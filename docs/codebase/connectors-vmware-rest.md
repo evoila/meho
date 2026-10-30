@@ -4515,7 +4515,8 @@ common task. The pools themselves are made and removed by
   leaves that pool's settings `null` with a `read_note`. When any details
   read failed, a pool can look like a root by mistake, so the host step is
   skipped and an open parent is `null` with `parent not known`. A failed
-  cluster or host read leaves the open parents `null` with `parent not
+  cluster or host read stops the parent lookup. The parents found before
+  it stay; the open parents still unknown are `null` with `parent not
   read`. The other rows stay.
 - **Cost.** One or two list calls, plus one details call per pool in the
   vCenter. The cluster and host calls run only when a returned pool is a

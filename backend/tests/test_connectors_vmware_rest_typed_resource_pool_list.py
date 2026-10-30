@@ -6,8 +6,9 @@
 * :func:`resource_pool_list_impl` against a recording fake connector with
   saved answers: the rows and settings, the parent of each pool (another
   pool, a cluster or a standalone host), the filters on the ``/api`` and the
-  legacy ``/rest`` mount, the name pattern, a failed pool read and a failed
-  pool list;
+  legacy ``/rest`` mount, the name pattern, a failed pool read, a failed
+  parent lookup that keeps the parents found before it, and a failed pool
+  list;
 * the real connector over mocked HTTP: every call lands on ``/api`` with the
   bare filter names (the same on vCenter 8 and 9);
 * the operation metadata: ``safe``, runs at once, on both catalogs.
@@ -355,6 +356,22 @@ async def test_a_failed_cluster_read_leaves_the_root_parent_unknown() -> None:
     assert "parent not read" in rows["resgroup-8"]["read_note"]
     assert rows["resgroup-20"]["parent_id"] == "resgroup-8"
     assert rows["resgroup-20"]["read_note"] is None
+
+
+async def test_a_failed_host_list_keeps_the_cluster_parent_found_before_it() -> None:
+    conn = _FakeConnector(fail_paths=("/vcenter/host",))
+    out = await resource_pool_list_impl(conn, _operator(), _Target(), {})
+    rows = _by_id(out)
+    # The cluster lookup ran first and succeeded; its parent stays.
+    assert (rows["resgroup-8"]["parent_type"], rows["resgroup-8"]["parent_id"]) == (
+        "cluster",
+        "domain-c8",
+    )
+    assert rows["resgroup-8"]["read_note"] is None
+    # The standalone-host root is the one left unknown, with the error named.
+    assert (rows["resgroup-41"]["parent_type"], rows["resgroup-41"]["parent_id"]) == (None, None)
+    assert "parent not read" in rows["resgroup-41"]["read_note"]
+    assert "HTTPStatusError" in rows["resgroup-41"]["read_note"]
 
 
 async def test_a_failed_pool_list_fails_the_operation() -> None:

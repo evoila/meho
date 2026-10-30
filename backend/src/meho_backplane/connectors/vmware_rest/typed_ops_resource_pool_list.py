@@ -184,14 +184,17 @@ async def _standalone_host_roots(
     target: VsphereTargetLike,
     open_roots: set[str],
     cluster_ids: list[str],
-) -> dict[str, tuple[str, str]]:
-    """Root pool id -> ``("host", host id)`` for the standalone hosts."""
+    owners: dict[str, tuple[str, str]],
+) -> None:
+    """Add root pool id -> ``("host", host id)`` to ``owners`` for the standalone hosts.
+
+    Writes into ``owners`` as it goes, so a failed call keeps the hosts found before it.
+    """
     hosts = await _get_ids(connector, operator, target, HOST_LIST_PATH, "host")
     clustered: dict[str, Any] = {}
     if cluster_ids:
         query = {"filter.clusters": cluster_ids}
         clustered = await _get_ids(connector, operator, target, HOST_LIST_PATH, "host", query)
-    owners: dict[str, tuple[str, str]] = {}
     for host_id in hosts.keys() - clustered.keys():
         query = {"filter.hosts": [host_id]}
         pools = await _get_ids(
@@ -199,7 +202,6 @@ async def _standalone_host_roots(
         )
         for pool_id in pools.keys() & open_roots:
             owners[pool_id] = ("host", host_id)
-    return owners
 
 
 async def _root_owners(
@@ -209,21 +211,28 @@ async def _root_owners(
     open_roots: set[str],
     *,
     check_hosts: bool,
-) -> dict[str, tuple[str, str]]:
-    """Root pool id -> ``(parent_type, parent_id)`` for the clusters and standalone hosts."""
-    clusters = await _get_ids(connector, operator, target, CLUSTER_LIST_PATH, "cluster")
+) -> tuple[dict[str, tuple[str, str]], str | None]:
+    """Root pool id -> ``(parent_type, parent_id)`` for the clusters and standalone hosts.
+
+    Returns ``(owners, failure)``. A failed cluster or host call stops the lookup
+    but keeps every parent found before it; ``failure`` then names the error.
+    """
     owners: dict[str, tuple[str, str]] = {}
-    for cluster_id in clusters:
-        info = await _get(connector, operator, target, _cluster_path(cluster_id))
-        root = info.get("resource_pool") if isinstance(info, dict) else None
-        if isinstance(root, str) and root in open_roots:
-            owners[root] = ("cluster", cluster_id)
-    still_open = open_roots - owners.keys()
-    if still_open and check_hosts:
-        owners.update(
-            await _standalone_host_roots(connector, operator, target, still_open, list(clusters))
-        )
-    return owners
+    try:
+        clusters = await _get_ids(connector, operator, target, CLUSTER_LIST_PATH, "cluster")
+        for cluster_id in clusters:
+            info = await _get(connector, operator, target, _cluster_path(cluster_id))
+            root = info.get("resource_pool") if isinstance(info, dict) else None
+            if isinstance(root, str) and root in open_roots:
+                owners[root] = ("cluster", cluster_id)
+        still_open = open_roots - owners.keys()
+        if still_open and check_hosts:
+            await _standalone_host_roots(
+                connector, operator, target, still_open, list(clusters), owners
+            )
+    except (httpx.HTTPError, RuntimeError) as exc:
+        return owners, f"parent not read: {type(exc).__name__}: {exc}"
+    return owners, None
 
 
 def _settings(info: dict[str, Any] | None) -> dict[str, Any]:
@@ -270,14 +279,13 @@ async def _resolve_owners(
     """Find the cluster or host of each open root. Returns ``(owners, note)``."""
     if not open_roots:
         return {}, None
-    try:
-        # With a failed pool read a pool can look like a root by mistake, so
-        # only the exact cluster check runs then.
-        owners = await _root_owners(
-            connector, operator, target, open_roots, check_hosts=not info_failures
-        )
-    except (httpx.HTTPError, RuntimeError) as exc:
-        return {}, f"parent not read: {type(exc).__name__}: {exc}"
+    # With a failed pool read a pool can look like a root by mistake, so
+    # only the exact cluster check runs then.
+    owners, failure = await _root_owners(
+        connector, operator, target, open_roots, check_hosts=not info_failures
+    )
+    if failure is not None:
+        return owners, failure
     if info_failures:
         return owners, f"parent not known: {len(info_failures)} pool(s) could not be read"
     return owners, "parent not found: no pool, cluster or standalone host holds this pool"

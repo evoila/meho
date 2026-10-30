@@ -403,6 +403,13 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # ``vmware.appliance.local_account.policy.set`` sends only expiry
         # numbers and flags, so it is NOT pinned.
         "vmware.appliance.local_account.password.set",
+        # The Keycloak login test. Its params carry only a Vault *path*
+        # (``password_secret_ref``); the password is read in-process and sent
+        # only in the token request BODY, and the token answer carries an
+        # access and a refresh token. The pin sets body_recorded=false for its
+        # flight-recorder spans, collapses the broadcast to aggregate-only and
+        # keeps a waiting approval's params in the encrypted handoff store.
+        "keycloak.user.check_login",
     }
 )
 

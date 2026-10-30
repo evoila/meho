@@ -228,7 +228,7 @@ def unknown_connector_message(connector_id: str, did_you_mean: list[str]) -> str
     """
     text = (
         f"unknown connector_id {connector_id!r}. Expected <impl_id>-<version> "
-        "(e.g. 'vmware-rest-9.0', 'vault-1.x')."
+        "(e.g. 'k8s-1.x', 'vault-1.x')."
     )
     if did_you_mean:
         return f"{text} Did you mean: {', '.join(did_you_mean)}?"

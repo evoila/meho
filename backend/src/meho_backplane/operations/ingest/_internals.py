@@ -301,7 +301,7 @@ async def legacy_tenant_products(
 
     A ``connector_id`` fixes ``(version, impl_id)``; the product is read
     from the id's first segment. Rows a tenant ingested before a product
-    rename (``vcf-logs`` rows for ``vrli-rest-9.0``, now ``vrli``) share
+    rename (rows saved under the old product name) share
     the id but not the product, so every product-scoped probe misses
     them (#4889). This probe keys on ``(tenant_id, version, impl_id)``
     only and returns the distinct products that differ from

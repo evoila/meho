@@ -1404,7 +1404,7 @@ class OperationGroup(Base):
     ``list_operation_groups`` meta-tool (T8 #399) returns verbatim so
     the agent can pick the right group before calling
     ``search_operations`` against it. Examples per connector:
-    ``vmware-rest/9.0`` → ``vm-lifecycle`` / ``cluster`` / ``network``;
+    ``k8s/1.x`` → ``workload`` / ``inventory`` / ``network``;
     ``vault/1.x`` → ``kv`` / ``sys`` / ``auth``.
 
     ``tenant_id`` is NULL for built-in / global groups (shipped by spec
@@ -1684,9 +1684,9 @@ class EndpointDescriptor(Base):
 
     ``op_id`` is the connector-side natural key. Examples:
 
-    * Ingested HTTP — ``"GET:/api/vcenter/cluster"`` (method + path).
+    * Ingested HTTP — ``"GET:/repos/{owner}/{repo}/issues"`` (method + path).
     * Typed — ``"vault.kv.read"`` / ``"k8s.pod.list"`` (dotted handle).
-    * Composite — ``"vmware.composite.vm.create"`` (dotted handle).
+    * Composite — ``"gh.composite.repo_create"`` (dotted handle).
 
     The ``method`` / ``path`` columns are populated for ingested rows
     and NULL for typed/composite; ``handler_ref`` (a Python dotted
@@ -4869,8 +4869,8 @@ class RunnerWriteAllowlistEntry(Base):
         nullable=False,
     )
     # A glob over ``op_id`` (``fnmatch`` semantics): an exact op-class for a
-    # minimal Stage-1 allowlist (``vmware.vm.tag_set``) or a prefix
-    # (``vmware.vm.*``). Matched by the shared, DB-free gate
+    # minimal Stage-1 allowlist (``k8s.label``) or a prefix
+    # (``k8s.secret.*``). Matched by the shared, DB-free gate
     # (:func:`~meho_backplane.runner.satellite_tier.evaluate_remote_write_gate`).
     op_pattern: Mapped[str] = mapped_column(Text, nullable=False)
     # A target-scope cap: ``*`` (any target in the tenant), or a concrete
@@ -5576,7 +5576,7 @@ class AgentPermission(Base):
     ``principal_kind=agent`` (see :mod:`meho_backplane.auth.permissions`).
 
     **op_pattern is an fnmatch glob string.** Examples: ``"*"`` (every
-    op), ``"GET:/api/vcenter/*"`` (all vCenter GET ops), ``"vault.kv.*"``
+    op), ``"GET:/repos/*"`` (all GitHub repo GET ops), ``"vault.kv.*"``
     (all vault kv ops). The resolver scores patterns by the literal
     prefix before the first glob metacharacter and prefers the most
     specific match; ties fold to the most-restrictive verdict
@@ -5734,7 +5734,7 @@ class _StandingGrantColumns:
     # reference (no FK) -- same discipline as AgentPermission.principal_sub.
     principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
     # Exactly one operation id (no glob). Raw HTTP ops are ``"POST:/path"``;
-    # typed / composite ops are dotted (``"vmware.composite.vm.create"``).
+    # typed / composite ops are dotted (``"gh.composite.repo_create"``).
     op_id: Mapped[str] = mapped_column(Text, nullable=False)
     # The ``"<impl_id>-<version>"`` connector string the dispatcher resolves
     # (same shape as ApprovalRequest.connector_id).
@@ -9128,7 +9128,7 @@ class DispatchTraceSpan(Base):
       ``composite_step`` / ``jsonflux_reduction`` / ``typed`` / ``opaque``
       (the decision's enumerated span kinds). Text (no DB ``CHECK``) so a
       new kind lands without a migration; the seam validates.
-    * ``name`` -- Text NOT NULL. Human label (``"GET /rest/vm"``,
+    * ``name`` -- Text NOT NULL. Human label (``"GET /repos/{owner}/{repo}"``,
       ``"jsonflux.reduce"``, a composite sub-step name).
     * ``started_at`` -- ``timestamptz`` NOT NULL. Span start time.
     * ``duration_ms`` -- ``numeric(10,2)`` nullable. Same shape as

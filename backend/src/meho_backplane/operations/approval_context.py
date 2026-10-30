@@ -27,14 +27,15 @@ What it resolves
   ``version`` alongside the bare ``target_id`` GUID (tenant-scoped;
   never leaks a cross-tenant name).
 * **subject** -- for a path-variable op (e.g.
-  ``POST:/vcenter/vm/{vm}/power?action=start``) the concrete entity the
-  write touches, recovered from the *identity* fields the caller supplied
-  on the gate params (the VM ``name`` and/or its path-variable moid), so
-  the reviewer reads ``web-01 (vm-1042)`` instead of an unresolved
-  ``{vm}``. When the params name no subject, a ``subject`` string the
-  op's preview builder stored under ``proposed_effect.preview`` is used
-  (``k8s.apply`` names its objects there, #3877). Fail-open to ``None``
-  (the surface keeps the placeholder).
+  ``DELETE:/api/v2.0/projects/{project_name_or_id}``) the concrete entity
+  the write touches, recovered from the *identity* fields the caller
+  supplied on the gate params (a ``name`` and/or the value bound to the
+  path variable), so the reviewer reads ``team-a (42)`` instead of an
+  unresolved ``{project_name_or_id}``. When the params name no subject,
+  a ``subject`` string the op's preview builder stored under
+  ``proposed_effect.preview`` is used (``k8s.apply`` names its objects
+  there, #3877). Fail-open to ``None`` (the surface keeps the
+  placeholder).
 * **parent composite** -- for a composite *child* park, the op id of the
   composite that fanned it out, walked off the ``request_audit_id`` ->
   ``parent_audit_id`` lineage the #3348 fix now records on the direct

@@ -62,9 +62,9 @@ the v1 :func:`~meho_backplane.connectors.registry.get_connector` lookup
 while dispatch consulted v2's
 :func:`~meho_backplane.connectors.resolve_connector`, producing
 disagreeing yes/no answers for the same target (consumer feedback
-signal 19 in ``claude-rdc-hetzner-dc#697`` — ``rdc-vcenter`` got 501
+signal 19 in ``claude-rdc-hetzner-dc#697`` — a target got 501
 from ``/probe`` while ``POST /operations/call`` resolved the same
-target's ``vmware-rest-9.0`` connector cleanly).
+target's connector cleanly).
 
 Resolver outcomes map to HTTP status as follows:
 
@@ -214,7 +214,7 @@ def _connector_id_for(cls: type[Connector]) -> str:
     """Build the canonical ``connector_id`` string for a resolved connector.
 
     Matches the dispatcher's ``connector_id`` form (e.g. ``"k8s-1.x"``,
-    ``"vmware-rest-9.0"``) — used in the ``fingerprint_failed`` 500
+    ``"harbor-rest-2.x"``) — used in the ``fingerprint_failed`` 500
     envelope (G0.15-T1 #1210) and the structured log line so operator-
     facing diagnostics name the *specific* impl that failed, not just
     the product slug. Falls back to the bare product token when
@@ -732,7 +732,7 @@ def _registered_impl_ids(product: str) -> set[str]:
     G0.16-T6 review-iter-1 B1 (#1312). The set is **product-scoped**.
     A global allowlist (the pre-B1 shape) accepted any impl_id
     registered for *any* product, so a ``k8s`` target could pass
-    validation with ``preferred_impl_id="vmware-rest-9.0"`` and the
+    validation with ``preferred_impl_id="harbor-rest-2.x"`` and the
     resolver would silently ignore it at dispatch time -- the exact
     foot-gun G0.15-T6 (#1215) was created to close. The filter is
     consulted at both POST (``body.product``) and PATCH (the
@@ -749,15 +749,15 @@ def _registered_impl_ids(product: str) -> set[str]:
     registry.
 
     G0.16-T6 Finding C (#1312). The set includes BOTH the base
-    ``impl_id`` (``"nsx-rest"``) AND the versioned form
-    ``"{impl_id}-{version}"`` (``"nsx-rest-4.2"``) for every triple
+    ``impl_id`` (``"harbor-rest"``) AND the versioned form
+    ``"{impl_id}-{version}"`` (``"harbor-rest-2.x"``) for every triple
     with a non-empty ``version``. The versioned form is the canonical
     shape per ``docs/codebase/api-shape-conventions.md`` §3 because
     it's more specific (disambiguates when multiple connector versions
     ship in one release) and it matches the ``connector_id`` string
     the dispatcher's ``parse_connector_id`` round-trips through. The
     base form stays accepted so existing operators / fixtures that
-    pin ``preferred_impl_id="nsx-rest"`` aren't broken. The resolver
+    pin ``preferred_impl_id="harbor-rest"`` aren't broken. The resolver
     (:func:`meho_backplane.connectors.resolver._run_tie_break_ladder`)
     normalizes both forms to the base ``impl_id`` before matching
     candidates, so picking either form selects the same connector
@@ -804,7 +804,7 @@ def _build_unknown_preferred_impl_detail(
             f"preferred_impl_id={preferred_impl_id!r} is not registered; "
             f"pick one of {valid_impl_ids!r} or register a connector for "
             f"it before retrying. The canonical form is versioned "
-            f"(e.g. 'nsx-rest-4.2'); the base form ('nsx-rest') stays "
+            f"(e.g. 'harbor-rest-2.x'); the base form ('harbor-rest') stays "
             f"accepted for backward compatibility. The resolver silently "
             f"ignores unknown impl_id overrides; this 422 surfaces the "
             f"foot-gun at write time. See "
@@ -823,7 +823,7 @@ def _validate_preferred_impl_id(preferred_impl_id: str | None, product: str) -> 
     always valid; a non-``None`` value must match an impl_id registered in
     the v2 connector registry **for the target's product** (G0.16-T6
     review-iter-1 B1 #1312 -- a cross-product allowlist let a ``k8s``
-    target pin ``vmware-rest-9.0`` and the resolver would silently ignore
+    target pin ``harbor-rest-2.x`` and the resolver would silently ignore
     it at dispatch). ``valid_impl_ids`` is empty when no connector is
     registered for the product (test isolation / pre-lifespan state, or a
     not-yet-registered product); validation is skipped in that case for

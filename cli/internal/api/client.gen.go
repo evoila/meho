@@ -2085,7 +2085,7 @@ type AuthModel string
 // “target_name“ is resolved to a live target descriptor, “op“ to the
 // resolved connector's enabled descriptor (yielding “handler_ref“ +
 // “safety_level“ + the “(product, version, impl_id)“ key). “op“ is
-// the connector-side op id (e.g. “"vsphere.host.list"“); the connector
+// the connector-side op id (e.g. “"k8s.node.list"“); the connector
 // triple is derived from the resolved target, not authored here.
 type AuthoredCheckItem struct {
 	CadenceSeconds int                     `json:"cadence_seconds"`
@@ -3424,11 +3424,11 @@ type BudgetStatus struct {
 // and the MCP handler share validation. “target“ accepts either
 // shape and “None“:
 //
-//   - **Bare string** -- “target: "rdc-vcenter"“. The forward-preferred
+//   - **Bare string** -- “target: "prod-k8s"“. The forward-preferred
 //     shape; matches “query_topology“ / “query_audit“ so an agent
 //     can carry a target name across the read and the write surfaces
 //     without reshape. G0.13-T2 (#1132) widening of #780.
-//   - **Dict** -- “target: {"name": "rdc-vcenter"}“. The original
+//   - **Dict** -- “target: {"name": "prod-k8s"}“. The original
 //     shape; the handler resolves the “name“ field and (optionally)
 //     reads “fqdn“ for vhost routing. Still accepted unchanged.
 //   - **None** -- the operation does not need a target (typed handlers
@@ -3510,8 +3510,8 @@ type CallOperationBody_Target struct {
 // CandidateHint One candidate target a connector's :meth:`Connector.list_candidates` returns.
 //
 // Candidates are potentially-reachable targets the connector inferred
-// from an existing seed (e.g. a vCenter exposing its managed ESXi
-// hosts; a kubeconfig listing peer cluster contexts). The
+// from an existing seed (e.g. a kubeconfig listing peer cluster
+// contexts). The
 // G9.1-T6 “meho targets discover“ CLI verb surfaces these to the
 // operator; auto-registration is intentionally out of scope per
 // Initiative #363 (operator runs “meho targets import“ after review).
@@ -3666,8 +3666,8 @@ type ConfirmVerifyResponseAnswer string
 // (the dispatchability flag that survives connector-level
 // enable/disable cycles via operator overrides). Useful for the
 // CLI's “meho connector list --status staged“ summary view and
-// for an LLM browsing the catalog: “vmware-rest-9.0“ ingests
-// ~2,211 ops of which only a fraction are enabled, and before the
+// for an LLM browsing the catalog: a big ingested connector
+// can carry thousands of ops of which only a fraction are enabled, and before the
 // split nothing on the row said which of the two numbers
 // “operation_count“ was.
 //
@@ -3692,7 +3692,7 @@ type ConfirmVerifyResponseAnswer string
 // object on “state="registered"“ rows and “None“ on
 // “state="ingested"“ rows (no operator action remains for an
 // ingested connector) — with one exception: a tenant row stored under
-// a former product name (“vcf-logs“ rows for “vrli-rest-9.0“,
+// a former product name (rows saved before a product rename,
 // #4889) can never be called, so it ships “dispatchable=False“ plus
 // a “next_step“ naming “meho connector delete <id>“ as the
 // clean-up. For registered rows the hint is computed against the curated
@@ -3902,8 +3902,7 @@ type ConnectorReviewGroupAdvisory struct {
 // “parameter_schema“ / “response_schema“ / “embedding“ —
 // those are dispatch-time concerns, not review-time concerns, and
 // sending 4 KB of schema per op would balloon the review payload
-// for connectors with thousands of operations (vCenter has 961
-// paths in v0.2).
+// for connectors with thousands of operations.
 type ConnectorReviewOp struct {
 	CustomDescription *string  `json:"custom_description"`
 	Description       *string  `json:"description"`
@@ -6140,7 +6139,7 @@ type IngestKbRequest struct {
 // :func:`register_ingested_operations` once per spec under the same
 // “(product, version, impl_id)“ connector triple, then run
 // :func:`run_llm_grouping` once for the whole connector. Multi-spec
-// ingestion (vCenter's “vcenter.yaml“ + “vi-json.yaml“) lands as
+// ingestion (a product whose API is split across several spec files) lands as
 // multiple “SpecSource“ entries in one request.
 //
 // Two mutually-exclusive request shapes:
@@ -6822,7 +6821,7 @@ type OpAllowlistEntry struct {
 // OperationCallStep A step the agent dispatches via the operation registry.
 //
 // :attr:`op_id` is the registry operation id (e.g.
-// “vmware.composite.vm.create“); :attr:`params` is the call payload,
+// “gh.composite.repo_create“); :attr:`params` is the call payload,
 // which may contain “${...}“ substitutions resolved at advance time.
 // :attr:`body` is operator-readable Markdown context (may also contain
 // substitutions). :attr:`verify` gates advance to the next step.
@@ -9112,13 +9111,13 @@ type SensorStatus string
 // floor of what runs unattended, not a bypass of a modeled destructive
 // gate).
 type ServiceGrantCreate struct {
-	// ConnectorId Exact '<impl_id>-<version>' connector id, e.g. 'vmware-rest-9.0'.
+	// ConnectorId Exact '<impl_id>-<version>' connector id, e.g. 'gh-rest-3'.
 	ConnectorId string `json:"connector_id"`
 
 	// ExpiresAt Optional UTC expiry; null = standing (permanent) grant; must be future.
 	ExpiresAt *time.Time `json:"expires_at"`
 
-	// OpId Exact operation id, no glob (e.g. 'POST:/vcenter/vm').
+	// OpId Exact operation id, no glob (e.g. 'POST:/repos/{owner}/{repo}/issues').
 	OpId string `json:"op_id"`
 
 	// PrincipalSub JWT sub of the service principal the grant authorises (no wildcard).
@@ -9133,7 +9132,7 @@ type ServiceGrantCreate struct {
 	// TargetNamePattern Target selector (#3349): match any dispatch whose target name matches this fnmatch glob (e.g. 'esx-dc*'). Requires target_id to be null. This glob is the explicit any-target request — it is never implied by a null target_id.
 	TargetNamePattern *string `json:"target_name_pattern"`
 
-	// TargetProduct Target selector (#3349): match any dispatch whose target product equals this exact value (e.g. 'vmware'). Requires target_id to be null.
+	// TargetProduct Target selector (#3349): match any dispatch whose target product equals this exact value (e.g. 'gh'). Requires target_id to be null.
 	TargetProduct *string `json:"target_product"`
 }
 
@@ -9593,7 +9592,7 @@ type Target struct {
 //
 // “version“ is accepted as an optional operator-asserted product
 // version (G0.15-T6 #1215). Operators who know the version up-front
-// (e.g. “"9.0"“ for a vCenter Hetzner-DC target the consumer just
+// (e.g. “"2.11.0"“ for a Harbor target the consumer just
 // deployed) can pass it at create time so the very first probe
 // dispatches against the versioned connector without round-tripping
 // through PATCH. Fresh targets still default to “None“ and resolve
@@ -11348,7 +11347,7 @@ type PostCallApiV1OperationsCallPostParams struct {
 
 // GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams defines parameters for GetGovernedSubopsApiV1OperationsGovernedSubopsGet.
 type GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams struct {
-	// OpId A composite op id whose governed child ops to enumerate — e.g. `vmware.composite.vm.create`.
+	// OpId A composite op id whose governed child ops to enumerate — e.g. `gh.composite.repo_create`.
 	OpId string `form:"op_id" json:"op_id"`
 
 	// ConnectorId Optional connector-id override for resolving each child's best-effort safety_level; defaults to the connector the composite is registered against.
@@ -11358,7 +11357,7 @@ type GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams struct {
 
 // GetGroupsApiV1OperationsGroupsGetParams defines parameters for GetGroupsApiV1OperationsGroupsGet.
 type GetGroupsApiV1OperationsGroupsGetParams struct {
-	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
+	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `gh-rest-3`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `gh`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
 	ConnectorId string `form:"connector_id" json:"connector_id"`
 
 	// Limit Page size. Default 100; max 500. Matches `list_targets` paging — sibling list surfaces share one ceiling (G0.18-T5 #1358).
@@ -11404,7 +11403,7 @@ type CancelOperationRunApiV1OperationsRunsHandleCancelPostParams struct {
 
 // GetSearchApiV1OperationsSearchGetParams defines parameters for GetSearchApiV1OperationsSearchGet.
 type GetSearchApiV1OperationsSearchGetParams struct {
-	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
+	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `gh-rest-3`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `gh`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
 	ConnectorId string `form:"connector_id" json:"connector_id"`
 
 	// Q Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated.

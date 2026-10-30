@@ -1,0 +1,3669 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Governance backplane for AI agents acting on infrastructure — policy-gated, audit-grade, MCP-native.">
+      
+      
+      
+        <link rel="canonical" href="https://evoila.github.io/meho/0.39/reference/whats-new/">
+      
+      
+        <link rel="prev" href="../">
+      
+      
+        <link rel="next" href="../connectors/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>What's new - MEHO</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#whats-new" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="MEHO" class="md-header__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MEHO
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              What's new
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../.." class="md-tabs__link">
+          
+  
+  
+  Start here
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../install/" class="md-tabs__link">
+          
+  
+  
+  Install & operate
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../clients/" class="md-tabs__link">
+          
+  
+  
+  Connect clients
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/" class="md-tabs__link">
+          
+  
+  
+  Do real work
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../project/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Project
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="MEHO" class="md-nav__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    MEHO
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment-shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment shapes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install & operate
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Install & operate
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The install trail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/credential-backends/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credential backends
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/keycloak-realm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Keycloak realm setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/openbao-unseal-key/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenBao unseal key: who keeps what
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/tls-ingress/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS and ingress
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/upgrades/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrades
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/kind-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local kind quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Connect clients
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/mcp-surface-and-scopes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP surface and scopes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The meho CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/claude-desktop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Desktop
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/claude-code/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/mcp-remote-shim/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Other MCP clients (mcp-remote shim)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting auth walls
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Do real work
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/targets-and-secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Register targets and secrets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/first-operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run your first operations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sensors-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Watch your estate with sensors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/approvals-and-break-glass/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Approvals and break-glass
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/tenant-bootstrap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add a tenant
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/topology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Topology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/broadcast/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Broadcast
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/memory-and-knowledge/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory and knowledge
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/audit-forensics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audit forensics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/flight-recorder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Flight recorder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/runbooks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Runbooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/hosted-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hosted agents
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/event-ingestion/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Event ingestion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/satellite-gateway/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Satellite gateway
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/windows-and-guest-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Windows estate and in-guest execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/add-ons/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add-ons
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    What's new
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    What's new
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#v0390-2026-10-30" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.39.0 — 2026-10-30
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0380-2026-10-28" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.38.0 — 2026-10-28
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0370-2026-10-24" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.37.0 — 2026-10-24
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0360-2026-10-23" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.36.0 — 2026-10-23
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03522-2026-10-13" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.22 — 2026-10-13
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03521-2026-10-13" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.21 — 2026-10-13
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03520-2026-10-12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.20 — 2026-10-12
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03519-2026-10-07" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.19 — 2026-10-07
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03518-2026-10-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.18 — 2026-10-05
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03517-2026-10-04" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.17 — 2026-10-04
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03516-2026-09-27" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.16 — 2026-09-27
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03515-2026-09-27" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.15 — 2026-09-27
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03514-2026-09-24" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.14 — 2026-09-24
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03513-2026-09-23" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.13 — 2026-09-23
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03512-2026-09-22" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.12 — 2026-09-22
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03511-2026-09-21" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.11 — 2026-09-21
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03510-2026-09-21" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.10 — 2026-09-21
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0359-2026-09-21" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.9 — 2026-09-21
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0358-2026-09-20" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.8 — 2026-09-20
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0357-2026-09-19" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.7 — 2026-09-19
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0356-2026-09-18" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.6 — 2026-09-18
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0355-2026-09-17" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.5 — 2026-09-17
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0354-2026-09-17" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.4 — 2026-09-17
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0353-2026-09-17" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.3 — 2026-09-17
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0352-2026-09-16" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.2 — 2026-09-16
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0351-2026-09-15" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.1 — 2026-09-15
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0350-2026-09-14" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.0 — 2026-09-14
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0343-2026-09-12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.34.3 — 2026-09-12
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0342-2026-09-10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.34.2 — 2026-09-10
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0341-2026-09-09" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.34.1 — 2026-09-09
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0333-2026-09-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.33.3 — 2026-09-05
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0332-2026-09-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.33.2 — 2026-09-05
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0331-2026-09-04" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.33.1 — 2026-09-04
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0330-2026-09-04" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.33.0 — 2026-09-04
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0320-2026-09-02" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.32.0 — 2026-09-02
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0310-2026-08-27" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.31.0 — 2026-08-27
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0300-2026-08-25" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.30.0 — 2026-08-25
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0290-2026-08-19" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.29.0 — 2026-08-19
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../connectors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connectors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP tools
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../maturity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Maturity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../project/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#v0390-2026-10-30" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.39.0 — 2026-10-30
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0380-2026-10-28" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.38.0 — 2026-10-28
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0370-2026-10-24" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.37.0 — 2026-10-24
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0360-2026-10-23" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.36.0 — 2026-10-23
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03522-2026-10-13" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.22 — 2026-10-13
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03521-2026-10-13" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.21 — 2026-10-13
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03520-2026-10-12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.20 — 2026-10-12
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03519-2026-10-07" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.19 — 2026-10-07
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03518-2026-10-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.18 — 2026-10-05
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03517-2026-10-04" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.17 — 2026-10-04
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03516-2026-09-27" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.16 — 2026-09-27
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03515-2026-09-27" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.15 — 2026-09-27
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03514-2026-09-24" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.14 — 2026-09-24
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03513-2026-09-23" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.13 — 2026-09-23
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03512-2026-09-22" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.12 — 2026-09-22
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03511-2026-09-21" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.11 — 2026-09-21
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v03510-2026-09-21" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.10 — 2026-09-21
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0359-2026-09-21" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.9 — 2026-09-21
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0358-2026-09-20" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.8 — 2026-09-20
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0357-2026-09-19" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.7 — 2026-09-19
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0356-2026-09-18" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.6 — 2026-09-18
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0355-2026-09-17" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.5 — 2026-09-17
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0354-2026-09-17" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.4 — 2026-09-17
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0353-2026-09-17" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.3 — 2026-09-17
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0352-2026-09-16" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.2 — 2026-09-16
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0351-2026-09-15" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.1 — 2026-09-15
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0350-2026-09-14" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.0 — 2026-09-14
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0343-2026-09-12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.34.3 — 2026-09-12
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0342-2026-09-10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.34.2 — 2026-09-10
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0341-2026-09-09" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.34.1 — 2026-09-09
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0333-2026-09-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.33.3 — 2026-09-05
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0332-2026-09-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.33.2 — 2026-09-05
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0331-2026-09-04" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.33.1 — 2026-09-04
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0330-2026-09-04" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.33.0 — 2026-09-04
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0320-2026-09-02" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.32.0 — 2026-09-02
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0310-2026-08-27" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.31.0 — 2026-08-27
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0300-2026-08-25" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.30.0 — 2026-08-25
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0290-2026-08-19" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.29.0 — 2026-08-19
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/evoila/meho/edit/main/docs-site/reference/whats-new.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="whats-new">What's new<a class="headerlink" href="#whats-new" title="Permanent link">&para;</a></h1>
+<p>A plain-language summary of what landed in recent MEHO releases. It
+covers releases <strong>since v0.28.0</strong>; older releases are in the
+<a href="https://github.com/evoila/meho/blob/main/CHANGELOG.md">CHANGELOG</a>,
+which carries the full detail — every change, and the migration recipe
+for each breaking one.</p>
+<p>MEHO is under active development. Each release below links to its full
+notes.</p>
+<h2 id="v0390-2026-10-30"><a href="https://github.com/evoila/meho/releases/tag/v0.39.0">v0.39.0</a> — 2026-10-30<a class="headerlink" href="#v0390-2026-10-30" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Safer approvals.</strong> The sender of a change that waits for approval
+  can withdraw it. An approval now covers one exact MEHO release, so an
+  upgrade ends the requests that still wait, and the requester asks
+  again.</li>
+<li><strong>First steps for several tenants.</strong> The login can list every tenant
+  of a person, the audit views and the approvals page show the tenant,
+  and a tenant admin can turn built-in operations on or off for their
+  own tenant only.</li>
+<li><strong>Connector packages.</strong> A MEHO image can carry connector packages from
+  other repositories. The status and version pages list them, and a
+  satellite runner gets only the work its packages can run.</li>
+<li><strong>New connector and operations.</strong> The phpIPAM connector reads subnets
+  and books addresses. New operations cover Azure VMware Solution and
+  Azure Arc, the steps that build a Windows domain controller,
+  Kubernetes access checks, vSphere datastore and vSAN folder lists,
+  Vault folder deletes with one approval, and Holodeck lab removal.</li>
+<li><strong>Fewer secrets in errors and traces.</strong> Error results, HTTP
+  diagnostics and traces hide secret fields before the audit row is
+  written.</li>
+<li><strong>Admin edits stay, and only make things stricter.</strong> A change to an
+  operation's risk level or approval flag now stays after a restart. An
+  edit can only make an operation stricter; turning approval off needs
+  a platform admin, a reason and a fresh sign-in.</li>
+<li><strong>Before you upgrade.</strong> There are nine database migrations, and a few
+  scripts and grants must change. Read "Breaking changes" and "Steps
+  after the upgrade" in the release notes.</li>
+</ul>
+<h2 id="v0380-2026-10-28"><a href="https://github.com/evoila/meho/releases/tag/v0.38.0">v0.38.0</a> — 2026-10-28<a class="headerlink" href="#v0380-2026-10-28" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Azure, read end to end.</strong> MEHO logs in to Azure with a service
+  principal from Vault and reads inventory, compute, network, storage,
+  AKS, cost, security, Automation and Azure Migrate; Entra ID users,
+  groups and roles come through Microsoft Graph. Every later Azure
+  read gets the same careful HTTP behaviour: one retry budget, waiting
+  when Azure says "too many requests", paging and polling. A CI check
+  compares every hand-written call with Azure's own API files.</li>
+<li><strong>Four more connectors.</strong> vSphere Replication, VMware Orchestrator
+  (also through VCF Automation on VCF 9), Salt, and the migration
+  assessment shapes that turn any source estate into one inventory.</li>
+<li><strong>A service principal reads only what a person allows.</strong> A read scope
+  limits a machine login to named targets; a read outside it is refused.</li>
+<li><strong>Install form 2 is closed by default.</strong> The install script sets the
+  host firewall, and <code>meho-host</code> checks the machine, writes a support
+  bundle, changes the admin network and uninstalls.</li>
+<li><strong>Fewer secrets in traces and errors.</strong> An operation that sends a
+  secret keeps the vendor's error text back, the audit parameter hash
+  skips secrets, and the flight recorder gets only checked files.</li>
+<li><strong>Many smaller fixes</strong> in vCenter reads, approvals, the console, the
+  CLI and MCP tools.</li>
+</ul>
+<h2 id="v0370-2026-10-24"><a href="https://github.com/evoila/meho/releases/tag/v0.37.0">v0.37.0</a> — 2026-10-24<a class="headerlink" href="#v0370-2026-10-24" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Security fix: deployment passwords in traces.</strong> For tenants with the
+  flight recorder on, MEHO kept the full request and answer of seven
+  deployment and depot operations in its traces. They hold deployment
+  passwords and licence keys. MEHO now leaves them out. Traces written
+  before the upgrade keep them until they expire: check your trace
+  retention, and change those passwords and keys if needed.</li>
+<li><strong>More VMware work through MEHO.</strong> VM snapshots, a VM's hardware and
+  CD drives, vSphere licences, the vCenter appliance's local accounts
+  and vCenter alarms. Every change waits for approval. A second person
+  approves snapshot deletes, licence assignments and appliance password
+  changes.</li>
+<li><strong>Licence keys stay masked.</strong> The vSphere, SDDC Manager and VCF
+  Operations licence reads show only the last 5 characters of a key.
+  <code>sddc.license.list</code> now returns <code>key_masked</code> instead of <code>key</code>, so
+  scripts that read <code>key</code> must change.</li>
+<li><strong>New connectors and reads.</strong> Site Recovery Manager, eight HCX reads,
+  GitHub repository create and view, VCF Automation operations for
+  networks, deployments and image names, and a VCF Operations property
+  read.</li>
+<li><strong>Two 0.36.0 problems fixed.</strong> A <code>vault.kv.patch</code> with the right Vault
+  rights waits for approval again, and sensors check their rule against
+  the full result, so they no longer turn <code>unknown</code> when an answer is
+  shortened.</li>
+<li><strong>Before you upgrade.</strong> No database migration. If you come from
+  0.35.x, do the 0.36.0 steps first.</li>
+</ul>
+<h2 id="v0360-2026-10-23"><a href="https://github.com/evoila/meho/releases/tag/v0.36.0">v0.36.0</a> — 2026-10-23<a class="headerlink" href="#v0360-2026-10-23" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Security fixes: logins, grants and secrets.</strong> Everyone who used the
+  shared CLI and MCP logins was an admin. Now each person's role comes
+  from one Keycloak login group. Agent and service logins could create
+  standing grants; now only a person can. Approval requests and some
+  SDDC Manager and BIND reads showed passwords and keys. Now MEHO hides
+  them, and these reads wait for approval.</li>
+<li><strong>Security fixes in the image and the CLI.</strong> The image gets newer
+  <code>certifi</code> and <code>aiohttp</code> versions, and the CLI is built with Go
+  1.26.10. The image still has 27 known Pillow findings. MEHO never
+  opens image files, and the image scan skips these findings until 30
+  November 2026, while the fix is prepared.</li>
+<li><strong>More risky work waits for a second person.</strong> A VM move that copies
+  disks, every delete loaded from a vendor API file, and the delete of a
+  content-library item now wait until a second person approves. After
+  the upgrade, load the vCenter connectors again, so their stored
+  operations get the new rules.</li>
+<li><strong>Only registered agents post announcements.</strong> Broadcast now carries
+  agent announcements only. A person's own login can still read them.
+  The audit log stays the record of operations, approvals and checks.</li>
+<li><strong>A clearer audit log.</strong> Every audit record now says what kind of
+  event it is. A multi-step operation that waits or is refused, and
+  every tool call of a hosted agent, now leave a record.</li>
+<li><strong>Short, citable evidence from knowledge and memory.</strong> Knowledge base
+  entries keep their earlier texts, and search returns the matching
+  passages with a link to the exact text. Memory search returns short
+  snippets with a link to the full entry.</li>
+<li><strong>The AI knows more about each operation.</strong> Many vCenter, SDDC
+  Manager, NSX, VCF Automation, Holodeck and other operations now say
+  what they take and return, with an example call. <code>search_operations</code>
+  can show what one operation needs.</li>
+<li><strong>New connector and reads.</strong> A new HCX connector, VCF Installer 9.0
+  support, three new VCF Installer reads, <code>vmware.tasks.history</code> for
+  older vCenter tasks, and new Keycloak and pfSense operations.</li>
+<li><strong>Before you upgrade.</strong> The upgrade runs 12 database steps, so back up
+  the database first. Several changes can break scripts; read Breaking
+  changes in the full notes. The Helm chart can now also run its own
+  PostgreSQL, Keycloak and OpenBao, all off by default.</li>
+</ul>
+<h2 id="v03522-2026-10-13"><a href="https://github.com/evoila/meho/releases/tag/v0.35.22">v0.35.22</a> — 2026-10-13<a class="headerlink" href="#v03522-2026-10-13" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Security fix: the audit clean-up now runs on time.</strong> MEHO keeps
+  each connector's answer before redaction in the audit log, and that
+  answer can hold secrets. A weekly job empties old answers. Before,
+  every restart of MEHO started the job's week again. So on a
+  deployment that restarted often, the job never ran, and old answers
+  stayed past the retention window. Now the job counts from its last
+  run. After this update, its first run comes about one minute after
+  MEHO starts.</li>
+<li><strong>Delete Keycloak users, groups and clients.</strong> The new
+  <code>keycloak.user.delete</code>, <code>keycloak.group.delete</code> and
+  <code>keycloak.client.delete</code> remove one object from a Keycloak realm. A
+  second person must approve every call, after seeing what goes on the
+  approval card. MEHO refuses to delete Keycloak's built-in clients and
+  the account MEHO itself logs in with.</li>
+<li><strong>DRS operations work on vCenter 8.0.</strong> Four DRS operations failed at
+  once on vCenter 8.0.x: the DRS recommendations read, the two rule
+  creates and the rule delete. They now read the cluster settings in a
+  way vCenter 8.0.x accepts.</li>
+</ul>
+<h2 id="v03521-2026-10-13"><a href="https://github.com/evoila/meho/releases/tag/v0.35.21">v0.35.21</a> — 2026-10-13<a class="headerlink" href="#v03521-2026-10-13" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Security fix: PowerShell connectors.</strong> This release fixes a
+  critical command injection in the PowerShell-based connectors:
+  <code>msad</code>, <code>winsrv</code>, <code>wsfc</code>, <code>hyperv</code>, <code>windows_dns</code> and <code>holodeck</code>.
+  A value with a typographic single quote could end a quoted
+  PowerShell string early, and the rest of the value ran as PowerShell
+  on the target host. MEHO now handles all five single-quote
+  characters. Please upgrade. Advisory: GHSA-v2v2-4gh2-m4q8.</li>
+<li><strong>Security fixes in the client packages.</strong> The Claude Code plugin and
+  the Claude Desktop bundle get newer <code>proxy-addr</code> and <code>undici</code>
+  versions that fix known vulnerabilities.</li>
+<li><strong>Fully remove a Vault secret.</strong> The new <code>vault.kv.metadata.delete</code>
+  deletes every version of a Vault secret and its metadata. This
+  cannot be undone, so a second person must approve every call. The
+  approver sees the path, never the secret value.</li>
+<li><strong>Delete a vCenter DRS rule.</strong> The new
+  <code>vmware.composite.cluster.drs_rule.delete</code> removes one DRS rule from
+  a cluster. A second person must approve every call, after seeing the
+  rule on the approval card.</li>
+<li><strong>Longer logins, and no hanging calls.</strong> The Claude Code plugin and
+  the Claude Desktop bundle now keep their login up to the limit your
+  Keycloak realm sets (48 hours is recommended), not about 30 minutes.
+  In Claude Code, a MEHO call no longer hangs while a login waits in
+  the browser: it fails with a clear message, or stops after 5
+  minutes. Run <code>claude plugin update meho@meho</code>, restart Claude Code,
+  and log in once.</li>
+</ul>
+<h2 id="v03520-2026-10-12"><a href="https://github.com/evoila/meho/releases/tag/v0.35.20">v0.35.20</a> — 2026-10-12<a class="headerlink" href="#v03520-2026-10-12" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Security fix: the CLI is built with a newer Go.</strong> The <code>meho</code> CLI
+  binaries are now built with Go 1.26.9. This fixes nine known flaws in
+  the network and TLS code of Go's standard library, which the v0.35.19
+  CLI still had. Install the new CLI to get the fixes. These Go flaws
+  do not affect the container image or the Helm chart.</li>
+<li><strong>Security fix in the container image.</strong> The pydantic-ai library is
+  updated to a version that fixes a known vulnerability. Agent requests
+  stay the same.</li>
+<li><strong>Read more around a docs hit.</strong> The new <code>read_docs</code> tool, the
+  <code>meho docs read</code> command and a "Read around this hit" button in the
+  console show the text before and after a docs search hit, its whole
+  page, or its section. It is off until an operator turns it on for a
+  docs collection, and the documentation service must offer reads.</li>
+<li><strong>Two safe pfSense reads.</strong> <code>pfsense.user.list</code> lists the firewall's
+  local users, and <code>pfsense.route.static.list</code> lists its static routes.
+  They need no approval. They return only a fixed set of fields, so
+  password hashes and keys are never part of the answer. You no longer
+  need the whole config file to check a user or a route.</li>
+</ul>
+<h2 id="v03519-2026-10-07"><a href="https://github.com/evoila/meho/releases/tag/v0.35.19">v0.35.19</a> — 2026-10-07<a class="headerlink" href="#v03519-2026-10-07" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Security fix: the pfSense config read no longer shows secrets.</strong>
+  <code>pfsense.config.show</code> used to return the whole firewall config,
+  including password hashes and private keys, to anyone who could call
+  it, with no approval. MEHO now replaces the known secrets with
+  <code>***REDACTED***</code> before the answer leaves the connector. The rest of
+  the file stays the same. Secrets that someone typed into free-text
+  fields, such as descriptions or commands, can still show. Copies of
+  the full config that earlier versions saved in the audit log are
+  removed by the audit clean-up below, once they are older than its
+  retention window.</li>
+<li><strong>Security fix: the audit clean-up now works on PostgreSQL.</strong> MEHO
+  keeps each connector's answer before redaction in the audit log, and
+  that answer can hold secrets. A weekly job is meant to empty it after
+  90 days by default. Since v0.34.0 the audit log's protection against
+  changes also blocked this job, so nothing was ever emptied. A database
+  migration now lets the job empty that one field. Every other change
+  and every delete stays blocked. The first run after the upgrade
+  empties all old entries at once, about 7 days after MEHO starts.</li>
+<li><strong>Security fixes in the container image.</strong> The pymongo and fsspec
+  Python libraries are updated to versions that fix known
+  vulnerabilities.</li>
+<li><strong>Docs search hits show their page and source.</strong> <code>search_docs</code> and
+  <code>ask_docs</code> hits now carry a readable title made of the section and
+  the page name, say whether a lower or a higher score is better, and
+  can link to the public source page, or the PDF page, when the
+  documentation service sends that link.</li>
+</ul>
+<h2 id="v03518-2026-10-05"><a href="https://github.com/evoila/meho/releases/tag/v0.35.18">v0.35.18</a> — 2026-10-05<a class="headerlink" href="#v03518-2026-10-05" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>You can now clean up vCenter objects through MEHO.</strong> Six new vCenter
+  operations delete port groups, empty folders, files and folders on a
+  datastore, and content libraries and their items. A seventh creates a
+  folder on a datastore. Every delete waits for a second person's
+  approval, and the approval request shows what will be deleted. MEHO
+  refuses a delete while something still uses the object, for example
+  a VM on a port group or a disk file that a VM needs, and says what
+  blocks it. Running a delete again for an object that is already gone
+  changes nothing.</li>
+</ul>
+<h2 id="v03517-2026-10-04"><a href="https://github.com/evoila/meho/releases/tag/v0.35.17">v0.35.17</a> — 2026-10-04<a class="headerlink" href="#v03517-2026-10-04" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>A documentation collection can now answer questions with its own
+  answer service.</strong> <code>ask_docs</code> used to search a collection and then
+  write the answer with MEHO's own model. If a collection's
+  documentation service has its own answer endpoint, MEHO can now pass
+  the question to it and return that answer and its citations, in the
+  same response shape as before. This is off by default. An
+  administrator turns it on for one collection at a time and can turn
+  it off again with one command. The console's Ask mode, the REST API
+  and MCP now all answer through the same code.</li>
+<li><strong>The product and version you ask about reach a documentation service
+  only when its collection is set up for them.</strong> When you give
+  <code>search_docs</code> or <code>ask_docs</code> a product or version, MEHO now passes it
+  on only if the collection asks for it: as a hint that ranks the
+  matching release first, or as a strict filter. Both are off by
+  default. MEHO used to send these values as filters, and the shared
+  VMware documentation service ignored them, so its results do not
+  change. The tool descriptions now also say which product names and
+  version formats to use.</li>
+<li><strong>Documentation answers are easier to trace in the logs.</strong> Every
+  <code>search_docs</code> and <code>ask_docs</code> call now logs the IDs of the chunks it
+  found and the IDs of the chunks the answer cited, so you can see
+  whether a wrong answer came from the search or from the answer step.
+  The logs hold IDs and source references only, never the question or
+  the document text. A new setting can also log the question while you
+  debug; it is off by default. A new optional alert warns when searches
+  for a product or version keep finding nothing.</li>
+<li><strong>Security fixes in the container image.</strong> OpenSSL and PCRE2 in the
+  base image, and the PyJWT and urllib3 Python libraries, are updated to
+  versions that fix known vulnerabilities. The image build now checks a
+  minimum version for each security-patched system package and stops if
+  one is older.</li>
+</ul>
+<h2 id="v03516-2026-09-27"><a href="https://github.com/evoila/meho/releases/tag/v0.35.16">v0.35.16</a> — 2026-09-27<a class="headerlink" href="#v03516-2026-09-27" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Breaking: creating a VCF Automation API token now names the Vault
+  target that stores it.</strong> In 0.35.15 the new token was written to Vault
+  with your own Vault identity, which usually may not write there, so
+  the call failed after approval. You now name a Vault target, and the
+  token is written with that target's Vault role, the same way a Vault
+  write on that target works. The approval card shows in advance whether
+  the Vault write will be allowed. Calls without the new <code>vault_target</code>
+  setting are refused.</li>
+</ul>
+<h2 id="v03515-2026-09-27"><a href="https://github.com/evoila/meho/releases/tag/v0.35.15">v0.35.15</a> — 2026-09-27<a class="headerlink" href="#v03515-2026-09-27" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>You can now set up a VCF Automation 9.1 tenant through MEHO.</strong> New
+  operations create an organization, a custom role, a local user, an API
+  token and a project, and test whether a tenant login works. Every change
+  needs approval first, and running one again for something that already
+  exists changes nothing. A new API token is written straight into Vault
+  at a path you name. It is never shown in the result, the audit log or the
+  activity feed. Passwords are read from Vault too.</li>
+<li><strong>Breaking for MCP clients: large <code>list_targets</code> pages now return a result
+  handle.</strong> A page of more than 50 targets, or more than 4 KB, used to come
+  back inline and could time out in Claude Desktop. It now comes back like any
+  other large result: a short preview plus a handle you read with
+  <code>result_query</code>. Smaller pages are unchanged. The release notes carry the
+  migration recipe.</li>
+<li><strong>The Claude Desktop extension works with an internal CA again.</strong> A recent
+  Claude Desktop update stopped passing the extension's "Internal CA bundle"
+  setting through, so connecting to a backplane with an internal certificate
+  timed out. The extension now loads the CA itself.</li>
+</ul>
+<h2 id="v03514-2026-09-24"><a href="https://github.com/evoila/meho/releases/tag/v0.35.14">v0.35.14</a> — 2026-09-24<a class="headerlink" href="#v03514-2026-09-24" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>You can now read and change a VM's CPU and memory limits and reservations.</strong>
+  Two new vCenter operations show a VM's current CPU and memory limit,
+  reservation, and shares, and change any of them. A change needs approval
+  first; the approval request shows the current values next to the requested
+  ones, and the result reports the before and after values. Only the fields you
+  ask for are changed, a request that already matches the VM changes nothing,
+  and setting a limit to <code>-1</code> removes it.</li>
+<li><strong>MEHO can log into VCF Automation 9.1.</strong> VCF Automation 9.1 changed how
+  logins work, so every tenant operation against a 9.1 appliance failed. MEHO
+  now supports both the old and the new login, and it can also use an API token
+  stored with the target's credentials. If no login works, the error says what
+  to add. The VCF Automation health check also works on 9.1 and now
+  reports whether the provider API is reachable and which API versions the
+  appliance supports.</li>
+<li><strong>The release process now covers release candidates and security
+  advisories.</strong> The maintainer release guide describes how v1.0 release
+  candidates are cut and promoted, and a new ledger records how every past
+  security fix is disclosed.</li>
+</ul>
+<h2 id="v03513-2026-09-23"><a href="https://github.com/evoila/meho/releases/tag/v0.35.13">v0.35.13</a> — 2026-09-23<a class="headerlink" href="#v03513-2026-09-23" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Each tenant on a shared instance can log into Vault under its own role.</strong>
+  MEHO used to log every operator into Vault under one deployment-wide role,
+  which made a strict per-tenant Vault policy impossible. A new, optional
+  setting maps each tenant to its own Vault login role; tenants not in the map
+  keep the deployment-wide role, and leaving the setting empty changes nothing.
+  A typo in the map stops MEHO from starting rather than silently sending a
+  login to the wrong role.</li>
+<li><strong>The CLI no longer tells you to re-run an operation after approving it.</strong>
+  When an operation parks for human approval, the CLI used to say "approve via
+  the approval queue, then re-dispatch" — but approving already runs the
+  operation, so re-running it created a second request for the same change. The
+  hint now says approval executes the operation, and it prints the approval id
+  with the command to inspect it.</li>
+<li><strong>The console's agent, principal, and grant forms look right again.</strong> The
+  create/edit agent form, the agent run console, the register-principal dialog,
+  and the new-grant / elevate dialogs used styling classes that no longer
+  existed, so their fields were laid out unevenly and validation errors showed
+  in plain text. They now use the same layout as the rest of the console, with
+  errors highlighted. Agent timestamps on the detail page and cards now read as
+  <code>YYYY-MM-DD HH:MM UTC</code> instead of raw machine timestamps.</li>
+</ul>
+<h2 id="v03512-2026-09-22"><a href="https://github.com/evoila/meho/releases/tag/v0.35.12">v0.35.12</a> — 2026-09-22<a class="headerlink" href="#v03512-2026-09-22" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>An approved Kubernetes apply that the server accepts but never saves now
+  fails instead of falsely reporting success.</strong> When an approved, high-risk
+  <code>k8s.apply</code> ran and the Kubernetes API server accepted the request and echoed
+  the object back but never actually persisted it, MEHO used to record the
+  operation as a success — indistinguishable from a real write, and a violation
+  of the rule that an operation only reports success when it actually happened.
+  MEHO now checks that the applied object came back with a real, persisted
+  revision; when it did not, the operation fails with a clear error instead of a
+  false success. Server dry-run previews, which legitimately return no revision,
+  are untouched.</li>
+<li><strong>Kubernetes targets whose kubeconfig points at an unreachable address can be
+  reached again.</strong> A Kubernetes target registered with a static kubeconfig used
+  to dial whatever server address was baked into that kubeconfig — which broke
+  when that address was an internal one the backplane cannot route to (for
+  example a guest cluster reached through a NAT alias whose kubeconfig names an
+  internal cluster VIP). MEHO now dials the operator-reachable host and port the
+  target was registered with and verifies the certificate against the target's
+  own server name, exactly as it already does for vSphere Supervisor targets,
+  while a cluster registered without a host keeps using the embedded address.</li>
+</ul>
+<h2 id="v03511-2026-09-21"><a href="https://github.com/evoila/meho/releases/tag/v0.35.11">v0.35.11</a> — 2026-09-21<a class="headerlink" href="#v03511-2026-09-21" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>A vSphere Supervisor that logs in without handing back a kubeconfig can be
+  reached again.</strong> A Kubernetes (vSphere Supervisor) target that authenticates
+  through WCP-SSO gets back a session token and, on newer Supervisors, no
+  embedded kubeconfig at all — and MEHO used to reject that successful login as
+  malformed, so the target could never be probed. MEHO now treats the embedded
+  kubeconfig as optional (just as <code>kubectl vsphere login</code> does): when it is
+  absent it builds the connection from what it already knows — the login
+  host/port, the target's pinned CA and certificate name, and the returned
+  session token as the bearer — and the target's own TLS policy always wins over
+  anything an embedded config tried to set.</li>
+</ul>
+<h2 id="v03510-2026-09-21"><a href="https://github.com/evoila/meho/releases/tag/v0.35.10">v0.35.10</a> — 2026-09-21<a class="headerlink" href="#v03510-2026-09-21" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>The operator console can't be stranded on a stale stylesheet after a
+  deploy.</strong> The console references its CSS, scripts and fonts at stable URLs
+  whose contents change every release, and the server sent them without a
+  <code>Cache-Control</code> header — so after a roll a returning browser could keep
+  serving the previous release's cached stylesheet and render the console
+  unstyled until someone hard-refreshed. MEHO now serves every console asset
+  <code>Cache-Control: no-cache</code>, which forces the browser to revalidate before
+  reuse (a cheap <code>304</code> when nothing changed), and a build-time gate refuses to
+  ship a stylesheet that is suspiciously small or missing the console's own
+  classes.</li>
+<li><strong>Re-running a storage-policy create now finishes instead of dead-ending.</strong>
+  Creating a vSphere storage policy through the governed path builds a tag
+  category, a tag and then the policy; if an earlier attempt failed partway it
+  left the category behind, and every retry died immediately with
+  <code>ALREADY_EXISTS</code>. The composite now adopts an existing category, tag or
+  matching policy instead of blindly re-creating it, so a retry converges; a
+  genuinely conflicting object (or a policy create that returns no id) is
+  reported as a clear, retryable error rather than a false success.</li>
+<li><strong>Supervisors reached through a NAT alias can be probed again.</strong> A Kubernetes
+  (vSphere Supervisor) target that logs in via WCP-SSO verified the server's
+  certificate against the address MEHO dialed, ignoring the target's configured
+  certificate name — so a Supervisor fronted by a NAT alias whose address isn't
+  in the certificate failed verification and couldn't be reached at all. The
+  login and the Kubernetes API legs now both honour the target's
+  <code>tls_server_name</code>, and a verification failure explains itself instead of
+  surfacing as a bare connection error.</li>
+</ul>
+<h2 id="v0359-2026-09-21"><a href="https://github.com/evoila/meho/releases/tag/v0.35.9">v0.35.9</a> — 2026-09-21<a class="headerlink" href="#v0359-2026-09-21" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Storage-policy writes to vCenter now authenticate.</strong> Creating or deleting a
+  vSphere storage policy through the governed path reaches vCenter's Storage
+  Policy (PBM) endpoint, which authenticates by a SOAP session-cookie header the
+  connector was never sending — so the first live policy write faulted
+  <code>NotAuthenticated</code> even though every other call on the very same credential
+  succeeded. MEHO now carries the vim session cookie as the <code>vcSessionCookie</code>
+  header on every PBM request (and self-heals an expired session with a single
+  re-login), so <code>vmware.composite.storage_policy.create</code> / <code>delete</code> authenticate
+  like the rest of the connector.</li>
+<li><strong>A composite operation that fails no longer reports success.</strong> Some composite
+  operations signal a load-bearing failure by <em>returning</em> a structured error
+  envelope rather than raising, and the dispatch/audit boundary treated any
+  returned value as success — so a mutation that actually failed (for example a
+  content-library create that got a <code>500</code> back from vCenter) was recorded
+  <code>ok</code> / 200 in the audit log and in a parked-then-approved run's result. MEHO
+  now maps a composite's terminal-error envelope (one flagged with an
+  <code>error</code>-severity issue) to a first-class dispatch error with an <code>error</code> audit
+  row, while success-with-warnings envelopes stay <code>ok</code>.</li>
+</ul>
+<h2 id="v0358-2026-09-20"><a href="https://github.com/evoila/meho/releases/tag/v0.35.8">v0.35.8</a> — 2026-09-20<a class="headerlink" href="#v0358-2026-09-20" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Bootstrap a tenant's Keycloak role groups through the governed path.</strong> The
+  backplane derives a tenant's claims (<code>tenant_id</code> / <code>tenant_role</code>) from Keycloak
+  group membership, but the Keycloak connector shipped no group operations — so
+  standing up a tenant's role group and adding its users was the one part of an
+  otherwise-governed identity bootstrap that had to escape to the Admin API,
+  outside policy, audit and approval. MEHO now ships governed <code>keycloak.group.*</code>
+  operations: list groups and members (safe reads), and create a group with
+  attributes, update its attributes, and add or remove members (approval-gated
+  writes) — also as <code>meho keycloak group ...</code> CLI verbs.</li>
+<li><strong>Agent permission grants now actually apply to agent tokens.</strong> A <code>deny</code>,
+  <code>auto-execute</code> or <code>needs-approval</code> grant created with <code>agent grant create</code> was
+  keyed on the agent's client identity but enforced only against the token's
+  service-account id, so no agent grant ever took effect. The resolver now also
+  matches the token's <code>agent:&lt;name&gt;</code> client identity (its <code>azp</code> claim), so — for
+  example — scoping an agent off a whole connector family with a <code>deny</code> grant
+  finally works; the new <code>--principal-kind user-agent</code> extends the same to a
+  human who signs in as an agent through a public client. Grant ceilings are
+  unchanged (<code>deny</code> still beats everything; destructive stays non-grantable for
+  agents).</li>
+</ul>
+<h2 id="v0357-2026-09-19"><a href="https://github.com/evoila/meho/releases/tag/v0.35.7">v0.35.7</a> — 2026-09-19<a class="headerlink" href="#v0357-2026-09-19" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Change the VLAN of a distributed portgroup that already exists.</strong> MEHO could
+  set a portgroup's VLAN only when it was created; the new
+  <code>vmware.composite.network.portgroup.vlan.set</code> reconfigures the VLAN of an
+  existing distributed portgroup — for example to add the native/untagged VLAN 0
+  to a trunk that was created without it — on the governed, approval-gated write
+  path, replacing the current VLAN config and returning <code>unchanged</code> (no write)
+  when the VLAN already matches.</li>
+<li><strong>A grown NFS datastore's free space becomes visible without SSH.</strong> ESXi caches
+  a datastore's capacity and free space from mount time, so after an NFS export
+  grows a deploy precheck could still fail on stale "not enough free space"
+  numbers. The new <code>vmware.composite.datastore.refresh</code> asks the host to re-probe
+  the volume and reads the fresh summary back — a first-class governed operation
+  in place of dropping to SSH or govc.</li>
+</ul>
+<h2 id="v0356-2026-09-18"><a href="https://github.com/evoila/meho/releases/tag/v0.35.6">v0.35.6</a> — 2026-09-18<a class="headerlink" href="#v0356-2026-09-18" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Re-mounting an NFS datastore that is already there no longer fails.</strong>
+  <code>vmware.composite.host.datastore_mount_nfs</code> is now idempotent: re-running the
+  mount on a host where the export is already mounted converges instead of
+  faulting. Previously a second call with the same parameters surfaced the
+  host's already-exists fault as a connector error, so an automation pack that
+  re-ran the step — a retry after a transient failure on a later host, or an
+  assisted-resume recheck — could never converge once the datastore was
+  mounted. The composite now reads the host's mounted datastores before writing
+  and matches on the export's identity (server and path, normalised for case and
+  a trailing slash): an export that is already mounted returns <code>already_mounted</code>
+  with no write, the requested name held by a different export returns a
+  <code>name_conflict</code> refusal with no write, and an export mounted concurrently
+  between the check and the write is recovered by re-reading. A fresh mount and
+  every other fault are unchanged.</li>
+</ul>
+<h2 id="v0355-2026-09-17"><a href="https://github.com/evoila/meho/releases/tag/v0.35.5">v0.35.5</a> — 2026-09-17<a class="headerlink" href="#v0355-2026-09-17" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>A standalone ESXi host that went quiet is recovered automatically.</strong> After
+  an idle period a standalone ESXi host could leave MEHO holding an expired
+  session that still answered the unauthenticated bootstrap but returned every
+  requested property as "missing" — so a read came back empty with no error and
+  never recovered for the life of the Pod. MEHO now refreshes a host session
+  before it can idle out (a bounded max-age, 20 minutes by default, tunable with
+  <code>VMWARE_SOAP_SESSION_MAX_AGE_SECONDS</code>), re-reads once on a fresh session when a
+  read comes back entirely missing under an auth fault, and confirms host
+  reachability with an authenticated liveness check — so an unreachable host is
+  reported as unreachable instead of silently empty.</li>
+</ul>
+<h2 id="v0354-2026-09-17"><a href="https://github.com/evoila/meho/releases/tag/v0.35.4">v0.35.4</a> — 2026-09-17<a class="headerlink" href="#v0354-2026-09-17" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Per-property detail on vSphere object reads.</strong> <code>vmware.object.collect</code> now
+  reports, per object, which requested properties came back missing and the
+  vSphere fault behind each (for example <code>NoPermission</code>) — names and counts
+  only, never the fault message or the payload — so a partial read is
+  diagnosable instead of opaque.</li>
+<li><strong>Service-principal grants get CLI commands and a console.</strong> Operators and
+  tenant admins can list, create, and manage service-principal grants from the
+  CLI and a unified grants console.</li>
+<li><strong>Stored large results are bounded by encoded size.</strong> A stored result handle
+  now caps its whole encoded record at a configured limit (16 MiB by default),
+  keeps the longest run of whole rows that fits, and tells the caller whether the
+  stored copy is complete or partial.</li>
+</ul>
+<h2 id="v0353-2026-09-17"><a href="https://github.com/evoila/meho/releases/tag/v0.35.3">v0.35.3</a> — 2026-09-17<a class="headerlink" href="#v0353-2026-09-17" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>A guest-composite read never keeps an in-guest password in the trace.</strong>
+  Every vSphere guest composite that carries a login — listing guest processes,
+  reading the guest environment or a guest file — is now classified so the
+  flight recorder does not record its request body, closing a path where a
+  safe-tier read could retain the guest login password in the 30-day trace
+  store. Forward-only: traces captured before this release keep their bodies
+  until they age out.</li>
+<li><strong>Reading a guest file can fetch its contents.</strong>
+  <code>vmware.composite.vm.guest.file.read</code> can now return the file itself, fetched
+  server-side with a size cap and returned behind a result handle; the operation
+  moves to the caution tier, so agent and service callers park for approval while
+  human operators run it as before.</li>
+</ul>
+<h2 id="v0352-2026-09-16"><a href="https://github.com/evoila/meho/releases/tag/v0.35.2">v0.35.2</a> — 2026-09-16<a class="headerlink" href="#v0352-2026-09-16" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>A parked secret value stays off approval screens.</strong> When an operation that
+  carries a credential parks for approval, its secret input is encrypted in a
+  one-time, tenant-bound hand-off, so the value never lands on the approval row
+  or any approval read surface. Operators configure the dedicated
+  <code>approvalHandoff</code> Secret reference in Helm values; approval rows written
+  before the upgrade are not backfilled.</li>
+<li><strong>Deploy request bodies redact OVF property values.</strong> Captured vendor deploy
+  bodies could retain OVF property values, which commonly carry appliance
+  credentials; the flight recorder now strips them structurally, on request and
+  response, for every connector. Forward-only.</li>
+<li><strong>Governed vSphere Supervisor namespaces.</strong> Create (approval-gated), delete
+  (approval-gated, with a blast-radius preview and a read-back), and status
+  composites for vSphere Supervisor namespaces, each on the governed dispatch
+  path.</li>
+</ul>
+<h2 id="v0351-2026-09-15"><a href="https://github.com/evoila/meho/releases/tag/v0.35.1">v0.35.1</a> — 2026-09-15<a class="headerlink" href="#v0351-2026-09-15" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Changing a built-in connector needs platform-admin.</strong> Enabling, disabling,
+  or editing a built-in (global) connector now requires the <code>platform_admin</code>
+  claim and answers a plain tenant admin with a clear <code>403</code> instead of the
+  misleading <code>404</code> an earlier path returned. Tenant-scoped connectors are
+  unaffected.</li>
+<li><strong>The operator console renders correctly again.</strong> A v0.35.0 build change left
+  the console without its compiled styles; the build now fails loudly if the
+  stylesheet comes out empty, and the scheduler's create-trigger form and
+  timestamps are back on the current layout.</li>
+</ul>
+<h2 id="v0350-2026-09-14"><a href="https://github.com/evoila/meho/releases/tag/v0.35.0">v0.35.0</a> — 2026-09-14<a class="headerlink" href="#v0350-2026-09-14" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>vSphere 8.0 and 9.0 side by side.</strong> A <code>vmware-rest-8.0</code> catalog is registered
+  next to <code>vmware-rest-9.0</code>, and MEHO picks the right one per target from its
+  fingerprint — an 8.0.x vCenter resolves to the 8.0 catalog, a 9.x vCenter to
+  the 9.0 one — so one estate spanning both is served correctly. An enabled 9.0
+  operation dispatched against an 8.0.x or otherwise unqualified target now fails
+  closed with a clear reason instead of a vendor error.</li>
+<li><strong>VMware VM writes ingest as approval-gated by default.</strong> Ingested VMware VM
+  hardware, create/delete, and power operations now carry the <code>dangerous</code> tier
+  and require approval out of the box; a re-ingest never weakens a stricter
+  reviewed posture.</li>
+<li><strong>Pin a host key through the backplane.</strong> <code>net.ssh_keyscan</code> reads a host's SSH
+  host keys (handshake only, no credentials offered) and returns ready-to-pin
+  <code>known_hosts</code> lines, so the pin the SSH connector's fail-closed verification
+  needs is minted through a governed operation instead of an out-of-band shell
+  step.</li>
+<li><strong>CLI parity for broadcast, and external token issuers.</strong> <code>meho broadcast
+  recent</code> / <code>announce</code> / <code>watch</code> reach the activity feed from the CLI, and the
+  declarative OAuth token-mint auth scheme can now mint a client-credentials
+  token at an external issuer.</li>
+</ul>
+<h2 id="v0343-2026-09-12"><a href="https://github.com/evoila/meho/releases/tag/v0.34.3">v0.34.3</a> — 2026-09-12<a class="headerlink" href="#v0343-2026-09-12" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Pass a secret into a remote script without leaving it on the host.</strong>
+  <code>linux.script.run</code> gains an optional <code>secret_env</code> map: the referenced secret is
+  resolved server-side under the caller's tenant scope and injected into the
+  script's environment at run time — never written to the approval request, the
+  audit parameters, the preview, or a log line. This retires the earlier
+  workaround that parked a live token on the target.</li>
+</ul>
+<h2 id="v0342-2026-09-10"><a href="https://github.com/evoila/meho/releases/tag/v0.34.2">v0.34.2</a> — 2026-09-10<a class="headerlink" href="#v0342-2026-09-10" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>A pfSense gateway delete recovers a transient non-persist.</strong> A pfSense
+  runtime race could leave a gateway delete uncommitted even though the command
+  exited cleanly, so a gateway that would otherwise delete was left in place and
+  the teardown hard-failed; the delete now re-applies once and re-verifies before
+  failing closed.</li>
+</ul>
+<h2 id="v0341-2026-09-09"><a href="https://github.com/evoila/meho/releases/tag/v0.34.1">v0.34.1</a> — 2026-09-09<a class="headerlink" href="#v0341-2026-09-09" title="Permanent link">&para;</a></h2>
+<p>A patch release that fixes a v0.34.0 regression and rolls up the governed
+connector and shared-instance work that landed since.</p>
+<ul>
+<li><strong>Compressed vendor responses decode again.</strong> On v0.34.0, any read against a
+  vendor that gzip- or deflate-compressed its response failed with a decoding
+  error, because the response body-size cap added in v0.34.0 decompressed the
+  body a second time. Every HTTP-based connector — vmware-rest, vcf-fleet,
+  gcloud, and the rest — was affected. This release restores the earlier
+  behaviour so a compressed response decodes exactly once
+  (<a href="https://github.com/evoila/meho/issues/3521">#3521</a>).</li>
+<li><strong>Kubernetes Secret and ArgoCD credential values are redacted on read.</strong> A
+  safe read that surfaces a Kubernetes <code>Secret</code> or an ArgoCD repository object
+  now blanks the secret values — keeping the key names and a digest — so payload
+  secrets no longer reach an agent on a shared instance.</li>
+<li><strong>More governed VMware and SDDC lifecycle.</strong> Resource-pool create/delete and a
+  DRS VM-Host affinity rule, an NFS tag-based storage policy, vSphere Supervisor
+  enable/disable/status, and SDDC Manager workload-domain build ops — each
+  approval-gated and audited on the governed dispatch path — plus a governed read
+  that stages a guest-cluster kubeconfig to a Vault reference instead of an
+  agent transcript.</li>
+<li><strong>Shared-instance isolation controls.</strong> Per-principal and per-tenant dispatch
+  rate limits, a per-tenant mail-recipient allowlist, an opt-in bearer guard on
+  <code>/metrics</code> and <code>/ready</code>, and a per-tenant bound on targetless network probes.</li>
+</ul>
+<h2 id="v0333-2026-09-05"><a href="https://github.com/evoila/meho/releases/tag/v0.33.3">v0.33.3</a> — 2026-09-05<a class="headerlink" href="#v0333-2026-09-05" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Probe a target's certificate, then pin it — in one step.</strong> <code>net.tls_inspect</code>
+  now returns each presented certificate as PEM (on the leaf and every chain
+  entry), not just facts about it. You can probe an endpoint and feed the right
+  trust anchor straight into a target's <code>tls_ca_pin</code> — the leaf for a
+  self-signed appliance, or an issuer/root for a CA-signed one — which is what
+  you need to register a target reachable only through a NAT alias, where
+  ordinary hostname verification can never match. The PEM is public handshake
+  material, never a private key.</li>
+<li><strong>The assistant no longer points at result-handle features that don't exist.</strong>
+  The guidance the agent reads, the CLI help, and the onboarding guides had
+  described a result-handle query surface — aggregation, filtering, describe —
+  that was never built. That text now matches what actually ships: paging a
+  result handle by offset and limit, and nothing it cannot do.</li>
+</ul>
+<h2 id="v0332-2026-09-05"><a href="https://github.com/evoila/meho/releases/tag/v0.33.2">v0.33.2</a> — 2026-09-05<a class="headerlink" href="#v0332-2026-09-05" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Standalone ESXi host operations now actually reach the host.</strong> The
+  host-setup reads and composites for a not-yet-managed ESXi host — list its
+  storage devices, mount an NFS datastore, mark a disk as flash — had been
+  failing at sign-in, because the connector spoke only the API surface a full
+  vCenter serves. It now speaks the protocol a standalone ESXi host actually
+  offers, so those operations work directly against a freshly provisioned host
+  early in a management-domain bring-up — the case v0.33.0 set out to support.</li>
+<li><strong>Distributed-switch portgroup VLANs are no longer silently dropped.</strong>
+  Creating a portgroup with a VLAN tag or a trunk range now applies that VLAN
+  instead of quietly producing an untagged (VLAN 0) portgroup. The create had
+  been reporting success while the tag was discarded.</li>
+</ul>
+<h2 id="v0331-2026-09-04"><a href="https://github.com/evoila/meho/releases/tag/v0.33.1">v0.33.1</a> — 2026-09-04<a class="headerlink" href="#v0331-2026-09-04" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Standing grants for query-string actions.</strong> A service principal can now
+  hold a standing grant for an operation whose id carries a literal <code>?action=</code>
+  verb — such as a vCenter power action or an OVF deploy. Before, these were
+  wrongly refused as wildcards, so an agent could never be granted them and the
+  power-on and deploy-from-library flows always had to park for a human.</li>
+<li><strong>The satellite gateway guide now covers remote writes.</strong> The guide for
+  running checks and operations through a remote runner used to say a satellite
+  had no way to write; it now documents the opt-in tier that lets that runner
+  perform governed, approval-gated, audited writes inside networks the central
+  instance cannot reach.</li>
+</ul>
+<h2 id="v0330-2026-09-04"><a href="https://github.com/evoila/meho/releases/tag/v0.33.0">v0.33.0</a> — 2026-09-04<a class="headerlink" href="#v0330-2026-09-04" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>A much bigger documentation site.</strong> New do-real-work guides for the flight
+  recorder, external event ingestion, and add-ons; a guide to the Windows
+  estate and governed in-guest program execution; a client-onramp section for
+  Claude Code and Claude Desktop; an explainer of the MCP surface tiers — the
+  default working surface versus the operator planes behind the <code>mcp:admin</code>
+  scope; and this What's new page. An accuracy sweep also brought the existing
+  guides back in line with what the last release actually ships.</li>
+<li><strong>Generated, always-current references.</strong> The connector catalogue, the full
+  MCP tool inventory, and every CLI command are published as reference pages
+  generated straight from the code, with a CI check that fails the build if
+  they drift out of date.</li>
+<li><strong>Standalone ESXi hosts, before any vCenter exists.</strong> The host-setup
+  composites — mount an NFS datastore, mark a disk as flash, control a service
+  — now run directly against a freshly provisioned ESXi host that no vCenter
+  manages yet, the exact state you are in early in a management-domain
+  bring-up. A new read lists a host's raw storage devices so the disk it
+  flash-marks is chosen from real data.</li>
+<li><strong>More governed deletes for pfSense.</strong> Removing a static route, a gateway,
+  or a single member of a shared firewall alias each became a governed,
+  approval-gated delete that previews exactly what goes and refuses to strand a
+  route behind a gateway or empty a shared alias.</li>
+<li><strong>Preview parity for approval-gated actions.</strong> An agent can now preview the
+  exact effect of an approval-requiring action before it parks for a human,
+  matching what the approver sees — while actions that carry a secret in their
+  request stay deliberately un-previewable.</li>
+<li><strong>Steadier CLI sign-in.</strong> A stale system-keyring entry can no longer shadow
+  a newer saved token, and expiry messages now say plainly when a session has
+  ended and point at how to sign back in.</li>
+<li><strong>Operator console polish.</strong> The Conventions create and edit dialogs render
+  correctly again after a UI-framework upgrade.</li>
+</ul>
+<h2 id="v0320-2026-09-02"><a href="https://github.com/evoila/meho/releases/tag/v0.32.0">v0.32.0</a> — 2026-09-02<a class="headerlink" href="#v0320-2026-09-02" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>The Microsoft estate gains connectors.</strong> New connectors for Windows
+  Server, Active Directory, SQL Server, failover clustering, and
+  Hyper-V — the Windows and SQL half of the datacenter, behind the same
+  policy and audit as every other connector.</li>
+<li><strong>Governed permanent deletes.</strong> A destructive-delete tier previews
+  exactly what would be removed, binds the human approval to that exact
+  preview, and refuses to run until a person approves — so a delete of a
+  VM, a DNS record, a firewall rule, or a secret always has a person who
+  owns it.</li>
+<li><strong>Flight recorder.</strong> A complete, redaction-safe record of each
+  dispatch, captured at the vendor-API level with secrets stripped, and
+  readable by operators and by the agent's own session.</li>
+<li><strong>Governed in-guest program execution.</strong> Run a program inside a VM's
+  guest operating system as a governed, approval-gated step that keeps
+  secrets out of the preview.</li>
+<li><strong>Governed writes on satellite runners.</strong> A remote runner can execute
+  policy-checked, audited writes inside networks the central instance
+  cannot reach — limited to an operator-set allowlist, and never for the
+  destructive or dangerous tiers.</li>
+<li><strong>Read result handles from the CLI and REST.</strong> <code>result_query</code> reached
+  full parity: a large, set-shaped result can be paged back from the CLI
+  and REST, not only from an MCP client.</li>
+<li><strong>A dedicated approve-only role.</strong> A principal who can clear the
+  approval queue without any power to run an operation — separation of
+  duties for regulated teams.</li>
+</ul>
+<h2 id="v0310-2026-08-27"><a href="https://github.com/evoila/meho/releases/tag/v0.31.0">v0.31.0</a> — 2026-08-27<a class="headerlink" href="#v0310-2026-08-27" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>One-command onboarding.</strong> A Claude Code plugin (<code>claude plugin
+  marketplace add evoila/meho</code>, then <code>/plugin install meho@meho</code>) and a
+  one-click <code>.mcpb</code> bundle for Claude Desktop point a client at your own
+  backplane in a single step. Nothing is exposed to the internet.</li>
+<li><strong>Least privilege by default.</strong> A connecting agent now sees only the
+  25-tool working surface; the operator planes list only for a session
+  that explicitly requests the <code>mcp:admin</code> scope. See
+  <a href="../../clients/mcp-surface-and-scopes/">MCP surface and scopes</a>.</li>
+<li><strong>The AI cannot approve itself.</strong> Approving an action, rejecting it,
+  and granting an agent more access have no path an MCP client can call —
+  those decisions move to the operator console or the CLI.</li>
+<li><strong>Two breaking changes for MCP clients.</strong> The default surface dropped
+  to 25 tools, and the approval and grant-elevate verbs left the MCP
+  surface. Each carries a migration recipe in the release notes.</li>
+</ul>
+<h2 id="v0300-2026-08-25"><a href="https://github.com/evoila/meho/releases/tag/v0.30.0">v0.30.0</a> — 2026-08-25<a class="headerlink" href="#v0300-2026-08-25" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>VMware Cloud Foundation bring-up through the backplane.</strong> Submit and
+  poll a management-domain bring-up as governed, approval-gated steps.</li>
+<li><strong>Air-gapped installs.</strong> Govern the depot configuration, TLS-trust,
+  and bundle pre-download steps an air-gapped bring-up depends on.</li>
+<li><strong>Recover from a failed bring-up.</strong> Resume a failed management-domain
+  bring-up from where it stopped, under the same approval posture as the
+  original run.</li>
+<li><strong>Migration-source connectors for older VMware and Aria versions.</strong> So
+  one estate spanning old and new resolves to the right implementation
+  per system — useful for reading and inventorying an existing estate
+  during onboarding.</li>
+</ul>
+<h2 id="v0290-2026-08-19"><a href="https://github.com/evoila/meho/releases/tag/v0.29.0">v0.29.0</a> — 2026-08-19<a class="headerlink" href="#v0290-2026-08-19" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>External event ingestion.</strong> An authenticated webhook from your
+  monitoring stack can fire a subscribed agent run on match, through the
+  same policy, approval, and audit path as any other operation.</li>
+<li><strong>Checks say which items breached.</strong> A breaching aggregate assertion
+  now carries a sample of the offending rows in its evidence, so a
+  notification names the specific items, not just that the aggregate
+  tripped.</li>
+<li><strong>PostgreSQL 12 dropped from the supported range.</strong> The end-of-life
+  release is no longer supported.</li>
+<li><strong>More curated read operations across connectors.</strong> Kubernetes,
+  Harbor, and database connectors gained typed read operations that
+  dispatch on a fresh boot with no ingest step.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../" class="md-footer__link md-footer__link--prev" aria-label="Previous: Reference">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Reference
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../connectors/" class="md-footer__link md-footer__link--next" aria-label="Next: Connectors">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Connectors
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 evoila Group — Apache 2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

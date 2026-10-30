@@ -51,7 +51,7 @@ What is never shown
   (``PGPASSWORD=...``, ``AWS_SECRET_ACCESS_KEY=...``, ``--password=...``,
   any length), the word after a secret flag (``--password x``,
   ``--token x``, ``-p x``), the password in ``user:password`` after ``-u``
-  or ``--user``, the password in a URL (``https://user:password@host``)
+  or ``--user``, the password in a URL that carries a user and password
   and tokens with a known vendor prefix (``ghp_...``). Then the shared
   params redaction of the generic echo runs over the spec: it hides
   secret-shaped text anywhere (JWTs, bearer tokens) and the value of a
@@ -184,7 +184,7 @@ _ASSIGNMENT = re.compile(
     r"(?P<value>'[^']*'|\"[^\"]*\"|[^\s'\";&|]+)"
 )
 
-#: The password in a URL: ``scheme://user:password@host``.
+#: The password in a URL that carries a user and password before the ``@``.
 _URL_PASSWORD = re.compile(r"(?P<head>[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@]*:)[^\s/@]+@")
 
 #: Tokens with a known vendor prefix (GitHub, GitLab, Slack, AWS key id).

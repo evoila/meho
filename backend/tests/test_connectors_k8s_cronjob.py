@@ -62,6 +62,8 @@ _BATCH_V1 = "meho_backplane.connectors.kubernetes.ops_cronjob.client.BatchV1Api"
 _SECRET = "made-up-env-Value-4958"
 #: A short made-up password on a command line.
 _SHORT = "Xq9"
+#: A URL with a user and the short made-up password in it.
+_URL_WITH_PASSWORD = f"https://bob:{_SHORT}@example.invalid"  # trufflehog:ignore
 
 
 @pytest.fixture(autouse=True)
@@ -330,7 +332,7 @@ async def test_cronjob_run_preview_shows_job_template_and_active_jobs_not_values
         f"PGPASSWORD={_SHORT} pg_dump -h db app",
         "--password",
         _SHORT,
-        f"curl -u admin:{_SHORT} https://bob:{_SHORT}@example.invalid",  # gitleaks:allow
+        f"curl -u admin:{_SHORT} {_URL_WITH_PASSWORD}",  # gitleaks:allow
     ]
     ctx = PreviewContext(
         descriptor=_FakeDescriptor(op_id="k8s.cronjob.run"),  # type: ignore[arg-type]

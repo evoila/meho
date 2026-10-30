@@ -300,6 +300,8 @@ async def test_k8s_job_create_hides_secret_shapes_anywhere_in_the_spec() -> None
 
 #: A short made-up password: short values must be hidden too.
 _SHORT = "Xq9"
+#: A URL with a user and the short made-up password in it.
+_URL_WITH_PASSWORD = f"https://bob:{_SHORT}@example.invalid"  # trufflehog:ignore
 
 
 @pytest.mark.parametrize(
@@ -312,7 +314,7 @@ _SHORT = "Xq9"
         (["--password", _SHORT, "--verbose"], "--verbose"),
         (["-c", f"mysql -u root -p {_SHORT} app"], "mysql"),
         (["-c", f"curl -u admin:{_SHORT} https://example.invalid"], "admin:"),  # gitleaks:allow
-        (["curl", "--user", f"admin:{_SHORT}", f"https://bob:{_SHORT}@example.invalid"], "curl"),
+        (["curl", "--user", f"admin:{_SHORT}", _URL_WITH_PASSWORD], "curl"),
         (["-c", f"git clone https://ghp_{_SECRET.replace('-', '')}@example.invalid/r"], "clone"),
     ],
 )

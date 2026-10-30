@@ -492,8 +492,8 @@ words stay, but these values are hidden: the value of a `NAME=VALUE` or
 `--name=value` whose name holds a secret word (`PGPASSWORD=...`,
 `AWS_SECRET_ACCESS_KEY=...`, `--password=...`, any length), the word after
 a secret flag (`--password x`, `--token x`, `-p x`), the password in
-`user:password` after `-u` or `--user`, the password in a URL
-(`https://user:password@host`) and tokens with a known vendor prefix
+`user:password` after `-u` or `--user`, the password in a URL that
+carries a user and password, and tokens with a known vendor prefix
 (`ghp_...`). Then the same two-step redaction as the generic params echo
 runs over the spec: it hides secret-shaped text anywhere (JWTs, bearer
 tokens) and the value of a field with a secret-shaped name (a `secret`

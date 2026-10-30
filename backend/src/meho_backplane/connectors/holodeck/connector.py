@@ -5,8 +5,9 @@
 # On main the module was already 723 lines (> 600) with fingerprint (109) /
 # probe (111, C901 14) over budget; G3.18-T2 (#2154) appended three small
 # write-op shims + the WRITE_OPS wiring, and #2908 appends four more small
-# deploy-op delegating shims + the DEPLOY when_to_use merge. Every shim is a
-# 3-line delegate to ops_deploy; splitting the connector or refactoring
+# deploy-op delegating shims + the DEPLOY when_to_use merge, and #4066 three
+# more DNS-op shims + the DNS when_to_use merge. Every shim is a
+# 3-line delegate to its ops module; splitting the connector or refactoring
 # fingerprint/probe is out of scope for a typed-op addition and would balloon
 # the review surface; tracked separately.
 
@@ -76,6 +77,9 @@ from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.holodeck.ops import HOLODECK_OPS
 from meho_backplane.connectors.holodeck.ops_deploy import (
     HOLODECK_WHEN_TO_USE_DEPLOY_BY_GROUP,
+)
+from meho_backplane.connectors.holodeck.ops_dns import (
+    HOLODECK_WHEN_TO_USE_DNS_BY_GROUP,
 )
 from meho_backplane.connectors.holodeck.ops_remove import (
     HOLODECK_WHEN_TO_USE_REMOVE_BY_GROUP,
@@ -181,6 +185,9 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # so they never collide with the read/write group keys above; the blurbs
     # are the single source of truth in ``ops_deploy``.
     **HOLODECK_WHEN_TO_USE_DEPLOY_BY_GROUP,
+    # #4066 DNS name groups (``dns`` read, ``dns-write`` add / remove); the
+    # blurbs are the single source of truth in ``ops_dns``.
+    **HOLODECK_WHEN_TO_USE_DNS_BY_GROUP,
     # The delete of an instance (holodeck.instance.remove); text in ``ops_remove``.
     **HOLODECK_WHEN_TO_USE_REMOVE_BY_GROUP,
 }
@@ -792,6 +799,57 @@ class HolodeckConnector(SshConnector):
         )
 
         return await _holodeck_router_patch(self, target, params, operator)
+
+    async def dns_host_list(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.dns.host.list`` (#4066).
+
+        Safe read. Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_dns.holodeck_dns_host_list`.
+        """
+        from meho_backplane.connectors.holodeck.ops_dns import (
+            holodeck_dns_host_list as _holodeck_dns_host_list,
+        )
+
+        return await _holodeck_dns_host_list(self, target, params, operator)
+
+    async def dns_host_add(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.dns.host.add`` (#4066).
+
+        **Approval-gated write.** Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_dns.holodeck_dns_host_add`.
+        """
+        from meho_backplane.connectors.holodeck.ops_dns import (
+            holodeck_dns_host_add as _holodeck_dns_host_add,
+        )
+
+        return await _holodeck_dns_host_add(self, target, params, operator)
+
+    async def dns_host_remove(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.dns.host.remove`` (#4066).
+
+        **Approval-gated write.** Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_dns.holodeck_dns_host_remove`.
+        """
+        from meho_backplane.connectors.holodeck.ops_dns import (
+            holodeck_dns_host_remove as _holodeck_dns_host_remove,
+        )
+
+        return await _holodeck_dns_host_remove(self, target, params, operator)
 
     async def instance_remove(
         self,

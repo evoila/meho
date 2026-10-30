@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Response schemas for the 18 Holodeck operations, keyed by op id.
+"""Response schemas for the 21 Holodeck operations, keyed by op id.
 
 Each schema names the fields the handler really returns (see the handlers
-in ``ops.py``, ``ops_read.py``, ``ops_write.py``, ``ops_deploy.py`` and
-``ops_remove.py``).
+in ``ops.py``, ``ops_read.py``, ``ops_write.py``, ``ops_deploy.py``,
+``ops_dns.py`` and ``ops_remove.py``).
 Holodeck has no published API file. Where a field is a cmdlet answer passed
 through as is (``Get-HoloDeckConfig``, ``Get-HoloDeckPod``), the schema keeps
 that object open and names only the keys MEHO itself reads. The schemas are
@@ -454,6 +454,87 @@ _ROUTER_PATCH = _envelope(
 
 
 #: Response schema per op id. Every Holodeck op has an entry.
+_DNS_HOST_LIST = _envelope(
+    {
+        "rows": _f(
+            "array",
+            "One row per line of the 'hosts' key of ConfigMap default/dnsmasq.",
+            items=_obj(
+                "One hosts line.",
+                {
+                    "address": _f("string", "IP address of the line."),
+                    "names": _f(
+                        "array", "DNS names of the line, in lower case.", items={"type": "string"}
+                    ),
+                },
+            ),
+        ),
+        "total": _TOTAL,
+        "error": _ERROR,
+    }
+)
+
+
+def _dns_host_write(states: list[str]) -> dict[str, Any]:
+    return _envelope(
+        {
+            "op": _f("string", "Which change ran: 'dns-host-add' or 'dns-host-remove'."),
+            "state": _f(
+                ["string", "null"],
+                "Result of the change; null when refused or failed early.",
+                enum=[*states, None],
+            ),
+            "changed": _f("boolean", "True when MEHO wrote the ConfigMap in this call."),
+            "address": _f(["string", "null"], "The address, in standard form."),
+            "name": _f(["string", "null"], "The name, in lower case."),
+            "backup_path": _f(
+                ["string", "null"],
+                "File on the router with the ConfigMap as it was before the write; "
+                "null when nothing was written.",
+            ),
+            "lines_before": _f(["integer", "null"], "Number of hosts lines before the call."),
+            "lines_after": _f(["integer", "null"], "Number of hosts lines after the call."),
+            "restarted": _f("boolean", "True when the dnsmasq pods were restarted."),
+            "checks": _f(
+                "array",
+                "One answer per running dnsmasq pod.",
+                items=_obj(
+                    "What one pod answered.",
+                    {
+                        "pod": _f("string", "Pod name."),
+                        "pod_ip": _f(["string", "null"], "Pod IP address MEHO asked."),
+                        "forward": _f(
+                            "array",
+                            "Addresses the pod gave for the name.",
+                            items={"type": "string"},
+                        ),
+                        "reverse": _f(
+                            "array", "Names the pod gave for the address.", items={"type": "string"}
+                        ),
+                        "forward_status": _f(
+                            ["string", "null"],
+                            "DNS status of the name query (NOERROR, NXDOMAIN, SERVFAIL, ...); "
+                            "null when dig did not run.",
+                        ),
+                        "reverse_status": _f(
+                            ["string", "null"],
+                            "DNS status of the address query; null when dig did not run.",
+                        ),
+                        "ok": _f("boolean", "True when the pod answered as expected."),
+                        "error": _f("string", "Set when the pod could not be asked."),
+                    },
+                ),
+            ),
+            "verified": _f("boolean", "True when every pod answered as expected, both ways."),
+            "error": _ERROR,
+        }
+    )
+
+
+_DNS_HOST_ADD = _dns_host_write(["added", "unchanged"])
+_DNS_HOST_REMOVE = _dns_host_write(["removed", "absent"])
+
+
 HOLODECK_RESPONSE_SCHEMAS: dict[str, dict[str, Any]] = {
     "holodeck.about": _ABOUT,
     "holodeck.config.show": _CONFIG_SHOW,
@@ -473,4 +554,7 @@ HOLODECK_RESPONSE_SCHEMAS: dict[str, dict[str, Any]] = {
     "holodeck.instance.status": _INSTANCE_STATUS,
     "holodeck.instance.remove": _INSTANCE_REMOVE,
     "holodeck.router.patch": _ROUTER_PATCH,
+    "holodeck.dns.host.list": _DNS_HOST_LIST,
+    "holodeck.dns.host.add": _DNS_HOST_ADD,
+    "holodeck.dns.host.remove": _DNS_HOST_REMOVE,
 }

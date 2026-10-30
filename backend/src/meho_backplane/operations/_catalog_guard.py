@@ -10,7 +10,8 @@ it can serve the target. When it cannot, the call is normally rejected
 with ``unqualified_target_version``.
 
 One implementation can ship several versioned catalogs, for example
-``vmware-rest-9.0`` (9.x targets) and ``vmware-rest-8.0`` (8.0.x targets).
+an ``<impl_id>-9.0`` catalog (9.x targets) and an ``<impl_id>-8.0``
+catalog (8.0.x targets).
 A caller that names one catalog for a target the other catalog serves gets
 the other catalog's descriptor instead (#3600), but only when:
 

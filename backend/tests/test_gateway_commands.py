@@ -540,6 +540,28 @@ async def test_mint_remote_write_refused_on_params_swap(
     assert await _approval_resumed_at(approval_id) is None
 
 
+async def test_mint_remote_write_refused_for_older_release_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approval made under an older MEHO release mints nothing (#5030).
+
+    The seeded approval carries no release, so it counts as older than the
+    running release. The approval stays unconsumed and nothing reaches a
+    runner.
+    """
+    approval_id = await _seed_committed_approval()
+    await _seed_write_allowlist()
+    monkeypatch.setenv("GIT_SHA", "a" * 40)
+
+    result = await _mint_caution(monkeypatch)
+
+    assert not result.minted
+    assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED
+    assert "older MEHO release" in (result.refusal_reason or "")
+    assert await _count(GatewayCommand) == 0
+    assert await _approval_resumed_at(approval_id) is None
+
+
 async def test_mint_remote_write_refused_on_secret_value_swap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

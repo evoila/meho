@@ -38,17 +38,17 @@ What this harness proves (issue #551 DoD)
   and ``vault.kv.metadata.delete``,
   ``credential_read`` for ``vault.kv.read`` /
   ``vault.kv.list``, ``read`` for the KV-v2 / sys metadata reads and
-  the ``.list`` auth ops, and ``other`` for the two ``.read``
-  auth-config ops (``vault.auth.userpass.read`` /
-  ``vault.auth.approle.read``). ``.read`` is deliberately absent from
-  ``_READ_SUFFIXES`` so the suffix check never over-matches the
-  ``credential_read``-allowlisted ``vault.kv.read``; the auth-config
-  ``.read`` ops therefore classify ``other``, the safe
-  over-broadcast direction for non-secret auth-method metadata
-  (decision #3). ``vault.sys.policy.read`` (G3.15-T2 #1410) shares
-  this ``other`` classification for the same reason — its only param
-  is the policy name — while ``vault.sys.policy.list`` is ``read`` via
-  the ``.list`` suffix. The test assertions below encode this split.
+  the ``.list`` auth ops, ``read`` for the ``safe`` config reads
+  (``vault.auth.userpass.read`` / ``vault.auth.approle.read`` /
+  ``vault.sys.policy.read`` / ``vault.token.role.read`` /
+  ``vault.auth.jwt.role.read`` / ``vault.auth.jwt.config.read``), and ``write``
+  for the sys bootstrap writes (``vault.sys.auth.enable`` / ``.tune``,
+  ``vault.sys.mounts.enable`` / ``.tune``). ``.read`` / ``.enable`` /
+  ``.tune`` are not verb suffixes ``classify_op`` knows; a typed op's
+  class follows its risk level (``resolve_operation_op_class``): ``safe``
+  is ``read``, ``caution`` or higher is ``write``. ``vault.kv.read``
+  stays ``credential_read`` because the credential classes always win.
+  The test assertions below encode this split.
 * The dev-root token is generated into the container via
   ``VAULT_DEV_ROOT_TOKEN_ID`` and only ever held in the fixture's
   return value — it is never written to a workflow log, a committed
@@ -933,10 +933,8 @@ async def test_sys_policy_read_against_dev_vault(
     await _assert_audited(
         "vault.sys.policy.read",
         operator_sub="op-policy-read",
-        # ``.read`` is not a read-suffix; policy.read's only param is the
-        # policy name, so it broadcasts ``other`` (full params) like the
-        # vault.auth.*.read ops.
-        expected_op_class="other",
+        # A ``safe`` typed op: its class follows its risk level.
+        expected_op_class="read",
     )
 
 
@@ -970,8 +968,9 @@ async def test_sys_policy_list_against_dev_vault(
 # sys bootstrap writes — auth/mount enable + tune (G3.15-T5 #1413). These
 # are approval-gated, so each dispatch passes ``_approved=True`` (the
 # approvals-API resume flag) to drive the authorized-execution path.
-# ``.enable`` / ``.tune`` are not write/read suffixes, so all four
-# broadcast ``other`` (full params; no secret material in the params).
+# ``.enable`` / ``.tune`` are not write/read suffixes, but all four are
+# ``caution`` or higher, so their class is ``write`` (no secret material
+# in the params).
 # ---------------------------------------------------------------------------
 
 
@@ -979,7 +978,7 @@ async def test_sys_policy_list_against_dev_vault(
 async def test_sys_auth_enable_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
 ) -> None:
-    """``vault.sys.auth.enable`` mounts a new auth method; op_class=other."""
+    """``vault.sys.auth.enable`` mounts a new auth method; op_class=write."""
     target, addr = vault_e2e
     operator = _make_operator(sub="op-auth-enable")
     result = await dispatch(
@@ -1002,7 +1001,7 @@ async def test_sys_auth_enable_against_dev_vault(
     await _assert_audited(
         "vault.sys.auth.enable",
         operator_sub="op-auth-enable",
-        expected_op_class="other",
+        expected_op_class="write",
     )
 
 
@@ -1034,7 +1033,7 @@ async def test_sys_auth_enable_idempotent_on_existing_path(
 async def test_sys_mounts_enable_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
 ) -> None:
-    """``vault.sys.mounts.enable`` mounts a new secret engine; op_class=other."""
+    """``vault.sys.mounts.enable`` mounts a new secret engine; op_class=write."""
     target, addr = vault_e2e
     operator = _make_operator(sub="op-mount-enable")
     result = await dispatch(
@@ -1052,7 +1051,7 @@ async def test_sys_mounts_enable_against_dev_vault(
     await _assert_audited(
         "vault.sys.mounts.enable",
         operator_sub="op-mount-enable",
-        expected_op_class="other",
+        expected_op_class="write",
     )
 
 
@@ -1060,7 +1059,7 @@ async def test_sys_mounts_enable_against_dev_vault(
 async def test_sys_auth_tune_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
 ) -> None:
-    """``vault.sys.auth.tune`` reconfigures the seeded userpass mount; op_class=other."""
+    """``vault.sys.auth.tune`` reconfigures the seeded userpass mount; op_class=write."""
     target, addr = vault_e2e
     operator = _make_operator(sub="op-auth-tune")
     result = await dispatch(
@@ -1079,7 +1078,7 @@ async def test_sys_auth_tune_against_dev_vault(
     await _assert_audited(
         "vault.sys.auth.tune",
         operator_sub="op-auth-tune",
-        expected_op_class="other",
+        expected_op_class="write",
     )
 
 
@@ -1087,7 +1086,7 @@ async def test_sys_auth_tune_against_dev_vault(
 async def test_sys_mounts_tune_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
 ) -> None:
-    """``vault.sys.mounts.tune`` reconfigures the dev ``secret/`` mount; op_class=other."""
+    """``vault.sys.mounts.tune`` reconfigures the dev ``secret/`` mount; op_class=write."""
     target, addr = vault_e2e
     operator = _make_operator(sub="op-mount-tune")
     result = await dispatch(
@@ -1105,7 +1104,7 @@ async def test_sys_mounts_tune_against_dev_vault(
     await _assert_audited(
         "vault.sys.mounts.tune",
         operator_sub="op-mount-tune",
-        expected_op_class="other",
+        expected_op_class="write",
     )
 
 
@@ -1144,14 +1143,9 @@ async def test_auth_userpass_read_against_dev_vault(
 ) -> None:
     """``vault.auth.userpass.read`` returns the user's policies.
 
-    ``op_class`` is ``other``, not ``read``: ``classify_op`` keys the
-    read class off an explicit suffix allowlist (``.list`` / ``.get`` /
-    ``.info`` / … / ``.versions``) and ``.read`` is deliberately absent
-    so the generic suffix never over-matches ``vault.kv.read`` (which
-    is in the ``credential_read`` allowlist instead). A userpass-config
-    read returns policy/TTL metadata, not set-shaped data or secret
-    values, so the ``other`` full-detail broadcast is the intended
-    classification per decision #3.
+    ``op_class`` is ``read``: ``.read`` is not a read suffix
+    ``classify_op`` knows, but the op is ``safe``, so its class follows
+    its risk level. It returns policy/TTL metadata, no secret values.
     """
     target, _ = vault_e2e
     operator = _make_operator(sub="op-up-read")
@@ -1168,7 +1162,7 @@ async def test_auth_userpass_read_against_dev_vault(
     await _assert_audited(
         "vault.auth.userpass.read",
         operator_sub="op-up-read",
-        expected_op_class="other",
+        expected_op_class="read",
     )
 
 
@@ -1202,12 +1196,9 @@ async def test_auth_approle_read_against_dev_vault(
 ) -> None:
     """``vault.auth.approle.read`` returns the role config.
 
-    ``op_class`` is ``other`` for the same reason as
-    ``vault.auth.userpass.read``: ``.read`` is not in
-    ``classify_op``'s read-suffix allowlist (kept narrow so it never
-    over-matches the ``credential_read``-classified ``vault.kv.read``),
-    and a role-config read carries no secret-id / set-shaped payload,
-    so the full-detail ``other`` broadcast is intended.
+    ``op_class`` is ``read`` for the same reason as
+    ``vault.auth.userpass.read``: the op is ``safe``, so its class
+    follows its risk level. It carries no secret id.
     """
     target, _ = vault_e2e
     operator = _make_operator(sub="op-ar-read")
@@ -1224,7 +1215,7 @@ async def test_auth_approle_read_against_dev_vault(
     await _assert_audited(
         "vault.auth.approle.read",
         operator_sub="op-ar-read",
-        expected_op_class="other",
+        expected_op_class="read",
     )
 
 
@@ -1784,7 +1775,7 @@ async def test_token_role_write_read_list_against_dev_vault(
     await _assert_audited(
         "vault.token.role.read",
         operator_sub="op-token-role-read",
-        expected_op_class="other",
+        expected_op_class="read",
     )
 
     listing = await dispatch(
@@ -1894,7 +1885,7 @@ async def test_auth_jwt_role_write_read_list_and_config_against_dev_vault(
     assert read.status == "ok", read.error
     assert read.result == after
     await _assert_audited(
-        "vault.auth.jwt.role.read", operator_sub="op-jwt-role-read", expected_op_class="other"
+        "vault.auth.jwt.role.read", operator_sub="op-jwt-role-read", expected_op_class="read"
     )
 
     listing = await dispatch(
@@ -1924,5 +1915,5 @@ async def test_auth_jwt_role_write_read_list_and_config_against_dev_vault(
     await _assert_audited(
         "vault.auth.jwt.config.read",
         operator_sub="op-jwt-config-read",
-        expected_op_class="other",
+        expected_op_class="read",
     )

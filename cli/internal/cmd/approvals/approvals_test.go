@@ -665,6 +665,46 @@ func TestPrintDetailRendersOptionalFields(t *testing.T) {
 	}
 }
 
+// TestPrintDetailRendersReleaseAndExpiredReason confirms show prints the
+// release a request was made under, and why an expired request expired
+// with the advice to ask again (#5030).
+func TestPrintDetailRendersReleaseAndExpiredReason(t *testing.T) {
+	d := newApprovalView(t, "expired", "")
+	release := "0123456789abcdef0123456789abcdef01234567 (chart 0.40.0)"
+	reason := api.ApprovalExpiredReasonReleaseChanged
+	message := "MEHO was updated while the request waited, and an approval covers one exact release. Ask again."
+	d.ReleaseId = &release
+	d.ExpiredReason = &reason
+	d.ExpiredMessage = &message
+
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	out := stdout.String()
+	for _, want := range []string{
+		"Release:      " + release,
+		"Expired:      " + message,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printDetail render missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintDetailOmitsReleaseWhenUnset confirms a request with no release
+// and no expiry reason prints neither line (#5030).
+func TestPrintDetailOmitsReleaseWhenUnset(t *testing.T) {
+	d := newApprovalView(t, "pending", "")
+
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	out := stdout.String()
+	for _, banned := range []string{"Release:", "Expired:"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("printDetail render included %q for nil field in:\n%s", banned, out)
+		}
+	}
+}
+
 // TestPrintListTableEmpty — an empty list names the state filter that
 // produced it and how to see more; only --status all with no --work-ref
 // and no offset says "none at all". With --work-ref, the message names
@@ -725,6 +765,61 @@ func TestListSendsWorkRef(t *testing.T) {
 	}
 	if got := seen.Get("work_ref"); got != "gh:evoila/meho#1" {
 		t.Errorf("expected work_ref=gh:evoila/meho#1 on the wire, got %q", got)
+	}
+}
+
+// TestListOrderOnTheWire pins --order (#3596): unset with no --work-ref
+// leaves `order` off the wire (server default, newest first); --work-ref
+// alone sends order=oldest; an explicit --order always wins.
+func TestListOrderOnTheWire(t *testing.T) {
+	cases := []struct {
+		name string
+		opts listOpts
+		want string
+	}{
+		{"default", listOpts{}, ""},
+		{"work ref defaults to oldest", listOpts{WorkRef: "gh:evoila/meho#1"}, "oldest"},
+		{"explicit newest with work ref", listOpts{WorkRef: "gh:evoila/meho#1", Order: "newest"}, "newest"},
+		{"explicit oldest", listOpts{Order: "oldest"}, "oldest"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var seen url.Values
+			srv := mockBackplane(t, map[string]mockHandler{
+				"GET /api/v1/approvals": func(w http.ResponseWriter, r *http.Request) {
+					seen = r.URL.Query()
+					writeJSON(t, w, http.StatusOK, []api.ApprovalRequestView{})
+				},
+			})
+			defer srv.Close()
+
+			stderr, err := runListWithMock(t, srv, tc.opts)
+			if err != nil {
+				t.Fatalf("runList: %v (stderr: %s)", err, stderr.String())
+			}
+			if _, present := seen["order"]; tc.want == "" && present {
+				t.Errorf("order should stay off the wire; got %q", seen.Get("order"))
+			}
+			if got := seen.Get("order"); got != tc.want {
+				t.Errorf("expected order=%q on the wire, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestListRejectsUnknownOrder — a value other than oldest/newest fails
+// before any request.
+func TestListRejectsUnknownOrder(t *testing.T) {
+	cmd := &cobra.Command{Use: "list"}
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	cmd.SetContext(context.Background())
+	err := runList(cmd, listOpts{Order: "random", JSONOut: true})
+	if err == nil {
+		t.Fatal("expected an error for --order random")
+	}
+	if !strings.Contains(stderr.String(), "--order must be oldest or newest") {
+		t.Errorf("error should name the accepted values; got:\n%s", stderr.String())
 	}
 }
 

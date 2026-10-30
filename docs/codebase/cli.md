@@ -40,7 +40,7 @@ names.
   (`groups`, `search`, `call`).
 - `meho connector ...` (G0.7-T5 #405) — spec-ingestion + review
   workflow (`ingest`, `list`, `review`, `edit-group`, `edit-op`,
-  `enable`, `disable`, `delete`).
+  `overrides`, `remove-override`, `enable`, `disable`, `delete`).
 - `meho audit ...` (G8.1-T3 #467) — audit-log query surface
   (`query`, `recent`, `show`, `who-touched`, `my-recent`) wrapping
   the four `/api/v1/audit/*` routes shipped by G8.1-T2 (#466). G8.2-T5
@@ -48,6 +48,8 @@ names.
   tree over `GET /api/v1/audit/sessions/{id}/replay` (`--json`,
   `--max-depth`; a 413 `session_too_large` redirects to
   `query --session-id`) — plus a `--session-id` filter on `query`.
+  `count` (#4983) counts the rows that match the `query` filters, per
+  event class, in one call (`POST /api/v1/audit/class-counts`).
   #4855 adds `trace list` (the operation runs that still have a stored
   flight-recorder trace, via `query` with `has_trace=true`, audit id
   first) and `trace show <audit-id>` (one trace over
@@ -200,10 +202,13 @@ cli/
     │   ├── doctor.go          # `meho doctor` (#3666) — command, report model, redaction, exit codes.
     │   ├── doctor_offline.go  # offline layer: binary, config, credential store, plugin shim/lock/cache, plugin settings, CA bundle.
     │   ├── doctor_online.go   # authenticated layer: DNS, token + refresh, MCP handshake, working-surface compare.
+    │   ├── doctor_server.go   # server layer (#4740): runs `meho-host check --json` as root on a form-2 server.
     │   ├── doctor_test.go     # offline, credential-store, redaction, and httptest MCP-stub tests.
+    │   ├── doctor_server_test.go # server layer with a fake meho-host: root, not root, laptop, bad answers, time limit.
     │   ├── audit/            # G8.1-T3 #467 — `meho audit …` verb tree.
     │   │   ├── audit.go          # NewRootCmd + shared typed-client helpers (G0.12-T5 #1263).
     │   │   ├── query.go          # `meho audit query` (POST /api/v1/audit/query).
+    │   │   ├── count.go          # `meho audit count` (#4983; POST /api/v1/audit/class-counts) — the query filters without --limit / --cursor; work-ref filter is --filter-work-ref; prints the counted window.
     │   │   ├── recent.go         # `meho audit recent` — shortcut for `query --since 24h`.
     │   │   ├── show.go           # `meho audit show <audit-id>` (GET /api/v1/audit/show/{id}).
     │   │   ├── who_touched.go    # `meho audit who-touched <target>` (GET /api/v1/audit/who-touched/{target}).
@@ -213,6 +218,7 @@ cli/
     │   │   ├── trace_show.go     # `meho audit trace show <audit-id>` (GET /api/v1/audit/{id}/trace) — header + one line per span; no header/body values.
     │   │   ├── audit_test.go     # helper + URL-normalisation + register-all-verbs tests.
     │   │   ├── query_test.go     # body-marshal + render + 400-passthrough + --session-id tests.
+    │   │   ├── count_test.go     # window + per-class render, wire filters, --json as it came, refused --since, flag names.
     │   │   ├── show_test.go      # path-escape + 404 / 422 surface + summary render tests.
     │   │   ├── replay_test.go    # tree render + --json + --max-depth fold + 413 redirect tests.
     │   │   ├── trace_test.go     # has_trace body + audit-id-first table + --json + 403 tests.
@@ -260,7 +266,9 @@ cli/
     │   │   ├── list.go           # `meho connector list` (GET  /api/v1/connectors). List endpoint returns dict[str, list[dict]] (no response_model on the backend; per-row UUID serialisation), so a package-private listEntry decode lives here.
     │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review). `--prefer tenant|builtin|legacy` (#3799, #4889) is sent as `?prefer=` to pick a row when the id matches both a built-in and a tenant connector (`legacy` picks the tenant's old copy under a former product name); omitted, the 409 stays the default.
     │   │   ├── edit_group.go     # `meho connector edit-group <id> <key>` (PATCH groups/{key}).
-    │   │   ├── edit_op.go        # `meho connector edit-op <id> <op>` (PATCH operations/{op}).
+    │   │   ├── edit_op.go        # `meho connector edit-op <id> <op>` (PATCH operations/{op}). `--safety` takes all four levels and can only raise the level; `--reason` goes to the audit row and is required to turn approval off (#4711). A `401` with `approval_off_needs_fresh_sign_in` prints the server's message and says to run `meho login` again.
+    │   │   ├── overrides.go      # `meho connector overrides [--reduced-approval]` (GET /api/v1/connectors/operation-overrides, #4711) — lists operator changes to risk levels and approval; `--reduced-approval` lists the operations running with approval turned off. The scope column shows the tenant id.
+    │   │   ├── remove_override.go # `meho connector remove-override <id> <op> [--tenant <uuid>] [--reason <text>]` (DELETE /api/v1/connectors/{id}/operation-overrides/{op_id}, #4711) — removes one tenant's or the install-wide change; ending approval needs platform_admin, a reason and a fresh sign-in.
     │   │   ├── enable.go         # `meho connector enable <id>`  + shared transition factory + `disable` + `delete`.
     │   │   ├── enable_reads.go   # `meho connector enable-reads <id>` (POST /enable-reads, G0.25-T7 #1749) — bulk-enable GET/HEAD ingested ops; writes stay default-deny. Renders the ops_enabled count; idempotent. Takes the same `--prefer tenant|builtin|legacy` flag as `review` (#3799, #4889).
     │   │   ├── disable.go        # `meho connector disable <id>` (constructor only; logic in enable.go).
@@ -275,6 +283,7 @@ cli/
     │   │   ├── groups.go         # `meho operation groups` (GET /api/v1/operations/groups) — typed via api.GetGroupsApiV1OperationsGroupsGetParams.
     │   │   ├── search.go         # `meho operation search` (GET /api/v1/operations/search) — typed via api.GetSearchApiV1OperationsSearchGetParams. A 200 with the backplane's `status: "rate_limited"` envelope is rendered as unexpected_response (exit 4) with the wait, in both ranked and `--op-id` mode.
     │   │   ├── call.go           # `meho operation call`   (POST /api/v1/operations/call) — typed via api.CallOperationBody + FromCallOperationBodyTarget0.
+    │   │   ├── subops.go         # `meho operation subops` (#4983; GET /api/v1/operations/governed-subops) — child steps, risk level, grantable; the 404 `no_governed_subops` answer prints a plain note, exit 0.
     │   │   ├── operation_test.go # render + helper + sentinel tests.
     │   │   └── client_test.go    # G0.12-T2 #1260 — fakeOperationsClient mocks the operationsAPI seam; asserts typed request params + 401 refresh dance + error classification.
     │   ├── retrieval/         # G4.3-T2 #441 — retrieval-quality tooling. G0.12-T12 #1270 moved every verb onto the generated `api.ClientWithResponses` (no consumer-side struct copies).
@@ -348,6 +357,7 @@ cli/
     │   ├── netdiag.go         # shared DNS / TLS / unreachable classifier for client diagnostics (#3666).
     │   └── netdiag_test.go    # table tests + a real TLS failure.
     ├── output/
+    │   ├── audit_receipt.go   # Meho-Audit-Id header reader + the `audit receipt: <id>` line (#4976).
     │   ├── format.go          # human + JSON formatters + structured exit codes.
     │   └── format_test.go     # human/JSON/exit-code pinning.
     └── version/
@@ -1045,6 +1055,39 @@ that header from one place, so every verb gets it without its own flag.
 - No PersistentPreRun hooks exist below the root. If one is added, it
   must call `applyWorkRef` too (cobra runs only the nearest hook).
 
+## Audit receipt on writes with no body (#4976)
+
+Some write routes answer `204 No Content`. They have no body, so the
+audit id cannot come back in a JSON field the way `operation call`
+gets it. The backplane sends it in a response header instead:
+
+- The audit middleware (`backend/src/meho_backplane/audit.py`) puts
+  `Meho-Audit-Id: <id>` on every buffered response that has an audit
+  record. The id is the first `operation_execution` row the request
+  committed in the caller's name (for example the
+  `meho_connector_edit_group` row). A call allowed by a standing grant
+  saves an approval decision row before the operation runs; the header
+  still names the execution row, the same row as the body's `audit_id`.
+  When the request saved no execution row, it is the first other row it
+  saved in the caller's name (for example a decision row). When it saved
+  none, it is the request row the middleware wrote. A request with no record gets no header.
+- `output.AuditIDFromResponse` reads the header. `output.WriteAuditReceipt`
+  prints `audit receipt: <id>`. `dispatch.WriteAuditReceipt` calls it,
+  so the line is the same for every command.
+
+These commands print the line and put `audit_id` in their `--json`
+output: `connector edit-group`, `connector enable`, `connector disable`,
+`connector delete`, `sensor delete`, `dashboard delete`,
+`conventions delete`, `scheduler cancel` and `topology unannotate`.
+With an older backplane there is no header: the text output has no
+receipt line and `audit_id` is `null`.
+
+`meho audit query --audit-id <id>` returns the row the receipt names.
+`backend/tests/test_audit_wrapper_cutover.py` proves this with the
+wrapper-row cutover on and off, and
+`backend/tests/test_api_v1_connectors_ingest.py` for `edit-group` and
+`enable`.
+
 ## Doctor flow (`meho doctor`, #3666)
 
 `meho doctor` checks the client setup on this machine and says which
@@ -1118,11 +1161,62 @@ makes exactly the calls it reports, and none with `--no-network`.
    server lists for this session but the client did not see is a
    `surface_gap`.
 
+### Server layer (form-2 server only, #4740)
+
+`runServerChecks` in `doctor_server.go`. It runs last, after the
+authenticated layer. It is the ADR 0007 amendment of 2026-10-16: the
+checks of the built-in Kubernetes (RKE2) live in `meho-host check`, and
+the doctor runs them on the server, so the CLI needs no Kubernetes
+library.
+
+- **No `/usr/local/sbin/meho-host`** (a laptop): no server layer and no
+  line. The output is the same as before #4740. The path is the
+  constant `mehoHostPath`; `install.sh` of install form 2 puts the file
+  there.
+- **`--no-network`**: one `skip` line. `meho-host check` asks the
+  Kubernetes API, and the backplane runs in that same cluster.
+- **Not root** (effective user id is not 0): one `warn` line with the
+  hint "RKE2 checks need root: run `sudo meho doctor`". The doctor does
+  not run `meho-host` and does not ask for a password.
+- **Root**: runs `meho-host check --json` with a 60-second limit
+  (`mehoHostTimeout`) and adds one line per check, in its order, after
+  the doctor's own lines. `meho-host` exits 1 when a line is red. With
+  valid JSON that is a normal answer: the lines decide, not the exit
+  code.
+
+The status words map one to one: `ok`, `warn` and `fail` (the words
+`meho-host` uses), and `skip`. A line with another word becomes a
+`fail` line that names the word. These answers become one `fail` line
+named `meho-host check`, with a hint to run `sudo meho-host check`:
+no output, output that is not valid JSON, an empty list, a command that
+could not start, and the time limit. The detail names the exit status
+and the first line of `meho-host`'s error output, where it prints its
+own `[FAIL]` message.
+
+`exec.CommandContext` stops only `meho-host` itself at the limit. A
+`kubectl` or `rke2` that it started can keep the output pipe open, so
+`Cmd.WaitDelay` (5 seconds) bounds the wait for the output after that.
+Such a child process ends on its own; `kubectl` has a 10-second request
+limit in `meho-host`.
+
+The seams in `doctorDeps` are `stat` (the file check), `geteuid` (the
+user id), `runCommand` (runs the command and returns its standard output
+and standard error) and `serverTimeout`. The human output prints the
+server lines after the summary of the authenticated layer (scopes,
+working surface, session id). The JSON output has them at the end of
+`checks`, with `"layer":"server"`.
+
+Under `sudo`, the doctor runs as root. The offline and authenticated
+layers then read the settings and the login that root sees, which are
+usually not those of the admin's own user.
+
 Failure classes: `dns`, `tls`, `unreachable` (from `internal/netdiag`),
 `not_logged_in`, `refresh_rejected`, `no_refresh_token`, `unauthorized`,
 `surface_gap`, `unexpected`. Exit codes follow the `meho status`
 taxonomy: 2 login problem, 3 network problem, 4 unexpected answer or
-surface gap, 1 an offline check failed, 0 no failure.
+surface gap, 1 an offline or server check failed, 0 no failure. The
+first failed line decides, so a red server line gives 1 only when no
+earlier line failed. Warning lines keep 0.
 
 The scopes shown are the CLI login's scopes. A Claude client logs in on
 its own through `mcp-remote` and can hold other scopes (for example
@@ -1419,7 +1513,9 @@ narrow-waist contract.
   MCP-only. Whenever the op resolved, the human output also prints one
   plain line with the risk level and what MEHO would do with this call
   for this caller and target (#3973 / #4923) — for example "Risk level:
-  dangerous. This call waits for approval." — and `--json` carries
+  dangerous. This call waits for approval. A second person must approve
+  it." The line says a second person must approve only for `dangerous`
+  and `destructive`, where that is always true (#4963). `--json` carries
   `safety_level`, `requires_approval`, `policy_verdict` and
   `policy_reason`. The verb exits 1 on a non-ok
   envelope (`status="error"` for input faults, `status="unavailable"` for
@@ -1451,6 +1547,15 @@ narrow-waist contract.
   Paging a document handle without `--path` is a server 422; the CLI
   shows the server's message and adds the `--path` form that works
   (`resultquery_path.go`).
+- `meho operation subops <op_id> [--connector <connector_id>]` (#4983)
+  — calls `GET /api/v1/operations/governed-subops`. Prints one row per
+  child step of a multi-step operation: the op id, the risk level
+  (`unknown` when the step has no descriptor), and whether a standing
+  grant may cover it, with the reason when not. `--connector` sends
+  `connector_id`. When the op has no child steps, the route answers 404
+  with `reason: no_governed_subops`; the command prints one plain line
+  and exits 0. Any other 404 stays an error. `--json` prints the answer
+  as it came (`subops.go`).
 
 ### Reserved flags (same shape across all three verbs)
 
@@ -1615,8 +1720,8 @@ removes one through `DELETE /api/v1/targets/{name}`.
   The optional flags mirror the `TargetCreate` fields one-for-one
   (`--alias` repeatable, `--version`, `--port`, `--fqdn`,
   `--secret-ref`, `--auth-model`, `--verify-tls`, `--tls-ca-pin`,
-  `--tls-server-name`, `--preferred-impl`, `--note`) and are sent only
-  when set, so the server's defaults apply to the rest — notably an
+  `--tls-server-name`, `--vpn-required`, `--preferred-impl`, `--note`)
+  and are sent only when set, so the server's defaults apply to the rest — notably an
   omitted `--secret-ref` derives the per-tenant default credential path
   (#1723) rather than persisting "no credential". `--no-secret-ref`
   (Task #3854; cannot be combined with `--secret-ref`) sends an
@@ -1637,6 +1742,8 @@ removes one through `DELETE /api/v1/targets/{name}`.
   (Task #3854) — calls `PATCH /api/v1/targets/{name}` (`TargetUpdate`)
   for one target. The field flags have the same names as `add`'s and
   are sent only when set, so every other column keeps its value.
+  For example, `--vpn-required=false` clears the VPN flag, and an
+  update without `--vpn-required` leaves it as it is (#5075).
   `--alias` replaces the whole alias list and `--extra key=value`
   replaces the whole `extras` map, matching the server's PATCH
   semantics. `--clear <field>` (repeatable) sends an explicit JSON null

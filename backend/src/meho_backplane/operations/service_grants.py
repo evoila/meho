@@ -188,17 +188,14 @@ class DeleteGrantNeedsTenantAdminError(Exception):
 
 #: A well-formed HTTP-style ``op_id`` ending in a **literal** query string.
 #:
-#: Several governed vCenter operations carry a ``?action=<verb>`` (or a
-#: multi-param) query string as a literal part of their canonical op id — the
-#: ``vm.power`` / ``vm.deploy_from_library`` / host-software composite sub-ops
-#: (``POST:/vcenter/vm/{vm}/power?action=start``,
-#: ``POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy``,
-#: ``POST:/esx/settings/hosts/{host}/software?action=apply&vmw-task=true``) and
-#: every ``?action=`` endpoint the ingest parser emits. That ``?`` is part of
-#: the exact op id, not a glob — grant matching is exact string equality (see
+#: Some ingested operations carry a ``?action=<verb>`` (or a multi-param)
+#: query string as a literal part of their canonical op id. The ingest parser
+#: keeps the query of such a path, so the op id looks like
+#: ``POST:/items/{id}?action=start``. That ``?`` is part of the exact op id,
+#: not a glob — grant matching is exact string equality (see
 #: :func:`find_live_grant`), so the literal is safe. This matches exactly one
 #: ``?`` (no ``*``), followed by one or more ``key=value`` pairs joined by
-#: ``&`` (keys / values are ``[A-Za-z0-9_.-]``, covering ``vmw-task``).
+#: ``&`` (keys / values are ``[A-Za-z0-9_.-]``, so hyphenated keys fit).
 _LITERAL_QUERY_STRING_OP_ID: re.Pattern[str] = re.compile(
     r"^[A-Z]+:/[^?*]+\?[A-Za-z0-9_.-]+=[A-Za-z0-9_.-]+"
     r"(?:&[A-Za-z0-9_.-]+=[A-Za-z0-9_.-]+)*$"
@@ -215,8 +212,8 @@ def _reject_wildcards(payload: ServiceGrantCreate) -> None:
     permitted anywhere.
 
     The one exception is a **literal** query string on an HTTP-style
-    ``op_id`` (e.g. ``POST:/vcenter/vm/{vm}/power?action=start``): several
-    governed vCenter ops carry a ``?action=`` key as a literal part of their
+    ``op_id`` (for example an op id ending in ``?action=start``): some
+    ingested ops carry a ``?key=value`` suffix as a literal part of their
     exact op id, and grant matching is exact string equality, so such an op
     id is accepted verbatim (see :data:`_LITERAL_QUERY_STRING_OP_ID`). A
     ``?`` anywhere else — a malformed op id, or a ``connector_id`` /

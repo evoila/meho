@@ -10,7 +10,7 @@
   Each control PATCHes
   ``/ui/connectors/registry/{connector_id}/operations/{op_id}`` and swaps
   THIS row's outerHTML with the re-rendered row. The ``op_id`` is the
-  natural key ``f"{method}:{path}"`` (e.g. ``GET:/api/vcenter/cluster``)
+  natural key ``f"{method}:{path}"`` (e.g. ``GET:/repos/{owner}/{repo}/issues``)
   which CONTAINS slashes; it is emitted RAW into the ``hx-patch`` URL
   (Jinja HTML-escapes the attribute but does NOT URL-encode the path) so
   the ``{op_id:path}`` converter on the route captures the slash-bearing
@@ -51,8 +51,11 @@
     * ``connector_id``   -- str: the ``<impl_id>-<version>`` key.
     * ``op``             -- dict: {op_id, summary, description,
                             custom_description, safety_level,
-                            requires_approval, is_enabled,
-                            tenant_enabled, tags}.
+                            requires_approval, classified_safety_level,
+                            is_enabled, tenant_enabled, tags}.
+                            ``safety_level`` / ``requires_approval`` are
+                            the effective values (operator overrides
+                            applied, #4711).
     * ``is_tenant_admin``-- bool: edit controls vs read-only badges.
     * ``csrf_token``     -- str: minted double-submit token.
     * ``warnings``       -- list[dict]: {code, connector_class, message}
@@ -100,7 +103,10 @@
           data-control="safety_level"
           onchange="this.form.requestSubmit()"
         >
-          {% for level in ["safe", "caution", "dangerous", "destructive"] %}
+          {#- #4711: only levels at or above the classification. Lowering the
+              classification needs a pull request, not an edit. -#}
+          {%- set levels = ["safe", "caution", "dangerous", "destructive"] -%}
+          {% for level in levels[levels.index(op.classified_safety_level | default("safe")):] %}
             <option value="{{ level }}" {{ "selected" if op.safety_level == level else "" }}>
               {{ level }}
             </option>
@@ -123,6 +129,21 @@
         data-control-form="requires_approval"
       >
         <input type="hidden" name="requires_approval" value="{{ "false" if op.requires_approval else "true" }}" />
+        {% if op.requires_approval %}
+          {#- #4711: turning approval off is a platform-admin act with a
+              written reason; the server refuses it without one. -#}
+          <input
+            type="text"
+            name="reason"
+            class="input input-bordered input-xs"
+            maxlength="1024"
+            required
+            placeholder="reason to turn approval off"
+            aria-label="Reason to turn approval off for {{ op.op_id }}"
+            data-control="approval_reason"
+            autocomplete="off"
+          />
+        {% endif %}
         <button
           type="submit"
           class="btn btn-xs {{ 'btn-outline' if op.requires_approval else 'btn-ghost' }}"

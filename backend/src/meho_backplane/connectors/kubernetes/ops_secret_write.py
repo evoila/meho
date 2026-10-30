@@ -460,8 +460,8 @@ _SECRET_DELETE_LLM: dict[str, Any] = {
     "output_shape": "{name, namespace, deleted}.",
     "next_step": (
         "If the preview lists workloads that use the Secret, change them first "
-        "(k8s.apply) or keep the Secret. After the delete, k8s.cr.list of secrets "
-        "in the namespace no longer shows it."
+        "(k8s.apply) or keep the Secret. After the delete, k8s.secret.list in the "
+        "namespace no longer shows it."
     ),
 }
 

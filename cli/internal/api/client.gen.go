@@ -45,6 +45,12 @@ const (
 	AggregateFuncSUM   AggregateFunc = "SUM"
 )
 
+// Defines values for ApprovalExpiredReason.
+const (
+	ApprovalExpiredReasonDeadlinePassed ApprovalExpiredReason = "deadline_passed"
+	ApprovalExpiredReasonReleaseChanged ApprovalExpiredReason = "release_changed"
+)
+
 // Defines values for ApprovalRequestStatus.
 const (
 	ApprovalRequestStatusApproved  ApprovalRequestStatus = "approved"
@@ -441,6 +447,12 @@ const (
 	MemoryScopeUserTenant MemoryScope = "user-tenant"
 )
 
+// Defines values for OperationOverrideRowScope.
+const (
+	OperationOverrideRowScopeInstall OperationOverrideRowScope = "install"
+	OperationOverrideRowScopeTenant  OperationOverrideRowScope = "tenant"
+)
+
 // Defines values for OperationRunStatus.
 const (
 	OperationRunStatusCancelled OperationRunStatus = "cancelled"
@@ -689,6 +701,7 @@ const (
 	TargetCreateProductMssql      TargetCreateProduct = "mssql"
 	TargetCreateProductNsx        TargetCreateProduct = "nsx"
 	TargetCreateProductPfsense    TargetCreateProduct = "pfsense"
+	TargetCreateProductPhpipam    TargetCreateProduct = "phpipam"
 	TargetCreateProductPostgres   TargetCreateProduct = "postgres"
 	TargetCreateProductPrometheus TargetCreateProduct = "prometheus"
 	TargetCreateProductProxmox    TargetCreateProduct = "proxmox"
@@ -823,6 +836,12 @@ const (
 	MehoBackplaneUiRoutesTopologyTableSortColumnName      MehoBackplaneUiRoutesTopologyTableSortColumn = "name"
 )
 
+// Defines values for ListApprovalsApiV1ApprovalsGetParamsOrder.
+const (
+	ListApprovalsApiV1ApprovalsGetParamsOrderNewest ListApprovalsApiV1ApprovalsGetParamsOrder = "newest"
+	ListApprovalsApiV1ApprovalsGetParamsOrderOldest ListApprovalsApiV1ApprovalsGetParamsOrder = "oldest"
+)
+
 // Defines values for ListEndpointApiV1ConnectorsGetParamsStatus.
 const (
 	ListEndpointApiV1ConnectorsGetParamsStatusAll      ListEndpointApiV1ConnectorsGetParamsStatus = "all"
@@ -901,6 +920,12 @@ const (
 	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateOk       ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "ok"
 	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateSkip     ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "skip"
 	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateUnknown  ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "unknown"
+)
+
+// Defines values for UiConnectorsOverridesUiConnectorsOverridesGetParamsShow.
+const (
+	UiConnectorsOverridesUiConnectorsOverridesGetParamsShowAll     UiConnectorsOverridesUiConnectorsOverridesGetParamsShow = "all"
+	UiConnectorsOverridesUiConnectorsOverridesGetParamsShowReduced UiConnectorsOverridesUiConnectorsOverridesGetParamsShow = "reduced"
 )
 
 // Defines values for RunbooksIndexUiRunbooksGetParamsStatus.
@@ -1442,6 +1467,18 @@ type Aggregate struct {
 // AggregateFunc Aggregate function (fixed allow-list).
 type AggregateFunc string
 
+// ApprovalExpiredReason Why an “expired“ request expired (#5030).
+//
+// Read off the row, never stored, like :class:`ApprovalResultState`.
+//
+//   - :attr:`DEADLINE_PASSED` -- the request waited past “expires_at“
+//     without a decision.
+//   - :attr:`RELEASE_CHANGED` -- MEHO started with a different release
+//     while the request waited (:func:`expire_older_release_requests`).
+//     Only this path expires a request before its deadline, so an
+//     “expired“ row with “decided_at < expires_at“ is this case.
+type ApprovalExpiredReason string
+
 // ApprovalRequestStatus Closed lifecycle status of an :class:`ApprovalRequest`.
 //
 // Initiative #803 (G11.2 Agent permission model), Task #817 (T4). The
@@ -1485,7 +1522,20 @@ type ApprovalRequestView struct {
 	// ``Instructed-by:`` / ``Instruction:`` / ``Refs:`` trailer block. The
 	// approver is still ``reviewed_by``; ``instructed_by`` is the other human
 	// whose written instruction they acted on.
-	Delegation     *DelegationView        `json:"delegation,omitempty"`
+	Delegation     *DelegationView `json:"delegation,omitempty"`
+	ExpiredMessage *string         `json:"expired_message"`
+
+	// ExpiredReason Why an ``expired`` request expired (#5030).
+	//
+	// Read off the row, never stored, like :class:`ApprovalResultState`.
+	//
+	// * :attr:`DEADLINE_PASSED` -- the request waited past ``expires_at``
+	//   without a decision.
+	// * :attr:`RELEASE_CHANGED` -- MEHO started with a different release
+	//   while the request waited (:func:`expire_older_release_requests`).
+	//   Only this path expires a request before its deadline, so an
+	//   ``expired`` row with ``decided_at < expires_at`` is this case.
+	ExpiredReason  *ApprovalExpiredReason `json:"expired_reason,omitempty"`
 	ExpiresAt      *string                `json:"expires_at"`
 	Id             openapi_types.UUID     `json:"id"`
 	OpId           string                 `json:"op_id"`
@@ -1495,6 +1545,7 @@ type ApprovalRequestView struct {
 	PrincipalName  *string                `json:"principal_name"`
 	PrincipalSub   string                 `json:"principal_sub"`
 	ProposedEffect map[string]interface{} `json:"proposed_effect"`
+	ReleaseId      *string                `json:"release_id"`
 
 	// ResultState Whether an approved request has run yet (#3486).
 	//
@@ -2085,7 +2136,7 @@ type AuthModel string
 // “target_name“ is resolved to a live target descriptor, “op“ to the
 // resolved connector's enabled descriptor (yielding “handler_ref“ +
 // “safety_level“ + the “(product, version, impl_id)“ key). “op“ is
-// the connector-side op id (e.g. “"vsphere.host.list"“); the connector
+// the connector-side op id (e.g. “"k8s.node.list"“); the connector
 // triple is derived from the resolved target, not authored here.
 type AuthoredCheckItem struct {
 	CadenceSeconds int                     `json:"cadence_seconds"`
@@ -2864,6 +2915,7 @@ type BodyUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPost struct {
 type BodyUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatch struct {
 	CustomDescription *string `json:"custom_description"`
 	IsEnabled         *string `json:"is_enabled"`
+	Reason            *string `json:"reason"`
 	RequiresApproval  *string `json:"requires_approval"`
 	SafetyLevel       *string `json:"safety_level"`
 
@@ -3424,11 +3476,11 @@ type BudgetStatus struct {
 // and the MCP handler share validation. “target“ accepts either
 // shape and “None“:
 //
-//   - **Bare string** -- “target: "rdc-vcenter"“. The forward-preferred
+//   - **Bare string** -- “target: "prod-k8s"“. The forward-preferred
 //     shape; matches “query_topology“ / “query_audit“ so an agent
 //     can carry a target name across the read and the write surfaces
 //     without reshape. G0.13-T2 (#1132) widening of #780.
-//   - **Dict** -- “target: {"name": "rdc-vcenter"}“. The original
+//   - **Dict** -- “target: {"name": "prod-k8s"}“. The original
 //     shape; the handler resolves the “name“ field and (optionally)
 //     reads “fqdn“ for vhost routing. Still accepted unchanged.
 //   - **None** -- the operation does not need a target (typed handlers
@@ -3510,8 +3562,8 @@ type CallOperationBody_Target struct {
 // CandidateHint One candidate target a connector's :meth:`Connector.list_candidates` returns.
 //
 // Candidates are potentially-reachable targets the connector inferred
-// from an existing seed (e.g. a vCenter exposing its managed ESXi
-// hosts; a kubeconfig listing peer cluster contexts). The
+// from an existing seed (e.g. a kubeconfig listing peer cluster
+// contexts). The
 // G9.1-T6 “meho targets discover“ CLI verb surfaces these to the
 // operator; auto-registration is intentionally out of scope per
 // Initiative #363 (operator runs “meho targets import“ after review).
@@ -3666,8 +3718,8 @@ type ConfirmVerifyResponseAnswer string
 // (the dispatchability flag that survives connector-level
 // enable/disable cycles via operator overrides). Useful for the
 // CLI's “meho connector list --status staged“ summary view and
-// for an LLM browsing the catalog: “vmware-rest-9.0“ ingests
-// ~2,211 ops of which only a fraction are enabled, and before the
+// for an LLM browsing the catalog: a big ingested connector
+// can carry thousands of ops of which only a fraction are enabled, and before the
 // split nothing on the row said which of the two numbers
 // “operation_count“ was.
 //
@@ -3692,7 +3744,7 @@ type ConfirmVerifyResponseAnswer string
 // object on “state="registered"“ rows and “None“ on
 // “state="ingested"“ rows (no operator action remains for an
 // ingested connector) — with one exception: a tenant row stored under
-// a former product name (“vcf-logs“ rows for “vrli-rest-9.0“,
+// a former product name (rows saved before a product rename,
 // #4889) can never be called, so it ships “dispatchable=False“ plus
 // a “next_step“ naming “meho connector delete <id>“ as the
 // clean-up. For registered rows the hint is computed against the curated
@@ -3902,19 +3954,20 @@ type ConnectorReviewGroupAdvisory struct {
 // “parameter_schema“ / “response_schema“ / “embedding“ —
 // those are dispatch-time concerns, not review-time concerns, and
 // sending 4 KB of schema per op would balloon the review payload
-// for connectors with thousands of operations (vCenter has 961
-// paths in v0.2).
+// for connectors with thousands of operations.
 type ConnectorReviewOp struct {
-	CustomDescription *string  `json:"custom_description"`
-	Description       *string  `json:"description"`
-	IsEnabled         bool     `json:"is_enabled"`
-	NeedsReingest     *bool    `json:"needs_reingest,omitempty"`
-	OpId              string   `json:"op_id"`
-	RequiresApproval  bool     `json:"requires_approval"`
-	SafetyLevel       string   `json:"safety_level"`
-	Summary           *string  `json:"summary"`
-	Tags              []string `json:"tags"`
-	TenantEnabled     *bool    `json:"tenant_enabled"`
+	ClassifiedRequiresApproval *bool    `json:"classified_requires_approval"`
+	ClassifiedSafetyLevel      *string  `json:"classified_safety_level"`
+	CustomDescription          *string  `json:"custom_description"`
+	Description                *string  `json:"description"`
+	IsEnabled                  bool     `json:"is_enabled"`
+	NeedsReingest              *bool    `json:"needs_reingest,omitempty"`
+	OpId                       string   `json:"op_id"`
+	RequiresApproval           bool     `json:"requires_approval"`
+	SafetyLevel                string   `json:"safety_level"`
+	Summary                    *string  `json:"summary"`
+	Tags                       []string `json:"tags"`
+	TenantEnabled              *bool    `json:"tenant_enabled"`
 }
 
 // ConnectorReviewPayload Top-level review payload returned by :meth:`ReviewService.get_review_payload`.
@@ -5080,8 +5133,19 @@ type EditGroupBody struct {
 //
 // “safety_level“ is the bounded enum from
 // :class:`~meho_backplane.db.models.EndpointDescriptor.safety_level`
-// (“safe“ / “caution“ / “dangerous“); a value outside the set
-// is rejected by Pydantic before the service layer sees it.
+// (“safe“ / “caution“ / “dangerous“ / “destructive“); a value
+// outside the set is rejected by Pydantic before the service layer sees
+// it. It can only raise the level above the classification (#4711).
+//
+// “safety_level“ and “requires_approval“ are stored as an operator
+// override, apart from the value in code or in the API description, so
+// they survive a restart and a re-ingest (#4711). “requires_approval:
+// false“ where the classification requires approval needs
+// “platform_admin“, a “reason“ and a fresh sign-in; it is never
+// allowed for a destructive operation.
+//
+// “reason“ is written to the audit row. It is required to turn
+// approval off.
 //
 // “is_enabled“ is the per-op override that wins over the group
 // cascade (see :meth:`ReviewService.edit_op` for the full
@@ -5101,6 +5165,7 @@ type EditGroupBody struct {
 type EditOpBody struct {
 	CustomDescription *string                `json:"custom_description"`
 	IsEnabled         *bool                  `json:"is_enabled"`
+	Reason            *string                `json:"reason"`
 	RequiresApproval  *bool                  `json:"requires_approval"`
 	SafetyLevel       *EditOpBodySafetyLevel `json:"safety_level"`
 }
@@ -6140,7 +6205,7 @@ type IngestKbRequest struct {
 // :func:`register_ingested_operations` once per spec under the same
 // “(product, version, impl_id)“ connector triple, then run
 // :func:`run_llm_grouping` once for the whole connector. Multi-spec
-// ingestion (vCenter's “vcenter.yaml“ + “vi-json.yaml“) lands as
+// ingestion (a product whose API is split across several spec files) lands as
 // multiple “SpecSource“ entries in one request.
 //
 // Two mutually-exclusive request shapes:
@@ -6822,7 +6887,7 @@ type OpAllowlistEntry struct {
 // OperationCallStep A step the agent dispatches via the operation registry.
 //
 // :attr:`op_id` is the registry operation id (e.g.
-// “vmware.composite.vm.create“); :attr:`params` is the call payload,
+// “gh.composite.repo_create“); :attr:`params` is the call payload,
 // which may contain “${...}“ substitutions resolved at advance time.
 // :attr:`body` is operator-readable Markdown context (may also contain
 // substitutions). :attr:`verify` gates advance to the next step.
@@ -6930,6 +6995,33 @@ type OperationDescriptor struct {
 	TenantId          *openapi_types.UUID     `json:"tenant_id"`
 	Version           string                  `json:"version"`
 }
+
+// OperationOverrideList Response body for “GET /api/v1/connectors/operation-overrides“ (#4711).
+type OperationOverrideList struct {
+	Overrides []OperationOverrideRow `json:"overrides"`
+}
+
+// OperationOverrideRow One operator override of a risk level or approval flag (#4711).
+//
+// “scope“ is “tenant“ (the change applies to “tenant_id“ only) or
+// “install“ (the whole install). “safety_level“ / “requires_approval“
+// are the values that apply in that scope: the classification with every
+// override there. “reason“ is the reason a platform admin gave for
+// turning approval off.
+type OperationOverrideRow struct {
+	ConnectorId      string                    `json:"connector_id"`
+	OpId             string                    `json:"op_id"`
+	Reason           *string                   `json:"reason"`
+	RequiresApproval *bool                     `json:"requires_approval"`
+	SafetyLevel      *string                   `json:"safety_level"`
+	Scope            OperationOverrideRowScope `json:"scope"`
+	SetAt            time.Time                 `json:"set_at"`
+	SetBySub         string                    `json:"set_by_sub"`
+	TenantId         *openapi_types.UUID       `json:"tenant_id"`
+}
+
+// OperationOverrideRowScope defines model for OperationOverrideRow.Scope.
+type OperationOverrideRowScope string
 
 // OperationRunStatus Closed lifecycle status of an :class:`OperationRun`.
 //
@@ -8248,6 +8340,7 @@ type RunnerPrincipalRead struct {
 	LastSeenAt         *time.Time         `json:"last_seen_at"`
 	Name               string             `json:"name"`
 	OwnerSub           string             `json:"owner_sub"`
+	PackageSetDigest   *string            `json:"package_set_digest"`
 	Revoked            bool               `json:"revoked"`
 	TenantId           openapi_types.UUID `json:"tenant_id"`
 	UpdatedAt          time.Time          `json:"updated_at"`
@@ -8305,12 +8398,20 @@ type RunnerResultBatch struct {
 // path materialises only “safe“ ops and never signs them) -- signing is
 // a write-tier property, so their absence on a “safe“ item is correct,
 // not a missing field.
+//
+// Connector packages (#5038): “package_set“ is the digest of the
+// connector package set the item needs
+// (:func:`~meho_backplane.runner.package_set.package_set_digest`). The
+// central MEHO sets it only when a connector package provides the op, and
+// the runner refuses the item when its own digest differs. “None“ for an
+// op built into MEHO.
 type RunnerWorkItem struct {
 	CheckRef   string                  `json:"check_ref"`
 	ExpiresAt  *time.Time              `json:"expires_at"`
 	HandlerRef string                  `json:"handler_ref"`
 	ImplId     *string                 `json:"impl_id,omitempty"`
 	OpId       string                  `json:"op_id"`
+	PackageSet *string                 `json:"package_set"`
 	Params     *map[string]interface{} `json:"params,omitempty"`
 
 	// Principal Principal context an executed op runs under, carried on each item.
@@ -9103,13 +9204,13 @@ type SensorStatus string
 // floor of what runs unattended, not a bypass of a modeled destructive
 // gate).
 type ServiceGrantCreate struct {
-	// ConnectorId Exact '<impl_id>-<version>' connector id, e.g. 'vmware-rest-9.0'.
+	// ConnectorId Exact '<impl_id>-<version>' connector id, e.g. 'gh-rest-3'.
 	ConnectorId string `json:"connector_id"`
 
 	// ExpiresAt Optional UTC expiry; null = standing (permanent) grant; must be future.
 	ExpiresAt *time.Time `json:"expires_at"`
 
-	// OpId Exact operation id, no glob (e.g. 'POST:/vcenter/vm').
+	// OpId Exact operation id, no glob (e.g. 'POST:/repos/{owner}/{repo}/issues').
 	OpId string `json:"op_id"`
 
 	// PrincipalSub JWT sub of the service principal the grant authorises (no wildcard).
@@ -9124,7 +9225,7 @@ type ServiceGrantCreate struct {
 	// TargetNamePattern Target selector (#3349): match any dispatch whose target name matches this fnmatch glob (e.g. 'esx-dc*'). Requires target_id to be null. This glob is the explicit any-target request — it is never implied by a null target_id.
 	TargetNamePattern *string `json:"target_name_pattern"`
 
-	// TargetProduct Target selector (#3349): match any dispatch whose target product equals this exact value (e.g. 'vmware'). Requires target_id to be null.
+	// TargetProduct Target selector (#3349): match any dispatch whose target product equals this exact value (e.g. 'gh'). Requires target_id to be null.
 	TargetProduct *string `json:"target_product"`
 }
 
@@ -9584,7 +9685,7 @@ type Target struct {
 //
 // “version“ is accepted as an optional operator-asserted product
 // version (G0.15-T6 #1215). Operators who know the version up-front
-// (e.g. “"9.0"“ for a vCenter Hetzner-DC target the consumer just
+// (e.g. “"2.11.0"“ for a Harbor target the consumer just
 // deployed) can pass it at create time so the very first probe
 // dispatches against the versioned connector without round-tripping
 // through PATCH. Fresh targets still default to “None“ and resolve
@@ -10848,10 +10949,16 @@ type ListApprovalsApiV1ApprovalsGetParams struct {
 	// Limit Return at most this many requests (1..500). Omit for no limit.
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 
-	// Offset Skip this many requests first (newest first). Defaults to 0.
-	Offset        *int    `form:"offset,omitempty" json:"offset,omitempty"`
-	Authorization *string `json:"authorization,omitempty"`
+	// Offset Skip this many requests first, in the chosen order. Defaults to 0.
+	Offset *int `form:"offset,omitempty" json:"offset,omitempty"`
+
+	// Order Sort by creation time. 'newest' (default) lists the newest request first; 'oldest' lists the oldest first, which is the order a chain of requests under one change ticket was sent in.
+	Order         *ListApprovalsApiV1ApprovalsGetParamsOrder `form:"order,omitempty" json:"order,omitempty"`
+	Authorization *string                                    `json:"authorization,omitempty"`
 }
+
+// ListApprovalsApiV1ApprovalsGetParamsOrder defines parameters for ListApprovalsApiV1ApprovalsGet.
+type ListApprovalsApiV1ApprovalsGetParamsOrder string
 
 // GetApprovalRequestApiV1ApprovalsRequestIdGetParams defines parameters for GetApprovalRequestApiV1ApprovalsRequestIdGet.
 type GetApprovalRequestApiV1ApprovalsRequestIdGetParams struct {
@@ -10988,6 +11095,7 @@ type GetAssignmentApiV1ChecksAssignmentGetParams struct {
 	KnownVersion           *string `form:"known_version,omitempty" json:"known_version,omitempty"`
 	Authorization          *string `json:"authorization,omitempty"`
 	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
+	XMEHORunnerPackageSet  *string `json:"X-MEHO-Runner-Package-Set,omitempty"`
 }
 
 // PutAssignmentApiV1ChecksAssignmentRunnerPutParams defines parameters for PutAssignmentApiV1ChecksAssignmentRunnerPut.
@@ -11024,6 +11132,7 @@ type GetDashboardApiV1ChecksDashboardsDashboardIdGetParams struct {
 type PostResultsApiV1ChecksResultsPostParams struct {
 	Authorization          *string `json:"authorization,omitempty"`
 	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
+	XMEHORunnerPackageSet  *string `json:"X-MEHO-Runner-Package-Set,omitempty"`
 }
 
 // ListEndpointApiV1ConnectorsGetParams defines parameters for ListEndpointApiV1ConnectorsGet.
@@ -11048,6 +11157,13 @@ type IngestEndpointApiV1ConnectorsIngestPostParams struct {
 // GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams defines parameters for GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet.
 type GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams defines parameters for ListOperationOverridesApiV1ConnectorsOperationOverridesGet.
+type ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams struct {
+	// ReducedApproval Only the operations a platform admin turned approval off for.
+	ReducedApproval *bool   `form:"reduced_approval,omitempty" json:"reduced_approval,omitempty"`
+	Authorization   *string `json:"authorization,omitempty"`
 }
 
 // DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams defines parameters for DeleteEndpointApiV1ConnectorsConnectorIdDelete.
@@ -11077,6 +11193,16 @@ type EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer st
 
 // EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams defines parameters for EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatch.
 type EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams defines parameters for RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDelete.
+type RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams struct {
+	// TenantId The tenant whose override to remove. Leave it out for the install-wide override. A tenant admin can name only their own tenant.
+	TenantId *openapi_types.UUID `form:"tenant_id,omitempty" json:"tenant_id,omitempty"`
+
+	// Reason Why you remove it; written to the audit row. Required when the removal ends approval.
+	Reason        *string `form:"reason,omitempty" json:"reason,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -11236,12 +11362,14 @@ type PollNextCommandApiV1GatewayRunnerNextGetParams struct {
 	Wait                   *int    `form:"wait,omitempty" json:"wait,omitempty"`
 	Authorization          *string `json:"authorization,omitempty"`
 	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
+	XMEHORunnerPackageSet  *string `json:"X-MEHO-Runner-Package-Set,omitempty"`
 }
 
 // ReportCommandResultApiV1GatewayRunnerResultPostParams defines parameters for ReportCommandResultApiV1GatewayRunnerResultPost.
 type ReportCommandResultApiV1GatewayRunnerResultPostParams struct {
 	Authorization          *string `json:"authorization,omitempty"`
 	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
+	XMEHORunnerPackageSet  *string `json:"X-MEHO-Runner-Package-Set,omitempty"`
 }
 
 // AuthenticatedHealthApiV1HealthGetParams defines parameters for AuthenticatedHealthApiV1HealthGet.
@@ -11335,7 +11463,7 @@ type PostCallApiV1OperationsCallPostParams struct {
 
 // GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams defines parameters for GetGovernedSubopsApiV1OperationsGovernedSubopsGet.
 type GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams struct {
-	// OpId A composite op id whose governed child ops to enumerate — e.g. `vmware.composite.vm.create`.
+	// OpId A composite op id whose governed child ops to enumerate — e.g. `gh.composite.repo_create`.
 	OpId string `form:"op_id" json:"op_id"`
 
 	// ConnectorId Optional connector-id override for resolving each child's best-effort safety_level; defaults to the connector the composite is registered against.
@@ -11345,7 +11473,7 @@ type GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams struct {
 
 // GetGroupsApiV1OperationsGroupsGetParams defines parameters for GetGroupsApiV1OperationsGroupsGet.
 type GetGroupsApiV1OperationsGroupsGetParams struct {
-	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
+	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `gh-rest-3`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `gh`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
 	ConnectorId string `form:"connector_id" json:"connector_id"`
 
 	// Limit Page size. Default 100; max 500. Matches `list_targets` paging — sibling list surfaces share one ceiling (G0.18-T5 #1358).
@@ -11391,7 +11519,7 @@ type CancelOperationRunApiV1OperationsRunsHandleCancelPostParams struct {
 
 // GetSearchApiV1OperationsSearchGetParams defines parameters for GetSearchApiV1OperationsSearchGet.
 type GetSearchApiV1OperationsSearchGetParams struct {
-	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
+	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `gh-rest-3`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `gh`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
 	ConnectorId string `form:"connector_id" json:"connector_id"`
 
 	// Q Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated.
@@ -11868,6 +11996,7 @@ type ApprovalsIndexUiApprovalsGetParams struct {
 	Tab     *string `form:"tab,omitempty" json:"tab,omitempty"`
 	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	Offset  *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Order   *string `form:"order,omitempty" json:"order,omitempty"`
 }
 
 // ApprovalsHistoryUiApprovalsListGetParams defines parameters for ApprovalsHistoryUiApprovalsListGet.
@@ -11876,6 +12005,7 @@ type ApprovalsHistoryUiApprovalsListGetParams struct {
 	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	Offset  *int    `form:"offset,omitempty" json:"offset,omitempty"`
 	Partial *string `form:"partial,omitempty" json:"partial,omitempty"`
+	Order   *string `form:"order,omitempty" json:"order,omitempty"`
 }
 
 // UiAuditPageUiAuditGetParams defines parameters for UiAuditPageUiAuditGet.
@@ -11974,6 +12104,14 @@ type UiConnectorsListUiConnectorsGetParams struct {
 	Dir     *UnderscoreSortDirection                           `form:"dir,omitempty" json:"dir,omitempty"`
 	Product *string                                            `form:"product,omitempty" json:"product,omitempty"`
 }
+
+// UiConnectorsOverridesUiConnectorsOverridesGetParams defines parameters for UiConnectorsOverridesUiConnectorsOverridesGet.
+type UiConnectorsOverridesUiConnectorsOverridesGetParams struct {
+	Show *UiConnectorsOverridesUiConnectorsOverridesGetParamsShow `form:"show,omitempty" json:"show,omitempty"`
+}
+
+// UiConnectorsOverridesUiConnectorsOverridesGetParamsShow defines parameters for UiConnectorsOverridesUiConnectorsOverridesGet.
+type UiConnectorsOverridesUiConnectorsOverridesGetParamsShow string
 
 // UiConnectorsRegistryListUiConnectorsRegistryGetParams defines parameters for UiConnectorsRegistryListUiConnectorsRegistryGet.
 type UiConnectorsRegistryListUiConnectorsRegistryGetParams struct {
@@ -12505,6 +12643,9 @@ type UiConnectorsImportPreviewUiConnectorsImportPostMultipartRequestBody = BodyU
 
 // UiConnectorsImportConfirmUiConnectorsImportConfirmPostMultipartRequestBody defines body for UiConnectorsImportConfirmUiConnectorsImportConfirmPost for multipart/form-data ContentType.
 type UiConnectorsImportConfirmUiConnectorsImportConfirmPostMultipartRequestBody = BodyUiConnectorsImportConfirmUiConnectorsImportConfirmPost
+
+// UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody defines body for UiConnectorsOverridesUiConnectorsOverridesGet for application/json ContentType.
+type UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody = UISessionContext
 
 // UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody defines body for UiConnectorsRegistryListUiConnectorsRegistryGet for application/json ContentType.
 type UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody = UISessionContext
@@ -14587,6 +14728,9 @@ type ClientInterface interface {
 	// GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet request
 	GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet(ctx context.Context, jobId openapi_types.UUID, params *GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListOperationOverridesApiV1ConnectorsOperationOverridesGet request
+	ListOperationOverridesApiV1ConnectorsOperationOverridesGet(ctx context.Context, params *ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DeleteEndpointApiV1ConnectorsConnectorIdDelete request
 	DeleteEndpointApiV1ConnectorsConnectorIdDelete(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -14603,6 +14747,9 @@ type ClientInterface interface {
 	EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithBody(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatch(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, body EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDelete request
+	RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDelete(ctx context.Context, connectorId string, opId string, params *RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBody request with any body
 	EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBody(ctx context.Context, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -15288,6 +15435,11 @@ type ClientInterface interface {
 
 	// UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody request with any body
 	UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsOverridesUiConnectorsOverridesGetWithBody request with any body
+	UiConnectorsOverridesUiConnectorsOverridesGetWithBody(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsOverridesUiConnectorsOverridesGet(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, body UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiConnectorsRegistryListUiConnectorsRegistryGetWithBody request with any body
 	UiConnectorsRegistryListUiConnectorsRegistryGetWithBody(ctx context.Context, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -16969,6 +17121,18 @@ func (c *Client) GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet(ctx conte
 	return c.Client.Do(req)
 }
 
+func (c *Client) ListOperationOverridesApiV1ConnectorsOperationOverridesGet(ctx context.Context, params *ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListOperationOverridesApiV1ConnectorsOperationOverridesGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) DeleteEndpointApiV1ConnectorsConnectorIdDelete(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDeleteEndpointApiV1ConnectorsConnectorIdDeleteRequest(c.Server, connectorId, params)
 	if err != nil {
@@ -17031,6 +17195,18 @@ func (c *Client) EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchW
 
 func (c *Client) EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatch(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, body EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchRequest(c.Server, connectorId, groupKey, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDelete(ctx context.Context, connectorId string, opId string, params *RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteRequest(c.Server, connectorId, opId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -20079,6 +20255,30 @@ func (c *Client) UiConnectorsImportPreviewUiConnectorsImportPostWithBody(ctx con
 
 func (c *Client) UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiConnectorsImportConfirmUiConnectorsImportConfirmPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsOverridesUiConnectorsOverridesGetWithBody(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsOverridesUiConnectorsOverridesGetRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsOverridesUiConnectorsOverridesGet(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, body UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsOverridesUiConnectorsOverridesGetRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -24871,6 +25071,22 @@ func NewListApprovalsApiV1ApprovalsGetRequest(server string, params *ListApprova
 
 		}
 
+		if params.Order != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "order", runtime.ParamLocationQuery, *params.Order); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -26455,6 +26671,17 @@ func NewGetAssignmentApiV1ChecksAssignmentGetRequest(server string, params *GetA
 			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
 		}
 
+		if params.XMEHORunnerPackageSet != nil {
+			var headerParam2 string
+
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam2)
+		}
+
 	}
 
 	return req, nil
@@ -26876,6 +27103,17 @@ func NewPostResultsApiV1ChecksResultsPostRequestWithBody(server string, params *
 			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
 		}
 
+		if params.XMEHORunnerPackageSet != nil {
+			var headerParam2 string
+
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam2)
+		}
+
 	}
 
 	return req, nil
@@ -27066,6 +27304,70 @@ func NewGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetRequest(server stri
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListOperationOverridesApiV1ConnectorsOperationOverridesGetRequest generates requests for ListOperationOverridesApiV1ConnectorsOperationOverridesGet
+func NewListOperationOverridesApiV1ConnectorsOperationOverridesGetRequest(server string, params *ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/operation-overrides")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.ReducedApproval != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "reduced_approval", runtime.ParamLocationQuery, *params.ReducedApproval); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -27359,6 +27661,100 @@ func NewEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchRequestWit
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteRequest generates requests for RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDelete
+func NewRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteRequest(server string, connectorId string, opId string, params *RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "op_id", runtime.ParamLocationPath, opId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/%s/operation-overrides/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_id", runtime.ParamLocationQuery, *params.TenantId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Reason != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "reason", runtime.ParamLocationQuery, *params.Reason); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -29042,6 +29438,17 @@ func NewPollNextCommandApiV1GatewayRunnerNextGetRequest(server string, runner st
 			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
 		}
 
+		if params.XMEHORunnerPackageSet != nil {
+			var headerParam2 string
+
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam2)
+		}
+
 	}
 
 	return req, nil
@@ -29113,6 +29520,17 @@ func NewReportCommandResultApiV1GatewayRunnerResultPostRequestWithBody(server st
 			}
 
 			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
+		}
+
+		if params.XMEHORunnerPackageSet != nil {
+			var headerParam2 string
+
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam2)
 		}
 
 	}
@@ -36890,6 +37308,22 @@ func NewApprovalsIndexUiApprovalsGetRequest(server string, params *ApprovalsInde
 
 		}
 
+		if params.Order != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "order", runtime.ParamLocationQuery, *params.Order); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -37001,6 +37435,22 @@ func NewApprovalsHistoryUiApprovalsListGetRequest(server string, params *Approva
 		if params.Partial != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "partial", runtime.ParamLocationQuery, *params.Partial); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Order != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "order", runtime.ParamLocationQuery, *params.Order); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -38741,6 +39191,68 @@ func NewUiConnectorsImportConfirmUiConnectorsImportConfirmPostRequestWithBody(se
 	}
 
 	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsOverridesUiConnectorsOverridesGetRequest calls the generic UiConnectorsOverridesUiConnectorsOverridesGet builder with application/json body
+func NewUiConnectorsOverridesUiConnectorsOverridesGetRequest(server string, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, body UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsOverridesUiConnectorsOverridesGetRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewUiConnectorsOverridesUiConnectorsOverridesGetRequestWithBody generates requests for UiConnectorsOverridesUiConnectorsOverridesGet with any type of body
+func NewUiConnectorsOverridesUiConnectorsOverridesGetRequestWithBody(server string, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/overrides")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Show != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "show", runtime.ParamLocationQuery, *params.Show); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
@@ -46409,6 +46921,9 @@ type ClientWithResponsesInterface interface {
 	// GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetWithResponse request
 	GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetWithResponse(ctx context.Context, jobId openapi_types.UUID, params *GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams, reqEditors ...RequestEditorFn) (*GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse, error)
 
+	// ListOperationOverridesApiV1ConnectorsOperationOverridesGetWithResponse request
+	ListOperationOverridesApiV1ConnectorsOperationOverridesGetWithResponse(ctx context.Context, params *ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams, reqEditors ...RequestEditorFn) (*ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse, error)
+
 	// DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse request
 	DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse, error)
 
@@ -46425,6 +46940,9 @@ type ClientWithResponsesInterface interface {
 	EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithBodyWithResponse(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse, error)
 
 	EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithResponse(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, body EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse, error)
+
+	// RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteWithResponse request
+	RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteWithResponse(ctx context.Context, connectorId string, opId string, params *RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams, reqEditors ...RequestEditorFn) (*RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse, error)
 
 	// EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBodyWithResponse request with any body
 	EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBodyWithResponse(ctx context.Context, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse, error)
@@ -47110,6 +47628,11 @@ type ClientWithResponsesInterface interface {
 
 	// UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBodyWithResponse request with any body
 	UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse, error)
+
+	// UiConnectorsOverridesUiConnectorsOverridesGetWithBodyWithResponse request with any body
+	UiConnectorsOverridesUiConnectorsOverridesGetWithBodyWithResponse(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsOverridesUiConnectorsOverridesGetResponse, error)
+
+	UiConnectorsOverridesUiConnectorsOverridesGetWithResponse(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, body UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsOverridesUiConnectorsOverridesGetResponse, error)
 
 	// UiConnectorsRegistryListUiConnectorsRegistryGetWithBodyWithResponse request with any body
 	UiConnectorsRegistryListUiConnectorsRegistryGetWithBodyWithResponse(ctx context.Context, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryListUiConnectorsRegistryGetResponse, error)
@@ -49226,6 +49749,29 @@ func (r GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse) StatusCod
 	return 0
 }
 
+type ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *OperationOverrideList
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -49331,6 +49877,28 @@ func (r EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse) 
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -53420,6 +53988,28 @@ func (r UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse) Status()
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsOverridesUiConnectorsOverridesGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsOverridesUiConnectorsOverridesGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsOverridesUiConnectorsOverridesGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -57529,6 +58119,15 @@ func (c *ClientWithResponses) GetIngestJobEndpointApiV1ConnectorsIngestJobsJobId
 	return ParseGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse(rsp)
 }
 
+// ListOperationOverridesApiV1ConnectorsOperationOverridesGetWithResponse request returning *ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse
+func (c *ClientWithResponses) ListOperationOverridesApiV1ConnectorsOperationOverridesGetWithResponse(ctx context.Context, params *ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams, reqEditors ...RequestEditorFn) (*ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse, error) {
+	rsp, err := c.ListOperationOverridesApiV1ConnectorsOperationOverridesGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse(rsp)
+}
+
 // DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse request returning *DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse
 func (c *ClientWithResponses) DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse, error) {
 	rsp, err := c.DeleteEndpointApiV1ConnectorsConnectorIdDelete(ctx, connectorId, params, reqEditors...)
@@ -57580,6 +58179,15 @@ func (c *ClientWithResponses) EditGroupEndpointApiV1ConnectorsConnectorIdGroupsG
 		return nil, err
 	}
 	return ParseEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse(rsp)
+}
+
+// RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteWithResponse request returning *RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse
+func (c *ClientWithResponses) RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteWithResponse(ctx context.Context, connectorId string, opId string, params *RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams, reqEditors ...RequestEditorFn) (*RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse, error) {
+	rsp, err := c.RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDelete(ctx, connectorId, opId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse(rsp)
 }
 
 // EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBodyWithResponse request with arbitrary body returning *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse
@@ -59789,6 +60397,23 @@ func (c *ClientWithResponses) UiConnectorsImportConfirmUiConnectorsImportConfirm
 		return nil, err
 	}
 	return ParseUiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse(rsp)
+}
+
+// UiConnectorsOverridesUiConnectorsOverridesGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsOverridesUiConnectorsOverridesGetResponse
+func (c *ClientWithResponses) UiConnectorsOverridesUiConnectorsOverridesGetWithBodyWithResponse(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsOverridesUiConnectorsOverridesGetResponse, error) {
+	rsp, err := c.UiConnectorsOverridesUiConnectorsOverridesGetWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsOverridesUiConnectorsOverridesGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsOverridesUiConnectorsOverridesGetWithResponse(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, body UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsOverridesUiConnectorsOverridesGetResponse, error) {
+	rsp, err := c.UiConnectorsOverridesUiConnectorsOverridesGet(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsOverridesUiConnectorsOverridesGetResponse(rsp)
 }
 
 // UiConnectorsRegistryListUiConnectorsRegistryGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryListUiConnectorsRegistryGetResponse
@@ -63985,6 +64610,39 @@ func ParseGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse(rsp *htt
 	return response, nil
 }
 
+// ParseListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse parses an HTTP response from a ListOperationOverridesApiV1ConnectorsOperationOverridesGetWithResponse call
+func ParseListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse(rsp *http.Response) (*ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OperationOverrideList
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseDeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse parses an HTTP response from a DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse call
 func ParseDeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse(rsp *http.Response) (*DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -64105,6 +64763,32 @@ func ParseEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse
 	}
 
 	response := &EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse parses an HTTP response from a RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteWithResponse call
+func ParseRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse(rsp *http.Response) (*RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
@@ -69445,6 +70129,32 @@ func ParseUiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse(rsp *ht
 	}
 
 	response := &UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsOverridesUiConnectorsOverridesGetResponse parses an HTTP response from a UiConnectorsOverridesUiConnectorsOverridesGetWithResponse call
+func ParseUiConnectorsOverridesUiConnectorsOverridesGetResponse(rsp *http.Response) (*UiConnectorsOverridesUiConnectorsOverridesGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsOverridesUiConnectorsOverridesGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

@@ -76,8 +76,9 @@ MIGRATION_INVENTORY_DESCRIPTION: Final = (
 
 MIGRATION_GROUP_WHEN_TO_USE: Final = (
     "Use to collect a vCenter's VMs for a migration assessment, in MEHO's common "
-    "inventory shape. The result is always stored, and its handle feeds the "
-    "migration operations (for example migration.inventory.csv). Read-only."
+    "inventory shape (vmware.migration.inventory, safe). The result is always "
+    "stored, and its handle feeds the migration operations (for example "
+    "migration.inventory.csv)."
 )
 
 MIGRATION_INVENTORY_LLM_INSTRUCTIONS: dict[str, Any] = {

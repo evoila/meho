@@ -740,8 +740,9 @@ runs every migration as `meho`. Helm deletes the Job once it succeeds, so
 the job reads Helm's record of the hook run (`helm status -o json`,
 `last_run.phase` is `Succeeded`). It also checks that the Deployment has
 no init container and that the `db` check of `/ready` reports
-`revision=<head>`, then runs `helm test`. The job is not part of the
-required `helm-test-gate`. The render tests (the golden render,
+`revision=<head>`, then runs `helm test`. The required `helm-test-gate`
+needs this job as well as `helm-test`, so a broken bring-your-own install
+stops a chart PR. The render tests (the golden render,
 `test_chart_migrate_job_no_sa.py`) and
 `backend/tests/migrations/test_migrate_runner.py` still cover the Job's
 render and its runner.

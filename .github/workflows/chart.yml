@@ -1294,7 +1294,8 @@ jobs:
     # in the `if:` below, `ubuntu-24.04` for kind, and `helm install` and
     # `helm test` as the namespace admin of #4099. The `if:` skips this job
     # on a PR that does not touch the chart, and a skipped job reports
-    # Success. This job is not part of the required `helm-test-gate`.
+    # Success. The required `helm-test-gate` needs this job too, so a broken
+    # bring-your-own install stops a chart PR.
     name: helm install + helm test (bring-your-own PostgreSQL)
     permissions:
       contents: read
@@ -1563,12 +1564,13 @@ jobs:
     # `helm-test` (because `changes`/`validate` failed, or a transient `changes`
     # `gh api` blip) reports Success on its own, so we must not let that skip
     # masquerade as a passing gate. On a non-chart PR the gate passes without
-    # running kind; on a chart PR it requires `changes` + `validate` + the kind
-    # `helm-test` run to all have succeeded.
+    # running kind; on a chart PR it requires `changes` + `validate` + both kind
+    # runs (`helm-test`, built-in PostgreSQL, and `helm-test-byo`,
+    # bring-your-own PostgreSQL, #5412) to all have succeeded.
     # Refs #349; GitHub "Troubleshooting required status checks" + actions/runner#2566.
     name: helm install + helm test (pgvector preflight)
     if: always()
-    needs: [changes, validate, helm-test]
+    needs: [changes, validate, helm-test, helm-test-byo]
     # Pinned 2026-10-29 with the kind job (ubuntu-latest is now 26.04, whose Docker breaks kind image load); revisit when kind/docker support it.
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -1591,7 +1593,11 @@ jobs:
               echo "::error title=Chart gate failed::helm-test (kind install + pgvector preflight) did not pass (result=${{ needs.helm-test.result }})."
               exit 1
             fi
-            echo "Chart change verified: validate + helm-test both passed."
+            if [[ "${{ needs.helm-test-byo.result }}" != "success" ]]; then
+              echo "::error title=Chart gate failed::helm-test-byo (kind install with bring-your-own PostgreSQL) did not pass (result=${{ needs.helm-test-byo.result }})."
+              exit 1
+            fi
+            echo "Chart change verified: validate, helm-test and helm-test-byo all passed."
           else
             echo "No chart-relevant changes — gate passes without running kind."
           fi

@@ -147,14 +147,17 @@ def _holodeck_ops() -> tuple[HolodeckOp, ...]:
     #4066 appends the 3 DNS name ops
     (:data:`~meho_backplane.connectors.holodeck.ops_dns.DNS_OPS`:
     ``holodeck.dns.host.list`` / ``holodeck.dns.host.add`` /
-    ``holodeck.dns.host.remove``) -- 20 ops total.
+    ``holodeck.dns.host.remove``), and ``holodeck.instance.remove``
+    (:data:`~meho_backplane.connectors.holodeck.ops_remove.REMOVE_OPS`)
+    makes 21.
     """
     from meho_backplane.connectors.holodeck.ops_deploy import DEPLOY_OPS
     from meho_backplane.connectors.holodeck.ops_dns import DNS_OPS
     from meho_backplane.connectors.holodeck.ops_read import READ_OPS
+    from meho_backplane.connectors.holodeck.ops_remove import REMOVE_OPS
     from meho_backplane.connectors.holodeck.ops_write import WRITE_OPS
 
-    return (_HOLODECK_ABOUT_OP, *READ_OPS, *WRITE_OPS, *DEPLOY_OPS, *DNS_OPS)
+    return (_HOLODECK_ABOUT_OP, *READ_OPS, *WRITE_OPS, *DEPLOY_OPS, *DNS_OPS, *REMOVE_OPS)
 
 
 #: The ops :class:`HolodeckConnector` registers at lifespan startup.

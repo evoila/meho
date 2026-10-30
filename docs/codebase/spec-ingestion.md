@@ -306,12 +306,31 @@ vCenter variant — owned by the profiled-dispatch wiring
    `"none"`. Each row's `EndpointDescriptor.group_id` is set to the
    matching group's UUID; sentinel and unknown-key entries leave
    `group_id=NULL`.
+3. **Extend rounds for leftovers (#4972)** — when ops are still
+   without a group after a filing pass (on a full run or a re-run),
+   the run makes another "extend" round: Pass 1 lists every group so
+   far and asks for new groups for the leftovers (`[]` is a valid
+   answer), then Pass 2 files the leftovers into the new groups only.
+   Before this, a full run stopped after one Pass 2, and a re-run
+   stopped after one extend round, so ops past the `max_groups` limit
+   (15) stayed without a group. The rounds stop when every op has a
+   group, when the model proposes no new group, when a round files
+   no op, or after `DEFAULT_MAX_EXTEND_ROUNDS` (3) rounds. The round
+   limit bounds the model calls and logs
+   `llm_grouping_extend_round_limit_reached`. An op that already has a
+   group is never moved, and no group is renamed. We chose more rounds
+   over one catch-all "other" group because the ops left over tend to
+   form real families (licences, sessions, agent manager), and a
+   catch-all group does not help an agent pick a group.
 
 The function commits exactly once at the end of both passes, in the
 same transaction as a single `meho_connector_llm_grouping` audit row
 that records `{connector_id, groups_created, operations_assigned,
-operations_unassigned, llm_call_count, batch_size,
-operations_added_by_group}`. Partial failure
+operations_unassigned, unassigned_op_ids, llm_call_count, batch_size,
+operations_added_by_group}`. `unassigned_op_ids` lists the op ids
+still without a group after the run, sorted, at most
+`UNASSIGNED_OP_IDS_LIMIT` (200); `operations_unassigned` keeps the
+full count. Partial failure
 (LLM output that fails schema validation) raises
 `LlmOutputInvalid`, rolls back the transaction, and leaves the
 connector in whatever state preceded the call — operator retries via
@@ -340,7 +359,8 @@ Idempotency:
     re-validation, #3685). Ops still left over get an "extend" Pass 1:
     the prompt lists the existing groups and asks for at most
     `max_groups` new ones, and `[]` is a valid answer. A second Pass 2
-    then files the leftovers into the new groups only.
+    then files the leftovers into the new groups only. More extend
+    rounds follow while ops are left (step 3 above).
   * Every Pass-1 proposal whose key already exists in the connector
     scope (typed keys included) is dropped, so no persisted group is
     renamed or duplicated.
@@ -349,6 +369,12 @@ Idempotency:
   composite, and ingested ops the group now holds. The ingest job result and
   `meho connector ingest` show it; the CLI prints a warning for a typed
   group that also holds ingested ops.
+* `GroupingResult.unassigned_op_ids` names the ops still without a
+  group (same list as the audit row). The ingest response and the
+  ingest job result carry it as `grouping.unassigned_op_ids`.
+  `meho connector ingest` and `meho connector ingest-status` print
+  each op id, and say how many more there are when the list was cut
+  (`meho connector review` shows them all).
 
 The LLM client is injected as a `LlmClient` `Protocol` (one async
 method, `generate_json`). Tests pass a deterministic stub from
@@ -747,8 +773,8 @@ per role in the T3 grouping run:
   validator; oversized prose rejected via bounded `max_length`.
 * `GroupingResult` — counts + timings the orchestrator returns
   (`groups_created`, `operations_assigned`, `operations_unassigned`,
-  `llm_call_count`, `llm_duration_ms`, and `groups`: one
-  `GroupSummary` per group). Surfaced in the operator-facing CLI / API
+  `unassigned_op_ids`, `llm_call_count`, `llm_duration_ms`, and
+  `groups`: one `GroupSummary` per group). Surfaced in the operator-facing CLI / API
   at T5.
 * `GroupingConfig` — tunable knobs (`batch_size`, `min_groups`,
   `max_groups`). Constructed from the keyword arguments to
@@ -1058,6 +1084,67 @@ Since #3870 a tenant's own copy is the only copy used for that tenant,
 and the old copy lacks the hand-written ops of the built-in copy
 (`vrli.event.query`), so the tenant would lose them.
 
+### Each tenant turns built-in operations on or off (#5029)
+
+A built-in operation row (`endpoint_descriptor.tenant_id IS NULL`) is
+shared by every tenant. Its `is_enabled` flag is the **install
+default**. A tenant can now turn a built-in operation on or off for
+itself only. Other tenants keep the install default.
+
+- **Where it is stored.** The table `tenant_operation_setting`
+  (migration `0120`, model `TenantOperationSetting`): one row per
+  `(tenant_id, product, version, impl_id, op_id)` with `enabled`
+  true or false. No row means "use the install default". The row is
+  keyed on the operation's natural key, not on the descriptor id. A
+  start (typed registration) and an update (spec ingest, or rows
+  written again) only write `endpoint_descriptor`, so they never
+  change a tenant setting.
+- **How it is read.** `enabled_for_tenant_clause` in
+  `operations/_lookup.py` is the one "is this op on for this tenant"
+  predicate. For a built-in row it takes the tenant setting first,
+  then `is_enabled`. A tenant's own row uses its own `is_enabled`.
+  `lookup_descriptor` (dispatch, preview), `count_known_ops`,
+  `find_connectors_with_op`, `search_operations` (the PostgreSQL SQL in
+  `_search.py` carries the same rule as `_ENABLED_FOR_TENANT_SQL`,
+  checked at import), `list_operation_groups` and its op counts, the
+  operation contract, runbook verify steps and the console operations
+  pages all use it.
+- **Groups.** `group_visible_for_tenant_clause` decides which groups
+  `list_operation_groups` and a group-scoped `search_operations` show.
+  A group shows when it is fully enabled or holds an op that is on for
+  the tenant. A fully enabled group is hidden when the tenant turned ops
+  in it off and none of its ops is still on for the tenant. A group
+  setting is the same per-op setting written for each op in the group,
+  the way the install-default group enable cascades onto each op.
+- **Who may change it.** REST
+  (`api/v1/connector_tenant_settings.py`):
+  `PUT /api/v1/connectors/{id}/tenant-settings/operations/{op_id}` and
+  `PUT /api/v1/connectors/{id}/tenant-settings/groups/{group_key}` with
+  body `{"enabled": true | false | null}` (`null` = back to the install
+  default). Role `tenant_admin` for the caller's own tenant. The
+  optional `?tenant_id=` names another tenant and needs
+  `platform_admin` (403 `cross_tenant_requires_platform_admin`). The
+  install default stays the `edit-op` / `enable` / `disable` paths,
+  which need `platform_admin` for a built-in row (#3616).
+- **Audit.** Every change writes one audit row with path
+  `meho_connector_tenant_setting` in the same transaction. The payload
+  names the connector, the target tenant, the op or group, and the new
+  value. A write that changes nothing writes no row.
+- **Showing both values.** `GET /api/v1/connectors/{id}/tenant-settings`
+  lists the ops the tenant has a setting for, each with
+  `default_enabled`, `tenant_enabled` and the `enabled` value that
+  applies. The review payload (`GET /{id}/review`) carries
+  `tenant_enabled` on every op of a built-in connector. The CLI has
+  `meho connector tenant-setting show | set | set-group`, and
+  `meho connector review` prints a `ten` column next to `en`. The
+  console review drawer shows "Install default: on. This tenant: off."
+  on an op the tenant set.
+- **Tenant copies.** A connector the tenant imported for itself keeps
+  its own rows (#3870); a tenant setting would have no effect there, so
+  the write is refused with 409 `tenant_owns_connector`.
+- **Scope.** Only on and off. Risk levels and approval flags are not
+  per tenant.
+
 ### Operator-selectable auth scheme on a non-catalog ingest (#2289)
 
 Boot stamping (above) makes a *shipped* profile-backed catalog row
@@ -1106,6 +1193,43 @@ op** — the `review_status='staged'` gate (#1971) stays the interlock, so the
 connector lands dispatchable-but-unreviewed (`kind="profiled-but-unreviewed"`)
 and the operator clears the gate per-op via the normal review/enable flow.
 Omitting `auth_scheme` keeps the historical bare-shim behaviour byte-identical.
+
+**The choice is saved, so the connector survives a restart (#5016).** The
+connector table in `connectors/registry.py` lives in memory. Before #5016 a
+restart dropped the stamped class: the ops stayed enabled, but every call
+failed with `no_connector` and the list showed `ingested-shim`. Now:
+
+* `_stamp_profiled_connector` first saves the choice through
+  `ingest/ingest_auth_store.py::save_ingest_auth_profile` into the
+  `ingested_auth_profile` table (migration `0121`). One row per
+  `(tenant_id, product, version, impl_id)`. It holds the scheme name and the
+  secret field **names** only, never values. A re-ingest with a login type
+  replaces the row.
+* At start, `main.py` calls `restore_ingested_profiled_connectors()` right
+  after the catalog stamp. It rebuilds the profile with
+  `build_ingest_execution_profile` and stamps it through the same
+  `record_profile_stamp` step (audit sub `system:ingested-profile-restore`).
+  A key that already has a class is skipped, so a shipped profile or a
+  hand-written class keeps its key. A row that no longer builds a valid
+  profile is logged (`ingested_profile_restore_skipped`) and skipped.
+* A replica that was already running when another replica took the ingest
+  catches up on the first call: before the dispatcher resolves the connector
+  for an ingested op, it runs the same restore for the rows of the target's
+  product and builds any class it does not have yet. It does this before
+  the resolver runs, not only on a miss, so a replica that already holds
+  another connector for the same product also loads the new one when the
+  target prefers it (`preferred_impl_id`). A row whose key already has a
+  class is skipped, so the read is one small query per call. Until the
+  first call that replica's `meho connector list` still shows the old kind.
+* A connector delete removes the row, so the class does not come back.
+  This also holds for a connector that has no operation rows (an API file
+  with no paths, ingested with a login type): the delete removes the saved
+  row and answers 204, instead of 404 for "nothing to delete".
+* Restoring never enables an op, lowers a risk level, or removes an
+  approval; the review gate stays the interlock.
+
+A connector ingested before this change has no saved row. Ingest it once
+more with the same `--auth-scheme` to save it.
 
 ### Authoring-mode `kind` on the list / review surfaces (G0.28-T6 #1979)
 
@@ -2365,9 +2489,37 @@ Each `ConnectorReviewGroup` carries `advisory`
 * `flags` — short, plain notes, at most five, without repeats:
   * the text makes a safety claim the ops break: "read-only" (or "no
     side effects", "does not modify") while an op is not `safe` or needs
-    approval; "non-destructive" while an op is `destructive`; "all ...
-    dangerous/destructive" while an op is at another level, higher or
-    lower; "all ... require approval" while an op does not;
+    approval; "non-destructive" while an op is `destructive`;
+  * an approval claim ("approval-required", "require(s) approval",
+    "need(s) approval") or a level claim ("dangerous", "destructive")
+    that the ops it is about break (#4971). Each sentence is checked on
+    its own, and the subject of the sentence decides which ops it is
+    about:
+    * a sentence that names a read ("All read and write operations
+      require approval.", "Reads and writes are dangerous."), or that has
+      "all" or "every" and names no change ("All operations are
+      approval-required.", "Every call is dangerous."), is about every op
+      in the group. The approval claim is flagged while an op does not
+      need approval. The level claim is flagged while an op is at another
+      level, higher or lower;
+    * any other sentence ("Write operations are approval-required.",
+      "Every change requires approval.", "Delete operations are
+      dangerous.") is about the changes: the ops that are not `safe`, or
+      every op when all of them are `safe`. The approval claim is flagged
+      while a change op does not need approval. The level claim is
+      flagged while a change op is below the named level.
+
+    So with one `safe` read without approval and one `caution` write
+    that needs approval, "Every change requires approval." is true, and
+    both "All operations are approval-required." and "All read and
+    write operations require approval." are flagged. A change is named
+    by a word such as "write", "change", "update", "create", "delete",
+    "remove", "edit", "modify", or "mutate". A read is named by a word
+    such as "read", "get", "list", "query", "fetch", "retrieve", "view",
+    "inspect", or "search". A sentence that says one thing about reads
+    and another about writes ("Reads run at once, writes need
+    approval.") is checked against every op as a whole; two sentences
+    say it better;
   * the text shares no word with the op ids and summaries.
 
 A `staged` group has no enabled op until the operator enables it. Then
@@ -2397,6 +2549,40 @@ new connector `version` with its own rows next to the old ones. The same
 `OpIdCollision`. `test_operations_ingest_review.py` pins all of this
 (`-k override_preserved_on_reingest`,
 `-k breaking_change_new_version_identity`).
+
+### Group text check at ingest (#4971)
+
+Pass 1 sends the model only `op_id`, `summary`, and `tags` for each op.
+It never sees a risk level, so it can write "Write operations are
+approval-required." for a group whose writes run at once. An agent or an
+operator who trusts that text expects a second person to check a change
+that nobody checks.
+
+So the grouping run checks each new text before it is stored:
+
+1. The members of a group are known only after Pass 2. So the check runs
+   in `_create_groups_and_assign` right after Pass 2, for every group
+   this run created (full runs and extend runs).
+2. `drop_unsupported_claims` in `group_truth.py` splits the text into
+   sentences. It removes each sentence that makes a safety claim the
+   group's ops break. It uses the same word match and the same claim
+   subjects as the review advice above, with the real `safety_level` and
+   `requires_approval` of the member ops. A true claim stays: a group
+   whose every change needs approval may say "Every change requires
+   approval.", even when it also holds reads that run at once. The same
+   group may not say "All operations are approval-required.".
+3. When no sentence is left, the group gets the plain text
+   `Operations for <name>.` A group with no member ops keeps its text.
+4. Each changed text logs `llm_grouping_unsupported_claims_dropped`.
+
+Why remove sentences instead of asking the model to rewrite the text:
+removing is the same on every run, adds no model call (so
+`expected_llm_call_count` stays true), and cannot add a new wrong claim.
+The cost is that a sentence with a broken claim is lost as a whole.
+
+Groups that already exist are never checked or changed here, so a text
+an operator edited with `meho connector edit-group` stays as it is.
+`test_operations_ingest_group_text_check.py` pins this.
 
 ### T2 control flow
 
@@ -2475,7 +2661,8 @@ run_llm_grouping
 │  ├─ parse_proposal_response       # GroupProposal schema validation
 │  ├─ drop proposals with an existing key
 │  ├─ _persist_proposed_groups      # session.add per row + flush
-│  └─ _assign_and_apply             # Pass 2
+│  ├─ _assign_and_apply             # Pass 2
+│  └─ _check_new_group_texts        # drop broken safety claims (#4971)
 │
 │  _assign_and_apply:
 │  ├─ _assign_ops_in_batches        # one LLM call per `batch_size` ops
@@ -2697,7 +2884,7 @@ catalog shows a permanent `state="registered"` stub with nothing to
 dispatch. The DELETE surface removes it:
 
 * **REST** — `DELETE /api/v1/connectors/{connector_id}` → `204 No
-  Content`. `tenant_admin` role. Always scoped to the calling
+  Content` (`409 connector_in_use` while something uses it). `tenant_admin` role. Always scoped to the calling
   operator's tenant (the #1699 contract: the route exposes no
   `tenant_id` parameter).
 * **CLI** — `meho connector delete <connector_id> [--confirm] [--json]`
@@ -2738,6 +2925,58 @@ All three delegate to `ReviewService.delete_connector`
 * **404 conflation.** Unknown id, cross-tenant probe, rows visible
   only under a scope the caller did not name, and repeat deletes all
   return the same 404 the other connector routes use.
+* **A connector that is still used is not deleted (#5027).** Before
+  any row goes, the delete looks for things that still use the
+  connector. If it finds any, it deletes nothing, writes no audit row,
+  and raises `ConnectorInUseError`. The things it looks for:
+  * a **sensor** whose `connector_id` is the connector;
+  * a **runbook template**, draft or published, with a step or a verify
+    call whose `op_id` is one of the connector's operations
+    (deprecated templates do not count);
+  * a **hosted agent** whose `toolset.connectors` list names the
+    connector, and an active or paused **schedule** that starts such
+    an agent;
+  * an **approval request** that waits, or that is approved and nobody
+    has started it (`resumed_at IS NULL`). This is exactly the row that
+    `claim_resume` in `operations/approval_queue.py` could still claim
+    and run. That claim has no time limit (the approval time limit
+    expires waiting requests only), so an approved request that nobody
+    ever started blocks the delete however old it is, until someone runs
+    it;
+  * an **operation run** that is queued (`pending`) or `running`.
+
+  Which tenants count: for a tenant copy, that tenant. For the
+  built-in copy, every tenant that has no copy of its own (a tenant's
+  own rows replace the built-in ones completely, #3870). The search
+  lives in `operations/ingest/connector_users.py`.
+
+  The refusal lists each user: kind, id, name and operation. REST
+  answers `409` with the detail `connector_in_use` (`connector_id`,
+  `users[]`, `other_tenant_user_count`, `message`). MCP answers
+  `-32602` with the same detail as `data`. The CLI prints one line per
+  user. The console registry shows the list in its error panel. Users
+  in another tenant are counted in `other_tenant_user_count` but not
+  named, unless the caller is a platform admin. An old tenant copy
+  under a former product name (#4889) skips the check, because nothing
+  can call it. A zero-op stub skips it too: it has no rows to use.
+
+  The check and the delete are one step. The delete takes a PostgreSQL
+  advisory lock in exclusive mode as the first statement of its
+  transaction (`db/connector_usage_lock.py`). The writers of sensors,
+  runbook templates (create and edit), hosted agents (create and
+  update) and schedules (create) take the same lock in shared mode as
+  the first statement of their write. Shared locks do not wait for each
+  other, so these writes only wait while a delete runs. A writer that
+  was first is committed before the check, so the delete sees it and is
+  refused. A sensor create that comes second reads the operation again
+  after the lock and fails with `sensor_operation_not_found`, so no
+  sensor is saved for a deleted connector. Approval requests and
+  operation runs are made by the dispatch path, which does not take the
+  lock; one made during a delete fails when it runs, because the
+  operation is gone. On SQLite (tests) the lock does nothing.
+  `tests/test_operations_ingest_delete_in_use.py` covers each kind;
+  `tests/integration/test_connector_delete_in_use_pg.py` covers the two
+  race orders on PostgreSQL.
 * **Enabled ops warn, never block.** The delete completes; the
   advisory rides the MCP response body (`warnings[]`, the `edit_op`
   #1630 discipline), the `connector_delete_enabled_ops` log event,
@@ -2752,9 +2991,15 @@ All three delegate to `ReviewService.delete_connector`
   rows from scratch.
 * **Process-local deregistration.** The registry pop applies to the
   serving pod; sibling replicas keep the class until their next
-  restart (no startup path re-registers ingest shims, so restarts
+  restart (no startup path re-registers bare ingest shims, so restarts
   converge every pod on the post-delete state). The DB rows are the
-  durable truth and are gone everywhere immediately.
+  durable truth and are gone everywhere immediately. The delete also
+  removes the saved login type (`ingested_auth_profile`, #5016), so the
+  start-up restore does not build a profiled class for a deleted
+  connector. The audit payload's `auth_profile_deleted` says whether
+  such a row went. A connector with no operation rows but a saved login
+  type is deleted the same way (`registry_only=true`); only a connector
+  with no rows, no saved login type and no bare shim answers 404.
 
 ## Known issues
 
@@ -2795,16 +3040,65 @@ All three delegate to `ReviewService.delete_connector`
 * **Cross-document `$ref` rejected.** External files
   (`other.yaml#/...`) raise `UnsupportedSpecError`. Same v0.2.next
   note.
-* **Swagger 2.0 rejected with an actionable remedy.** A spec declaring
-  `swagger: "2.0"` (no `openapi` key) raises `UnsupportedSpecError`
-  whose message names the conversion path — convert to OpenAPI 3.x
-  (`swagger2openapi` / `converter.swagger.io`) and re-ingest the 3.x
-  output. The parser stays 3.x-only on purpose: the maintained 2.0→3.0
-  converters are Node/web-service tools (`swagger2openapi`/oas-kit,
-  `converter.swagger.io`), and an in-house converter is a large
-  correctness surface the review queue can't backstop, so the
-  documented decision (#1532, reaffirmed for the VCF Automation case
-  in #2090) is to reject-with-remedy rather than convert in-process.
+* **Swagger 2.0 is converted by the CLI, not the backplane (#5028).**
+  The backplane parser stays OpenAPI 3.x only (#1532, #2090). The CLI
+  converts instead, on the operator's machine:
+  - `meho connector ingest` reads a `file://` or `docs:` spec itself.
+    When the file says `swagger: "2.0"`, the CLI converts it to
+    OpenAPI 3.0 with the Go library `kin-openapi` (`openapi2conv`, MIT
+    licence, pinned in `cli/go.mod`), prints a short summary (paths,
+    operations, login schemes), and uploads only the converted JSON.
+    Code: `cli/internal/cmd/connector/swagger2.go`.
+  - The conversion fetches nothing. A `$ref` to another file or a URL
+    is refused with the name and place of the reference, like the
+    backplane's own cross-document `$ref` rule. A `$ref` key inside
+    free data (`example`, `examples`, `default`, `enum`, or an `x-`
+    extension) is data, not a reference, and is not checked. A
+    property or response that is *named* `default` or `example` is
+    still checked.
+  - `--save-converted <file>` also writes the converted copy, so the
+    operator can check it and keep it next to the original.
+  - What changes in the conversion: `in: body` becomes `requestBody`,
+    `in: formData` becomes a `multipart/form-data` or
+    `application/x-www-form-urlencoded` body (a `file` field becomes
+    `type: string, format: binary`), `definitions` become
+    `components.schemas`, `securityDefinitions` become
+    `components.securitySchemes`, and `host` + `basePath` + `schemes`
+    become `servers`. A `description` written next to a `$ref` is
+    dropped (OpenAPI 3.0 ignores it anyway). When the file declares no
+    `consumes`, the body media type is `*/*`; the parser's media-type
+    fallback still finds the schema. A root-level `produces` list is
+    copied to every operation that has none, so the response media
+    types stay as the file declared them (the library alone would
+    fall back to `application/json`); an operation's own `produces`
+    wins. A shared response (`#/responses/Name`) is built once with
+    the root list; an operation whose `produces` differs gets its own
+    copy of that response, so its media type is kept. A form body
+    with a required field is a required `requestBody` (the library
+    alone leaves the body optional). A shared body parameter
+    (`#/parameters/Name` with `in: body`) is built once with the root
+    `consumes` list; a path with an operation whose `consumes` differs
+    gets its own copy, so the body media type is kept. A path that
+    declares a body and has an operation with its own body also gets
+    the copies, so the operation's body replaces the path's by name and
+    place as Swagger 2.0 says (the library alone would count two bodies
+    and refuse the file). A path item that is only a reference to
+    another place in the same file (`$ref: "#/paths/~1widgets"`) is
+    replaced by a copy of what it points to before the conversion; the
+    library alone would write an empty path and drop its operations.
+    When the referenced item is itself a reference, the whole chain is
+    merged, so an operation declared on any link survives; the item
+    nearer to the path wins a clash. A reference that points nowhere,
+    or runs in a loop, is refused. An array query
+    parameter with no `collectionFormat` keeps the Swagger 2.0 default,
+    one comma-separated value (`ids=1,2`); the library alone would
+    leave the OpenAPI 3 default, which repeats the name (`ids=1&ids=2`).
+  - An `https://` spec is fetched by the backplane, which still rejects
+    Swagger 2.0 with `UnsupportedSpecError`. Its message names the CLI
+    path first (download the file, pass it as `file://`), then a local
+    `swagger2openapi` run as the fallback. It names no hosted
+    converter, because that would send the vendor's file to an outside
+    service.
   The product-agnostic convert-then-ingest runbook lives at
   [`connector-ingestion.md` § "Product ships only Swagger 2.0"](../cross-repo/connector-ingestion.md#product-ships-only-swagger-20)
   (VCF Automation's vra-sdk-go fragments are the worked example);

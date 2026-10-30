@@ -67,7 +67,6 @@ import respx
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.vcf_logs import (
     VRLI_CONNECTOR_ID,
@@ -75,6 +74,7 @@ from meho_backplane.connectors.vcf_logs import (
     VRLI_VERSION,
     VcfLogsConnector,
 )
+from meho_backplane.connectors.vcf_logs.connector import _session_cache_key
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, Target
 from meho_backplane.operations import reset_dispatcher_caches
@@ -531,7 +531,7 @@ async def test_vrli_e2e_session_establishes_on_first_dispatch(
     target_name = vrli_e2e_canary.target_name
     # The session-token cache is keyed on the tenant-unique (tenant_id, id)
     # tuple (#1642), not the bare name.
-    cache_key = target_cache_key(vrli_e2e_canary.db_target)
+    cache_key = _session_cache_key(vrli_e2e_canary.db_target)
 
     assert cache_key not in instance._session_tokens, (
         "Expected empty token cache before first dispatch; "
@@ -665,7 +665,7 @@ async def test_vrli_e2e_401_recovery_via_connector_method(
         f"Expected GET /api/v2/version called twice (401 + retry); "
         f"got call_count={bundle.version_route.call_count}"
     )
-    cached = bundle.connector_instance._session_tokens.get(target_cache_key(bundle.db_target))
+    cached = bundle.connector_instance._session_tokens.get(_session_cache_key(bundle.db_target))
     assert cached == VRLI_CANARY_SESSION_REFRESH_ID, (
         f"Expected post-retry token to be the refreshed id {VRLI_CANARY_SESSION_REFRESH_ID!r}; "
         f"got cached token {cached!r}"
@@ -752,7 +752,7 @@ async def test_vrli_e2e_440_recovery_via_connector_method(
         f"Expected GET /api/v2/version called twice (440 + retry); "
         f"got call_count={bundle.version_route.call_count}"
     )
-    cached = bundle.connector_instance._session_tokens.get(target_cache_key(bundle.db_target))
+    cached = bundle.connector_instance._session_tokens.get(_session_cache_key(bundle.db_target))
     assert cached == VRLI_CANARY_SESSION_REFRESH_ID, (
         f"Expected post-retry token to be the refreshed id {VRLI_CANARY_SESSION_REFRESH_ID!r}; "
         f"got cached token {cached!r}"

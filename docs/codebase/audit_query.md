@@ -221,6 +221,7 @@ Field-to-source mapping:
 | `id` | `audit_log.id` |
 | `ts` | `audit_log.occurred_at` |
 | `tenant_id` | `audit_log.tenant_id` |
+| `tenant_name` | LEFT JOIN `tenant.name ON audit_log.tenant_id = tenant.id` (#5238). Every row is already in `:tenant_id`, so it only names the caller's own tenant. `None` when the tenant row is gone; show `tenant_id` then. Replay nodes carry it too. |
 | `principal_sub` | `audit_log.operator_sub` |
 | `target_id` | `audit_log.target_id` |
 | `target_name` | LEFT JOIN `targets.name ON audit_log.target_id = targets.id AND targets.tenant_id = :tenant_id`. The tenant-id half of the ON clause is defence-in-depth: `audit_log.target_id` has no FK in v0.2 (soft column per chassis discipline) so a cross-tenant value resolves to `target_name=None` rather than leaking another tenant's name. |
@@ -252,9 +253,10 @@ end of the matching set under the current filter).
 ```text
 query_audit(filters, tenant_id, session)
   │
-  ├─ Build SELECT audit_log, targets.name
+  ├─ Build SELECT audit_log, targets.name, tenant.name
   │     OUTER JOIN targets ON audit_log.target_id = targets.id
   │                       AND targets.tenant_id   = :tenant_id   ← JOIN-scope defence
+  │     OUTER JOIN tenant  ON audit_log.tenant_id = tenant.id    ← tenant_name (#5238)
   │     WHERE audit_log.tenant_id = :tenant_id      ← always first
   │       [+ audit_id = :audit_id]
   │       [+ parent_audit_id = :parent_audit_id]                ← exact match
@@ -276,7 +278,7 @@ query_audit(filters, tenant_id, session)
   │
   ├─ Fetch rows; has_more = (len > limit); page = rows[:limit]
   │
-  ├─ For each (audit_log, target_name) row:
+  ├─ For each (audit_log, target_name, tenant_name) row:
   │   ┌─ payload = dict(row.payload or {})
   │   ├─ op_id = payload['op_id'] if str else f"http.{method.lower()}:{path}"
   │   ├─ op_class = payload['op_class'] if str else classify_op(op_id)

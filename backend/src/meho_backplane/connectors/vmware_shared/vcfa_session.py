@@ -28,7 +28,7 @@ How it works
 What this module does not do
 ============================
 
-* No cache. The connector keeps the token, per tenant and target.
+* No cache. The connector keeps the token, per credential and org.
 * No retry. One login request per call.
 * No trace. The login goes straight to the connector's HTTP client, not
   through the traced request path, so no trace records the token. No log

@@ -113,7 +113,7 @@ _BULK_IMPORT_DESCRIPTION: Final[str] = (
     "superseded, conflicts}]}`. `edge_id` is null on dry-run rows (no "
     "row exists yet). `superseded` lists auto edges the row would "
     "displace; `conflicts` lists incompatible-kind edges over the same "
-    "endpoint pair (§6 diagnostics). Node bulk import is out of scope — "
+    "endpoint pair. Node bulk import is out of scope — "
     "this seeds edges only, matching the underlying service."
 )
 

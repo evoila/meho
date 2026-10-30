@@ -53,6 +53,12 @@ names.
   first) and `trace show <audit-id>` (one trace over
   `GET /api/v1/audit/{audit_id}/trace`; headers and bodies only in
   `--json`).
+  #5238 shows the tenant: the `query` / `recent` / `who-touched` /
+  `my-recent` and `trace list` tables have a `TENANT` column (the
+  tenant name, else the tenant id), each `replay` tree line ends with
+  `tenant=<name or id>`, `show` prints a `tenant_name:` line under
+  `tenant_id:`, and `--json` carries `tenant_id` and `tenant_name` as
+  the backend sends them.
 - `meho kb ...` (G4.1-T4 #418) — knowledge-base operator surface
   (`ingest`, `search`, `list`, `show`, `add`, `delete`) wrapping
   the five `/api/v1/kb*` routes shipped by G4.1-T2 (#416) plus the
@@ -248,7 +254,8 @@ cli/
     │   │   └── memory_test.go    # parseScope/parseTTL/parseScopeSlugArg + verb-happy-path + 403/404/422 + decline + JSON envelope tests.
     │   ├── connector/         # G0.7-T5 #405 — `meho connector …` verb tree. G0.12-T7 #1265 migrated every verb onto the generated typed client (api.ClientWithResponses via api.AuthedClient + retryOn401); api.CatalogListResponse / api.ConnectorReviewPayload / api.IngestRequest / api.IngestResponse / api.EditGroupBody / api.EditOpBody are the single source of truth, no consumer-side struct duplicates.
     │   │   ├── connector.go      # NewRootCmd + newAuthedClient / retryOn401 / renderRequestError / renderHTTPStatus helpers.
-    │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest). 202-aware since G0.22-T4 #1609: polls GET /ingest/jobs/{job_id} to a terminal status by default, `--no-wait` exits 0 with the job handle; 200 stays the legacy sync render. Owns the shared pollIngestJob loop + renderIngestTerminal lifecycle switch (succeeded/failed/degraded/undocumented) that ingest_status.go reuses. `--tenant-id` (#2209) selects the write scope: omitted leaves the body's tenant_id unset (built-in/global, the #2085 omit-equals-global contract); the operator's own tenant UUID makes the ingest tenant-curated.
+    │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest). 202-aware since G0.22-T4 #1609: polls GET /ingest/jobs/{job_id} to a terminal status by default, `--no-wait` exits 0 with the job handle; 200 stays the legacy sync render. Owns the shared pollIngestJob loop + renderIngestTerminal lifecycle switch (succeeded/failed/degraded/undocumented) that ingest_status.go reuses. `--tenant-id` (#2209) selects the write scope: omitted leaves the body's tenant_id unset (built-in/global, the #2085 omit-equals-global contract); the operator's own tenant UUID makes the ingest tenant-curated. Converts a `file://` / `docs:` Swagger 2.0 spec to OpenAPI 3 before the upload (see swagger2.go); `--save-converted <file>` keeps the converted copy.
+    │   │   ├── swagger2.go       # Local Swagger 2.0 → OpenAPI 3.0 conversion for `connector ingest` (#5028), via kin-openapi `openapi2conv`. Fetches nothing; refuses a `$ref` to another file or URL by name; prints a one-line summary per converted spec to stderr.
     │   │   ├── ingest_status.go  # `meho connector ingest-status <job-id> [--wait] [--json]` (#1621) — post-`--no-wait` poll/inspect verb. Snapshot by default (running → identity+lifecycle echo, exit 0), `--wait` polls to terminal; terminal render + poll loop reuse ingest.go's renderIngestTerminal / pollIngestJob (no duplicated switch). Closes the PR #1618 loop the `--no-wait` hint now names.
     │   │   ├── list.go           # `meho connector list` (GET  /api/v1/connectors). List endpoint returns dict[str, list[dict]] (no response_model on the backend; per-row UUID serialisation), so a package-private listEntry decode lives here.
     │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review). `--prefer tenant|builtin|legacy` (#3799, #4889) is sent as `?prefer=` to pick a row when the id matches both a built-in and a tenant connector (`legacy` picks the tenant's old copy under a former product name); omitted, the 409 stays the default.
@@ -259,6 +266,8 @@ cli/
     │   │   ├── disable.go        # `meho connector disable <id>` (constructor only; logic in enable.go).
     │   │   ├── delete.go         # `meho connector delete <id>` (DELETE /api/v1/connectors/{id}, #4889) — removes the connector's operations and groups from the operator's own tenant; the built-in copy stays. Constructor only; logic in enable.go. The verb the list `next_step` and the `connector_legacy_tenant_copy` message name.
     │   │   ├── delete_test.go    # `delete` wiring, 204 --json envelope, 404 render.
+    │   │   ├── tenant_setting.go # `meho connector tenant-setting show|set|set-group` (#5029) — GET /{id}/tenant-settings, PUT /{id}/tenant-settings/operations/{op} and /groups/{key} with `--on|--off|--default`; turns built-in ops on or off for one tenant only. `--tenant-id` acts on another tenant (platform_admin). `review` prints the tenant setting in its `ten` column.
+    │   │   ├── tenant_setting_test.go # wire body (`enabled` true/false/null), `?tenant_id`, both values in the render.
     │   │   ├── connector_test.go # pure-function + typed-client mocked HTTP contract tests.
     │   │   └── prefer_test.go    # `--prefer` on review / enable-reads + the 409 connector_scope_ambiguous CLI error (#3799).
     │   ├── operation/         # G0.6-T13 #481 — `meho operation …` meta-tool surface.
@@ -795,6 +804,7 @@ field, so a response from an older backplane prints as it always did.
 | `Approvals: …` | `approvals` | `Approvals: a second person must approve; decisions on someone else's instruction are refused; approval key configured` |
 | `Features: …` | `features` | `Features: all configured` or `Features: not configured: agent_runtime (needs KEYCLOAK_ADMIN_CLIENT_ID)` |
 | `Sandbox mode: on …` | `sandbox_mode` | printed only when the mode is on (#4622) |
+| `Operation settings: written by release …` | `operation_catalog` | printed only when another release wrote the shared operation rows (#5019) |
 
 The DB line (`formatDB` in `internal/output/format.go`) uses the
 database revision and the revision this version expects, which the
@@ -837,6 +847,13 @@ readiness checks and the approval key state all come from one
      at login time. If refresh succeeds, retries the request once.
    * If refresh fails (no refresh_token, IdP rejected), surfaces
      `auth_expired`.
+   * A 401 whose `detail` is `missing_tenant_claim` (bare, or with
+     the explanation newer backplanes add) is checked first, by
+     `noTenantMessage` (#3872). The login worked but the token has no
+     tenant, so "run `meho login`" would be wrong. The CLI writes its
+     own text: the person is in no MEHO role group, ask the admin, and
+     the link to the guide `guides/tenant-bootstrap/`. Exit code stays
+     2 (`auth_expired`).
 4. **Check the version gap.** `printVersionSkew` reads the
    backplane's `GET /version` (3-second cap) and compares its
    `chart_version` with the CLI's build version
@@ -1586,9 +1603,8 @@ add` (Task #2862) for a single target without authoring a YAML file —
 the earlier blanket deferral of a standalone `create` verb (#1574 /
 #1559) is lifted for the single-target create case only. `meho targets
 update` (Task #3854) changes one target through `PATCH
-/api/v1/targets/{name}`. No standalone `delete` verb is surfaced yet,
-though the API supports `DELETE /api/v1/targets/{name}`
-(`tenant_admin`).
+/api/v1/targets/{name}`, and `meho targets delete` (Task #3943)
+removes one through `DELETE /api/v1/targets/{name}`.
 
 ### Subcommands
 
@@ -1634,6 +1650,25 @@ though the API supports `DELETE /api/v1/targets/{name}`
   cannot be both set and cleared (all exit 4). Server errors use the shared
   `renderHTTPStatus` ladder (404 near-misses, 409 ambiguous alias, 422
   body verbatim). Same `doAuthedRequest` plumbing as `add`.
+- `meho targets delete <name-or-alias> [--force] [--confirm]`
+  (Task #3943) — calls `DELETE /api/v1/targets/{name}` (`tenant_admin`).
+  The server soft-deletes: it sets `deleted_at`, so the row stays and
+  audit rows still point at it, but no read path or call finds it any
+  more. The system itself and its Vault secret are not touched. Without
+  `--confirm` the verb asks y/N on stdin first; closed stdin counts as
+  no, and a decline exits 0 without a request (`--json` prints
+  `{"name", "status": "declined", "force"}`). With `--json` the question
+  goes to the terminal, not to stdout or stderr, so both streams hold
+  only JSON; when a program pipes the answer in, no question is printed.
+  When topology nodes
+  (`graph_node` rows) still point at the target, the server answers 409
+  `target_has_references` with the count; the CLI turns it into a plain
+  message ("This target is linked from 3 topology nodes. The nodes
+  stay, but they will point at a deleted target. Run again with --force
+  to delete it anyway.", exit 4). `--force` sends `?force=true`; the
+  nodes stay and keep the deleted target's id. Any other 409
+  (ambiguous alias) and 404 near-misses go through the shared
+  `renderHTTPStatus` ladder. Same `doAuthedRequest` plumbing as `add`.
 - `meho targets list [--product P] [--limit N] [--cursor C]` — calls
   `GET /api/v1/targets`. Renders the operator's tenant-scoped targets
   as a `NAME / ALIASES / PRODUCT / HOST` table. Results are keyset-
@@ -1727,12 +1762,9 @@ verbatim.
 
 ### Out of scope (v0.2)
 
-- A standalone `delete` verb. The API supports
-  `DELETE /api/v1/targets/{name}` (`tenant_admin`); the CLI surfaces it
-  in a follow-up task when operators ask. Single-target **create** ships
-  as `meho targets add` (Task #2862) and single-target **update** as
-  `meho targets update` (Task #3854); bulk reconciliation of updates
-  stays with `meho targets import --update`.
+- Bulk delete. `meho targets delete` (Task #3943) removes one target
+  per call; bulk reconciliation of updates stays with
+  `meho targets import --update`.
 - Auto-completion of target names. Operators type names; tab-completion
   would need a separate `cobra-complete`-style design pass.
 - Client-side caching. Every CLI invocation hits the API fresh — the
@@ -2434,8 +2466,9 @@ have to trust to run `meho login` against their secrets.
 `cli/internal/cmd/admin/keycloak/` registers the install-time
 realm-provisioning verb that closes the v0.3.1 dogfood's deepest
 deployer friction: a working `meho-cli` device-code client + the
-public MCP browser-flow client + the **6 protocol mappers + 4 default
-client scopes + five MEHO role groups + admin user** that together let
+public MCP browser-flow client + the **8 protocol mappers + 4 default
+client scopes + five MEHO role groups + `MEHO-Platform-Admins` + admin
+user** that together let
 `meho login` and the MCP onramp authenticate without 4 sequential
 walls of opaque `invalid_token` / `unauthorized_client` errors. The
 verb encodes the 5-step recipe documented in
@@ -2463,14 +2496,17 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      loopback callbacks `http://localhost:*` + `http://127.0.0.1:*`
      that `mcp-remote` and Claude Code listen on — Keycloak matches
      redirect hosts literally, so both loopback forms are listed).
-  3. 6 protocol mappers, installed on **both** public clients:
+  3. 8 protocol mappers, installed on **both** public clients:
      `audience-meho-backplane`, `meho-mcp-audience`, `groups-claim`,
-     and three stock User Attribute mappers
-     (`oidc-usermodel-attribute-mapper`) — `tenant-id`, `tenant-role`
-     and `approver` — that read the `tenant_id`, `tenant_role` and
-     `approver` attributes of the person's group
-     (`aggregate.attrs=false`, `multivalued=false`; `approver` is a
-     `boolean` claim). No mapper carries a fixed value
+     four stock User Attribute mappers
+     (`oidc-usermodel-attribute-mapper`) — `tenant-id`, `tenant-role`,
+     `approver` and `platform-admin` — that read the `tenant_id`,
+     `tenant_role`, `approver` and `platform_admin` attributes of the
+     person's group (`aggregate.attrs=false`, `multivalued=false`;
+     `approver` and `platform_admin` are `boolean` claims), and
+     `meho-tenants` (`tenantsMapper` in `tenants.go`), which lists the
+     `meho_tenant` value of every group of the person in the
+     `meho_tenants` claim (`aggregate.attrs=true`, `multivalued=true`). No mapper carries a fixed value
      ([`docs/decisions/login-role-groups.md`](../decisions/login-role-groups.md),
      #4590). The names `tenant-id` / `tenant-role` are the names the
      older fixed-value mappers had, so a run on an older realm updates
@@ -2492,10 +2528,26 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      `MEHO-Readers` (`read_only`), `MEHO-Operators` (`operator`),
      `MEHO-SA-Operators` (`operator`), `MEHO-Admins` (`tenant_admin`),
      `MEHO-Approvers` (`read_only` + `approver=true`). Each carries
-     `tenant_id` from `--tenant-id` (default the all-zero UUID). The
+     `tenant_id` from `--tenant-id` (default the all-zero UUID) and
+     `meho_tenant` = `<tenant-id>:<tenant-name>:<Role>` (`--tenant-name`,
+     default `main`). Also `MEHO-Platform-Admins` (`platform_admin=true`)
+     and, with `--add-tenant <name>`, the five groups
+     `MEHO-<name>-<Role>` of one more tenant, which carry only
+     `meho_tenant` (`extraTenantGroups` in `tenants.go`). The tenant's
+     UUID comes from `--add-tenant-id`, else from the `meho_tenant` value
+     its groups already carry, else a new one that the summary prints.
+     The UUID is stored in its standard form (lowercase, with dashes)
+     whatever form the flag used, so the `meho_tenant` value keeps its
+     three colon-separated parts. The first tenant's `meho_tenant` uses
+     the standard form of `--tenant-id` in the same way, while its
+     `tenant_id` attribute keeps the flag's text as given.
+     Names are checked before any Keycloak call: lowercase letters,
+     digits and dashes, not `sa` / `platform` / `ci`, and not the first
+     tenant's name or id. Each group spec names the keys the command owns
+     (`groupSpec.Owned`); only those are set or removed. The
      groups are created even with `--skip-user-provisioning`, because
      they carry the tenant and the role. Then an admin user joined to
-     `MEHO-Admins`, with a password set via
+     `MEHO-Admins` and `MEHO-Platform-Admins`, with a password set via
      `/users/{id}/reset-password` (skipped with
      `--skip-user-provisioning`). `--tenant-role` and
      `--admin-group-name` were removed in #4590; passing either fails
@@ -2632,8 +2684,13 @@ the CA cert is available.
 in-memory state maps) through these scenarios, among others:
 
 - Fresh realm: every resource created, mapper + scope counts match
-  the recipe (6 mappers, 4 default scopes, 2 clients, 5 groups with
-  their attributes, 1 user in `MEHO-Admins` only).
+  the recipe (8 mappers, 4 default scopes, 2 clients, 5 groups with
+  their attributes plus `MEHO-Platform-Admins`, 1 user in `MEHO-Admins`
+  and `MEHO-Platform-Admins`).
+- `tenants_test.go`: `--add-tenant` makes five groups with only
+  `meho_tenant`, a second run changes nothing, a missing id is made once
+  and read back, a one-tenant realm gains `meho_tenant`, and bad tenant
+  flags stop before any Keycloak call.
 - Idempotent re-run: zero new POSTs and zero mapper / group /
   membership PUTs against the same realm; password reset called
   exactly once across two runs.
@@ -2673,11 +2730,17 @@ fixed-value mappers is upgraded, with a second run changing nothing.
 
 ## Known issues / forward-compat scaffolding
 
-* `meho version` prints CLI metadata only. The Goal #11 contract
-  also calls for a backplane-version line; this is now feasible
-  (the AuthedClient can call `GET /version`) but deferred until
-  Initiative G2.7 wires its CI seam so the format choice doesn't
-  thrash. Filed as a follow-up adjacent to T3.
+* `meho version` prints the CLI line first. When a backplane is
+  known (`--backplane`, or the URL the last `meho login` stored), it
+  also reads the public `GET /version` (3-second cap, no login, no
+  work reference because the route is not audited) and prints a
+  `backplane <release> (commit …, built …) at <url>` line and the
+  connector packages the image carries (#5036): `Connector packages:
+  none`, or one line per package with its version and wheel digest.
+  If the backplane cannot be reached, one warning line goes to stderr
+  and the command still exits 0. With no known backplane the output is
+  the single CLI line, as before. `meho status` prints the same list
+  from `GET /api/v1/health` (`output.FormatConnectorPackages`).
 * Persistent `--config` and `-v/--verbose` flags are registered on
   the root command but not yet consumed; reserved for v0.2.
 * The auth-config endpoint at `/api/v1/auth-config` shipped in v0.3.1

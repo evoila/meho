@@ -20,28 +20,31 @@ ignored); vCenter -> the ``host`` param (name / moref) via GET:/vcenter/host.
 
 Device rows come from ``HostSystem.config.storageDevice.scsiLun`` (the read
 mirror of ``HostStorageSystem.storageDeviceInfo.scsiLun``) via one
-PropertyCollector ``RetrievePropertiesEx`` on the VI-JSON seam; set-shaped,
-JSONFlux-reduced when large. ``ssd`` / ``local`` / ``capacity_bytes`` are
+PropertyCollector ``RetrievePropertiesEx`` (VI-JSON, or SOAP on a standalone
+ESXi host); set-shaped, JSONFlux-reduced when large. ``ssd`` / ``local`` / ``capacity_bytes`` are
 ``HostScsiDisk`` fields, ``null`` on a non-disk LUN.
 
 Boot-device identification needs **no esxcli seam**: the same read also
 fetches ``configManager.bootDeviceSystem``, and when present the op calls
-``HostBootDeviceSystem.QueryBootDevices`` (a vim query over the same seam)
-and matches its ``HostBootDeviceInfo.currentBootDeviceKey`` against the
-rows. That key is **vendor-defined** (it *typically* embeds the canonical
-name / uuid, but the format is not contractual, and ESXi frequently leaves
-``bootDeviceSystem`` unpopulated), so the match is a labelled best-effort
-heuristic and ``boot_device_resolution`` reports the outcome: ``matched``
-(a LUN positively matched -- then, and only then, ``is_boot`` is
-authoritative: true on the match, false on the rest), ``no_match`` (key
-resolved, matched no listed LUN), or ``unavailable`` (no config manager /
-an unsupported / erroring query -- an **expected** outcome, not an error).
-On ``no_match`` and ``unavailable`` every ``is_boot`` is ``null`` -- the op
-never asserts ``false`` in an ambiguous state -- and the listing is still
-returned. See the vSphere Web Services API reference for
-``HostBootDeviceSystem`` / ``HostBootDeviceInfo``
-(developer.broadcom.com/xapis/vsphere-web-services-api); follow-up to
-verify the key format on real hardware: evoila/meho#3336.
+``HostBootDeviceSystem.QueryBootDevices`` (a vim query; over SOAP on a
+standalone ESXi host) and compares its
+``HostBootDeviceInfo.currentBootDeviceKey`` with the rows. Per the WS-API
+reference that key is the ``key`` of one entry in
+``HostBootDeviceInfo.bootDevices`` -- an opaque id of a boot option, not a
+device name. A standalone ESXi 9.1 host booting from a disk returned a bare
+``"8"`` (#3336) that names no LUN. So a row matches only when the key is
+**exactly** its canonical name or uuid, and on most hosts the result is
+``no_match``.
+``boot_device_resolution`` reports the outcome: ``matched`` (a LUN matched
+-- then, and only then, ``is_boot`` is authoritative: true on the match,
+false on the rest), ``no_match`` (key resolved, matched no listed LUN -- the
+usual case), or ``unavailable`` (no config manager / an unsupported /
+erroring query -- an **expected** outcome, not an error). On ``no_match``
+and ``unavailable`` every ``is_boot`` is ``null`` -- the op never asserts
+``false`` in an ambiguous state -- and the listing is still returned. See
+the vSphere Web Services API reference for ``HostBootDeviceSystem`` /
+``HostBootDeviceInfo`` / ``HostBootDevice``
+(developer.broadcom.com/xapis/vsphere-web-services-api).
 """
 
 from __future__ import annotations
@@ -93,11 +96,8 @@ _PROP_SCSI_LUN = "config.storageDevice.scsiLun"
 _PROP_BOOT_DEVICE_SYSTEM = "configManager.bootDeviceSystem"
 _STORAGE_DEVICE_PATH_SET = (_PROP_SCSI_LUN, _PROP_BOOT_DEVICE_SYSTEM)
 # HostBootDeviceSystem.QueryBootDevices vim method (the moId rides the
-# path); posted through the same VI-JSON seam as RetrievePropertiesEx.
+# path); posted through the same seam as RetrievePropertiesEx.
 _QUERY_BOOT_DEVICES_PATH = "/HostBootDeviceSystem/{moid}/QueryBootDevices"
-# Minimum identifier length trusted for a substring match against the boot
-# key -- guards a short id from spuriously matching (fail-safe).
-_MIN_BOOT_MATCH_LEN = 6
 
 HOST_STORAGE_DEVICES_GROUP_KEY = "vmware-host-storage-devices"
 
@@ -138,22 +138,17 @@ def _capacity_bytes(capacity: Any) -> int | None:
 
 
 def _matches_boot(uuid: str | None, canonical_name: str | None, boot_key: str) -> bool:
-    """Best-effort: whether a scsiLun row is the current boot device.
+    """Whether a scsiLun row is the current boot device.
 
-    ``currentBootDeviceKey`` is a vendor-defined key that *typically* embeds
-    the canonical name / uuid (heuristic, see the module docstring); match by
-    containment either way, both sides >= :data:`_MIN_BOOT_MATCH_LEN` chars.
+    ``currentBootDeviceKey`` is the opaque key of a ``HostBootDevice`` entry
+    (``"8"`` on ESXi 9.1), so only an **exact** (case-insensitive) match
+    with the canonical name or uuid counts. A raw substring test could pair
+    a short key with an unrelated id, and so is not used.
     """
     key_l = boot_key.strip().lower()
-    if len(key_l) < _MIN_BOOT_MATCH_LEN:
+    if not key_l:
         return False
-    for ident in (canonical_name, uuid):
-        if not ident:
-            continue
-        ident_l = ident.lower()
-        if len(ident_l) >= _MIN_BOOT_MATCH_LEN and (ident_l in key_l or key_l in ident_l):
-            return True
-    return False
+    return any(ident and ident.lower() == key_l for ident in (canonical_name, uuid))
 
 
 def _map_scsi_lun(lun: dict[str, Any], is_boot: bool | None) -> dict[str, Any]:
@@ -341,9 +336,9 @@ async def host_storage_devices_impl(
     )
     # is_boot is authoritative ONLY when a key positively matched a listed LUN
     # ("matched": true = boot, false = not-boot). A resolved-but-unmatched key
-    # ("no_match") or no key ("unavailable") is ambiguous -- the boot device
-    # may be a non-SCSI device absent from scsiLun, OR the vendor-defined key
-    # format did not align -- so every is_boot is null (unknown), never false (B2).
+    # ("no_match") or no key ("unavailable") is ambiguous -- the key is usually
+    # an opaque boot-option id that names no LUN, or the boot device is absent
+    # from scsiLun (USB / SD) -- so every is_boot is null (unknown), never false.
     if boot_key is None:
         boot_resolution = "unavailable"
         is_boot_flags: list[bool | None] = [None] * len(scsi_luns)
@@ -449,8 +444,10 @@ _DEVICE_ITEM_SCHEMA: dict[str, Any] = {
         "is_boot": {
             "type": ["boolean", "null"],
             "description": (
-                "Best-effort boot-device flag (matched from QueryBootDevices' "
-                "currentBootDeviceKey against canonical_name / uuid). "
+                "Best-effort boot-device flag: true when QueryBootDevices' "
+                "currentBootDeviceKey is exactly this row's canonical_name or uuid. "
+                "That key is usually an opaque boot-option id (e.g. '8'), so this "
+                "is usually null. "
                 "**Authoritative only when boot_device_resolution == 'matched'** "
                 "(true = boot, false = not); otherwise null on every row — treat "
                 "null as UNKNOWN, never as 'not the boot disk'."
@@ -507,7 +504,8 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "'matched' — a LUN matched the boot key (is_boot authoritative: "
                 "match true, rest false); 'no_match' — key matched no LUN (all "
-                "is_boot null, key echoed); 'unavailable' — boot query did not "
+                "is_boot null, key echoed) — the usual result, because the key "
+                "is an opaque boot-option id; 'unavailable' — boot query did not "
                 "resolve (all null; see boot_device_note) — expected on many "
                 "hosts, not an error. Only on 'ok'."
             ),
@@ -581,7 +579,10 @@ VMWARE_HOST_STORAGE_DEVICES_OP = VmwareTypedOp(
         ),
         "next_step": (
             "Trust is_boot only when boot_device_resolution is matched; null means "
-            "unknown, never 'not the boot disk'. Pass the chosen uuid values as "
+            "unknown, never 'not the boot disk'. no_match is the usual result, "
+            "because the boot key is an opaque boot-option id that names no disk; "
+            "then ask the operator which disk is the boot disk; do not guess it. "
+            "Pass the chosen uuid values as "
             "disk_uuids to vmware.composite.host.disk_mark_flash. On ambiguous_host, "
             "call again with one of candidate_hosts."
         ),

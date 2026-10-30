@@ -725,8 +725,8 @@ async def test_reduce_scalar_hint_skips_reserved_non_scalar_and_absent_keys() ->
 
     * ``total`` collides with reducer bookkeeping — the reduction contract
       wins (the vendor value is dropped with a warning).
-    * ``additionalProperties`` is a nested object — copying it inline would
-      defeat the reduction the hint rides on.
+    * ``additionalProperties`` is a nested object — the scalar hint skips it;
+      the parts rule (#5139) keeps it whole instead.
     * ``missing`` is absent from the payload — a poll-shape variance, not
       an error.
     * ``validationChecks`` is the collection itself — already represented
@@ -758,7 +758,7 @@ async def test_reduce_scalar_hint_skips_reserved_non_scalar_and_absent_keys() ->
     assert reduced["id"] == payload["id"]
     assert reduced["resultStatus"] is None
     assert reduced["total"] == 60, "reducer bookkeeping must win over a colliding vendor field"
-    assert "additionalProperties" not in reduced
+    assert reduced["additionalProperties"] == {"nested": "object"}
     assert "missing" not in reduced
     assert "validationChecks" not in reduced
 
@@ -3103,8 +3103,8 @@ async def test_default_rule_is_bounded() -> None:
     assert len(_serialize(scalars)) <= reducer_module._DEFAULT_SCALAR_BYTE_BUDGET
 
 
-async def test_default_rule_never_copies_object_or_list_siblings() -> None:
-    """Objects stay behind the bounded ``result_objects`` opt-in (#3592)."""
+async def test_default_rule_copies_small_object_and_list_siblings_whole() -> None:
+    """Small objects and lists next to the rows ride inline whole (#5139)."""
     payload = {
         "items": [{"i": i} for i in range(60)],
         "leaf": {"subject": "CN=x", "pem": "-----BEGIN CERTIFICATE-----"},
@@ -3116,8 +3116,9 @@ async def test_default_rule_never_copies_object_or_list_siblings() -> None:
     reduced, _handle = await reducer.reduce(payload, None, {"op_id": "example.list"})
 
     assert reduced["name"] == "inventory"
-    assert "leaf" not in reduced
-    assert "tags" not in reduced
+    assert reduced["leaf"] == payload["leaf"]
+    assert reduced["tags"] == ["a", "b"]
+    assert "parts_not_inline" not in reduced
 
 
 def test_object_seam_constants_are_unchanged() -> None:
@@ -3141,7 +3142,7 @@ async def test_default_rule_does_not_apply_to_a_bare_list() -> None:
 async def test_hinted_scalars_are_kept_on_top_of_the_default_copy() -> None:
     """A hint keeps its keys outside the default budget; the rest still apply."""
     payload: dict[str, Any] = {"items": [{"i": i} for i in range(60)]}
-    payload["report"] = "r" * 20_000  # over the default budget on its own
+    payload["report"] = "r" * 2_000  # over the default budget on its own
     payload["state"] = "done"
     context = {"op_id": "example.list", "result_scalars": {"keys": ["report"]}}
     reducer = JsonFluxReducer(sample_size=5)
@@ -3151,3 +3152,25 @@ async def test_hinted_scalars_are_kept_on_top_of_the_default_copy() -> None:
     assert reduced["report"] == payload["report"]
     assert reduced["state"] == "done"
     assert "omitted_scalar_count" not in reduced
+
+
+async def test_a_hinted_scalar_over_the_summary_limit_is_moved_out() -> None:
+    """The whole summary stays under 4,096 bytes, hint or not (#5139).
+
+    The hint lifts the default per-value and total budgets, not the limit of
+    the whole summary. A hinted value that would push the summary over is
+    counted under ``omitted_scalar_count`` and stored with the rows (see
+    ``test_operations_jsonflux_reducer_parts.py`` for the read-back).
+    """
+    payload: dict[str, Any] = {"items": [{"i": i} for i in range(60)]}
+    payload["report"] = "r" * 20_000
+    payload["state"] = "done"
+    context = {"op_id": "example.list", "result_scalars": {"keys": ["report"]}}
+    reducer = JsonFluxReducer(sample_size=5)
+
+    reduced, _handle = await reducer.reduce(payload, None, context)
+
+    assert "report" not in reduced
+    assert reduced["state"] == "done"
+    assert reduced["omitted_scalar_count"] == 1
+    assert len(_serialize(reduced)) < reducer_module._INLINE_SUMMARY_BYTE_LIMIT

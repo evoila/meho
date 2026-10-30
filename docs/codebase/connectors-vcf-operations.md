@@ -247,7 +247,7 @@ registrar is queued via `register_typed_op_registrar` in the package
   before it returns: only the last 5 characters show, dashes stay, and a
   key of 10 characters or fewer is hidden in full. An empty key, or one
   that is not text, gives null; the response schema allows both. The rule is
-  `mask_license_key` in `connectors/_shared/license_key.py`, the same one
+  `mask_license_key` in `connectors/vmware_shared/license_key.py`, the same one
   `sddc.license.list` uses. The op also carries the tag
   `license-key`, so the flight recorder leaves the raw vendor bodies of
   both calls out of the trace. So no licence key reaches the agent, the

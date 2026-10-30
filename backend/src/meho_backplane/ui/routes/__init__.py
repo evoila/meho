@@ -60,6 +60,8 @@ ships the umbrella :func:`build_router` that aggregates:
   navigation, pending panel fragment on the bell's ``HX-Request``),
   ``GET /ui/approvals/list`` (status-filterable decision-history partial,
   G10.8-T #1827), ``GET /ui/approvals/<id>``,
+  ``GET`` / ``POST /ui/approvals/in-order`` (approve a change ticket's
+  requests oldest first, #3597),
   ``POST /ui/approvals/<id>/approve`` + ``.../reject`` -- the approvals
   bell/badge + approve/deny modal + full-page history over a session BFF
   that calls the ``approval_queue`` service in-process (G10.7-T3 #1778,
@@ -91,7 +93,7 @@ from meho_backplane.ui.routes.account import build_account_router
 from meho_backplane.ui.routes.agents import build_agents_router
 from meho_backplane.ui.routes.agents.grants import build_agent_grants_router
 from meho_backplane.ui.routes.agents.runs import build_runs_router
-from meho_backplane.ui.routes.approvals import build_approvals_router
+from meho_backplane.ui.routes.approvals import build_approvals_router, build_in_order_router
 from meho_backplane.ui.routes.audit import build_audit_router
 from meho_backplane.ui.routes.automation import build_automation_router
 from meho_backplane.ui.routes.broadcast import build_router as build_broadcast_router
@@ -233,6 +235,9 @@ def build_router() -> APIRouter:
     # first-match-wins lookup against the placeholder ``/ui/{slug}``.
     router.include_router(build_retrieval_router())
     router.include_router(build_runbooks_router())
+    # The literal ``/ui/approvals/in-order`` (#3597) goes before the
+    # approvals router's ``/ui/approvals/{request_id}`` slug route.
+    router.include_router(build_in_order_router())
     router.include_router(build_approvals_router())
     # Scheduler lands ``/ui/scheduler`` + ``/ui/scheduler/{trigger_id}`` +
     # the literal ``/ui/scheduler/create`` + ``/ui/scheduler/validate-cron``

@@ -67,6 +67,20 @@ The operator console exposes the same queue at **`/ui/approvals`**: a
 bell with the live pending count, a request-detail modal with the
 proposed effect, and Approve / Deny buttons.
 
+When several requests belong to one change ticket and depend on each
+other, approve them as a group, oldest first:
+
+```bash
+meho approvals approve --work-ref <ticket> --in-order
+```
+
+Each step is an ordinary approval and runs at once. MEHO goes on to the
+next step only when the run was OK. It stops at the first step that fails
+or is refused, and names that step and the steps it did not run. At a
+dangerous or destructive step it shows what the step changes and asks
+you to type `yes` first. In the console, filter the Pending tab to the
+change ticket and use **Approve group in order**.
+
 ## The rule: requester and approver must differ
 
 Approval keys on your **subject** — the stable `sub` claim on your

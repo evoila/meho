@@ -652,6 +652,9 @@ async def _build_history_context(
         "page_size": _HISTORY_PAGE_SIZE,
         "next_offset": offset + _HISTORY_PAGE_SIZE,
         "has_more": has_more,
+        # "Approve group in order" (#3597): offered on the Pending tab when
+        # the filter names a change ticket with two or more pending requests.
+        "in_order_work_ref": work_ref_filter if tab == "pending" and positions else None,
     }
 
 

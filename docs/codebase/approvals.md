@@ -2071,6 +2071,9 @@ empty message names the change ticket and points to removing the filter,
 for the same reason. `--order oldest|newest` picks the sort (#3596). It
 defaults to newest first, but to **oldest first when `--work-ref` is
 set**, so the steps of one change ticket read in the order they were sent.
+`approve --work-ref REF --in-order [--reason]` approves the requests of one
+change ticket oldest first and stops at the first step that fails (#3597,
+see "Approve a change ticket's requests in order" below).
 
 ### Operator console (`backend/src/meho_backplane/ui/routes/approvals/`)
 
@@ -2114,6 +2117,8 @@ no new gate, service call, route, or migration.
 | `GET` | `/ui/approvals/{id}` | Request-detail modal. A pending row offers Approve/Deny; a **decided** row renders read-only with a decision banner ("Approved/Rejected by X at T"). An approved row also shows how its run ended; a failed run turns the banner red (#3543). The `proposed_effect` envelope renders **structurally** (#2447), not as raw JSON (below). |
 | `POST` | `/ui/approvals/{id}/approve` | Approve in-process + re-dispatch the parked op + fail-open broadcast. |
 | `POST` | `/ui/approvals/{id}/reject` | Reject in-process + broadcast; the op never runs. |
+| `GET` | `/ui/approvals/in-order?work_ref=` | The "Approve group in order" modal: the change ticket's requests oldest first and a Start button (#3597). |
+| `POST` | `/ui/approvals/in-order` | Runs the steps in order (form: `work_ref`, `reason`, `confirm_id`); renders what happened to each step (#3597). |
 
 The console is **read-only over substrate that already exists** — it adds
 no new service call, no `api/v1` Bearer route, no CLI verb, and no
@@ -2196,6 +2201,65 @@ shows that order on the surfaces an approver uses. Nothing here changes what
   fields (fail-open, like the event itself).
 - **CLI.** `meho approvals list --order oldest|newest`; oldest is the
   default when `--work-ref` is set (see the CLI section above).
+
+### Approve a change ticket's requests in order (#3597)
+
+Step numbers (#3596) show the order, but approving still runs one step at a
+time, and nothing stops an approver from approving step 3 after step 2's run
+failed. The in-order action approves the steps for the approver, oldest
+first, and stops at the first failure. It exists on the CLI and in the
+console. Each step is still an ordinary single approval: its own
+`approval.decision` audit row, its own self-approval (#1401), role and
+approver (#3243) checks. There is no bulk-approve endpoint and no new
+permission.
+
+For each request of the `work_ref`, oldest first (`status=all`,
+`order=oldest`):
+
+| The request is | The run |
+|---|---|
+| `approved` and its run is `executed` (ran OK) | skips it; this makes a second run after a stop safe |
+| `approved` with any other run state (`failed`, `started`, `not_started`) | stops: an approval is used once, so the step cannot run again from here; the requester must send it again |
+| `rejected`, `expired` or `withdrawn` | stops: the steps after it may need it |
+| `pending`, risk level `dangerous` or `destructive` | waits for a yes for this one step, then approves it |
+| `pending`, any other risk level | approves it |
+
+After an approval the run reads how the run of the operation ended. It
+goes on only for `ok` and `already_resumed` (the waiting requester ran it).
+Any other status, a refusal (403 self-approval or role, 409 already
+decided or expired, 422), or an answer that is not a finished 200 stops it.
+The steps after a stop stay pending. The run is not one transaction: if it
+stops or is killed, the steps it already approved stay approved.
+
+Before it starts, the run warns when the requests come from more than one
+`principal_sub`, or when two requests have the same `created_at`. Oldest
+first is the dependency order only for one chain sent in order by one
+requester.
+
+- **CLI** (`cli/internal/cmd/approvals/approve_in_order.go`). Lists the
+  group through `GET /api/v1/approvals`, then posts `/decide` per step and
+  reads `DecideResponseBody.dispatch_status` / `dispatch_error` (the
+  single-id `approve` only checks the HTTP status). At a dangerous or
+  destructive step it prints what the step does (`reviewer_context` from
+  `GET /api/v1/approvals/{id}`) on stderr and reads a line from stdin; only
+  `yes` goes on. On a stop it exits non-zero and names the step and the
+  steps it did not run. A refusal returns the same error and exit code the
+  single-id `approve` returns. `--json` prints `{work_ref, completed,
+  stopped_at, warnings, steps[]}`.
+- **Console** (`ui/routes/approvals/in_order.py`, `_in_order.html`). The
+  Pending tab shows **Approve group in order** when the `work_ref` filter
+  names a ticket with two or more pending requests. The steps run on the
+  server, through the same `_commit_decision` +
+  `resume_dispatch_after_approval` calls the single Approve button uses. A
+  server-side loop was picked over re-opening the detail modal for each
+  step: the server reads each step's run result before it goes on, with no
+  round trip per step. At a dangerous or destructive step the POST returns
+  the modal with that step's context and an **Approve step k and go on**
+  button. That button posts `confirm_id` = the id of that one request, so a
+  yes never covers another step. Every form in the modal carries a CSRF
+  token minted for that render, and the response re-sets the cookie. The
+  response fires `meho:approval-bump`, not `meho:approval-decided`, so the
+  bell and the history refresh but the modal stays open.
 
 ### Structured `proposed_effect` render in the modal (#2447)
 

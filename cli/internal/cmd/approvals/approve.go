@@ -14,6 +14,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/cmd/workref"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -43,12 +44,12 @@ func delegatedReasonHelp(verb string) string {
 // newApproveCmd returns the `meho approvals approve` command.
 //
 //	meho approvals approve <id> [--reason TEXT] [--json] [--backplane <url>]
-//	meho approvals approve --work-ref REF --in-order [--reason TEXT] [--json] [--backplane <url>]
+//	meho approvals approve --filter-work-ref REF --in-order [--reason TEXT] [--json] [--backplane <url>]
 //
 // Role: operator. Approves a pending approval request via
 // POST /api/v1/approvals/{id}/decide. The backplane records the
 // decision durably and broadcasts approval_decided; the paused agent
-// run resumes off the broadcast (#1117 path). With --work-ref and
+// run resumes off the broadcast (#1117 path). With --filter-work-ref and
 // --in-order it approves every pending request of one change ticket,
 // oldest first, and stops at the first step that fails (#3597).
 func newApproveCmd() *cobra.Command {
@@ -60,7 +61,7 @@ func newApproveCmd() *cobra.Command {
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
-		Use:   "approve <id> | --work-ref REF --in-order",
+		Use:   "approve <id> | --filter-work-ref REF --in-order",
 		Short: "Approve a pending approval request",
 		Long: "approve calls POST /api/v1/approvals/{id}/decide with " +
 			"decision=approved to flip the request status, write the " +
@@ -86,10 +87,10 @@ func newApproveCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&reason, "reason", "", "optional rationale for the approval; the command help explains the Instructed-by: layout")
-	cmd.Flags().StringVar(&workRef, "work-ref", "",
+	cmd.Flags().StringVar(&workRef, workref.FilterFlag, "",
 		"with --in-order: the change ticket whose pending requests to approve, oldest first")
 	cmd.Flags().BoolVar(&inOrder, "in-order", false,
-		"approve every pending request of --work-ref oldest first; stop at the first failure")
+		"approve every pending request of --filter-work-ref oldest first; stop at the first failure")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw JSON response instead of summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL (defaults to the URL from `meho login`)")

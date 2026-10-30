@@ -400,14 +400,14 @@ meho approvals
 Approve a pending approval request
 
 ```
-meho approvals approve <id> | --work-ref REF --in-order [flags]
+meho approvals approve <id> | --filter-work-ref REF --in-order [flags]
 ```
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
-- `--in-order` — approve every pending request of --work-ref oldest first; stop at the first failure
+- `--filter-work-ref` — with --in-order: the change ticket whose pending requests to approve, oldest first
+- `--in-order` — approve every pending request of --filter-work-ref oldest first; stop at the first failure
 - `--json` — emit raw JSON response instead of summary
 - `--reason` — optional rationale for the approval; the command help explains the Instructed-by: layout
-- `--work-ref` — with --in-order: the change ticket whose pending requests to approve, oldest first
 
 ### `meho approvals list`
 

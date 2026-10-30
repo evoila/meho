@@ -22,8 +22,8 @@ import (
 )
 
 // inOrderHelp is the part of `meho approvals approve --help` that
-// explains --work-ref REF --in-order (#3597).
-const inOrderHelp = "With --work-ref REF --in-order, approve takes every " +
+// explains --filter-work-ref REF --in-order (#3597).
+const inOrderHelp = "With --filter-work-ref REF --in-order, approve takes every " +
 	"request of change ticket REF, oldest first, and approves the " +
 	"pending ones one by one. Each step is an ordinary single " +
 	"approval: it runs the operation at once and has its own audit " +
@@ -91,21 +91,21 @@ type stepStop struct {
 	err    error
 }
 
-// approveArgs checks the positional args against --work-ref/--in-order:
+// approveArgs checks the positional args against --filter-work-ref/--in-order:
 // one id for a single approve, none for an in-order run.
 func approveArgs(workRef *string, inOrder *bool) cobra.PositionalArgs {
 	return func(_ *cobra.Command, args []string) error {
 		if *inOrder {
 			if strings.TrimSpace(*workRef) == "" {
-				return errors.New("--in-order needs --work-ref <change ticket>")
+				return errors.New("--in-order needs --filter-work-ref <change ticket>")
 			}
 			if len(args) != 0 {
-				return errors.New("--in-order takes no request id; it approves the requests of --work-ref")
+				return errors.New("--in-order takes no request id; it approves the requests of --filter-work-ref")
 			}
 			return nil
 		}
 		if *workRef != "" {
-			return errors.New("--work-ref needs --in-order; to approve one request, pass its id")
+			return errors.New("--filter-work-ref needs --in-order; to approve one request, pass its id")
 		}
 		if len(args) != 1 {
 			return fmt.Errorf("approve takes one request id, got %d", len(args))

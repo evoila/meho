@@ -311,7 +311,7 @@ func TestInOrderWarnsOnMixedGroup(t *testing.T) {
 	}
 }
 
-// TestApproveArgs checks the command-line rules for --work-ref and
+// TestApproveArgs checks the command-line rules for --filter-work-ref and
 // --in-order.
 func TestApproveArgs(t *testing.T) {
 	cases := []struct {
@@ -321,10 +321,10 @@ func TestApproveArgs(t *testing.T) {
 	}{
 		{"single id", []string{stubID}, ""},
 		{"no id", nil, "one request id"},
-		{"in-order", []string{"--work-ref", inOrderRef, "--in-order"}, ""},
-		{"in-order without ref", []string{"--in-order"}, "needs --work-ref"},
-		{"in-order with id", []string{"--work-ref", inOrderRef, "--in-order", stubID}, "takes no request id"},
-		{"ref without in-order", []string{"--work-ref", inOrderRef, stubID}, "needs --in-order"},
+		{"in-order", []string{"--filter-work-ref", inOrderRef, "--in-order"}, ""},
+		{"in-order without ref", []string{"--in-order"}, "needs --filter-work-ref"},
+		{"in-order with id", []string{"--filter-work-ref", inOrderRef, "--in-order", stubID}, "takes no request id"},
+		{"ref without in-order", []string{"--filter-work-ref", inOrderRef, stubID}, "needs --in-order"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

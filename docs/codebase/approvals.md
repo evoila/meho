@@ -2071,7 +2071,7 @@ empty message names the change ticket and points to removing the filter,
 for the same reason. `--order oldest|newest` picks the sort (#3596). It
 defaults to newest first, but to **oldest first when `--filter-work-ref` is
 set**, so the steps of one change ticket read in the order they were sent.
-`approve --work-ref REF --in-order [--reason]` approves the requests of one
+`approve --filter-work-ref REF --in-order [--reason]` approves the requests of one
 change ticket oldest first and stops at the first step that fails (#3597,
 see "Approve a change ticket's requests in order" below).
 

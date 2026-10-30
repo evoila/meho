@@ -71,7 +71,7 @@ When several requests belong to one change ticket and depend on each
 other, approve them as a group, oldest first:
 
 ```bash
-meho approvals approve --work-ref <ticket> --in-order
+meho approvals approve --filter-work-ref <ticket> --in-order
 ```
 
 Each step is an ordinary approval and runs at once. MEHO goes on to the

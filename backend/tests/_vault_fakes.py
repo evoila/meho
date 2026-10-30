@@ -115,10 +115,20 @@ class _FakeTokenAuth:
     roles_payload: Any = None
     raise_on_list_roles: Exception | None = None
     list_roles_calls: int = 0
+    # ``vault.token.create_and_store``: what Vault says about the new token
+    # (``orphan`` / ``lease_duration``), the ``create-orphan`` calls, and the
+    # token each ``revoke_self`` ran with (read off the client, ``parent``).
+    minted_orphan: bool = True
+    minted_lease_duration: int = 86400
+    create_orphan_calls: list[dict[str, Any]] = field(default_factory=list)
+    revoked_tokens: list[str | None] = field(default_factory=list)
+    parent: Any | None = None
 
     def revoke_self(self, mount_point: str = "token") -> None:
         _ = mount_point
         self.revoke_calls += 1
+        if self.parent is not None:
+            self.revoked_tokens.append(self.parent.token)
         if self.raise_on_revoke is not None:
             raise self.raise_on_revoke
 
@@ -126,11 +136,22 @@ class _FakeTokenAuth:
         self.create_calls.append(dict(kwargs))
         if self.raise_on_create is not None:
             raise self.raise_on_create
+        return self._minted(kwargs)
+
+    def create_orphan(self, **kwargs: Any) -> dict[str, Any]:
+        self.create_orphan_calls.append(dict(kwargs))
+        if self.raise_on_create is not None:
+            raise self.raise_on_create
+        return self._minted(kwargs)
+
+    def _minted(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         return {
             "auth": {
                 "client_token": self.minted_client_token,
                 "accessor": self.minted_accessor,
                 "policies": list(kwargs.get("policies", []) or []),
+                "orphan": self.minted_orphan,
+                "lease_duration": self.minted_lease_duration,
             }
         }
 
@@ -873,6 +894,7 @@ def install_fake_vault(
         secrets=_FakeSecrets(kv=_FakeKV(v2=kv_v2), identity=_FakeIdentity()),
     )
     jwt_auth.parent = fake
+    token_auth.parent = fake
 
     def _fake_build_client(_settings: Any, *, token: str | None = None) -> _FakeClient:
         fake.token = token

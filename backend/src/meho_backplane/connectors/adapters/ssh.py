@@ -31,7 +31,10 @@ system-initiated calls cannot read per-target vendor credentials
 
 * **Key auth (preferred):** the secret carries a ``ssh_private_key``
   field (PEM-encoded text) plus ``username``; the key is parsed via
-  ``asyncssh.import_private_key`` and passed as ``client_keys``.
+  ``asyncssh.import_private_key`` and passed as ``client_keys``. When
+  ``ssh_private_key`` is absent, a ``private_key`` field is used instead
+  (#3711), so a secret written by an automation pack under that name works
+  with no ``secret_field_map`` on the target.
 * **Password auth (fallback):** the secret carries ``username`` and
   ``password``; used when ``ssh_private_key`` is absent.
 * **Missing credentials:** raises :exc:`ValueError` immediately so callers
@@ -291,15 +294,17 @@ class SshConnector(Connector):
         :class:`asyncssh.SSHKnownHosts` pin, or ``None`` for the audited
         per-target opt-out); it is threaded here so :meth:`_connect`
         never has to re-read the secret. Raises :exc:`ValueError` when
-        the resolved secret carries neither ``ssh_private_key`` nor
-        ``password``, and :exc:`SshHostKeyUnpinnedError` when it pins no
+        the resolved secret carries none of ``ssh_private_key``,
+        ``private_key`` or ``password``, and :exc:`SshHostKeyUnpinnedError` when it pins no
         host key and sets no opt-out; Vault resolution failures propagate
         per :meth:`_resolve_secret`'s two-phase error contract.
         """
         secret = await self._resolve_secret(target, operator)
         username: str = strip_credential_value(secret.get("username", "root"))
         known_hosts = _known_hosts_from_secret(target.name, secret)
-        private_key_raw = secret.get("ssh_private_key")
+        # #3711: ``private_key`` is an alias used only when ``ssh_private_key``
+        # is absent.
+        private_key_raw = secret.get("ssh_private_key") or secret.get("private_key")
         if private_key_raw:
             key = asyncssh.import_private_key(strip_credential_value(private_key_raw))
             return {"username": username, "known_hosts": known_hosts, "client_keys": [key]}
@@ -312,7 +317,8 @@ class SshConnector(Connector):
             }
         raise ValueError(
             f"target '{target.name}': the Vault secret at secret_ref must include "
-            "ssh_private_key or password"
+            "ssh_private_key or password (private_key is accepted in place of "
+            "ssh_private_key)"
         )
 
     async def _connect(

@@ -7,7 +7,7 @@
 #
 #   build.sh --base ghcr.io/evoila/meho@sha256:<digest> \
 #            --connectors DIR [--deps DIR] --tag IMAGE:TAG \
-#            [--platform LIST] [--push] [--sign]
+#            [--platform LIST] [--push] [--sign --reviews DIR]
 #
 #   --base        the public image, pinned by its digest. A tag alone is refused.
 #   --connectors  folder with the connector package wheels (*.whl).
@@ -18,12 +18,16 @@
 #   --sign        sign the pushed image with cosign (needs --push). evoila
 #                 uses this for its own images (tier 2). A user's own image
 #                 (tier 1) is built without it.
+#   --reviews     folder with the review records (*.json). Needed with --sign:
+#                 each connector wheel needs a record by a person for its
+#                 exact name, version and wheel digest. Checked before the
+#                 build starts.
 #
 # No package index is used: every wheel must be in the two folders.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-base="" connectors="" deps="" tag="" platform="" push=0 sign=0
+base="" connectors="" deps="" tag="" platform="" reviews="" push=0 sign=0
 
 die() { echo "build.sh: $*" >&2; exit 1; }
 
@@ -34,9 +38,10 @@ while [ $# -gt 0 ]; do
     --deps) deps="${2:-}"; shift 2 ;;
     --tag) tag="${2:-}"; shift 2 ;;
     --platform) platform="${2:-}"; shift 2 ;;
+    --reviews) reviews="${2:-}"; shift 2 ;;
     --push) push=1; shift ;;
     --sign) sign=1; shift ;;
-    -h|--help) sed -n '5,22p' "$0"; exit 0 ;;
+    -h|--help) sed -n '5,26p' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -48,6 +53,8 @@ done
 [ -d "$connectors" ] || die "--connectors is not a folder: $connectors"
 [ -z "$deps" ] || [ -d "$deps" ] || die "--deps is not a folder: $deps"
 [ "$sign" -eq 0 ] || [ "$push" -eq 1 ] || die "--sign needs --push: only a pushed image can be signed"
+[ "$sign" -eq 0 ] || [ -n "$reviews" ] || die "--sign needs --reviews: a person must review each connector package before it is signed"
+[ -z "$reviews" ] || [ -d "$reviews" ] || die "--reviews is not a folder: $reviews"
 
 ctx="$(mktemp -d)"
 trap 'rm -rf "$ctx"' EXIT
@@ -57,6 +64,11 @@ shopt -s nullglob
 wheels=("$connectors"/*.whl)
 [ "${#wheels[@]}" -gt 0 ] || die "no connector wheel (*.whl) in $connectors"
 cp "${wheels[@]}" "$ctx/connectors/"
+if [ -n "$reviews" ]; then
+  # Check the copies that go into the image, so the reviewed wheels are the built ones.
+  python3 -I -S "$here/overlay_check.py" check-reviews --connectors "$ctx/connectors" --reviews "$reviews" \
+    || die "signing stopped: the review check failed (see the message above)"
+fi
 if [ -n "$deps" ]; then
   extra=("$deps"/*.whl)
   [ "${#extra[@]}" -eq 0 ] || cp "${extra[@]}" "$ctx/deps/"

@@ -219,6 +219,12 @@ async def test_op_is_dangerous_needs_approval_and_is_a_credential_mint(_register
     assert group_key == "token"
     assert TOKEN_STORE_OP in _CREDENTIAL_MINT_OPS
     assert classify_op(TOKEN_STORE_OP) == "credential_mint"
+    # A credential_mint op keeps a part of its answer only through its own
+    # hint; without this, ``stored_to`` is lost when the policy list spills.
+    hints = row.llm_instructions
+    assert hints["result_scalars"] == {"keys": ["accessor", "expire_time", "ttl_seconds"]}
+    assert set(hints["result_objects"]["objects"]) == {"stored_to"}
+    assert "kind" in hints["result_objects"]["objects"]["stored_to"]
 
 
 def test_preview_preflight_group_text_and_flight_recorder() -> None:

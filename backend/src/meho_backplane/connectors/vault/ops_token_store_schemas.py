@@ -208,4 +208,12 @@ VAULT_TOKEN_CREATE_AND_STORE_LLM_INSTRUCTIONS: dict[str, Any] = {
     # Keep these fields in the inline answer even when a long policy list
     # is moved behind a result handle.
     "result_scalars": {"keys": ["accessor", "expire_time", "ttl_seconds"]},
+    # The op is credential_mint, so the reducer copies no part of the answer
+    # on its own. This hint keeps ``stored_to`` whole with the rows and its
+    # place fields inline, so the caller still learns where the token went.
+    "result_objects": {
+        "objects": {
+            "stored_to": ["kind", "mount", "path", "field", "target", "namespace", "name", "key"]
+        }
+    },
 }

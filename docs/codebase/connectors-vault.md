@@ -517,7 +517,11 @@ target registration) is documented in
      When that revoke also fails, the error names the accessor and
      `vault.token.revoke_accessor`.
   6. Return `{accessor, expire_time, ttl_seconds, policies, stored_to}`;
-     `expire_time` is the creation time plus `auth.lease_duration`.
+     `expire_time` is the creation time plus `auth.lease_duration`. A
+     `credential_mint` op keeps a part of its answer only through its own
+     hint, so a `result_scalars` hint keeps the three scalars inline and a
+     `result_objects` hint keeps `stored_to` when a long policy list is
+     moved behind a result handle.
 
   The op is pinned `credential_mint` (aggregate-only broadcast, no
   flight-recorder bodies) and its tags mark it secret-bearing, so the

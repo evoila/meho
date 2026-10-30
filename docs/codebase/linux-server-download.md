@@ -74,6 +74,8 @@ environment:
 | `MEHO_SIGNER_REF` | `refs/tags/v<version>` | the git ref in the cosign identity of `chart.yml` and `image.yml` |
 | `MEHO_WAIT_SECONDS` | `0` | how long to wait for the chart and the image |
 | `MEHO_DOWNLOAD_MAX_BYTES` | `2040109465` (1.9 GiB) | the size limit |
+| `MEHO_OVERLAY_IMAGE`, `MEHO_OVERLAY_SIGNER`, `MEHO_OVERLAY_OIDC_ISSUER`, `MEHO_OVERLAY_LICENCE` | empty | an overlay image instead of `ghcr.io/evoila/meho` (see [Build with an overlay image](#build-with-an-overlay-image)) |
+| `MEHO_REGISTRY`, `MEHO_REGISTRY_USERNAME`, `MEHO_REGISTRY_PASSWORD` | empty | a login for a private registry |
 
 Steps, in order:
 
@@ -83,6 +85,8 @@ Steps, in order:
 4. Wait until the chart and the image of the version are on ghcr.io and
    `cosign verify` passes for both, with the exact identity
    `https://github.com/evoila/meho/.github/workflows/<chart.yml|image.yml>@<MEHO_SIGNER_REF>`.
+   With an overlay image, the image must be signed by `MEHO_OVERLAY_SIGNER`
+   instead.
    On a tag, `chart.yml` and `image.yml` run at the same time as the build,
    so the release run waits up to 60 minutes.
 5. `helm pull` the chart. The digest `helm pull` prints must be the digest
@@ -222,6 +226,61 @@ cosign verify-blob \
 sha256sum -c SHA256SUMS-linux
 ```
 
+## Build with an overlay image
+
+An overlay image is the public MEHO image plus connector packages
+([connector-packages.md](connector-packages.md)). The appliance ships
+evoila's own connectors in an overlay image that evoila signs. The CI of
+the private connectors repository runs the same two scripts with these
+inputs. This repository's CI never does: `linux-download.yml` sets none of
+them, so a release download always has the public image.
+
+| Setting | What |
+| --- | --- |
+| `MEHO_OVERLAY_IMAGE` | The image repository with its registry and without a tag, for example `registry.example.com/team/meho-overlay`. Its tag is `MEHO_IMAGE_TAG` (default `v<version>`). |
+| `MEHO_OVERLAY_SIGNER` | Required with an overlay. The exact cosign certificate identity that signed the image, for example `https://github.com/<org>/<repo>/.github/workflows/<file>@refs/tags/<tag>`. Any other signer stops the build. |
+| `MEHO_OVERLAY_OIDC_ISSUER` | The OIDC issuer of that identity. Default: `https://token.actions.githubusercontent.com`. |
+| `MEHO_OVERLAY_LICENCE` | Required with an overlay. The line of the overlay in `LICENSES/README.txt`: `<licence files> <source>`, in the format of `packaging/image-sources.txt`. The licence files must be files that `LICENSES/` holds. |
+| `MEHO_REGISTRY`, `MEHO_REGISTRY_USERNAME`, `MEHO_REGISTRY_PASSWORD` | A login for a private registry, all three or none. `check-download.sh` reads them too, because it asks the registry for the digest of the overlay tag. |
+
+What changes with an overlay:
+
+- `cosign verify` checks the overlay image against `MEHO_OVERLAY_SIGNER`.
+  The chart is still the public chart, signed by `chart.yml`. With a wrong
+  signer, the build stops with one `[FAIL]` line that names the expected
+  identity.
+- The build adds `image.repository: <overlay>` to the end of
+  `chart/values-single-node.yaml` in the download. `install.sh`, the update
+  and `check-download.sh` pass this file to Helm, so all of them use the
+  overlay image. The archive holds the overlay image, not the public one.
+  The check "the chart uses the signed image" looks for the overlay.
+- `LICENSES/README.txt` names the overlay image with `MEHO_OVERLAY_LICENCE`.
+  `packaging/image-sources.txt` does not change.
+
+The login:
+
+- regctl and cosign log in with `--pass-stdin` and `--password-stdin`. The
+  password goes to them on stdin, so it is never on a command line, in the
+  process list or in the log. After the login, the script removes it from
+  its environment, so later commands do not get it.
+- The logins are kept in the build folder (`REGCTL_CONFIG` and
+  `DOCKER_CONFIG`), which the build removes at the end. The logins of the
+  user who runs the build are neither read nor changed. So with a login,
+  the build has only this one login, and it reads the other registries
+  without one.
+- The download must not be published on this repository's releases: it
+  holds an image that is not public.
+
+```bash
+MEHO_CLI_BINARY=/path/to/meho \
+MEHO_OVERLAY_IMAGE=registry.example.com/team/meho-overlay \
+MEHO_OVERLAY_SIGNER=https://github.com/<org>/<repo>/.github/workflows/overlay.yml@refs/tags/v0.36.0-1 \
+MEHO_OVERLAY_LICENCE="Apache-2.0.txt,MEHO-NOTICE.txt https://example.com/meho-overlay/licence" \
+MEHO_IMAGE_TAG=v0.36.0-1 \
+MEHO_REGISTRY=registry.example.com MEHO_REGISTRY_USERNAME=robot MEHO_REGISTRY_PASSWORD="$TOKEN" \
+  deploy/linux-server/build-download.sh 0.36.0 /tmp/download
+```
+
 ## Dependencies
 
 - The build host: Linux amd64 with `curl`, GNU `tar`, `zstd`, `jq`,
@@ -268,7 +327,9 @@ The tests run the functions of `packaging/` with bash, offline:
   writes it.
 
 They cover the options, the size limit (one `[FAIL]` line with both
-sizes), the image references and the lock, the licence table, the layout
+sizes), the image references and the lock, the licence table, the overlay
+inputs (with a stub `cosign` that passes only for the given signer), the
+registry login (the password is on no command line), the layout
 check (missing and extra files, owner, modes, links) and the archive check
 (`docker save` format, wrong digest, missing or extra image, changed or
 missing blob, other platform, decoder memory).

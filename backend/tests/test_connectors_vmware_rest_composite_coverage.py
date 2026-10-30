@@ -42,6 +42,8 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.event.tail",
         "vmware.composite.datastore.usage",
         "vmware.composite.datastore.refresh",
+        # #3814: ``.orphan_dirs`` is not a classifier suffix -> ``other``; a read.
+        "vmware.composite.datastore.orphan_dirs",
         "vmware.composite.network.portgroup.audit",
         "vmware.composite.vm.clone",
         "vmware.composite.vm.deploy_from_library",

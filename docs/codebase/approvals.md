@@ -2066,10 +2066,10 @@ shows every state. An empty list names the state it filtered on and points
 to `--status all` (#5129). `--limit` / `--offset` go to the server as
 `limit` / `offset`. When `--offset` skips every match, the empty message
 says the page is empty and points to a smaller `--offset`, so it does not
-claim the tenant has no requests. When `--work-ref` matches nothing, the
+claim the tenant has no requests. When `--filter-work-ref` matches nothing, the
 empty message names the change ticket and points to removing the filter,
 for the same reason. `--order oldest|newest` picks the sort (#3596). It
-defaults to newest first, but to **oldest first when `--work-ref` is
+defaults to newest first, but to **oldest first when `--filter-work-ref` is
 set**, so the steps of one change ticket read in the order they were sent.
 
 ### Operator console (`backend/src/meho_backplane/ui/routes/approvals/`)
@@ -2195,7 +2195,7 @@ shows that order on the surfaces an approver uses. Nothing here changes what
   pending requests under its `work_ref`. A read error only drops the two
   fields (fail-open, like the event itself).
 - **CLI.** `meho approvals list --order oldest|newest`; oldest is the
-  default when `--work-ref` is set (see the CLI section above).
+  default when `--filter-work-ref` is set (see the CLI section above).
 
 ### Structured `proposed_effect` render in the modal (#2447)
 

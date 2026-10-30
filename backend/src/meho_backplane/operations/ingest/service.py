@@ -1375,7 +1375,7 @@ class ReviewService:
         leaving every write-shaped verb (POST / PUT / PATCH / DELETE)
         and every typed / composite op **default-deny**. The point is
         broad governed *read* coverage on big ingested surfaces
-        (``vmware-rest-9.0`` is 3000+ ops, mostly staged GETs) without
+        (a big ingested connector can carry thousands of ops, mostly staged GETs) without
         a per-op death-march; writes keep their per-op / composite
         curation by design — that's the governance boundary.
 

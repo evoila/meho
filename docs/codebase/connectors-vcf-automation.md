@@ -98,8 +98,8 @@ flow only where a convertible OpenAPI 3.x spec is pinned — for VCFA only
 the 9.1 appliance-served IaaS document above would qualify, and none is
 pinned.
 
-**Operation contracts.** The 29 typed ops (the seven reads above, the
-nine provisioning ops, the four image ops and the nine network and deploy ops
+**Operation contracts.** The 30 typed ops (the seven reads above, the
+ten provisioning ops, the four image ops and the nine network and deploy ops
 below) meet the VMware operation-contract check
 (`backend/tests/test_operation_contracts.py`) and have no entry in its
 gap list:
@@ -133,7 +133,7 @@ cannot serve the tenant plane: `POST /iaas/api/login` exchanges only a
 `invalid_grant`). The bootstrap sequence — org → custom global role
 carrying `API Tokens: Manage` (the stock *Organization Administrator*
 role is `readOnly` and lacks it) → local org user → API token → project
-— is governed by nine typed ops in `provisioning_ops.py` (metadata) with
+— is governed by ten typed ops in `provisioning_ops.py` (metadata) with
 handlers in `_provisioning.py` / `_role_user.py` / `_api_token.py`,
 lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
 `_provisioning_preview.py`:
@@ -141,9 +141,10 @@ lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
 | op_id | tier / approval | wire |
 |---|---|---|
 | `vcfa.provider.right.list` | safe | `GET /cloudapi/1.0.0/rights` (`name_contains` → FIQL `name==*x*`) |
-| `vcfa.provider.role.list` | safe | `GET /cloudapi/1.0.0/globalRoles`; with `org`: `GET /cloudapi/1.0.0/roles` + tenant-context headers |
+| `vcfa.provider.role.list` | safe | `GET /cloudapi/1.0.0/globalRoles`; with `org`: `GET /cloudapi/1.0.0/roles` + tenant-context headers (a VM Apps org's own roles show up here) |
 | `vcfa.provider.org.create` | caution, approval | `POST /cloudapi/1.0.0/orgs` (`org_type=vm_apps` → `isClassicTenant: true`) |
 | `vcfa.provider.role.create` | caution, approval | `POST …/globalRoles`, `PUT …/{id}/rights` (rollback `DELETE …/{id}` on failure), `POST …/{id}/tenants/publish` or `…/publishAll` |
+| `vcfa.provider.role.delete` | dangerous, approval | `DELETE /cloudapi/1.0.0/globalRoles/{id}` (role found by name first) |
 | `vcfa.provider.user.create` | caution, approval | `POST /cloudapi/1.0.0/users` + tenant-context headers |
 | `vcfa.provider.api_token.create` | dangerous, approval | user session → `POST /oauth/<tenant/<org>\|provider>/register` → jwt-bearer `POST …/token` → Vault → `DELETE …/sessions/current` |
 | `vcfa.provider.api_token.revoke` | dangerous, approval | user session → `DELETE /cloudapi/1.0.0/tokens/{id}` → `DELETE …/sessions/current` |
@@ -159,11 +160,28 @@ lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
   (`updated` + `reconciled: [...]`; rights already present are never
   replaced), and a failed rights PUT right after the create deletes the new
   role — so an interrupted run never leaves a half-built role that a re-run
-  calls `unchanged`. Upstream 4xx/5xx raise and
+  calls `unchanged`.
+- **VM Apps orgs (#3894).** A VM Apps org (`isClassicTenant: true`) has its
+  own fixed org roles, and the appliance answers `400 Cannot publish to
+  classic tenants` to a global-role publish. So `role.create` with a VM Apps
+  `publish_to_org` answers `invalid_request` before any write (before the
+  role lookup too), and its guidance names the org's own roles from
+  `GET /cloudapi/1.0.0/roles` (a failed read of those roles only drops the
+  names). `role.list` with `org` lists those roles, and `user.create`
+  takes one of them. `role.delete` removes a global role nobody needs: a
+  missing role (or a `404` on the delete) is `unchanged`, a built-in
+  (`readOnly`) role is `invalid_request` with nothing sent, and a refused
+  delete (for example a role users still hold) is a `connector_error`. Only
+  an exact name match counts (case matters), so a repeated delete cannot
+  take a role that differs by case alone; when several roles carry exactly
+  that name, the call is `invalid_request` with nothing sent. Its
+  approval card reads the role once with the same rules
+  (`would: delete | unchanged | refuse_built_in | refuse_ambiguous_name`).
+- **Errors.** Upstream 4xx/5xx raise and
   the dispatcher maps them (`connector_error` / `connector_http_403` with
   `upstream_message`); a rejected login is `connector_auth_failed`.
 - **Name lookups** use the FIQL `filter` (`name==<v>`), compared
-  case-insensitively; a value containing a FIQL-reserved character
+  case-insensitively (`role.delete` is the exception: exact name only); a value containing a FIQL-reserved character
   (`,;()*=!<>` or a quote — e.g. "Org Admin (API token)") is matched by
   paging the full list (the `go-vcloud-director`
   fallback). Org scoping uses the `X-VMWARE-VCLOUD-TENANT-CONTEXT` (org
@@ -285,8 +303,8 @@ approval preview in `_images.py`, all on the tenant plane, in the group
 `register_typed_operations` (a classmethod on the connector, queued onto
 the lifespan registrar list via `register_vcfa_typed_operations` in
 `__init__.py`) upserts the seven read descriptors, the nine
-provisioning descriptors, the four image descriptors and the nine network and
-deploy descriptors on startup — the same argocd / bind9 / Kubernetes
+provisioning descriptors, the four image descriptors, the nine network and
+deploy descriptors and the two feature-flag descriptors on startup — the same argocd / bind9 / Kubernetes
 typed-registrar shape.
 
 **A project's own network and its first deployment.** With an org, a
@@ -349,6 +367,43 @@ true).
   `vra-iaas.json`, `vra-blueprint.json` and `vra-catalog-deployment.json`
   of the pinned `vra-sdk-go` v0.6.5 shelf.
 
+**Feature flags (#3893).** VCF Automation 9.1 refuses a VM Apps (classic
+tenant) org while the appliance feature flag `CLASSIC_TENANT_CREATION`
+("Classic Tenant Creation") is off: the org create answers HTTP 400. Two
+provider-plane ops let the tenant set-up read and change the flags through
+MEHO, with approval and audit. Metadata is in `feature_flag_ops.py`; the
+handlers, the org-create check and the park-time preview are in
+`_feature_flags.py`. Wire facts follow `go-vcloud-director` v3
+`govcd/feture_flag.go` (flag ids look like
+`urn:vcloud:featureflag:<NAME>`).
+
+| op_id | risk level / approval | wire |
+|---|---|---|
+| `vcfa.provider.feature_flag.list` | safe | `GET /cloudapi/1.0.0/featureFlags` |
+| `vcfa.provider.feature_flag.set` | caution, approval | `GET …/featureFlags` (find by name), `GET …/featureFlags/{id}` (state + `ETag`), then `PUT …/featureFlags/{id}` with `If-Match` |
+
+- **Safe to run twice.** `set` finds the flag by id, name or display name
+  (case does not matter) before any write; no match answers
+  `invalid_request`. A flag already in the requested state answers
+  `unchanged` and sends no `PUT`; otherwise it answers `changed` with
+  `previous_enabled`. The `PUT` body is the flag as read, with `enabled`
+  replaced. A read that returns no `ETag` refuses the write with an error
+  and sends no `PUT`, because without `If-Match` the write could
+  overwrite a change made in between.
+- **Response headers.** `_send_with_retry` on the connector returns the
+  raw `httpx.Response` (same 401 retry-once as the JSON helpers), so the
+  handler can read the `ETag` header.
+- **Org-create check.** For `org_type=vm_apps` (the default),
+  `vcfa.provider.org.create` reads `CLASSIC_TENANT_CREATION` after the name
+  check and before the `POST`. When the flag is there and off, it answers
+  `invalid_request` with guidance naming `vcfa.provider.feature_flag.set`,
+  and writes nothing. A missing flag or a failed read lets the create go
+  ahead, so the appliance answers for itself. `all_apps` does not read it.
+- **Preview.** The park card for `set` shows the flag name, its id and
+  display name, `current_enabled`, `requested_enabled` and `would`
+  (`change` / `unchanged` / `invalid_request`). Without a connector it shows
+  `would: set_if_different` and no current state.
+
 Source: `backend/src/meho_backplane/connectors/vcf_automation/`.
 
 The connector is **dual-plane**: a single registry triple covers both the
@@ -403,7 +458,7 @@ domains.
   (`deploy_ops.py`) — the six network ops and the three deploy ops (see
   **A project's own network and its first deployment** above), checked by
   the same `validate_typed_ops()`.
-- **`VCFA_PROVISIONING_OPS`** (`provisioning_ops.py`) — the nine #3890
+- **`VCFA_PROVISIONING_OPS`** (`provisioning_ops.py`) — the ten (#3890, #3894)
   provisioning ops (see **Provisioning ops** above), validated by the
   same `validate_typed_ops()`. Each `VcfaTypedOp` carries a `plane` + `path`;
   the module's `validate_typed_ops()` cross-checks them at import
@@ -411,6 +466,9 @@ domains.
   surfacing as a misrouted 401.
 - **`VCFA_IMAGE_OPS`** (`image_ops.py`) — the four image ops (see **Image
   ops** above), validated by the same `validate_typed_ops()`.
+- **`VCFA_FEATURE_FLAG_OPS`** (`feature_flag_ops.py`) — the two
+  feature-flag ops (see **Feature flags** above), validated by the same
+  `validate_typed_ops()`.
 - **`VCFA_PRODUCT` / `VCFA_VERSION` / `VCFA_IMPL_ID` /
   `VCFA_CONNECTOR_ID`** (`__init__.py`) — DB-side keys. Since #1814 the
   registry key `VcfAutomationConnector.product` was unified to `"vcfa"`,
@@ -439,7 +497,8 @@ domains.
    upserts the seven `typed_ops.VCFA_TYPED_OPS` descriptors, the nine
    `provisioning_ops.VCFA_PROVISIONING_OPS` (#3890), the four
    `image_ops.VCFA_IMAGE_OPS` and the nine
-   `VCFA_NETWORK_OPS` + `VCFA_DEPLOY_OPS` — no ingest needed, so
+   `VCFA_NETWORK_OPS` + `VCFA_DEPLOY_OPS` and the two
+   `VCFA_FEATURE_FLAG_OPS` — no ingest needed, so
    the audited read surface and the provisioning writes work on a fresh
    boot.
 
@@ -573,7 +632,8 @@ the consumer repo, validated 2026-05-17):
 ### 401 → re-login + retry-once (per plane, independent)
 
 `VcfAutomationConnector._request_json` (idempotent verbs) and
-`_post_json` (POST) share a common `_do_request_with_retry` helper:
+`_post_json` (POST) share a common `_do_request_with_retry` helper, which
+parses the body of the response `_send_with_retry` returns:
 
 1. Build headers via `auth_headers(..., path=path)` (lazy login on first use).
 2. Fire the request through the per-target `AsyncClient`.
@@ -690,8 +750,9 @@ for ingested breadth on connectors that *do* publish a convertible spec.
   ships no swagger artifact at all. The ingest parser is
   OpenAPI-3.x-only by decision (#2090, reaffirming #1532) and rejects
   native 2.0 with a structured `UnsupportedSpecError` naming the
-  conversion on-ramp — convert with `swagger2openapi` /
-  `converter.swagger.io` first, then ingest the 3.x output (see the
+  conversion on-ramp — pass the file to `meho connector ingest` as
+  `file://` (the CLI converts it on your machine), or convert it with a
+  local `swagger2openapi` run first (see the
   ["Product ships only Swagger
   2.0"](../cross-repo/connector-ingestion.md#product-ships-only-swagger-20)
   runbook section, which uses VCFA as the worked example). This is

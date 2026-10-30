@@ -200,10 +200,29 @@ def test_last_applied_annotation_on_secret_is_redacted() -> None:
     out = redact_kubernetes_payload(secret)
     annotations = out["metadata"]["annotations"]
     assert annotations[LAST_APPLIED_ANNOTATION].startswith(REDACTED_PREFIX)
-    assert annotations["owner"] == "team-a"
+    assert annotations["owner"] == redact_secret_value("team-a")
     assert _TLS_KEY_B64 not in str(out)
     # The annotation on a non-Secret object stays as it is.
     config_map = {"kind": "ConfigMap", "metadata": {"annotations": {LAST_APPLIED_ANNOTATION: "x"}}}
+    assert redact_kubernetes_payload(config_map) == config_map
+
+
+def test_every_annotation_value_on_secret_is_redacted_keys_kept() -> None:
+    """Any annotation can hold a copy of the manifest, so all values are hidden."""
+    secret = _make_secret()
+    secret["metadata"]["annotations"] = {
+        "owner": "platform-group",
+        "deploy-tool.example/original": f'{{"data":{{"app-token":"{_APP_TOKEN_B64}"}}}}',
+    }
+    out = redact_kubernetes_payload(secret)
+    annotations = out["metadata"]["annotations"]
+    assert set(annotations) == {"owner", "deploy-tool.example/original"}
+    assert all(value.startswith(REDACTED_PREFIX) for value in annotations.values())
+    assert _APP_TOKEN_B64 not in str(out)
+    assert "platform-group" not in str(out)
+    # The same annotations on a non-Secret object stay as they are.
+    config_map = {"kind": "ConfigMap", "metadata": {"annotations": dict(annotations)}}
+    config_map["metadata"]["annotations"]["owner"] = "platform-group"
     assert redact_kubernetes_payload(config_map) == config_map
 
 
@@ -255,6 +274,26 @@ def test_custom_resource_row_secret_surfaces_redacted_data_with_digest() -> None
     assert _TLS_KEY_B64 not in str(row)
     assert _APP_TOKEN_B64 not in str(row)
     assert _STRINGDATA_PLAINTEXT not in str(row)
+
+
+def test_custom_resource_row_secret_keeps_annotation_keys_but_hides_values() -> None:
+    """A Secret row shows its annotation keys, never their values."""
+    secret = _make_secret()
+    secret["metadata"]["annotations"] = {
+        LAST_APPLIED_ANNOTATION: f'{{"data":{{"tls.key":"{_TLS_KEY_B64}"}}}}',
+        "owner": "platform-group",
+        "deploy-tool.example/original": f'{{"data":{{"app-token":"{_APP_TOKEN_B64}"}}}}',
+    }
+    row = custom_resource_row(secret)
+    assert set(row["annotations"]) == {"owner", "deploy-tool.example/original"}
+    assert row["annotations"]["owner"] == redact_secret_value("platform-group")
+    assert all(value.startswith(REDACTED_PREFIX) for value in row["annotations"].values())
+    assert row["annotations_truncated"] is False
+    assert row["status_excerpt"] is None
+    assert row["data"]["tls.key"].startswith(REDACTED_PREFIX)
+    assert _TLS_KEY_B64 not in str(row)
+    assert _APP_TOKEN_B64 not in str(row)
+    assert "platform-group" not in str(row)
 
 
 def test_custom_resource_row_non_secret_has_no_data_fields() -> None:

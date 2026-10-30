@@ -3227,8 +3227,8 @@ def test_ingest_swagger_2_spec_returns_structured_unsupported_spec_400(
     re-parse prose to learn the spec flavour was the problem. The
     body now carries the shared builder's envelope — the stable
     ``unsupported_spec`` classifier plus the message that names the
-    declared ``swagger`` version and the ``swagger2openapi`` /
-    converter.swagger.io conversion remediation.
+    declared ``swagger`` version and the conversion remediation (the
+    CLI path first, #5028).
     """
     spec_path = tmp_path / "swagger2.yaml"
     spec_path.write_text(
@@ -3264,8 +3264,9 @@ paths:
     detail = response.json()["detail"]
     assert detail["detail"] == "unsupported_spec"
     assert "swagger='2.0'" in detail["message"]
-    assert "swagger2openapi" in detail["message"]
-    assert "converter.swagger.io" in detail["message"]
+    assert "meho connector ingest" in detail["message"]
+    assert "file://" in detail["message"]
+    assert "converter.swagger.io" not in detail["message"]
 
 
 #: One case per parser-family ``SpecError`` sibling the REST 400 handler

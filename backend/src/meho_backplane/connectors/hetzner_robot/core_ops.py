@@ -735,7 +735,6 @@ async def apply_robot_core_curation(
     works around this via the audit-log-driven operator-override
     exclusion — the same mechanism
     :func:`~meho_backplane.connectors.harbor.core_ops.apply_harbor_core_curation`
-    and :func:`~meho_backplane.connectors.nsx.core_ops.apply_nsx_core_curation`
     established:
 
     1. :meth:`ReviewService.get_review_payload` loads the current

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``0121_add_operation_policy_override`` (#4711).
+"""Behavioural tests for ``0127_add_operation_policy_override`` (#4711).
 
 The migration adds one table for the operator's stricter risk levels and
 approval flags. These tests pin: the table exists after upgrade, the two
@@ -9,8 +9,8 @@ partial unique indexes keep one row per scope and operation name (one
 install-wide row, one row per tenant), the risk level check refuses an
 unknown value, and ``downgrade()`` drops the table.
 
-Every step targets this migration's own revision (``0121``) and its
-``down_revision`` (``0120``), never ``head``.
+Every step targets this migration's own revision (``0127``) and its
+``down_revision`` (``0126``), never ``head``.
 """
 
 from __future__ import annotations
@@ -29,8 +29,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0121"
-_DOWN_REVISION = "0120"
+_REVISION = "0127"
+_DOWN_REVISION = "0126"
 _TABLE = "operation_policy_override"
 _INSERT = text(
     "INSERT INTO operation_policy_override "
@@ -43,7 +43,7 @@ _INSERT = text(
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
-    db_path = tmp_path / "migration_0121.db"
+    db_path = tmp_path / "migration_0127.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

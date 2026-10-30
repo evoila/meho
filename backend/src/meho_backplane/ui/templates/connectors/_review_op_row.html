@@ -10,7 +10,7 @@
   Each control PATCHes
   ``/ui/connectors/registry/{connector_id}/operations/{op_id}`` and swaps
   THIS row's outerHTML with the re-rendered row. The ``op_id`` is the
-  natural key ``f"{method}:{path}"`` (e.g. ``GET:/api/vcenter/cluster``)
+  natural key ``f"{method}:{path}"`` (e.g. ``GET:/repos/{owner}/{repo}/issues``)
   which CONTAINS slashes; it is emitted RAW into the ``hx-patch`` URL
   (Jinja HTML-escapes the attribute but does NOT URL-encode the path) so
   the ``{op_id:path}`` converter on the route captures the slash-bearing

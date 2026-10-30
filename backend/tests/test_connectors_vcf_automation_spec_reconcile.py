@@ -93,6 +93,7 @@ from meho_backplane.connectors.vcf_automation import _routing as _routing_module
 from meho_backplane.connectors.vcf_automation import typed_ops as _typed_ops_module
 from meho_backplane.connectors.vcf_automation._routing import plane_for_path
 from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
+from meho_backplane.connectors.vcf_automation.feature_flag_ops import VCFA_FEATURE_FLAG_OPS
 from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
 from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
 from meho_backplane.connectors.vcf_automation.provisioning_ops import VCFA_PROVISIONING_OPS
@@ -141,6 +142,8 @@ _PATHS_METHODS: dict[str, frozenset[str]] = {
     "OAUTH_TOKEN_PATH": frozenset({"POST"}),
     "ORG_SESSION_CURRENT_PATH": frozenset({"DELETE"}),
     "ORG_SESSION_PATH": frozenset({"POST"}),
+    "PROVIDER_FEATURE_FLAGS_PATH": frozenset({"GET"}),
+    "PROVIDER_FEATURE_FLAG_PATH": frozenset({"GET", "PUT"}),
     "PROVIDER_GLOBAL_ROLES_PATH": frozenset({"GET", "POST"}),
     "PROVIDER_GLOBAL_ROLE_PATH": frozenset({"DELETE"}),
     "PROVIDER_GLOBAL_ROLE_PUBLISH_ALL_PATH": frozenset({"POST"}),
@@ -272,6 +275,7 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
             *VCFA_IMAGE_OPS,
             *VCFA_NETWORK_OPS,
             *VCFA_DEPLOY_OPS,
+            *VCFA_FEATURE_FLAG_OPS,
         )
         if op.path not in swept
     }
@@ -344,6 +348,10 @@ def test_vcfa_hand_coded_op_id_manifest_is_pinned() -> None:
         "PATCH:/iaas/api/fabric-networks-vsphere/{id}",
         "POST:/blueprint/api/blueprint-requests",
         "POST:/iaas/api/network-profiles",
+        # Feature flags (provider plane).
+        "GET:/cloudapi/1.0.0/featureFlags",
+        "GET:/cloudapi/1.0.0/featureFlags/{id}",
+        "PUT:/cloudapi/1.0.0/featureFlags/{id}",
     }
 
 

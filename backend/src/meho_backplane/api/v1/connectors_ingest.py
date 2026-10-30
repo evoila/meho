@@ -448,8 +448,8 @@ async def ingest_endpoint(
     :class:`IngestJobHandle` at HTTP 202; the operator polls
     ``GET /api/v1/connectors/ingest/jobs/{job_id}`` for completion.
     This is the only mode that survives real-world vendor specs
-    without tripping the kubelet liveness probe -- the
-    ``vmware/9.0.0.0`` spec at 7.5 MB / 1275 ops blocks the event
+    without tripping the kubelet liveness probe -- a vendor
+    spec at 7.5 MB / 1275 ops blocks the event
     loop for ~30 s in the register + LLM-grouping phases, past
     the 25 s liveness deadline. The 202 + job-id shape is the
     "escape hatch must not crash the pod" answer G0.16-T1 closes.
@@ -1511,7 +1511,7 @@ async def edit_op_endpoint(
 
     The ``op_id`` path parameter uses the ``:path`` converter so
     operations whose natural key contains slashes
-    (``"GET:/api/vcenter/cluster"``) round-trip without
+    (``"GET:/repos/{owner}/{repo}/issues"``) round-trip without
     URL-encoding the colon-prefixed path segment.
 
     ``safety_level`` / ``requires_approval`` are stored as an operator

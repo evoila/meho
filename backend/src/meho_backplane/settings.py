@@ -1801,7 +1801,7 @@ class Settings(BaseModel):
     # the mint is still refused if this config disagrees). Format: a
     # comma-separated list of ``op_pattern`` or ``op_pattern@target_scope``
     # tokens (``@`` omitted => ``target_scope='*'``), e.g.
-    # ``"vmware.vm.tag_set@*,vmware.vm.annotation_set"``; default ``""`` is
+    # ``"k8s.label@*,k8s.annotate"``; default ``""`` is
     # fail-closed (no remote-write executes at the edge until provisioned).
     # Central-only deployments (no runner role) leave this unset.
     satellite_write_allowlist: str = ""
@@ -2201,6 +2201,13 @@ class Settings(BaseModel):
     #: secrets are relocated. Pre-#1725 this defaulted empty (guard off).
     #: Set via ``VAULT_KV_TENANT_SCOPE_PREFIX``.
     vault_kv_tenant_scope_prefix: str = "secret/tenants/{tenant_id}/"
+
+    #: The most secrets one folder call may walk or delete: ``vault.kv.list``
+    #: with ``recursive=true`` and ``vault.kv.folder.delete``. A bigger folder
+    #: is refused, and the caller picks smaller folders. The delete also
+    #: refuses a ``keys`` list longer than this before it asks for approval.
+    #: Set via ``VAULT_KV_FOLDER_MAX_KEYS``.
+    vault_kv_folder_max_keys: int = Field(default=500, ge=1, le=10000)
 
     @property
     def keycloak_discovery_base(self) -> str:
@@ -3062,4 +3069,5 @@ def get_settings() -> Settings:
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"
         ).strip(),
+        vault_kv_folder_max_keys=int(os.environ.get("VAULT_KV_FOLDER_MAX_KEYS", "500")),
     )

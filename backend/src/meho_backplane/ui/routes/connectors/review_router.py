@@ -31,7 +31,7 @@ Route-ordering contract (first-match-wins)
 ``connector_id`` (``<impl_id>-<version>``) and ``group_key`` (snake_case,
 max 64) are slash-free, so they use plain string path params -- NOT the
 ``:path`` converter. ``op_id`` is the natural key ``f"{method}:{path}"``
-(e.g. ``GET:/api/vcenter/cluster``) which CONTAINS slashes, so the per-op
+(e.g. ``GET:/repos/{owner}/{repo}/issues``) which CONTAINS slashes, so the per-op
 PATCH route uses ``{op_id:path}`` -- the only param here that needs it --
 so the key round-trips intact without URL-encoding breakage.
 

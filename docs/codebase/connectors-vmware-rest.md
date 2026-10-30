@@ -87,6 +87,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   pinned `vi-json.yaml` documents and vCenter 9.1 sends); a standalone ESXi
   host sends the SOAP-shaped XML fault. The addressed read operations `vmware.vm.info`,
   `vmware.host.usage`, `vmware.host.storage_devices`,
+  `vmware.host.datastores` (its host read),
   `vmware.host.network_uplinks`, and `vmware.object.collect` explicitly opt
   into promotion on their `PropertyCollector.RetrievePropertiesEx` calls, so the connector
   reads the fault in either form (JSON first, then XML) and raises
@@ -793,6 +794,39 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   failure). Set-shaped (JSONFlux-reduced when large), with `host_required`
   / `host_not_found` / `ambiguous_host` / `unsupported_host_target`
   covering the resolution refusals.
+- **`vmware.host.datastores`** (`typed_ops_host_datastores.py`, handler
+  `host_datastores`, `#3373`) — the datastores mounted on one host, `safe`,
+  in its own group `vmware-host-datastores`, on both catalogs. It works on a
+  vCenter target and on a **standalone ESXi** target, so a mount made by
+  `vmware.composite.host.datastore_mount_nfs` can be checked by a separate
+  read. The ingested `GET:/vcenter/datastore` and
+  `vmware.composite.datastore.usage` cannot do this on ESXi: they use the
+  vCenter Automation REST surface, which ESXi does not serve. Host
+  resolution uses `host_target.classify_host_target` (ESXi → `ha-host`,
+  `host` ignored; vCenter → `GET:/vcenter/host`; anything else →
+  `unsupported_host_target`), with its own refusals in the
+  `datastores` / `datastore_count` shape. Two `RetrievePropertiesEx` reads
+  over the vmomi seam (VI-JSON on vCenter, SOAP on ESXi): first
+  `HostSystem.datastore` (the `Datastore` MoRefs, one object, one call on
+  `_post_vmomi_json`), then `summary.{name,type,capacity,freeSpace}` plus
+  `host` (the `DatastoreHostMount` list) over those moids through
+  `vim_retrieve.retrieve_all_pages`, so a split answer is read whole and a
+  lost continuation page fails the read. The rows are mapped **per result
+  object** (keyed by the `Datastore` moid). Each row is
+  `{datastore, name, type, capacity_bytes, free_space_bytes, accessible}`;
+  `accessible` is the selected host's own `mountInfo.accessible` from
+  `Datastore.host`, not `summary.accessible` (on vCenter that flag is true
+  when *any* host reaches the datastore), and is null when the datastore
+  has no mount entry for the host. Sizes go through `_int_or_none` because
+  the SOAP codec leaves a bare numeric leaf as text. A datastore the read
+  does not return keeps its row with null fields. A failed read returns
+  `status='datastores_unreadable'` with an empty set. That includes a
+  `HostSystem.datastore` the collector could not read: the HTTP call
+  succeeds but the property is in the object's `missingSet` (for example
+  `NoPermission`), and the op names the fault class in `read_note` instead
+  of answering `ok` with no datastores. A host that truly has no datastore
+  sends an empty array and no `missingSet` entry, and is `ok` with zero
+  rows. Set-shaped (JSONFlux-reduced when large).
 - **`vmware.snapshot.list`** (`typed_ops_snapshot_list.py`, handler
   `snapshot_list`) — the snapshots of one VM (by `vm` moid) as a flat list in
   tree order. `safe`, in its own group `vmware-snapshot-list`, on both
@@ -1362,7 +1396,7 @@ unchanged consumers read:
 | establish + fingerprint | `RetrieveServiceContent` | `ServiceInstance` | ServiceContent (PC/SessionManager moids, `about`) |
 | establish | `SessionManager.Login` | SessionManager moid | cookie set (success) |
 | teardown | `SessionManager.Logout` | SessionManager moid | empty |
-| storage_devices, config-mgr reads, task polls | `PropertyCollector.RetrievePropertiesEx` | PC moid **from ServiceContent** | `{objects:[{obj,propSet:[{name,val}]}]}` |
+| storage_devices, host.datastores, config-mgr reads, task polls | `PropertyCollector.RetrievePropertiesEx` | PC moid **from ServiceContent** | `{objects:[{obj,propSet:[{name,val}]}]}` |
 | storage_devices (best-effort) | `HostBootDeviceSystem.QueryBootDevices` | boot-device-system moid | `HostBootDeviceInfo` |
 | datastore_mount_nfs | `HostDatastoreSystem.CreateNasDatastore` | `configManager.datastoreSystem` moid | Datastore MoRef (synchronous) |
 | disk_mark_flash | `HostStorageSystem.MarkAsSsd_Task` / `MarkAsNonSsd_Task` | `configManager.storageSystem` moid | Task MoRef → poll `Task.info` |
@@ -1777,7 +1811,8 @@ The write composites build their `/api` request bodies as the vSphere
 Automation `*Spec` **at the top level** of the JSON body —
 `{"placement": {…}}` for relocate, `{"count": …, "cores_per_socket": …}`
 for the CPU PATCH, and so on. `_split_sub_op` substitutes the
-`{vm}` / `{nic}` / `{cdrom}` path variables into the URL and posts every
+`{vm}` / `{nic}` / `{cdrom}` path variables into the URL (each value
+percent-encoded as one path segment) and posts every
 remaining key verbatim as the body, so a handler passes the `*Spec` fields
 alongside the path vars (e.g. `{"vm": vm_moid, "placement": {"host": …}}`).
 
@@ -2501,9 +2536,17 @@ Code: `composites/_teardown.py` (shared plan helpers + `folder.delete`),
 listed in `_governed_subops.py`; the vim paths are reconciled against the
 pinned `vi-json.yaml` and the REST paths against `vcenter.yaml`.
 
-Follow-up (not in #3339): `_write._split_sub_op` puts path values into URLs
-without percent-encoding. The new ops validate every id first; the older
-library ops (`content_library.subscribed.status` / `.sync`) do not yet.
+The older library ops use the same id rule (#3938):
+`content_library.subscribed.sync` / `.status` / `.items.list` (the
+`library_id`, the id found for a `library_name`, and the item ids vCenter
+lists), `vm.deploy_from_library` and `vm.import_from_library` (the
+`library_item`, and the item id found for a `library_item_name`), and
+`vm.clone` (`library_item`). Each is checked in the input schema and in the
+handler, before any request. The items list skips an item whose id is not a
+UUID and adds a `warning` issue. As a second layer, `_write._split_sub_op`
+percent-encodes each path value as one segment (`_write._path_segment`):
+`/`, `%`, `?`, `#` and a bare `.` / `..` are encoded, while moids, UUIDs and
+`urn:...` ids keep the same URL as before.
 
 ### Governed DRS rule delete (`cluster.drs_rule.delete`)
 
@@ -3692,8 +3735,8 @@ in one folder of a datastore, so a check can confirm a plain datastore file
 ### AI guidance of the guest, event, performance and typed reads
 
 The six guest operations (`vm.guest.*`), `event.tail`,
-`performance.summary` and the seven typed reads (`vmware.host.usage`,
-`.host.network_uplinks`, `.host.storage_devices`, `.host.vsan_health`,
+`performance.summary` and the typed reads (`vmware.host.usage`,
+`.host.network_uplinks`, `.host.storage_devices`, `.host.datastores`, `.host.vsan_health`,
 `vmware.object.collect`, `vmware.tasks.recent`, `vmware.vm.info`) each
 carry `llm_instructions` with `when_to_call`, `output_shape` and
 `next_step`, plus `preconditions` for the guest file read and the two guest
@@ -3803,7 +3846,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.snapshot.create` | `{action, vm, snapshot_name, memory, quiesce}` echo | param echo, no I/O |
 | `vm.snapshot.delete` | mandatory `blast_radius` from the handler's own plan: the snapshot, and the snapshots below it when `remove_children` is set | live read (vim `RetrievePropertiesEx` of `VirtualMachine.snapshot`) |
 | `vm.migrate` | `{vm, cluster, target_host, target_host_source}` | param echo, no I/O |
-| `vm.power` | `{vm, verb, power_kind}` echo (`power_kind` = `hard` vs Tools-soft `guest`) | param echo, no I/O |
+| `vm.power` | `{vm, name, power_state, verb, power_kind}` (`power_kind` = `hard` vs Tools-soft `guest`); a failed read keeps the moid, sets `name` / `power_state` to `null` and adds an `unavailable` note -- the request is still created (#3942) | live read, best-effort (`GET:/vcenter/vm/{vm}`) |
 | `cluster.drs_rule.create` | `{cluster, cluster_name, rule_type, rule_name, enabled, resolved, total_resolved}` | live read (`GET:/vcenter/vm` + `GET:/vcenter/cluster/{cluster}`) |
 | `folder.create` | `{parent_folder` / `parent_folder_id, datacenter?, new_folder_name}` echo | param echo, no I/O |
 

@@ -105,6 +105,7 @@ from meho_backplane.operations._lookup import (
     connector_exists,
     enabled_for_tenant_clause,
     group_visible_for_tenant_clause,
+    installed_owner_clause,
     parse_connector_id,
     visible_scope_clause,
 )
@@ -771,6 +772,7 @@ async def _count_ops_per_group(
     count_stmt = select(EndpointDescriptor.group_id).where(
         EndpointDescriptor.group_id.in_(group_ids),
         enabled_for_tenant_clause(tenant_id=tenant_id),
+        installed_owner_clause(),
     )
     count_rows = (await session.execute(count_stmt)).all()
     counts: dict[uuid.UUID, int] = {}
@@ -812,7 +814,9 @@ def _build_operation_groups_query(
     :class:`OperationGroupSummary` tell a fully-enabled group apart from
     a per-op-only (``partial``) one. The predicate lives in
     :func:`~meho_backplane.operations._lookup.group_visible_for_tenant_clause`
-    so it also reads the tenant's own on/off settings (#5029).
+    so it also reads the tenant's own on/off settings (#5029) and hides a
+    group whose rows all belong to a connector package that is not
+    installed (#5037).
     """
     stmt = (
         select(OperationGroup)
@@ -1044,6 +1048,7 @@ async def _has_enabled_operation(
             EndpointDescriptor.version == version,
             EndpointDescriptor.impl_id == impl_id,
             enabled_for_tenant_clause(tenant_id=tenant_id),
+            installed_owner_clause(),
         )
         .exists()
     )

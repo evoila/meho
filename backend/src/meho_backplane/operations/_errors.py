@@ -17,7 +17,8 @@ Each builder owns one ``error_code`` from the contract documented in
 :mod:`meho_backplane.operations.dispatcher`'s module docstring:
 ``unknown_op`` / ``unknown_connector`` / ``invalid_params`` /
 ``invalid_op_schema`` / ``no_connector`` /
-``ambiguous_connector`` / ``handler_unreachable`` / ``denied`` /
+``ambiguous_connector`` / ``handler_unreachable`` /
+``connector_package_not_installed`` / ``denied`` /
 ``awaiting_approval`` / ``connector_unsupported`` /
 ``connector_http_403`` / ``connector_http_422`` /
 ``connector_auth_failed`` / ``connector_tls_verify_failed`` /
@@ -70,6 +71,7 @@ __all__ = [
     "result_connector_http_403",
     "result_connector_http_422",
     "result_connector_not_found",
+    "result_connector_package_not_installed",
     "result_connector_probe_refused",
     "result_connector_tls_verify_failed",
     "result_connector_unsupported",
@@ -259,6 +261,33 @@ def result_unknown_connector(
             "error_code": "unknown_connector",
             "connector_id": connector_id,
             "did_you_mean": found,
+        },
+    )
+
+
+def result_connector_package_not_installed(
+    op_id: str, connector_id: str, package: str, duration_ms: float
+) -> OperationResult:
+    """The op belongs to a connector package that is not installed (#5037).
+
+    The row stays in the database, hidden from discovery, so it and the
+    operator's settings on it come back when the package is installed
+    again.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"connector_package_not_installed: operation {op_id!r} of connector "
+            f"{connector_id!r} comes from the connector package {package!r}, which is "
+            "not installed in this MEHO. Install the package (build the image with it) "
+            "to use the operation again."
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "connector_package_not_installed",
+            "connector_id": connector_id,
+            "package": package,
         },
     )
 

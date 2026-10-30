@@ -1878,6 +1878,13 @@ class EndpointDescriptor(Base):
     )
     custom_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     custom_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # #5037: the connector package that wrote this row at start. NULL means
+    # the op is built into MEHO (or ingested). When the package is not
+    # installed, discovery hides the row and dispatch refuses it with
+    # ``connector_package_not_installed``. The row and the operator's
+    # settings on it stay, so they come back with the package. See
+    # ``docs/codebase/connector-packages.md``.
+    owner_package: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

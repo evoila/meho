@@ -6240,11 +6240,47 @@ meho vmware operation search <query> [flags]
 
 ### `meho vmware vm`
 
-vSphere VM verbs (list / info / create)
+vSphere VM verbs (list / info / create / cdrom)
 
 ```
 meho vmware vm
 ```
+
+#### `meho vmware vm cdrom`
+
+VM CD drive verbs (mount-library-iso / unmount-library-iso)
+
+```
+meho vmware vm cdrom
+```
+
+##### `meho vmware vm cdrom mount-library-iso`
+
+Mount an ISO from a content library on a VM, as a new CD drive
+
+```
+meho vmware vm cdrom mount-library-iso <vm-name-or-id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--library-item` — id of the content-library item that holds the ISO file
+- `--library-item-name` — name of the library item, looked up on the backend; refused when it fits 0 or >1 items
+- `--library-name` — library to look --library-item-name up in (optional)
+- `--target` — target slug to dispatch against
+
+##### `meho vmware vm cdrom unmount-library-iso`
+
+Unmount a content-library ISO from a VM and remove its CD drive
+
+```
+meho vmware vm cdrom unmount-library-iso <vm-name-or-id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--cdrom` — id of the CD drive, as mount-library-iso returned it; required
+- `--json` — emit the full OperationResult envelope as JSON
+- `--target` — target slug to dispatch against
 
 #### `meho vmware vm create`
 

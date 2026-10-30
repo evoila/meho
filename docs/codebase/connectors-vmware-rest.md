@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 79 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 81 hand-authored composites
 that orchestrate cross-spec workflows: 19 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -21,7 +21,7 @@ cache-refresh read `datastore.refresh` / `#3789` + the datastore file list
 read `datastore.file.list` / `#3432` + the vSAN folder list
 read `datastore.vsan.folder.list` / `#4022` + the VM limit and
 reservation read `vm.resource_allocation.show` / `#3880` + the migration
-inventory read `vmware.migration.inventory`) and 60 write
+inventory read `vmware.migration.inventory`) and 62 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
 governed vSphere Namespace `namespace.create` (caution) +
 `namespace.delete` (destructive) / `#3502` (see the **Governed vSphere
@@ -67,7 +67,9 @@ writes `content_library.create` + `content_library.item.upload` (see the
 DRS rule delete `cluster.drs_rule.delete` (see **Governed DRS rule delete**), the
 CD drive add `vm.cdrom.add` (`dangerous`) and the VMware Tools installer unmount
 `vm.tools.installer.unmount` (`caution`) (see **VM hardware read, CD drive add and
-Tools installer unmount**), the VM snapshot writes `vm.snapshot.create` (caution)
+Tools installer unmount**), the content-library ISO mount and unmount
+`vm.cdrom.mount_library_iso` + `vm.cdrom.unmount_library_iso` (both `caution`)
+(see **Content-library ISO mount and unmount**), the VM snapshot writes `vm.snapshot.create` (caution)
 + `vm.snapshot.delete` (destructive) (see **VM snapshot operations**), the licence
 assign `license.assign` (see **vSphere licences**), and the two caution alarm changes
 `alarm.acknowledge` + `alarm.reset` / `#4383` (see **Alarms**)). The
@@ -558,10 +560,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 79
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 81
   `_CompositeSpec` rows (19 read — incl. the `#3789` datastore
   cache-refresh read `datastore.refresh` — + 46 dangerous/destructive
-  writes + 14 caution writes); each row carries its
+  writes + 16 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
   (`llm_instructions`) of the VM and folder writes and the VM allocation
@@ -1354,17 +1356,18 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 79 `vmware.composite.*` rows with
+   queued registrar and upserts: the 81 `vmware.composite.*` rows with
    `source_kind="composite"` — 19 reads (18 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 60 writes, all `requires_approval=True`
-   (35 `safety_level="dangerous"`; 14 `safety_level="caution"` —
+   service principals), and 62 writes, all `requires_approval=True`
+   (35 `safety_level="dangerous"`; 16 `safety_level="caution"` —
    `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
    `vm.resource_allocation.set` / `#3880`, `datastore.dir.create` / `#3339`,
-   `vm.tools.installer.unmount`, `vm.snapshot.create`,
+   `vm.tools.installer.unmount`, `vm.cdrom.mount_library_iso` +
+   `vm.cdrom.unmount_library_iso`, `vm.snapshot.create`,
    `content_library.create` + `content_library.item.upload`;
    and 11 `safety_level="destructive"` — `vm.destroy` / `#3198`,
    `namespace.delete`, `storage_policy.delete`, `cluster.drs_rule.delete`,
@@ -1752,7 +1755,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 79 composites (19 reads + 60 writes) land as `source_kind="composite"`
+The 81 composites (19 reads + 62 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1849,7 +1852,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 79 composites are hand-authored aggregators the connector ships as
+The 81 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -2332,6 +2335,63 @@ installer is mounted now. The `vm` id goes into the URL path, so it must match
 of the three operations against the pinned `vcenter.yaml` of 8.0 and 9.0 (it
 skips without the vendor spec files). Tests use saved responses
 (`test_connectors_vmware_rest_typed_vm_hardware.py`).
+
+### Content-library ISO mount and unmount
+
+Two changes put an ISO from a vCenter content library into a VM and take it
+out again (`#3576`). They use the vSphere `Iso.Image` API. That API adds a new
+CD drive backed by the library item's ISO file, and removes that drive again.
+Both live in `composites/_vm_cdrom_library_iso.py`, are `caution`, wait for
+approval, and are on both catalogs (`vmware-rest-8.0` and `vmware-rest-9.0`).
+They call vSphere REST on the connector session through the shared write seam
+(`_write._write_sub_op`), so they need no catalog ingest. Like the CD drive
+add, they take the VM id (`vm`) only, and no VM name.
+
+- **`vmware.composite.vm.cdrom.mount_library_iso`**. The library item is
+  given by id (`library_item`) or by name (`library_item_name`, optionally
+  inside one library `library_name`). A name is looked up with
+  `POST /content/library?action=find` and
+  `POST /content/library/item?action=find`. No match gives
+  `library_not_found` / `item_not_found`; more than one match gives
+  `ambiguous_library` / `ambiguous_item` with the ids in `candidates`. In
+  these cases nothing is sent. Then one
+  `POST /vcenter/iso/image?action=mount` with `{library_item, vm}`. vCenter
+  answers with the new drive id (`cdrom`); MEHO reads the drive back
+  (`cdrom_info`). Not safe to run twice: each call adds a drive.
+  **The approved run mounts the item the approver saw.** The approval
+  preview looks the name up and shows the item id. After the approval, the
+  handler does not look the name up again: it reads the preview back with
+  `approved_preview(op_id)` (`operations/_preview.py`, bound by
+  `composite_resume_binding` on both resume paths, see
+  [approvals.md](approvals.md)) and mounts that id. So a rename or a
+  replaced item between park and approval cannot change what is mounted.
+  When the preview showed no id (the name fit no item or more than one, or
+  the read failed), the approved run sends nothing and answers
+  `item_not_pinned`. A mount write that policy holds saves the id as
+  `resume_state`, so its resume mounts the same item too.
+- **`vmware.composite.vm.cdrom.unmount_library_iso`**. One
+  `POST /vcenter/iso/image?action=unmount` with `{vm, cdrom}`, where `cdrom`
+  is the id the mount returned. vCenter answers 204.
+
+vCenter answers HTTP 400 when it refuses (for example an item with no `.iso`
+file, or a VM state that does not allow the change) and HTTP 404 when the VM,
+the item or the drive does not exist. The answer is then `refused` or
+`not_found` with vCenter's error type and message, and nothing changed. The
+approval previews are registered in the same module: the mount shows the
+resolved library item id and the drives the VM has now; the unmount shows the
+drive it will take off. `test_connectors_vmware_rest_cdrom_library_iso_reconcile.py`
+checks every REST call against the pinned `vcenter.yaml` of 8.0 and 9.0 (it
+skips without the vendor spec files), and checks that the two request bodies
+match the `Iso.Image` rows of `_governed_iso_recipe.py`. Tests use a REST fake
+(`test_connectors_vmware_rest_composites_cdrom_library_iso.py`).
+
+On the command line, `meho vmware vm cdrom mount-library-iso <vm-name-or-id>
+--library-item <id>` (or `--library-item-name <name> [--library-name <library>]`)
+and `meho vmware vm cdrom unmount-library-iso <vm-name-or-id> --cdrom <id>`
+(`cli/internal/cmd/vmware/vm_cdrom.go`) run the two operations through the
+same dispatch path as MCP. The VM name is resolved to its id on the client
+through the typed `vmware.vm.info` read, so the commands work before the
+catalog is ingested, and the approval names the VM id.
 
 ### Shared disks for WSFC/FCI — bus-sharing, eagerzeroedthick, shared-attach (#3256)
 
@@ -5113,8 +5173,9 @@ the filter and the summary fields against the pinned vCenter 8.0 U3 and 9.0
 
 ## References
 
-- Governed content-library ISO import-from-URL + `iso.image`
-  mount/unmount recipe (raw ingested ops, no composite):
+- Governed content-library ISO import-from-URL recipe (raw ingested ops);
+  the `iso.image` mount/unmount now runs through the two composites in
+  **Content-library ISO mount and unmount**:
   [vmware-rest-governed-iso-path.md](vmware-rest-governed-iso-path.md) (#3086).
 - Governed nested-hypervisor VM recipe (composite create with `VMKERNEL_*`
   pass-through + raw disk/cdrom adds + VI-JSON VHV via `nestedHVEnabled`):

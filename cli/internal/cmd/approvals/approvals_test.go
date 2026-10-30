@@ -768,6 +768,61 @@ func TestListSendsWorkRef(t *testing.T) {
 	}
 }
 
+// TestListOrderOnTheWire pins --order (#3596): unset with no --work-ref
+// leaves `order` off the wire (server default, newest first); --work-ref
+// alone sends order=oldest; an explicit --order always wins.
+func TestListOrderOnTheWire(t *testing.T) {
+	cases := []struct {
+		name string
+		opts listOpts
+		want string
+	}{
+		{"default", listOpts{}, ""},
+		{"work ref defaults to oldest", listOpts{WorkRef: "gh:evoila/meho#1"}, "oldest"},
+		{"explicit newest with work ref", listOpts{WorkRef: "gh:evoila/meho#1", Order: "newest"}, "newest"},
+		{"explicit oldest", listOpts{Order: "oldest"}, "oldest"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var seen url.Values
+			srv := mockBackplane(t, map[string]mockHandler{
+				"GET /api/v1/approvals": func(w http.ResponseWriter, r *http.Request) {
+					seen = r.URL.Query()
+					writeJSON(t, w, http.StatusOK, []api.ApprovalRequestView{})
+				},
+			})
+			defer srv.Close()
+
+			stderr, err := runListWithMock(t, srv, tc.opts)
+			if err != nil {
+				t.Fatalf("runList: %v (stderr: %s)", err, stderr.String())
+			}
+			if _, present := seen["order"]; tc.want == "" && present {
+				t.Errorf("order should stay off the wire; got %q", seen.Get("order"))
+			}
+			if got := seen.Get("order"); got != tc.want {
+				t.Errorf("expected order=%q on the wire, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestListRejectsUnknownOrder — a value other than oldest/newest fails
+// before any request.
+func TestListRejectsUnknownOrder(t *testing.T) {
+	cmd := &cobra.Command{Use: "list"}
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	cmd.SetContext(context.Background())
+	err := runList(cmd, listOpts{Order: "random", JSONOut: true})
+	if err == nil {
+		t.Fatal("expected an error for --order random")
+	}
+	if !strings.Contains(stderr.String(), "--order must be oldest or newest") {
+		t.Errorf("error should name the accepted values; got:\n%s", stderr.String())
+	}
+}
+
 // TestPrintListTableHappyPath — happy-path render emits the header,
 // the row's coordinates, and the "Showing N." footer.
 func TestPrintListTableHappyPath(t *testing.T) {

@@ -18,17 +18,18 @@ Coverage matrix (per Task #588 acceptance criteria):
 * ``ensure_path_under_root`` -- accepts absolute paths under the root,
   relative paths resolved under the root, and rejects every traversal
   / control-char / absolute-outside variant.
+* ``ensure_config_file_name`` -- lets ``named.conf``, ``named.conf.*``
+  and ``*.conf`` through; refuses key files and zone files (#5132).
 * ``Bind9Connector.bind9_zone_list`` / ``.bind9_zone_read`` /
   ``.bind9_record_get`` / ``.bind9_config_show`` -- bound-method shim
   invariants against mocked ``_run_command``: correct command,
   correct argument plumbing, structured-error envelopes from the
-  dispatcher seam (path rejection, missing zone).
-* ``BIND9_OPS`` registration shape -- the three zone / record reads carry
-  ``safety_level='safe'``; ``bind9.config.show`` is ``caution`` with
-  approval because a config file can hold TSIG / rndc key secrets
-  (#4617). All four carry ``additionalProperties=False`` on the
-  parameter schema, non-empty ``llm_instructions``, and bind9-namespace
-  op_ids.
+  dispatcher seam (path rejection, missing zone, symlinks).
+* ``BIND9_OPS`` registration shape -- all four reads carry
+  ``safety_level='safe'`` without approval; ``bind9.config.show`` reads
+  only config files and hides key secrets (#4617, #5132). All four
+  carry ``additionalProperties=False`` on the parameter schema,
+  non-empty ``llm_instructions``, and bind9-namespace op_ids.
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ from meho_backplane.connectors.bind9 import BIND9_OPS, Bind9Connector
 from meho_backplane.connectors.bind9.ops_config import (
     ConfigPathRejectedError,
     bind9_config_show,
+    ensure_config_file_name,
     ensure_path_under_root,
 )
 from meho_backplane.connectors.bind9.ops_record import (
@@ -459,6 +461,63 @@ def test_ensure_path_rejects_non_absolute_allowed_root() -> None:
 
 
 # ---------------------------------------------------------------------------
+# ensure_config_file_name (#5132)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/etc/bind/named.conf",
+        "/etc/bind/named.conf.local",
+        "/etc/bind/named.conf.options",
+        "/etc/bind/named.conf.default-zones",
+        "/etc/bind/views/external.conf",
+        "/etc/bind/rndc.conf",
+    ],
+)
+def test_config_file_name_accepts_config_files(path: str) -> None:
+    assert ensure_config_file_name(path) == path
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/etc/bind/rndc.key",
+        "/etc/bind/ddns.key",
+        "/etc/bind/named.conf.local.key",
+        "/etc/bind/keys/Kexample.com.+013+12345.key",
+        "/etc/bind/keys/Kexample.com.+013+12345.private",
+        "/etc/bind/bind.keys",
+        "/etc/bind/db.example.com",
+        "/etc/bind/db.local",
+        "/etc/bind/zones.rfc1918",
+        "/etc/bind/named.confx",
+        "/etc/bind",
+    ],
+)
+def test_config_file_name_refuses_other_files(path: str) -> None:
+    with pytest.raises(ConfigPathRejectedError, match="not a BIND config file"):
+        ensure_config_file_name(path)
+
+
+@pytest.mark.parametrize(
+    "requested",
+    [
+        "rndc.key",
+        "named.conf.local/../rndc.key",
+        "./rndc.key/.",
+        "views/../db.example.com",
+    ],
+)
+def test_config_file_name_runs_on_the_normalised_path(requested: str) -> None:
+    """A ``..`` or ``.`` segment cannot hide a key file or a zone file."""
+    resolved = ensure_path_under_root(requested, "/etc/bind")
+    with pytest.raises(ConfigPathRejectedError, match="not a BIND config file"):
+        ensure_config_file_name(resolved)
+
+
+# ---------------------------------------------------------------------------
 # Handler shims -- bind9_zone_list / bind9_zone_read
 # ---------------------------------------------------------------------------
 
@@ -621,12 +680,20 @@ async def test_config_show_reads_file_under_named_conf_path_directory() -> None:
         probe_method="ssh: named -v",
         extras={"os": "debian 12", "named_conf_path": "/etc/bind/named.conf"},
     )
-    run_mock = AsyncMock(return_value=_completed_process(stdout="options { };"))
+    run_mock = AsyncMock(
+        side_effect=[
+            _completed_process(stdout="/etc/bind\n/etc/bind/named.conf.options\n"),
+            _completed_process(stdout="options { };"),
+        ]
+    )
     with (
         patch.object(connector, "fingerprint", AsyncMock(return_value=fp)),
         patch.object(connector, "_run_command", run_mock),
     ):
         result = await bind9_config_show(connector, _TARGET, {"path": "named.conf.options"})
+    assert run_mock.await_args_list[0].args[1] == (
+        "realpath -- /etc/bind /etc/bind/named.conf.options"
+    )
     cmd = run_mock.await_args.args[1]
     # ``shlex.quote`` skips quoting when the input has no shell
     # metacharacters; ``/etc/bind/named.conf.options`` is safe as-is.
@@ -639,6 +706,102 @@ async def test_config_show_reads_file_under_named_conf_path_directory() -> None:
     }
     assert result["file"] == "/etc/bind/named.conf.options"
     assert result["content"] == "options { };"
+
+
+def _config_show_fingerprint() -> FingerprintResult:
+    return FingerprintResult(
+        vendor="isc",
+        product="bind9",
+        version="9.18.24",
+        build="BIND 9.18.24 (Test)",
+        reachable=True,
+        probed_at=datetime.now(UTC),
+        probe_method="ssh: named -v",
+        extras={"os": "debian 12", "named_conf_path": "/etc/bind/named.conf"},
+    )
+
+
+@pytest.mark.parametrize("requested", ["rndc.key", "/etc/bind/db.example.com", "keys/K.private"])
+async def test_config_show_refuses_non_config_file_before_wire_io(requested: str) -> None:
+    """A key file or a zone file is refused before any SSH command runs."""
+    connector = Bind9Connector()
+    run_mock = AsyncMock()
+    with (
+        patch.object(connector, "fingerprint", AsyncMock(return_value=_config_show_fingerprint())),
+        patch.object(connector, "_run_command", run_mock),
+        pytest.raises(ConfigPathRejectedError, match="not a BIND config file"),
+    ):
+        await bind9_config_show(connector, _TARGET, {"path": requested})
+    assert run_mock.await_count == 0
+
+
+@pytest.mark.parametrize(
+    "realpath_stdout, match",
+    [
+        # named.conf.extra is a symlink to the rndc key file.
+        ("/etc/bind\n/etc/bind/rndc.key\n", "not a BIND config file"),
+        # views/x.conf is a symlink to a file outside the root.
+        ("/etc/bind\n/etc/passwd\n", "outside the bind config root"),
+        # a symlink to a *.conf file outside the root.
+        ("/etc/bind\n/etc/other/secret.conf\n", "outside the bind config root"),
+    ],
+)
+async def test_config_show_refuses_symlink_to_forbidden_file(
+    realpath_stdout: str, match: str
+) -> None:
+    """The checks run again on the real path, so a symlink cannot get around them."""
+    connector = Bind9Connector()
+    run_mock = AsyncMock(
+        side_effect=[
+            _completed_process(stdout=realpath_stdout),
+            _completed_process(stdout="WOULD-LEAK"),
+        ]
+    )
+    with (
+        patch.object(connector, "fingerprint", AsyncMock(return_value=_config_show_fingerprint())),
+        patch.object(connector, "_run_command", run_mock),
+        pytest.raises(ConfigPathRejectedError, match=match),
+    ):
+        await bind9_config_show(connector, _TARGET, {"path": "named.conf.extra"})
+    # Only the realpath call ran; the file itself was never read.
+    assert run_mock.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "proc",
+    [
+        _completed_process(stdout="", exit_status=1),
+        _completed_process(stdout="/etc/bind\n", exit_status=0),
+    ],
+)
+async def test_config_show_refuses_when_realpath_fails(proc: Any) -> None:
+    connector = Bind9Connector()
+    run_mock = AsyncMock(return_value=proc)
+    with (
+        patch.object(connector, "fingerprint", AsyncMock(return_value=_config_show_fingerprint())),
+        patch.object(connector, "_run_command", run_mock),
+        pytest.raises(ConfigPathRejectedError, match="real path"),
+    ):
+        await bind9_config_show(connector, _TARGET, {"path": "named.conf.local"})
+    assert run_mock.await_count == 1
+
+
+async def test_config_show_follows_symlinked_root() -> None:
+    """A root that is itself a symlink is fine: both real paths are compared."""
+    connector = Bind9Connector()
+    run_mock = AsyncMock(
+        side_effect=[
+            _completed_process(stdout="/srv/bind\n/srv/bind/named.conf.local\n"),
+            _completed_process(stdout="zone x {};"),
+        ]
+    )
+    with (
+        patch.object(connector, "fingerprint", AsyncMock(return_value=_config_show_fingerprint())),
+        patch.object(connector, "_run_command", run_mock),
+    ):
+        result = await bind9_config_show(connector, _TARGET, {"path": "named.conf.local"})
+    assert run_mock.await_args.args[1] == "cat /srv/bind/named.conf.local"
+    assert result == {"file": "/etc/bind/named.conf.local", "content": "zone x {};"}
 
 
 async def test_config_show_rejects_traversal_with_no_content_in_envelope() -> None:
@@ -723,19 +886,14 @@ def test_bind9_ops_table_includes_all_t2_read_ops() -> None:
 
 @pytest.mark.parametrize(
     "op_id",
-    ["bind9.zone.list", "bind9.zone.read", "bind9.record.get"],
+    ["bind9.zone.list", "bind9.zone.read", "bind9.record.get", "bind9.config.show"],
 )
 def test_each_read_op_is_safe_and_no_approval(op_id: str) -> None:
+    """#5132: ``bind9.config.show`` reads only config files and hides key
+    secrets, so it no longer waits for approval."""
     op = next(o for o in BIND9_OPS if o.op_id == op_id)
     assert op.safety_level == "safe"
     assert op.requires_approval is False
-
-
-def test_config_show_is_caution_with_approval() -> None:
-    """#4617: a config file can hold TSIG / rndc key secrets, so the read waits."""
-    op = next(o for o in BIND9_OPS if o.op_id == "bind9.config.show")
-    assert op.safety_level == "caution"
-    assert op.requires_approval is True
 
 
 @pytest.mark.parametrize(

@@ -1217,8 +1217,9 @@ meho connector edit-op <connector_id> <op_id> [flags]
 - `--enable` — set is_enabled=true on this op
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
 - `--no-requires-approval` — clear the requires_approval flag
+- `--reason` — why you make this change; written to the audit row and required to turn approval off
 - `--requires-approval` — mark the op as requiring an approval workflow
-- `--safety` — replacement safety_level: safe | caution | dangerous
+- `--safety` — replacement safety_level: safe | caution | dangerous | destructive (can only raise the level)
 
 ### `meho connector enable`
 
@@ -1291,6 +1292,31 @@ meho connector list [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 - `--status` — filter by review status: staged | enabled | disabled | all (default all)
+
+### `meho connector overrides`
+
+List operator changes to risk levels and approval, or the operations running with reduced approval
+
+```
+meho connector overrides [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit machine-readable JSON to stdout instead of the human table
+- `--reduced-approval` — list only the operations a platform admin turned approval off for
+
+### `meho connector remove-override`
+
+Remove one operator change to an operation's risk level or approval
+
+```
+meho connector remove-override <connector_id> <op_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit machine-readable JSON to stdout instead of the human summary
+- `--reason` — why you remove it; written to the audit row and required when the removal ends approval
+- `--tenant` — the tenant whose change to remove (a UUID); leave it out for the install-wide change
 
 ### `meho connector review`
 

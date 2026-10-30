@@ -4724,7 +4724,7 @@
           "connectors"
         ],
         "summary": "Edit Op Endpoint",
-        "description": "Edit a per-op operator override.\n\nAt least one of ``custom_description`` / ``safety_level`` /\n``requires_approval`` / ``is_enabled`` must be set; an empty\nbody yields 400. Writes one ``meho_connector_edit_op`` audit\nrow. Returns 200 with an :class:`EditOpResponse` on success.\n\nG0.23-T4 (#1630) promoted the route from 204 No Content to 200\nso enable-time advisories have a structured wire home:\n``is_enabled=true`` on an op whose resolved connector is the\nunconfigured ingest auto-shim returns\n``warnings=[{code='unreplaced_auto_shim', ...}]`` \u2014 the edit\nstill lands (warnings never block the write), but the operator\nlearns about the guaranteed dispatch dead end here instead of\none ``call_operation`` later. The sibling ``edit_group`` route\nstays at 204 \u2014 it has no advisory to carry.\n\nThe ``op_id`` path parameter uses the ``:path`` converter so\noperations whose natural key contains slashes\n(``\"GET:/repos/{owner}/{repo}/issues\"``) round-trip without\nURL-encoding the colon-prefixed path segment.",
+        "description": "Edit a per-op operator override.\n\nAt least one of ``custom_description`` / ``safety_level`` /\n``requires_approval`` / ``is_enabled`` must be set; an empty\nbody yields 400. Writes one ``meho_connector_edit_op`` audit\nrow. Returns 200 with an :class:`EditOpResponse` on success.\n\nG0.23-T4 (#1630) promoted the route from 204 No Content to 200\nso enable-time advisories have a structured wire home:\n``is_enabled=true`` on an op whose resolved connector is the\nunconfigured ingest auto-shim returns\n``warnings=[{code='unreplaced_auto_shim', ...}]`` \u2014 the edit\nstill lands (warnings never block the write), but the operator\nlearns about the guaranteed dispatch dead end here instead of\none ``call_operation`` later. The sibling ``edit_group`` route\nstays at 204 \u2014 it has no advisory to carry.\n\nThe ``op_id`` path parameter uses the ``:path`` converter so\noperations whose natural key contains slashes\n(``\"GET:/repos/{owner}/{repo}/issues\"``) round-trip without\nURL-encoding the colon-prefixed path segment.\n\n``safety_level`` / ``requires_approval`` are stored as an operator\noverride (#4711). Turning approval off needs a person with a fresh\nsign-in (:func:`~meho_backplane.auth.fresh_sign_in.has_fresh_sign_in`):\nan API token with an old sign-in, a service principal or an agent gets\n``401`` with ``WWW-Authenticate: Bearer\nerror=\"insufficient_user_authentication\"``. A tenant admin asking for it\ngets ``403``; a level below the classification, a missing reason or a\ndestructive operation gets ``400``.",
         "operationId": "edit_op_endpoint_api_v1_connectors__connector_id__operations__op_id__patch",
         "parameters": [
           {
@@ -4776,6 +4776,89 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-maturity": "experimental"
+      }
+    },
+    "/api/v1/connectors/{connector_id}/operation-overrides/{op_id}": {
+      "delete": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Remove Op Override Endpoint",
+        "description": "Remove one operator override of a risk level or approval flag.\n\nThe override is the one ``GET /api/v1/connectors/operation-overrides``\nlists for ``connector_id``, ``op_id`` and ``tenant_id`` (none for the\ninstall-wide one). A platform admin can remove any tenant's override;\na tenant admin only their own tenant's (``403`` for the install-wide\none, ``404`` for another tenant's). When the removal ends approval in\nthat scope it needs ``platform_admin`` (``403``), a ``reason``\n(``400``) and a fresh sign-in (``401``), like turning approval off.\n``404`` when there is no such override. Writes one\n``meho_connector_edit_op`` audit row. Returns 204 on success.",
+        "operationId": "remove_op_override_endpoint_api_v1_connectors__connector_id__operation_overrides__op_id__delete",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "op_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Op Id"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "description": "The tenant whose override to remove. Leave it out for the install-wide override. A tenant admin can name only their own tenant.",
+              "title": "Tenant Id"
+            },
+            "description": "The tenant whose override to remove. Leave it out for the install-wide override. A tenant admin can name only their own tenant."
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "nullable": true,
+              "description": "Why you remove it; written to the audit row. Required when the removal ends approval.",
+              "title": "Reason"
+            },
+            "description": "Why you remove it; written to the audit row. Required when the removal ends approval."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -4997,6 +5080,63 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/connectors/operation-overrides": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "List Operation Overrides",
+        "description": "List the operator overrides of risk levels and approval flags.\n\n``reduced_approval=true`` keeps only the operations whose approval a\nplatform admin turned off and where approval is still off. Each row\nnames the connector, the operation, the risk level and approval that\napply in the row's scope, the scope, who set it, when, and the reason.",
+        "operationId": "list_operation_overrides_api_v1_connectors_operation_overrides_get",
+        "parameters": [
+          {
+            "name": "reduced_approval",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Only the operations a platform admin turned approval off for.",
+              "default": false,
+              "title": "Reduced Approval"
+            },
+            "description": "Only the operations a platform admin turned approval off for."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationOverrideList"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-maturity": "experimental"
       }
     },
     "/api/v1/connectors/{connector_id}/tenant-settings": {
@@ -14507,6 +14647,65 @@
             "multipart/form-data": {
               "schema": {
                 "$ref": "#/components/schemas/Body_ui_connectors_import_confirm_ui_connectors_import_confirm_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/overrides": {
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Overrides",
+        "description": "Render the override report page.",
+        "operationId": "ui_connectors_overrides_ui_connectors_overrides_get",
+        "parameters": [
+          {
+            "name": "show",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "reduced",
+                "all"
+              ],
+              "type": "string",
+              "default": "reduced",
+              "title": "Show"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
               }
             }
           }
@@ -26153,6 +26352,12 @@
             "nullable": true,
             "title": "Is Enabled"
           },
+          "reason": {
+            "type": "string",
+            "maxLength": 1024,
+            "nullable": true,
+            "title": "Reason"
+          },
           "session_ctx": {
             "$ref": "#/components/schemas/UISessionContext",
             "nullable": true
@@ -27638,6 +27843,16 @@
             "type": "boolean",
             "title": "Needs Reingest",
             "default": false
+          },
+          "classified_safety_level": {
+            "type": "string",
+            "nullable": true,
+            "title": "Classified Safety Level"
+          },
+          "classified_requires_approval": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Classified Requires Approval"
           },
           "tenant_enabled": {
             "type": "boolean",
@@ -29593,12 +29808,19 @@
             "type": "boolean",
             "nullable": true,
             "title": "Is Enabled"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 1024,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Reason"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "title": "EditOpBody",
-        "description": "PATCH body for ``/api/v1/connectors/{id}/operations/{op_id}``.\n\nPer-op operator overrides. At least one field must be set.\n\n``safety_level`` is the bounded enum from\n:class:`~meho_backplane.db.models.EndpointDescriptor.safety_level`\n(``safe`` / ``caution`` / ``dangerous``); a value outside the set\nis rejected by Pydantic before the service layer sees it.\n\n``is_enabled`` is the per-op override that wins over the group\ncascade (see :meth:`ReviewService.edit_op` for the full\nsemantics). ``requires_approval`` flips the per-op flag that\nforces the dispatcher to write an audit row in\n``status='pending'`` and wait for an operator decision before\nexecuting.\n\n``custom_description`` is the operator's free-form override\nthat the agent surfaces in place of the upstream spec's\n``description`` field; capped at 4096 chars to keep audit-log\npayloads bounded.\n\n``extra=\"forbid\"`` (G0.9-T2 / #729) rejects unknown fields with\n422 ``extra_forbidden`` \u2014 same fail-loud posture as every other\npublic v1 request schema."
+        "description": "PATCH body for ``/api/v1/connectors/{id}/operations/{op_id}``.\n\nPer-op operator overrides. At least one field must be set.\n\n``safety_level`` is the bounded enum from\n:class:`~meho_backplane.db.models.EndpointDescriptor.safety_level`\n(``safe`` / ``caution`` / ``dangerous`` / ``destructive``); a value\noutside the set is rejected by Pydantic before the service layer sees\nit. It can only raise the level above the classification (#4711).\n\n``safety_level`` and ``requires_approval`` are stored as an operator\noverride, apart from the value in code or in the API description, so\nthey survive a restart and a re-ingest (#4711). ``requires_approval:\nfalse`` where the classification requires approval needs\n``platform_admin``, a ``reason`` and a fresh sign-in; it is never\nallowed for a destructive operation.\n\n``reason`` is written to the audit row. It is required to turn\napproval off.\n\n``is_enabled`` is the per-op override that wins over the group\ncascade (see :meth:`ReviewService.edit_op` for the full\nsemantics). ``requires_approval`` flips the per-op flag that\nforces the dispatcher to write an audit row in\n``status='pending'`` and wait for an operator decision before\nexecuting.\n\n``custom_description`` is the operator's free-form override\nthat the agent surfaces in place of the upstream spec's\n``description`` field; capped at 4096 chars to keep audit-log\npayloads bounded.\n\n``extra=\"forbid\"`` (G0.9-T2 / #729) rejects unknown fields with\n422 ``extra_forbidden`` \u2014 same fail-loud posture as every other\npublic v1 request schema."
       },
       "EditOpResponse": {
         "properties": {
@@ -32122,6 +32344,87 @@
         ],
         "title": "OperationDescriptor",
         "description": "Full :class:`~meho_backplane.db.models.EndpointDescriptor` read shape.\n\nReturned by :func:`describe_descriptor` (and the\n``GET /api/v1/operations/{descriptor_id}`` route). ``embedding`` is\ndeliberately omitted \u2014 it's a 384-dim float vector that adds wire\nbulk with no operator value at the descriptor-inspection layer.\n``llm_instructions`` IS included; the route is gated on\n``tenant_admin`` so the per-op agent prompt stays out of read-only\noperators' hands."
+      },
+      "OperationOverrideList": {
+        "properties": {
+          "overrides": {
+            "items": {
+              "$ref": "#/components/schemas/OperationOverrideRow"
+            },
+            "type": "array",
+            "title": "Overrides"
+          }
+        },
+        "type": "object",
+        "required": [
+          "overrides"
+        ],
+        "title": "OperationOverrideList",
+        "description": "Response body for ``GET /api/v1/connectors/operation-overrides`` (#4711)."
+      },
+      "OperationOverrideRow": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "tenant",
+              "install"
+            ],
+            "title": "Scope"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          },
+          "safety_level": {
+            "type": "string",
+            "nullable": true,
+            "title": "Safety Level"
+          },
+          "requires_approval": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Requires Approval"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Reason"
+          },
+          "set_by_sub": {
+            "type": "string",
+            "title": "Set By Sub"
+          },
+          "set_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Set At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "op_id",
+          "scope",
+          "tenant_id",
+          "safety_level",
+          "requires_approval",
+          "reason",
+          "set_by_sub",
+          "set_at"
+        ],
+        "title": "OperationOverrideRow",
+        "description": "One operator override of a risk level or approval flag (#4711).\n\n``scope`` is ``tenant`` (the change applies to ``tenant_id`` only) or\n``install`` (the whole install). ``safety_level`` / ``requires_approval``\nare the values that apply in that scope: the classification with every\noverride there. ``reason`` is the reason a platform admin gave for\nturning approval off."
       },
       "OperationRunStatus": {
         "type": "string",

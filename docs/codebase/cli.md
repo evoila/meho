@@ -40,7 +40,7 @@ names.
   (`groups`, `search`, `call`).
 - `meho connector ...` (G0.7-T5 #405) — spec-ingestion + review
   workflow (`ingest`, `list`, `review`, `edit-group`, `edit-op`,
-  `enable`, `disable`, `delete`).
+  `overrides`, `remove-override`, `enable`, `disable`, `delete`).
 - `meho audit ...` (G8.1-T3 #467) — audit-log query surface
   (`query`, `recent`, `show`, `who-touched`, `my-recent`) wrapping
   the four `/api/v1/audit/*` routes shipped by G8.1-T2 (#466). G8.2-T5
@@ -264,7 +264,9 @@ cli/
     │   │   ├── list.go           # `meho connector list` (GET  /api/v1/connectors). List endpoint returns dict[str, list[dict]] (no response_model on the backend; per-row UUID serialisation), so a package-private listEntry decode lives here.
     │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review). `--prefer tenant|builtin|legacy` (#3799, #4889) is sent as `?prefer=` to pick a row when the id matches both a built-in and a tenant connector (`legacy` picks the tenant's old copy under a former product name); omitted, the 409 stays the default.
     │   │   ├── edit_group.go     # `meho connector edit-group <id> <key>` (PATCH groups/{key}).
-    │   │   ├── edit_op.go        # `meho connector edit-op <id> <op>` (PATCH operations/{op}).
+    │   │   ├── edit_op.go        # `meho connector edit-op <id> <op>` (PATCH operations/{op}). `--safety` takes all four levels and can only raise the level; `--reason` goes to the audit row and is required to turn approval off (#4711). A `401` with `approval_off_needs_fresh_sign_in` prints the server's message and says to run `meho login` again.
+    │   │   ├── overrides.go      # `meho connector overrides [--reduced-approval]` (GET /api/v1/connectors/operation-overrides, #4711) — lists operator changes to risk levels and approval; `--reduced-approval` lists the operations running with approval turned off. The scope column shows the tenant id.
+    │   │   ├── remove_override.go # `meho connector remove-override <id> <op> [--tenant <uuid>] [--reason <text>]` (DELETE /api/v1/connectors/{id}/operation-overrides/{op_id}, #4711) — removes one tenant's or the install-wide change; ending approval needs platform_admin, a reason and a fresh sign-in.
     │   │   ├── enable.go         # `meho connector enable <id>`  + shared transition factory + `disable` + `delete`.
     │   │   ├── enable_reads.go   # `meho connector enable-reads <id>` (POST /enable-reads, G0.25-T7 #1749) — bulk-enable GET/HEAD ingested ops; writes stay default-deny. Renders the ops_enabled count; idempotent. Takes the same `--prefer tenant|builtin|legacy` flag as `review` (#3799, #4889).
     │   │   ├── disable.go        # `meho connector disable <id>` (constructor only; logic in enable.go).
@@ -1665,8 +1667,8 @@ removes one through `DELETE /api/v1/targets/{name}`.
   The optional flags mirror the `TargetCreate` fields one-for-one
   (`--alias` repeatable, `--version`, `--port`, `--fqdn`,
   `--secret-ref`, `--auth-model`, `--verify-tls`, `--tls-ca-pin`,
-  `--tls-server-name`, `--preferred-impl`, `--note`) and are sent only
-  when set, so the server's defaults apply to the rest — notably an
+  `--tls-server-name`, `--vpn-required`, `--preferred-impl`, `--note`)
+  and are sent only when set, so the server's defaults apply to the rest — notably an
   omitted `--secret-ref` derives the per-tenant default credential path
   (#1723) rather than persisting "no credential". `--no-secret-ref`
   (Task #3854; cannot be combined with `--secret-ref`) sends an
@@ -1687,6 +1689,8 @@ removes one through `DELETE /api/v1/targets/{name}`.
   (Task #3854) — calls `PATCH /api/v1/targets/{name}` (`TargetUpdate`)
   for one target. The field flags have the same names as `add`'s and
   are sent only when set, so every other column keeps its value.
+  For example, `--vpn-required=false` clears the VPN flag, and an
+  update without `--vpn-required` leaves it as it is (#5075).
   `--alias` replaces the whole alias list and `--extra key=value`
   replaces the whole `extras` map, matching the server's PATCH
   semantics. `--clear <field>` (repeatable) sends an explicit JSON null

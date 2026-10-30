@@ -44,6 +44,7 @@ from meho_backplane.operations._lookup import (
     installed_owner_clause,
     visible_scope_clause,
 )
+from meho_backplane.operations.op_policy import OpKey, effective_policy_map
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RRF_K
 
@@ -335,7 +336,7 @@ async def _hybrid_search_pg(
     fused = _rrf_fuse(bm25_rows, cosine_rows, limit=limit)
     if not fused:
         return []
-    return await _hydrate_hits(session, fused)
+    return await _hydrate_hits(session, fused, tenant_id=tenant_id)
 
 
 async def _hybrid_search_fallback(
@@ -407,7 +408,7 @@ async def _hybrid_search_fallback(
     fused = _rrf_fuse(bm25_rows, cosine_rows, limit=limit)
     if not fused:
         return []
-    return await _hydrate_hits(session, fused)
+    return await _hydrate_hits(session, fused, tenant_id=tenant_id)
 
 
 class _FallbackRow:
@@ -491,8 +492,14 @@ def _coerce_uuid(value: Any) -> uuid.UUID:
 async def _hydrate_hits(
     session: AsyncSession,
     fused: list[_FusedEntry],
+    *,
+    tenant_id: uuid.UUID,
 ) -> list[OperationSearchHit]:
-    """Bulk-fetch full descriptor rows + group_key for the fused top-N entries."""
+    """Bulk-fetch full descriptor rows + group_key for the fused top-N entries.
+
+    Each hit shows the risk level and approval that apply to *tenant_id*,
+    with the operator overrides (#4711) — the same values a call uses.
+    """
     from meho_backplane.operations.meta_tools import OperationSearchHit
 
     descriptor_ids = [e.descriptor_id for e in fused]
@@ -505,6 +512,9 @@ async def _hydrate_hits(
     by_id: dict[uuid.UUID, tuple[EndpointDescriptor, str | None]] = {
         descriptor.id: (descriptor, group_key) for descriptor, group_key in rows
     }
+    policies = await effective_policy_map(
+        session, tenant_id=tenant_id, rows=[descriptor for descriptor, _ in by_id.values()]
+    )
     hits: list[OperationSearchHit] = []
     for entry in fused:
         pair = by_id.get(entry.descriptor_id)
@@ -513,14 +523,15 @@ async def _hydrate_hits(
             # rather than fail; the caller's hit list shortens by one.
             continue
         descriptor, group_key = pair
+        policy = policies[OpKey.of(descriptor)]
         hits.append(
             OperationSearchHit(
                 op_id=descriptor.op_id,
                 summary=descriptor.summary,
                 description=descriptor.description,
                 group_key=group_key,
-                safety_level=descriptor.safety_level,
-                requires_approval=descriptor.requires_approval,
+                safety_level=policy.safety_level,
+                requires_approval=policy.requires_approval,
                 fused_score=entry.fused_score,
                 bm25_score=entry.bm25_score,
                 cosine_score=entry.cosine_score,

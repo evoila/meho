@@ -13,10 +13,12 @@ under the chassis ~600-line cap.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Final
 
 from fastapi.responses import HTMLResponse
 
+from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations.approval_outcome import (
     ResumeOutcome,
@@ -25,9 +27,13 @@ from meho_backplane.operations.approval_outcome import (
 )
 from meho_backplane.operations.approval_queue import (
     EXPIRED_REASON_MESSAGES,
+    ApprovalNotFoundError,
+    ChainPosition,
     Delegation,
     approval_expired_reason,
     approval_result_state,
+    get_request,
+    pending_chain_positions,
 )
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME
 from meho_backplane.ui.references import subject_ref
@@ -35,6 +41,7 @@ from meho_backplane.ui.references import subject_ref
 __all__ = [
     "RESULT_STATE_PILL",
     "STATUS_PILL_CLASS",
+    "parked_request_chain",
     "project_outcome",
     "project_request_to_view",
     "project_run_result",
@@ -113,7 +120,9 @@ def project_run_result(result: Any, *, parked_op_id: str) -> dict[str, Any] | No
 
 
 def project_request_to_view(
-    row: ApprovalRequest, delegation: Delegation | None = None
+    row: ApprovalRequest,
+    delegation: Delegation | None = None,
+    chain: ChainPosition | None = None,
 ) -> dict[str, Any]:
     """Project an :class:`ApprovalRequest` ORM row into a template dict.
 
@@ -155,6 +164,10 @@ def project_request_to_view(
     ran and how it ended. Both are ``None`` for a request that is not
     approved; ``outcome`` is also ``None`` before the run starts.
 
+    ``chain`` (#3596) is ``{"work_ref", "step", "total"}`` when the request
+    is step ``step`` of ``total`` pending requests under one change ticket,
+    else ``None``. Only the callers that computed it pass it.
+
     ``expired_reason`` / ``expired_message`` (#5030) say why an ``expired``
     request expired (its deadline passed, or MEHO was updated while it
     waited) and tell the requester to ask again; ``release_id`` is the
@@ -183,10 +196,57 @@ def project_request_to_view(
         "delegation": delegation.to_payload() if delegation is not None else None,
         "result_state": result_state.value if result_state is not None else None,
         "outcome": project_outcome(resume_outcome(row)),
+        "chain": _project_chain(chain),
         "expired_reason": expired_reason.value if expired_reason else None,
         "expired_message": EXPIRED_REASON_MESSAGES[expired_reason] if expired_reason else None,
         "release_id": row.release_id,
     }
+
+
+def _project_chain(chain: ChainPosition | None) -> dict[str, Any] | None:
+    """Project a :class:`ChainPosition` into the ``chain`` template dict (#3596)."""
+    if chain is None:
+        return None
+    return {"work_ref": chain.work_ref, "step": chain.step, "total": chain.total}
+
+
+async def parked_request_chain(
+    tenant_id: uuid.UUID, envelope: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Find the step of a just-parked request in its change ticket (#3596).
+
+    A "waiting for approval" result fragment (operations run, vault write)
+    calls this with the ``call_operation`` envelope. For an
+    ``awaiting_approval`` envelope it loads the parked request named by
+    ``extras.approval_request_id`` and numbers it among the pending
+    requests of its ``work_ref``. Returns ``{"work_ref", "step", "total"}``
+    when that change ticket has two or more pending requests, so the
+    fragment can say "Step k of N" and link to the ticket's oldest-first
+    view. Returns ``None`` for any other envelope, for a request with no
+    ``work_ref`` or no pending siblings, and for an id that is missing or
+    outside *tenant_id* (fail-open: the fragment keeps its per-request
+    link).
+    """
+    if not envelope or envelope.get("status") != "awaiting_approval":
+        return None
+    raw_id = (envelope.get("extras") or {}).get("approval_request_id")
+    if not raw_id:
+        return None
+    try:
+        request_id = uuid.UUID(str(raw_id))
+    except ValueError:
+        return None
+    async with get_sessionmaker()() as db_session:
+        try:
+            row = await get_request(db_session, tenant_id=tenant_id, request_id=request_id)
+        except ApprovalNotFoundError:
+            return None
+        if row.work_ref is None:
+            return None
+        positions = await pending_chain_positions(
+            db_session, tenant_id=tenant_id, work_ref=row.work_ref
+        )
+    return _project_chain(positions.get(row.id))
 
 
 def set_csrf_cookie(response: HTMLResponse, csrf_token: str) -> None:

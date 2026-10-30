@@ -40,7 +40,8 @@ What this harness proves (issue #551 DoD)
   ``vault.kv.list``, ``read`` for the KV-v2 / sys metadata reads and
   the ``.list`` auth ops, ``read`` for the ``safe`` config reads
   (``vault.auth.userpass.read`` / ``vault.auth.approle.read`` /
-  ``vault.sys.policy.read`` / ``vault.token.role.read``), and ``write``
+  ``vault.sys.policy.read`` / ``vault.token.role.read`` /
+  ``vault.auth.jwt.role.read`` / ``vault.auth.jwt.config.read``), and ``write``
   for the sys bootstrap writes (``vault.sys.auth.enable`` / ``.tune``,
   ``vault.sys.mounts.enable`` / ``.tune``). ``.read`` / ``.enable`` /
   ``.tune`` are not verb suffixes ``classify_op`` knows; a typed op's
@@ -1884,7 +1885,7 @@ async def test_auth_jwt_role_write_read_list_and_config_against_dev_vault(
     assert read.status == "ok", read.error
     assert read.result == after
     await _assert_audited(
-        "vault.auth.jwt.role.read", operator_sub="op-jwt-role-read", expected_op_class="other"
+        "vault.auth.jwt.role.read", operator_sub="op-jwt-role-read", expected_op_class="read"
     )
 
     listing = await dispatch(
@@ -1914,5 +1915,5 @@ async def test_auth_jwt_role_write_read_list_and_config_against_dev_vault(
     await _assert_audited(
         "vault.auth.jwt.config.read",
         operator_sub="op-jwt-config-read",
-        expected_op_class="other",
+        expected_op_class="read",
     )

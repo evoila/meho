@@ -32,6 +32,10 @@ Decision #12 (transport = B: HttpConnector + google-auth impersonation)
 is recorded in ``docs/decisions/locked-decisions.md``.
 """
 
+# Import for the registration side-effect: at module load this registers the
+# checks that run before a person is asked to approve the pool delete and
+# the service-account binding removal.
+from meho_backplane.connectors.gcloud import workload_identity_preflight  # noqa: F401
 from meho_backplane.connectors.gcloud.connector import GcloudConnector
 from meho_backplane.connectors.gcloud.session import (
     GcloudCredentialsLoader,

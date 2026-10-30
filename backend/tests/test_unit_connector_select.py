@@ -167,6 +167,7 @@ def test_every_contract_test_file_exists() -> None:
 # the docs. They do not need to join every one-connector run.
 WALKS_SOMETHING_ELSE = {
     "tests/acceptance/test_g41_kb_canary.py": "a sample knowledge folder",
+    "tests/test_connector_overlay_build.py": "a temp output folder of the overlay build",
     "tests/test_connectors_azure_spec_reconcile.py": "the azure spec files",
     "tests/test_connectors_bind9_atomic.py": "a temp folder",
     "tests/test_capture_secret_scan.py": "the saved test captures",

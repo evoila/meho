@@ -20,6 +20,13 @@ helm upgrade meho oci://ghcr.io/evoila/meho-chart \
    `kubectl logs`.
 2. Only after migrations succeed does the new Deployment roll.
 
+An upgrade ends the approval requests that still wait. A person approves
+one exact release of MEHO, so when the new version starts, every request
+that waits from the older version expires with the reason "MEHO was
+updated; ask again". An approved request that has not run yet is refused
+and does not run. The requester asks again under the new version. Tell
+the people who wait for an approval before you upgrade.
+
 Keep the image tag pinned and immutable (`v<x.y.z>` or
 `sha-<git-sha>`) — `:latest` is never published, and `:main` is a
 moving dev alias, not a deploy target.
@@ -64,6 +71,13 @@ older application runs against the newer schema and relies on the
 backend tolerating it. What "verified rollback" means precisely, and
 the schema-check fallback when it cannot be, is specified in the
 [rollback acceptance contract](https://github.com/evoila/meho/blob/main/docs/acceptance/rollback.md).
+
+Every start writes the settings of the built-in operations into rows that
+all pods share. A start that fails changes none of them. A pod that started
+does change them, so during an update the old pod serves the new settings
+until it stops. `GET /api/v1/health` shows which release wrote the rows
+(`operation_catalog`). After a rollback, if it names another release,
+restart the pods you keep. The rollback contract above has the steps.
 
 ## Version-specific notes
 

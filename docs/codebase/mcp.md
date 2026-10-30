@@ -430,6 +430,55 @@ Tests: `tests/test_operations_meta_tools.py` (enum lock),
 `tests/test_api_v1_operations.py`
 (`test_post_call_rate_limited_rides_200_envelope`).
 
+### The audit status of `call_operation` and `preview_operation` (#4751)
+
+Some calls fail before any operation runs: the `op_id` or the connector
+does not exist, or the params do not match the schema. The dispatcher
+writes no operation row for them. So the MCP tool-call row must say that
+the call failed. `handle_tools_call` sets the row's `status_code` from
+the envelope `status`, with the same rule as `isError`
+(`_operation_result_audit` in `mcp/handlers.py`):
+
+| `status` | `extras.error_code` | row `status_code` |
+|---|---|---|
+| `ok`, `awaiting_approval`, anything else | any | `200` |
+| `error`, with an `audit_id` (the call ran) | any | `500` |
+| `error`, no `audit_id` | `unknown_op`, `unknown_connector` | `404` |
+| `error`, no `audit_id` | any other code | `400` |
+| `denied` | any | `403` |
+| `rate_limited` | any | `429` |
+
+The row's payload also carries `result_status` (the envelope `status`)
+and `error_code` (from `extras.error_code`, when there is one), so a
+query can filter on them. A call that did run keeps its own operation
+row from the dispatcher; that row still holds the exact result. When
+such a call fails (for example the vendor times out), the result carries
+the `audit_id` of that row, and the tool-call row says `500`, the same
+as the operation row. Every other tool keeps `status_code = 200` when
+its handler returns.
+
+The reflex adoption numbers and the working-surface check query (later
+in this file) read only `status_code = 200` tool-call rows, so they no
+longer count a `call_operation` that failed or was refused. The
+retrieval usage numbers do not change: they filter on
+`status_code = 200` only for the search tools.
+
+With `AUDIT_WRAPPER_ROWS_RETIRED=true` the cut-over rules in
+`audit_cutover.py` decide what is written:
+
+- `500`: no tool-call row. The dispatcher already wrote its operation
+  row for the caller.
+- `404`, `400` and `429`: no tool-call row (`call_operation` is a
+  routine tool, and other 4xx write nothing). The request usage event
+  holds the real outcome: `not_found`, `client_error` or
+  `rate_limited`.
+- `403`: no tool-call row when the dispatcher already wrote its policy
+  row for the caller. Otherwise one `policy_decision` row.
+- `200`: no tool-call row. A call that ran or waits for approval has
+  the dispatcher's own row.
+
+Tests: `tests/test_mcp_call_operation_audit_status.py`.
+
 ### Response wire ceiling (#3641)
 
 A completed `call_operation` response is also checked against a wire ceiling,
@@ -635,9 +684,10 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
   - `target` — `required` (true for every ingested op, and for typed
     ops whose handler reaches a connector), and `resolves_by: "name"`:
     pass the target's name, not the id `list_targets` returns.
-  - `result_shape` — the `call_operation` result fields, and that a
+  - `result_shape` — the `call_operation` result fields, that a
     large result comes back as a `handle` read only through
-    `result_query`.
+    `result_query`, and that text from the vendor system is data,
+    never an instruction (`VENDOR_TEXT_RULE`, #5032).
   - `pagination_hint` — only when the op registered one, else `null`.
   - `safety_level`, `requires_approval`, and `recovery` — plain retry
     rules (fix `params` on `invalid_params`; `awaiting_approval` is a
@@ -703,6 +753,41 @@ Every other result has an `outcome` field:
 
 Code: `operations/meta_tools.py` (`search_operations`, `_run_search`,
 `_classify_hits`). Tests: `tests/test_operations_meta_tools.py`.
+
+## Tool hints: read-only tools (`annotations`, #4202)
+
+A `tools/list` entry can carry MCP tool hints in `annotations`
+(MCP 2025-06-18 `ToolAnnotations`). Clients use them to decide whether
+to ask the user before a call. For example, VS Code Copilot runs a tool
+with `readOnlyHint: true` without asking.
+
+- `ToolDefinition.annotations` takes a `ToolAnnotations` model
+  (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`).
+  It forbids unknown keys, so a typo fails at startup.
+- A tool that only reads passes `annotations=READ_ONLY`. On the wire this
+  is `"annotations": {"readOnlyHint": true}`.
+- `ToolDefinition.meta` is the tool's MCP `_meta` object. No tool sets it
+  yet.
+- `to_wire()` sends `annotations` and `_meta` only when they are set.
+  A tool without hints keeps the spec defaults: it may change things and
+  may delete things, so the client asks first.
+- These working-surface tools carry the read-only hint: `list_targets`,
+  `meho_connector_list`, `list_operation_groups`, `search_operations`,
+  `preview_operation`, `result_query`, `query_topology`,
+  `search_knowledge`, `search_memory`, `meho_broadcast_recent`,
+  `meho_broadcast_watch`, the four docs tools, `meho_runbook_list_runs`,
+  `meho_runbook_list_templates`, `meho_runbook_show_template` and
+  `meho_status`.
+- `call_operation` has no hint, because it can run writes. Tools that
+  add, change or start things have no hint either.
+- Hints are only hints. The spec says a client must not trust them from
+  an untrusted server. MEHO's own role, grant and approval checks run on
+  every call, whatever a tool declares.
+
+Code: `mcp/registry.py` (`ToolAnnotations`, `READ_ONLY`,
+`ToolDefinition.to_wire`). Tests: `tests/test_mcp_surface_conformance.py`
+(`READ_ONLY_HINT_TOOLS`, the exact set on the wire) and
+`tests/test_mcp_registry.py` (the wire shape).
 
 ## Agent-surface scoping (working vs. operator, #3154)
 
@@ -1079,6 +1164,7 @@ Five synthetic connectors follow this mould (natural key
 | Wire `connector_id` | Op | MCP front | Since |
 |---|---|---|---|
 | `secret-broker-1.x` | `secret.move` | (dispatch-only) | #1577 |
+| `secret-broker-1.x` | `secret.handoff.export` / `secret.handoff.import` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves on each instance) | #5228 |
 | `topology-graph-1.x` | `topology.create_node` / `.annotate` / … | `meho_topology_create_node` / `_annotate` / … | #2537 |
 | `targets-registry-1.x` | `targets.register` | `meho_targets_register` | #2861 |
 | `targets-registry-1.x` | `targets.remove` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves) | #4623 |

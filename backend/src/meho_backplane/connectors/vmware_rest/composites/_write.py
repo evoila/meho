@@ -93,6 +93,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, NamedTuple
+from urllib.parse import quote
 
 import httpx
 import structlog
@@ -101,6 +102,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest import library_download, ovf_import_control
 from meho_backplane.connectors.vmware_rest.composite_issues import issue
+from meho_backplane.connectors.vmware_rest.composites.schemas import CONTENT_LIBRARY_ID_PATTERN
 from meho_backplane.connectors.vmware_rest.ovf_import import (
     ImportPlacement,
     LeaseImportResult,
@@ -184,10 +186,11 @@ def _step_connector_id(connector: VmwareRestConnector) -> str:
 _WRITE_SAFETY_LEVEL = "dangerous"
 _WRITE_REQUIRES_APPROVAL = False
 
-# ``{var}`` path-template placeholder pattern. vCenter moids are bare
-# ``[A-Za-z0-9-]`` tokens, so a plain ``str.format`` matches the RFC6570
-# simple-expansion the ingested path did.
+# ``{var}`` path-template placeholder pattern. Each value is percent-encoded
+# as one path segment (see :func:`_path_segment`); vCenter moids, UUIDs and
+# ``urn:...`` ids need no encoding, so their URLs are unchanged.
 _PATH_VAR_RE = re.compile(r"\{([^{}]+)\}")
+_CONTENT_LIBRARY_ID_RE: Final = re.compile(CONTENT_LIBRARY_ID_PATTERN)
 
 # vCenter REST op_ids (canonical METHOD:/path keys from vcenter.yaml).
 #
@@ -1278,6 +1281,23 @@ def _unwrap_value(payload: Any) -> Any:
     return payload
 
 
+def _path_segment(value: Any) -> str:
+    """*value* encoded as one URL path segment.
+
+    ``/``, ``%``, ``?`` and ``#`` are percent-encoded, and so is a bare ``.``
+    or ``..``, so a value can never add, remove or climb path segments.
+    """
+    text = str(value)
+    if text in {".", ".."}:
+        return text.replace(".", "%2E")
+    return quote(text, safe=":@")
+
+
+def _is_content_library_id(value: Any) -> bool:
+    """Whether *value* is a vCenter content-library or item id (a UUID)."""
+    return isinstance(value, str) and _CONTENT_LIBRARY_ID_RE.fullmatch(value) is not None
+
+
 def _split_sub_op(op_id: str, params: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
     """Split *op_id* + *params* into ``(method, spec-relative path, remainder)``.
 
@@ -1291,7 +1311,8 @@ def _split_sub_op(op_id: str, params: dict[str, Any]) -> tuple[str, str, dict[st
     method, _, path_template = op_id.partition(":")
     var_names = _PATH_VAR_RE.findall(path_template)
     path_params = {name: params[name] for name in var_names}
-    path = path_template.format(**path_params) if path_params else path_template
+    segments = {name: _path_segment(value) for name, value in path_params.items()}
+    path = path_template.format(**segments) if segments else path_template
     remainder = {k: v for k, v in params.items() if k not in path_params}
     return method, path, remainder
 
@@ -2903,6 +2924,11 @@ async def vm_clone_composite(
     source_vm = params["source_vm"]
     target_name = params["target_name"]
     library_item = params["library_item"]
+    if not _is_content_library_id(library_item):
+        raise ValueError(
+            "vm.clone: library_item must be a vCenter content-library item id (a UUID); "
+            f"got {library_item!r}. Nothing was sent."
+        )
 
     # Source config drives CloneSpec; the read is a no-op when the
     # source VM lookup fails (httpx.HTTPError surfaces upstream).
@@ -3064,15 +3090,29 @@ async def _resolve_deploy_library_item(
     Returns ``(item_id, None)`` on success or ``(None, envelope)`` with a
     terminal response dict on failure (``invalid_reference`` /
     ``library_not_found`` / ``ambiguous_library`` / ``item_not_found`` /
-    ``ambiguous_item``). ``library_item`` (an id) short-circuits; otherwise
+    ``ambiguous_item``). ``library_item`` (a UUID) short-circuits; otherwise
     ``library_item_name`` is resolved via ``Content.Library.Item_find``
     (filtered to ``type=ovf``), optionally scoped to the library
     ``library_name`` resolves to via ``Content.Library_find``. Ambiguity is
     refused before any deploy so the operator re-dispatches by explicit id.
+    A given id or one vCenter returns for a name that is not a UUID is
+    refused before it can reach a URL path.
     """
     passthrough = params.get("library_item")
-    if isinstance(passthrough, str) and passthrough:
-        return passthrough, None
+    if passthrough is not None:
+        if not _is_content_library_id(passthrough):
+            return None, _deploy_failure(
+                "invalid_reference",
+                issues=[
+                    issue(
+                        "input",
+                        "error",
+                        "library_item must be a vCenter content-library item id (a UUID); "
+                        f"got {passthrough!r}",
+                    )
+                ],
+            )
+        return str(passthrough), None
 
     item_name = params.get("library_item_name")
     if not isinstance(item_name, str) or not item_name:
@@ -3130,6 +3170,11 @@ async def _resolve_deploy_library_item(
             issues=[
                 issue("input", "error", f"OVF item {item_name!r} matched {len(item_ids)} items")
             ],
+        )
+    if not _is_content_library_id(item_ids[0]):
+        return None, _deploy_failure(
+            "invalid_reference",
+            issues=[issue("input", "error", f"vCenter returned an unexpected id {item_ids[0]!r}")],
         )
     return item_ids[0], None
 

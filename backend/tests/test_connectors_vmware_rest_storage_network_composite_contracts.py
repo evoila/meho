@@ -29,6 +29,8 @@ from meho_backplane.operations._validate import validate_params
 _PARAMETER_SCHEMAS: dict[str, dict[str, Any]] = {
     "datastore.usage": schemas.DATASTORE_USAGE_PARAMETER_SCHEMA,
     "datastore.refresh": schemas.DATASTORE_REFRESH_PARAMETER_SCHEMA,
+    "datastore.file.list": schemas.DATASTORE_FILE_LIST_PARAMETER_SCHEMA,
+    "datastore.vsan.folder.list": schemas.DATASTORE_VSAN_FOLDER_LIST_PARAMETER_SCHEMA,
     "datastore.dir.create": schemas.DATASTORE_DIR_CREATE_PARAMETER_SCHEMA,
     "datastore.file.delete": schemas.DATASTORE_FILE_DELETE_PARAMETER_SCHEMA,
     "storage_policy.list": schemas.STORAGE_POLICY_LIST_PARAMETER_SCHEMA,
@@ -45,6 +47,8 @@ _PARAMETER_SCHEMAS: dict[str, dict[str, Any]] = {
 _READ_ONLY = {
     "datastore.usage",
     "datastore.refresh",
+    "datastore.file.list",
+    "datastore.vsan.folder.list",
     "storage_policy.list",
     "network.portgroup.audit",
 }

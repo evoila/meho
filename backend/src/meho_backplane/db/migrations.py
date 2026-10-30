@@ -17,8 +17,9 @@ The comparison is deliberately **not** strict equality: a database
 *ahead* of the code's head (a revision this image's ``versions/``
 directory cannot resolve) reports ``ok=True``. That is the schema
 state every ``helm rollback`` / ``--atomic`` auto-rollback produces —
-the ``pre-upgrade`` migration Job's commit survives the manifest
-rollback (Helm reverts manifests only, never hook side effects), so
+the migration's commit (from the ``pre-upgrade`` hook Job, or from the
+``migrate`` init container of a new pod with the built-in PostgreSQL,
+#5233) survives the manifest rollback (Helm reverts manifests only), so
 the rolled-back image must tolerate the newer schema or the rollback
 is dead on arrival (#1607, 2026-06-08 outage). The additive-only
 ``upgrade()`` contract enforced by
@@ -61,6 +62,7 @@ __all__ = [
     "db_migration_probe",
     "db_migration_status",
     "find_alembic_ini",
+    "revision_known",
 ]
 
 _log = logging.getLogger(__name__)
@@ -190,18 +192,20 @@ def _read_current_revision(connection: Connection) -> str | None:
     return context.get_current_revision()
 
 
-def _revision_known(script: ScriptDirectory, revision: str) -> bool:
+def revision_known(script: ScriptDirectory, revision: str) -> bool:
     """Return ``True`` iff *revision* resolves in this image's ``versions/``.
 
     ``alembic_version`` has a single writer — ``alembic upgrade head``
-    run by the chart's pre-upgrade migration Job — so a revision the
-    on-disk :class:`~alembic.script.ScriptDirectory` cannot resolve
-    was stamped by a *newer* image: the database is ahead of this
-    code, not diverged from it. Alembic signals the unknown id with
-    :class:`alembic.util.exc.CommandError` ("Can't locate revision
-    identified by ..."); only that error is treated as "unknown".
-    Anything else propagates to the probe's catch-all so the probe
-    stays fail-closed (``check_failed: <ExcClass>``).
+    run by the migration runner (:mod:`meho_backplane.db.migrate`) — so
+    a revision the on-disk :class:`~alembic.script.ScriptDirectory`
+    cannot resolve was stamped by a *newer* image: the database is
+    ahead of this code, not diverged from it. The readiness probe and
+    the runner both use this check (#1607, #5233). Alembic signals the
+    unknown id with :class:`alembic.util.exc.CommandError` ("Can't
+    locate revision identified by ..."); only that error is treated as
+    "unknown". Anything else propagates: to the probe's catch-all so
+    the probe stays fail-closed (``check_failed: <ExcClass>``), and to
+    the runner's ``migration_failed`` line.
     """
     try:
         script.get_revision(revision)
@@ -279,7 +283,7 @@ async def db_migration_status() -> DbMigrationStatus:
             if engine.dialect.name == "postgresql":
                 pgvector_ok = await conn.run_sync(_check_pgvector_extension)
         # The verdict stays inside the try: its db-ahead branch walks
-        # the script directory again (``_revision_known``), and an
+        # the script directory again (``revision_known``), and an
         # unexpected error there must fold into ``check_failed`` —
         # the probe never raises (Task #27 AC #3).
         return DbMigrationStatus(
@@ -316,7 +320,7 @@ async def db_migration_probe() -> ProbeResult:
       ``versions/`` directory cannot resolve, i.e. it was stamped by
       a newer release. This is the expected state after a
       ``helm rollback`` / ``--atomic`` auto-rollback: Helm reverts
-      manifests only, never the pre-upgrade migration Job's commit,
+      manifests only, never the migration's commit,
       and the additive-only ``upgrade()`` contract
       (``scripts/ci/check_migration_compat.py``) guarantees the
       newer schema is readable by this code. Detail carries
@@ -393,7 +397,7 @@ def _revision_verdict(
         # behind head) keep failing. ``head is None`` with a stamped
         # DB (image shipped without its ``versions/``) is a packaging
         # defect, not a rollback — also keeps failing.
-        db_ahead = current is not None and head is not None and not _revision_known(script, current)
+        db_ahead = current is not None and head is not None and not revision_known(script, current)
         if not db_ahead:
             return ProbeResult(
                 name="db",

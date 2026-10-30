@@ -139,7 +139,7 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
             "type": ["string", "null"],
             "description": (
                 "Glob pattern matched against the op_id (e.g. "
-                '"vsphere.vm.*"). Translates to SQL LIKE with `*` as the '
+                '"k8s.pod.*"). Translates to SQL LIKE with `*` as the '
                 "wildcard."
             ),
             "maxLength": 256,
@@ -272,7 +272,7 @@ _TOOL_DESCRIPTION: Final[str] = (
     "the backplane (HTTP route, MCP tool call) writes one audit row, and "
     "this tool is how an agent reads them back.\n\n"
     "WHEN TO CALL: investigation flows — the operator asks 'who patched "
-    "rdc-vcenter on Tuesday', 'did someone read vault.kv before the outage', "
+    "prod-k8s on Tuesday', 'did someone read vault.kv before the outage', "
     "'show me every denied request in the last 24h'. Pre-canned shortcut "
     "shapes (`audit_id=<uuid>` for show, `target=<name>` for who-touched, "
     "`principal=<operator.sub>` for my-recent) are filter combinations, not "

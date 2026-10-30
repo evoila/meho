@@ -3,8 +3,8 @@
 
 """Add the owner package to ``endpoint_descriptor`` (#5037).
 
-Revision ID: 0122
-Revises: 0121
+Revision ID: 0125
+Revises: 0124
 Create Date: 2026-10-28
 
 One nullable column, ``endpoint_descriptor.owner_package``: the connector
@@ -21,8 +21,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0122"
-down_revision: str | None = "0121"
+revision: str = "0125"
+down_revision: str | None = "0124"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

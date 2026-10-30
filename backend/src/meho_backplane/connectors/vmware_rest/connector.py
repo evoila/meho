@@ -3215,6 +3215,26 @@ class VmwareRestConnector(HttpConnector):
 
         return await host_storage_devices_impl(self, operator, target, params)
 
+    async def host_datastores(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.datastores`` -- the datastores mounted on one host (#3373).
+
+        A ``source_kind="typed"`` op, like :meth:`host_storage_devices`: works
+        on a vCenter target and on a standalone ESXi host. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_datastores.host_datastores_impl`
+        (imported lazily, same as the other typed reads). Returns
+        ``{"status": ..., "host": ..., "datastores": [...], "datastore_count": ...}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_datastores import (
+            host_datastores_impl,
+        )
+
+        return await host_datastores_impl(self, operator, target, params)
+
     async def vm_info(
         self,
         operator: Operator,

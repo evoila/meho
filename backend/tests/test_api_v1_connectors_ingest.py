@@ -472,6 +472,13 @@ async def _audit_row_count(*, op_id: str) -> int:
         return len(list(result.scalars().all()))
 
 
+async def _receipt_row_path(response: Any) -> str | None:
+    """Return the ``path`` (op id) of the audit row the ``Meho-Audit-Id`` header names (#4976)."""
+    async with get_sessionmaker()() as session:
+        row = await session.get(AuditLog, uuid.UUID(response.headers["meho-audit-id"]))
+        return None if row is None else row.path
+
+
 def _authed(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
@@ -1980,6 +1987,7 @@ async def test_edit_group_updates_and_writes_audit_row(
     assert response.status_code == 204
     audit_count = await _audit_row_count(op_id="meho_connector_edit_group")
     assert audit_count == 1
+    assert await _receipt_row_path(response) == "meho_connector_edit_group"
 
 
 @pytest.mark.asyncio
@@ -2205,6 +2213,7 @@ async def test_enable_transitions_all_groups_and_cascades(
     assert set(statuses.values()) == {"enabled"}
     audit_count = await _audit_row_count(op_id="meho_connector_enable")
     assert audit_count == 1
+    assert await _receipt_row_path(response) == "meho_connector_enable"
 
 
 @pytest.mark.asyncio
@@ -3222,8 +3231,8 @@ def test_ingest_swagger_2_spec_returns_structured_unsupported_spec_400(
     re-parse prose to learn the spec flavour was the problem. The
     body now carries the shared builder's envelope — the stable
     ``unsupported_spec`` classifier plus the message that names the
-    declared ``swagger`` version and the ``swagger2openapi`` /
-    converter.swagger.io conversion remediation.
+    declared ``swagger`` version and the conversion remediation (the
+    CLI path first, #5028).
     """
     spec_path = tmp_path / "swagger2.yaml"
     spec_path.write_text(
@@ -3259,8 +3268,9 @@ paths:
     detail = response.json()["detail"]
     assert detail["detail"] == "unsupported_spec"
     assert "swagger='2.0'" in detail["message"]
-    assert "swagger2openapi" in detail["message"]
-    assert "converter.swagger.io" in detail["message"]
+    assert "meho connector ingest" in detail["message"]
+    assert "file://" in detail["message"]
+    assert "converter.swagger.io" not in detail["message"]
 
 
 #: One case per parser-family ``SpecError`` sibling the REST 400 handler

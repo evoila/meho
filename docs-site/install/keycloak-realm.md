@@ -175,6 +175,8 @@ Then put each person in **exactly one** of the five groups:
   cannot set these values on themselves
   ([Keycloak docs](https://www.keycloak.org/docs/26.8.1/server_admin/#_understanding-managed-and-unmanaged-attributes)).
 
+To add another tenant later, follow [Add a tenant](../guides/tenant-bootstrap.md).
+
 `meho admin keycloak bootstrap-clients --tenant-id <uuid>` creates the
 five groups for you. On a later run, pass the same `--tenant-id`:
 without it, the command writes the all-zero UUID to the five groups.

@@ -45,6 +45,12 @@ const (
 	AggregateFuncSUM   AggregateFunc = "SUM"
 )
 
+// Defines values for ApprovalExpiredReason.
+const (
+	ApprovalExpiredReasonDeadlinePassed ApprovalExpiredReason = "deadline_passed"
+	ApprovalExpiredReasonReleaseChanged ApprovalExpiredReason = "release_changed"
+)
+
 // Defines values for ApprovalRequestStatus.
 const (
 	ApprovalRequestStatusApproved  ApprovalRequestStatus = "approved"
@@ -689,6 +695,7 @@ const (
 	TargetCreateProductMssql      TargetCreateProduct = "mssql"
 	TargetCreateProductNsx        TargetCreateProduct = "nsx"
 	TargetCreateProductPfsense    TargetCreateProduct = "pfsense"
+	TargetCreateProductPhpipam    TargetCreateProduct = "phpipam"
 	TargetCreateProductPostgres   TargetCreateProduct = "postgres"
 	TargetCreateProductPrometheus TargetCreateProduct = "prometheus"
 	TargetCreateProductProxmox    TargetCreateProduct = "proxmox"
@@ -1442,6 +1449,18 @@ type Aggregate struct {
 // AggregateFunc Aggregate function (fixed allow-list).
 type AggregateFunc string
 
+// ApprovalExpiredReason Why an “expired“ request expired (#5030).
+//
+// Read off the row, never stored, like :class:`ApprovalResultState`.
+//
+//   - :attr:`DEADLINE_PASSED` -- the request waited past “expires_at“
+//     without a decision.
+//   - :attr:`RELEASE_CHANGED` -- MEHO started with a different release
+//     while the request waited (:func:`expire_older_release_requests`).
+//     Only this path expires a request before its deadline, so an
+//     “expired“ row with “decided_at < expires_at“ is this case.
+type ApprovalExpiredReason string
+
 // ApprovalRequestStatus Closed lifecycle status of an :class:`ApprovalRequest`.
 //
 // Initiative #803 (G11.2 Agent permission model), Task #817 (T4). The
@@ -1485,7 +1504,20 @@ type ApprovalRequestView struct {
 	// ``Instructed-by:`` / ``Instruction:`` / ``Refs:`` trailer block. The
 	// approver is still ``reviewed_by``; ``instructed_by`` is the other human
 	// whose written instruction they acted on.
-	Delegation     *DelegationView        `json:"delegation,omitempty"`
+	Delegation     *DelegationView `json:"delegation,omitempty"`
+	ExpiredMessage *string         `json:"expired_message"`
+
+	// ExpiredReason Why an ``expired`` request expired (#5030).
+	//
+	// Read off the row, never stored, like :class:`ApprovalResultState`.
+	//
+	// * :attr:`DEADLINE_PASSED` -- the request waited past ``expires_at``
+	//   without a decision.
+	// * :attr:`RELEASE_CHANGED` -- MEHO started with a different release
+	//   while the request waited (:func:`expire_older_release_requests`).
+	//   Only this path expires a request before its deadline, so an
+	//   ``expired`` row with ``decided_at < expires_at`` is this case.
+	ExpiredReason  *ApprovalExpiredReason `json:"expired_reason,omitempty"`
 	ExpiresAt      *string                `json:"expires_at"`
 	Id             openapi_types.UUID     `json:"id"`
 	OpId           string                 `json:"op_id"`
@@ -1495,6 +1527,7 @@ type ApprovalRequestView struct {
 	PrincipalName  *string                `json:"principal_name"`
 	PrincipalSub   string                 `json:"principal_sub"`
 	ProposedEffect map[string]interface{} `json:"proposed_effect"`
+	ReleaseId      *string                `json:"release_id"`
 
 	// ResultState Whether an approved request has run yet (#3486).
 	//
@@ -2085,7 +2118,7 @@ type AuthModel string
 // “target_name“ is resolved to a live target descriptor, “op“ to the
 // resolved connector's enabled descriptor (yielding “handler_ref“ +
 // “safety_level“ + the “(product, version, impl_id)“ key). “op“ is
-// the connector-side op id (e.g. “"vsphere.host.list"“); the connector
+// the connector-side op id (e.g. “"k8s.node.list"“); the connector
 // triple is derived from the resolved target, not authored here.
 type AuthoredCheckItem struct {
 	CadenceSeconds int                     `json:"cadence_seconds"`
@@ -3424,11 +3457,11 @@ type BudgetStatus struct {
 // and the MCP handler share validation. “target“ accepts either
 // shape and “None“:
 //
-//   - **Bare string** -- “target: "rdc-vcenter"“. The forward-preferred
+//   - **Bare string** -- “target: "prod-k8s"“. The forward-preferred
 //     shape; matches “query_topology“ / “query_audit“ so an agent
 //     can carry a target name across the read and the write surfaces
 //     without reshape. G0.13-T2 (#1132) widening of #780.
-//   - **Dict** -- “target: {"name": "rdc-vcenter"}“. The original
+//   - **Dict** -- “target: {"name": "prod-k8s"}“. The original
 //     shape; the handler resolves the “name“ field and (optionally)
 //     reads “fqdn“ for vhost routing. Still accepted unchanged.
 //   - **None** -- the operation does not need a target (typed handlers
@@ -3510,8 +3543,8 @@ type CallOperationBody_Target struct {
 // CandidateHint One candidate target a connector's :meth:`Connector.list_candidates` returns.
 //
 // Candidates are potentially-reachable targets the connector inferred
-// from an existing seed (e.g. a vCenter exposing its managed ESXi
-// hosts; a kubeconfig listing peer cluster contexts). The
+// from an existing seed (e.g. a kubeconfig listing peer cluster
+// contexts). The
 // G9.1-T6 “meho targets discover“ CLI verb surfaces these to the
 // operator; auto-registration is intentionally out of scope per
 // Initiative #363 (operator runs “meho targets import“ after review).
@@ -3666,8 +3699,8 @@ type ConfirmVerifyResponseAnswer string
 // (the dispatchability flag that survives connector-level
 // enable/disable cycles via operator overrides). Useful for the
 // CLI's “meho connector list --status staged“ summary view and
-// for an LLM browsing the catalog: “vmware-rest-9.0“ ingests
-// ~2,211 ops of which only a fraction are enabled, and before the
+// for an LLM browsing the catalog: a big ingested connector
+// can carry thousands of ops of which only a fraction are enabled, and before the
 // split nothing on the row said which of the two numbers
 // “operation_count“ was.
 //
@@ -3692,7 +3725,7 @@ type ConfirmVerifyResponseAnswer string
 // object on “state="registered"“ rows and “None“ on
 // “state="ingested"“ rows (no operator action remains for an
 // ingested connector) — with one exception: a tenant row stored under
-// a former product name (“vcf-logs“ rows for “vrli-rest-9.0“,
+// a former product name (rows saved before a product rename,
 // #4889) can never be called, so it ships “dispatchable=False“ plus
 // a “next_step“ naming “meho connector delete <id>“ as the
 // clean-up. For registered rows the hint is computed against the curated
@@ -3902,8 +3935,7 @@ type ConnectorReviewGroupAdvisory struct {
 // “parameter_schema“ / “response_schema“ / “embedding“ —
 // those are dispatch-time concerns, not review-time concerns, and
 // sending 4 KB of schema per op would balloon the review payload
-// for connectors with thousands of operations (vCenter has 961
-// paths in v0.2).
+// for connectors with thousands of operations.
 type ConnectorReviewOp struct {
 	CustomDescription *string  `json:"custom_description"`
 	Description       *string  `json:"description"`
@@ -3914,6 +3946,7 @@ type ConnectorReviewOp struct {
 	SafetyLevel       string   `json:"safety_level"`
 	Summary           *string  `json:"summary"`
 	Tags              []string `json:"tags"`
+	TenantEnabled     *bool    `json:"tenant_enabled"`
 }
 
 // ConnectorReviewPayload Top-level review payload returned by :meth:`ReviewService.get_review_payload`.
@@ -5837,6 +5870,11 @@ type HTTPValidationError struct {
 // “connector_packages“ (#5036) lists the connector packages this image
 // carries, the same list “GET /version“ shows. It is empty for the
 // plain public image.
+//
+// “operation_catalog“ (#5019) names the release that wrote the shared
+// operation rows and says whether it is this pod's release
+// (:class:`OperationCatalogStatus`). The “None“ default keeps older
+// response decoders working; the handler always fills it.
 type HealthResponse struct {
 	// Approvals The approval settings in force (#4830).
 	//
@@ -5880,6 +5918,26 @@ type HealthResponse struct {
 	GrantedScopes       *[]string        `json:"granted_scopes,omitempty"`
 	McpProtocolVersion  *string          `json:"mcp_protocol_version,omitempty"`
 	McpSessionIdCapture string           `json:"mcp_session_id_capture"`
+
+	// OperationCatalog Which release wrote the shared operation rows (#5019).
+	//
+	// The operation rows hold, for each built-in operation, which code
+	// runs, the parameter rules, the risk level and the approval flag.
+	// Every start writes them, and all pods share them. ``state`` is:
+	//
+	// * ``same_release`` -- this pod's release wrote them.
+	// * ``other_release`` -- another release wrote them, so this pod
+	//   serves settings that were not made for its code. Usually a sign
+	//   that two releases run at the same time; see
+	//   ``docs/acceptance/rollback.md`` for what to do.
+	// * ``not_recorded`` -- no start since this check shipped has written
+	//   them yet.
+	// * ``unknown`` -- the database could not be read (the ``db`` field
+	//   says more).
+	//
+	// ``this_release`` and ``written_by_release`` are commit hashes, the
+	// ``git_sha`` value of ``GET /version``.
+	OperationCatalog *OperationCatalogStatus `json:"operation_catalog,omitempty"`
 
 	// Operator Operator identity surface exposed to the CLI and MCP ``meho_status``.
 	//
@@ -6114,7 +6172,7 @@ type IngestKbRequest struct {
 // :func:`register_ingested_operations` once per spec under the same
 // “(product, version, impl_id)“ connector triple, then run
 // :func:`run_llm_grouping` once for the whole connector. Multi-spec
-// ingestion (vCenter's “vcenter.yaml“ + “vi-json.yaml“) lands as
+// ingestion (a product whose API is split across several spec files) lands as
 // multiple “SpecSource“ entries in one request.
 //
 // Two mutually-exclusive request shapes:
@@ -6796,7 +6854,7 @@ type OpAllowlistEntry struct {
 // OperationCallStep A step the agent dispatches via the operation registry.
 //
 // :attr:`op_id` is the registry operation id (e.g.
-// “vmware.composite.vm.create“); :attr:`params` is the call payload,
+// “gh.composite.repo_create“); :attr:`params` is the call payload,
 // which may contain “${...}“ substitutions resolved at advance time.
 // :attr:`body` is operator-readable Markdown context (may also contain
 // substitutions). :attr:`verify` gates advance to the next step.
@@ -6843,6 +6901,31 @@ type OperationCallVerifyResponse struct {
 	Actual  map[string]interface{} `json:"actual"`
 	Matched bool                   `json:"matched"`
 	Type    string                 `json:"type"`
+}
+
+// OperationCatalogStatus Which release wrote the shared operation rows (#5019).
+//
+// The operation rows hold, for each built-in operation, which code
+// runs, the parameter rules, the risk level and the approval flag.
+// Every start writes them, and all pods share them. “state“ is:
+//
+//   - “same_release“ -- this pod's release wrote them.
+//   - “other_release“ -- another release wrote them, so this pod
+//     serves settings that were not made for its code. Usually a sign
+//     that two releases run at the same time; see
+//     “docs/acceptance/rollback.md“ for what to do.
+//   - “not_recorded“ -- no start since this check shipped has written
+//     them yet.
+//   - “unknown“ -- the database could not be read (the “db“ field
+//     says more).
+//
+// “this_release“ and “written_by_release“ are commit hashes, the
+// “git_sha“ value of “GET /version“.
+type OperationCatalogStatus struct {
+	State            string     `json:"state"`
+	ThisRelease      string     `json:"this_release"`
+	WrittenAt        *time.Time `json:"written_at"`
+	WrittenByRelease *string    `json:"written_by_release"`
 }
 
 // OperationDescriptor Full :class:`~meho_backplane.db.models.EndpointDescriptor` read shape.
@@ -8197,6 +8280,7 @@ type RunnerPrincipalRead struct {
 	LastSeenAt         *time.Time         `json:"last_seen_at"`
 	Name               string             `json:"name"`
 	OwnerSub           string             `json:"owner_sub"`
+	PackageSetDigest   *string            `json:"package_set_digest"`
 	Revoked            bool               `json:"revoked"`
 	TenantId           openapi_types.UUID `json:"tenant_id"`
 	UpdatedAt          time.Time          `json:"updated_at"`
@@ -8254,12 +8338,20 @@ type RunnerResultBatch struct {
 // path materialises only “safe“ ops and never signs them) -- signing is
 // a write-tier property, so their absence on a “safe“ item is correct,
 // not a missing field.
+//
+// Connector packages (#5038): “package_set“ is the digest of the
+// connector package set the item needs
+// (:func:`~meho_backplane.runner.package_set.package_set_digest`). The
+// central MEHO sets it only when a connector package provides the op, and
+// the runner refuses the item when its own digest differs. “None“ for an
+// op built into MEHO.
 type RunnerWorkItem struct {
 	CheckRef   string                  `json:"check_ref"`
 	ExpiresAt  *time.Time              `json:"expires_at"`
 	HandlerRef string                  `json:"handler_ref"`
 	ImplId     *string                 `json:"impl_id,omitempty"`
 	OpId       string                  `json:"op_id"`
+	PackageSet *string                 `json:"package_set"`
 	Params     *map[string]interface{} `json:"params,omitempty"`
 
 	// Principal Principal context an executed op runs under, carried on each item.
@@ -9052,13 +9144,13 @@ type SensorStatus string
 // floor of what runs unattended, not a bypass of a modeled destructive
 // gate).
 type ServiceGrantCreate struct {
-	// ConnectorId Exact '<impl_id>-<version>' connector id, e.g. 'vmware-rest-9.0'.
+	// ConnectorId Exact '<impl_id>-<version>' connector id, e.g. 'gh-rest-3'.
 	ConnectorId string `json:"connector_id"`
 
 	// ExpiresAt Optional UTC expiry; null = standing (permanent) grant; must be future.
 	ExpiresAt *time.Time `json:"expires_at"`
 
-	// OpId Exact operation id, no glob (e.g. 'POST:/vcenter/vm').
+	// OpId Exact operation id, no glob (e.g. 'POST:/repos/{owner}/{repo}/issues').
 	OpId string `json:"op_id"`
 
 	// PrincipalSub JWT sub of the service principal the grant authorises (no wildcard).
@@ -9073,7 +9165,7 @@ type ServiceGrantCreate struct {
 	// TargetNamePattern Target selector (#3349): match any dispatch whose target name matches this fnmatch glob (e.g. 'esx-dc*'). Requires target_id to be null. This glob is the explicit any-target request — it is never implied by a null target_id.
 	TargetNamePattern *string `json:"target_name_pattern"`
 
-	// TargetProduct Target selector (#3349): match any dispatch whose target product equals this exact value (e.g. 'vmware'). Requires target_id to be null.
+	// TargetProduct Target selector (#3349): match any dispatch whose target product equals this exact value (e.g. 'gh'). Requires target_id to be null.
 	TargetProduct *string `json:"target_product"`
 }
 
@@ -9533,7 +9625,7 @@ type Target struct {
 //
 // “version“ is accepted as an optional operator-asserted product
 // version (G0.15-T6 #1215). Operators who know the version up-front
-// (e.g. “"9.0"“ for a vCenter Hetzner-DC target the consumer just
+// (e.g. “"2.11.0"“ for a Harbor target the consumer just
 // deployed) can pass it at create time so the very first probe
 // dispatches against the versioned connector without round-tripping
 // through PATCH. Fresh targets still default to “None“ and resolve
@@ -9775,6 +9867,14 @@ type TenantFlightRecorderPolicyUpdate struct {
 	FlightRecorderRetentionDays *int  `json:"flight_recorder_retention_days"`
 }
 
+// TenantGroupSettingResponse The group's operations after a group write.
+type TenantGroupSettingResponse struct {
+	ConnectorId string                       `json:"connector_id"`
+	GroupKey    string                       `json:"group_key"`
+	Items       []TenantOperationSettingItem `json:"items"`
+	TenantId    openapi_types.UUID           `json:"tenant_id"`
+}
+
 // TenantMailRecipientPolicy Resolved per-tenant mail-recipient policy -- the PATCH read-back shape (#3499).
 //
 // Frozen; maps 1:1 to the tenant's “mail_recipient_allowlist“ column plus the
@@ -9810,6 +9910,22 @@ type TenantMailRecipientPolicyUpdate struct {
 	MailRecipientAllowlist *string `json:"mail_recipient_allowlist"`
 }
 
+// TenantOperationSettingItem One built-in operation with its install default and the tenant's own setting.
+type TenantOperationSettingItem struct {
+	DefaultEnabled bool    `json:"default_enabled"`
+	Enabled        bool    `json:"enabled"`
+	GroupKey       *string `json:"group_key"`
+	OpId           string  `json:"op_id"`
+	TenantEnabled  *bool   `json:"tenant_enabled"`
+}
+
+// TenantOperationSettingsResponse The tenant settings of one connector, for one tenant.
+type TenantOperationSettingsResponse struct {
+	ConnectorId string                       `json:"connector_id"`
+	Items       []TenantOperationSettingItem `json:"items"`
+	TenantId    openapi_types.UUID           `json:"tenant_id"`
+}
+
 // TenantRole Per-tenant role granted to the operator by the JWT issuer.
 //
 // The set is intentionally small in v0.2: a closed three-value enum
@@ -9827,6 +9943,15 @@ type TenantMailRecipientPolicyUpdate struct {
 // “f"role={role}"“ renders as “"role=tenant_admin"“ rather than
 // “"role=TenantRole.TENANT_ADMIN"“.
 type TenantRole string
+
+// TenantSettingBody Body of the tenant-setting writes.
+//
+// “enabled“ is required: “true“ turns the operation on for the tenant,
+// “false“ turns it off, “null“ removes the setting so the tenant uses
+// the install default again.
+type TenantSettingBody struct {
+	Enabled *bool `json:"enabled"`
+}
 
 // ThresholdCompare Numeric-bound comparator: “ok“ / “degraded“ / “critical“.
 //
@@ -10904,6 +11029,7 @@ type GetAssignmentApiV1ChecksAssignmentGetParams struct {
 	KnownVersion           *string `form:"known_version,omitempty" json:"known_version,omitempty"`
 	Authorization          *string `json:"authorization,omitempty"`
 	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
+	XMEHORunnerPackageSet  *string `json:"X-MEHO-Runner-Package-Set,omitempty"`
 }
 
 // PutAssignmentApiV1ChecksAssignmentRunnerPutParams defines parameters for PutAssignmentApiV1ChecksAssignmentRunnerPut.
@@ -10940,6 +11066,7 @@ type GetDashboardApiV1ChecksDashboardsDashboardIdGetParams struct {
 type PostResultsApiV1ChecksResultsPostParams struct {
 	Authorization          *string `json:"authorization,omitempty"`
 	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
+	XMEHORunnerPackageSet  *string `json:"X-MEHO-Runner-Package-Set,omitempty"`
 }
 
 // ListEndpointApiV1ConnectorsGetParams defines parameters for ListEndpointApiV1ConnectorsGet.
@@ -11010,6 +11137,27 @@ type GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams struct {
 
 // GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer defines parameters for GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet.
 type GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer string
+
+// ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetParams defines parameters for ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGet.
+type ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetParams struct {
+	// TenantId Act on this tenant instead of your own. Needs platform_admin when it is not your tenant.
+	TenantId      *openapi_types.UUID `form:"tenant_id,omitempty" json:"tenant_id,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
+// SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams defines parameters for SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPut.
+type SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams struct {
+	// TenantId Act on this tenant instead of your own. Needs platform_admin when it is not your tenant.
+	TenantId      *openapi_types.UUID `form:"tenant_id,omitempty" json:"tenant_id,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
+// SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams defines parameters for SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPut.
+type SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams struct {
+	// TenantId Act on this tenant instead of your own. Needs platform_admin when it is not your tenant.
+	TenantId      *openapi_types.UUID `form:"tenant_id,omitempty" json:"tenant_id,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
 
 // ListConventionsApiV1ConventionsGetParams defines parameters for ListConventionsApiV1ConventionsGet.
 type ListConventionsApiV1ConventionsGetParams struct {
@@ -11131,12 +11279,14 @@ type PollNextCommandApiV1GatewayRunnerNextGetParams struct {
 	Wait                   *int    `form:"wait,omitempty" json:"wait,omitempty"`
 	Authorization          *string `json:"authorization,omitempty"`
 	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
+	XMEHORunnerPackageSet  *string `json:"X-MEHO-Runner-Package-Set,omitempty"`
 }
 
 // ReportCommandResultApiV1GatewayRunnerResultPostParams defines parameters for ReportCommandResultApiV1GatewayRunnerResultPost.
 type ReportCommandResultApiV1GatewayRunnerResultPostParams struct {
 	Authorization          *string `json:"authorization,omitempty"`
 	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
+	XMEHORunnerPackageSet  *string `json:"X-MEHO-Runner-Package-Set,omitempty"`
 }
 
 // AuthenticatedHealthApiV1HealthGetParams defines parameters for AuthenticatedHealthApiV1HealthGet.
@@ -11230,7 +11380,7 @@ type PostCallApiV1OperationsCallPostParams struct {
 
 // GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams defines parameters for GetGovernedSubopsApiV1OperationsGovernedSubopsGet.
 type GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams struct {
-	// OpId A composite op id whose governed child ops to enumerate — e.g. `vmware.composite.vm.create`.
+	// OpId A composite op id whose governed child ops to enumerate — e.g. `gh.composite.repo_create`.
 	OpId string `form:"op_id" json:"op_id"`
 
 	// ConnectorId Optional connector-id override for resolving each child's best-effort safety_level; defaults to the connector the composite is registered against.
@@ -11240,7 +11390,7 @@ type GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams struct {
 
 // GetGroupsApiV1OperationsGroupsGetParams defines parameters for GetGroupsApiV1OperationsGroupsGet.
 type GetGroupsApiV1OperationsGroupsGetParams struct {
-	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
+	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `gh-rest-3`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `gh`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
 	ConnectorId string `form:"connector_id" json:"connector_id"`
 
 	// Limit Page size. Default 100; max 500. Matches `list_targets` paging — sibling list surfaces share one ceiling (G0.18-T5 #1358).
@@ -11286,7 +11436,7 @@ type CancelOperationRunApiV1OperationsRunsHandleCancelPostParams struct {
 
 // GetSearchApiV1OperationsSearchGetParams defines parameters for GetSearchApiV1OperationsSearchGet.
 type GetSearchApiV1OperationsSearchGetParams struct {
-	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
+	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `gh-rest-3`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `gh`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
 	ConnectorId string `form:"connector_id" json:"connector_id"`
 
 	// Q Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated.
@@ -12166,6 +12316,12 @@ type EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBo
 
 // EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchJSONRequestBody defines body for EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatch for application/json ContentType.
 type EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchJSONRequestBody = EditOpBody
+
+// SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutJSONRequestBody defines body for SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPut for application/json ContentType.
+type SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutJSONRequestBody = TenantSettingBody
+
+// SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutJSONRequestBody defines body for SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPut for application/json ContentType.
+type SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutJSONRequestBody = TenantSettingBody
 
 // CreateConventionApiV1ConventionsPostJSONRequestBody defines body for CreateConventionApiV1ConventionsPost for application/json ContentType.
 type CreateConventionApiV1ConventionsPostJSONRequestBody = ConventionCreate
@@ -14500,6 +14656,19 @@ type ClientInterface interface {
 
 	// GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet request
 	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet(ctx context.Context, connectorId string, params *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGet request
+	ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGet(ctx context.Context, connectorId string, params *ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithBody request with any body
+	SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithBody(ctx context.Context, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPut(ctx context.Context, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, body SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithBody request with any body
+	SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithBody(ctx context.Context, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPut(ctx context.Context, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, body SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListConventionsApiV1ConventionsGet request
 	ListConventionsApiV1ConventionsGet(ctx context.Context, params *ListConventionsApiV1ConventionsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -16943,6 +17112,66 @@ func (c *Client) EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatch(ctx
 
 func (c *Client) GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet(ctx context.Context, connectorId string, params *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetRequest(c.Server, connectorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGet(ctx context.Context, connectorId string, params *ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetRequest(c.Server, connectorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithBody(ctx context.Context, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutRequestWithBody(c.Server, connectorId, groupKey, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPut(ctx context.Context, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, body SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutRequest(c.Server, connectorId, groupKey, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithBody(ctx context.Context, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutRequestWithBody(c.Server, connectorId, opId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPut(ctx context.Context, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, body SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutRequest(c.Server, connectorId, opId, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -26271,6 +26500,17 @@ func NewGetAssignmentApiV1ChecksAssignmentGetRequest(server string, params *GetA
 			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
 		}
 
+		if params.XMEHORunnerPackageSet != nil {
+			var headerParam2 string
+
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam2)
+		}
+
 	}
 
 	return req, nil
@@ -26690,6 +26930,17 @@ func NewPostResultsApiV1ChecksResultsPostRequestWithBody(server string, params *
 			}
 
 			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
+		}
+
+		if params.XMEHORunnerPackageSet != nil {
+			var headerParam2 string
+
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam2)
 		}
 
 	}
@@ -27315,6 +27566,259 @@ func NewGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetRequest(server strin
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetRequest generates requests for ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGet
+func NewListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetRequest(server string, connectorId string, params *ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/%s/tenant-settings", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_id", runtime.ParamLocationQuery, *params.TenantId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutRequest calls the generic SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPut builder with application/json body
+func NewSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutRequest(server string, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, body SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutRequestWithBody(server, connectorId, groupKey, params, "application/json", bodyReader)
+}
+
+// NewSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutRequestWithBody generates requests for SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPut with any type of body
+func NewSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutRequestWithBody(server string, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "group_key", runtime.ParamLocationPath, groupKey)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/%s/tenant-settings/groups/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_id", runtime.ParamLocationQuery, *params.TenantId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("PUT", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutRequest calls the generic SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPut builder with application/json body
+func NewSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutRequest(server string, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, body SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutRequestWithBody(server, connectorId, opId, params, "application/json", bodyReader)
+}
+
+// NewSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutRequestWithBody generates requests for SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPut with any type of body
+func NewSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutRequestWithBody(server string, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "op_id", runtime.ParamLocationPath, opId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/%s/tenant-settings/operations/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_id", runtime.ParamLocationQuery, *params.TenantId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("PUT", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -28605,6 +29109,17 @@ func NewPollNextCommandApiV1GatewayRunnerNextGetRequest(server string, runner st
 			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
 		}
 
+		if params.XMEHORunnerPackageSet != nil {
+			var headerParam2 string
+
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam2)
+		}
+
 	}
 
 	return req, nil
@@ -28676,6 +29191,17 @@ func NewReportCommandResultApiV1GatewayRunnerResultPostRequestWithBody(server st
 			}
 
 			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
+		}
+
+		if params.XMEHORunnerPackageSet != nil {
+			var headerParam2 string
+
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam2)
 		}
 
 	}
@@ -45997,6 +46523,19 @@ type ClientWithResponsesInterface interface {
 	// GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetWithResponse request
 	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetWithResponse(ctx context.Context, connectorId string, params *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams, reqEditors ...RequestEditorFn) (*GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse, error)
 
+	// ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetWithResponse request
+	ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetWithResponse(ctx context.Context, connectorId string, params *ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetParams, reqEditors ...RequestEditorFn) (*ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse, error)
+
+	// SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithBodyWithResponse request with any body
+	SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithBodyWithResponse(ctx context.Context, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse, error)
+
+	SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithResponse(ctx context.Context, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, body SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutJSONRequestBody, reqEditors ...RequestEditorFn) (*SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse, error)
+
+	// SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithBodyWithResponse request with any body
+	SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithBodyWithResponse(ctx context.Context, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse, error)
+
+	SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithResponse(ctx context.Context, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, body SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutJSONRequestBody, reqEditors ...RequestEditorFn) (*SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse, error)
+
 	// ListConventionsApiV1ConventionsGetWithResponse request
 	ListConventionsApiV1ConventionsGetWithResponse(ctx context.Context, params *ListConventionsApiV1ConventionsGetParams, reqEditors ...RequestEditorFn) (*ListConventionsApiV1ConventionsGetResponse, error)
 
@@ -48927,6 +49466,75 @@ func (r GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse) Status() s
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *TenantOperationSettingsResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *TenantGroupSettingResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *TenantOperationSettingItem
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -57089,6 +57697,49 @@ func (c *ClientWithResponses) GetReviewEndpointApiV1ConnectorsConnectorIdReviewG
 	return ParseGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse(rsp)
 }
 
+// ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetWithResponse request returning *ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse
+func (c *ClientWithResponses) ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetWithResponse(ctx context.Context, connectorId string, params *ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetParams, reqEditors ...RequestEditorFn) (*ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse, error) {
+	rsp, err := c.ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGet(ctx, connectorId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse(rsp)
+}
+
+// SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithBodyWithResponse request with arbitrary body returning *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse
+func (c *ClientWithResponses) SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithBodyWithResponse(ctx context.Context, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse, error) {
+	rsp, err := c.SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithBody(ctx, connectorId, groupKey, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse(rsp)
+}
+
+func (c *ClientWithResponses) SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithResponse(ctx context.Context, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, body SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutJSONRequestBody, reqEditors ...RequestEditorFn) (*SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse, error) {
+	rsp, err := c.SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPut(ctx, connectorId, groupKey, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse(rsp)
+}
+
+// SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithBodyWithResponse request with arbitrary body returning *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse
+func (c *ClientWithResponses) SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithBodyWithResponse(ctx context.Context, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse, error) {
+	rsp, err := c.SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithBody(ctx, connectorId, opId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse(rsp)
+}
+
+func (c *ClientWithResponses) SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithResponse(ctx context.Context, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, body SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutJSONRequestBody, reqEditors ...RequestEditorFn) (*SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse, error) {
+	rsp, err := c.SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPut(ctx, connectorId, opId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse(rsp)
+}
+
 // ListConventionsApiV1ConventionsGetWithResponse request returning *ListConventionsApiV1ConventionsGetResponse
 func (c *ClientWithResponses) ListConventionsApiV1ConventionsGetWithResponse(ctx context.Context, params *ListConventionsApiV1ConventionsGetParams, reqEditors ...RequestEditorFn) (*ListConventionsApiV1ConventionsGetResponse, error) {
 	rsp, err := c.ListConventionsApiV1ConventionsGet(ctx, params, reqEditors...)
@@ -63609,6 +64260,105 @@ func ParseGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse(rsp *http
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest ConnectorReviewPayload
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse parses an HTTP response from a ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetWithResponse call
+func ParseListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse(rsp *http.Response) (*ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TenantOperationSettingsResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse parses an HTTP response from a SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithResponse call
+func ParseSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse(rsp *http.Response) (*SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TenantGroupSettingResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse parses an HTTP response from a SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithResponse call
+func ParseSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse(rsp *http.Response) (*SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TenantOperationSettingItem
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

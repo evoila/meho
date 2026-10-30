@@ -70,6 +70,16 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
   `ops_config.py` to fit under the 600-line code-quality cap; the
   separation also aligns with the operator mental model (events are
   observability, configmaps are configuration).
+- **Core-group object reads** (`ops_core_objects.py`, #3840) --
+  `list_core_objects` / `get_core_object` send the `k8s.cr.*` GET to
+  the core `/api/{version}` root when `group` is empty, and
+  `list_items` copies the list kind onto items that lack one.
+- **Access checks** (`ops_access.py`, #3840) -- `access_review_body`,
+  `access_review_result`, `rules_review_result` plus the `ACCESS_OPS`
+  rows for `k8s.auth.can_i` / `k8s.auth.rules`.
+- **Admission webhooks** (`ops_admission.py`, #3840) --
+  `admission_webhook_rows` plus the `ADMISSION_OPS` row for
+  `k8s.admission_webhook.list`.
 - **`KubernetesTargetLike`** (`kubeconfig.py`) -- runtime-checkable
   Protocol capturing the minimum target shape the connector reads:
   `name`, `host`, `port`, `secret_ref`. Replaced by the concrete
@@ -349,8 +359,11 @@ real operator through the same loader.
 | `k8s.persistentvolume.list` | safe | `CoreV1Api.list_persistent_volume()` -- name / phase / capacity / storage_class / claim_ref (`namespace/name`) / access_modes / reclaim_policy. Cluster-scoped, no params. (`ops_storage.py`) |
 | `k8s.persistentvolumeclaim.list` | safe | `CoreV1Api.list_namespaced_persistent_volume_claim()` / `list_persistent_volume_claim_for_all_namespaces()` -- name / namespace / status / capacity (`status.capacity.storage`) / storage_class / volume_name / access_modes. `namespace` XOR `all_namespaces`. Backs `k8s.ls /<ns>/persistentvolumeclaims`. (`ops_storage.py`) |
 | `k8s.crd.list`         | safe   | `ApiextensionsV1Api.list_custom_resource_definition()` -- group / kind / plural / scope / versions (`{name, served, storage}`). Discovery op for the generic CR reads. (`ops_customresource.py`) |
-| `k8s.cr.list`          | safe   | Generic CR list over `CustomObjectsApi.list_namespaced_custom_object()` (with `namespace`) / `list_cluster_custom_object()` (without). Rows = metadata + bounded JSON `spec_excerpt` (cap `CR_SPEC_EXCERPT_MAX_BYTES` = 2048 B, `spec_truncated` flag). Requires `group`/`version`/`plural`. (`ops_customresource.py`) |
-| `k8s.cr.info`          | safe   | Generic single CR read over `CustomObjectsApi.get_namespaced_custom_object()` / `get_cluster_custom_object()`. Single-object projection (metadata + bounded `spec_excerpt`), not a rows envelope. Requires `group`/`version`/`plural`/`name`. (`ops_customresource.py`) |
+| `k8s.cr.list`          | safe   | Generic CR list over `CustomObjectsApi.list_namespaced_custom_object()` (with `namespace`) / `list_cluster_custom_object()` (without). Rows = metadata + bounded JSON `spec_excerpt` (cap `CR_SPEC_EXCERPT_MAX_BYTES` = 2048 B, `spec_truncated` flag). Requires `group`/`version`/`plural`. `group: ""` reads the core group under `/api/{version}` instead (`ops_core_objects.py`, #3840). (`ops_customresource.py`) |
+| `k8s.cr.info`          | safe   | Generic single CR read over `CustomObjectsApi.get_namespaced_custom_object()` / `get_cluster_custom_object()`. Single-object projection (metadata + bounded `spec_excerpt`), not a rows envelope. Requires `group`/`version`/`plural`/`name`. `group: ""` reads one core-group object under `/api/{version}`. (`ops_customresource.py`) |
+| `k8s.auth.can_i`       | safe   | `AuthorizationV1Api.create_self_subject_access_review()` -- may the target's kubeconfig identity do one verb on one resource (or one non-resource path)? `{allowed, denied, reason, evaluation_error}`. Same as `kubectl auth can-i`. (`ops_access.py`, #3840) |
+| `k8s.auth.rules`       | safe   | `AuthorizationV1Api.create_self_subject_rules_review()` -- every rule that identity has in one namespace, one row per rule, plus `incomplete`. Same as `kubectl auth can-i --list`. (`ops_access.py`, #3840) |
+| `k8s.admission_webhook.list` | safe | `AdmissionregistrationV1Api.list_validating_webhook_configuration()` + `list_mutating_webhook_configuration()` -- one row per webhook: rules, selectors, `failure_policy`, `side_effects`, `timeout_seconds`, service or URL. `caBundle` is left out. Optional `type` filter. (`ops_admission.py`, #3840) |
 | `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. |
 | `k8s.exec`             | **dangerous** (`requires_approval=True`) | `CoreV1Api.connect_get_namespaced_pod_exec()` over the `WsApiClient` websocket transport -- bounded argv command-and-capture: stdout / stderr demuxed from the `v4.channel.k8s.io` channels + exit code parsed from the channel-3 status frame, per-stream 1 MiB cap, bounded timeout. Interactive `-it` deferred. |
 | `k8s.secret.read_to_ref` | **caution** (`requires_approval=True`) | `CoreV1Api.read_namespaced_secret()` -- reads one Secret's `data[data_key]` (default `value`), decodes it, and stages the value to a **tenant-scoped Vault `secret_ref`** via `vault.kv.put`; returns **only** the ref + provenance (SHA-256 / byte length), never the value. Classified `credential_read` (audit + broadcast aggregate-only). The governed VKS guest-kubeconfig read (`ops_secret_read.py`, #3496). |
@@ -533,7 +546,24 @@ to the API's `?dryRun=All`) so the would-be object is returned without
 mutating -- the diff-preview an agent or reviewer runs before the real
 apply. When the op waits for approval, the `k8s.apply` preview builder in
 `operations/_preview.py` runs this dry-run and stores the result on the
-approval row (see `approvals.md`).
+approval row (see `approvals.md`). Next to the dry-run summary it stores
+the manifest itself (`preview.manifest`, one dict per document) and a
+`preview.subject` line such as `Deployment/prod/web` (#3877). Before the
+manifest is stored, `apply_manifest_echo` in `ops_write_preview.py` hides
+Secret `data` / `stringData` values (key names stay), every `env` value
+(variable names stay), every `httpHeaders` value of a probe or lifecycle
+hook (header names stay), the text of every `command` / `args` list (only
+its size in bytes stays, as `{"hidden": true, "bytes": N}`) and the
+last-applied annotation. All of this is done at any depth: a Secret nested
+in a custom resource and a pod template's copy of the annotation are hidden
+too. Hiding a value in an `env` or `httpHeaders` entry does not stop the
+walk: the entry's other fields are checked as well. Then the shared
+params redaction of the generic echo runs over the documents. The size
+limit comes last, after all redaction, because a redaction marker can be
+longer than the value it replaces: the echo keeps at most 16 KB in total
+as stored, counting every entry. A document that does not fit in full
+keeps only its identity; when not even that fits, one closing entry
+counts the documents left out.
 
 **`k8s.apply` API-server rejections (#3876).** `DynamicClient.request`
 calls the API with `_preload_content=False`, and kubernetes_asyncio only
@@ -713,6 +743,15 @@ uses `target=None`, like the handler's write, so the check uses the same
 Vault role. If the identity lacks `create` + `update`, MEHO refuses the
 park with `write_capability_denied` (#3542) and nobody approves a write
 that would fail.
+
+**Vault grant it needs (#3843).** The write path is fixed. It must stay
+`tenants/<tenant_id>/<register_as>`: the tenant-scope guard refuses a
+write outside the tenant subtree, and `targets create` without a
+`secret_ref` reads this path. Of the per-tenant policies, only
+`meho-tenant-admin` grants `create` + `update` there. The caller and the
+approver both need it. The deploy steps are in
+[`connector-vault-policy.md`](../cross-repo/connector-vault-policy.md)
+§6.6.
 
 **Supervisor case: no server rewrite (corpus-verified).** A VKS guest
 kubeconfig's `clusters[].cluster.server` already points at the guest
@@ -918,7 +957,58 @@ consumer session that fell back to raw kubectl):
   keeps metadata identifiers + `labels` and a JSON `spec_excerpt` capped
   at `CR_SPEC_EXCERPT_MAX_BYTES` (2048 B); over the cap, `spec_truncated`
   is `true` and the excerpt is a preview (not parseable JSON). The
-  verbose `managedFields` / `annotations` metadata blocks are dropped.
+  verbose `managedFields` metadata block is dropped.
+- **Annotations, version and status on CR rows** (#3878): every
+  `k8s.cr.list` row and the `k8s.cr.info` result also carry
+  `resource_version`, `uid`, `annotations` and a `status_excerpt`. This
+  lets a governed read confirm that an annotation-only change landed
+  (for example a Cluster API pause annotation). `annotations` is an
+  object column, so `result_query` cannot filter or sort on it. Return
+  it with `select`, or read the raw rows by paging (`offset` /
+  `limit`).
+  - Each annotation value is cut at `CR_ANNOTATION_VALUE_MAX_BYTES`
+    (256 B). `annotations_truncated` is `true` when any value was cut.
+  - The `kubectl.kubernetes.io/last-applied-configuration` annotation
+    is always left out. It is a copy of the whole last manifest, so it
+    is large, and on a Secret it repeats every value.
+  - On a `Secret`, every annotation value is the redacted placeholder
+    (the same one `data` values get). The keys stay. Deploy tools can
+    copy the whole manifest into an annotation, so no value is shown.
+  - `status_excerpt` is the JSON `.status`, capped like `spec_excerpt`
+    (2048 B), with its own `status_truncated` flag. It is `null` when
+    the object has no `.status`.
+- **Built-in kinds** (#3840): the same two ops read any kind no
+  dedicated op covers. A built-in group with a name (for example
+  `apiregistration.k8s.io` / `v1` / `apiservices`, or
+  `admissionregistration.k8s.io` / `v1` /
+  `validatingadmissionpolicies`) goes through `CustomObjectsApi` like a
+  CRD. The core group has an empty name and a different root
+  (`/api/v1`, not `/apis/...`), so `group: ""` is sent by
+  `ops_core_objects.py` through the same `ApiClient.call_api` (same
+  auth, TLS and wire span). The API server does not repeat `kind` /
+  `apiVersion` on the items of a list of built-in objects, so
+  `list_items` copies them from the list kind (`SecretList` ->
+  `Secret`) before the row projection. That keeps the Secret
+  redaction below working for list reads too.
+
+### Access checks and admission webhooks (#3840, `ops_access.py` / `ops_admission.py`)
+
+Three safe reads in the `access` group answer "why did this apply not
+take effect?" without leaving MEHO:
+
+- `k8s.auth.can_i` -- a `SelfSubjectAccessReview`. Takes `verb` and
+  either a resource (`group`, `resource`, `subresource`, `name`,
+  `namespace`, `version`) or a `non_resource_path`; the schema's
+  `oneOf` allows exactly one of the two forms.
+- `k8s.auth.rules` -- a `SelfSubjectRulesReview` for one `namespace`.
+  `incomplete: true` means an authorizer could not list its rules, so
+  confirm a single action with `k8s.auth.can_i`.
+- `k8s.admission_webhook.list` -- one row per webhook of every
+  validating and mutating webhook configuration.
+
+Both reviews are HTTP `POST` calls, but the API server stores nothing,
+so they are `safe`. They always check the identity in the target's
+kubeconfig (the identity MEHO uses for that target), not the caller.
 
 This tier also retires the `cluster_kinds` **dead-end advertisements**:
 `k8s.ls /` had long listed `storageclasses` / `persistentvolumes` in its
@@ -951,11 +1041,14 @@ The redactor is wired into `custom_resource_row`
 `k8s.cr.info` share, so a dynamic read pointed at core Secrets
 (`group=""` / `version="v1"` / `plural="secrets"`) — the one shipped read
 path that can surface a raw Secret object — is scrubbed before JSONFlux /
-audit / broadcast.
+audit / broadcast. For a list read, each item first gets `kind: Secret`
+from its `SecretList` (see "Built-in kinds" above), because the API
+server leaves `kind` off list items.
 
 **Projection note.** `custom_resource_row` otherwise keeps only
-`metadata` + a bounded `.spec` excerpt and drops every other top-level
-field; a `Secret` has no `.spec`, so before #3501 a CR read of a Secret
+`metadata` + bounded `.spec` / `.status` excerpts and drops every other
+top-level field (a Secret's annotation keys show, but every annotation
+value is replaced by the placeholder); a `Secret` has no `.spec`, so before #3501 a CR read of a Secret
 returned no `data` at all (safe, but uninformative). The redactor lets
 the projection surface a `data` / `string_data` **key inventory** (values
 redacted, digests attached) for a `kind: Secret` object instead — safe
@@ -1075,9 +1168,9 @@ happened" apply could not be explained from the trace.
 - Secret payloads are masked before capture. Every JSON request and
   response body first goes through the connector's structural Secret
   redactor (`redaction.py`, the same walk `k8s.cr.*` reads use). Every
-  `data` / `stringData` value of a `kind: Secret` object, and its
-  `last-applied-configuration` annotation, is replaced by a placeholder
-  plus a digest; key names stay. This covers a `k8s.apply` of a Secret
+  `data` / `stringData` value of a `kind: Secret` object, and every
+  annotation value on it, is replaced by a placeholder plus a digest;
+  key names stay. This covers a `k8s.apply` of a Secret
   manifest, a `k8s.cr.info` read of one, and the items of a
   `SecretList` (which carry no `kind` of their own). The normal body
   redaction then runs over the masked body.

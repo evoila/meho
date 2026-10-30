@@ -56,6 +56,7 @@ func newIngestCmd() *cobra.Command {
 		tenantID          string
 		authScheme        string
 		authSecretFields  []string
+		saveConverted     string
 		dryRun            bool
 		noWait            bool
 		jsonOut           bool
@@ -83,6 +84,14 @@ func newIngestCmd() *cobra.Command {
 			"      $CLAUDE_RDC_DOCS; read + uploaded by the CLI like file://)\n" +
 			"  Repeat --spec to merge multiple specs under one connector_id\n" +
 			"  (vSphere is the canonical case: vcenter.yaml + vi-json.yaml).\n\n" +
+			"  Swagger 2.0: MEHO imports only OpenAPI 3. When a file:// or docs:\n" +
+			"  spec says swagger: \"2.0\", the CLI converts it to OpenAPI 3.0 on\n" +
+			"  this machine, prints a short summary, and sends only the converted\n" +
+			"  file. Nothing is fetched and no outside converter is used. A\n" +
+			"  reference to another file or a URL ($ref) is refused. Pass\n" +
+			"  --save-converted <file> to keep the converted copy. An https://\n" +
+			"  Swagger 2.0 spec is refused by MEHO: download it and pass it as\n" +
+			"  file://.\n\n" +
 			"  When a vendor spec self-versions independently of the product\n" +
 			"  line (e.g. a version-stable /api/v2 surface reports\n" +
 			"  info.version=v2 while the connector label is 9.0), pass\n" +
@@ -134,6 +143,7 @@ func newIngestCmd() *cobra.Command {
 				TenantID:          tenantID,
 				AuthScheme:        authScheme,
 				AuthSecretFields:  authSecretFields,
+				SaveConverted:     saveConverted,
 				DryRun:            dryRun,
 				NoWait:            noWait,
 				JSONOut:           jsonOut,
@@ -173,6 +183,9 @@ func newIngestCmd() *cobra.Command {
 		"manual mode: override a secret-field NAME the --auth-scheme reads at dispatch (never the "+
 			"value — that stays in the target's secret_ref); repeat for multiple. Omit for the "+
 			"per-scheme defaults. Requires --auth-scheme")
+	cmd.Flags().StringVar(&saveConverted, "save-converted", "",
+		"manual mode: when a --spec is a Swagger 2.0 file the CLI converts to OpenAPI 3, also write the "+
+			"converted file here so you can check it and keep it next to the original")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"parse and plan without writing to the DB; the response carries an IngestionResult with counts but no GroupingResult")
 	cmd.Flags().BoolVar(&noWait, "no-wait", false,
@@ -195,6 +208,7 @@ type ingestOptions struct {
 	TenantID          string
 	AuthScheme        string
 	AuthSecretFields  []string
+	SaveConverted     string
 	DryRun            bool
 	NoWait            bool
 	JSONOut           bool
@@ -219,6 +233,13 @@ func runIngest(cmd *cobra.Command, opts ingestOptions) error {
 	body, err := buildIngestRequest(opts)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), opts.JSONOut)
+	}
+	if body.Specs != nil {
+		convs, cerr := convertSwagger2Specs(*body.Specs, opts.SaveConverted)
+		if cerr != nil {
+			return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(cerr.Error()), opts.JSONOut)
+		}
+		printSwagger2Conversions(cmd.ErrOrStderr(), convs, opts.SaveConverted)
 	}
 
 	authed, err := newAuthedClient(cmd.Context(), backplaneURL)
@@ -358,6 +379,11 @@ func validateIngestMode(opts ingestOptions) error {
 			return errors.New(
 				"--catalog cannot be combined with --product/--version/--impl/--spec; " +
 					"use catalog mode OR manual mode, not both")
+		}
+		if opts.SaveConverted != "" {
+			return errors.New(
+				"--save-converted cannot be combined with --catalog; it keeps the converted " +
+					"copy of a Swagger 2.0 --spec file")
 		}
 		if opts.AuthScheme != "" {
 			return errors.New(

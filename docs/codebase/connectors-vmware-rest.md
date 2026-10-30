@@ -8,8 +8,8 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 78 hand-authored composites
-that orchestrate cross-spec workflows: 18 read composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 79 hand-authored composites
+that orchestrate cross-spec workflows: 19 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
 in `#2258`; plus the four guest-operations reads `#3100` and the
@@ -18,7 +18,8 @@ Supervisor status read `#3281` + the vSphere Namespace status read
 the two SUBSCRIBED content-library reads `content_library.subscribed.status` +
 `content_library.subscribed.items.list` / `#3495` + the datastore
 cache-refresh read `datastore.refresh` / `#3789` + the datastore file list
-read `datastore.file.list` / `#3432` + the VM limit and
+read `datastore.file.list` / `#3432` + the vSAN folder list
+read `datastore.vsan.folder.list` / `#4022` + the VM limit and
 reservation read `vm.resource_allocation.show` / `#3880` + the migration
 inventory read `vmware.migration.inventory`) and 60 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
@@ -89,6 +90,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   pinned `vi-json.yaml` documents and vCenter 9.1 sends); a standalone ESXi
   host sends the SOAP-shaped XML fault. The addressed read operations `vmware.vm.info`,
   `vmware.host.usage`, `vmware.host.storage_devices`,
+  `vmware.host.datastores` (its host read),
   `vmware.host.network_uplinks`, and `vmware.object.collect` explicitly opt
   into promotion on their `PropertyCollector.RetrievePropertiesEx` calls, so the connector
   reads the fault in either form (JSON first, then XML) and raises
@@ -556,8 +558,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 78
-  `_CompositeSpec` rows (18 read — incl. the `#3789` datastore
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 79
+  `_CompositeSpec` rows (19 read — incl. the `#3789` datastore
   cache-refresh read `datastore.refresh` — + 46 dangerous/destructive
   writes + 14 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
@@ -855,6 +857,39 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   failure). Set-shaped (JSONFlux-reduced when large), with `host_required`
   / `host_not_found` / `ambiguous_host` / `unsupported_host_target`
   covering the resolution refusals.
+- **`vmware.host.datastores`** (`typed_ops_host_datastores.py`, handler
+  `host_datastores`, `#3373`) — the datastores mounted on one host, `safe`,
+  in its own group `vmware-host-datastores`, on both catalogs. It works on a
+  vCenter target and on a **standalone ESXi** target, so a mount made by
+  `vmware.composite.host.datastore_mount_nfs` can be checked by a separate
+  read. The ingested `GET:/vcenter/datastore` and
+  `vmware.composite.datastore.usage` cannot do this on ESXi: they use the
+  vCenter Automation REST surface, which ESXi does not serve. Host
+  resolution uses `host_target.classify_host_target` (ESXi → `ha-host`,
+  `host` ignored; vCenter → `GET:/vcenter/host`; anything else →
+  `unsupported_host_target`), with its own refusals in the
+  `datastores` / `datastore_count` shape. Two `RetrievePropertiesEx` reads
+  over the vmomi seam (VI-JSON on vCenter, SOAP on ESXi): first
+  `HostSystem.datastore` (the `Datastore` MoRefs, one object, one call on
+  `_post_vmomi_json`), then `summary.{name,type,capacity,freeSpace}` plus
+  `host` (the `DatastoreHostMount` list) over those moids through
+  `vim_retrieve.retrieve_all_pages`, so a split answer is read whole and a
+  lost continuation page fails the read. The rows are mapped **per result
+  object** (keyed by the `Datastore` moid). Each row is
+  `{datastore, name, type, capacity_bytes, free_space_bytes, accessible}`;
+  `accessible` is the selected host's own `mountInfo.accessible` from
+  `Datastore.host`, not `summary.accessible` (on vCenter that flag is true
+  when *any* host reaches the datastore), and is null when the datastore
+  has no mount entry for the host. Sizes go through `_int_or_none` because
+  the SOAP codec leaves a bare numeric leaf as text. A datastore the read
+  does not return keeps its row with null fields. A failed read returns
+  `status='datastores_unreadable'` with an empty set. That includes a
+  `HostSystem.datastore` the collector could not read: the HTTP call
+  succeeds but the property is in the object's `missingSet` (for example
+  `NoPermission`), and the op names the fault class in `read_note` instead
+  of answering `ok` with no datastores. A host that truly has no datastore
+  sends an empty array and no `missingSet` entry, and is `ok` with zero
+  rows. Set-shaped (JSONFlux-reduced when large).
 - **`vmware.snapshot.list`** (`typed_ops_snapshot_list.py`, handler
   `snapshot_list`) — the snapshots of one VM (by `vm` moid) as a flat list in
   tree order. `safe`, in its own group `vmware-snapshot-list`, on both
@@ -1305,8 +1340,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 78 `vmware.composite.*` rows with
-   `source_kind="composite"` — 18 reads (17 with `safety_level="safe"` +
+   queued registrar and upserts: the 79 `vmware.composite.*` rows with
+   `source_kind="composite"` — 19 reads (18 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
    service principals), and 60 writes, all `requires_approval=True`
@@ -1425,7 +1460,7 @@ unchanged consumers read:
 | establish + fingerprint | `RetrieveServiceContent` | `ServiceInstance` | ServiceContent (PC/SessionManager moids, `about`) |
 | establish | `SessionManager.Login` | SessionManager moid | cookie set (success) |
 | teardown | `SessionManager.Logout` | SessionManager moid | empty |
-| storage_devices, config-mgr reads, task polls | `PropertyCollector.RetrievePropertiesEx` | PC moid **from ServiceContent** | `{objects:[{obj,propSet:[{name,val}]}]}` |
+| storage_devices, host.datastores, config-mgr reads, task polls | `PropertyCollector.RetrievePropertiesEx` | PC moid **from ServiceContent** | `{objects:[{obj,propSet:[{name,val}]}]}` |
 | storage_devices (best-effort) | `HostBootDeviceSystem.QueryBootDevices` | boot-device-system moid | `HostBootDeviceInfo` |
 | datastore_mount_nfs | `HostDatastoreSystem.CreateNasDatastore` | `configManager.datastoreSystem` moid | Datastore MoRef (synchronous) |
 | disk_mark_flash | `HostStorageSystem.MarkAsSsd_Task` / `MarkAsNonSsd_Task` | `configManager.storageSystem` moid | Task MoRef → poll `Task.info` |
@@ -1703,7 +1738,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 78 composites (18 reads + 60 writes) land as `source_kind="composite"`
+The 79 composites (19 reads + 60 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1800,7 +1835,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 78 composites are hand-authored aggregators the connector ships as
+The 79 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -1840,7 +1875,8 @@ The write composites build their `/api` request bodies as the vSphere
 Automation `*Spec` **at the top level** of the JSON body —
 `{"placement": {…}}` for relocate, `{"count": …, "cores_per_socket": …}`
 for the CPU PATCH, and so on. `_split_sub_op` substitutes the
-`{vm}` / `{nic}` / `{cdrom}` path variables into the URL and posts every
+`{vm}` / `{nic}` / `{cdrom}` path variables into the URL (each value
+percent-encoded as one path segment) and posts every
 remaining key verbatim as the body, so a handler passes the `*Spec` fields
 alongside the path vars (e.g. `{"vm": vm_moid, "placement": {"host": …}}`).
 
@@ -2566,9 +2602,17 @@ Code: `composites/_teardown.py` (shared plan helpers + `folder.delete`),
 listed in `_governed_subops.py`; the vim paths are reconciled against the
 pinned `vi-json.yaml` and the REST paths against `vcenter.yaml`.
 
-Follow-up (not in #3339): `_write._split_sub_op` puts path values into URLs
-without percent-encoding. The new ops validate every id first; the older
-library ops (`content_library.subscribed.status` / `.sync`) do not yet.
+The older library ops use the same id rule (#3938):
+`content_library.subscribed.sync` / `.status` / `.items.list` (the
+`library_id`, the id found for a `library_name`, and the item ids vCenter
+lists), `vm.deploy_from_library` and `vm.import_from_library` (the
+`library_item`, and the item id found for a `library_item_name`), and
+`vm.clone` (`library_item`). Each is checked in the input schema and in the
+handler, before any request. The items list skips an item whose id is not a
+UUID and adds a `warning` issue. As a second layer, `_write._split_sub_op`
+percent-encodes each path value as one segment (`_write._path_segment`):
+`/`, `%`, `?`, `#` and a bare `.` / `..` are encoded, while moids, UUIDs and
+`urn:...` ids keep the same URL as before.
 
 ### Governed DRS rule delete (`cluster.drs_rule.delete`)
 
@@ -3436,7 +3480,7 @@ None of the three composites registers a park-time preview builder (matching
 ### AI guidance of the storage and network operations
 
 The fourteen storage and network multi-step operations (`datastore.usage`,
-`datastore.refresh`, `datastore.file.list`, `datastore.dir.create`, `datastore.file.delete`, the three
+`datastore.refresh`, `datastore.file.list`, `datastore.vsan.folder.list`, `datastore.dir.create`, `datastore.file.delete`, the three
 `storage_policy.*` operations, `network.portgroup.audit` / `.create` /
 `.security.set` / `.vlan.set` / `.delete` and `host.standard_portgroup.delete`)
 keep their AI guidance (`llm_instructions`: `when_to_call`, `preconditions`,
@@ -3754,11 +3798,60 @@ in one folder of a datastore, so a check can confirm a plain datastore file
   keeps `status`, the datastore fields, `path`, `count`, `vm_check` and
   `guidance` next to the handle.
 
+### vSAN folder list (`datastore.vsan.folder.list`, #4022)
+
+`vmware.composite.datastore.vsan.folder.list` is a read composite (safety
+`safe`, no approval) in `composites/_datastore_vsan.py`. It lets a check
+after a VM delete ("is the VM's folder on the vSAN datastore gone?") run
+through MEHO instead of `govc datastore.ls`.
+
+Why a separate op: the datastore writes (`datastore.file.delete`,
+`datastore.dir.create`) refuse vSAN in `_datastore_browse.resolve_for_path`.
+On vSAN vCenter names each top-level folder (a vSAN object) by a UUID, so
+their check for files of registered VMs could not trust a friendly name.
+That guard stays as it is. This op writes nothing and shows both names, so
+it does not use `resolve_for_path`; it calls `resolve_datastore` and
+`search` from `_datastore_browse` directly.
+
+- **Input.** `datastore` is a `datastore-NNN` moid of a vSAN datastore
+  (`summary.type` `vsan`); any other type is `invalid_request`. `folder` is
+  optional: the friendly name or the UUID path of a folder (it may go
+  deeper, e.g. `<folder>/logs`). The schema pattern `VSAN_FOLDER_PATTERN`
+  refuses empty segments, `.` / `..`, wildcards, brackets, backslashes and
+  control characters.
+- **Without `folder`.** One `SearchDatastore_Task` on the root. Each folder
+  entry gives `uuid_path` (its `path`, a UUID on vSAN) and `name` (its
+  `friendlyName`, or the path when there is none). Hidden folders (name
+  starts with `.`) are left out. Then one `SearchDatastoreSubFolders_Task`
+  from the root sums every file below each folder: `size_bytes`,
+  `file_count`, and `modified` (the latest change). A result folder is
+  matched to its top-level folder by UUID or by friendly name. Last, one
+  `read_many` of the datastore's VMs (`Datastore.vm`) names the VMs that use
+  each folder (`vms`), with the same rules as the delete check
+  (`_datastore_claims._claim_hits`), tried for the UUID path and for the
+  friendly name. `vm_check` is `complete`, or `incomplete` when vCenter
+  answered only in part.
+- **With `folder`.** One `SearchDatastore_Task` on that folder. Each entry:
+  `name`, `kind` (file / folder), `file_type`, `size_bytes` (null for a
+  folder) and `modified`. A missing folder (`FileNotFound`) is
+  `status="absent"` with empty `entries`, not an error.
+- **Answer.** `status` is `ok`, `absent`, `not_found` (no such datastore) or
+  `invalid_request`. A long `entries` list becomes a result handle;
+  `llm_instructions.result_scalars` keeps `status`, the datastore fields,
+  `folder`, `count`, `vm_check` and `guidance` next to the handle.
+- **Scope.** vCenter targets only, like the datastore writes. It is
+  registered on the 9.0 and the 8.0 catalogs. Tests use the shared vim fake
+  with a vSAN browse on top
+  (`test_connectors_vmware_rest_composites_datastore_vsan.py`); it has not
+  been run against a real vSAN datastore.
+- **Later.** The general file list `datastore.file.list` (`#3432`, above)
+  covers VMFS and NFS. The two reads can be merged into one op later.
+
 ### AI guidance of the guest, event, performance and typed reads
 
 The six guest operations (`vm.guest.*`), `event.tail`,
-`performance.summary` and the seven typed reads (`vmware.host.usage`,
-`.host.network_uplinks`, `.host.storage_devices`, `.host.vsan_health`,
+`performance.summary` and the typed reads (`vmware.host.usage`,
+`.host.network_uplinks`, `.host.storage_devices`, `.host.datastores`, `.host.vsan_health`,
 `vmware.object.collect`, `vmware.tasks.recent`, `vmware.vm.info`) each
 carry `llm_instructions` with `when_to_call`, `output_shape` and
 `next_step`, plus `preconditions` for the guest file read and the two guest
@@ -3868,7 +3961,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.snapshot.create` | `{action, vm, snapshot_name, memory, quiesce}` echo | param echo, no I/O |
 | `vm.snapshot.delete` | mandatory `blast_radius` from the handler's own plan: the snapshot, and the snapshots below it when `remove_children` is set | live read (vim `RetrievePropertiesEx` of `VirtualMachine.snapshot`) |
 | `vm.migrate` | `{vm, cluster, target_host, target_host_source}` | param echo, no I/O |
-| `vm.power` | `{vm, verb, power_kind}` echo (`power_kind` = `hard` vs Tools-soft `guest`) | param echo, no I/O |
+| `vm.power` | `{vm, name, power_state, verb, power_kind}` (`power_kind` = `hard` vs Tools-soft `guest`); a failed read keeps the moid, sets `name` / `power_state` to `null` and adds an `unavailable` note -- the request is still created (#3942) | live read, best-effort (`GET:/vcenter/vm/{vm}`) |
 | `cluster.drs_rule.create` | `{cluster, cluster_name, rule_type, rule_name, enabled, resolved, total_resolved}` | live read (`GET:/vcenter/vm` + `GET:/vcenter/cluster/{cluster}`) |
 | `folder.create` | `{parent_folder` / `parent_folder_id, datacenter?, new_folder_name}` echo | param echo, no I/O |
 

@@ -176,6 +176,8 @@ _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.datastore.refresh",
     # Datastore file list read (#3432).
     "vmware.composite.datastore.file.list",
+    # vSAN folder list read (#4022).
+    "vmware.composite.datastore.vsan.folder.list",
     "vmware.composite.network.portgroup.audit",
     # VM CPU / memory limit + reservation read (#3880).
     "vmware.composite.vm.resource_allocation.show",

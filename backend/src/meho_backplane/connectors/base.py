@@ -99,10 +99,10 @@ class Connector(ABC):
     * :attr:`product` — product slug, e.g. ``"vsphere"``, ``"vault"``,
       ``"bind9"``.
     * :attr:`version` — connector implementation version
-      (e.g. ``"9.0"`` for a vSphere 9.0 connector). Empty string means
+      (e.g. ``"2.x"`` for a Harbor 2.x connector). Empty string means
       "unversioned" and preserves v1 single-product registry behaviour.
     * :attr:`impl_id` — implementation discriminator, e.g.
-      ``"vmware-rest"`` vs ``"vmware-pyvmomi"``. Empty string preserves
+      ``"bind9-ssh"`` vs ``"bind9-rndc"``. Empty string preserves
       v1 behaviour.
     * :attr:`supported_version_range` — PEP 440-style version spec
       (e.g. ``">=8.5,<10.0"``) the connector advertises against a
@@ -168,7 +168,7 @@ class Connector(ABC):
 
         ``operator`` (optional) is the request-scoped operator. When the
         fingerprint path needs to read per-target vendor credentials from
-        Vault (the K8s/vmware/sddc-manager/NSX surface, and any future
+        Vault (the K8s surface, and any future
         connector that authenticates a session against the fingerprint
         endpoint), the operator's validated Keycloak ``raw_jwt`` flows to
         Vault's JWT/OIDC auth method via
@@ -209,11 +209,11 @@ class Connector(ABC):
         op_id namespace varies by source_kind:
 
         * ``'ingested'``  — ``"{METHOD}:{path}"``
-          (e.g. ``"GET:/api/vcenter/cluster"``).
+          (e.g. ``"GET:/repos/{owner}/{repo}/issues"``).
         * ``'typed'``     — dotted shape per product
           (e.g. ``"vault.kv.read"``).
         * ``'composite'`` — dotted with ``.composite`` suffix
-          (e.g. ``"vmware.composite.vm.create"``).
+          (e.g. ``"gh.composite.repo_create"``).
 
         In v0.2.next post-G0.6, this method is typically called BY the
         G0.6 dispatcher AFTER lookup + validation; subclasses don't

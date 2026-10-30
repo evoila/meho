@@ -86,7 +86,7 @@ Pattern matching
 
 ``fnmatch.fnmatch(op_id, pattern)`` from the Python stdlib. Glob rules:
 ``*`` matches anything including ``/`` and ``.``, which lets
-``"GET:/api/*"`` match ``"GET:/api/vcenter/cluster"`` and
+``"GET:/repos/*"`` match ``"GET:/repos/{owner}/{repo}/issues"`` and
 ``"vault.kv.*"`` match ``"vault.kv.read"``. Quoted in the module-level
 ``__all__`` so callers can import the function directly for testing.
 
@@ -398,7 +398,7 @@ async def resolve_verdict(
         The resolved operator identity carrying ``sub``, ``tenant_id``,
         and ``tenant_role``.
     op_id:
-        The canonical operation identifier (e.g. ``"GET:/api/vcenter/cluster"``,
+        The canonical operation identifier (e.g. ``"GET:/repos/{owner}/{repo}/issues"``,
         ``"vault.kv.read"``).
     safety_level:
         The op's :attr:`~meho_backplane.db.models.EndpointDescriptor.safety_level`

@@ -254,7 +254,8 @@ cli/
     │   │   └── memory_test.go    # parseScope/parseTTL/parseScopeSlugArg + verb-happy-path + 403/404/422 + decline + JSON envelope tests.
     │   ├── connector/         # G0.7-T5 #405 — `meho connector …` verb tree. G0.12-T7 #1265 migrated every verb onto the generated typed client (api.ClientWithResponses via api.AuthedClient + retryOn401); api.CatalogListResponse / api.ConnectorReviewPayload / api.IngestRequest / api.IngestResponse / api.EditGroupBody / api.EditOpBody are the single source of truth, no consumer-side struct duplicates.
     │   │   ├── connector.go      # NewRootCmd + newAuthedClient / retryOn401 / renderRequestError / renderHTTPStatus helpers.
-    │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest). 202-aware since G0.22-T4 #1609: polls GET /ingest/jobs/{job_id} to a terminal status by default, `--no-wait` exits 0 with the job handle; 200 stays the legacy sync render. Owns the shared pollIngestJob loop + renderIngestTerminal lifecycle switch (succeeded/failed/degraded/undocumented) that ingest_status.go reuses. `--tenant-id` (#2209) selects the write scope: omitted leaves the body's tenant_id unset (built-in/global, the #2085 omit-equals-global contract); the operator's own tenant UUID makes the ingest tenant-curated.
+    │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest). 202-aware since G0.22-T4 #1609: polls GET /ingest/jobs/{job_id} to a terminal status by default, `--no-wait` exits 0 with the job handle; 200 stays the legacy sync render. Owns the shared pollIngestJob loop + renderIngestTerminal lifecycle switch (succeeded/failed/degraded/undocumented) that ingest_status.go reuses. `--tenant-id` (#2209) selects the write scope: omitted leaves the body's tenant_id unset (built-in/global, the #2085 omit-equals-global contract); the operator's own tenant UUID makes the ingest tenant-curated. Converts a `file://` / `docs:` Swagger 2.0 spec to OpenAPI 3 before the upload (see swagger2.go); `--save-converted <file>` keeps the converted copy.
+    │   │   ├── swagger2.go       # Local Swagger 2.0 → OpenAPI 3.0 conversion for `connector ingest` (#5028), via kin-openapi `openapi2conv`. Fetches nothing; refuses a `$ref` to another file or URL by name; prints a one-line summary per converted spec to stderr.
     │   │   ├── ingest_status.go  # `meho connector ingest-status <job-id> [--wait] [--json]` (#1621) — post-`--no-wait` poll/inspect verb. Snapshot by default (running → identity+lifecycle echo, exit 0), `--wait` polls to terminal; terminal render + poll loop reuse ingest.go's renderIngestTerminal / pollIngestJob (no duplicated switch). Closes the PR #1618 loop the `--no-wait` hint now names.
     │   │   ├── list.go           # `meho connector list` (GET  /api/v1/connectors). List endpoint returns dict[str, list[dict]] (no response_model on the backend; per-row UUID serialisation), so a package-private listEntry decode lives here.
     │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review). `--prefer tenant|builtin|legacy` (#3799, #4889) is sent as `?prefer=` to pick a row when the id matches both a built-in and a tenant connector (`legacy` picks the tenant's old copy under a former product name); omitted, the 409 stays the default.
@@ -265,6 +266,8 @@ cli/
     │   │   ├── disable.go        # `meho connector disable <id>` (constructor only; logic in enable.go).
     │   │   ├── delete.go         # `meho connector delete <id>` (DELETE /api/v1/connectors/{id}, #4889) — removes the connector's operations and groups from the operator's own tenant; the built-in copy stays. Constructor only; logic in enable.go. The verb the list `next_step` and the `connector_legacy_tenant_copy` message name.
     │   │   ├── delete_test.go    # `delete` wiring, 204 --json envelope, 404 render.
+    │   │   ├── tenant_setting.go # `meho connector tenant-setting show|set|set-group` (#5029) — GET /{id}/tenant-settings, PUT /{id}/tenant-settings/operations/{op} and /groups/{key} with `--on|--off|--default`; turns built-in ops on or off for one tenant only. `--tenant-id` acts on another tenant (platform_admin). `review` prints the tenant setting in its `ten` column.
+    │   │   ├── tenant_setting_test.go # wire body (`enabled` true/false/null), `?tenant_id`, both values in the render.
     │   │   ├── connector_test.go # pure-function + typed-client mocked HTTP contract tests.
     │   │   └── prefer_test.go    # `--prefer` on review / enable-reads + the 409 connector_scope_ambiguous CLI error (#3799).
     │   ├── operation/         # G0.6-T13 #481 — `meho operation …` meta-tool surface.
@@ -345,6 +348,7 @@ cli/
     │   ├── netdiag.go         # shared DNS / TLS / unreachable classifier for client diagnostics (#3666).
     │   └── netdiag_test.go    # table tests + a real TLS failure.
     ├── output/
+    │   ├── audit_receipt.go   # Meho-Audit-Id header reader + the `audit receipt: <id>` line (#4976).
     │   ├── format.go          # human + JSON formatters + structured exit codes.
     │   └── format_test.go     # human/JSON/exit-code pinning.
     └── version/
@@ -801,6 +805,7 @@ field, so a response from an older backplane prints as it always did.
 | `Approvals: …` | `approvals` | `Approvals: a second person must approve; decisions on someone else's instruction are refused; approval key configured` |
 | `Features: …` | `features` | `Features: all configured` or `Features: not configured: agent_runtime (needs KEYCLOAK_ADMIN_CLIENT_ID)` |
 | `Sandbox mode: on …` | `sandbox_mode` | printed only when the mode is on (#4622) |
+| `Operation settings: written by release …` | `operation_catalog` | printed only when another release wrote the shared operation rows (#5019) |
 
 The DB line (`formatDB` in `internal/output/format.go`) uses the
 database revision and the revision this version expects, which the
@@ -843,6 +848,13 @@ readiness checks and the approval key state all come from one
      at login time. If refresh succeeds, retries the request once.
    * If refresh fails (no refresh_token, IdP rejected), surfaces
      `auth_expired`.
+   * A 401 whose `detail` is `missing_tenant_claim` (bare, or with
+     the explanation newer backplanes add) is checked first, by
+     `noTenantMessage` (#3872). The login worked but the token has no
+     tenant, so "run `meho login`" would be wrong. The CLI writes its
+     own text: the person is in no MEHO role group, ask the admin, and
+     the link to the guide `guides/tenant-bootstrap/`. Exit code stays
+     2 (`auth_expired`).
 4. **Check the version gap.** `printVersionSkew` reads the
    backplane's `GET /version` (3-second cap) and compares its
    `chart_version` with the CLI's build version
@@ -1033,6 +1045,39 @@ that header from one place, so every verb gets it without its own flag.
   keeps its own meaning. Only `MEHO_WORK_REF` reaches the header there.
 - No PersistentPreRun hooks exist below the root. If one is added, it
   must call `applyWorkRef` too (cobra runs only the nearest hook).
+
+## Audit receipt on writes with no body (#4976)
+
+Some write routes answer `204 No Content`. They have no body, so the
+audit id cannot come back in a JSON field the way `operation call`
+gets it. The backplane sends it in a response header instead:
+
+- The audit middleware (`backend/src/meho_backplane/audit.py`) puts
+  `Meho-Audit-Id: <id>` on every buffered response that has an audit
+  record. The id is the first `operation_execution` row the request
+  committed in the caller's name (for example the
+  `meho_connector_edit_group` row). A call allowed by a standing grant
+  saves an approval decision row before the operation runs; the header
+  still names the execution row, the same row as the body's `audit_id`.
+  When the request saved no execution row, it is the first other row it
+  saved in the caller's name (for example a decision row). When it saved
+  none, it is the request row the middleware wrote. A request with no record gets no header.
+- `output.AuditIDFromResponse` reads the header. `output.WriteAuditReceipt`
+  prints `audit receipt: <id>`. `dispatch.WriteAuditReceipt` calls it,
+  so the line is the same for every command.
+
+These commands print the line and put `audit_id` in their `--json`
+output: `connector edit-group`, `connector enable`, `connector disable`,
+`connector delete`, `sensor delete`, `dashboard delete`,
+`conventions delete`, `scheduler cancel` and `topology unannotate`.
+With an older backplane there is no header: the text output has no
+receipt line and `audit_id` is `null`.
+
+`meho audit query --audit-id <id>` returns the row the receipt names.
+`backend/tests/test_audit_wrapper_cutover.py` proves this with the
+wrapper-row cutover on and off, and
+`backend/tests/test_api_v1_connectors_ingest.py` for `edit-group` and
+`enable`.
 
 ## Doctor flow (`meho doctor`, #3666)
 
@@ -1408,7 +1453,9 @@ narrow-waist contract.
   MCP-only. Whenever the op resolved, the human output also prints one
   plain line with the risk level and what MEHO would do with this call
   for this caller and target (#3973 / #4923) — for example "Risk level:
-  dangerous. This call waits for approval." — and `--json` carries
+  dangerous. This call waits for approval. A second person must approve
+  it." The line says a second person must approve only for `dangerous`
+  and `destructive`, where that is always true (#4963). `--json` carries
   `safety_level`, `requires_approval`, `policy_verdict` and
   `policy_reason`. The verb exits 1 on a non-ok
   envelope (`status="error"` for input faults, `status="unavailable"` for
@@ -1592,9 +1639,8 @@ add` (Task #2862) for a single target without authoring a YAML file —
 the earlier blanket deferral of a standalone `create` verb (#1574 /
 #1559) is lifted for the single-target create case only. `meho targets
 update` (Task #3854) changes one target through `PATCH
-/api/v1/targets/{name}`. No standalone `delete` verb is surfaced yet,
-though the API supports `DELETE /api/v1/targets/{name}`
-(`tenant_admin`).
+/api/v1/targets/{name}`, and `meho targets delete` (Task #3943)
+removes one through `DELETE /api/v1/targets/{name}`.
 
 ### Subcommands
 
@@ -1640,6 +1686,25 @@ though the API supports `DELETE /api/v1/targets/{name}`
   cannot be both set and cleared (all exit 4). Server errors use the shared
   `renderHTTPStatus` ladder (404 near-misses, 409 ambiguous alias, 422
   body verbatim). Same `doAuthedRequest` plumbing as `add`.
+- `meho targets delete <name-or-alias> [--force] [--confirm]`
+  (Task #3943) — calls `DELETE /api/v1/targets/{name}` (`tenant_admin`).
+  The server soft-deletes: it sets `deleted_at`, so the row stays and
+  audit rows still point at it, but no read path or call finds it any
+  more. The system itself and its Vault secret are not touched. Without
+  `--confirm` the verb asks y/N on stdin first; closed stdin counts as
+  no, and a decline exits 0 without a request (`--json` prints
+  `{"name", "status": "declined", "force"}`). With `--json` the question
+  goes to the terminal, not to stdout or stderr, so both streams hold
+  only JSON; when a program pipes the answer in, no question is printed.
+  When topology nodes
+  (`graph_node` rows) still point at the target, the server answers 409
+  `target_has_references` with the count; the CLI turns it into a plain
+  message ("This target is linked from 3 topology nodes. The nodes
+  stay, but they will point at a deleted target. Run again with --force
+  to delete it anyway.", exit 4). `--force` sends `?force=true`; the
+  nodes stay and keep the deleted target's id. Any other 409
+  (ambiguous alias) and 404 near-misses go through the shared
+  `renderHTTPStatus` ladder. Same `doAuthedRequest` plumbing as `add`.
 - `meho targets list [--product P] [--limit N] [--cursor C]` — calls
   `GET /api/v1/targets`. Renders the operator's tenant-scoped targets
   as a `NAME / ALIASES / PRODUCT / HOST` table. Results are keyset-
@@ -1733,12 +1798,9 @@ verbatim.
 
 ### Out of scope (v0.2)
 
-- A standalone `delete` verb. The API supports
-  `DELETE /api/v1/targets/{name}` (`tenant_admin`); the CLI surfaces it
-  in a follow-up task when operators ask. Single-target **create** ships
-  as `meho targets add` (Task #2862) and single-target **update** as
-  `meho targets update` (Task #3854); bulk reconciliation of updates
-  stays with `meho targets import --update`.
+- Bulk delete. `meho targets delete` (Task #3943) removes one target
+  per call; bulk reconciliation of updates stays with
+  `meho targets import --update`.
 - Auto-completion of target names. Operators type names; tab-completion
   would need a separate `cobra-complete`-style design pass.
 - Client-side caching. Every CLI invocation hits the API fresh — the

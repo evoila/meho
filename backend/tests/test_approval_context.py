@@ -255,6 +255,36 @@ async def test_subject_none_without_identity_params(session: AsyncSession) -> No
     assert ctx.subject is None
 
 
+@pytest.mark.asyncio
+async def test_subject_from_preview_when_params_name_none(session: AsyncSession) -> None:
+    """``k8s.apply`` names its objects in the preview; the context uses that (#3877)."""
+    request = await _seed_request(
+        session,
+        op_id="k8s.apply",
+        connector_id="kubernetes-1.x",
+        params={"manifest": "kind: Deployment", "dry_run": "none"},
+        proposed_effect={
+            "op_id": "k8s.apply",
+            "preview": {"subject": "Deployment/prod/web, Service/prod/web"},
+        },
+    )
+    ctx = await resolve_reviewer_context(session, request)
+    assert ctx.subject == "Deployment/prod/web, Service/prod/web"
+
+
+@pytest.mark.asyncio
+async def test_preview_subject_not_used_for_credential_class_op(session: AsyncSession) -> None:
+    """A credential-class op gets no subject, even one named in its preview."""
+    request = await _seed_request(
+        session,
+        op_id="k8s.secret.create",
+        connector_id="kubernetes-1.x",
+        proposed_effect={"op_id": "k8s.secret.create", "preview": {"subject": "Secret/prod/db"}},
+    )
+    ctx = await resolve_reviewer_context(session, request)
+    assert ctx.subject is None
+
+
 # ---------------------------------------------------------------------------
 # Secret hygiene (the hard constraint)
 # ---------------------------------------------------------------------------

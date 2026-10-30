@@ -26,14 +26,15 @@ the source_kind="composite" persistence.
 Mixed safety posture
 --------------------
 
-The 17 read composites (the five T5 / #508 reads + the datastore
+The 19 read composites (the five T5 / #508 reads + the datastore
 cache-refresh read ``datastore.refresh`` / #3789 + the datastore file list
-``datastore.file.list`` / #3432 + the VM allocation read
+``datastore.file.list`` / #3432 + the vSAN folder list
+``datastore.vsan.folder.list`` / #4022 + the VM allocation read
 ``vm.resource_allocation.show`` / #3880 + the 4 guest-ops reads
 ``vm.guest.process.list`` / ``vm.guest.env.read`` / ``vm.guest.net.show``
 / ``vm.guest.file.read`` / #3100 + the Supervisor / namespace /
 storage-policy / content-library ``status`` + ``list`` reads) are
-read-only. 16 of them pass ``safety_level="safe"`` +
+read-only. 18 of them pass ``safety_level="safe"`` +
 ``requires_approval=False`` -- overrides of T4's ``dangerous`` / ``True``
 defaults. The exception is ``vm.guest.file.read``, promoted to
 ``caution`` in #3720 (it can fetch arbitrary guest bytes as the in-guest
@@ -115,6 +116,9 @@ from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
 )
 from meho_backplane.connectors.vmware_rest.composites._datastore_list import (
     datastore_file_list_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._datastore_vsan import (
+    datastore_vsan_folder_list_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
     cluster_drs_rule_delete_composite,
@@ -288,6 +292,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     DATASTORE_REFRESH_RESPONSE_SCHEMA,
     DATASTORE_USAGE_PARAMETER_SCHEMA,
     DATASTORE_USAGE_RESPONSE_SCHEMA,
+    DATASTORE_VSAN_FOLDER_LIST_PARAMETER_SCHEMA,
+    DATASTORE_VSAN_FOLDER_LIST_RESPONSE_SCHEMA,
     EVENT_TAIL_PARAMETER_SCHEMA,
     EVENT_TAIL_RESPONSE_SCHEMA,
     FOLDER_CREATE_PARAMETER_SCHEMA,
@@ -505,8 +511,10 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "placement filter (datastore.usage), and a read-side refresh of a "
         "single datastore's cached capacity/free-space via "
         "Datastore.RefreshDatastore (datastore.refresh) so a grown NFS "
-        "export becomes visible to a host without SSH/govc. These reads change "
-        "nothing. The "
+        "export becomes visible to a host without SSH/govc, and the vSAN folder "
+        "list (datastore.vsan.folder.list: top-level folders with friendly name, UUID "
+        "path, size and the VMs that use them, or the files of one folder). These reads "
+        "change nothing. The "
         "right group for 'where is this VM stored?', 'which datastores are "
         "running low?', 'how many VMs live on this datastore?', or 'the "
         "export grew but the datastore still shows the old free space'. "
@@ -817,6 +825,25 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="safe",
         requires_approval=False,
         llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS["vmware.composite.datastore.file.list"],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.datastore.vsan.folder.list",
+        handler=datastore_vsan_folder_list_composite,
+        summary="List the folders of a vSAN datastore, or the files in one folder.",
+        description=(
+            "Lists the top-level folders of a vSAN datastore with friendly name, UUID path, "
+            "size and the registered VMs that use each. With folder, lists the files in that "
+            "folder with size and last change; a missing folder answers 'absent'. Read-only."
+        ),
+        parameter_schema=DATASTORE_VSAN_FOLDER_LIST_PARAMETER_SCHEMA,
+        response_schema=DATASTORE_VSAN_FOLDER_LIST_RESPONSE_SCHEMA,
+        group_key="storage",
+        tags=["composite", "read-only", "storage", "datastore", "vsan", "vi-json"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS[
+            "vmware.composite.datastore.vsan.folder.list"
+        ],
     ),
     _CompositeSpec(
         op_id="vmware.composite.network.portgroup.audit",

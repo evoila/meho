@@ -33,6 +33,7 @@ import structlog
 from meho_backplane.connectors.vmware_rest._content_library_schemas import (
     CONTENT_LIBRARY_GROUP_KEY,
     CONTENT_LIBRARY_WHEN_TO_USE,
+    FIND_LIBRARY_CALL,
 )
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp
 
@@ -53,9 +54,8 @@ __all__ = [
 
 #: The two vCenter REST calls (``Content.Library_find`` /
 #: ``Content.Library.Item_find``), in the ``METHOD:/path`` form the ingest
-#: parser emits. The spec reconcile lane checks both against the pinned
-#: ``vcenter.yaml``.
-FIND_LIBRARY_CALL: Final = "POST:/content/library?action=find"
+#: parser emits. The library find is the shared :data:`FIND_LIBRARY_CALL`.
+#: The spec reconcile lane checks both against the pinned ``vcenter.yaml``.
 FIND_LIBRARY_ITEM_CALL: Final = "POST:/content/library/item?action=find"
 CONTENT_LIBRARY_FIND_REST_CALLS: Final = (FIND_LIBRARY_CALL, FIND_LIBRARY_ITEM_CALL)
 

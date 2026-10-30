@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Group text and response schemas of the typed content-library reads.
+"""Group text, the find call and response schemas of the typed content-library reads.
 
 The operations are in :mod:`.typed_ops_content_library`. This module imports
-nothing from the connector, so the composite registrar can share the group
-text without an import cycle.
+nothing from the connector, so the composites, the finds and the reads can
+share the group text and the find call id without an import cycle.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ __all__ = [
     "CONTENT_LIBRARY_GROUP_KEY",
     "CONTENT_LIBRARY_WHEN_TO_USE",
     "FILE_ROW_SCHEMA",
+    "FIND_LIBRARY_CALL",
     "ITEM_RESPONSE_SCHEMA",
     "LIBRARY_RESPONSE_SCHEMA",
     "OVF_OPTIONS_RESPONSE_SCHEMA",
@@ -24,6 +25,11 @@ __all__ = [
 ]
 
 CONTENT_LIBRARY_GROUP_KEY: Final = "content_library"
+
+#: The vendor call that finds libraries by name or type
+#: (``Content.Library_find``), in the ``METHOD:/path`` form the ingest parser
+#: emits. The composites, the typed find and the typed reads all send it.
+FIND_LIBRARY_CALL: Final = "POST:/content/library?action=find"
 
 #: Group text, shared by the typed content-library reads, the two typed finds
 #: (``typed_ops_content_library_find.py``) and the content-library composites

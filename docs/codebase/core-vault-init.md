@@ -83,8 +83,11 @@ The Secrets:
    - **New server:** `init` with one key share and threshold 1. Store the
      unseal key first, then the root token, then unseal. The key goes first:
      without it the server can never be unsealed again.
-   - **Server set up before:** wait until it is unsealed (up to 10 minutes;
-     in keyholder mode a person unseals it). If `<release>-core-vault-init`
+     Then wait until OpenBao is active (`sys/health` answers 200). Right
+     after an unseal it answers for a moment before it is active, and fails
+     most calls with HTTP 500 then.
+   - **Server set up before:** wait until it is unsealed and active (up to
+     10 minutes; in keyholder mode a person unseals it). If `<release>-core-vault-init`
      holds a root token that still works, an earlier run stopped halfway:
      go on with it. Else log in with the `kubernetes-sa` login. A left-over
      Secret with a revoked root token is deleted. If that login fails, the

@@ -119,6 +119,8 @@ class FakeBao:
         # reachable yet.
         self.jwks_errors = 0
         self.jwks_error = "error checking jwks URL"
+        # Health checks that answer "standby", as right after an unseal.
+        self.standby = 0
 
     def state(self) -> dict[str, Any]:
         return copy.deepcopy(
@@ -167,6 +169,15 @@ class FakeBao:
             return Reply(200, {"sealed": False})
         if path == "sys/seal-status":
             return Reply(200, {"sealed": self.sealed})
+        if path == "sys/health":
+            if not self.initialized:
+                return Reply(501, {"initialized": False})
+            if self.sealed:
+                return Reply(503, {"sealed": True})
+            if self.standby:
+                self.standby -= 1
+                return Reply(429, {"standby": True})
+            return Reply(200, {"standby": False})
         if self.sealed:
             return Reply(503, {"errors": ["Vault is sealed"]})
         if path == "auth/kubernetes-sa/login":
@@ -409,6 +420,21 @@ async def test_the_job_waits_until_openbao_answers(
 
     assert bao.root not in bao.tokens
     assert store.secrets[plan.unseal_secret] == {"key": bao.key}
+
+
+async def test_the_job_waits_until_openbao_is_active_after_the_unseal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(vault_init, "_POLL_S", 0)
+    plan = _plan(tmp_path)
+    bao, store = FakeBao(), FakeStore()
+    bao.standby = 2
+
+    await _run(plan, bao, store)
+
+    unseal = bao.calls.index(("PUT", "sys/unseal"))
+    assert bao.calls[unseal + 1 : unseal + 4] == [("GET", "sys/health")] * 3
+    assert bao.root not in bao.tokens
 
 
 async def test_the_job_waits_until_openbao_reads_keycloaks_keys(

@@ -15,7 +15,8 @@ changed setup starts a new Job under Helm, klipper-helm and Argo CD alike.
    A server that is already set up: the Job goes on with the root token
    from the short-lived Secret (an earlier run stopped halfway), else it
    logs in with its own service account (login ``kubernetes-sa``).
-2. It waits until the server is unsealed and Keycloak serves realm ``meho``.
+2. It waits until the server is unsealed and active, and Keycloak serves
+   realm ``meho``.
 3. It sets up the key-value store at ``secret/``, the ``jwt`` login that
    trusts Keycloak, the policies, the ``meho-mcp`` role with one group per
    tenant role, the ``meho-admin`` role, the ``kubernetes-sa`` login for
@@ -266,9 +267,18 @@ async def _answers(bao: Bao) -> bool:
     return await _seal_status(bao) is not None
 
 
-async def _unsealed(bao: Bao) -> bool:
-    status = await _seal_status(bao)
-    return status is not None and status.get("sealed") is False
+async def _active(bao: Bao) -> bool:
+    """True once OpenBao is unsealed and is the active node.
+
+    Right after an unseal it answers for a moment before it is active, and
+    fails most calls with HTTP 500 then. ``sys/health`` answers 200 only when
+    it is set up, unsealed and active.
+    """
+    try:
+        reply = await bao.call("GET", "sys/health")
+    except VaultInitError:
+        return False
+    return reply.status == 200
 
 
 @dataclass(frozen=True)
@@ -320,10 +330,13 @@ async def _open_session(plan: Plan, bao: Bao, store: SecretStore) -> _Session:
         await store.put(plan.init_secret, {"token": root})
         _say(f"OpenBao: initialised; unseal key in Secret {plan.unseal_secret}")
         _expect(await bao.call("PUT", "sys/unseal", json={"key": key}), 200, what="unseal failed")
+        await _wait(
+            lambda: _active(bao), f"OpenBao was not active {_WAIT_S} seconds after the unseal"
+        )
         return _Session(root, root=True, fresh=True)
 
     await _wait(
-        lambda: _unsealed(bao),
+        lambda: _active(bao),
         f"OpenBao is still sealed after {_WAIT_S} seconds. With the Secret "
         f"{plan.unseal_secret} the pod unseals itself; without it (keyholder mode) a "
         "person unseals it, and the Job runs again.",

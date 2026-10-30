@@ -55,8 +55,10 @@ REMOVE_FIREWALL = (
 # parts of the etcd account that the install created.
 SYSCTL_FILE = "/etc/sysctl.d/60-rke2-cis.conf"
 ETCD_RECORD = "/etc/meho/etcd-account"
-PASSWD = "root:x:0:0:root:/root:/bin/bash\n"
-GROUP = "root:x:0:\n"
+# The lines of /etc/passwd and /etc/group without the etcd account. The
+# names avoid "passwd", which CodeQL reads as a password.
+BASE_USERS = "root:x:0:0:root:/root:/bin/bash\n"
+BASE_GROUPS = "root:x:0:\n"
 ETCD_USER = "etcd:x:998:998:etcd user:/nonexistent:/sbin/nologin\n"
 ETCD_GROUP = "etcd:x:998:\n"
 KERNEL_LINE = (
@@ -769,8 +771,8 @@ class UninstallTests(HostTestCase):
         uninstall.write_text(RKE2_UNINSTALL_STUB)
         uninstall.chmod(0o755)
         self.host.host_file(SYSCTL_FILE, RKE2_CIS_SYSCTL)
-        self.host.host_file("/etc/passwd", PASSWD + ETCD_USER)
-        self.host.host_file("/etc/group", GROUP + ETCD_GROUP)
+        self.host.host_file("/etc/passwd", BASE_USERS + ETCD_USER)
+        self.host.host_file("/etc/group", BASE_GROUPS + ETCD_GROUP)
         self.host.host_file(ETCD_RECORD, etcd_record("user", "group"))
 
     def uninstall(self) -> subprocess.CompletedProcess[str]:
@@ -791,8 +793,8 @@ class UninstallTests(HostTestCase):
             *MEHO_COMMANDS,
         ):
             self.assertTrue(self.host.host_path(path).exists(), path)
-        self.assertEqual(PASSWD + ETCD_USER, self.host_text("/etc/passwd"))
-        self.assertEqual(GROUP + ETCD_GROUP, self.host_text("/etc/group"))
+        self.assertEqual(BASE_USERS + ETCD_USER, self.host_text("/etc/passwd"))
+        self.assertEqual(BASE_GROUPS + ETCD_GROUP, self.host_text("/etc/group"))
         calls = self.host.calls()
         for command in ("rke2-uninstall.sh", "userdel", "groupdel"):
             self.assertNotIn(command, calls)
@@ -859,8 +861,8 @@ class UninstallTests(HostTestCase):
     def test_the_etcd_user_and_group_that_the_install_created_go(self) -> None:
         result = self.uninstall()
 
-        self.assertEqual(PASSWD, self.host_text("/etc/passwd"))
-        self.assertEqual(GROUP, self.host_text("/etc/group"))
+        self.assertEqual(BASE_USERS, self.host_text("/etc/passwd"))
+        self.assertEqual(BASE_GROUPS, self.host_text("/etc/group"))
         calls = self.host.calls().splitlines()
         self.assertIn("userdel etcd", calls)
         # userdel removed the group with the user (USERGROUPS_ENAB yes).
@@ -886,8 +888,8 @@ class UninstallTests(HostTestCase):
 
         calls = self.host.calls().splitlines()
         self.assertLess(calls.index("userdel etcd"), calls.index("groupdel etcd"))
-        self.assertEqual(PASSWD, self.host_text("/etc/passwd"))
-        self.assertEqual(GROUP, self.host_text("/etc/group"))
+        self.assertEqual(BASE_USERS, self.host_text("/etc/passwd"))
+        self.assertEqual(BASE_GROUPS, self.host_text("/etc/group"))
         self.assertIn("[ok]   removed the etcd user and group that the install", result.stdout)
 
     def test_an_etcd_user_from_before_the_install_stays(self) -> None:
@@ -895,8 +897,8 @@ class UninstallTests(HostTestCase):
 
         result = self.uninstall()
 
-        self.assertEqual(PASSWD + ETCD_USER, self.host_text("/etc/passwd"))
-        self.assertEqual(GROUP, self.host_text("/etc/group"))
+        self.assertEqual(BASE_USERS + ETCD_USER, self.host_text("/etc/passwd"))
+        self.assertEqual(BASE_GROUPS, self.host_text("/etc/group"))
         self.assertNotIn("userdel", self.host.calls())
         self.assertIn("groupdel etcd\n", self.host.calls())
         self.assertIn(
@@ -914,8 +916,8 @@ class UninstallTests(HostTestCase):
 
         result = self.uninstall()
 
-        self.assertEqual(PASSWD + ETCD_USER, self.host_text("/etc/passwd"))
-        self.assertEqual(GROUP + ETCD_GROUP, self.host_text("/etc/group"))
+        self.assertEqual(BASE_USERS + ETCD_USER, self.host_text("/etc/passwd"))
+        self.assertEqual(BASE_GROUPS + ETCD_GROUP, self.host_text("/etc/group"))
         for command in ("userdel", "groupdel"):
             self.assertNotIn(command, self.host.calls())
         self.assertIn(
@@ -935,8 +937,8 @@ class UninstallTests(HostTestCase):
 
         result = self.uninstall()
 
-        self.assertEqual(PASSWD + ETCD_USER, self.host_text("/etc/passwd"))
-        self.assertEqual(GROUP + ETCD_GROUP, self.host_text("/etc/group"))
+        self.assertEqual(BASE_USERS + ETCD_USER, self.host_text("/etc/passwd"))
+        self.assertEqual(BASE_GROUPS + ETCD_GROUP, self.host_text("/etc/group"))
         for command in ("userdel", "groupdel"):
             self.assertNotIn(command, self.host.calls())
         self.assertIn(
@@ -948,8 +950,8 @@ class UninstallTests(HostTestCase):
         self.assertEqual(KERNEL_LINE, result.stdout.splitlines()[-1])
 
     def test_without_an_etcd_account_nothing_is_said_about_it(self) -> None:
-        self.host.host_file("/etc/passwd", PASSWD)
-        self.host.host_file("/etc/group", GROUP)
+        self.host.host_file("/etc/passwd", BASE_USERS)
+        self.host.host_file("/etc/group", BASE_GROUPS)
 
         result = self.uninstall()
 
@@ -1070,10 +1072,10 @@ class InstallUpdateUninstallTests(InstallTestCase):
     def test_an_account_from_before_the_install_stays_through_update_and_uninstall(
         self,
     ) -> None:
-        passwd = PASSWD + "etcd:x:991:991::/nonexistent:/sbin/nologin\n"
-        group = GROUP + "etcd:x:991:\n"
-        self.machine.host_file("/etc/passwd", passwd)
-        self.machine.host_file("/etc/group", group)
+        users = BASE_USERS + "etcd:x:991:991::/nonexistent:/sbin/nologin\n"
+        groups = BASE_GROUPS + "etcd:x:991:\n"
+        self.machine.host_file("/etc/passwd", users)
+        self.machine.host_file("/etc/group", groups)
         self.assert_succeeds(self.machine.run())
         self.update()
         self.assertFalse(self.machine.host_path(ETCD_RECORD).exists())
@@ -1081,8 +1083,8 @@ class InstallUpdateUninstallTests(InstallTestCase):
         result = run_installed_meho_host(self.machine, "uninstall")
 
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        self.assertEqual(passwd, self.etc_text("passwd"))
-        self.assertEqual(group, self.etc_text("group"))
+        self.assertEqual(users, self.etc_text("passwd"))
+        self.assertEqual(groups, self.etc_text("group"))
         self.assertIn("[note] kept the etcd user and group:", result.stdout)
         self.assertNotIn("userdel", self.machine.calls())
 

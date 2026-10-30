@@ -35,14 +35,16 @@ client polls land in #2499; the long-poll command plane in #2498.
   central endpoints (#2499 imports these; it may widen them here, and
   must not fork a parallel copy — one codebase, one schema). Their
   version is `SCHEMA_VERSION` (the wire version); see "Wire version
-  check" below for how both sides use it:
+  check" below for how both sides use it, and "Connector package set
+  check" for the package set digest:
   - `RunnerAssignment` — `assignment_version` (an opaque content digest
     the runner uses only as a cache key; the digest contract is #2499's)
     plus `items`.
   - `RunnerWorkItem` — one authorized op: `check_ref`, `op_id`,
     `(product, version, impl_id)`, `handler_ref`, `params`,
-    `safety_level`, a `RunnerPrincipal`, and an optional
-    `ResolvedTargetDescriptor`.
+    `safety_level`, a `RunnerPrincipal`, an optional
+    `ResolvedTargetDescriptor`, and `package_set` (the connector package
+    set digest the item needs; `None` for an op built into MEHO).
   - `ResolvedTargetDescriptor` — the centrally-resolved target
     attributes a connector handler duck-reads (the runner has no local
     target table). v1 carries `name` / `product` / `version` /
@@ -60,7 +62,9 @@ client polls land in #2499; the long-poll command plane in #2498.
   `RunnerConfigError` naming the variable.
 - **`RunnerClient`** (`runner.client`) — an `httpx.AsyncClient` wrapper
   for the two calls (`fetch_assignment`, `post_results`). Every request
-  carries the wire version in the `X-MEHO-Runner-Wire-Version` header.
+  carries the wire version in the `X-MEHO-Runner-Wire-Version` header
+  and the connector package set digest in the `X-MEHO-Runner-Package-Set`
+  header.
   Both calls raise `RunnerClientError` on any transport or non-success
   status, and its subclass `RunnerWireVersionMismatchError` when central
   refuses the wire version; a `304` fetch returns the
@@ -114,26 +118,29 @@ before the tick ends.
 `execute_work_item` is fail-closed defence in depth (the real
 authorization boundary is central minting, #2500):
 
-1. Classify the item's `safety_level` against the shared satellite-mint
+1. Refuse an item whose `package_set` differs from the runner's own
+   connector package set digest (see "Connector package set check"
+   below). The refusal names both digests.
+2. Classify the item's `safety_level` against the shared satellite-mint
    tier ladder (see below) and refuse anything but a `SAFE`-tier item —
    an `EXCLUDED` (`dangerous`/`destructive`) item outright, a `remote-write`
    (`caution`) item through the fail-closed edge re-check.
-2. Refuse any `handler_ref` not lexically under
+3. Refuse any `handler_ref` not lexically under
    `meho_backplane.connectors.` — checked **before** import (import has
    module-load side effects) and re-checked on the resolved callable's
    `__module__`.
-3. Resolve the handler via `import_handler` (dotted-path import + getattr
+4. Resolve the handler via `import_handler` (dotted-path import + getattr
    walk, no DB). Rebind a bound-method handler against its connector
    instance via `is_unbound_method` + `get_or_create_connector_instance`
    (the dispatcher's own rebinding steps, minus the DB descriptor lookup;
    the connector class comes from the in-memory registry keyed on the
    payload's `(product, version, impl_id)`). Module-level handlers such
    as `net.*` need no rebinding.
-4. Reconstruct the acting `Operator` from the principal context with an
+5. Reconstruct the acting `Operator` from the principal context with an
    empty `raw_jwt` (no bearer token for the acting principal exists on
    the runner; the op was authorized centrally). Build the duck-typed
    target from the descriptor (`None` for targetless ops).
-5. Invoke `handler(operator, target, params)`. A handler exception
+6. Invoke `handler(operator, target, params)`. A handler exception
    becomes a structured `error` result — a failed check is a result,
    never a crashed tick.
 
@@ -519,6 +526,65 @@ visible instead of letting one side misread the other's messages.
   drop unknown fields without a message (the pydantic default), so any
   change a runner must not silently ignore needs a `SCHEMA_VERSION` bump.
 
+## Connector package set check (#5038)
+
+A MEHO image can carry connector packages (see
+[connector-packages.md](connector-packages.md)). A runner may run another
+image than the central MEHO, so it may lack the code of an operation the
+central MEHO assigns to it. Before this check the runner only failed with a
+vague `handler_unresolved`. Now both sides compare the **package set
+digest** and say which digests differ.
+
+- **The digest.** `runner/package_set.py::package_set_digest` is
+  `sha256:` and the SHA-256 hex digest over the sorted
+  `(name, version, wheel digest)` entries of the allowlist file. Folder
+  names are left out; the wheel digest covers the files. The plain image
+  has no allowlist file, so its digest is `EMPTY_PACKAGE_SET_DIGEST` (the
+  digest of an empty list). `local_package_set()` reads the file once per
+  process; the start-up folder check has already checked the same file.
+- **What the runner sends.** `RunnerClient` sends its digest on every call
+  in the `X-MEHO-Runner-Package-Set` header, next to the wire version.
+- **What central stores.** The `auth/runner_guard.py::runner_package_set`
+  dependency reads the header on all four runner-plane routes. A missing
+  header counts as `EMPTY_PACKAGE_SET_DIGEST`: every runner built before
+  the header existed ran an image without connector packages. A value in
+  another shape gets HTTP 400 `runner_package_set_invalid`.
+  `assert_runner_scope` stores the digest in
+  `runner_principal.package_set_digest` (migration `0124`). The header
+  never refuses a call by itself.
+- **What central assigns.** `materialize_assignment` sets
+  `RunnerWorkItem.package_set` to central's own digest when the item's
+  `handler_ref` lies in a connector folder that a listed package installed.
+  When the runner sent another digest, the item is left out of that
+  runner's assignment. Central logs `assignment_item_dropped` with
+  `reason=connector_package_set_mismatch`, the package name,
+  `runner_package_set` and `central_package_set`. An op built into MEHO
+  has `package_set = None` and runs on any runner.
+- **What the runner checks.** `execute_work_item` refuses an item whose
+  `package_set` differs from the runner's own digest, before any import.
+  The result is `refused` with the text of `package_set_mismatch_message`,
+  for example `connector_package_set_mismatch: the work item needs
+  connector package set sha256:..., the runner has sha256:...: run the
+  runner on an image with the same connector packages as the central
+  MEHO`. The runner logs it as `runner_item_refused`. The connector-tree
+  check on `handler_ref` stays.
+- **Where an operator sees it.** `GET /api/v1/runner-principals`,
+  `meho runner-principal list` (column `PACKAGES`, the start of the
+  digest; `-o json` has all of it) and the `/ui/runners` page ("Connector
+  packages" column) show the digest each runner sent last. The page marks
+  a digest that differs from central's.
+- **No wire version bump.** `package_set` is a new field that a runner
+  must act on, but central only sets it for a runner that sent the same
+  digest. An older runner sends no digest, which counts as no packages, so
+  it never gets an item with the field set.
+- **Strict on purpose.** The digest covers the whole set. A runner whose
+  set differs from central's in any package gets no package work at all,
+  also for a package both sides have.
+- **Scope.** The check is on the recurring assignment path, the path that
+  hands work items to the runner. The long-poll command envelope
+  (`GatewayCommandEnvelope`) carries no `handler_ref`, so it has nothing
+  to check.
+
 ## Dead-man switch + mandatory heartbeat (#2501)
 
 A runner that dies, wedges, or loses its network path must not leave its
@@ -595,7 +661,8 @@ the same in-process `RunnerPrincipalService.list_` the Bearer
 `stale_at` via `gateway/repository.py::get_stale_markers`; liveness is
 rendered from persisted state, never recomputed client-side. A "Wire
 version" column shows the version each runner sent last and marks one
-that differs from central's (#5020). To carry the
+that differs from central's (#5020). A "Connector packages" column does
+the same for the package set digest (#5038). To carry the
 liveness signal off the row, `RunnerPrincipalRead` gained an additive
 `last_seen_at` field (#2589) — every accessor already projects it from the
 ORM row via `from_attributes`, so the CLI `runner-principal list` /

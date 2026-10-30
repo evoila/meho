@@ -715,7 +715,7 @@ async def test_gcloud_e2e_audit_params_hash_field_present_in_all_ops() -> None:
 
 @pytest.mark.asyncio
 async def test_gcloud_e2e_all_ops_have_op_id_registered() -> None:
-    """All 9 GCLOUD_OPS have op_id and handler_attr — audit op_id binding verified.
+    """All GCLOUD_OPS have op_id and handler_attr — audit op_id binding verified.
 
     The dispatcher writes ``payload['op_id'] = op_id`` into the audit row.
     This test pins the full op_id registry to catch regressions where an op
@@ -732,6 +732,11 @@ async def test_gcloud_e2e_all_ops_have_op_id_registered() -> None:
         "gcloud.compute.subnetworks.list",
         "gcloud.iam.policy.read",
         "gcloud.iam.service_account_keys.list",
+        "gcloud.iam.workload_identity_pools.list",
+        "gcloud.iam.workload_identity_pools.providers.list",
+        "gcloud.iam.workload_identity_pools.delete",
+        "gcloud.iam.service_accounts.policy.read",
+        "gcloud.iam.service_accounts.binding.remove",
     }
     registered_op_ids = {op.op_id for op in GCLOUD_OPS}
     assert registered_op_ids == expected_op_ids, (

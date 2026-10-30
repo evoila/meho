@@ -117,10 +117,11 @@ _ALL_ON = [
 ]
 
 # The pods that render with `_ALL_ON`, so a part that silently stops
-# rendering cannot make the checks below pass on fewer pods.
+# rendering cannot make the checks below pass on fewer pods. With the
+# built-in PostgreSQL on, the migration is the `migrate` init container of
+# `Deployment/test-meho`, not a Job (#5233); `_images` covers init containers.
 _EXPECTED_PODS = {
     "Deployment/test-meho",
-    "Job/test-meho-migrate",
     "Job/test-core-secrets",
     "Job/test-core-bootstrap",
     "StatefulSet/test-postgres",

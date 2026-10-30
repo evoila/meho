@@ -72,6 +72,7 @@ from meho_backplane.ui.routes.connectors.forms_router import build_forms_router
 from meho_backplane.ui.routes.connectors.import_router import build_import_router
 from meho_backplane.ui.routes.connectors.ingest_router import build_ingest_router
 from meho_backplane.ui.routes.connectors.list_view import build_list_router
+from meho_backplane.ui.routes.connectors.overrides_view import build_overrides_router
 from meho_backplane.ui.routes.connectors.probe import build_probe_router
 from meho_backplane.ui.routes.connectors.registry_actions import build_registry_actions_router
 from meho_backplane.ui.routes.connectors.registry_list import build_registry_list_router
@@ -139,6 +140,9 @@ def build_router() -> APIRouter:
     router.include_router(build_list_router())
     router.include_router(build_forms_router())
     router.include_router(build_import_router())
+    # #4711: literal ``/ui/connectors/overrides`` must win over the
+    # ``GET /ui/connectors/{name}`` detail catch-all.
+    router.include_router(build_overrides_router())
     router.include_router(build_registry_list_router())
     router.include_router(build_ingest_router())
     router.include_router(build_registry_actions_router())

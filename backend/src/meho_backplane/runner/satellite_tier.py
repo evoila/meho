@@ -166,7 +166,7 @@ def parse_runner_allowlist(raw: str) -> tuple[RemoteWriteAllowEntry, ...]:
     ``op_pattern@target_scope`` tokens (``@`` omitted ⇒ ``target_scope='*'``);
     blank tokens are skipped. Deliberately trivial + stdlib-only so it never
     pulls the central stack onto the edge. Example:
-    ``"vmware.vm.tag_set@*,vmware.vm.annotation_set"``.
+    ``"k8s.label@*,k8s.annotate"``.
     """
     entries: list[RemoteWriteAllowEntry] = []
     for token in raw.split(","):

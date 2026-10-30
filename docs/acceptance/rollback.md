@@ -140,6 +140,65 @@ should run, and the result is recorded in the closing-comment
 artefact on issue #57 instead of in the verifier's exit code. Same
 posture as `install-verify.sh`'s authenticated audit-row check.
 
+## What an update and a rollback do to the operation rows
+
+MEHO keeps the settings of every built-in operation in shared database
+rows: which code runs, the parameter rules, the risk level and the
+approval flag. All MEHO pods read the same rows. Every start writes them
+from the code of the release that starts.
+
+**A start that fails changes no row (#5019).** The start writes all
+operation rows in one database transaction. It commits that transaction
+only as its last step, after every start-up check passed and every
+background loop (the sweepers, the scheduler, the check runner) started.
+When a check, the write itself, the start of a loop or the final
+commit fails, the transaction is undone: the rows stay as the previous release left them,
+and the loops that already started are stopped again. The log then shows
+`operation_catalog_unchanged`.
+
+**The rows say which release wrote them.** In the same transaction the
+start stores its release (the commit hash, `git_sha` of `GET /version`)
+in the one-row table `operation_catalog_state`. `GET /api/v1/health`
+and the MCP tool `meho_status` show it as `operation_catalog`:
+
+| `state` | Meaning |
+| --- | --- |
+| `same_release` | This pod's release wrote the rows. All is well. |
+| `other_release` | Another release wrote the rows. This pod serves settings that were not made for its code. When the health status is read (`GET /api/v1/health`, `meho_status`), the pod logs `operation_catalog_written_by_other_release`, and `meho status` prints one line. Nothing checks it on its own, so no log line appears until someone reads the health status. |
+| `not_recorded` | No start since this check shipped has written the rows yet. |
+| `unknown` | The database could not be read. The `db` field says more. |
+
+**What still happens during an update.** The chart uses Kubernetes'
+rolling update today. The new pod starts while the old pod still serves.
+When the new pod has started, it has written its rows, so the old pod
+serves the new rows until it stops. This is also true when the new pod
+then never becomes ready (for example Keycloak or Vault cannot be
+reached): its start did not fail, so its rows stay. `/ready` does not
+look at the operation rows.
+
+**What to do when a pod reports `other_release`:**
+
+1. Check which releases run: `kubectl get pods -n <ns> -l app.kubernetes.io/instance=<release> -o wide`
+   and `GET /version` on each pod.
+2. While an update is still in progress, wait until it has finished.
+   The old pods stop, and the new pods report `same_release`.
+3. After a `helm rollback`, or when only pods of one release should run
+   but the rows were written by another release: restart the pods of
+   the release you want to keep, for example
+   `kubectl rollout restart deployment -n <ns> -l app.kubernetes.io/instance=<release>`. Each start
+   writes that release's rows again. Then check that `GET /api/v1/health`
+   shows `same_release`.
+
+A release from before this check does not write `operation_catalog_state`.
+After a rollback to such a release, its restarts rewrite the operation
+rows, but the table still names the newer release. Only the newer
+release reads the table, so the old release is not affected.
+
+A restart does not remove rows that only the other release knows. They
+stay on purpose (an older release must not delete operations a newer
+release owns), and calls to them fail with `handler_unreachable` until
+that release runs again.
+
 ## What failure looks like
 
 The verifier exits non-zero on the first failed check and prints a

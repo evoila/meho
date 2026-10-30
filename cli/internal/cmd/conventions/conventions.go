@@ -148,6 +148,8 @@ func newAuthedClient(ctx context.Context, backplaneURL string) (*api.AuthedClien
 type rawResponse struct {
 	StatusCode int
 	Body       []byte
+	// AuditID is the Meho-Audit-Id response header (#4976), nil when absent.
+	AuditID *string
 }
 
 // readAllBody drains rsp.Body up to the responseBodyCap, closing the
@@ -217,7 +219,7 @@ func doRequest(
 	if err != nil {
 		return nil, err
 	}
-	return &rawResponse{StatusCode: rsp.StatusCode, Body: raw}, nil
+	return &rawResponse{StatusCode: rsp.StatusCode, Body: raw, AuditID: output.AuditIDFromResponse(rsp)}, nil
 }
 
 // renderRequestError translates a transport-layer request error into

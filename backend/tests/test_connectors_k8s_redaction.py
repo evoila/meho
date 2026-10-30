@@ -200,10 +200,29 @@ def test_last_applied_annotation_on_secret_is_redacted() -> None:
     out = redact_kubernetes_payload(secret)
     annotations = out["metadata"]["annotations"]
     assert annotations[LAST_APPLIED_ANNOTATION].startswith(REDACTED_PREFIX)
-    assert annotations["owner"] == "team-a"
+    assert annotations["owner"] == redact_secret_value("team-a")
     assert _TLS_KEY_B64 not in str(out)
     # The annotation on a non-Secret object stays as it is.
     config_map = {"kind": "ConfigMap", "metadata": {"annotations": {LAST_APPLIED_ANNOTATION: "x"}}}
+    assert redact_kubernetes_payload(config_map) == config_map
+
+
+def test_every_annotation_value_on_secret_is_redacted_keys_kept() -> None:
+    """Any annotation can hold a copy of the manifest, so all values are hidden."""
+    secret = _make_secret()
+    secret["metadata"]["annotations"] = {
+        "owner": "platform-group",
+        "deploy-tool.example/original": f'{{"data":{{"app-token":"{_APP_TOKEN_B64}"}}}}',
+    }
+    out = redact_kubernetes_payload(secret)
+    annotations = out["metadata"]["annotations"]
+    assert set(annotations) == {"owner", "deploy-tool.example/original"}
+    assert all(value.startswith(REDACTED_PREFIX) for value in annotations.values())
+    assert _APP_TOKEN_B64 not in str(out)
+    assert "platform-group" not in str(out)
+    # The same annotations on a non-Secret object stay as they are.
+    config_map = {"kind": "ConfigMap", "metadata": {"annotations": dict(annotations)}}
+    config_map["metadata"]["annotations"]["owner"] = "platform-group"
     assert redact_kubernetes_payload(config_map) == config_map
 
 
@@ -257,6 +276,26 @@ def test_custom_resource_row_secret_surfaces_redacted_data_with_digest() -> None
     assert _STRINGDATA_PLAINTEXT not in str(row)
 
 
+def test_custom_resource_row_secret_keeps_annotation_keys_but_hides_values() -> None:
+    """A Secret row shows its annotation keys, never their values."""
+    secret = _make_secret()
+    secret["metadata"]["annotations"] = {
+        LAST_APPLIED_ANNOTATION: f'{{"data":{{"tls.key":"{_TLS_KEY_B64}"}}}}',
+        "owner": "platform-group",
+        "deploy-tool.example/original": f'{{"data":{{"app-token":"{_APP_TOKEN_B64}"}}}}',
+    }
+    row = custom_resource_row(secret)
+    assert set(row["annotations"]) == {"owner", "deploy-tool.example/original"}
+    assert row["annotations"]["owner"] == redact_secret_value("platform-group")
+    assert all(value.startswith(REDACTED_PREFIX) for value in row["annotations"].values())
+    assert row["annotations_truncated"] is False
+    assert row["status_excerpt"] is None
+    assert row["data"]["tls.key"].startswith(REDACTED_PREFIX)
+    assert _TLS_KEY_B64 not in str(row)
+    assert _APP_TOKEN_B64 not in str(row)
+    assert "platform-group" not in str(row)
+
+
 def test_custom_resource_row_non_secret_has_no_data_fields() -> None:
     row = custom_resource_row(
         {"apiVersion": "v1", "kind": "IPAddressPool", "metadata": {"name": "default"}}
@@ -273,15 +312,12 @@ def test_custom_resource_row_non_secret_has_no_data_fields() -> None:
 @pytest.mark.asyncio
 async def test_cr_info_of_secret_returns_no_bytes_but_keeps_keys() -> None:
     connector = _make_connector()
-    with (
-        patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
-            new_callable=AsyncMock,
-            return_value=MagicMock(close=AsyncMock()),
-        ),
-        patch("meho_backplane.connectors.kubernetes.connector.client.CustomObjectsApi") as co_cls,
+    api_client = MagicMock(close=AsyncMock(), call_api=AsyncMock(return_value=_make_secret()))
+    with patch(
+        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        new_callable=AsyncMock,
+        return_value=api_client,
     ):
-        co_cls.return_value.get_namespaced_custom_object = AsyncMock(return_value=_make_secret())
         result = await connector.k8s_cr_info(
             _make_operator(),
             _TARGET,
@@ -304,19 +340,21 @@ async def test_cr_info_of_secret_returns_no_bytes_but_keeps_keys() -> None:
 @pytest.mark.asyncio
 async def test_cr_list_of_secrets_returns_no_bytes_in_envelope() -> None:
     connector = _make_connector()
-    with (
-        patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
-            new_callable=AsyncMock,
-            return_value=MagicMock(close=AsyncMock()),
-        ),
-        patch("meho_backplane.connectors.kubernetes.connector.client.CustomObjectsApi") as co_cls,
+    # The API server does not repeat ``kind`` on the items of a SecretList;
+    # only the list carries it. The rows must still be redacted.
+    items = []
+    for _ in range(2):
+        item = _make_secret(namespace="team-a")
+        del item["kind"]
+        del item["apiVersion"]
+        items.append(item)
+    list_resp = {"apiVersion": "v1", "kind": "SecretList", "items": items}
+    api_client = MagicMock(close=AsyncMock(), call_api=AsyncMock(return_value=list_resp))
+    with patch(
+        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        new_callable=AsyncMock,
+        return_value=api_client,
     ):
-        co_cls.return_value.list_namespaced_custom_object = AsyncMock(
-            return_value={
-                "items": [_make_secret(namespace="team-a"), _make_secret(namespace="team-a")]
-            }
-        )
         result = await connector.k8s_cr_list(
             _make_operator(),
             _TARGET,
@@ -325,6 +363,7 @@ async def test_cr_list_of_secrets_returns_no_bytes_in_envelope() -> None:
 
     assert result["total"] == 2
     for row in result["rows"]:
+        assert row["kind"] == "Secret"
         assert row["data"]["tls.key"] == redact_secret_value(_TLS_KEY_B64)
     # No base64 value survives anywhere in the rows/total envelope.
     assert _TLS_KEY_B64 not in str(result)

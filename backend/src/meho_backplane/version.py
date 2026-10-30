@@ -37,7 +37,13 @@ from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.connector_packages import ConnectorPackage, installed_connector_packages
 
-__all__ = ["VersionResponse", "deployed_version_label", "router"]
+__all__ = [
+    "VersionResponse",
+    "build_git_sha",
+    "deployed_version_label",
+    "router",
+    "running_release_id",
+]
 
 _UNKNOWN: str = "unknown"
 
@@ -59,6 +65,16 @@ class VersionResponse(BaseModel):
     build_date: str
     chart_version: str | None
     connector_packages: list[ConnectorPackage] = []
+
+
+def build_git_sha() -> str:
+    """Return the commit hash of the running build, or ``"unknown"``.
+
+    The release identity ``GET /version`` reports as ``git_sha``. The
+    operation catalog stamp (:mod:`meho_backplane.operations.catalog_release`)
+    uses the same value, so both name a release the same way.
+    """
+    return os.environ.get("GIT_SHA") or _UNKNOWN
 
 
 def deployed_version_label() -> str:
@@ -92,6 +108,25 @@ def deployed_version_label() -> str:
     return _UNKNOWN
 
 
+def running_release_id() -> str | None:
+    """Return the identity of the running release, or ``None`` when unknown.
+
+    An approval request is bound to this value (#5030): a person approves
+    one exact release of MEHO. The value is the full ``GIT_SHA`` plus the
+    ``CHART_VERSION`` when it is set, the same values ``GET /version``
+    shows. ``None`` when ``GIT_SHA`` is unset or ``unknown``: only a local
+    development run has no release identity, and then MEHO does not bind
+    or check a release.
+    """
+    git_sha = os.environ.get("GIT_SHA")
+    if not git_sha or git_sha == _UNKNOWN:
+        return None
+    chart_version = os.environ.get("CHART_VERSION")
+    if chart_version:
+        return f"{git_sha} (chart {chart_version})"
+    return git_sha
+
+
 @router.get("/version", response_model=VersionResponse)
 async def version() -> VersionResponse:
     """Return the build-identity payload and the installed connector packages.
@@ -102,7 +137,7 @@ async def version() -> VersionResponse:
     empty for the plain public image.
     """
     return VersionResponse(
-        git_sha=os.environ.get("GIT_SHA") or _UNKNOWN,
+        git_sha=build_git_sha(),
         build_date=os.environ.get("BUILD_DATE") or _UNKNOWN,
         chart_version=os.environ.get("CHART_VERSION") or None,
         connector_packages=list(installed_connector_packages()),

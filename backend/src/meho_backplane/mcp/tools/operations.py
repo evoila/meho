@@ -57,7 +57,12 @@ from __future__ import annotations
 from typing import Any
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools._call_operation_async import poll_call, submit_async_call
 from meho_backplane.operations.meta_tools import (
@@ -184,16 +189,19 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="list_operation_groups",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "List enabled operation groups for a connector. Each group "
             "carries a `when_to_use` blurb explaining what the group is "
             "for so you can pick the right group before searching its "
-            "operations. Call this FIRST when you don't know which "
+            "operations. A group can hold reads and writes. Check each "
+            "operation's `safety_level` in the `search_operations` results. "
+            "Call this FIRST when you don't know which "
             "operation to invoke -- it narrows the search space from "
             "hundreds of operations to a handful of relevant ones. "
             "Argument: `connector_id` in `<impl_id>-<version>` form "
-            '(e.g. "vmware-rest-9.0", "vault-1.x") -- NOT the bare '
+            '(e.g. "k8s-1.x", "vault-1.x") -- NOT the bare '
             "product name. Returns groups in `group_key` order. An "
             "UNKNOWN connector_id is an error (no such connector, "
             "`-32602` with `data.reason=unknown_connector`); a "
@@ -219,7 +227,7 @@ register_mcp_tool(
                     "type": "string",
                     "description": (
                         "Connector identifier in the form "
-                        '`<impl_id>-<version>` (e.g. "vmware-rest-9.0", '
+                        '`<impl_id>-<version>` (e.g. "k8s-1.x", '
                         '"vault-1.x") -- NOT the bare product name. A '
                         "value naming no registered connector is an error."
                     ),
@@ -427,6 +435,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="search_operations",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Hybrid BM25 + cosine retrieval over a connector's enabled "
@@ -572,7 +581,7 @@ register_mcp_tool(
                     "minLength": 1,
                     "description": (
                         "Operation id from `search_operations`, e.g. "
-                        '"vault.kv.read" or "GET:/api/vcenter/cluster".'
+                        '"vault.kv.read" or "GET:/repos/{owner}/{repo}/issues".'
                     ),
                 },
                 "target": {
@@ -747,6 +756,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="preview_operation",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Preview an operation WITHOUT running it. Resolves the same "
@@ -796,7 +806,7 @@ register_mcp_tool(
                     "description": (
                         "Operation id as returned by `search_operations`. "
                         'Examples: "POST:/repos/{owner}/{repo}/issues", '
-                        '"GET:/api/vcenter/cluster".'
+                        '"GET:/repos/{owner}/{repo}/pulls".'
                     ),
                 },
                 "target": {

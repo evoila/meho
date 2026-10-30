@@ -94,6 +94,96 @@ terminal, so it cannot be approved (the pending guard raises
 `ApprovalRequestAlreadyDecidedError`) — an expired run-bound request can
 never be claimed or re-dispatched (#2293).
 
+## An approval covers one exact release (#5030)
+
+A person approves one exact release of MEHO. When MEHO is updated, every
+request that still waits from an older release ends, and the requester
+asks again under the new release. MEHO is updated about every week, and a
+request can wait up to 14 days, so an update often ends waiting requests.
+This costs one more approval for a request that waits across an update.
+It is the simple and strict choice.
+
+**What MEHO records.** `create_pending_request` stores the running
+release on the new column `approval_request.release_id` (migration
+`0126`). The value comes from `version.running_release_id()`: the full
+commit hash (`GIT_SHA`), plus the chart version (`CHART_VERSION`) when it
+is set. These are the same values `GET /version` shows.
+
+**At start-up.** `main._run_lifespan_startup` calls
+`approval_expiry.expire_approvals_from_older_release()`. For each tenant
+it calls `approval_queue.expire_older_release_requests()`, which moves
+every `pending` request whose `release_id` is not the running release to
+`expired`. A request with no `release_id` (saved before this change)
+counts as an older release, so the first start with this change ends it
+too. The expiry reuses the TTL path (`_expire_request`): one
+`approval.decision` audit row each, under `system:approval-expiry`, with
+`reason: "release_changed"`, `request_release` and `running_release` in
+the payload. A request already past its deadline expires as the TTL sweep
+would expire it, with no extra reason. This runs whether or not
+`APPROVAL_EXPIRY_ENABLED` is set: it is part of the approval rule, not the
+TTL clean-up. A failure is logged and the start goes on; the check below
+still stops any old approval from running.
+
+**Before an approved run.** Both resume paths call
+`approval_queue.refuse_resume_if_release_changed()` before they run
+anything: the operator surfaces (`resume_dispatch_after_approval`) and the
+in-process agent waiter (`agent/approval_wait.py`). When the request's
+`release_id` is not the running release, the operation does not run and
+the vendor gets no call:
+
+1. The one-resumer claim (`claim_resume`) is taken, so the request can
+   never run later. If another resumer took it first, the usual
+   `already_resumed` result comes back. The claim winner then deletes the
+   request's stored run input (`approval_handoff.discard`), the same as
+   every other way a request ends.
+2. One audit row records the refusal: `path = "approval.resume"`,
+   `status_code = 409`, `result_status = "release_changed_while_waiting"`,
+   both releases in the payload.
+3. The caller gets a `denied` result with
+   `error_code = "release_changed_while_waiting"`, and the refusal is
+   stored as the request's run result. So every read surface shows
+   `result_state = "failed"` with that error code.
+
+This covers a request that was approved just before an update and had
+not run yet. A remote-write mint for a satellite runner checks the same
+rule: an approval from an older release mints nothing
+(`REMOTE_WRITE_GATE_UNSATISFIED`, logged like the other mint refusals,
+and the approval stays unused).
+
+**No release identity.** A build with no `GIT_SHA` (or `GIT_SHA=unknown`)
+has no release identity. Only local development runs like this; every
+published image sets `GIT_SHA`. Then MEHO stores no `release_id`, ends no
+request at start-up, and refuses no run. The start-up check logs one
+`approval_release_binding_off` warning so this is visible. A request made in such a run has
+no `release_id`, so the first start of a real release ends it.
+
+**What the requester sees.** The read views (REST
+`ApprovalRequestView`, the MCP approvals tools, the console) carry three
+added fields: `release_id`, `expired_reason` (`deadline_passed` or
+`release_changed`, only for an `expired` request) and `expired_message`,
+a plain sentence with the advice to ask again. `meho approvals show`
+prints `Release:` and `Expired:` lines. The reason is read off the row and
+not stored: only the start-up expiry ends a request before its deadline,
+so an `expired` row with `decided_at < expires_at` expired because the
+release changed. The console modal shows such a request with the time
+the update ended it (`decided_at`), not the deadline it never reached.
+For a run MEHO refused (error code `release_changed_while_waiting`), the
+console says MEHO was updated, the operation did not run, and the
+requester must ask again; it does not say the operation ran and failed.
+
+**During a rolling update.** For a short time old and new pods run side
+by side. A new pod ends the waiting requests it finds when it starts. A
+request that an old pod saves after that point still waits; if it is
+approved, a new pod refuses to run it. Once both releases have this
+check, an old pod also refuses to run a request made by a new pod. In both cases nothing from the wrong release
+runs; the requester asks again.
+
+**Later, not built yet: a finer binding.** Each operation could get an
+execution version: a checksum of its handler code, the shared code it
+uses, its schemas, its risk level, its approval flag and its steps. Then
+an update would end only the requests whose operation changed. That needs
+its own design.
+
 ## The params hash on requests and audit rows
 
 Two kinds of rows carry a keyed hash of a call's params:
@@ -394,7 +484,11 @@ What it resolves, all fail-open to `None`:
   so the reviewer reads `web-01 (vm-1042)` instead of an unresolved
   `{vm}`. The gate params already carry the sub-op's full logical params
   (`connectors/vmware_rest/composites/_write.py`), so no live read is
-  needed at render time.
+  needed at render time. When the params name no subject, the resolver
+  uses a `subject` string the preview builder stored under
+  `proposed_effect.preview`, with the same credential-class and redaction
+  rules. `k8s.apply` names its objects there, for example
+  `Deployment/prod/web, Service/prod/web` (#3877).
 - **parent composite** — for a composite *child* park, the op id of the
   composite that fanned it out, walked off the `request_audit_id` →
   `parent_audit_id` lineage the #3348 direct-seam fix records (see
@@ -1330,7 +1424,19 @@ The only builder wired in #1437 is **`k8s.apply`**: it re-invokes the
 `k8s_apply` handler with `dry_run="server"` forced on (the API's
 `?dryRun=All`), so nothing persists and the per-document summary
 (resource identity + `resourceVersion` + `uid`) is the diff-preview the
-reviewer reads. When the API server rejects the dry-run (for example an
+reviewer reads. The builder also adds `manifest` (the applied manifest,
+one dict per document) and `subject` (the objects it touches), so the
+approver sees what the apply sets, not only which objects it touches
+(#3877). Secret `data` / `stringData` values, every `env` value, every
+`httpHeaders` value of a probe or lifecycle hook, every `command` / `args`
+list (only its size in bytes stays) and the
+`kubectl.kubernetes.io/last-applied-configuration` annotation are hidden
+first, at any depth (`connectors/kubernetes/ops_write_preview.py`), then
+the echo goes through the same two-pass redaction as the generic params
+echo. The echo keeps at most 16 KB in total, counting every entry: a
+document that does not fit in full keeps only its identity, and when not
+even that fits, one closing entry counts the documents left out. When the
+API server rejects the dry-run (for example an
 admission webhook denial), the handler raises `ApplyRejectedError` and the
 row gets the `preview_unavailable` marker with the server's message in
 `preview_error`, so the reviewer sees that the apply will be rejected
@@ -1423,6 +1529,48 @@ is empty today. Two credential writes have no builder and are not in the
 sweep: `vmware.composite.vm.guest.env.read` and
 `vmware.composite.vm.guest.process.list`. They are `safe`, so no call of
 theirs waits for approval by default.
+
+## Operator overrides and the fresh sign-in check (#4711)
+
+The `safety_level` and `requires_approval` a dispatch sees are the
+*effective* values: the classification in code or in the API
+description, made stricter by operator overrides
+(`operation_policy_override`; see `spec-ingestion.md`, "Operator
+overrides of risk level and approval"). `lookup_descriptor` applies the
+overrides, so the approval gate, the preview and the parked request all
+use the same values. A destructive operation always waits for approval,
+whatever the overrides say.
+
+Turning approval off for an operation is the one loosening edit. It
+needs `platform_admin`, a written reason, and a person. This holds for
+every edit that ends approval, also removing an override that required
+it (`meho connector remove-override`, `DELETE
+/api/v1/connectors/{id}/operation-overrides/{op_id}`), and also when
+approval ends only for a tenant's own copy of a built-in operation that
+an install-wide override reached: in the console
+the web session is the person (the same rule as an approval click); on
+REST it is the **fresh sign-in check**,
+`auth/fresh_sign_in.py:has_fresh_sign_in`:
+
+* the caller is a human principal (`PrincipalKind.USER`); agents,
+  service principals and runners always fail;
+* the token's `auth_time` claim (now on `Operator.auth_time`) is at
+  most `FRESH_SIGN_IN_MAX_AGE_SECONDS` old (default `300`, from 30 to
+  3600; `get_settings()` reads the environment variable, and the same
+  value sets the check and the `max_age` in the challenge). A token
+  refresh keeps `auth_time` (RFC 9470 section 6.1), so a long-lived
+  refreshed CLI token does not pass; a token without `auth_time` fails.
+
+A failed check answers `401` with `WWW-Authenticate: Bearer
+error="insufficient_user_authentication", max_age=<N>`
+(`fresh_sign_in_challenge`, RFC 9470 section 3). The CLI prints the
+message and says to run `meho login` again. The MCP edit tool never
+loosens, so this check has no MCP path. The check is meant to be shared:
+the approval decision on CLI and REST (#3979) reuses it. Two edits of
+the same operation cannot slip past the check together: edits and
+removals of one operation run one at a time, across all scopes, under
+a per-operation lock (see `spec-ingestion.md`, "Edits of one operation
+run one at a time").
 
 ## Catalog `safety_level` on every envelope (#1855)
 
@@ -1766,6 +1914,60 @@ so a write Vault would refuse is refused at park time instead of after
 approval. See
 [`docs/codebase/connectors-kubernetes.md`](connectors-kubernetes.md).
 
+### The requester's policy on a second target (#3898)
+
+Some ops write to a second target that the caller names in the params.
+`vcfa.provider.api_token.create` is the first: it writes the minted token
+through `vault.kv.patch` on the caller-named `vault_target`. The handler
+calls the Vault handler directly, so the dispatcher's policy gate never
+sees that write. One shared module checks it:
+`operations/secondary_target_policy.py`.
+
+**Execution runs as the reviewer. The requester's policy on the second
+target is still enforced.** The operator approval surfaces (REST
+`/approve` and `/decide`, the MCP by-id approve) run the approved call as
+the reviewer. Without this module, only the reviewer's policy would be
+checked, and an agent's `deny` on the Vault target would be skipped.
+
+How it works:
+
+1. **At park time** the op's permission preflight calls
+   `requester_policy_preflight`. It runs the policy gate for the requester
+   on the second target and adds three keys to
+   `proposed_effect["permission_preflight"]`:
+   - `requester_denied` — `true` when the requester's policy says `deny`.
+   - `requester_reason` — the `policy_denied: …` reason, or `null`.
+   - `requester` — who asked: `sub`, `principal_kind`, `client_id`,
+     `tenant_role`, `act`. The resume uses this to check them again.
+
+   `needs-approval` counts as allowed: the approval being asked for
+   satisfies it. A `requester_denied: true` does **not** refuse the park.
+   The reviewer sees it on the card and should reject.
+2. **On a reviewer's resume** `_dispatch_resume_with_bound_context` binds
+   the requester for the run (`bind_approved_requester`). Who asked comes
+   from the approval row (`principal_sub` / `principal_act`). The card's
+   `requester` record supplies the rest (kind, role, client id), and only
+   when its `sub` matches the row.
+3. **In the handler** `secondary_target_refusal` checks the caller (the
+   reviewer) as before, then the bound requester, **live**, with
+   `decide_only=True` (no standing grant is marked used). A requester
+   `deny` refuses before any appliance call:
+   `policy_denied: requester '<sub>': <op> on <target label> '<name>': …`.
+   A deny added while the request waited still stops it.
+
+The agent's own resume (`call_operation_with_approval`) runs as the agent,
+so the agent is the caller and the requester check adds nothing. When a
+reviewer runs an opted-in op and the card has no `requester` record, or
+its `sub` does not match the row, the run is refused before any appliance
+call: `policy_denied: the requester's policy … cannot be checked … -- ask
+again`. This covers a park whose preflight failed and a request parked
+before #3898. Ops that do not opt in never read the binding.
+
+**To opt an op in:** describe its second-target write as a
+`SecondaryTargetWrite(connector_id, op_ids, target_label)`. Call
+`requester_policy_preflight` from its registered permission preflight and
+`secondary_target_refusal` from its handler, with the same value.
+
 ## Transports
 
 ### REST (`backend/src/meho_backplane/api/v1/approvals.py`)
@@ -1821,7 +2023,7 @@ token-decode + live decouple verification, and a rollback note — lives in
 
 | Verb | Path | Access | Purpose |
 |---|---|---|---|
-| `GET` | `/api/v1/approvals` | operator **or** approver | List, newest first, filtered by `status` (default: `pending`; `all` = every state, #5129). Optional `limit` (1..500, no limit when omitted) and `offset`. |
+| `GET` | `/api/v1/approvals` | operator **or** approver | List, newest first, filtered by `status` (default: `pending`; `all` = every state, #5129). Optional `limit` (1..500, no limit when omitted) and `offset`. Optional `order=oldest\|newest` (default `newest`, #3596): `oldest` lists `created_at ASC`. |
 | `GET` | `/api/v1/approvals/{id}` | operator **or** approver | **Inspect one request** (T5). 404 on cross-tenant. |
 | `GET` | `/api/v1/approvals/{id}/result` | **request owner** (any role) | **Read the approved dispatch's result** (#3209). Principal-scoped: only `principal_sub` reads it; any other principal gets 403 `not_request_owner`. Writes an `approval.result` audit row. |
 | `POST` | `/api/v1/approvals/{id}/approve` | **human** operator **or** approver | Approve. Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1); 403 `human_principal_required` for a machine `principal_kind` (#289). |
@@ -1866,7 +2068,9 @@ to `--status all` (#5129). `--limit` / `--offset` go to the server as
 says the page is empty and points to a smaller `--offset`, so it does not
 claim the tenant has no requests. When `--work-ref` matches nothing, the
 empty message names the change ticket and points to removing the filter,
-for the same reason.
+for the same reason. `--order oldest|newest` picks the sort (#3596). It
+defaults to newest first, but to **oldest first when `--work-ref` is
+set**, so the steps of one change ticket read in the order they were sent.
 
 ### Operator console (`backend/src/meho_backplane/ui/routes/approvals/`)
 
@@ -1905,8 +2109,8 @@ no new gate, service call, route, or migration.
 | Verb | Path | Purpose |
 |---|---|---|
 | `GET` | `/ui/approvals/badge` | Live **pending** count for the app-shell bell. Always `status='pending'` — it counts actionable work, not history. |
-| `GET` | `/ui/approvals` | Content-negotiated. A normal navigation (no `HX-Request`) → the **full-page console**: status tabs (Pending / Approved / Rejected / Expired / All), a `work_ref` filter, and the decision-history list. The bell's `hx-get` (`HX-Request: true`) → the existing pending **panel** modal fragment (unchanged). (G10.8-T #1827) |
-| `GET` | `/ui/approvals/list` | Decision-history partial — the HTMX swap target for the status tabs / `work_ref` filter / "Load more" offset pager. Reuses `list_pending(status=…, work_ref=…, offset=…)`; `tab=all` passes `status=None`. Pages with a real offset, not the badge's 50-row glance cap. (G10.8-T #1827) |
+| `GET` | `/ui/approvals` | Content-negotiated. A normal navigation (no `HX-Request`) → the **full-page console**: status tabs (Pending / Approved / Rejected / Expired / All), a `work_ref` filter, an oldest/newest toggle (`order`, #3596), and the decision-history list. The bell's `hx-get` (`HX-Request: true`) → the pending **panel** modal fragment, oldest first with step numbers when a change ticket has two or more pending requests (#3596). (G10.8-T #1827) |
+| `GET` | `/ui/approvals/list` | Decision-history partial — the HTMX swap target for the status tabs / `work_ref` filter / oldest-newest toggle / "Load more" offset pager. Reuses `list_pending(status=…, work_ref=…, offset=…, order=…)`; `tab=all` passes `status=None`. `order` is `oldest`, `newest`, or empty (the default rule in "Chains of requests under one change ticket" below); any other value is a 422. Pages with a real offset, not the badge's 50-row glance cap. (G10.8-T #1827) |
 | `GET` | `/ui/approvals/{id}` | Request-detail modal. A pending row offers Approve/Deny; a **decided** row renders read-only with a decision banner ("Approved/Rejected by X at T"). An approved row also shows how its run ended; a failed run turns the banner red (#3543). The `proposed_effect` envelope renders **structurally** (#2447), not as raw JSON (below). |
 | `POST` | `/ui/approvals/{id}/approve` | Approve in-process + re-dispatch the parked op + fail-open broadcast. |
 | `POST` | `/ui/approvals/{id}/reject` | Reject in-process + broadcast; the op never runs. |
@@ -1930,6 +2134,68 @@ of the open Pending tab without a reload. The decision **reason** lives on
 the `audit_log` decision row, not the `ApprovalRequest` row, so the
 history view shows who/when (`reviewed_by` / `decided_at`) but not the
 free-text reason (an `audit_log` read deferred to a follow-up).
+
+### Chains of requests under one change ticket: oldest first and step numbers (#3596)
+
+Approving runs the operation at once. When an agent sends several requests
+that depend on each other (step 2 needs step 1 to have run), approving them
+newest first runs them in the wrong order, and the later steps fail. The
+requests of such a chain share one change ticket (`work_ref`). MEHO now
+shows that order on the surfaces an approver uses. Nothing here changes what
+"approve" runs, and nothing stores an order on the row.
+
+- **Step numbers.** `approval_queue.pending_chain_positions(session,
+  tenant_id=…, work_ref=None)` reads the pending requests that have a
+  `work_ref`, groups them by `work_ref`, and numbers each group oldest
+  first (`created_at`, then `id`). It returns a `ChainPosition(work_ref,
+  step, total)` per request, only for groups with **two or more** pending
+  requests. The numbers count pending requests only: once step 1 is
+  decided, the old step 2 becomes step 1 of the rest.
+- **Sort order.** `list_pending(order="oldest"|"newest")` (default
+  `newest`) and `GET /api/v1/approvals?order=` (default `newest`, so a
+  client that does not send it gets the same answer as before). `oldest`
+  sorts on `created_at ASC, id ASC`, the same order the step numbers use.
+- **Bell panel.** When any change ticket has two or more pending requests,
+  the panel lists oldest first and shows "Step k of N in change ticket
+  `<work_ref>`" on each grouped row. Otherwise it stays newest first. The
+  approver does not need to type a filter.
+- **Full-page console.** The Pending tab uses the same rule when no
+  `order` is given (the rule looks only at the `work_ref` filter when one
+  is set). Every other tab is newest first by default. The "Oldest first" /
+  "Newest first" toggle sets `order` explicitly; the live refresh and the
+  `work_ref` box keep that choice, a tab switch drops it, and "Load more"
+  carries the order the first page used. Pending rows in a group show the
+  "Step k of N" badge.
+- **Detail modal.** A pending request in a group shows "Step k of N
+  waiting in this change ticket" and a link to the Pending tab filtered to
+  that ticket, oldest first. When k > 1, an earlier step still waits, so
+  the consequence banner says so and the Approve armer opens **one more
+  confirm** first (`data-approval-confirm="out-of-order"`): "You are
+  approving step k of N before the earlier steps. This runs at once and
+  cannot be un-approved." Only after "Approve step k anyway" does the
+  normal approve confirm appear. The route computes the step for every way
+  the modal opens (bell, history row, or a deep link from a "waiting for
+  approval" result), so the link used cannot skip it. This is a console
+  prompt, not a server rule: REST and CLI approve a later step without
+  asking.
+- **"Waiting for approval" result in the console.** When an operator runs
+  an operation (`operations/_result.html`) or a Vault write
+  (`vault/_write_result.html`) and it waits for approval, the result
+  fragment calls `render.parked_request_chain(tenant_id, envelope)`. It
+  loads the parked request named by `extras.approval_request_id` and
+  numbers it among the pending requests of its `work_ref`. When the ticket
+  has two or more pending requests, the fragment says "Step k of N waiting
+  in change ticket `<work_ref>`" and its first link opens the Pending tab
+  filtered to that ticket, oldest first; the per-request modal link stays
+  as the second link. A lone request, a request with no `work_ref`, or an
+  id outside the tenant keeps the plain per-request link.
+- **Step event for the requesting add-on.** The `approval.pending` add-on
+  step event (`record_approval_step_event`) adds `chain_step` and
+  `chain_total` to its payload when the new request is one of two or more
+  pending requests under its `work_ref`. A read error only drops the two
+  fields (fail-open, like the event itself).
+- **CLI.** `meho approvals list --order oldest|newest`; oldest is the
+  default when `--work-ref` is set (see the CLI section above).
 
 ### Structured `proposed_effect` render in the modal (#2447)
 

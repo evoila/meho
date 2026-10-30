@@ -101,6 +101,11 @@ _HTTP_TIMEOUT_S = 30
 # realm. In keyholder mode a person must unseal within this time on a later run.
 _WAIT_S = 600
 _POLL_S = 5
+# OpenBao fetches Keycloak's keys itself when the Job writes the `jwt` login's
+# config, over the cluster network. On a fresh install that can fail for a
+# short time after the Job already sees the realm, so the Job tries again.
+_JWKS_WAIT_S = 120
+_JWKS_ERROR = "error checking jwks URL"
 
 
 class VaultInitError(Exception):
@@ -392,6 +397,24 @@ async def _write(bao: Bao, token: str, path: str, body: Mapping[str, Any]) -> No
     )
 
 
+async def _write_jwt_config(bao: Bao, token: str, plan: Plan) -> None:
+    path = f"auth/{JWT_MOUNT}/config"
+    body = {"jwks_url": plan.jwks_url, "bound_issuer": plan.bound_issuer}
+    deadline = time.monotonic() + _JWKS_WAIT_S
+    waited = False
+    while True:
+        reply = await bao.call("POST", path, token=token, json=body)
+        if reply.status in (200, 204):
+            return
+        detail = _detail(reply)
+        if _JWKS_ERROR not in detail or time.monotonic() > deadline:
+            raise VaultInitError(f"cannot write {path}: {detail}")
+        if not waited:
+            _say(f"login {JWT_MOUNT}/: OpenBao cannot read Keycloak's keys yet; trying again")
+            waited = True
+        await asyncio.sleep(_POLL_S)
+
+
 async def _ensure_group(bao: Bao, token: str, policy: str, role: str, accessor: str) -> None:
     """An external group that gives ``policy`` to every login whose tenant_role is ``role``."""
     path = f"identity/group/name/{policy}"
@@ -471,12 +494,7 @@ async def set_up(
 
     await _ensure_kv(bao, token)
     accessor = await _ensure_jwt_login(bao, token, JWT_MOUNT)
-    await _write(
-        bao,
-        token,
-        f"auth/{JWT_MOUNT}/config",
-        {"jwks_url": plan.jwks_url, "bound_issuer": plan.bound_issuer},
-    )
+    await _write_jwt_config(bao, token, plan)
     for name, text in policies.items():
         _expect(
             await bao.call(

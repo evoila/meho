@@ -20,6 +20,7 @@ import re
 import secrets
 from collections.abc import Mapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -114,6 +115,10 @@ class FakeBao:
         self.sa_login_ok = True
         # Calls that fail as if the pod were not up yet.
         self.down = 0
+        # Writes of the jwt config that fail as if Keycloak's keys were not
+        # reachable yet.
+        self.jwks_errors = 0
+        self.jwks_error = "error checking jwks URL"
 
     def state(self) -> dict[str, Any]:
         return copy.deepcopy(
@@ -181,6 +186,9 @@ class FakeBao:
         if not self._allowed(token, method, path):
             self.denied.append((method, path))
             return Reply(403, {"errors": ["permission denied"]})
+        if path == "auth/jwt/config" and self.jwks_errors:
+            self.jwks_errors -= 1
+            return Reply(400, {"errors": [self.jwks_error]})
         return self._route(method, path, json)
 
     def _route(self, method: str, path: str, body: Any) -> Reply:
@@ -401,6 +409,56 @@ async def test_the_job_waits_until_openbao_answers(
 
     assert bao.root not in bao.tokens
     assert store.secrets[plan.unseal_secret] == {"key": bao.key}
+
+
+async def test_the_job_waits_until_openbao_reads_keycloaks_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(vault_init, "_POLL_S", 0)
+    plan = _plan(tmp_path)
+    bao, store = FakeBao(), FakeStore()
+    bao.jwks_errors = 3
+
+    await _run(plan, bao, store)
+
+    assert bao.calls.count(("POST", "auth/jwt/config")) == 4
+    assert bao.written["auth/jwt/config"] == {
+        "jwks_url": plan.jwks_url,
+        "bound_issuer": plan.bound_issuer,
+    }
+    assert bao.root not in bao.tokens
+    assert capfd.readouterr().out.count("cannot read Keycloak's keys yet") == 1
+
+
+async def test_keycloaks_keys_that_stay_unreadable_stop_after_the_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(vault_init, "_POLL_S", 0)
+    # Each look at the clock is one second later.
+    clock = iter(range(1000))
+    monkeypatch.setattr(vault_init, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    monkeypatch.setattr(vault_init, "_JWKS_WAIT_S", 5)
+    plan = _plan(tmp_path)
+    bao, store = FakeBao(), FakeStore()
+    bao.jwks_errors = 1000
+
+    with pytest.raises(
+        VaultInitError,
+        match=r"^cannot write auth/jwt/config: HTTP 400: error checking jwks URL$",
+    ):
+        await _run(plan, bao, store)
+    assert bao.calls.count(("POST", "auth/jwt/config")) == 6
+    assert "auth/jwt/config" not in bao.written
+
+
+async def test_another_jwt_config_error_stops_at_once(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+    bao, store = FakeBao(), FakeStore()
+    bao.jwks_errors, bao.jwks_error = 5, "invalid jwks_url"
+
+    with pytest.raises(VaultInitError, match="invalid jwks_url"):
+        await _run(plan, bao, store)
+    assert bao.calls.count(("POST", "auth/jwt/config")) == 1
 
 
 async def test_a_dead_token_in_a_secret_is_replaced(tmp_path: Path) -> None:

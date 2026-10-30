@@ -91,6 +91,12 @@ The Secrets:
      Job stops and says how to give it a root token (see "When the Job
      cannot log in" below).
 3. Wait until Keycloak serves realm `meho` (up to 10 minutes).
+   When the Job writes the `jwt/` login's config, OpenBao fetches Keycloak's
+   keys itself, over the cluster network. On a fresh install that can still
+   fail for a short time after the Job sees the realm: OpenBao answers
+   `HTTP 400: error checking jwks URL`. The Job then tries again every
+   5 seconds for up to 2 minutes, and prints one line that it waits. After
+   that it stops with the same error. Any other error stops it at once.
 4. Set up the objects of the tables above. Mounts, groups, the test secret
    and the two tokens are read first and made only when missing; a group is
    written only when its type or policy differs (a real OpenBao stamps a

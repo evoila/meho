@@ -5,9 +5,11 @@
 
 * :func:`portgroup_show_impl` against a recording fake connector with saved
   VI-JSON answers: the full row (VLAN, security, teaming, traffic shaping),
-  the trunk, private VLAN and missing VLAN shapes, the lookup by name on the
-  ``/api`` and the legacy ``/rest`` mount, an unknown or ambiguous name, an
-  unknown port group and an unreadable ``config`` property;
+  the trunk, private VLAN and missing VLAN shapes, local and inherited
+  settings mixed inside one policy (resolved against the switch defaults), a
+  whole inherited policy, unreadable switch defaults, the lookup by name on
+  the ``/api`` and the legacy ``/rest`` mount, an unknown or ambiguous name,
+  an unknown port group and an unreadable ``config`` property;
 * the real connector over mocked HTTP: both reads land on the VI-JSON path of
   the target's release, on vCenter 9.0 and 8.0;
 * the operation metadata: ``safe``, runs at once, in its own group.
@@ -22,12 +24,17 @@ from uuid import UUID, uuid4
 
 import pytest
 import respx
+import structlog
 from jsonschema import Draft202012Validator
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.schemas import AuthModel
-from meho_backplane.connectors.vmware_rest import VmwareRestConnector, VsphereTargetLike
+from meho_backplane.connectors.vmware_rest import (
+    VmwareRestConnector,
+    VsphereTargetLike,
+    typed_ops_portgroup_show,
+)
 from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.typed_ops import (
     VMWARE_TYPED_OPS,
@@ -57,8 +64,12 @@ def _bool(value: bool, *, inherited: bool = False) -> dict[str, Any]:
     return {"_typeName": "BoolPolicy", "inherited": inherited, "value": value}
 
 
-def _long(value: int) -> dict[str, Any]:
-    return {"_typeName": "LongPolicy", "inherited": False, "value": value}
+def _long(value: int, *, inherited: bool = False) -> dict[str, Any]:
+    return {"_typeName": "LongPolicy", "inherited": inherited, "value": value}
+
+
+def _string(value: str, *, inherited: bool = False) -> dict[str, Any]:
+    return {"_typeName": "StringPolicy", "inherited": inherited, "value": value}
 
 
 def _shaping(enabled: bool, *, inherited: bool = True) -> dict[str, Any]:
@@ -71,6 +82,46 @@ def _shaping(enabled: bool, *, inherited: bool = True) -> dict[str, Any]:
         "burstSize": _long(104857600),
     }
 
+
+#: The switch's ``config.defaultPortConfig`` as VI-JSON returns it. Nothing is
+#: inherited here: the switch is the top of the chain.
+_SWITCH_DEFAULTS: dict[str, Any] = {
+    "_typeName": "VMwareDVSPortSetting",
+    "blocked": _bool(False),
+    "inShapingPolicy": _shaping(False, inherited=False),
+    "outShapingPolicy": _shaping(False, inherited=False),
+    "vlan": {
+        "_typeName": "VmwareDistributedVirtualSwitchVlanIdSpec",
+        "inherited": False,
+        "vlanId": 0,
+    },
+    "uplinkTeamingPolicy": {
+        "_typeName": "VmwareUplinkPortTeamingPolicy",
+        "inherited": False,
+        "policy": _string("loadbalance_srcid"),
+        "reversePolicy": _bool(True),
+        "notifySwitches": _bool(True),
+        "rollingOrder": _bool(False),
+        "failureCriteria": {
+            "_typeName": "DVSFailureCriteria",
+            "inherited": False,
+            "checkBeacon": _bool(False),
+        },
+        "uplinkPortOrder": {
+            "_typeName": "VMwareUplinkPortOrderPolicy",
+            "inherited": False,
+            "activeUplinkPort": ["uplink1", "uplink2"],
+            "standbyUplinkPort": [],
+        },
+    },
+    "securityPolicy": {
+        "_typeName": "DVSSecurityPolicy",
+        "inherited": False,
+        "allowPromiscuous": _bool(False),
+        "macChanges": _bool(False),
+        "forgedTransmits": _bool(False),
+    },
+}
 
 #: A saved ``DVPortgroupConfigInfo`` as VI-JSON returns it: access VLAN 120.
 _CONFIG: dict[str, Any] = {
@@ -150,6 +201,11 @@ _EXPECTED_ROW: dict[str, Any] = {
         "mac_changes": True,
         "forged_transmits": True,
         "inherited": False,
+        "inherited_settings": {
+            "allow_promiscuous": False,
+            "mac_changes": False,
+            "forged_transmits": False,
+        },
     },
     "teaming": {
         "load_balancing": "loadbalance_srcid",
@@ -159,6 +215,15 @@ _EXPECTED_ROW: dict[str, Any] = {
         "notify_switches": True,
         "beacon_probing": False,
         "inherited": False,
+        "inherited_settings": {
+            "load_balancing": False,
+            "active_uplinks": False,
+            "standby_uplinks": False,
+            "failback": False,
+            "notify_switches": False,
+            # failureCriteria is inherited as a whole, so beacon probing is too.
+            "beacon_probing": True,
+        },
     },
     "traffic_shaping": {
         "ingress": {
@@ -167,6 +232,12 @@ _EXPECTED_ROW: dict[str, Any] = {
             "peak_bandwidth_bps": 200000000,
             "burst_size_bytes": 104857600,
             "inherited": True,
+            "inherited_settings": {
+                "enabled": True,
+                "average_bandwidth_bps": True,
+                "peak_bandwidth_bps": True,
+                "burst_size_bytes": True,
+            },
         },
         "egress": {
             "enabled": True,
@@ -174,9 +245,16 @@ _EXPECTED_ROW: dict[str, Any] = {
             "peak_bandwidth_bps": 200000000,
             "burst_size_bytes": 104857600,
             "inherited": False,
+            "inherited_settings": {
+                "enabled": False,
+                "average_bandwidth_bps": False,
+                "peak_bandwidth_bps": False,
+                "burst_size_bytes": False,
+            },
         },
     },
     "blocked": False,
+    "inherited_settings": {"vlan": False, "blocked": True},
 }
 
 
@@ -207,13 +285,14 @@ def _answer(
     return {"_typeName": "RetrieveResult", "objects": [obj]}
 
 
-def _switch_answer() -> dict[str, Any]:
+def _switch_answer(
+    defaults: dict[str, Any] | None = _SWITCH_DEFAULTS, *, missing: list[str] | None = None
+) -> dict[str, Any]:
     # A primitive in DynamicProperty.val arrives boxed on vCenter 8.0.x.
-    return _answer(
-        "VmwareDistributedVirtualSwitch",
-        "dvs-21",
-        {"name": {"_typeName": "string", "_value": "dvs-prod"}},
-    )
+    props: dict[str, Any] = {"name": {"_typeName": "string", "_value": "dvs-prod"}}
+    if defaults is not None:
+        props["config.defaultPortConfig"] = defaults
+    return _answer("VmwareDistributedVirtualSwitch", "dvs-21", props, missing=missing)
 
 
 @dataclass
@@ -235,8 +314,10 @@ class _FakeConnector:
         listing: Any = None,
         mount_prefix: str = "/api",
         error: Exception | None = None,
+        switch_answer: dict[str, Any] | None = None,
     ) -> None:
         self._config_answer = config_answer
+        self._switch_answer = switch_answer if switch_answer is not None else _switch_answer()
         self._listing = listing
         self._mount_prefix = mount_prefix
         self._error = error
@@ -277,7 +358,7 @@ class _FakeConnector:
             if self._error is not None:
                 raise self._error
             return self._config_answer
-        return _switch_answer()
+        return self._switch_answer
 
 
 def _config_answer(config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -300,7 +381,7 @@ async def test_show_returns_every_setting_of_the_portgroup() -> None:
     Draft202012Validator(VMWARE_NETWORK_PORTGROUP_SHOW_OP.response_schema).validate(out)
 
 
-async def test_show_reads_the_whole_config_then_the_switch_name() -> None:
+async def test_show_reads_the_whole_config_then_the_switch_name_and_defaults() -> None:
     conn = _FakeConnector(_config_answer())
     await _show(conn)
     first, second = conn.vim_calls
@@ -313,7 +394,7 @@ async def test_show_reads_the_whole_config_then_the_switch_name() -> None:
     assert switch_spec["propSet"][0] == {
         "_typeName": "PropertySpec",
         "type": "VmwareDistributedVirtualSwitch",
-        "pathSet": ["name"],
+        "pathSet": ["name", "config.defaultPortConfig"],
     }
     assert conn.get_calls == []
 
@@ -362,7 +443,133 @@ async def test_sparse_config_gives_nulls_not_errors() -> None:
     assert out["dvs"] is None
     assert out["dvs_name"] is None
     assert out["teaming"]["active_uplinks"] == []
+    assert out["teaming"]["inherited_settings"]["active_uplinks"] is None
     assert out["security"]["allow_promiscuous"] is None
+    assert out["inherited_settings"] == {"vlan": None, "blocked": None}
+    Draft202012Validator(VMWARE_NETWORK_PORTGROUP_SHOW_OP.response_schema).validate(out)
+
+
+# ---------------------------------------------------------------------------
+# Local and inherited settings mixed inside one policy
+# ---------------------------------------------------------------------------
+
+
+def _mixed_config() -> dict[str, Any]:
+    """Local load balancing next to inherited uplinks, as vCenter can send it.
+
+    The inherited ``uplinkPortOrder`` carries no uplink lists at all, so the
+    port group object alone would show empty uplinks.
+    """
+    config = copy.deepcopy(_CONFIG)
+    config["defaultPortConfig"]["uplinkTeamingPolicy"] = {
+        "_typeName": "VmwareUplinkPortTeamingPolicy",
+        "inherited": False,
+        "policy": _string("failover_explicit"),
+        "notifySwitches": _bool(False),
+        "rollingOrder": {"_typeName": "BoolPolicy", "inherited": True},
+        "failureCriteria": {"_typeName": "DVSFailureCriteria", "inherited": True},
+        "uplinkPortOrder": {"_typeName": "VMwareUplinkPortOrderPolicy", "inherited": True},
+    }
+    config["defaultPortConfig"]["securityPolicy"] = {
+        "_typeName": "DVSSecurityPolicy",
+        "inherited": False,
+        "allowPromiscuous": _bool(True),
+        "macChanges": {"_typeName": "BoolPolicy", "inherited": True},
+        "forgedTransmits": {"_typeName": "BoolPolicy", "inherited": True},
+    }
+    config["defaultPortConfig"]["vlan"] = {
+        "_typeName": "VmwareDistributedVirtualSwitchVlanIdSpec",
+        "inherited": True,
+    }
+    return config
+
+
+async def test_inherited_settings_come_from_the_switch_next_to_local_ones() -> None:
+    out = await _show(_FakeConnector(_config_answer(_mixed_config())))
+    assert out["teaming"] == {
+        "load_balancing": "failover_explicit",
+        "active_uplinks": ["uplink1", "uplink2"],
+        "standby_uplinks": [],
+        "failback": True,
+        "notify_switches": False,
+        "beacon_probing": False,
+        "inherited": False,
+        "inherited_settings": {
+            "load_balancing": False,
+            "active_uplinks": True,
+            "standby_uplinks": True,
+            "failback": True,
+            "notify_switches": False,
+            "beacon_probing": True,
+        },
+    }
+    assert out["security"] == {
+        "allow_promiscuous": True,
+        "mac_changes": False,
+        "forged_transmits": False,
+        "inherited": False,
+        "inherited_settings": {
+            "allow_promiscuous": False,
+            "mac_changes": True,
+            "forged_transmits": True,
+        },
+    }
+    assert out["vlan"] == {"mode": "access", "vlan_id": 0}
+    assert out["inherited_settings"] == {"vlan": True, "blocked": True}
+    Draft202012Validator(VMWARE_NETWORK_PORTGROUP_SHOW_OP.response_schema).validate(out)
+
+
+async def test_whole_inherited_policy_takes_every_setting_from_the_switch() -> None:
+    config = copy.deepcopy(_CONFIG)
+    config["defaultPortConfig"]["uplinkTeamingPolicy"] = {
+        "_typeName": "VmwareUplinkPortTeamingPolicy",
+        "inherited": True,
+    }
+    config["defaultPortConfig"]["outShapingPolicy"] = {
+        "_typeName": "DVSTrafficShapingPolicy",
+        "inherited": True,
+    }
+    out = await _show(_FakeConnector(_config_answer(config)))
+    teaming = out["teaming"]
+    assert teaming["inherited"] is True
+    assert teaming["load_balancing"] == "loadbalance_srcid"
+    assert teaming["active_uplinks"] == ["uplink1", "uplink2"]
+    assert teaming["failback"] is True
+    assert teaming["notify_switches"] is True
+    assert teaming["beacon_probing"] is False
+    assert all(teaming["inherited_settings"].values())
+    egress = out["traffic_shaping"]["egress"]
+    assert egress["inherited"] is True
+    assert egress["enabled"] is False
+    assert egress["average_bandwidth_bps"] == 100000000
+    assert all(egress["inherited_settings"].values())
+    Draft202012Validator(VMWARE_NETWORK_PORTGROUP_SHOW_OP.response_schema).validate(out)
+
+
+async def test_unreadable_switch_defaults_keep_the_portgroup_values_and_warn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A fresh logger so capture_logs sees the event whatever an earlier test
+    # did to the structlog setup.
+    monkeypatch.setattr(
+        typed_ops_portgroup_show, "_log", structlog.get_logger(typed_ops_portgroup_show.__name__)
+    )
+    switch = _switch_answer(None, missing=["config.defaultPortConfig"])
+    conn = _FakeConnector(_config_answer(_mixed_config()), switch_answer=switch)
+    with structlog.testing.capture_logs() as events:
+        out = await _show(conn)
+    assert out["dvs_name"] == "dvs-prod"
+    # The flags still say what is inherited; the values are what vCenter sent.
+    assert out["teaming"]["load_balancing"] == "failover_explicit"
+    assert out["teaming"]["active_uplinks"] == []
+    assert out["teaming"]["inherited_settings"]["active_uplinks"] is True
+    assert out["vlan"] == {"mode": "access", "vlan_id": None}
+    assert out["inherited_settings"]["vlan"] is True
+    warnings = [
+        e for e in events if e["event"] == "vmware_portgroup_show_switch_defaults_unreadable"
+    ]
+    assert len(warnings) == 1
+    assert warnings[0]["dvs"] == "dvs-21"
     Draft202012Validator(VMWARE_NETWORK_PORTGROUP_SHOW_OP.response_schema).validate(out)
 
 

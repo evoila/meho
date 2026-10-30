@@ -3,16 +3,18 @@
 
 """Real-spec reconcile lane for ``vmware.network.portgroup.show``.
 
-The operation reads the VIM property ``DistributedVirtualPortgroup.config`` with
+The operation reads the VIM property ``DistributedVirtualPortgroup.config`` and
+the switch's ``name`` and ``config.defaultPortConfig`` with
 ``PropertyCollector.RetrievePropertiesEx`` and, for a lookup by name, calls the
 REST list ``GET /vcenter/network`` with the ``names`` and ``types`` filters.
 
-* An always-on test pins the VIM type, the property and the REST path.
+* An always-on test pins the VIM types, the properties and the REST path.
 * The shelf tests check, in the pinned ``vi-json.yaml`` of vCenter 9.0 and the
   three 8.0 update files, that ``DistributedVirtualPortgroup`` has the
-  ``config`` property, that ``RetrievePropertiesEx`` is served, and that every
-  VIM field the operation reads exists on its type. They also check the REST
-  path and its two filters in the pinned ``vcenter.yaml`` of 8.0 U3 and 9.0.
+  ``config`` property, that ``DistributedVirtualSwitch`` has ``name`` and
+  ``config``, that ``RetrievePropertiesEx`` is served, and that every VIM
+  field the operation reads exists on its type. They also check the REST path
+  and its two filters in the pinned ``vcenter.yaml`` of 8.0 U3 and 9.0.
 
 The shelf tests skip when the spec shelf is not there and run in CI. Follows
 ``docs/decisions/spec-reconcile-guards-standard.md``.
@@ -24,9 +26,11 @@ import pytest
 
 from meho_backplane.connectors.vmware_rest.typed_ops_portgroup_show import (
     DVPG_MO_TYPE,
+    DVS_MO_TYPE,
     PORT_SETTING_FIELDS,
     PORTGROUP_CONFIG_PROPERTY,
     PORTGROUP_LIST_PATH,
+    SWITCH_DEFAULTS_PROPERTY,
 )
 from meho_backplane.operations.ingest import parse_openapi
 from tests._spec_shelf import require_shelf_spec
@@ -44,6 +48,9 @@ def test_read_targets_are_pinned() -> None:
     """Shape gate (always runs)."""
     assert DVPG_MO_TYPE == "DistributedVirtualPortgroup"
     assert PORTGROUP_CONFIG_PROPERTY == "config"
+    assert DVS_MO_TYPE == "DistributedVirtualSwitch"
+    assert SWITCH_DEFAULTS_PROPERTY == "config.defaultPortConfig"
+    assert "defaultPortConfig" in PORT_SETTING_FIELDS["DVSConfigInfo"]
     assert PORTGROUP_LIST_PATH == "/vcenter/network"
 
 
@@ -80,6 +87,8 @@ def test_vim_fields_exist_in_the_pinned_vi_json(shelf: str, filename: str) -> No
     spec_path = require_shelf_spec(shelf, filename)
     lines = spec_path.read_text(encoding="utf-8").splitlines()
     assert f"  /{DVPG_MO_TYPE}/{{moId}}/{PORTGROUP_CONFIG_PROPERTY}:" in lines
+    assert f"  /{DVS_MO_TYPE}/{{moId}}/name:" in lines
+    assert f"  /{DVS_MO_TYPE}/{{moId}}/config:" in lines
     assert "  /PropertyCollector/{moId}/RetrievePropertiesEx:" in lines
     missing = {
         vim_type: sorted(set(fields) - _schema_fields(lines, vim_type))

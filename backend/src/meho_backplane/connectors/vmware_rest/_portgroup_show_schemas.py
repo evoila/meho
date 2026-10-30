@@ -12,8 +12,20 @@ __all__ = ["PORTGROUP_SHOW_RESPONSE_SCHEMA"]
 _NULLABLE_BOOL: dict[str, Any] = {"type": ["boolean", "null"]}
 _INHERITED: dict[str, Any] = {
     "type": ["boolean", "null"],
-    "description": "True when the setting comes from the switch, not the port group.",
+    "description": "True when the whole policy comes from the switch, not the port group.",
 }
+
+
+def _inherited_settings(*fields: str) -> dict[str, Any]:
+    """One true/false flag per field: does that one setting come from the switch?"""
+    return {
+        "type": "object",
+        "description": (
+            "Per setting: true when it comes from the switch, false when the port group "
+            "sets it, null when vCenter does not say."
+        ),
+        "properties": {field: {"type": ["boolean", "null"]} for field in fields},
+    }
 
 
 def _shaping_schema(direction: str) -> dict[str, Any]:
@@ -35,6 +47,9 @@ def _shaping_schema(direction: str) -> dict[str, Any]:
                 "description": "Largest burst in bytes.",
             },
             "inherited": _INHERITED,
+            "inherited_settings": _inherited_settings(
+                "enabled", "average_bandwidth_bps", "peak_bandwidth_bps", "burst_size_bytes"
+            ),
         },
     }
 
@@ -100,6 +115,9 @@ PORTGROUP_SHOW_RESPONSE_SCHEMA: dict[str, Any] = {
                 "mac_changes": {**_NULLABLE_BOOL, "description": "MAC address changes."},
                 "forged_transmits": {**_NULLABLE_BOOL, "description": "Forged transmits."},
                 "inherited": _INHERITED,
+                "inherited_settings": _inherited_settings(
+                    "allow_promiscuous", "mac_changes", "forged_transmits"
+                ),
             },
         },
         "teaming": {
@@ -136,6 +154,14 @@ PORTGROUP_SHOW_RESPONSE_SCHEMA: dict[str, Any] = {
                     "description": "Failure detection by beacon probing (false = link status).",
                 },
                 "inherited": _INHERITED,
+                "inherited_settings": _inherited_settings(
+                    "load_balancing",
+                    "active_uplinks",
+                    "standby_uplinks",
+                    "failback",
+                    "notify_switches",
+                    "beacon_probing",
+                ),
             },
         },
         "traffic_shaping": {
@@ -147,6 +173,7 @@ PORTGROUP_SHOW_RESPONSE_SCHEMA: dict[str, Any] = {
             },
         },
         "blocked": {**_NULLABLE_BOOL, "description": "Whether the ports are blocked."},
+        "inherited_settings": _inherited_settings("vlan", "blocked"),
     },
     "required": ["portgroup", "vlan", "security", "teaming", "traffic_shaping"],
 }

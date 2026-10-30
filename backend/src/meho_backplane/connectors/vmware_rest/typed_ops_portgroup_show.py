@@ -7,13 +7,23 @@ The vCenter REST API lists port groups (``GET /vcenter/network``) but shows only
 their id, name and type. The settings live on the VIM object
 ``DistributedVirtualPortgroup.config`` (a ``DVPortgroupConfigInfo``). This read
 gets that property with one ``PropertyCollector.RetrievePropertiesEx`` call, the
-same read path ``vmware.vm.info`` uses, and the parent switch name with a second
-one. It is a ``source_kind="typed"`` bound method on :class:`VmwareRestConnector`,
-so it works on a fresh install with no catalog ingest, on vCenter 8 and 9.
+same read path ``vmware.vm.info`` uses, and the parent switch's ``name`` and
+``config.defaultPortConfig`` (its default port settings) with a second one. It
+is a ``source_kind="typed"`` bound method on :class:`VmwareRestConnector`, so
+it works on a fresh install with no catalog ingest, on vCenter 8 and 9.
 
-The whole ``config`` object is read, never a deep path such as
+The port group's whole ``config`` object is read, never a deep path such as
 ``config.defaultPortConfig.vlan``: vCenter 8.0.x answers deep paths into a
-``DVPortSetting`` with HTTP 500.
+``DVPortSetting`` with HTTP 500. On the switch, ``config.defaultPortConfig``
+is the same path the port group write composites read, and no deeper.
+
+Inheritance. Every setting is an ``InheritablePolicy`` with its own
+``inherited`` flag, and a port group can mix local and inherited settings
+inside one policy (for example a local load balancing with inherited uplinks).
+A setting that is inherited, by itself or through its policy, is taken from
+the switch defaults when vCenter gave them; otherwise the port group's own
+object is used. Each policy in the row carries ``inherited`` (the whole policy
+comes from the switch) and ``inherited_settings`` (one flag per field).
 
 Field names follow the VIM types in the pinned ``vi-json.yaml``:
 
@@ -28,11 +38,13 @@ Field names follow the VIM types in the pinned ``vi-json.yaml``:
 
 A missing port group is a ``not_found`` result. A ``config`` property vCenter
 could not read (a ``missingSet`` entry, for example no permission) fails the
-call: empty settings would be a wrong answer.
+call: empty settings would be a wrong answer. Switch defaults vCenter could
+not read only log a warning: the row then shows the port group's own values.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -55,11 +67,13 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DVPG_MO_TYPE",
+    "DVS_MO_TYPE",
     "PORTGROUP_CONFIG_PROPERTY",
     "PORTGROUP_LIST_PATH",
     "PORTGROUP_SHOW_GROUP_KEY",
     "PORTGROUP_SHOW_WHEN_TO_USE",
     "PORT_SETTING_FIELDS",
+    "SWITCH_DEFAULTS_PROPERTY",
     "VMWARE_NETWORK_PORTGROUP_SHOW_OP",
     "portgroup_show_impl",
 ]
@@ -72,8 +86,10 @@ _NETWORK_TYPE_DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
 #: PropertyCollector ``RetrievePropertiesEx`` on the singleton ``propertyCollector``.
 _RETRIEVE_PROPERTIES_PATH = "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
 DVPG_MO_TYPE = "DistributedVirtualPortgroup"
-_DVS_MO_TYPE = "DistributedVirtualSwitch"
+DVS_MO_TYPE = "DistributedVirtualSwitch"
 PORTGROUP_CONFIG_PROPERTY = "config"
+#: The switch's default port settings (a ``DVPortSetting``), read with its name.
+SWITCH_DEFAULTS_PROPERTY = "config.defaultPortConfig"
 _PROP_NAME = "name"
 
 #: The VIM fields this read uses, per VIM type. The reconcile test checks each
@@ -91,6 +107,7 @@ PORT_SETTING_FIELDS: dict[str, tuple[str, ...]] = {
         "autoExpand",
         "uplink",
     ),
+    "DVSConfigInfo": ("defaultPortConfig",),
     "DVPortSetting": ("blocked", "inShapingPolicy", "outShapingPolicy"),
     "VMwareDVSPortSetting": ("vlan", "uplinkTeamingPolicy", "securityPolicy"),
     "DVSSecurityPolicy": ("allowPromiscuous", "macChanges", "forgedTransmits"),
@@ -176,13 +193,51 @@ def _vlan_view(raw: Any) -> dict[str, Any] | None:
     return None
 
 
-def _security_view(raw: Any) -> dict[str, Any]:
-    policy = _as_dict(raw)
+def _pick(
+    local: Any, parent: Any, group_inherited: bool | None
+) -> tuple[dict[str, Any], bool | None]:
+    """The effective policy object and whether it comes from the switch.
+
+    A policy that is inherited, by itself or through its policy group, is taken
+    from the switch default *parent* when vCenter gave one. Otherwise the port
+    group's own object is used, which is also what vCenter sends when it fills
+    inherited values in. The flag is ``None`` when the object does not say.
+    """
+    own = _inherited(local)
+    inherited = True if (group_inherited or own) else own
+    if inherited and isinstance(parent, dict):
+        return parent, True
+    return _as_dict(local), inherited
+
+
+_Pick = Callable[[str], tuple[dict[str, Any], bool | None]]
+
+
+def _picker(local: dict[str, Any], parent: dict[str, Any], group_inherited: bool | None) -> _Pick:
+    """A ``pick(field)`` closure over one policy and its switch default."""
+
+    def pick(field: str) -> tuple[dict[str, Any], bool | None]:
+        return _pick(local.get(field), parent.get(field), group_inherited)
+
+    return pick
+
+
+def _security_view(raw: Any, parent_raw: Any) -> dict[str, Any]:
+    policy, inherited = _pick(raw, parent_raw, None)
+    pick = _picker(policy, _as_dict(parent_raw), inherited)
+    promiscuous, promiscuous_inherited = pick("allowPromiscuous")
+    mac_changes, mac_changes_inherited = pick("macChanges")
+    forged, forged_inherited = pick("forgedTransmits")
     return {
-        "allow_promiscuous": _bool_value(policy.get("allowPromiscuous")),
-        "mac_changes": _bool_value(policy.get("macChanges")),
-        "forged_transmits": _bool_value(policy.get("forgedTransmits")),
-        "inherited": _inherited(raw),
+        "allow_promiscuous": _bool_value(promiscuous),
+        "mac_changes": _bool_value(mac_changes),
+        "forged_transmits": _bool_value(forged),
+        "inherited": inherited,
+        "inherited_settings": {
+            "allow_promiscuous": promiscuous_inherited,
+            "mac_changes": mac_changes_inherited,
+            "forged_transmits": forged_inherited,
+        },
     }
 
 
@@ -190,30 +245,60 @@ def _uplink_names(value: Any) -> list[str]:
     return [name for name in value if isinstance(name, str)] if isinstance(value, list) else []
 
 
-def _teaming_view(raw: Any) -> dict[str, Any]:
-    policy = _as_dict(raw)
-    order = _as_dict(policy.get("uplinkPortOrder"))
-    rolling_order = _bool_value(policy.get("rollingOrder"))
-    load_balancing = _policy_value(policy.get("policy"))
+def _teaming_view(raw: Any, parent_raw: Any) -> dict[str, Any]:
+    policy, inherited = _pick(raw, parent_raw, None)
+    parent = _as_dict(parent_raw)
+    pick = _picker(policy, parent, inherited)
+    load_balancing, load_balancing_inherited = pick("policy")
+    order, order_inherited = pick("uplinkPortOrder")
+    rolling, rolling_inherited = pick("rollingOrder")
+    notify, notify_inherited = pick("notifySwitches")
+    criteria, criteria_inherited = pick("failureCriteria")
+    beacon, beacon_inherited = _pick(
+        criteria.get("checkBeacon"),
+        _as_dict(parent.get("failureCriteria")).get("checkBeacon"),
+        criteria_inherited,
+    )
+    load_balancing_value = _policy_value(load_balancing)
+    rolling_order = _bool_value(rolling)
     return {
-        "load_balancing": load_balancing if isinstance(load_balancing, str) else None,
+        "load_balancing": load_balancing_value if isinstance(load_balancing_value, str) else None,
         "active_uplinks": _uplink_names(order.get("activeUplinkPort")),
         "standby_uplinks": _uplink_names(order.get("standbyUplinkPort")),
         "failback": None if rolling_order is None else not rolling_order,
-        "notify_switches": _bool_value(policy.get("notifySwitches")),
-        "beacon_probing": _bool_value(_as_dict(policy.get("failureCriteria")).get("checkBeacon")),
-        "inherited": _inherited(raw),
+        "notify_switches": _bool_value(notify),
+        "beacon_probing": _bool_value(beacon),
+        "inherited": inherited,
+        "inherited_settings": {
+            "load_balancing": load_balancing_inherited,
+            "active_uplinks": order_inherited,
+            "standby_uplinks": order_inherited,
+            "failback": rolling_inherited,
+            "notify_switches": notify_inherited,
+            "beacon_probing": beacon_inherited,
+        },
     }
 
 
-def _shaping_view(raw: Any) -> dict[str, Any]:
-    policy = _as_dict(raw)
+def _shaping_view(raw: Any, parent_raw: Any) -> dict[str, Any]:
+    policy, inherited = _pick(raw, parent_raw, None)
+    pick = _picker(policy, _as_dict(parent_raw), inherited)
+    enabled, enabled_inherited = pick("enabled")
+    average, average_inherited = pick("averageBandwidth")
+    peak, peak_inherited = pick("peakBandwidth")
+    burst, burst_inherited = pick("burstSize")
     return {
-        "enabled": _bool_value(policy.get("enabled")),
-        "average_bandwidth_bps": _int_or_none(_policy_value(policy.get("averageBandwidth"))),
-        "peak_bandwidth_bps": _int_or_none(_policy_value(policy.get("peakBandwidth"))),
-        "burst_size_bytes": _int_or_none(_policy_value(policy.get("burstSize"))),
-        "inherited": _inherited(raw),
+        "enabled": _bool_value(enabled),
+        "average_bandwidth_bps": _int_or_none(_policy_value(average)),
+        "peak_bandwidth_bps": _int_or_none(_policy_value(peak)),
+        "burst_size_bytes": _int_or_none(_policy_value(burst)),
+        "inherited": inherited,
+        "inherited_settings": {
+            "enabled": enabled_inherited,
+            "average_bandwidth_bps": average_inherited,
+            "peak_bandwidth_bps": peak_inherited,
+            "burst_size_bytes": burst_inherited,
+        },
     }
 
 
@@ -221,9 +306,21 @@ def _str_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _portgroup_row(portgroup: str, config: dict[str, Any], dvs_name: str | None) -> dict[str, Any]:
-    """The operator-facing row from a ``DVPortgroupConfigInfo``."""
+def _portgroup_row(
+    portgroup: str,
+    config: dict[str, Any],
+    dvs_name: str | None,
+    switch_defaults: dict[str, Any],
+) -> dict[str, Any]:
+    """The operator-facing row from a ``DVPortgroupConfigInfo``.
+
+    *switch_defaults* is the switch's ``config.defaultPortConfig`` (``{}`` when
+    vCenter did not give it); inherited settings are resolved against it.
+    """
     port = _as_dict(config.get("defaultPortConfig"))
+    pick = _picker(port, switch_defaults, None)
+    vlan, vlan_inherited = pick("vlan")
+    blocked, blocked_inherited = pick("blocked")
     auto_expand = config.get("autoExpand")
     uplink = config.get("uplink")
     return {
@@ -238,14 +335,23 @@ def _portgroup_row(portgroup: str, config: dict[str, Any], dvs_name: str | None)
         "auto_expand": auto_expand if isinstance(auto_expand, bool) else None,
         "uplink_portgroup": uplink if isinstance(uplink, bool) else None,
         "config_version": _str_or_none(config.get("configVersion")),
-        "vlan": _vlan_view(port.get("vlan")),
-        "security": _security_view(port.get("securityPolicy")),
-        "teaming": _teaming_view(port.get("uplinkTeamingPolicy")),
+        "vlan": _vlan_view(vlan),
+        "security": _security_view(
+            port.get("securityPolicy"), switch_defaults.get("securityPolicy")
+        ),
+        "teaming": _teaming_view(
+            port.get("uplinkTeamingPolicy"), switch_defaults.get("uplinkTeamingPolicy")
+        ),
         "traffic_shaping": {
-            "ingress": _shaping_view(port.get("inShapingPolicy")),
-            "egress": _shaping_view(port.get("outShapingPolicy")),
+            "ingress": _shaping_view(
+                port.get("inShapingPolicy"), switch_defaults.get("inShapingPolicy")
+            ),
+            "egress": _shaping_view(
+                port.get("outShapingPolicy"), switch_defaults.get("outShapingPolicy")
+            ),
         },
-        "blocked": _bool_value(port.get("blocked")),
+        "blocked": _bool_value(blocked),
+        "inherited_settings": {"vlan": vlan_inherited, "blocked": blocked_inherited},
     }
 
 
@@ -317,27 +423,39 @@ async def _portgroup_id_by_name(
     return ids[0]
 
 
-async def _switch_name(
+async def _switch_defaults(
     connector: VmwareRestConnector,
     operator: Operator,
     target: VsphereTargetLike,
     switch_ref: Any,
-) -> str | None:
-    """The display name of the parent switch; ``None`` when vCenter does not give it."""
+) -> tuple[str | None, dict[str, Any]]:
+    """The parent switch's display name and its default port settings.
+
+    ``(None, {})`` without a switch reference. Switch defaults vCenter could not
+    read (a ``missingSet`` entry, for example no permission on the switch) log a
+    warning and give ``{}``: the row then shows the port group's own values.
+    """
     moid = _moref_value(switch_ref)
     if moid is None:
-        return None
+        return None, {}
     ref_type = switch_ref.get("type")
-    mo_type = ref_type if isinstance(ref_type, str) and ref_type else _DVS_MO_TYPE
+    mo_type = ref_type if isinstance(ref_type, str) and ref_type else DVS_MO_TYPE
     result = await connector._post_vmomi_json(
         target,
         _RETRIEVE_PROPERTIES_PATH,
         operator=operator,
-        json=retrieve_properties_body(mo_type, [moid], (_PROP_NAME,)),
+        json=retrieve_properties_body(mo_type, [moid], (_PROP_NAME, SWITCH_DEFAULTS_PROPERTY)),
     )
     found = _object_props(result, moid)
-    name = found[0].get(_PROP_NAME) if found is not None else None
-    return name if isinstance(name, str) else None
+    if found is None:
+        return None, {}
+    props, missing = found
+    if SWITCH_DEFAULTS_PROPERTY in missing:
+        _log.warning(
+            "vmware_portgroup_show_switch_defaults_unreadable", target=target.name, dvs=moid
+        )
+    name = props.get(_PROP_NAME)
+    return (name if isinstance(name, str) else None), _as_dict(props.get(SWITCH_DEFAULTS_PROPERTY))
 
 
 async def portgroup_show_impl(
@@ -351,7 +469,8 @@ async def portgroup_show_impl(
     1. With ``name``: ``GET /vcenter/network`` (distributed port groups with that
        name) to find the id. Skipped when ``portgroup`` is given.
     2. ``RetrievePropertiesEx`` of the port group's ``config``.
-    3. ``RetrievePropertiesEx`` of the parent switch's ``name``.
+    3. ``RetrievePropertiesEx`` of the parent switch's ``name`` and
+       ``config.defaultPortConfig``, to resolve inherited settings.
 
     Returns one flat row (see the response schema of
     :data:`VMWARE_NETWORK_PORTGROUP_SHOW_OP`).
@@ -380,8 +499,8 @@ async def portgroup_show_impl(
         )
     config = _as_dict(props.get(PORTGROUP_CONFIG_PROPERTY))
     switch_ref = config.get("distributedVirtualSwitch")
-    dvs_name = await _switch_name(connector, operator, target, switch_ref)
-    row = _portgroup_row(portgroup, config, dvs_name)
+    dvs_name, switch_defaults = await _switch_defaults(connector, operator, target, switch_ref)
+    row = _portgroup_row(portgroup, config, dvs_name, switch_defaults)
     _log.info(
         "vmware_portgroup_show_read",
         target=target.name,
@@ -427,7 +546,8 @@ PORTGROUP_SHOW_WHEN_TO_USE = (
     "trunk ranges or private VLAN), the security policy (promiscuous mode, MAC address "
     "changes, forged transmits), teaming and failover (load balancing, active and standby "
     "uplinks, failback), traffic shaping in and out, port binding and the number of ports. "
-    "It reads the port group's VIM 'config' property, with no catalog ingest. Read-only. "
+    "Each setting says whether it is set on the port group or comes from the switch. It "
+    "reads the port group's VIM 'config' property, with no catalog ingest. Read-only. "
     "To list all port groups with their VLAN and VMs, use "
     "vmware.composite.network.portgroup.audit."
 )
@@ -438,9 +558,9 @@ VMWARE_NETWORK_PORTGROUP_SHOW_OP = VmwareTypedOp(
     summary="All settings of one distributed port group: VLAN, security, teaming, shaping.",
     description=(
         "Returns one distributed port group by id (portgroup) or name: switch, VLAN (single, "
-        "trunk or private VLAN), security policy, teaming and failover, traffic shaping in "
-        "and out, port binding and number of ports. An unknown port group gives a not_found "
-        "result. Read-only."
+        "trunk or private VLAN), security, teaming and failover, traffic shaping, port "
+        "binding and number of ports. Flags say which settings come from the switch. An "
+        "unknown port group gives a not_found result. Read-only."
     ),
     parameter_schema=_PARAMETER_SCHEMA,
     response_schema=PORTGROUP_SHOW_RESPONSE_SCHEMA,
@@ -463,10 +583,13 @@ VMWARE_NETWORK_PORTGROUP_SHOW_OP = VmwareTypedOp(
             "{portgroup, name, key, description, dvs, dvs_name, port_binding, num_ports, "
             "auto_expand, uplink_portgroup, config_version, vlan: {mode: access|trunk|pvlan, "
             "vlan_id | ranges: [{start, end}] | pvlan_id} | null, security: "
-            "{allow_promiscuous, mac_changes, forged_transmits, inherited}, teaming: "
-            "{load_balancing, active_uplinks, standby_uplinks, failback, notify_switches, "
-            "beacon_probing, inherited}, traffic_shaping: {ingress, egress: {enabled, "
-            "average_bandwidth_bps, peak_bandwidth_bps, burst_size_bytes, inherited}}, blocked}."
+            "{allow_promiscuous, mac_changes, forged_transmits, inherited, inherited_settings}, "
+            "teaming: {load_balancing, active_uplinks, standby_uplinks, failback, "
+            "notify_switches, beacon_probing, inherited, inherited_settings}, traffic_shaping: "
+            "{ingress, egress: {enabled, average_bandwidth_bps, peak_bandwidth_bps, "
+            "burst_size_bytes, inherited, inherited_settings}}, blocked, inherited_settings: "
+            "{vlan, blocked}}. 'inherited' means the whole policy comes from the switch; "
+            "'inherited_settings' has one true/false flag per field of that object."
         ),
         "next_step": (
             "To change the VLAN, call vmware.composite.network.portgroup.vlan.set. To change "

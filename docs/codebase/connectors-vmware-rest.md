@@ -4488,7 +4488,7 @@ operation for this common task.
 
 | Operation | What it does | Vendor calls | Risk |
 |---|---|---|---|
-| `vmware.network.portgroup.show` | One row: `portgroup` (moid), `name`, `key`, `description`, `dvs` and `dvs_name` (the switch), `port_binding`, `num_ports`, `auto_expand`, `uplink_portgroup`, `config_version`, `vlan` (`access` with `vlan_id`, `trunk` with `ranges`, or `pvlan` with `pvlan_id`), `security`, `teaming` (load balancing, active and standby uplinks, `failback`, `notify_switches`, `beacon_probing`), `traffic_shaping.ingress` / `.egress`, `blocked`. Takes `portgroup` (moid) or `name`. | VIM `PropertyCollector.RetrievePropertiesEx` of `DistributedVirtualPortgroup.config`, then of the switch `name`; with `name`, first `GET /vcenter/network` with the `names` and `types` filters | `safe`; runs at once |
+| `vmware.network.portgroup.show` | One row: `portgroup` (moid), `name`, `key`, `description`, `dvs` and `dvs_name` (the switch), `port_binding`, `num_ports`, `auto_expand`, `uplink_portgroup`, `config_version`, `vlan` (`access` with `vlan_id`, `trunk` with `ranges`, or `pvlan` with `pvlan_id`), `security`, `teaming` (load balancing, active and standby uplinks, `failback`, `notify_switches`, `beacon_probing`), `traffic_shaping.ingress` / `.egress`, `blocked`. Each policy carries `inherited` (the whole policy comes from the switch) and `inherited_settings` (one flag per field); the row carries `inherited_settings` for `vlan` and `blocked`. Takes `portgroup` (moid) or `name`. | VIM `PropertyCollector.RetrievePropertiesEx` of `DistributedVirtualPortgroup.config`, then of the switch `name` and `config.defaultPortConfig`; with `name`, first `GET /vcenter/network` with the `names` and `types` filters | `safe`; runs at once |
 
 | Versions | Catalog |
 |---|---|
@@ -4497,13 +4497,22 @@ operation for this common task.
 
 - **How it calls vCenter.** On the connector's own session, so it needs no
   spec ingest. The VIM reads go through `_post_vmomi_json` on the VI-JSON
-  path of the target's release (`/sdk/vim25/{release}`). The whole `config`
-  object is read: vCenter 8.0.x answers deep paths such as
-  `config.defaultPortConfig.vlan` with HTTP 500.
-- **Values.** Each setting is the `value` of a VIM policy object; `inherited`
-  says that the setting comes from the switch. `failback` is the inverse of
-  the VIM field `rollingOrder`. Bandwidth is in bits per second, burst size
-  in bytes. A setting the switch does not report is `null`.
+  path of the target's release (`/sdk/vim25/{release}`). The port group's
+  whole `config` object is read: vCenter 8.0.x answers deep paths such as
+  `config.defaultPortConfig.vlan` with HTTP 500. On the switch,
+  `config.defaultPortConfig` (its default port settings) is read with the
+  `name`, the same path the port group write composites use.
+- **Values.** Each setting is the `value` of a VIM policy object. `failback`
+  is the inverse of the VIM field `rollingOrder`. Bandwidth is in bits per
+  second, burst size in bytes. A setting the switch does not report is `null`.
+- **Inherited settings.** A port group can mix local and inherited settings
+  inside one policy, for example a local load balancing with inherited
+  uplinks. A setting that is inherited, by itself or through its policy, is
+  taken from the switch defaults, so the row shows the real uplinks and not an
+  empty list. Each policy says `inherited` (the whole policy comes from the
+  switch) and `inherited_settings` (true, false or null per field). When
+  vCenter cannot read the switch defaults (for example no permission on the
+  switch), the read logs a warning and shows the port group's own values.
 - **Errors.** An unknown id or name is a `not_found` result. A name used by
   two port groups (for example in two datacenters) is an error that names the
   ids. A `config` property vCenter could not read (a `missingSet` entry, for

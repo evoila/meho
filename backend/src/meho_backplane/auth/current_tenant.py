@@ -43,6 +43,7 @@ of their group there.
 
 from __future__ import annotations
 
+from typing import Final
 from uuid import UUID
 
 import structlog
@@ -97,31 +98,62 @@ def with_membership(operator: Operator, membership: TenantMembership) -> Operato
     )
 
 
+#: Payload key that says where the role in the current tenant came from.
+TENANT_ROLE_SOURCE: Final[str] = "tenant_role_source"
+
+#: The contextvar :func:`bind_tenant_role_source` binds: the payload key
+#: under the ``audit_*`` prefix the wrapper writers read.
+_TENANT_ROLE_SOURCE_CONTEXTVAR: Final[str] = f"audit_{TENANT_ROLE_SOURCE}"
+
+#: The value when the role came from the platform admin group.
+_PLATFORM_ADMIN_SOURCE: Final[str] = "platform_admin"
+
+
 def bind_tenant_role_source(operator: Operator) -> None:
     """Note on the audit rows when the role came from the platform admin group.
 
     A platform admin working in a tenant without a role group there acts
     as ``tenant_admin``. Every audit row of the request then carries
     ``tenant_role_source: platform_admin`` in its payload (the ``audit_*``
-    contextvar convention; no schema change). Nothing is bound otherwise.
-    Called by the REST and MCP bind steps.
+    contextvar convention; no schema change). The wrapper writers read the
+    contextvar. The audit cutover listener
+    (:mod:`meho_backplane.audit_cutover`) copies the key onto every other
+    row built while it is bound (:func:`tenant_role_source_from_context`),
+    so a writer that composes its own payload needs no change. Nothing is
+    bound otherwise. Called by the REST and MCP bind steps.
     """
     if operator.role_from_platform_admin:
-        structlog.contextvars.bind_contextvars(audit_tenant_role_source="platform_admin")
+        structlog.contextvars.bind_contextvars(
+            **{_TENANT_ROLE_SOURCE_CONTEXTVAR: _PLATFORM_ADMIN_SOURCE}
+        )
 
 
 def tenant_role_source_payload(operator: Operator) -> dict[str, str]:
     """The payload keys an audit writer adds for the role source.
 
     ``{"tenant_role_source": "platform_admin"}`` when the role came from
-    the platform admin group, else empty. For the audit writers that build
-    their own payload (approval decisions, grants, topology edits, agent
-    tool calls) and so do not see the ``audit_*`` contextvars of
-    :func:`bind_tenant_role_source`. With the wrapper rows retired, their
-    row is the only record of the request.
+    the platform admin group, else empty. For the audit writers that have
+    the operator at hand and build their own payload (approval decisions,
+    grants, topology edits, agent tool calls): the marker is then on the
+    row also outside a request, for example in a test. With the wrapper
+    rows retired, their row is the only record of the request.
     """
     if operator.role_from_platform_admin:
-        return {"tenant_role_source": "platform_admin"}
+        return {TENANT_ROLE_SOURCE: _PLATFORM_ADMIN_SOURCE}
+    return {}
+
+
+def tenant_role_source_from_context() -> dict[str, str]:
+    """The payload keys for the role source of the current request.
+
+    Reads what :func:`bind_tenant_role_source` bound. Empty when the role
+    did not come from the platform admin group, or outside a request. For
+    the audit writers that know only the caller's ``sub`` (connector
+    lifecycle actions, the runbook abort row, the dispatcher).
+    """
+    value = structlog.contextvars.get_contextvars().get(_TENANT_ROLE_SOURCE_CONTEXTVAR)
+    if isinstance(value, str) and value:
+        return {TENANT_ROLE_SOURCE: value}
     return {}
 
 

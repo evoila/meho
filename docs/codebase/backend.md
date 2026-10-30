@@ -103,12 +103,17 @@ this stage it exposes:
     tenant row is made. `bind_tenant_role_source` (called by the REST and
     MCP bind steps) puts `tenant_role_source: platform_admin` into the
     payload of every audit row of such a request that the middleware or
-    the MCP dispatcher writes. The audit writers that build their own
-    payload (approval decisions, standing grants, add-on runs, topology
-    edits and refresh, gateway commands, agent tool calls) add the same
-    key with `tenant_role_source_payload(operator)`, so the marker is on
-    the record also when the wrapper rows are retired
-    (`AUDIT_WRAPPER_ROWS_RETIRED=true`).
+    the MCP dispatcher writes. The audit cutover listener
+    (`audit_cutover.py`) copies the same key onto every other audit row
+    built during the request whose writer left it out (connector
+    lifecycle actions, the runbook abort row, the dispatcher, ...), so
+    the marker is on the record also when the wrapper rows are retired
+    (`AUDIT_WRAPPER_ROWS_RETIRED=true`) and the writer's row is the only
+    one. Writers that have the operator at hand (approval decisions,
+    standing grants, add-on runs, topology edits and refresh, gateway
+    commands, agent tool calls) add the key themselves with
+    `tenant_role_source_payload(operator)`, so it is there also outside
+    a request.
   - Status without a tenant: `GET /api/v1/health` uses
     `verify_jwt_allow_unchosen`. A login with several tenants and no
     header gets `Operator.tenant_chosen=False`; the route then skips the

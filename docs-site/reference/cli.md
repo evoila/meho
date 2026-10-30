@@ -4777,6 +4777,7 @@ meho targets add <name> [flags]
 - `--tls-server-name` — TLS SNI / certificate-verification hostname, decoupled from --host
 - `--verify-tls` — verify the target's TLS certificate; pass --verify-tls=false to opt out
 - `--version` — operator-asserted product version (e.g. 9.0) the resolver consults before the first probe
+- `--vpn-required` — mark that a VPN must be up to reach the target (default: false)
 
 ### `meho targets delete`
 
@@ -4878,6 +4879,7 @@ meho targets update <name|alias> [flags]
 - `--tls-server-name` — TLS SNI / certificate-verification hostname, decoupled from --host
 - `--verify-tls` — verify the target's TLS certificate; pass --verify-tls=false to opt out
 - `--version` — operator-asserted product version
+- `--vpn-required` — mark that a VPN must be up to reach the target; pass --vpn-required=false to clear it
 
 ## `meho tenants`
 

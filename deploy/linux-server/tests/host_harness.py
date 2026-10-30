@@ -92,6 +92,10 @@ commonName = optional
 basicConstraints = critical,CA:true,pathlen:0
 keyUsage = critical,keyCertSign,cRLSign
 subjectKeyIdentifier = hash
+[ root_ext ]
+basicConstraints = critical,CA:true,pathlen:1
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
 """
 
 
@@ -139,11 +143,22 @@ def _request(work: Path, name: str, subject: str) -> None:
 
 @functools.cache
 def console_certificate(
-    host: str = HOSTNAME, *, start: int = -30, end: int = 365, ca: str = "MEHO install CA"
+    host: str = HOSTNAME,
+    *,
+    start: int = -30,
+    end: int = 365,
+    ca: str = "MEHO install CA",
+    intermediate_end: int | None = None,
 ) -> tuple[str, str]:
     """(tls.crt, ca.crt) of a test certificate for the host, signed by a test
     CA with the given name, valid from NOW + start to NOW + end days. The
-    CA is valid from 400 days before NOW to ten years after it."""
+    CA is valid from 400 days before NOW to ten years after it.
+
+    With intermediate_end, the chain has three levels, as a customer's
+    certificate usually has: the CA is the root, it signs an intermediate CA
+    that is valid until NOW + intermediate_end days, and the intermediate
+    signs the server certificate. tls.crt is then the server certificate and
+    the intermediate; ca.crt is the root."""
     with tempfile.TemporaryDirectory(prefix="meho-host-cert-") as folder:
         work = Path(folder)
         (work / "ca.cnf").write_text(_CA_CONFIG)
@@ -158,8 +173,25 @@ def console_certificate(
             "-keyfile",
             "ca.key",
             "-extensions",
-            "ca_ext",
+            "ca_ext" if intermediate_end is None else "root_ext",
         )
+        issuer, chain_tail = "ca", ""
+        if intermediate_end is not None:
+            _request(work, "intermediate", f"/CN={ca} intermediate")
+            chain_tail = _sign(
+                work,
+                "intermediate.csr",
+                "intermediate.crt",
+                -400,
+                intermediate_end,
+                "-cert",
+                "ca.crt",
+                "-keyfile",
+                "ca.key",
+                "-extensions",
+                "ca_ext",
+            )
+            issuer = "intermediate"
         (work / "leaf.ext").write_text(
             "basicConstraints = critical,CA:false\nkeyUsage = critical,digitalSignature\n"
             f"extendedKeyUsage = serverAuth\nsubjectAltName = DNS:{host}\n"
@@ -172,13 +204,13 @@ def console_certificate(
             start,
             end,
             "-cert",
-            "ca.crt",
+            f"{issuer}.crt",
             "-keyfile",
-            "ca.key",
+            f"{issuer}.key",
             "-extfile",
             "leaf.ext",
         )
-    return leaf_pem, ca_pem
+    return leaf_pem + chain_tail, ca_pem
 
 
 def expires(days: int) -> str:
@@ -385,6 +417,8 @@ class FakeHost:
         self.fake = base / "fake"
         self.stubs = base / "stubs"
         self.tools = base / "tools"
+        # A trust folder for openssl's default (SSL_CERT_DIR), set by machine_trusts().
+        self.trust_folder: Path | None = None
         for folder in (self.root, self.fake, self.stubs, self.tools):
             folder.mkdir()
         for tool in HOST_REAL_TOOLS:
@@ -421,6 +455,24 @@ class FakeHost:
         self.answer("console_tls_crt", chain)
         self.answer("console_ca_crt", ca)
 
+    def machine_trusts(self, ca: str) -> None:
+        """Put the CA certificate into a trust folder that openssl uses as the
+        machine's default (SSL_CERT_DIR), as a public CA is on a real machine.
+        The folder holds the certificate under its subject hash, as
+        'openssl rehash' names it."""
+        folder = self.fake / "machine-trust"
+        folder.mkdir(exist_ok=True)
+        subject_hash = subprocess.run(
+            ["openssl", "x509", "-noout", "-subject_hash"],
+            input=ca,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        ).stdout.strip()
+        (folder / f"{subject_hash}.0").write_text(ca)
+        self.trust_folder = folder
+
     def host_path(self, path: str) -> Path:
         """The place of a machine path, such as /var/lib/meho, below the fake root."""
         return self.root / path.lstrip("/")
@@ -448,6 +500,8 @@ class FakeHost:
         }
         if ssh_client is not None:
             env["SSH_CLIENT"] = ssh_client
+        if self.trust_folder is not None:
+            env["SSL_CERT_DIR"] = str(self.trust_folder)
         return subprocess.run(
             [str(MEHO_HOST), *args],
             capture_output=True,

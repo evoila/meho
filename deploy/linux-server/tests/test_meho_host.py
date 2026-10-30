@@ -540,14 +540,30 @@ class ConsoleCertificateLineTests(CheckTestCase):
         calls = self.host.calls()
         self.assertIn("kubectl --kubeconfig", calls)
         self.assertIn("-n meho get secret meho-core-tls -o go-template=", calls)
-        self.assertIn("openssl verify -attime 1792756800 -partial_chain -CAfile ", calls)
+        self.assertIn(
+            "openssl verify -attime 1792756800 -partial_chain -no-CApath -no-CAstore -CAfile ",
+            calls,
+        )
         self.assertNotIn("tls.key", calls)
 
     def test_a_chain_with_an_intermediate_ca_is_green(self) -> None:
-        chain, ca = console_certificate()
-        self.host.console_certificate(chain + ca, ca)
+        # tls.crt is the server certificate and the intermediate; ca.crt is the root.
+        self.host.console_certificate(*console_certificate(intermediate_end=3650))
 
         self.assertEqual(OK_LINES[6], self.line("console-certificate"))
+
+    def test_the_machine_trust_store_does_not_stand_in_for_ca_crt(self) -> None:
+        # The machine trusts the CA that signed the certificate, as it trusts
+        # a public CA. ca.crt is another CA, so the chain does not end at it.
+        chain, issuer = console_certificate()
+        self.host.machine_trusts(issuer)
+        self.host.console_certificate(chain, console_certificate(ca="Another CA")[1])
+
+        self.assertEqual(
+            "[FAIL] console-certificate: its chain to ca.crt is not valid: unable to get "
+            "local issuer certificate. " + CERTIFICATE_FIX,
+            self.line("console-certificate"),
+        )
 
     def test_30_days_or_less_left_warns_and_more_is_green(self) -> None:
         cases = {
@@ -596,6 +612,10 @@ class ConsoleCertificateLineTests(CheckTestCase):
             "signed by another CA": (
                 (console_certificate()[0], console_certificate(ca="Another CA")[1]),
                 "its chain to ca.crt is not valid: unable to get local issuer certificate",
+            ),
+            "an expired intermediate CA": (
+                console_certificate(intermediate_end=-5),
+                "its chain to ca.crt is not valid: certificate has expired",
             ),
             "no ca.crt": (
                 (console_certificate()[0], ""),

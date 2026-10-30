@@ -463,12 +463,16 @@ utc_day() { date -u -d "@$1" +%F; }
 # verify of the server certificate at that time, with the rest of the chain
 # as the intermediate certificates. The CA certificate is the trust anchor
 # (-partial_chain: it may be an intermediate CA, as the customer's ca.crt
-# can be); without one, the trust store of this machine is. It prints
-# openssl's messages and returns its exit code.
+# can be); without one, the trust store of this machine is. With a CA
+# certificate, -no-CApath and -no-CAstore keep the machine's trust folder and
+# store out: otherwise a certificate from a public CA passes with an
+# unrelated ca.crt. (-CAfile already replaces the machine's trust file.) It
+# prints openssl's messages and returns its exit code.
 verify_chain() {
     local chain=$1 ca=$2 now=$3
     if [[ -n $ca ]]; then
-        openssl verify -attime "$now" -partial_chain -CAfile <(printf '%s\n' "$ca") \
+        openssl verify -attime "$now" -partial_chain -no-CApath -no-CAstore \
+            -CAfile <(printf '%s\n' "$ca") \
             -untrusted <(printf '%s\n' "$chain") <(printf '%s\n' "$chain") 2>&1
     else
         openssl verify -attime "$now" -untrusted <(printf '%s\n' "$chain") <(printf '%s\n' "$chain") 2>&1

@@ -86,8 +86,10 @@ login show: the TLS Secret of the Ingress, `meho-core-tls`
 it for the host name, and `meho-host certificate` (#4738) puts the
 customer's own certificate into the same Secret. The check reads only
 `tls.crt` (the server certificate, then the intermediate certificates) and
-`ca.crt` (the CA the clients trust), each with its own Go template. It never
-reads `tls.key`. The host name comes from `options.hostname` in
+`ca.crt` (the CA the clients trust), with one `kubectl` call: one Go
+template prints `tls.crt`, the line `#ca.crt`, then `ca.crt`. One call,
+because `meho doctor` gives the whole check 60 seconds. It never reads
+`tls.key`. The host name comes from `options.hostname` in
 `/etc/meho/install.json`. The rule:
 
 1. The server certificate is valid now: not before its start date, and not
@@ -97,10 +99,12 @@ reads `tls.key`. The host name comes from `options.hostname` in
    names, a wildcard only in the first label, and the common name only when
    there is no DNS name.
 3. Its chain ends at `ca.crt`, and every certificate of the chain is valid
-   now: `openssl verify -attime <now> -partial_chain -CAfile <ca.crt>
-   -untrusted <tls.crt> <tls.crt>`. `-partial_chain` lets `ca.crt` be an
-   intermediate CA. Without `ca.crt`, the trust store of the machine is the
-   anchor.
+   now: `openssl verify -attime <now> -partial_chain -no-CApath -no-CAstore
+   -CAfile <ca.crt> -untrusted <tls.crt> <tls.crt>`. `-partial_chain` lets
+   `ca.crt` be an intermediate CA. `-no-CApath` and `-no-CAstore` stop
+   OpenSSL from also trusting the machine's own CA folder and store, so a
+   certificate from a public CA does not pass with an unrelated `ca.crt`.
+   Without `ca.crt`, the trust store of the machine is the anchor.
 4. More than 30 days are left.
 
 Points 1 to 3 make a red line, which names every problem it finds. Point 4

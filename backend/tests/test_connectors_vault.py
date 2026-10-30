@@ -659,6 +659,35 @@ async def test_execute_vault_kv_list_honors_explicit_mount(
     ]
 
 
+async def test_execute_vault_kv_list_empty_folder_returns_empty_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_typed_ops: None,
+) -> None:
+    """Vault answers a LIST on an empty or missing folder with a 404 (#5231).
+
+    hvac raises that 404 as ``InvalidPath``. It means "no keys here", so
+    the op returns ``status: ok`` with an empty key list, not an error.
+    """
+    install_fake_client(monkeypatch, list_exc=hvac.exceptions.InvalidPath())
+    result = await _dispatch_vault("vault.kv.list", {"path": "meho/new-folder"})
+
+    assert result.status == "ok", result.error
+    assert result.result == {"keys": []}
+
+
+async def test_execute_vault_kv_list_forbidden_stays_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_typed_ops: None,
+) -> None:
+    """A permission denial on LIST is still an error, not an empty list."""
+    install_fake_client(monkeypatch, list_exc=hvac.exceptions.Forbidden("permission denied"))
+    result = await _dispatch_vault("vault.kv.list", {"path": "meho/locked"})
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("connector_vault_forbidden")
+
+
 async def test_execute_vault_kv_put_writes_new_version(
     monkeypatch: pytest.MonkeyPatch,
     _registered_vault_typed_ops: None,

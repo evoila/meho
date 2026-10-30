@@ -11,6 +11,8 @@
 //   - `meho vmware vm list [--target T]`            — GET:/vcenter/vm
 //   - `meho vmware vm info <name-or-id>`            — name → moid then GET:/vcenter/vm/{vm}
 //   - `meho vmware vm create --spec @file`          — vmware.composite.vm.create (T6)
+//   - `meho vmware vm cdrom mount-library-iso <vm>` — vmware.composite.vm.cdrom.mount_library_iso (#3576)
+//   - `meho vmware vm cdrom unmount-library-iso <vm>` — vmware.composite.vm.cdrom.unmount_library_iso (#3576)
 //   - `meho vmware host list`                       — GET:/vcenter/host
 //   - `meho vmware host evacuate <name>`            — vmware.composite.host.evacuate (T6)
 //   - `meho vmware cluster list`                    — GET:/vcenter/cluster
@@ -68,7 +70,7 @@ const ConnectorID = "vmware-rest-9.0"
 //
 // Sub-tree layout follows the issue #227 §10 verb table:
 //   - `vmware about`              — flat verb
-//   - `vmware vm <list|info|create>`     — sub-tree
+//   - `vmware vm <list|info|create|cdrom>` — sub-tree
 //   - `vmware host <list|evacuate>`      — sub-tree
 //   - `vmware cluster <list|patch>`      — sub-tree
 //   - `vmware datacenter list`           — flat verb

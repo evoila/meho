@@ -190,8 +190,17 @@ def test_input_schema_requires_core_fields_and_forbids_extras() -> None:
     props = schema["properties"]
     assert "fingerprint" not in props
     assert "tenant_id" not in props
-    for optional in ("aliases", "version", "port", "fqdn", "secret_ref", "auth_model"):
+    for optional in (
+        "aliases",
+        "version",
+        "port",
+        "fqdn",
+        "secret_ref",
+        "auth_model",
+        "vpn_required",
+    ):
         assert optional in props
+    assert props["vpn_required"]["type"] == "boolean"
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +255,54 @@ async def test_human_admin_creates_and_round_trips_via_list_targets(
     listed = _list_targets_call(client, 2).json()["result"]["structuredContent"]
     assert [t["name"] for t in listed["targets"]] == ["rdc-vault"]
     assert listed["targets"][0]["id"] == payload["target_id"]
+
+
+async def _stored_vpn_required(name: str) -> bool:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(
+            select(TargetORM.vpn_required).where(
+                TargetORM.tenant_id == OPERATOR_TENANT_ID, TargetORM.name == name
+            )
+        )
+        return bool(result.scalar_one())
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+@pytest.mark.parametrize(
+    ("extra_args", "expected"),
+    [({"vpn_required": True}, True), ({"vpn_required": False}, False), ({}, False)],
+    ids=["true", "false", "omitted"],
+)
+async def test_vpn_required_is_stored_and_defaults_to_false(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    _seeded_tenant: None,
+    extra_args: dict[str, Any],
+    expected: bool,
+) -> None:
+    """``vpn_required`` reaches the stored row; left out, it stays ``false`` (#5075)."""
+    client, _op = client_with_operator
+    result = _register_call(
+        client,
+        1,
+        {"name": "vpn-vault", "product": "vault", "host": "vault.example", **extra_args},
+    ).json()["result"]
+    assert result["isError"] is False
+    assert await _stored_vpn_required("vpn-vault") is expected
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_non_boolean_vpn_required_is_rejected_at_schema_layer(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A string ``vpn_required`` fails the boolean schema type → -32602."""
+    client, _op = client_with_operator
+    body = _register_call(
+        client,
+        1,
+        {"name": "x", "product": "vault", "host": "vault.example", "vpn_required": "yes"},
+    ).json()
+    assert body["error"]["code"] == INVALID_PARAMS
 
 
 # ---------------------------------------------------------------------------

@@ -159,6 +159,12 @@ from meho_backplane.connectors.vmware_rest.composites._library_delete import (
     content_library_delete_composite,
     content_library_item_delete_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._library_local import (
+    CONTENT_LIBRARY_CREATE_COMPOSITE,
+)
+from meho_backplane.connectors.vmware_rest.composites._library_upload import (
+    CONTENT_LIBRARY_ITEM_UPLOAD_COMPOSITE,
+)
 from meho_backplane.connectors.vmware_rest.composites._license import (
     LICENSE_ASSIGN_LLM_INSTRUCTIONS,
     LICENSE_ASSIGN_PARAMETER_SCHEMA,
@@ -219,6 +225,9 @@ from meho_backplane.connectors.vmware_rest.composites._teardown_network import (
 from meho_backplane.connectors.vmware_rest.composites._vm_allocation import (
     vm_resource_allocation_set_composite,
     vm_resource_allocation_show_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_library_iso import (
+    VM_CDROM_LIBRARY_ISO_COMPOSITES,
 )
 from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_tools import (
     VM_CDROM_TOOLS_COMPOSITES,
@@ -2050,9 +2059,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "vmware.composite.content_library.item.delete"
         ],
     ),
+    # Create a local content library and add a file to one from a URL
+    # (caution + approval); the rows live in their own modules.
+    _CompositeSpec(**CONTENT_LIBRARY_CREATE_COMPOSITE),
+    _CompositeSpec(**CONTENT_LIBRARY_ITEM_UPLOAD_COMPOSITE),
     # Add a CD drive and unmount the VMware Tools installer; the rows live in
     # their own module.
     *(_CompositeSpec(**row) for row in VM_CDROM_TOOLS_COMPOSITES),
+    # Mount and unmount a content-library ISO on a VM; the rows live in their
+    # own module.
+    *(_CompositeSpec(**row) for row in VM_CDROM_LIBRARY_ISO_COMPOSITES),
     # ----------------------------------------------------------------
     # Licence write -- dangerous / approval. The full key never leaves
     # the handler; the license-key tag keeps the vCenter bodies out of

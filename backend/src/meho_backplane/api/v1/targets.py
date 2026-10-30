@@ -7,7 +7,7 @@
 
 * ``GET  /api/v1/targets``                — list, keyset-paginated. ``operator`` role.
 * ``GET  /api/v1/targets/discover``       — discover candidates. ``operator`` role.
-* ``GET  /api/v1/targets/{name}``         — describe (alias-aware). ``operator`` role.
+* ``GET  /api/v1/targets/{name}``         — describe (name, alias or id). ``operator`` role.
 * ``POST /api/v1/targets/{name}/probe``   — invoke connector probe. ``operator`` role.
 * ``POST /api/v1/targets``                — create. ``tenant_admin`` role.
 * ``PATCH /api/v1/targets/{name}``        — update (partial). ``tenant_admin`` role.
@@ -20,16 +20,20 @@ reads are impossible — the WHERE clause always includes ``tenant_id``.
 Alias resolution
 ----------------
 
-``GET /{name}`` and ``PATCH /{name}`` both pass the caller-supplied ``name``
-to :func:`~meho_backplane.targets.resolver.resolve_target`, which implements
-the 3-step algorithm: exact name → alias element-equality → near-miss 404.
-Callers can address a target by any of its aliases and get the same result.
+``GET``, ``PATCH``, ``POST .../probe`` and ``DELETE`` on ``/{name}`` pass the
+caller-supplied value to :func:`_resolve_route_target`. It calls
+:func:`~meho_backplane.targets.resolver.resolve_target` (exact name → alias
+element-equality → near-miss 404) and, when that finds nothing and the value
+is a UUID, looks the target up by id. Callers can address a target by its
+name, any of its aliases or its id and get the same result. Other callers of
+``resolve_target`` (``call_operation`` and the rest) do not take an id.
 
 Audit enrichment
 ----------------
 
 Routes that call ``resolve_target`` get the resolved target's id bound
-into structlog contextvars at the resolver's single exit point;
+into structlog contextvars at the resolver's single exit point (an id
+lookup in :func:`_resolve_route_target` binds the same keys);
 :class:`~meho_backplane.audit.AuditMiddleware` reads ``target_id`` via
 :func:`~meho_backplane.audit._resolve_target_id` and writes it to
 ``audit_log.target_id``. ``create_target`` does not call
@@ -158,7 +162,11 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.flight_recorder.config import invalidate_target_override_cache
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.settings import get_settings
-from meho_backplane.targets.resolver import resolve_target
+from meho_backplane.targets.resolver import (
+    TargetNotFoundError,
+    resolve_target,
+    resolve_target_by_id,
+)
 from meho_backplane.targets.schemas import (
     Target,
     TargetCreate,
@@ -396,6 +404,44 @@ def _to_full(t: TargetORM) -> Target:
         updated_at=t.updated_at,
         deleted_at=t.deleted_at,
     )
+
+
+_NO_TARGET_BY_ID_MESSAGE: Final[str] = "No target has this name, alias or id."
+
+
+async def _resolve_route_target(
+    session: AsyncSession, tenant_id: uuid.UUID, value: str
+) -> TargetORM:
+    """Find one target for the describe, update, probe and delete routes.
+
+    Order: exact name, then alias (both through :func:`resolve_target`),
+    then id. The id step runs only when the name and alias steps found
+    nothing and *value* is a valid UUID, so a target named like a UUID
+    is still found by its name first. The id step loads only a live
+    target of *tenant_id*: the id of another tenant's target, or of a
+    deleted one, gives the same 404 as an unknown name.
+
+    :func:`resolve_target_by_id` does not bind ``target_id`` /
+    ``target_name`` for the audit row, so this helper binds them the
+    same way :func:`resolve_target` does. Other callers of
+    :func:`resolve_target` (``call_operation`` and the rest) keep the
+    name-or-alias-only lookup.
+    """
+    try:
+        return await resolve_target(session, tenant_id, value)
+    except TargetNotFoundError as not_found:
+        try:
+            target_id = uuid.UUID(value)
+        except ValueError:
+            raise not_found from None
+        t = await resolve_target_by_id(session, tenant_id, target_id)
+        if t is None:
+            raise TargetNotFoundError(
+                value, not_found.matches, message=_NO_TARGET_BY_ID_MESSAGE
+            ) from None
+    structlog.contextvars.bind_contextvars(target_id=str(t.id), target_name=t.name)
+    _log.info("target_resolved_by_id", target_id=str(t.id), name=t.name)
+    return t
 
 
 def _bind_tls_audit(
@@ -1145,13 +1191,13 @@ async def describe_target(
     operator: Operator = _require_operator,
     session: AsyncSession = Depends(get_session),
 ) -> Target:
-    """Describe a target by name or alias.
+    """Describe a target by name, alias or id.
 
-    Uses :func:`~meho_backplane.targets.resolver.resolve_target` so
-    callers can pass any alias instead of the canonical name. Returns
-    404 with near-misses when nothing matches.
+    Uses :func:`_resolve_route_target`: exact name, then alias, then
+    id (only when the value is a UUID). Returns 404 with near-misses
+    when nothing matches.
     """
-    t = await resolve_target(session, operator.tenant_id, name)
+    t = await _resolve_route_target(session, operator.tenant_id, name)
     return _to_full(t)
 
 
@@ -1186,14 +1232,11 @@ async def probe_target(
       boundary so probe + dispatch agree on the shape of a connector
       failure — sub-signal A of ``claude-rdc-hetzner-dc#753``).
 
-    No error branch writes to the DB row; the previously-cached
-    fingerprint survives. The outer ``async with session.begin()``
-    rolls back on every structured raise (nothing has been flushed by
-    that point), so the column always reflects the *last successful*
-    probe. The target must exist for the probe to fire — a
-    non-existent target returns 404 via ``resolve_target``.
+    No error branch writes to the DB row, so the column always
+    reflects the *last successful* probe. The path value is a name,
+    an alias or an id (:func:`_resolve_route_target`); no match is 404.
     """
-    t = await resolve_target(session, operator.tenant_id, name)
+    t = await _resolve_route_target(session, operator.tenant_id, name)
     cls, label, exception_message = resolve_connector_or_label(t)
     if label == "no_connector":
         raise HTTPException(
@@ -1214,16 +1257,8 @@ async def probe_target(
     try:
         # Forward the route operator so the connector's fingerprint reads
         # per-target Vault credentials under the operator's identity, the
-        # same code path the dispatch surface uses. G0.16-T4 (#1306)
-        # converged probe + dispatch on this signature; pre-fix the
-        # probe path passed nothing (so the connector synthesised a
-        # system operator with a placeholder JWT) and Vault rejected
-        # the JWT/OIDC login as ``malformed jwt: must have three
-        # parts`` on the connectors whose fingerprint authenticates
-        # via Vault (for example k8s-1.x). The wider ABC widening (with
-        # ``operator: Operator | None = None``) keeps this call
-        # backwards-compatible: connectors whose fingerprint does not
-        # touch Vault accept the parameter and ignore it.
+        # same code path the dispatch surface uses (G0.16-T4 #1306).
+        # Connectors whose fingerprint does not touch Vault ignore it.
         fp = await cls().fingerprint(t, operator=operator)
     except Exception as exc:
         # G0.15-T1 #1210: a connector that raises mid-fingerprint used
@@ -1443,9 +1478,10 @@ async def update_target(
     (``kind="secret_ref_outside_tenant_scope"``) — the same write-time
     gate as POST. An explicit ``{"secret_ref": null}`` (clear) and a
     PATCH not sending the field are untouched; no-op when the guard is
-    disabled. See :func:`_enforce_secret_ref_tenant_scope`.
+    disabled. See :func:`_enforce_secret_ref_tenant_scope`. The path
+    value is a name, an alias or an id (:func:`_resolve_route_target`).
     """
-    t = await resolve_target(session, operator.tenant_id, name)
+    t = await _resolve_route_target(session, operator.tenant_id, name)
     updates = body.model_dump(exclude_unset=True)
     # T1 (#1780). Snapshot the pre-patch TLS-verification state *before*
     # the ``setattr`` loop below mutates the row, so the audit fold-in
@@ -1614,20 +1650,19 @@ async def delete_target(
     ``meho_connector_edit_*`` precedent so cross-tenant audit
     queries can filter by op id prefix).
 
-    Re-deletes collapse to 404 — the second DELETE goes through
-    :func:`~meho_backplane.targets.resolver.resolve_target`
-    which filters ``deleted_at IS NULL``, so the row no longer
-    resolves once the first DELETE flushes.
+    The path value is a name, an alias or an id (see
+    :func:`_resolve_route_target`). Re-deletes collapse to 404 —
+    every lookup step filters ``deleted_at IS NULL``, so the row no
+    longer resolves once the first DELETE flushes.
 
-    ``tenant_admin`` role required (cross-tenant DELETE returns
-    the standard 404 conflation that :func:`resolve_target`
-    enforces).
+    ``tenant_admin`` role required (cross-tenant DELETE, by name or
+    by id, returns the standard 404).
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_DELETE_OP_ID,
         audit_op_class="write",
     )
-    t = await resolve_target(session, operator.tenant_id, name)
+    t = await _resolve_route_target(session, operator.tenant_id, name)
     await soft_delete_target(session, t, operator=operator, force=force)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

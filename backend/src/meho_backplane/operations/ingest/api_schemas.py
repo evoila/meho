@@ -61,6 +61,7 @@ staged`` will hit.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
@@ -87,6 +88,8 @@ __all__ = [
     "IngestResponse",
     "IngestionResultModel",
     "NextStep",
+    "OperationOverrideList",
+    "OperationOverrideRow",
     "SafetyChangeModel",
     "SpecSource",
 ]
@@ -1048,8 +1051,19 @@ class EditOpBody(BaseModel):
 
     ``safety_level`` is the bounded enum from
     :class:`~meho_backplane.db.models.EndpointDescriptor.safety_level`
-    (``safe`` / ``caution`` / ``dangerous``); a value outside the set
-    is rejected by Pydantic before the service layer sees it.
+    (``safe`` / ``caution`` / ``dangerous`` / ``destructive``); a value
+    outside the set is rejected by Pydantic before the service layer sees
+    it. It can only raise the level above the classification (#4711).
+
+    ``safety_level`` and ``requires_approval`` are stored as an operator
+    override, apart from the value in code or in the API description, so
+    they survive a restart and a re-ingest (#4711). ``requires_approval:
+    false`` where the classification requires approval needs
+    ``platform_admin``, a ``reason`` and a fresh sign-in; it is never
+    allowed for a destructive operation.
+
+    ``reason`` is written to the audit row. It is required to turn
+    approval off.
 
     ``is_enabled`` is the per-op override that wins over the group
     cascade (see :meth:`ReviewService.edit_op` for the full
@@ -1074,6 +1088,38 @@ class EditOpBody(BaseModel):
     safety_level: Literal["safe", "caution", "dangerous", "destructive"] | None = None
     requires_approval: bool | None = None
     is_enabled: bool | None = None
+    reason: str | None = Field(default=None, min_length=1, max_length=1024)
+
+
+class OperationOverrideRow(BaseModel):
+    """One operator override of a risk level or approval flag (#4711).
+
+    ``scope`` is ``tenant`` (the change applies to ``tenant_id`` only) or
+    ``install`` (the whole install). ``safety_level`` / ``requires_approval``
+    are the values that apply in that scope: the classification with every
+    override there. ``reason`` is the reason a platform admin gave for
+    turning approval off.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    connector_id: str
+    op_id: str
+    scope: Literal["tenant", "install"]
+    tenant_id: UUID | None
+    safety_level: str | None
+    requires_approval: bool | None
+    reason: str | None
+    set_by_sub: str
+    set_at: datetime
+
+
+class OperationOverrideList(BaseModel):
+    """Response body for ``GET /api/v1/connectors/operation-overrides`` (#4711)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    overrides: list[OperationOverrideRow]
 
 
 class EditOpWarning(BaseModel):

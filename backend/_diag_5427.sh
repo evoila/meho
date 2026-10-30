@@ -3,8 +3,6 @@
 # network alias on a runner. Removed again before the pull request is ready.
 set -uo pipefail
 TOOL="${MEHO_TEST_VAULT_IMAGE}"
-BAO=$(uv run python -c 'import yaml; i = yaml.safe_load(open("../deploy/charts/meho/charts/openbao/values.yaml"))["image"]; print(f"{i[\"repository\"]}@{i[\"digest\"]}")')
-docker pull -q "$BAO" >/dev/null
 docker pull -q "$TOOL" >/dev/null
 
 check() {
@@ -17,7 +15,7 @@ check() {
   sleep 5
   local want
   want=$(docker inspect -f "{{(index .NetworkSettings.Networks \"diag-$tag\").IPAddress}}" "kc-$tag")
-  for image in "$TOOL" "$BAO"; do
+  for image in "$TOOL"; do
     docker run --rm --network "diag-$tag" "$@" -e WANT="$want" --entrypoint sh "$image" -c '
       if grep -q "^search" /etc/resolv.conf; then echo "  search line: present, $(grep -c . /etc/resolv.conf) lines"; else echo "  search line: none"; fi
       i=0
@@ -40,6 +38,9 @@ echo "boot_id: $(cat /proc/sys/kernel/random/boot_id)"
 check plain
 check no-search --dns-search=.
 
+echo "::group::k3s test file"
+uv run pytest -q -o tmp_path_retention_policy=failed tests/integration/test_connectors_k8s_k3d.py 2>&1 | tail -1
+echo "::endgroup::"
 passed=0
 for i in $(seq 1 10); do
   if uv run pytest -q -o tmp_path_retention_policy=failed \
@@ -51,5 +52,5 @@ for i in $(seq 1 10); do
     grep -E "VaultInitError: " /tmp/ob.log | head -2
   fi
 done
-echo "openbao with the fix: $passed of 10 runs passed"
+echo "openbao with the fix, right after the k3s tests: $passed of 10 runs passed"
 check plain-again

@@ -321,7 +321,7 @@ _DANGEROUS_OP_IDS: frozenset[str] = frozenset({"pfsense.filter.rule.add"})
 #: the read surface, but it takes real params (``sanctioned_src`` /
 #: ``mgmt_nets`` are required), so it is held separate from the empty-params
 #: dispatch/audit sweep (covered by ``test_connectors_pfsense_ops.py``).
-_PARAM_READ_OP_IDS: frozenset[str] = frozenset({"pfsense.mgmt_flow.summary"})
+_PARAM_READ_OP_IDS: frozenset[str] = frozenset({"pfsense.mgmt_flow.summary", "pfsense.diag.ping"})
 
 # The governed user writes (#3937): ``dangerous`` + requires_approval.
 _USER_WRITE_OP_IDS: frozenset[str] = frozenset({"pfsense.user.disable", "pfsense.user.enable"})
@@ -448,7 +448,7 @@ def test_pfsense_ops_registration_count() -> None:
         | _USER_WRITE_OP_IDS
     ) - op_ids
     assert not missing, f"Missing ops: {missing}"
-    assert len(PFSENSE_OPS) == 23, f"Expected 23 ops, got {len(PFSENSE_OPS)}"
+    assert len(PFSENSE_OPS) == 24, f"Expected 24 ops, got {len(PFSENSE_OPS)}"
 
 
 def test_pfsense_ops_safety_levels_and_approval() -> None:

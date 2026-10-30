@@ -26,14 +26,15 @@ the source_kind="composite" persistence.
 Mixed safety posture
 --------------------
 
-The 17 read composites (the five T5 / #508 reads + the datastore
+The 19 read composites (the five T5 / #508 reads + the datastore
 cache-refresh read ``datastore.refresh`` / #3789 + the datastore file list
-``datastore.file.list`` / #3432 + the VM allocation read
+``datastore.file.list`` / #3432 + the vSAN folder list
+``datastore.vsan.folder.list`` / #4022 + the VM allocation read
 ``vm.resource_allocation.show`` / #3880 + the 4 guest-ops reads
 ``vm.guest.process.list`` / ``vm.guest.env.read`` / ``vm.guest.net.show``
 / ``vm.guest.file.read`` / #3100 + the Supervisor / namespace /
 storage-policy / content-library ``status`` + ``list`` reads) are
-read-only. 16 of them pass ``safety_level="safe"`` +
+read-only. 18 of them pass ``safety_level="safe"`` +
 ``requires_approval=False`` -- overrides of T4's ``dangerous`` / ``True``
 defaults. The exception is ``vm.guest.file.read``, promoted to
 ``caution`` in #3720 (it can fetch arbitrary guest bytes as the in-guest
@@ -119,6 +120,9 @@ from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
 )
 from meho_backplane.connectors.vmware_rest.composites._datastore_list import (
     datastore_file_list_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._datastore_vsan import (
+    datastore_vsan_folder_list_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
     cluster_drs_rule_delete_composite,
@@ -286,6 +290,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     DATASTORE_REFRESH_RESPONSE_SCHEMA,
     DATASTORE_USAGE_PARAMETER_SCHEMA,
     DATASTORE_USAGE_RESPONSE_SCHEMA,
+    DATASTORE_VSAN_FOLDER_LIST_PARAMETER_SCHEMA,
+    DATASTORE_VSAN_FOLDER_LIST_RESPONSE_SCHEMA,
     EVENT_TAIL_PARAMETER_SCHEMA,
     EVENT_TAIL_RESPONSE_SCHEMA,
     FOLDER_CREATE_PARAMETER_SCHEMA,
@@ -448,198 +454,150 @@ COMPOSITES_NOT_ON_8_0: dict[str, str] = {
 
 #: Curated agent-actionable group selectors for the vmware-rest
 #: composite surface (T4b #732). Surfaced verbatim by
-#: ``list_operation_groups`` so the LLM client picks the right
-#: composite group before drilling into ``search_operations``. Each
-#: string differentiates against the other six composite groups *and*
-#: against the ~3,470 ingested raw-REST ops that share the same
-#: ``(vmware, 9.0, vmware-rest)`` connector key -- a curated composite
-#: is the right route when one operator question maps to N raw REST
-#: calls plus rollback / polling / aggregation logic.
+#: ``list_operation_groups`` so the LLM client picks the right group
+#: before drilling into ``search_operations``. Each text names the
+#: group's main reads and its main changes. The same groups also hold
+#: the operations ingested from the vSphere API files, and those have
+#: their own safety levels. So a text names a safety level only next to a
+#: named operation, never for the whole group (#4120;
+#: ``tests/test_operation_group_texts.py`` checks it).
 _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "cluster": (
-        "Use for cluster-level reads and orchestrated cluster ops "
-        "that aggregate across hosts: DRS state + active "
-        "recommendations (read); sequential cluster patch (write, "
-        "approval-gated); the two DRS-rule writes — a VM-VM affinity / "
-        "anti-affinity rule by explicit VM list (drs_rule.create) and a "
-        "VM-Host rule pinning a VM group onto an (anti-)affine host group "
-        "(drs_vm_host_rule.create); and the governed resource-pool "
-        "allocation writes (resource_pool.create under a parent pool or a "
-        "cluster's root pool, and resource_pool.delete with a "
-        "refuse-then-force guard). The right group when the question is "
-        "'what is DRS suggesting?', 'patch every host in this cluster in "
-        "order', 'pin these VMs to these hosts', or 'carve out / tear down "
-        "a resource pool for this estate'. Pair with the 'host' group when "
-        "the follow-up drills into one host's lifecycle (evacuate, "
-        "maintenance), and with 'vm' when DRS recommendations need "
-        "to translate into actual VM migrations."
+        "Use for clusters, DRS and resource pools. Read: a cluster's DRS "
+        "settings and the moves DRS recommends now "
+        "(cluster.drs_recommendations, safe). Changes: "
+        "update every host of a cluster in turn (cluster.patch, dangerous); add a "
+        "DRS rule that keeps VMs together or apart (cluster.drs_rule.create, "
+        "dangerous) or runs a VM group on a host group "
+        "(cluster.drs_vm_host_rule.create, caution); delete a DRS rule "
+        "(cluster.drs_rule.delete, destructive); create a resource pool "
+        "(resource_pool.create, caution) or delete one (resource_pool.delete, "
+        "dangerous). Pair with 'host' for one host's maintenance and with 'vm' "
+        "to move VMs."
     ),
     "events": (
-        "Use for vCenter event-stream questions: 'what changed in "
-        "the last N events?' tail via EventManager.QueryEvents. "
-        "Read-only. The right group for live incident triage when "
-        "the operator doesn't yet know which entity to drill into. "
-        "Pair with 'vm' or 'host' once the event names a target "
-        "moid to inspect."
+        "Use for vCenter events: what changed, and when. Reads: the latest "
+        "events, filtered by time, event type or one object (event.tail, safe); "
+        "for a long history, open an event collector "
+        "(POST:/EventManager/{moId}/CreateCollectorForEvents), page through it "
+        "(POST:/EventHistoryCollector/{moId}/ReadNextEvents) and destroy it "
+        "when done. Changes: write a note of your own into the event log, for "
+        "example the start of a maintenance window "
+        "(POST:/EventManager/{moId}/LogUserEvent). The right group for "
+        "incident triage when you do not know yet which object to look at. "
+        "Pair with 'vm' or 'host' once an event names an object."
     ),
     "performance": (
-        "Use for performance-counter inspection on a single entity "
-        "(VM, host, cluster, datastore): discover available counters "
-        "via QueryAvailablePerfMetric, sample values via QueryPerf, "
-        "return both in one call. Read-only. The right group for "
-        "'is this VM hot?' / 'what does the last hour of CPU look "
-        "like?' questions. Pair with 'vm' / 'host' to convert "
-        "moids the operator already knows into one-shot perf "
-        "snapshots."
+        "Use for the performance counters of one VM, host or cluster. Reads: "
+        "the available counters and their recent samples in one call "
+        "(performance.summary, safe); the samples of chosen counters "
+        "(POST:/PerformanceManager/{moId}/QueryPerf) and the counter "
+        "definitions (POST:/PerformanceManager/{moId}/QueryPerfCounter). "
+        "Changes: set how long vCenter keeps statistics and how often it "
+        "samples (POST:/PerformanceManager/{moId}/UpdatePerfInterval), or how "
+        "much detail it collects per counter "
+        "(POST:/PerformanceManager/{moId}/UpdateCounterLevelMapping). These two "
+        "change the whole vCenter, not one object, and more detail costs "
+        "database space. The right group for 'is this VM busy?' or 'how did "
+        "CPU look in the last hour?'. Pair with 'vm' or 'host' to get the "
+        "object id first."
     ),
     "storage": (
-        "Use for datastore usage, VM-to-datastore placement, and "
-        "datastore cache refresh: capacity / free space / type per "
-        "datastore plus the vm_count + vm_names enrichment via the "
-        "placement filter (datastore.usage), and a read-side refresh of a "
-        "single datastore's cached capacity/free-space via "
-        "Datastore.RefreshDatastore (datastore.refresh) so a grown NFS "
-        "export becomes visible to a host without SSH/govc. These reads change "
-        "nothing. The "
-        "right group for 'where is this VM stored?', 'which datastores are "
-        "running low?', 'how many VMs live on this datastore?', or 'the "
-        "export grew but the datastore still shows the old free space'. "
-        "Also file writes on a datastore: delete a file or folder "
-        "(datastore.file.delete -- destructive, always needs approval; refused "
-        "for files of registered VMs and for system or content-library folders; "
-        "use it for VM folders left behind after vm.destroy) and create a folder "
-        "(datastore.dir.create, needs approval). "
-        "Pair with 'vm' when the question moves from 'which datastore?' to "
-        "acting on a specific VM."
+        "Use for datastores, the files on them, and VM storage policies. Reads: "
+        "list datastores and read one (GET:/api/vcenter/datastore); capacity, "
+        "free space and the VMs on each datastore (datastore.usage, safe); the "
+        "files in one datastore folder (datastore.file.list, safe); the folders "
+        "of a vSAN datastore with their size and the VMs that use them, or the "
+        "files of one such folder (datastore.vsan.folder.list, safe); make ESXi "
+        "read a datastore's capacity and free space again (datastore.refresh, "
+        "safe); list storage policies (storage_policy.list, safe). Changes: "
+        "create a datastore folder (datastore.dir.create, caution); delete a file "
+        "or folder, refused for files of registered VMs (datastore.file.delete, "
+        "destructive); create a storage policy (storage_policy.create, caution) "
+        "or delete one (storage_policy.delete, destructive). Pair with 'vm' when "
+        "the next step acts on one VM."
     ),
     "networking": (
-        "Use for distributed-switch and portgroup work: audit "
-        "(enumerate DVS + portgroups, enrich each with parent DVS + "
-        "connected VM names, read-only) and the two portgroup writes "
-        "for standing up an L2 substrate -- create a distributed "
-        "portgroup on a DVS with a VLAN trunk (or access) spec, and "
-        "set its security policy (promiscuous / forged-transmits / "
-        "MAC-changes), both approval-gated. The right group for "
-        "'what's connected to this portgroup?' / 'which DVS does "
-        "this VM live on?' and 'create the trunk portgroup my nested "
-        "ESXi attaches to'. The audit read surfaces the DVS / "
-        "portgroup moids the two writes take. Teardown (destructive, always "
-        "needs approval, refused while anything still uses the port group): delete "
-        "a distributed portgroup (network.portgroup.delete) or a port group on one "
-        "host's standard switch (host.standard_portgroup.delete). Pair with 'vm' "
-        "for the post-audit drill-in into one VM's NICs, and with 'host' "
-        "before its host_detach_from_vds write."
+        "Use for networks, distributed switches and port groups. Reads: list "
+        "networks (GET:/api/vcenter/network), and distributed port groups with "
+        "their switch, VLAN and connected VMs (network.portgroup.audit, safe). "
+        "Changes: create a distributed port group with a VLAN trunk or one "
+        "access VLAN (network.portgroup.create, dangerous); change its VLAN "
+        "(network.portgroup.vlan.set, dangerous) or its security policy "
+        "(network.portgroup.security.set, dangerous); delete a distributed port "
+        "group (network.portgroup.delete, destructive) or a port group on one "
+        "host's standard switch (host.standard_portgroup.delete, destructive). "
+        "Both deletes are refused while something uses the port group. Pair "
+        "with 'vm' for one VM's NICs, and with 'host' before "
+        "host.detach_from_vds."
     ),
     "vm": (
-        "Use for VM-lifecycle write composites: create with NIC "
-        "attach + optional power-on (rollback on partial failure), "
-        "clone from a content-library template (long-running task "
-        "polling) or from a folder VM template (CloneVM_Task, with "
-        "optional inline guest customization), deploy an OVF/OVA "
-        "content-library item to a new VM (deploy_from_library — "
-        "OVF-network→portgroup mappings, ambiguity-rejecting name "
-        "lookup, structured deploy-report statuses), VM snapshots (take "
-        "one with vm.snapshot.create -- caution, needs approval; revert to "
-        "one by name or id; delete one with vm.snapshot.delete -- "
-        "destructive, always needs approval; list them with the typed read "
-        "vmware.snapshot.list), "
-        "migrate via DRS or explicit host, bulk power across a "
-        "filter, or a single-VM power verb (on/off/reset plus a "
-        "Tools-mediated guest_shutdown/guest_reboot for one-off "
-        "incident actions), and a single VM's CPU / memory limit + "
-        "reservation (resource_allocation.show read, .set caution write), "
-        "and inventory folders (folder.create; folder.delete -- destructive, "
-        "only for empty folders). "
-        "Every other op is dangerous / approval-required. The "
-        "right group for any operator workflow that would otherwise "
-        "be a ``govc vm.*`` invocation orchestrating multiple raw "
-        "REST calls. Pair with 'storage' / 'networking' / 'cluster' "
-        "for the pre-flight reads that shape the create / migrate "
-        "parameters."
+        "Use for virtual machines. Reads: list VMs (GET:/api/vcenter/vm), read "
+        "one VM (GET:/api/vcenter/vm/{vm}), and a VM's CPU and memory limits "
+        "(vm.resource_allocation.show, safe). To list a VM's snapshots, use "
+        "vmware.snapshot.list. Changes: power one VM or many (vm.power, "
+        "vm.power.bulk, dangerous); create, clone or deploy a VM (vm.create, "
+        "vm.clone, vm.clone_from_template, vm.deploy_from_library, "
+        "vm.import_from_library, dangerous); change CPU, memory, disks, NICs or "
+        "CD drives (vm.resize, vm.disk.grow, vm.disk.attach, vm.nic.repoint, "
+        "vm.cdrom.add, vm.device.cdrom, dangerous); set CPU and memory limits "
+        "(vm.resource_allocation.set, caution); unmount the VMware Tools "
+        "installer (vm.tools.installer.unmount, caution); move a VM to another "
+        "host (vm.migrate, dangerous); take a snapshot (vm.snapshot.create, "
+        "caution), revert to one (vm.snapshot.revert, dangerous) or delete one "
+        "(vm.snapshot.delete, destructive); delete a powered-off VM and its "
+        "disks (vm.destroy, destructive); create a VM folder (folder.create, "
+        "dangerous) or delete an empty one (folder.delete, destructive). Pair "
+        "with 'storage', 'networking' or 'cluster' for the reads a create or a "
+        "move needs."
     ),
     "host": (
-        "Use for host-lifecycle and host-domain write "
-        "composites. Write (dangerous / "
-        "approval-required): evacuate "
-        "every VM off a host (recursive composite call into "
-        "vm.migrate) then enter maintenance, or detach a host from a "
-        "DVS after migrating its VM NICs off; the host_evacuate "
-        "composite is the first production composite that calls "
-        "another composite. Plus the host-domain writes, each "
-        "vCenter-mediated through the governed VI-JSON seam: mount an "
-        "NFS export as a datastore on a host "
-        "(datastore_mount_nfs), mark host disks as flash/HDD for "
-        "vSAN-ready validation (disk_mark_flash), or start/stop/restart "
-        "a bounded host service and set its policy (service_control, "
-        "allowlist-enforced — never an arbitrary service name). The "
-        "host is selected by display name or moref. The right group for "
-        "'safely take this host offline' and host bring-up / prep "
-        "workflows. Pair with 'networking' for the "
-        "DVS-audit prerequisite to host_detach_from_vds, and with "
-        "'cluster' / 'vm' for the pre-flight reads."
+        "Use for ESXi hosts. Reads: list hosts (GET:/api/vcenter/host). Changes: "
+        "move every running VM off a host, then put it into maintenance mode "
+        "(host.evacuate, dangerous); take a host out of maintenance mode "
+        "(host.maintenance.exit, dangerous); move a host's VM NICs to a "
+        "standard network, then take the host off a distributed switch "
+        "(host.detach_from_vds, dangerous); mount an NFS export as a datastore "
+        "(host.datastore_mount_nfs, dangerous); mark disks as flash or HDD "
+        "(host.disk_mark_flash, dangerous); start, stop or restart an allowed "
+        "host service (host.service_control, dangerous). Choose the host by "
+        "name or moref. Pair with 'networking' before host.detach_from_vds, and "
+        "with 'cluster' or 'vm' for the reads before a change."
     ),
     "guest": (
-        "Use for guest OS customization (GOSC) write composites -- how a "
-        "cloned VM gets its network identity on first boot. Write "
-        "(dangerous / approval-required): create a reusable named "
-        "customization spec (hostname + per-NIC static IP + gateway + "
-        "DNS for Linux, or a Windows sysprep spec), and apply a saved "
-        "spec to a powered-off VM (optional power-on afterward so it "
-        "applies that boot). The right group after a 'vm' clone/create "
-        "when the question is 'give this VM its hostname and static IP'. "
-        "Pair with 'vm' for the clone/create that produces the VM, and "
-        "with 'networking' when the per-NIC IPs need portgroup context. "
-        "GOSC specs can carry admin / sysprep credentials; those never "
-        "reach a reviewer surface (the create op is credential-class)."
+        "Use for guest OS customization: how a cloned VM gets its host name and "
+        "IP address on first boot. Changes: save a named customization spec "
+        "with host name, IP per NIC, gateway and DNS, or a Windows sysprep spec "
+        "(guest.customization_spec.create, dangerous); apply a saved spec to a "
+        "powered-off VM, and power it on if asked (vm.customize, dangerous). "
+        "Use it after a 'vm' clone or create. A spec can hold admin passwords; "
+        "they never reach a reviewer."
     ),
     "guest_ops": (
-        "Use for the governed guest-operations channel -- reaching INSIDE a "
-        "running VM's guest OS via VMware Tools (vim GuestOperationsManager), "
-        "the governed replacement for out-of-band 'govc guest.run'. Reads "
-        "(safe): list guest processes (process.list -- exec status), read "
-        "guest environment variables (env.read), show Tools-reported guest "
-        "network state (net.show -- per-NIC IPs / routes / DNS, needs NO guest "
-        "credentials), and initiate a guest file read (file.read -- returns the "
-        "transfer handle: size + attributes + one-time URL). Writes (dangerous / "
-        "approval-required): place a file into the guest (file.write) and run a "
-        "program in the guest (program.run -- freeform in-guest execution via "
-        "StartProgramInGuest, with optional exit-code polling). Guest OS "
-        "credentials resolve from the target's Vault secret_ref (guest_username "
-        "/ guest_password) and are NEVER a parameter. The right group for "
-        "'what's running in this appliance?', 'read /etc/os-release from the "
-        "guest', 'what does the guest think its network is?', 'drop this config "
-        "file into the guest', or 'run Install-WindowsFeature inside the guest'. "
-        "Requires VMware Tools in the guest."
+        "Use to work inside a running VM's guest OS through VMware Tools, "
+        "instead of 'govc guest.run'. Reads: list the guest's processes "
+        "(vm.guest.process.list, safe); read its environment variables "
+        "(vm.guest.env.read, safe); show its network settings, without a guest "
+        "login (vm.guest.net.show, safe); read a file's size and attributes, or "
+        "the file itself if asked (vm.guest.file.read, caution). Changes: write "
+        "a file into the guest (vm.guest.file.write, dangerous); run a program "
+        "in the guest (vm.guest.program.run, dangerous). The guest login comes "
+        "from the target's Vault secret (guest_username, guest_password), never "
+        "from a parameter. Needs VMware Tools in the guest."
     ),
     "namespace_management": (
-        "Use for governed vSphere Supervisor (Workload Control Plane / WCP) "
-        "lifecycle on a cluster -- the governed replacement for out-of-band "
-        "'govc'/'kubectl-vsphere' enablement. Writes (dangerous / "
-        "approval-required): enable the Supervisor on a single compute cluster "
-        "(supervisor.enable -- takes the nested EnableOnComputeClusterSpec: "
-        "control_plane + workloads with a network stack the composite validates, "
-        "VSPHERE+VSPHERE_FOUNDATION for the VDS + Foundation LB model or NSX_VPC "
-        "for NSX VPC), and disable/tear it down (supervisor.disable). Both are "
-        "asynchronous -- they return immediately and you poll for convergence. "
-        "Read (safe): supervisor.status -- read a cluster's config_status "
-        "(CONFIGURING -> RUNNING / ERROR) + kubernetes_status (READY) shaped so a "
-        "runbook OperationCallVerify step or a Sensor can poll ready==true. Plus "
-        "the vSphere Namespace lifecycle on an enabled Supervisor -- create a "
-        "namespace (namespace.create, caution + approval: binds an SPBM storage "
-        "policy, a TKr/VKr content library, and VM classes; the container a VKS "
-        "guest cluster is created into and the last vCenter-REST step before "
-        "k8s.apply of the Cluster CR) and tear one down (namespace.delete, "
-        "destructive + approval: cascades to every workload inside it). Poll a "
-        "namespace's readiness with namespace.status (safe: config_status "
-        "CONFIGURING -> RUNNING + a derived ready flag, boot-enabled like "
-        "supervisor.status). The "
-        "right group for 'stand up Kubernetes on this cluster', 'tear the "
-        "Supervisor down', 'has the Supervisor come up yet?', 'create the "
-        "namespace for the guest cluster', 'has the namespace come up yet?', or "
-        "'delete this namespace'. Pair with "
-        "'storage' for the SPBM policy id the enable spec / namespace needs, "
-        "'content_library' for the TKr library id the namespace binds, and "
-        "'networking' for the workload / management network context."
+        "Use for the vSphere Supervisor (Kubernetes on a cluster) and its "
+        "vSphere Namespaces. Reads: the Supervisor state of a cluster "
+        "(supervisor.status, safe) and the state of a namespace "
+        "(namespace.status, safe), both with a ready flag to poll. Changes: turn "
+        "on the Supervisor for one cluster (supervisor.enable, dangerous) or "
+        "remove it (supervisor.disable, dangerous); both run in the background, "
+        "so poll supervisor.status. Create a namespace with a storage policy, a "
+        "Kubernetes release library and VM classes (namespace.create, caution); "
+        "delete a namespace and everything in it (namespace.delete, "
+        "destructive). Pair with 'storage' for the storage policy id, "
+        "'content_library' for the library id, and 'networking' for the network "
+        "settings."
     ),
     # Shared with the typed content-library reads and finds: the same key and text.
     CONTENT_LIBRARY_GROUP_KEY: CONTENT_LIBRARY_WHEN_TO_USE,
@@ -810,6 +768,25 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="safe",
         requires_approval=False,
         llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS["vmware.composite.datastore.file.list"],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.datastore.vsan.folder.list",
+        handler=datastore_vsan_folder_list_composite,
+        summary="List the folders of a vSAN datastore, or the files in one folder.",
+        description=(
+            "Lists the top-level folders of a vSAN datastore with friendly name, UUID path, "
+            "size and the registered VMs that use each. With folder, lists the files in that "
+            "folder with size and last change; a missing folder answers 'absent'. Read-only."
+        ),
+        parameter_schema=DATASTORE_VSAN_FOLDER_LIST_PARAMETER_SCHEMA,
+        response_schema=DATASTORE_VSAN_FOLDER_LIST_RESPONSE_SCHEMA,
+        group_key="storage",
+        tags=["composite", "read-only", "storage", "datastore", "vsan", "vi-json"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS[
+            "vmware.composite.datastore.vsan.folder.list"
+        ],
     ),
     _CompositeSpec(
         op_id="vmware.composite.network.portgroup.audit",

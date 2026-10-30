@@ -1590,7 +1590,7 @@ hangs the queue forever:
 | Required context | Owning workflow | Reports on `merge_group`? |
 | --- | --- | --- |
 | `Python (ruff + mypy + pytest)` | `ci.yml` | yes (#769) |
-| `Python (integration testcontainers)` | `ci.yml` | yes (#769) |
+| `Python (integration testcontainers)` | `ci.yml` | yes (#769) — since #5384 the `python-integration` fan-in over four integration shards carries it |
 | `Python (database migrations)` | `ci.yml` | yes (#769) — `changes` job emits `true` on non-PR events |
 | `Go (golangci-lint + go test)` | `ci.yml` | yes (#769) |
 | `Helm (lint + template + kubeconform)` | `ci.yml` | yes (#769) |
@@ -1724,26 +1724,31 @@ workflow files, this doc, and the changelog.
 | --- | --- | --- |
 | `python-lint` (`Python lint + typecheck (ruff + mypy)`) | `backend/src/` + `backend/tests/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict`. Non-required; whole-tree, unshardable-by-file, runs once on a GitHub-hosted runner (#3251, #4626). |
 | `python-unit-shard` (`Python unit shard N/4`) | `backend/` unit + acceptance subtree, split 4 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). |
-| `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252). |
-| `python-integration` (`Python (integration testcontainers)`) | `backend/tests/integration/` | `uv sync --locked --all-groups` -> `pytest tests/integration/` against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. **Required merge gate (#698)** so the lane that exercises real connector dispatch can no longer ship red. |
+| `python-outside-backend` (`Python tests that read files outside backend`) | the backend tests that read files outside `backend/` | Runs only on a PR with no `backend/` change (`backend_python=false`) that is not docs-only. `pytest -n 3` over the fixed list in `backend/tests/_outside_backend_tests.py`, on a GitHub-hosted runner. Non-required; the fan-in requires it on that path (#5296). See [No-backend path (#5296)](#no-backend-path-5296). |
+| `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252); on a no-backend diff it requires `python-outside-backend` to pass (#5296). |
+| `python-integration-shard` (`Python integration shard N/4`) | `backend/tests/integration/` + the G0.7 vSphere canary module, split 4 ways | `uv sync --locked --all-groups` -> `pytest -x -rs` over a file set split by measured time, against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. No xdist inside a shard. Non-required matrix (#5384). |
+| `python-integration` (`Python (integration testcontainers)`) | fan-in | `needs: [changes, python-integration-shard]`; **required check (#698)** so the lane that exercises real connector dispatch can no longer ship red. Fails when any shard failed or was cancelled, or the detector is not green; reports success-by-skip on a docs-only diff and on a no-backend diff (#5296). Same rules as `python-unit-lane` (#5384). |
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
 
 The four `python-unit-shard` legs run on `meho-runners-ci-heavy`
 (dedicated ARC scale set, 6000m requests=limits, max 5 pods — #761 /
-rdc-gitops#55; four shards fit the 5-pod ceiling). `python-integration`,
-`python-migration-tests` and the nightly `python-coverage-combine` run
-on the dense `meho-runners-ci` pool (4-core): they pull their test images
-from the internal image mirror or read the private vendor spec shelf.
+rdc-gitops#55; four shards fit the 5-pod ceiling). The four
+`python-integration-shard` legs, `python-migration-tests` and the
+nightly `python-coverage-combine` run on the dense `meho-runners-ci` pool
+(4-core): they pull their test images from the internal image mirror or
+read the private vendor spec shelf.
 
 Since #4626 (step 1), the six small jobs that need nothing from the
-internal network run on GitHub-hosted `ubuntu-latest` runners:
+internal network run on GitHub-hosted `ubuntu-latest` runners. The
+`python-integration` fan-in (#5384) joined them later:
 
 | Job | Runs on | Why it can leave the internal pool |
 | --- | --- | --- |
 | `changes` | `ubuntu-latest` | one `git diff`, 12 s of work |
 | `python-lint` | `ubuntu-latest` | `uv sync` from PyPI + ruff + mypy |
 | `python-unit-lane` | `ubuntu-latest` | one bash step over `needs.*.result` |
+| `python-integration` | `ubuntu-latest` | the integration fan-in (#5384): one bash step over `needs.*.result` |
 | `go-lint-test` | `ubuntu-latest` | Go toolchain + public egress; gcc and make are preinstalled, so the "install if missing" steps are no-ops |
 | `cli-api-snapshot-freshness` | `ubuntu-latest` | Go + uv + `make`; regenerates committed artifacts offline |
 | `helm-lint-template` | `ubuntu-latest` | helm + kubeconform from public releases |
@@ -1768,12 +1773,13 @@ from the old 1320 s whole-suite budget) is the PR-level early-warning
 gate that fires well below the cap. `python-lint` and the fan-in carry
 10 and 5 minutes.
 `go-lint-test` and `helm-lint-template` carry 10 minutes;
-`python-integration` carries 60 minutes for the container-pull + DinD
-spin-up + testcontainers sweep (xdist loadgroup parallelisation tracked
-in #564). Wall-clock for a green PR is the slowest job's elapsed time
-because the jobs never block each other — since #3251 sharded the unit
-lane, `python-integration` is typically the dominant lane and the
-dispatch surface for the Goal #11 budget conversation.
+each `python-integration-shard` carries 30 minutes (hang backstop; the
+slowest shard is about 10 minutes of pytest plus about 2 minutes of
+setup) and its fan-in 5 minutes. Wall-clock for a green PR is the
+slowest job's elapsed time because the jobs never block each other.
+Until #5384 the serial integration job (60-minute cap, about 28 minutes
+of pytest) was the slowest job of every merge-queue run; see
+[Sharded integration lane (#5384)](#sharded-integration-lane-5384).
 
 ### Sharded unit lane (#3251)
 
@@ -1848,7 +1854,8 @@ shape (deterministic file-level matrix + fan-in):
   render tests really run there and fail, not skip, if helm is missing.
 - **`python-unit-lane`** — the **fan-in** carrying the exact
   branch-protection required context `Python (ruff + mypy + pytest)`. It
-  `needs: [changes, python-lint, python-unit-shard]` and, via `if: always()
+  `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`
+  and, via `if: always()
   && <fork guard>`, runs regardless of upstream results, then inspects
   `needs.*.result`. `always()` is load-bearing: a plain `needs:` gate would
   be *skipped* when a shard fails, and a skipped required check counts as
@@ -1858,10 +1865,15 @@ shape (deterministic file-level matrix + fan-in):
   guard skips this job (and the shards), reporting the required context as
   Success exactly as the old single job did. Since #3252 the step first
   fails CLOSED if the `changes` detector did not itself succeed, then
-  branches on `needs.changes.outputs.docs_only`: on the **docs-only fast
-  path** it accepts the detect-driven `skipped` lint/shards as pass; on a
-  **full run** it requires strict `success` (a `skipped` lint/shard there is
-  anomalous and fails the gate). See [Docs-only fast path
+  branches on `needs.changes.outputs.docs_only` (and, since #5296,
+  `backend_python`): on the **docs-only fast
+  path** it accepts the detect-driven `skipped` lint/shards as pass. Since
+  #5296, when no `backend/` file changed (`backend_python=false`), it accepts
+  the skipped lint/shards and passes only if `python-outside-backend` passes
+  (see [No-backend path (#5296)](#no-backend-path-5296)). On a **full run**
+  it requires strict `success` from lint and shards (a `skipped` lint/shard
+  there is anomalous and fails the gate), and `python-outside-backend` must
+  be skipped or passed. See [Docs-only fast path
   (#3252)](#docs-only-fast-path-3252).
 
 Because the required context string is unchanged and stays on a job, the
@@ -1872,6 +1884,49 @@ byte-identical). No escape-hatch label (the coverage lane's
 `ci-coverage-validate`) is needed: the coverage lane runs once a night and
 must be *forced* onto a PR, whereas the unit lane runs on every PR by default,
 so a sharding PR self-validates through its own `pull_request` run.
+
+### Sharded integration lane (#5384)
+
+The integration tests ran as one serial job. By October 2026 its pytest
+step took about 28 minutes, and the job finished last in every
+merge-queue run (median 32 minutes to the last required check). #5384
+split it the same way as the unit lane:
+
+- **`python-integration-shard`** — a **4-way matrix** on
+  `meho-runners-ci` (not the heavy pool: the tests run serially and
+  mostly wait on containers). Each shard lists `find tests/integration
+  -name 'test_*.py'` plus `tests/acceptance/test_g07_vsphere_canary.py`,
+  sorts the list, and pipes it into `tests/_unit_shard_split.py
+  --durations tests/_integration_shard_durations.json --shard N --total
+  4`. Same splitter as the unit shards, with its own measurements. Every
+  file lands in exactly one shard; `tests/test_unit_shard_split.py` pins
+  that, and also checks that the matrix size matches `TOTAL` and that the
+  file list in the workflow is the one the test uses. Each shard keeps
+  `-x -rs` and runs without xdist (the container fixtures were never
+  checked under xdist). Every shard has the full set-up of the old job:
+  the spec-shelf checkout and its layout check (for the canary), the
+  Docker Hub login, the test image variables, Go (for the Keycloak CLI
+  test) and `uv sync`. `fail-fast: false`, so one red shard does not
+  cancel the others. Each shard uploads its per-test times
+  (`python-integration-shard-junit-<N>`, xunit1); refresh
+  `tests/_integration_shard_durations.json` from the four artifacts of a
+  green run with `--measure`, as for the unit file.
+- **`python-integration`** — the **fan-in** with the exact required
+  name `Python (integration testcontainers)`, so branch protection and
+  the rulesets need no change. Same rules as `python-unit-lane`:
+  `if: always() && <fork guard>`, fails closed when `changes` did not
+  succeed, accepts `skipped` shards only on a docs-only diff or a
+  no-backend diff (#5296), and needs strict `success` on every other run.
+  It runs on `ubuntu-latest`.
+
+The first measurements (`tests/_integration_shard_durations.json`) are
+the median of four green merge-queue runs of the serial job (29 October
+2026), taken from the time of each file's log line. The slowest file,
+`tests/integration/test_connectors_k8s_k3d.py`, takes about 9 minutes on
+its own, so it gets a shard to itself, and it sets the lower limit of
+the integration wall. The other three shards are predicted at about 7
+minutes each. To change the shard count, edit the matrix and `TOTAL` in
+the pytest step together.
 
 ### Docs-only fast path (#3252)
 
@@ -1900,11 +1955,11 @@ completes CI in minutes.
   fast-path (a queue batch may mix docs + code; a `main` push must always run
   the full matrix).
 - **What skips.** `python-lint`, the four `python-unit-shard` legs, and
-  `python-integration` gain `needs: changes` and an `if:` that skips them when
-  `docs_only == 'true'` (same #2140 shape as the `python-migration-tests`
-  gate). A job skipped by its own `if:` reports **Success**, so the required
-  contexts `Python (ruff + mypy + pytest)` (via the fan-in) and
-  `Python (integration testcontainers)` stay green without running.
+  the four `python-integration-shard` legs gain `needs: changes` and an
+  `if:` that skips them when `docs_only == 'true'` (same #2140 shape as the
+  `python-migration-tests` gate). The required contexts `Python (ruff +
+  mypy + pytest)` and `Python (integration testcontainers)` come from
+  fan-ins that still run and pass on these skips.
 - **What still runs.** `go-lint-test`, `helm-lint-template`, and the sibling
   workflows' required contexts (`Semgrep SAST`, `TruffleHog Secret Scan`,
   `Python License Check`, `NPM License Check`, `helm install + helm test`,
@@ -1915,12 +1970,57 @@ completes CI in minutes.
   docs-only; (2) if the detector itself does not succeed, the
   `python-unit-lane` fan-in fails **CLOSED** (it asserts
   `needs.changes.result == 'success'` before trusting `docs_only`), which
-  blocks a code PR even though `python-integration` would skip-cascade to
-  green off the failed `needs`. The integration lane deliberately stays on the
-  plain `needs:`+`if:` shape (no `always()`) to preserve cancel-in-progress on
-  the heavy 60-min lane; its detect-crash exposure is identical to the
-  pre-existing migration gate and is neutralised for code PRs by the unit
-  lane's fail-closed guard above.
+  blocks a code PR. Since #5384 the `python-integration` fan-in has the
+  same guard. The integration shards stay on the plain `needs:`+`if:`
+  shape (no `always()`) to keep cancel-in-progress on the heavy legs; if
+  the detector crashes they skip-cascade, and the fan-in fails closed.
+
+### No-backend path (#5296)
+
+A PR that changes no file under `backend/` (for example a Go CLI change, a
+chart change, or a workflow other than `ci.yml`) cannot change the Python code.
+It used to pay the four unit shards and the integration job anyway. Now it
+runs one short job instead.
+
+- **Classification (fail-closed).** The `changes` job has a third output,
+  `backend_python`. It starts `true` and is `false` only when the event is
+  `pull_request`, the diff could be computed, no changed path apart from
+  `.md` files is under `backend/`, and `.github/workflows/ci.yml` did not
+  change. `push` and `merge_group` always keep it `true`. It uses the same
+  `HEAD^1..HEAD` diff as `docs_only`. The diff runs with
+  `core.quotePath=false`, so a path with non-ASCII characters (for example
+  `café.json`) is printed as is and the `backend/` check sees it. Git still
+  quotes a path that holds a double quote, a backslash or a control
+  character; such a line keeps every fail-safe default (full run and
+  migration gate on).
+- **What skips.** `python-lint`, the four `python-unit-shard` legs and
+  the four `python-integration-shard` legs skip by their own `if:` when
+  `backend_python` is `false`, the same way as on a docs-only PR. The
+  `python-integration` fan-in accepts the skipped legs on this path.
+- **What runs instead.** Some backend tests read files outside `backend/`:
+  the Helm chart, the Go CLI, the workflows, the docs and the examples. A PR
+  that changes no backend file can still break them. The job
+  `python-outside-backend` runs exactly these test files. The list lives in
+  `backend/tests/_outside_backend_tests.py`; the job reads it with
+  `uv run python tests/_outside_backend_tests.py`. It runs on a GitHub-hosted
+  runner with Helm installed and `MEHO_REQUIRE_HELM=1`.
+- **The list stays complete.** `backend/tests/test_outside_backend_tests.py`
+  scans the unit test files (everything under `backend/tests/` except
+  `integration/` and `migrations/`). A file reads outside `backend/` when it
+  climbs from `Path(__file__)` to the repository root with `.parents[N]` or a
+  `.parent` chain, calls a local `_repo_root` helper, or imports a helper
+  module in `tests/` that does. The test fails when the scan and the list
+  differ. Add a new file to the list in the same PR that adds it.
+- **The fan-in.** On this path `python-unit-lane` accepts the skipped lint and
+  shards and requires `python-outside-backend` to pass. On a full run that job
+  is skipped and lint and shards must pass, as before. The required check name
+  does not change.
+- **What is not covered.** The migration tests have their own detector
+  (`migrations`). A few integration tests read files outside `backend/` (the
+  Keycloak sub-chart, `examples/`, the CLI). They need containers, so on a
+  no-backend PR only the merge queue runs them.
+- **Tests.** `backend/tests/test_ci_backend_python_skip.py` runs the real
+  detect script and the real fan-in script from `ci.yml` for each case.
 
 ### Runner-CPU rule
 
@@ -1954,8 +2054,8 @@ ingest + op_id reconciliation against the **real** Broadcom/VMware-licensed
 `vcenter.yaml` / `vi-json.yaml`, which are deliberately not in this public
 repo. `ci.yml` provisions them at runtime, gated on a secret:
 
-- Both Python test jobs (`python-unit-shard` — every shard — and
-  `python-integration`) carry a
+- Both Python test jobs (`python-unit-shard` and
+  `python-integration-shard` — every shard of each) carry a
   secret-gated "Checkout vendor vCenter spec-shelf" step: a cone-mode sparse
   checkout of `docs/vcenter-9.0/` from the private
   `evoila-bosnia/claude-rdc-hetzner-dc` shelf repo into
@@ -1973,7 +2073,7 @@ repo. `ci.yml` provisions them at runtime, gated on a secret:
   drift into a job failure instead of a silent regression to lane-skip.
 - Lane placement (#2980): the seconds-cheap reconcile lanes run armed in
   the unit sweep; the canary's full-ingest tests run armed only in
-  `python-integration` — its pytest step selects
+  `python-integration-shard` — its pytest step selects
   `tests/acceptance/test_g07_vsphere_canary.py` explicitly, and the unit
   sweep opts out via `MEHO_SKIP_SPEC_INGEST_TESTS=1` (a collection-time
   `skipif` marker on the canary's full-ingest tests, backstopped in its

@@ -8,8 +8,8 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 76 hand-authored composites
-that orchestrate cross-spec workflows: 18 read composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 77 hand-authored composites
+that orchestrate cross-spec workflows: 19 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
 in `#2258`; plus the four guest-operations reads `#3100` and the
@@ -18,7 +18,8 @@ Supervisor status read `#3281` + the vSphere Namespace status read
 the two SUBSCRIBED content-library reads `content_library.subscribed.status` +
 `content_library.subscribed.items.list` / `#3495` + the datastore
 cache-refresh read `datastore.refresh` / `#3789` + the datastore file list
-read `datastore.file.list` / `#3432` + the VM limit and
+read `datastore.file.list` / `#3432` + the vSAN folder list
+read `datastore.vsan.folder.list` / `#4022` + the VM limit and
 reservation read `vm.resource_allocation.show` / `#3880` + the migration
 inventory read `vmware.migration.inventory`) and 58 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
@@ -495,8 +496,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `vcenter.yaml` by `test_connectors_vmware_rest_library_reconcile.py`.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 76
-  `_CompositeSpec` rows (18 read — incl. the `#3789` datastore
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 77
+  `_CompositeSpec` rows (19 read — incl. the `#3789` datastore
   cache-refresh read `datastore.refresh` — + 46 dangerous/destructive
   writes + 12 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
@@ -1334,8 +1335,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 76 `vmware.composite.*` rows with
-   `source_kind="composite"` — 18 reads (17 with `safety_level="safe"` +
+   queued registrar and upserts: the 77 `vmware.composite.*` rows with
+   `source_kind="composite"` — 19 reads (18 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
    service principals), and 58 writes, all `requires_approval=True`
@@ -1731,7 +1732,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 76 composites (18 reads + 58 writes) land as `source_kind="composite"`
+The 77 composites (19 reads + 58 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1828,7 +1829,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 76 composites are hand-authored aggregators the connector ships as
+The 77 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -3471,7 +3472,7 @@ None of the three composites registers a park-time preview builder (matching
 ### AI guidance of the storage and network operations
 
 The fourteen storage and network multi-step operations (`datastore.usage`,
-`datastore.refresh`, `datastore.file.list`, `datastore.dir.create`, `datastore.file.delete`, the three
+`datastore.refresh`, `datastore.file.list`, `datastore.vsan.folder.list`, `datastore.dir.create`, `datastore.file.delete`, the three
 `storage_policy.*` operations, `network.portgroup.audit` / `.create` /
 `.security.set` / `.vlan.set` / `.delete` and `host.standard_portgroup.delete`)
 keep their AI guidance (`llm_instructions`: `when_to_call`, `preconditions`,
@@ -3789,6 +3790,55 @@ in one folder of a datastore, so a check can confirm a plain datastore file
   keeps `status`, the datastore fields, `path`, `count`, `vm_check` and
   `guidance` next to the handle.
 
+### vSAN folder list (`datastore.vsan.folder.list`, #4022)
+
+`vmware.composite.datastore.vsan.folder.list` is a read composite (safety
+`safe`, no approval) in `composites/_datastore_vsan.py`. It lets a check
+after a VM delete ("is the VM's folder on the vSAN datastore gone?") run
+through MEHO instead of `govc datastore.ls`.
+
+Why a separate op: the datastore writes (`datastore.file.delete`,
+`datastore.dir.create`) refuse vSAN in `_datastore_browse.resolve_for_path`.
+On vSAN vCenter names each top-level folder (a vSAN object) by a UUID, so
+their check for files of registered VMs could not trust a friendly name.
+That guard stays as it is. This op writes nothing and shows both names, so
+it does not use `resolve_for_path`; it calls `resolve_datastore` and
+`search` from `_datastore_browse` directly.
+
+- **Input.** `datastore` is a `datastore-NNN` moid of a vSAN datastore
+  (`summary.type` `vsan`); any other type is `invalid_request`. `folder` is
+  optional: the friendly name or the UUID path of a folder (it may go
+  deeper, e.g. `<folder>/logs`). The schema pattern `VSAN_FOLDER_PATTERN`
+  refuses empty segments, `.` / `..`, wildcards, brackets, backslashes and
+  control characters.
+- **Without `folder`.** One `SearchDatastore_Task` on the root. Each folder
+  entry gives `uuid_path` (its `path`, a UUID on vSAN) and `name` (its
+  `friendlyName`, or the path when there is none). Hidden folders (name
+  starts with `.`) are left out. Then one `SearchDatastoreSubFolders_Task`
+  from the root sums every file below each folder: `size_bytes`,
+  `file_count`, and `modified` (the latest change). A result folder is
+  matched to its top-level folder by UUID or by friendly name. Last, one
+  `read_many` of the datastore's VMs (`Datastore.vm`) names the VMs that use
+  each folder (`vms`), with the same rules as the delete check
+  (`_datastore_claims._claim_hits`), tried for the UUID path and for the
+  friendly name. `vm_check` is `complete`, or `incomplete` when vCenter
+  answered only in part.
+- **With `folder`.** One `SearchDatastore_Task` on that folder. Each entry:
+  `name`, `kind` (file / folder), `file_type`, `size_bytes` (null for a
+  folder) and `modified`. A missing folder (`FileNotFound`) is
+  `status="absent"` with empty `entries`, not an error.
+- **Answer.** `status` is `ok`, `absent`, `not_found` (no such datastore) or
+  `invalid_request`. A long `entries` list becomes a result handle;
+  `llm_instructions.result_scalars` keeps `status`, the datastore fields,
+  `folder`, `count`, `vm_check` and `guidance` next to the handle.
+- **Scope.** vCenter targets only, like the datastore writes. It is
+  registered on the 9.0 and the 8.0 catalogs. Tests use the shared vim fake
+  with a vSAN browse on top
+  (`test_connectors_vmware_rest_composites_datastore_vsan.py`); it has not
+  been run against a real vSAN datastore.
+- **Later.** The general file list `datastore.file.list` (`#3432`, above)
+  covers VMFS and NFS. The two reads can be merged into one op later.
+
 ### AI guidance of the guest, event, performance and typed reads
 
 The six guest operations (`vm.guest.*`), `event.tail`,
@@ -3813,6 +3863,39 @@ that every example validates and every list names its fields.
 `vm.guest.file.read` stays `caution` without `requires_approval`: an agent's
 call waits for approval, a person's call runs at once. That is the one
 listed exception for these operations in the contract check's gap list.
+
+### Group texts name a safety level only next to an operation (#4120)
+
+The group texts of the multi-step operations live in
+`_WHEN_TO_USE_BY_GROUP` (`composites/_register.py`). Three come from other
+modules: `CONTENT_LIBRARY_WHEN_TO_USE` (`typed_ops_content_library_find.py`),
+`LICENSE_WHEN_TO_USE` and `ALARMS_WHEN_TO_USE`, and
+`MIGRATION_GROUP_WHEN_TO_USE`. The same groups also hold the operations
+ingested from the vSphere API files. Their safety level comes from the HTTP
+method or from the VMware safety floor, not from the group. So a group such as
+`vm` holds safe reads (list VMs, `GET:/api/vcenter/vm`) next to dangerous
+changes.
+
+Each text therefore says:
+
+- the group's main reads and main changes, with the ingested operations a
+  model looks for (for `vm`: list VMs and read one VM; for `events` and
+  `performance`, which have one hand-written read each: also the ingested
+  writes, such as `LogUserEvent` and `UpdatePerfInterval`);
+- a safety level only next to a named operation, for example
+  `(vm.snapshot.create, caution)`.
+
+No text says "Every op is ...", "All ops are ...", a bare "Read-only.", or
+"Writes (dangerous):". The `list_operation_groups` description also tells the
+model that a group can hold reads and writes, and to check each operation's
+`safety_level` in the `search_operations` results.
+
+`tests/test_operation_group_texts.py` checks this. It fails on "every op is",
+"every other op is" or "all ops are" in any group text MEHO's code writes, of
+every connector. For the `vmware-rest` texts it also fails on a bare
+"Read-only." and on a "Reads (safe):" or "Writes (dangerous):" label. A new
+text reaches running installs at start-up through the group text refresh
+(#4332), unless an operator changed it.
 
 ### Per-entity capacity sensing (`filter_names`, #2758)
 

@@ -3443,6 +3443,25 @@ class VmwareRestConnector(HttpConnector):
 
         return await alarm_triggered_list_impl(self, operator, target, params)
 
+    async def folder_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.folder.list`` -- the inventory folders, with datacenter and parent.
+
+        A ``source_kind="typed"`` read. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_folder_list.folder_list_impl`
+        (imported lazily, like the other typed reads). Returns
+        ``{"folders": [...], "read_note"}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_folder_list import (
+            folder_list_impl,
+        )
+
+        return await folder_list_impl(self, operator, target, params)
+
     async def sso_admin_api_file_get(
         self,
         operator: Operator,

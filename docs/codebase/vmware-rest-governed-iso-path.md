@@ -12,6 +12,13 @@ call. No composite exists and none is needed: every step is a single
 `call_operation`, the multi-step choreography is four writes plus one
 poll read, and each response is small and self-describing (#3086).
 
+**Prefer the typed op.** `vmware.composite.content_library.item.upload`
+runs steps 1-5 below in one governed call (with a preview, a read-back and
+clear answers), and `vmware.composite.content_library.create` makes the
+local library first. See **Local content-library create and item upload** in
+`connectors-vmware-rest.md`. The raw recipe below still works for callers
+that need a step the typed op does not offer.
+
 First consumer: the governed nested-ESXi substrate build — the ESX
 installer ISO sits on an HTTP depot and must reach a VM's CD-ROM
 without out-of-band `scp`/`govc`.

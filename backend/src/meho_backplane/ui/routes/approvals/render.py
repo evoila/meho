@@ -23,7 +23,12 @@ from meho_backplane.operations.approval_outcome import (
     resume_outcome,
     resume_outcome_from_envelope,
 )
-from meho_backplane.operations.approval_queue import Delegation, approval_result_state
+from meho_backplane.operations.approval_queue import (
+    EXPIRED_REASON_MESSAGES,
+    Delegation,
+    approval_expired_reason,
+    approval_result_state,
+)
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME
 from meho_backplane.ui.references import subject_ref
 
@@ -145,8 +150,15 @@ def project_request_to_view(
     ``result_state`` and ``outcome`` (#3543) say whether an approved request
     ran and how it ended. Both are ``None`` for a request that is not
     approved; ``outcome`` is also ``None`` before the run starts.
+
+    ``expired_reason`` / ``expired_message`` (#5030) say why an ``expired``
+    request expired (its deadline passed, or MEHO was updated while it
+    waited) and tell the requester to ask again; ``release_id`` is the
+    release the request was made under. The reason keys are ``None`` for a
+    request that is not expired.
     """
     result_state = approval_result_state(row)
+    expired_reason = approval_expired_reason(row)
     return {
         "id": str(row.id),
         "op_id": row.op_id,
@@ -167,6 +179,9 @@ def project_request_to_view(
         "delegation": delegation.to_payload() if delegation is not None else None,
         "result_state": result_state.value if result_state is not None else None,
         "outcome": project_outcome(resume_outcome(row)),
+        "expired_reason": expired_reason.value if expired_reason else None,
+        "expired_message": EXPIRED_REASON_MESSAGES[expired_reason] if expired_reason else None,
+        "release_id": row.release_id,
     }
 
 

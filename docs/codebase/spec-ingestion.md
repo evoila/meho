@@ -306,12 +306,31 @@ vCenter variant — owned by the profiled-dispatch wiring
    `"none"`. Each row's `EndpointDescriptor.group_id` is set to the
    matching group's UUID; sentinel and unknown-key entries leave
    `group_id=NULL`.
+3. **Extend rounds for leftovers (#4972)** — when ops are still
+   without a group after a filing pass (on a full run or a re-run),
+   the run makes another "extend" round: Pass 1 lists every group so
+   far and asks for new groups for the leftovers (`[]` is a valid
+   answer), then Pass 2 files the leftovers into the new groups only.
+   Before this, a full run stopped after one Pass 2, and a re-run
+   stopped after one extend round, so ops past the `max_groups` limit
+   (15) stayed without a group. The rounds stop when every op has a
+   group, when the model proposes no new group, when a round files
+   no op, or after `DEFAULT_MAX_EXTEND_ROUNDS` (3) rounds. The round
+   limit bounds the model calls and logs
+   `llm_grouping_extend_round_limit_reached`. An op that already has a
+   group is never moved, and no group is renamed. We chose more rounds
+   over one catch-all "other" group because the ops left over tend to
+   form real families (licences, sessions, agent manager), and a
+   catch-all group does not help an agent pick a group.
 
 The function commits exactly once at the end of both passes, in the
 same transaction as a single `meho_connector_llm_grouping` audit row
 that records `{connector_id, groups_created, operations_assigned,
-operations_unassigned, llm_call_count, batch_size,
-operations_added_by_group}`. Partial failure
+operations_unassigned, unassigned_op_ids, llm_call_count, batch_size,
+operations_added_by_group}`. `unassigned_op_ids` lists the op ids
+still without a group after the run, sorted, at most
+`UNASSIGNED_OP_IDS_LIMIT` (200); `operations_unassigned` keeps the
+full count. Partial failure
 (LLM output that fails schema validation) raises
 `LlmOutputInvalid`, rolls back the transaction, and leaves the
 connector in whatever state preceded the call — operator retries via
@@ -340,7 +359,8 @@ Idempotency:
     re-validation, #3685). Ops still left over get an "extend" Pass 1:
     the prompt lists the existing groups and asks for at most
     `max_groups` new ones, and `[]` is a valid answer. A second Pass 2
-    then files the leftovers into the new groups only.
+    then files the leftovers into the new groups only. More extend
+    rounds follow while ops are left (step 3 above).
   * Every Pass-1 proposal whose key already exists in the connector
     scope (typed keys included) is dropped, so no persisted group is
     renamed or duplicated.
@@ -349,6 +369,12 @@ Idempotency:
   composite, and ingested ops the group now holds. The ingest job result and
   `meho connector ingest` show it; the CLI prints a warning for a typed
   group that also holds ingested ops.
+* `GroupingResult.unassigned_op_ids` names the ops still without a
+  group (same list as the audit row). The ingest response and the
+  ingest job result carry it as `grouping.unassigned_op_ids`.
+  `meho connector ingest` and `meho connector ingest-status` print
+  each op id, and say how many more there are when the list was cut
+  (`meho connector review` shows them all).
 
 The LLM client is injected as a `LlmClient` `Protocol` (one async
 method, `generate_json`). Tests pass a deterministic stub from
@@ -747,8 +773,8 @@ per role in the T3 grouping run:
   validator; oversized prose rejected via bounded `max_length`.
 * `GroupingResult` — counts + timings the orchestrator returns
   (`groups_created`, `operations_assigned`, `operations_unassigned`,
-  `llm_call_count`, `llm_duration_ms`, and `groups`: one
-  `GroupSummary` per group). Surfaced in the operator-facing CLI / API
+  `unassigned_op_ids`, `llm_call_count`, `llm_duration_ms`, and
+  `groups`: one `GroupSummary` per group). Surfaced in the operator-facing CLI / API
   at T5.
 * `GroupingConfig` — tunable knobs (`batch_size`, `min_groups`,
   `max_groups`). Constructed from the keyword arguments to
@@ -773,7 +799,10 @@ flips it after the LLM-grouping pass runs.
 
 `safety_changes` (#2702) is a tuple of frozen `SafetyChange`
 entries — one per **existing** row whose `safety_level` the call
-overwrote with a different value. Both existing-row update paths in
+overwrote with a different value. An operator's stricter level is an
+override kept apart from the row (#4711, see
+[Operator overrides of risk level and approval](#operator-overrides-of-risk-level-and-approval-4711)),
+so a re-ingest never overwrites it and it never shows up here. Both existing-row update paths in
 `_upsert.py` capture the diff (the body hash covers embedding text,
 not safety metadata, so the skip-re-embed branch can carry a
 reclassification too). After the upsert loop,
@@ -1058,6 +1087,232 @@ Since #3870 a tenant's own copy is the only copy used for that tenant,
 and the old copy lacks the hand-written ops of the built-in copy
 (`vrli.event.query`), so the tenant would lose them.
 
+### Operator overrides of risk level and approval (#4711)
+
+An operator can make an operation stricter: raise its risk level,
+require approval, or turn it off. The change stays after a restart, an
+upgrade and a new ingest of the API description.
+
+**Where the values live.**
+
+* `endpoint_descriptor.safety_level` / `requires_approval` hold the
+  *classification*: the value in code (typed and composite operations)
+  or from the API description plus its safety floors (ingested
+  operations). Typed registration at every start and every re-ingest
+  write only these columns.
+* `operation_policy_override` (migration `0127`, model
+  `OperationPolicyOverride`) holds the operator's choice, one row per
+  scope and operation name `(product, version, impl_id, op_id)`.
+  `tenant_id` is the scope: a tenant UUID (that tenant only) or `NULL`
+  (the whole install). Keyed on the name, not on a descriptor id, so a
+  re-ingest that deletes and re-creates rows keeps it.
+* Turning an operation off still writes `endpoint_descriptor.is_enabled`
+  as before; both registration paths already keep it. A per-tenant
+  on/off switch for built-in operations is a separate task.
+
+**The effective values** (`operations/op_policy.py`,
+`effective_policy`):
+
+* risk level: the highest of the classification and every override that
+  applies (install-wide plus the caller's tenant);
+* approval: required when the classification or any override says so.
+  The only way to turn it off is an override with
+  `requires_approval=false` (see below). A destructive operation always
+  requires approval.
+
+`lookup_descriptor` (dispatch, preview, checks, gateway mint, governed
+sub-operations, service grants), the operation contract,
+`search_operations` hits, `describe_descriptor` (`GET
+/api/v1/operations/{descriptor_id}`, the console operation drawer and run
+window), the operations list on the console connector page and the review
+payload all read these effective values, so a call, a preview and the
+approval check always agree. For example, a typed operation raised to
+`destructive` shows the preview step in the console, because a
+destructive call needs a preview. The
+review payload also carries `classified_safety_level` /
+`classified_requires_approval` (the floor).
+
+**Edit rules** (`apply_policy_edit`, called by `ReviewService.edit_op`):
+
+| Edit | Who | Scope | Result |
+|---|---|---|---|
+| raise the risk level (any of the four levels) | tenant admin | own tenant | override; `destructive` also requires approval |
+| raise the risk level | platform admin, built-in operation | whole install | override |
+| require approval | tenant admin / platform admin | as above | override |
+| set the level back to the classification | same scope | same scope | override field removed, value from code applies |
+| remove an override (`remove_override`, `ReviewService.remove_op_override`) | platform admin: any scope; tenant admin: own tenant only | the named scope | override row deleted; when that ends approval in the scope, the approval-off checks apply |
+| a level below the classification | anyone | - | refused, `risk_level_below_classification`: open a pull request |
+| `requires_approval=false` where the classification requires it | platform admin, with a non-empty `reason` and a person present | whole install (built-in) or the row's tenant | override `false`; listed in the reduced-approval report |
+| `requires_approval=false` on a destructive operation | anyone | - | always refused, `approval_off_destructive` |
+
+**Every edit that ends approval passes the same checks.** The rule looks
+at the result, not at the field in the request. When the effective
+approval goes from required to not required, the edit needs
+`platform_admin`, a reason and a person present, and it is refused for a
+destructive operation and by the MCP tool. This also covers removing an
+override that required approval, and setting a level back from
+`destructive` (which ends the approval that `destructive` brings). A
+tenant admin who lowers their own `destructive` override can keep
+approval by also sending `requires_approval=true`.
+
+**An install-wide change is checked in every scope it reaches.** An
+install-wide override also applies to a tenant's own copy of the
+operation (a tenant row with the same name), and that copy may have its
+own classification. Before an install-wide override is lowered or
+removed, `apply_policy_edit` / `remove_override` look at every tenant
+with its own copy or its own override: when approval ends for any of
+them, the approval-off checks apply, even when the built-in operation
+keeps approval. The audit row names those tenants in
+`approval_ended_for_tenants`. An install-wide `requires_approval=true`
+is stored when any tenant needs it: because its copy's classification
+does not require approval, or because an approved tenant override turned
+approval off. So a platform admin can lower the level, or require
+approval again after a tenant exception, and it holds for everyone.
+
+**Edits of one operation run one at a time.** `apply_policy_edit` and
+`remove_override` first take a transaction-level PostgreSQL advisory
+lock on the operation name (`_lock_operation`), before they read any
+override. A second edit or removal of the same operation, in any scope,
+waits until the first commits and then reads what it wrote. Without the
+lock, two removals in different scopes (the install-wide override and a
+tenant's, both requiring approval) could each see the other's row, both
+pass the approval-off checks, and leave the tenant without approval.
+PostgreSQL releases the lock with the transaction. On SQLite the call
+does nothing; `tests/integration/test_operation_policy_override_pg.py`
+proves the rule against the real database.
+
+**Each scope's override stands on its own.** The stored value is
+measured against the classification, not against the other scopes'
+overrides. A tenant that selects `destructive` while the install-wide
+override already says `destructive` still gets its own row, so the
+tenant's choice holds when the install-wide override is removed. The
+same holds for approval: a tenant's `requires_approval=true` is stored
+unless the classification itself requires approval and no override turns
+it off.
+
+**Removing a tenant's override.** A platform admin's edit of a built-in
+operation targets the install-wide override, so it cannot reach a row a
+tenant stored. `DELETE
+/api/v1/connectors/{id}/operation-overrides/{op_id}?tenant_id=<uuid>`
+(`meho connector remove-override <id> <op_id> --tenant <uuid> --reason
+<text>`) removes the named tenant's override; without `tenant_id` it
+removes the install-wide one. A platform admin can remove any tenant's;
+a tenant admin only their own (`404` for another tenant's, `403` for the
+install-wide one). When the removal ends approval in that scope, the
+approval-off checks apply (`403` / `400` / `401` as for an edit). `404`
+when the scope has no override. The audit row is a
+`meho_connector_edit_op` row with `override_removed=true` and
+`override_tenant_id`.
+
+"A person present" is the fresh sign-in check on REST
+(`auth/fresh_sign_in.py`, see `approvals.md`) and the web session in the
+console. A tenant admin may now edit the risk level and approval of a
+built-in operation without `platform_admin`: the change is an override
+for their tenant, not a write to the shared row. Every other field of a
+built-in row still needs `platform_admin`.
+
+**Surfaces.** REST `PATCH /api/v1/connectors/{id}/operations/{op_id}`
+(body field `reason`), the console review drawer (the approval toggle
+asks for a reason; the risk level select offers only levels at or above
+the classification), the CLI `meho connector edit-op --safety
+safe|caution|dangerous|destructive --reason <text>`, and the MCP tool
+`meho_connector_edit_op`. The MCP tool passes `tighten_only=True`: it
+refuses `requires_approval=false` and any level below the current one
+(`edit_tool_cannot_loosen`), so an AI client can never loosen approval
+with an admin's token. REST maps refusals to `400`, a tenant admin
+turning approval off to `403`, and a missing fresh sign-in to `401` with
+`WWW-Authenticate: Bearer error="insufficient_user_authentication",
+max_age=<N>` (RFC 9470).
+
+**Audit.** The `meho_connector_edit_op` row carries `changes`
+(`{field: {"old", "new"}}` for the risk level, approval and
+`is_enabled`, with effective values; a field that changed as a side
+effect is recorded too, for example approval when a raise to
+`destructive` turns it on), `scope` (`tenant` / `install`),
+`approval_ended_for_tenants` (the tenants whose own copy of a built-in
+operation lost its approval requirement through an install-wide change)
+and `reason`, next to the existing `fields_updated` and
+`is_enabled_set_to`.
+
+**Report.** `GET /api/v1/connectors/operation-overrides`
+(`?reduced_approval=true` for the operations running with reduced
+approval), `meho connector overrides [--reduced-approval]`, and the
+console page `/ui/connectors/overrides`. A tenant admin sees the
+install-wide rows and their own tenant's; a platform admin sees all.
+The CLI table shows the tenant id in the scope column, so a platform
+admin can pass it to `remove-override --tenant`.
+Each row shows the risk level and approval that apply in the row's scope
+(the classification with every override there), not the stored override
+fields. The reduced-approval view lists an override only while approval
+is really off, so an exception that a later raise to `destructive` made
+void drops out. A later edit that does not touch approval keeps the
+reason, author and time of an approval exception.
+
+**Upgrade.** Before this change an edit wrote the descriptor row, so it
+was lost at the next start (typed) or re-ingest (ingested). Existing
+stricter edits on rows stay until then; re-apply them once with
+`edit-op` to make them stick.
+### Each tenant turns built-in operations on or off (#5029)
+
+A built-in operation row (`endpoint_descriptor.tenant_id IS NULL`) is
+shared by every tenant. Its `is_enabled` flag is the **install
+default**. A tenant can now turn a built-in operation on or off for
+itself only. Other tenants keep the install default.
+
+- **Where it is stored.** The table `tenant_operation_setting`
+  (migration `0120`, model `TenantOperationSetting`): one row per
+  `(tenant_id, product, version, impl_id, op_id)` with `enabled`
+  true or false. No row means "use the install default". The row is
+  keyed on the operation's natural key, not on the descriptor id. A
+  start (typed registration) and an update (spec ingest, or rows
+  written again) only write `endpoint_descriptor`, so they never
+  change a tenant setting.
+- **How it is read.** `enabled_for_tenant_clause` in
+  `operations/_lookup.py` is the one "is this op on for this tenant"
+  predicate. For a built-in row it takes the tenant setting first,
+  then `is_enabled`. A tenant's own row uses its own `is_enabled`.
+  `lookup_descriptor` (dispatch, preview), `count_known_ops`,
+  `find_connectors_with_op`, `search_operations` (the PostgreSQL SQL in
+  `_search.py` carries the same rule as `_ENABLED_FOR_TENANT_SQL`,
+  checked at import), `list_operation_groups` and its op counts, the
+  operation contract, runbook verify steps and the console operations
+  pages all use it.
+- **Groups.** `group_visible_for_tenant_clause` decides which groups
+  `list_operation_groups` and a group-scoped `search_operations` show.
+  A group shows when it is fully enabled or holds an op that is on for
+  the tenant. A fully enabled group is hidden when the tenant turned ops
+  in it off and none of its ops is still on for the tenant. A group
+  setting is the same per-op setting written for each op in the group,
+  the way the install-default group enable cascades onto each op.
+- **Who may change it.** REST
+  (`api/v1/connector_tenant_settings.py`):
+  `PUT /api/v1/connectors/{id}/tenant-settings/operations/{op_id}` and
+  `PUT /api/v1/connectors/{id}/tenant-settings/groups/{group_key}` with
+  body `{"enabled": true | false | null}` (`null` = back to the install
+  default). Role `tenant_admin` for the caller's own tenant. The
+  optional `?tenant_id=` names another tenant and needs
+  `platform_admin` (403 `cross_tenant_requires_platform_admin`). The
+  install default stays the `edit-op` / `enable` / `disable` paths,
+  which need `platform_admin` for a built-in row (#3616).
+- **Audit.** Every change writes one audit row with path
+  `meho_connector_tenant_setting` in the same transaction. The payload
+  names the connector, the target tenant, the op or group, and the new
+  value. A write that changes nothing writes no row.
+- **Showing both values.** `GET /api/v1/connectors/{id}/tenant-settings`
+  lists the ops the tenant has a setting for, each with
+  `default_enabled`, `tenant_enabled` and the `enabled` value that
+  applies. The review payload (`GET /{id}/review`) carries
+  `tenant_enabled` on every op of a built-in connector. The CLI has
+  `meho connector tenant-setting show | set | set-group`, and
+  `meho connector review` prints a `ten` column next to `en`. The
+  console review drawer shows "Install default: on. This tenant: off."
+  on an op the tenant set.
+- **Tenant copies.** A connector the tenant imported for itself keeps
+  its own rows (#3870); a tenant setting would have no effect there, so
+  the write is refused with 409 `tenant_owns_connector`.
+- **Scope.** Only on and off. Risk levels and approval flags are not
+  per tenant.
+
 ### Operator-selectable auth scheme on a non-catalog ingest (#2289)
 
 Boot stamping (above) makes a *shipped* profile-backed catalog row
@@ -1106,6 +1361,43 @@ op** — the `review_status='staged'` gate (#1971) stays the interlock, so the
 connector lands dispatchable-but-unreviewed (`kind="profiled-but-unreviewed"`)
 and the operator clears the gate per-op via the normal review/enable flow.
 Omitting `auth_scheme` keeps the historical bare-shim behaviour byte-identical.
+
+**The choice is saved, so the connector survives a restart (#5016).** The
+connector table in `connectors/registry.py` lives in memory. Before #5016 a
+restart dropped the stamped class: the ops stayed enabled, but every call
+failed with `no_connector` and the list showed `ingested-shim`. Now:
+
+* `_stamp_profiled_connector` first saves the choice through
+  `ingest/ingest_auth_store.py::save_ingest_auth_profile` into the
+  `ingested_auth_profile` table (migration `0121`). One row per
+  `(tenant_id, product, version, impl_id)`. It holds the scheme name and the
+  secret field **names** only, never values. A re-ingest with a login type
+  replaces the row.
+* At start, `main.py` calls `restore_ingested_profiled_connectors()` right
+  after the catalog stamp. It rebuilds the profile with
+  `build_ingest_execution_profile` and stamps it through the same
+  `record_profile_stamp` step (audit sub `system:ingested-profile-restore`).
+  A key that already has a class is skipped, so a shipped profile or a
+  hand-written class keeps its key. A row that no longer builds a valid
+  profile is logged (`ingested_profile_restore_skipped`) and skipped.
+* A replica that was already running when another replica took the ingest
+  catches up on the first call: before the dispatcher resolves the connector
+  for an ingested op, it runs the same restore for the rows of the target's
+  product and builds any class it does not have yet. It does this before
+  the resolver runs, not only on a miss, so a replica that already holds
+  another connector for the same product also loads the new one when the
+  target prefers it (`preferred_impl_id`). A row whose key already has a
+  class is skipped, so the read is one small query per call. Until the
+  first call that replica's `meho connector list` still shows the old kind.
+* A connector delete removes the row, so the class does not come back.
+  This also holds for a connector that has no operation rows (an API file
+  with no paths, ingested with a login type): the delete removes the saved
+  row and answers 204, instead of 404 for "nothing to delete".
+* Restoring never enables an op, lowers a risk level, or removes an
+  approval; the review gate stays the interlock.
+
+A connector ingested before this change has no saved row. Ingest it once
+more with the same `--auth-scheme` to save it.
 
 ### Authoring-mode `kind` on the list / review surfaces (G0.28-T6 #1979)
 
@@ -2365,9 +2657,37 @@ Each `ConnectorReviewGroup` carries `advisory`
 * `flags` — short, plain notes, at most five, without repeats:
   * the text makes a safety claim the ops break: "read-only" (or "no
     side effects", "does not modify") while an op is not `safe` or needs
-    approval; "non-destructive" while an op is `destructive`; "all ...
-    dangerous/destructive" while an op is at another level, higher or
-    lower; "all ... require approval" while an op does not;
+    approval; "non-destructive" while an op is `destructive`;
+  * an approval claim ("approval-required", "require(s) approval",
+    "need(s) approval") or a level claim ("dangerous", "destructive")
+    that the ops it is about break (#4971). Each sentence is checked on
+    its own, and the subject of the sentence decides which ops it is
+    about:
+    * a sentence that names a read ("All read and write operations
+      require approval.", "Reads and writes are dangerous."), or that has
+      "all" or "every" and names no change ("All operations are
+      approval-required.", "Every call is dangerous."), is about every op
+      in the group. The approval claim is flagged while an op does not
+      need approval. The level claim is flagged while an op is at another
+      level, higher or lower;
+    * any other sentence ("Write operations are approval-required.",
+      "Every change requires approval.", "Delete operations are
+      dangerous.") is about the changes: the ops that are not `safe`, or
+      every op when all of them are `safe`. The approval claim is flagged
+      while a change op does not need approval. The level claim is
+      flagged while a change op is below the named level.
+
+    So with one `safe` read without approval and one `caution` write
+    that needs approval, "Every change requires approval." is true, and
+    both "All operations are approval-required." and "All read and
+    write operations require approval." are flagged. A change is named
+    by a word such as "write", "change", "update", "create", "delete",
+    "remove", "edit", "modify", or "mutate". A read is named by a word
+    such as "read", "get", "list", "query", "fetch", "retrieve", "view",
+    "inspect", or "search". A sentence that says one thing about reads
+    and another about writes ("Reads run at once, writes need
+    approval.") is checked against every op as a whole; two sentences
+    say it better;
   * the text shares no word with the op ids and summaries.
 
 A `staged` group has no enabled op until the operator enables it. Then
@@ -2397,6 +2717,40 @@ new connector `version` with its own rows next to the old ones. The same
 `OpIdCollision`. `test_operations_ingest_review.py` pins all of this
 (`-k override_preserved_on_reingest`,
 `-k breaking_change_new_version_identity`).
+
+### Group text check at ingest (#4971)
+
+Pass 1 sends the model only `op_id`, `summary`, and `tags` for each op.
+It never sees a risk level, so it can write "Write operations are
+approval-required." for a group whose writes run at once. An agent or an
+operator who trusts that text expects a second person to check a change
+that nobody checks.
+
+So the grouping run checks each new text before it is stored:
+
+1. The members of a group are known only after Pass 2. So the check runs
+   in `_create_groups_and_assign` right after Pass 2, for every group
+   this run created (full runs and extend runs).
+2. `drop_unsupported_claims` in `group_truth.py` splits the text into
+   sentences. It removes each sentence that makes a safety claim the
+   group's ops break. It uses the same word match and the same claim
+   subjects as the review advice above, with the real `safety_level` and
+   `requires_approval` of the member ops. A true claim stays: a group
+   whose every change needs approval may say "Every change requires
+   approval.", even when it also holds reads that run at once. The same
+   group may not say "All operations are approval-required.".
+3. When no sentence is left, the group gets the plain text
+   `Operations for <name>.` A group with no member ops keeps its text.
+4. Each changed text logs `llm_grouping_unsupported_claims_dropped`.
+
+Why remove sentences instead of asking the model to rewrite the text:
+removing is the same on every run, adds no model call (so
+`expected_llm_call_count` stays true), and cannot add a new wrong claim.
+The cost is that a sentence with a broken claim is lost as a whole.
+
+Groups that already exist are never checked or changed here, so a text
+an operator edited with `meho connector edit-group` stays as it is.
+`test_operations_ingest_group_text_check.py` pins this.
 
 ### T2 control flow
 
@@ -2475,7 +2829,8 @@ run_llm_grouping
 │  ├─ parse_proposal_response       # GroupProposal schema validation
 │  ├─ drop proposals with an existing key
 │  ├─ _persist_proposed_groups      # session.add per row + flush
-│  └─ _assign_and_apply             # Pass 2
+│  ├─ _assign_and_apply             # Pass 2
+│  └─ _check_new_group_texts        # drop broken safety claims (#4971)
 │
 │  _assign_and_apply:
 │  ├─ _assign_ops_in_batches        # one LLM call per `batch_size` ops
@@ -2804,9 +3159,15 @@ All three delegate to `ReviewService.delete_connector`
   rows from scratch.
 * **Process-local deregistration.** The registry pop applies to the
   serving pod; sibling replicas keep the class until their next
-  restart (no startup path re-registers ingest shims, so restarts
+  restart (no startup path re-registers bare ingest shims, so restarts
   converge every pod on the post-delete state). The DB rows are the
-  durable truth and are gone everywhere immediately.
+  durable truth and are gone everywhere immediately. The delete also
+  removes the saved login type (`ingested_auth_profile`, #5016), so the
+  start-up restore does not build a profiled class for a deleted
+  connector. The audit payload's `auth_profile_deleted` says whether
+  such a row went. A connector with no operation rows but a saved login
+  type is deleted the same way (`registry_only=true`); only a connector
+  with no rows, no saved login type and no bare shim answers 404.
 
 ## Known issues
 
@@ -2847,16 +3208,65 @@ All three delegate to `ReviewService.delete_connector`
 * **Cross-document `$ref` rejected.** External files
   (`other.yaml#/...`) raise `UnsupportedSpecError`. Same v0.2.next
   note.
-* **Swagger 2.0 rejected with an actionable remedy.** A spec declaring
-  `swagger: "2.0"` (no `openapi` key) raises `UnsupportedSpecError`
-  whose message names the conversion path — convert to OpenAPI 3.x
-  (`swagger2openapi` / `converter.swagger.io`) and re-ingest the 3.x
-  output. The parser stays 3.x-only on purpose: the maintained 2.0→3.0
-  converters are Node/web-service tools (`swagger2openapi`/oas-kit,
-  `converter.swagger.io`), and an in-house converter is a large
-  correctness surface the review queue can't backstop, so the
-  documented decision (#1532, reaffirmed for the VCF Automation case
-  in #2090) is to reject-with-remedy rather than convert in-process.
+* **Swagger 2.0 is converted by the CLI, not the backplane (#5028).**
+  The backplane parser stays OpenAPI 3.x only (#1532, #2090). The CLI
+  converts instead, on the operator's machine:
+  - `meho connector ingest` reads a `file://` or `docs:` spec itself.
+    When the file says `swagger: "2.0"`, the CLI converts it to
+    OpenAPI 3.0 with the Go library `kin-openapi` (`openapi2conv`, MIT
+    licence, pinned in `cli/go.mod`), prints a short summary (paths,
+    operations, login schemes), and uploads only the converted JSON.
+    Code: `cli/internal/cmd/connector/swagger2.go`.
+  - The conversion fetches nothing. A `$ref` to another file or a URL
+    is refused with the name and place of the reference, like the
+    backplane's own cross-document `$ref` rule. A `$ref` key inside
+    free data (`example`, `examples`, `default`, `enum`, or an `x-`
+    extension) is data, not a reference, and is not checked. A
+    property or response that is *named* `default` or `example` is
+    still checked.
+  - `--save-converted <file>` also writes the converted copy, so the
+    operator can check it and keep it next to the original.
+  - What changes in the conversion: `in: body` becomes `requestBody`,
+    `in: formData` becomes a `multipart/form-data` or
+    `application/x-www-form-urlencoded` body (a `file` field becomes
+    `type: string, format: binary`), `definitions` become
+    `components.schemas`, `securityDefinitions` become
+    `components.securitySchemes`, and `host` + `basePath` + `schemes`
+    become `servers`. A `description` written next to a `$ref` is
+    dropped (OpenAPI 3.0 ignores it anyway). When the file declares no
+    `consumes`, the body media type is `*/*`; the parser's media-type
+    fallback still finds the schema. A root-level `produces` list is
+    copied to every operation that has none, so the response media
+    types stay as the file declared them (the library alone would
+    fall back to `application/json`); an operation's own `produces`
+    wins. A shared response (`#/responses/Name`) is built once with
+    the root list; an operation whose `produces` differs gets its own
+    copy of that response, so its media type is kept. A form body
+    with a required field is a required `requestBody` (the library
+    alone leaves the body optional). A shared body parameter
+    (`#/parameters/Name` with `in: body`) is built once with the root
+    `consumes` list; a path with an operation whose `consumes` differs
+    gets its own copy, so the body media type is kept. A path that
+    declares a body and has an operation with its own body also gets
+    the copies, so the operation's body replaces the path's by name and
+    place as Swagger 2.0 says (the library alone would count two bodies
+    and refuse the file). A path item that is only a reference to
+    another place in the same file (`$ref: "#/paths/~1widgets"`) is
+    replaced by a copy of what it points to before the conversion; the
+    library alone would write an empty path and drop its operations.
+    When the referenced item is itself a reference, the whole chain is
+    merged, so an operation declared on any link survives; the item
+    nearer to the path wins a clash. A reference that points nowhere,
+    or runs in a loop, is refused. An array query
+    parameter with no `collectionFormat` keeps the Swagger 2.0 default,
+    one comma-separated value (`ids=1,2`); the library alone would
+    leave the OpenAPI 3 default, which repeats the name (`ids=1&ids=2`).
+  - An `https://` spec is fetched by the backplane, which still rejects
+    Swagger 2.0 with `UnsupportedSpecError`. Its message names the CLI
+    path first (download the file, pass it as `file://`), then a local
+    `swagger2openapi` run as the fallback. It names no hosted
+    converter, because that would send the vendor's file to an outside
+    service.
   The product-agnostic convert-then-ingest runbook lives at
   [`connector-ingestion.md` § "Product ships only Swagger 2.0"](../cross-repo/connector-ingestion.md#product-ships-only-swagger-20)
   (VCF Automation's vra-sdk-go fragments are the worked example);

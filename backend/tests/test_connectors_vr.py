@@ -23,7 +23,7 @@ What is covered, with a respx-mocked appliance and no ingested catalog:
 * no password or session id in a result; registration shape; fingerprint.
 
 The login, session cache and API file read are shared with the SRM
-connector (``connectors/_shared/dr_rest.py``, ``dr_api_file.py``); their
+connector (``connectors/vmware_shared/dr_rest.py``, ``dr_api_file.py``); their
 edge cases are tested in ``test_connectors_srm.py``.
 
 Fixture values are made up; no real host, user or id appears here.

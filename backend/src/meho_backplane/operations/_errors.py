@@ -17,13 +17,15 @@ Each builder owns one ``error_code`` from the contract documented in
 :mod:`meho_backplane.operations.dispatcher`'s module docstring:
 ``unknown_op`` / ``unknown_connector`` / ``invalid_params`` /
 ``invalid_op_schema`` / ``no_connector`` /
-``ambiguous_connector`` / ``handler_unreachable`` / ``denied`` /
+``ambiguous_connector`` / ``handler_unreachable`` /
+``connector_package_not_installed`` / ``denied`` /
 ``awaiting_approval`` / ``connector_unsupported`` /
 ``connector_http_403`` / ``connector_http_422`` /
 ``connector_auth_failed`` / ``connector_tls_verify_failed`` /
 ``connector_vault_forbidden`` / ``connector_probe_refused`` /
 ``write_capability_denied`` / ``not_found`` / ``connector_timeout`` /
-``vault_credentials_read_error`` / ``connector_error``.
+``vault_credentials_read_error`` / ``connector_error`` /
+``release_changed_while_waiting``.
 The ``status`` field maps
 to ``OperationResult.status``; the ``error_code`` lives in ``extras``
 so callers can both string-match the ``error`` field
@@ -42,10 +44,12 @@ from uuid import UUID
 import httpx
 
 from meho_backplane.connectors import OperationResult, ResultHandle
+from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
+from meho_backplane.redaction.secret_fields import scrub_secret_fields_in_text
 
 if TYPE_CHECKING:
     from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
@@ -68,6 +72,7 @@ __all__ = [
     "result_connector_http_403",
     "result_connector_http_422",
     "result_connector_not_found",
+    "result_connector_package_not_installed",
     "result_connector_probe_refused",
     "result_connector_tls_verify_failed",
     "result_connector_unsupported",
@@ -82,6 +87,7 @@ __all__ = [
     "result_no_target",
     "result_rate_limited",
     "result_receipt_too_large",
+    "result_release_changed_while_waiting",
     "result_target_invalid_type",
     "result_target_required",
     "result_unknown_connector",
@@ -147,9 +153,14 @@ def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
 
     *cap* defaults to :data:`_EXC_MESSAGE_CAP`; upstream body text passes
     the larger :data:`_UPSTREAM_MESSAGE_CAP` (#3567).
+
+    Before the Tier-1 pass, the value of each quoted secret-named pair is
+    replaced (``"password": "..."`` in a vendor's JSON error body, #5031):
+    the Tier-1 patterns need the name right before the ``:`` and do not see
+    it behind a quote.
     """
     try:
-        redacted = redact(text, get_default_policy()).redacted
+        redacted = redact(scrub_secret_fields_in_text(text), get_default_policy()).redacted
     except Exception:  # fail-closed: never leak, never raise on the error path
         return _TEXT_WITHHELD
     if not isinstance(redacted, str):  # pragma: no cover -- str in, str out
@@ -219,7 +230,7 @@ def unknown_connector_message(connector_id: str, did_you_mean: list[str]) -> str
     """
     text = (
         f"unknown connector_id {connector_id!r}. Expected <impl_id>-<version> "
-        "(e.g. 'vmware-rest-9.0', 'vault-1.x')."
+        "(e.g. 'k8s-1.x', 'vault-1.x')."
     )
     if did_you_mean:
         return f"{text} Did you mean: {', '.join(did_you_mean)}?"
@@ -252,6 +263,33 @@ def result_unknown_connector(
             "error_code": "unknown_connector",
             "connector_id": connector_id,
             "did_you_mean": found,
+        },
+    )
+
+
+def result_connector_package_not_installed(
+    op_id: str, connector_id: str, package: str, duration_ms: float
+) -> OperationResult:
+    """The op belongs to a connector package that is not installed (#5037).
+
+    The row stays in the database, hidden from discovery, so it and the
+    operator's settings on it come back when the package is installed
+    again.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"connector_package_not_installed: operation {op_id!r} of connector "
+            f"{connector_id!r} comes from the connector package {package!r}, which is "
+            "not installed in this MEHO. Install the package (build the image with it) "
+            "to use the operation again."
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "connector_package_not_installed",
+            "connector_id": connector_id,
+            "package": package,
         },
     )
 
@@ -1112,6 +1150,40 @@ def result_already_resumed(
     )
 
 
+def result_release_changed_while_waiting(
+    op_id: str,
+    *,
+    approval_request_id: uuid.UUID,
+    request_release: str | None,
+    running_release: str,
+) -> OperationResult:
+    """An approved request from an older MEHO release was refused before it ran (#5030).
+
+    A person approves one exact release of MEHO. When MEHO was updated
+    after the request was made, the approval does not cover the new
+    release, so the operation is not run and the vendor gets no call. The
+    requester asks again under the running release. ``request_release`` is
+    ``None`` for a request saved before MEHO recorded the release.
+    """
+    reason = (
+        "MEHO was updated after this request was made, so the approval does "
+        "not cover the running release. The operation did not run. Ask again."
+    )
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=f"release_changed_while_waiting: {reason}",
+        duration_ms=0.0,
+        extras={
+            "error_code": "release_changed_while_waiting",
+            "reason": reason,
+            "approval_request_id": str(approval_request_id),
+            "request_release": request_release,
+            "running_release": running_release,
+        },
+    )
+
+
 def result_composite_terminal_error(
     op_id: str,
     *,
@@ -1666,10 +1738,6 @@ def _vi_json_fault(response: httpx.Response) -> tuple[str, str | None] | None:
 
 def _soap_fault(text: str) -> tuple[str | None, str | None] | None:
     """``(fault_type, faultstring)`` of a SOAP ``<soapenv:Fault>`` body, else ``None``."""
-    # Imported here, not at module top: the vmware_rest package imports the
-    # operations package, so a top-level import would be circular.
-    from meho_backplane.connectors.vmware_rest.soap import parse_soap_fault
-
     try:
         fault = parse_soap_fault(text)
     except Exception:  # never raise on the error path (e.g. a defusedxml refusal)
@@ -1685,7 +1753,7 @@ def _http_upstream_fault(response: httpx.Response) -> dict[str, str | None] | No
     Two body shapes are recognised: a VI/JSON fault from vCenter
     (``{"_typeName": ..., "faultstring": ...}``) and a SOAP
     ``<soapenv:Fault>`` from the ESXi / vim25 SOAP path (parsed by
-    :func:`~meho_backplane.connectors.vmware_rest.soap.parse_soap_fault`).
+    :func:`~meho_backplane.connectors._shared.soap_fault.parse_soap_fault`).
     Any other body yields ``None``. The fault type is the most useful field
     for triage (``NotAuthenticated`` vs ``InvalidLogin`` vs
     ``InvalidArgument``), so it gets its own field instead of being buried in
@@ -1734,16 +1802,13 @@ def _add_attached_upstream_fault(extras: dict[str, Any], exc: BaseException) -> 
 
     On the ESXi SOAP path the connector parses the fault itself and raises a
     plain :exc:`RuntimeError` or a ``ConnectorAuthError`` with the parsed fault
-    attached (:func:`~meho_backplane.connectors.vmware_rest.soap.attach_soap_fault`).
+    attached (:func:`~meho_backplane.connectors._shared.soap_fault.attach_soap_fault`).
     No :exc:`httpx.HTTPStatusError` reaches the builders there, so this reads the
     attached fault instead. Same redact-then-cap steps as the HTTP case. Does
     nothing when no fault is attached, or when the key is already set.
     """
     if "upstream_fault" in extras:
         return
-    # Imported here for the same reason as in :func:`_soap_fault`.
-    from meho_backplane.connectors.vmware_rest.soap import soap_fault_of
-
     fault = soap_fault_of(exc)
     if fault is None or (fault.fault_type is None and fault.faultstring is None):
         return

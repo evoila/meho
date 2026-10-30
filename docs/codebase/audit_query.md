@@ -221,6 +221,7 @@ Field-to-source mapping:
 | `id` | `audit_log.id` |
 | `ts` | `audit_log.occurred_at` |
 | `tenant_id` | `audit_log.tenant_id` |
+| `tenant_name` | LEFT JOIN `tenant.name ON audit_log.tenant_id = tenant.id` (#5238). Every row is already in `:tenant_id`, so it only names the caller's own tenant. `None` when the tenant row is gone; show `tenant_id` then. Replay nodes carry it too. |
 | `principal_sub` | `audit_log.operator_sub` |
 | `target_id` | `audit_log.target_id` |
 | `target_name` | LEFT JOIN `targets.name ON audit_log.target_id = targets.id AND targets.tenant_id = :tenant_id`. The tenant-id half of the ON clause is defence-in-depth: `audit_log.target_id` has no FK in v0.2 (soft column per chassis discipline) so a cross-tenant value resolves to `target_name=None` rather than leaking another tenant's name. |
@@ -252,9 +253,10 @@ end of the matching set under the current filter).
 ```text
 query_audit(filters, tenant_id, session)
   │
-  ├─ Build SELECT audit_log, targets.name
+  ├─ Build SELECT audit_log, targets.name, tenant.name
   │     OUTER JOIN targets ON audit_log.target_id = targets.id
   │                       AND targets.tenant_id   = :tenant_id   ← JOIN-scope defence
+  │     OUTER JOIN tenant  ON audit_log.tenant_id = tenant.id    ← tenant_name (#5238)
   │     WHERE audit_log.tenant_id = :tenant_id      ← always first
   │       [+ audit_id = :audit_id]
   │       [+ parent_audit_id = :parent_audit_id]                ← exact match
@@ -276,7 +278,7 @@ query_audit(filters, tenant_id, session)
   │
   ├─ Fetch rows; has_more = (len > limit); page = rows[:limit]
   │
-  ├─ For each (audit_log, target_name) row:
+  ├─ For each (audit_log, target_name, tenant_name) row:
   │   ┌─ payload = dict(row.payload or {})
   │   ├─ op_id = payload['op_id'] if str else f"http.{method.lower()}:{path}"
   │   ├─ op_class = payload['op_class'] if str else classify_op(op_id)
@@ -420,7 +422,7 @@ tenant-scoping invariant is enforced one layer up.
 | Route | Filter shape | Notes |
 |---|---|---|
 | `POST /api/v1/audit/query` | Body is `AuditQueryRequest`; `since` / `until` are strings parsed at the router via `parse_duration` (`"24h"` / `"7d"` / ISO-8601). Client-supplied `tenant_id` (or any other unknown field) is rejected with 422 `extra_forbidden` (`AuditQueryRequest.model_config` sets `extra="forbid"`, G0.9-T2 / #729); the route never reads tenant from the body — it always passes `operator.tenant_id` from the JWT to the substrate. | Full-filter surface. |
-| `POST /api/v1/audit/class-counts` | Body is `AuditClassCountsRequest`: the `AuditQueryRequest` filters without `event_class`, `limit` and `cursor` (those fields are a 422). 200 body is `AuditClassCounts` (`{counts, total, since}`), one count per event class (#3747). Without `since` only the last 24 hours count; `since` echoes the window start. | Counters. |
+| `POST /api/v1/audit/class-counts` | Body is `AuditClassCountsRequest`: the `AuditQueryRequest` filters without `event_class`, `limit` and `cursor` (those fields are a 422). 200 body is `AuditClassCounts` (`{counts, total, since}`), one count per event class (#3747). Without `since` only the last 24 hours count; `since` echoes the window start. | Counters. CLI: `meho audit count` (#4983). |
 | `GET /api/v1/audit/who-touched/{target}` | Path param becomes `filters.target`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/by-work-ref/{ref}` | Path param (`{ref:path}` converter — a work_ref carries embedded slashes, `#` is percent-encoded) becomes `filters.work_ref` (exact match); `since` query has **no** default window (a change-ticket lookup wants the whole governed history of the ref, not just the last 24h). The "show every write authorised by ticket X" lookup (work_ref I1-T3 #1658). | Pre-canned shortcut. |
 | `GET /api/v1/audit/my-recent` | `filters.principal_sub = operator.sub` (exact match on the user id, never the name filter); `since` query defaults to `"24h"`. | Pre-canned shortcut. |

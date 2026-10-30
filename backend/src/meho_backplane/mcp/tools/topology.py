@@ -116,7 +116,12 @@ from meho_backplane.connectors.topology.schemas import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphEdgeKind, Tenant
 from meho_backplane.db.models import Target as TargetORM
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.server import (
     McpInternalError,
     McpInvalidParamsError,
@@ -1062,6 +1067,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="topology",
         name=_QUERY_TOPOLOGY_NAME,
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=_QUERY_TOPOLOGY_DESCRIPTION,
         inputSchema=_QUERY_TOPOLOGY_INPUT_SCHEMA,
@@ -1090,8 +1096,7 @@ register_mcp_tool(
                         "`meho_backplane.topology.schemas.TopologyNode`. "
                         "A larger answer has `handle` instead. "
                         "When the anchor is untracked the array is empty "
-                        "and `status` carries `node_untracked` (G0.18-T4 "
-                        "#1357)."
+                        "and `status` carries `node_untracked`."
                     ),
                 },
                 "status": {
@@ -1106,10 +1111,10 @@ register_mcp_tool(
                         "one-element `[root]` in `nodes`). Auto-discovery "
                         "is k8s-only today; non-k8s targets surface here "
                         "until a populator or curated annotation lands. "
-                        "(G0.18-T4 #1357, RDC #789 N2.) `kind=path`: "
+                        "`kind=path`: "
                         "always present — `found`, `node_untracked` (an "
                         "endpoint is not in the graph) or `no_route` "
-                        "(both ends exist, no route) (#3760)."
+                        "(both ends exist, no route)."
                     ),
                 },
                 "detail": {
@@ -1370,7 +1375,7 @@ _LIST_TARGETS_INPUT_SCHEMA: Final[dict[str, Any]] = {
             "type": ["string", "null"],
             "description": (
                 "Optional connector filter in the form "
-                '`<impl_id>-<version>` (e.g. "vmware-rest-9.0") or a '
+                '`<impl_id>-<version>` (e.g. "k8s-1.x") or a '
                 'v1-style single-product slug (e.g. "vault"). Only the '
                 "product component is used: the result is narrowed to "
                 "targets whose `product` matches that connector's "
@@ -1384,19 +1389,16 @@ _LIST_TARGETS_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "Cross-tenant scope. Omit / null → the operator's own "
                 "tenant. A tenant slug OR UUID naming a DIFFERENT tenant "
                 "selects that tenant's targets and REQUIRES the "
-                "`platform_admin` capability (#1641); a caller who is "
+                "`platform_admin` capability; a caller who is "
                 "not a platform-admin passing a foreign tenant gets "
                 "-32602 (naming your own tenant explicitly is always "
-                "allowed). Canonical name "
-                "(G0.18-T5 #1358); matches `tenant_id` on "
+                "allowed). Canonical name; matches `tenant_id` on "
                 "`meho_connector_*` / `meho_scheduler_create`. "
                 "NOTE: `list_targets.tenant_id` accepts a slug OR a "
                 "UUID; the connector / scheduler tools accept UUID-"
                 "only because they cannot resolve slugs from inside "
                 "their service layer (cross-tenant slug resolution "
-                "requires a session). The accepted-shape asymmetry "
-                "is documented in "
-                "`docs/codebase/api-shape-conventions.md` §14."
+                "requires a session)."
             ),
             "maxLength": 256,
         },
@@ -1440,7 +1442,7 @@ _LIST_TARGETS_DESCRIPTION: Final[str] = (
     "`target`.\n\n"
     "WHEN TO CALL: the operator asks 'what can I act on?', or you need a "
     "concrete target name and only have a product in mind ('list the "
-    "vCenters' → `connector_id=vmware-rest-9.0`). Tenant scope is the "
+    "Kubernetes clusters' → `connector_id=k8s-1.x`). Tenant scope is the "
     "operator's own tenant unless a `platform_admin` passes `tenant`.\n\n"
     "Returns `{targets: [{id, name, aliases, product, host}, ...], "
     "next_cursor: <name|null>}` ordered by name; `next_cursor` is the "
@@ -1465,7 +1467,7 @@ _LIST_TARGETS_REDUCER: Final[JsonFluxReducer] = JsonFluxReducer()
 _LIST_TARGETS_PAGINATION_HINT: Final[dict[str, Any]] = {
     "params": {
         "connector_id": (
-            "Narrow to one connector's product (e.g. `vmware-rest-9.0`); "
+            "Narrow to one connector's product (e.g. `k8s-1.x`); "
             "a page at or under the threshold comes back inline as `targets`."
         ),
         "limit": "Page size (1..500). A smaller page can come back inline.",
@@ -1476,7 +1478,7 @@ _LIST_TARGETS_PAGINATION_HINT: Final[dict[str, Any]] = {
     },
     "example_next_call": {
         "tool": _LIST_TARGETS_NAME,
-        "args": {"connector_id": "vmware-rest-9.0"},
+        "args": {"connector_id": "k8s-1.x"},
     },
 }
 
@@ -1634,8 +1636,8 @@ async def _reject_unknown_connector(tenant_id: uuid.UUID, connector_id: str) -> 
     """Raise the unknown-connector ``-32602`` when no visible connector has the id's product.
 
     Runs only when the ``connector_id`` filter found no target (#4136).
-    Without it, a wrong id such as ``vmware-rest`` (product
-    ``vmware-rest``, which no target has) came back as an empty list with
+    Without it, a wrong id such as ``harbor-rest`` (product
+    ``harbor-rest``, which no target has) came back as an empty list with
     no warning. A known product with no targets still returns the empty
     list. The error is the one ``search_operations`` raises, with the
     close ids the caller can see.
@@ -1685,6 +1687,7 @@ register_mcp_tool(
         # registry entry, not Topology v2's.
         feature="targets",
         name=_LIST_TARGETS_NAME,
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=_LIST_TARGETS_DESCRIPTION,
         inputSchema=_LIST_TARGETS_INPUT_SCHEMA,
@@ -1920,17 +1923,17 @@ _ANNOTATE_DESCRIPTION: Final[str] = (
     "the empty-tenant bootstrap and for curated inner-graph nodes the "
     "probes cannot derive (vault-role, keycloak-realm, ...).\n\n"
     "WHEN TO CALL: an operator asks 'record that the prod namespace "
-    "authenticates against the rdc-vault role binding' — "
+    "authenticates against the prod-vault role binding' — "
     "`meho_topology_annotate {from_name: prod, kind: "
-    "authenticates-via, to_name: rdc-vault-role-bar}`. After this, "
-    "`query_topology {kind: dependents, target: rdc-vault-role-bar}` "
+    "authenticates-via, to_name: prod-vault-role}`. After this, "
+    "`query_topology {kind: dependents, target: prod-vault-role}` "
     "surfaces the namespace in the blast radius.\n\n"
     "AUTO-DISCOVERABLE KINDS (`runs-on`, `mounts`, `routes-through`, "
     "`belongs-to`) — accepted, with one caveat: when a probe-written "
     "**auto** edge already exists for the same pair, the curated row "
-    "lands as a §6 conflict marker (`conflicts_with`) for operator "
+    "lands as a conflict marker (`conflicts_with`) for operator "
     "review. Today only the Kubernetes connector populates auto edges "
-    "(G0.18-T4 #1357 — every other shipped connector inherits the "
+    "(every other shipped connector inherits the "
     "no-op `Connector.discover_topology` from the ABC), so on a "
     "non-k8s pair (or any pair no probe covers) the curated row "
     "inserts clean (`source: curated, conflicts: []`) and is the "
@@ -1993,7 +1996,7 @@ register_mcp_tool(
 
 
 _UNANNOTATE_DESCRIPTION: Final[str] = (
-    "Hard-delete a curated `graph_edge` and clear its reciprocal §6 "
+    "Hard-delete a curated `graph_edge` and clear its reciprocal conflict "
     "markers (tenant_admin only). Pass either `edge_id` OR the full "
     "`(from_name, kind, to_name)` triple — both forms, partial triples, "
     "or empty strings are rejected at the inputSchema layer (-32602) "
@@ -2003,7 +2006,7 @@ _UNANNOTATE_DESCRIPTION: Final[str] = (
     "but it turns out the real dependency is `database-Z`. "
     "`meho_topology_unannotate {from_name: service-X, kind: depends-on, "
     "to_name: database-Y}` removes the curated row and re-promotes any "
-    "auto edge it had marked superseded (§6 recoverability invariant). "
+    "auto edge it had marked superseded. "
     "After this, blast-radius checks no longer include the wrong edge.\n\n"
     "Refuses to delete an `source='auto'` edge — those resurrect on the "
     "next refresh, making manual deletion meaningless. The refusal "

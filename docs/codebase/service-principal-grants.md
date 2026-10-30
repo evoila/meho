@@ -108,9 +108,13 @@ cover the composite. So a service principal that runs a composite
 unattended needs **both**:
 
 - a grant on the composite op id, naming the connector of the call, and
-- a grant on each write step, naming the connector the step check uses
-  (for the vCenter composites that is `vmware-rest-9.0` today, whatever the
-  target's version; see #4991).
+- a grant on each write step, naming the connector the step check uses.
+  For the vCenter composites that is the connector the target resolves to:
+  `vmware-rest-8.0` for a vCenter 8.0.x target, `vmware-rest-9.0` for a
+  9.x target (#4991). Before #4991 every step was checked under
+  `vmware-rest-9.0`; a step grant for a vCenter 8 target that names
+  `vmware-rest-9.0` no longer matches and must be written again with
+  `vmware-rest-8.0`.
 
 What happens when one kind is missing:
 
@@ -431,7 +435,19 @@ What the code does:
   (no request field, header or token claim can set it; otherwise
   `DeleteGrantConsoleOnlyError`, HTTP 403 `delete_grant_console_only` on
   REST), and an expiry within 30 days (`SANDBOX_DELETE_GRANT_MAX_DAYS`).
-  The CLI refuses a delete op before it calls the server. The console
+  **The REST setting (#5251).** With `MEHO_SANDBOX_DELETE_GRANTS_FROM_API`
+  on (a `Settings` field, read at boot only, default `false`; chart value
+  `sandboxMode.deleteGrantsFromApi`), REST and the CLI may create a delete
+  grant too: `POST /api/v1/service-principals/grants` passes
+  `by_tenant_admin`, and an `operator` without `tenant_admin` gets
+  `DeleteGrantNeedsTenantAdminError`, HTTP 403
+  `grants_require_tenant_admin`. A machine token still gets 403 before the
+  route runs. The checks are the console's (`_review`). The mode check
+  runs first, so outside sandbox mode the setting changes nothing. The
+  CLI sends a delete op to the server and shows its answer, because only
+  the server knows the setting. The audit row of `service_grant.create`
+  carries `payload.created_via` (`console` or `api`). Renewal stays in
+  the console; a script renews by revoking and creating again. The console
   route itself runs only for a tenant admin who is a person
   (`is_human_principal`): a console session that holds an agent, service
   or runner token gets 403 `human_principal_required`, as on REST.
@@ -467,8 +483,8 @@ What the code does:
   `preview_hash` and `blast_radius` for a `destructive` call, or
   `proposed_effect` for a delete below it. A step's row names its
   multi-step operation through `parent_audit_id`.
-- **The step list.** `GET /api/v1/operations/governed-subops` marks delete
-  steps grantable with the mode on.
+- **The step list.** `GET /api/v1/operations/governed-subops` (CLI:
+  `meho operation subops`) marks delete steps grantable with the mode on.
 - **Display.** `/ready` has a top-level `sandbox_mode` (`"on"` / `"off"`)
   for every caller and `features.approval_queue.sandbox_mode`;
   `GET /api/v1/health` has `sandbox_mode`; `meho status` prints one line
@@ -477,7 +493,8 @@ What the code does:
 - **The audit mark.** `audit_log.sandbox_mode` (boolean, not null,
   database default `false`). One model default reads the process flag, so
   every writer stamps it.
-- **Chart.** `sandboxMode.enabled` and `sandboxMode.confirmHost`; the
+- **Chart.** `sandboxMode.enabled`, `sandboxMode.confirmHost` and
+  `sandboxMode.deleteGrantsFromApi` (rendered only with `enabled`); the
   render fails when the host is not `ingress.host`; the notes warn.
 
 Tests: `test_sandbox_mode_boot.py`, `test_sandbox_mode_grants.py`,
@@ -501,7 +518,14 @@ supported alternative:
 
 | Verb | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/v1/operations/governed-subops?op_id=<composite>&connector_id=<id>` | List the governed child ops a composite may dispatch (role: `operator`). |
+| `GET` | `/api/v1/operations/governed-subops?op_id=<composite>&connector_id=<id>` | List the governed child ops a composite may dispatch (role: `operator`). CLI: `meho operation subops <composite> [--connector <id>]`. |
+
+**Which connector id a step grant names.** Ask the route with the
+`connector_id` of the target's connector, and write each step grant with the
+`connector_id` the answer carries. A vCenter write step is checked under the
+connector the target resolves to (#4991): ask with `vmware-rest-8.0` for a
+vCenter 8.0.x target and with `vmware-rest-9.0` for a 9.x target. Without
+`connector_id` the route answers for `vmware-rest-9.0`.
 
 Each entry carries the child `op_id`, a best-effort `safety_level`
 (descriptor-resolved; `null` for a code-shipped vim sub-op with no

@@ -22,10 +22,13 @@ import (
 // so there is no canonical wire response to mirror. The envelope
 // captures the connector_id the operator targeted plus the verb's
 // post-condition (action="enabled"|"disabled"|"deleted") so downstream
-// tooling piping to jq sees a structured artifact.
+// tooling piping to jq sees a structured artifact. AuditID is the id
+// the backplane sent in the Meho-Audit-Id header (#4976); it is null
+// when the backplane sent none (an older backplane).
 type transitionResult struct {
-	ConnectorID string `json:"connector_id"`
-	Action      string `json:"action"`
+	ConnectorID string  `json:"connector_id"`
+	Action      string  `json:"action"`
+	AuditID     *string `json:"audit_id"`
 }
 
 // transitionVerb selects which typed-client endpoint a transition
@@ -146,14 +149,15 @@ func runTransition(cmd *cobra.Command, p transitionParams, opts transitionOption
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
 	}
-	if err := postTransition(cmd.Context(), backplaneURL, p.Verb, opts.ConnectorID); err != nil {
+	auditID, err := postTransition(cmd.Context(), backplaneURL, p.Verb, opts.ConnectorID)
+	if err != nil {
 		var he *httpResponseError
 		if errors.As(err, &he) {
 			return renderHTTPStatus(cmd, backplaneURL, he.statusCode, he.body, opts.JSONOut)
 		}
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	result := transitionResult{ConnectorID: opts.ConnectorID, Action: p.Action}
+	result := transitionResult{ConnectorID: opts.ConnectorID, Action: p.Action, AuditID: auditID}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), result)
 	}
@@ -164,7 +168,9 @@ func runTransition(cmd *cobra.Command, p transitionParams, opts transitionOption
 // postTransition drives the typed-client enable / disable / delete
 // endpoint with a one-shot 401-retry. All three routes return HTTP
 // 204 No Content on success; non-2xx surfaces as *httpResponseError
-// for the caller to route through renderHTTPStatus. The verb selector
+// for the caller to route through renderHTTPStatus. On success it
+// returns the audit id from the Meho-Audit-Id header (nil when the
+// backplane sent none). The verb selector
 // picks which generated `*WithResponse` method to invoke — the routes
 // share signature shape, so dispatching here keeps the call sites in
 // one place.
@@ -173,10 +179,10 @@ func postTransition(
 	backplaneURL string,
 	verb transitionVerb,
 	connectorID string,
-) error {
+) (*string, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	switch verb {
 	case verbEnable:
@@ -193,12 +199,12 @@ func postTransition(
 			},
 		)
 		if rerr != nil {
-			return rerr
+			return nil, rerr
 		}
 		if resp.StatusCode() != http.StatusNoContent {
-			return &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+			return nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
 		}
-		return nil
+		return output.AuditIDFromResponse(resp.HTTPResponse), nil
 	case verbDisable:
 		resp, rerr := retryOn401(ctx, authed,
 			func(ctx context.Context) (*api.DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse, error) {
@@ -213,12 +219,12 @@ func postTransition(
 			},
 		)
 		if rerr != nil {
-			return rerr
+			return nil, rerr
 		}
 		if resp.StatusCode() != http.StatusNoContent {
-			return &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+			return nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
 		}
-		return nil
+		return output.AuditIDFromResponse(resp.HTTPResponse), nil
 	case verbDelete:
 		resp, rerr := retryOn401(ctx, authed,
 			func(ctx context.Context) (*api.DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse, error) {
@@ -233,18 +239,18 @@ func postTransition(
 			},
 		)
 		if rerr != nil {
-			return rerr
+			return nil, rerr
 		}
 		if resp.StatusCode() != http.StatusNoContent {
-			return &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+			return nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
 		}
-		return nil
+		return output.AuditIDFromResponse(resp.HTTPResponse), nil
 	default:
 		// Defensive: the only constructors that build a
 		// transitionParams hard-code verbEnable / verbDisable /
 		// verbDelete, so reaching here means a future maintainer added
 		// a verb to the dispatch and forgot to update this switch.
-		return fmt.Errorf("unknown transition verb %q", verb)
+		return nil, fmt.Errorf("unknown transition verb %q", verb)
 	}
 }
 
@@ -261,4 +267,5 @@ func (s *silentTransitionError) ExitCode() int { return 1 }
 
 func printTransitionResult(w io.Writer, verb string, r transitionResult) {
 	fmt.Fprintf(w, "%s %s — %s (204 No Content)\n", verb, r.ConnectorID, r.Action)
+	output.WriteAuditReceipt(w, r.AuditID)
 }

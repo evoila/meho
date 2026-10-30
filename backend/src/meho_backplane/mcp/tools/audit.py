@@ -139,7 +139,7 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
             "type": ["string", "null"],
             "description": (
                 "Glob pattern matched against the op_id (e.g. "
-                '"vsphere.vm.*"). Translates to SQL LIKE with `*` as the '
+                '"k8s.pod.*"). Translates to SQL LIKE with `*` as the '
                 "wildcard."
             ),
             "maxLength": 256,
@@ -272,7 +272,7 @@ _TOOL_DESCRIPTION: Final[str] = (
     "the backplane (HTTP route, MCP tool call) writes one audit row, and "
     "this tool is how an agent reads them back.\n\n"
     "WHEN TO CALL: investigation flows — the operator asks 'who patched "
-    "rdc-vcenter on Tuesday', 'did someone read vault.kv before the outage', "
+    "prod-k8s on Tuesday', 'did someone read vault.kv before the outage', "
     "'show me every denied request in the last 24h'. Pre-canned shortcut "
     "shapes (`audit_id=<uuid>` for show, `target=<name>` for who-touched, "
     "`principal=<operator.sub>` for my-recent) are filter combinations, not "
@@ -284,7 +284,7 @@ _TOOL_DESCRIPTION: Final[str] = (
     "the most recent 100 rows of the operator's tenant — not unbounded.\n\n"
     "Tenant scoping is automatic — the operator's JWT determines the tenant "
     "boundary; cross-tenant probes are impossible. Filter contents are "
-    "NEVER broadcast on the SSE feed (decision #3); only "
+    "NEVER broadcast on the SSE feed; only "
     "`{op_id, result_status, row_count}` aggregate appears.\n\n"
     "Returns `{rows: [AuditEntry, ...], next_cursor: <opaque|null>}` sorted "
     "by timestamp descending. Use `next_cursor` (when non-null) to page "
@@ -613,7 +613,7 @@ _REPLAY_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
                 "Tenant-wide tally of header-less `method=MCP` audit "
                 "rows (NULL `agent_session_id`) that no session replay "
                 "can reach. Distinguishes an empty forest from an "
-                "empty history (#2700)."
+                "empty history."
             ),
         },
         "loose_row_count": {
@@ -622,7 +622,7 @@ _REPLAY_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
                 "Nodes in the tree whose `parent_audit_id` names a row "
                 "that does not exist: a multi-step operation that is "
                 "still running, or that stopped before its own row was "
-                "saved (#4670)."
+                "saved."
             ),
         },
     },
@@ -730,7 +730,7 @@ _REPLAY_TOOL_DESCRIPTION: Final[str] = (
     "Reconstruct the full trace of one agent session — every operation, "
     "its result, and the parent/child graph between them — as a "
     "chronological ReplayNode forest. tenant_admin forensic tool for "
-    "cross-session investigation (G8.2).\n\n"
+    "cross-session investigation.\n\n"
     "WHEN TO CALL: an admin investigates one agent's whole run after the "
     "fact — 'show me everything session <id> did, in order, with the "
     "lineage between composite operations'. The session id comes from a "
@@ -754,7 +754,7 @@ _REPLAY_TOOL_DESCRIPTION: Final[str] = (
     "tenant-wide tally of header-less `method=MCP` audit rows (NULL "
     "`agent_session_id`) that no session replay can reach — a non-zero "
     "value on an empty forest means un-negotiated MCP traffic this surface "
-    "structurally cannot see (#2700)."
+    "structurally cannot see."
 )
 
 

@@ -210,23 +210,35 @@ func printReviewTable(w io.Writer, r *api.ConnectorReviewPayload) {
 // printReviewOps renders a compact one-line-per-op table. Operators with
 // a 3000-op vcenter connector cannot scroll through a verbose render;
 // --json carries the full descriptions for the "ok now show me
-// everything" path.
+// everything" path. `en` is the install default; `ten` is this
+// tenant's own setting for a built-in op (- = the tenant uses `en`).
 func printReviewOps(w io.Writer, ops []api.ConnectorReviewOp) {
 	if len(ops) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "  %-42s %-9s %3s %3s  %s\n",
-		"op_id", "safety", "req", "en", "summary",
+	fmt.Fprintf(w, "  %-42s %-9s %3s %3s %3s  %s\n",
+		"op_id", "safety", "req", "en", "ten", "summary",
 	)
 	for _, op := range ops {
-		fmt.Fprintf(w, "  %-42s %-9s %3s %3s  %s\n",
+		fmt.Fprintf(w, "  %-42s %-9s %3s %3s %3s  %s\n",
 			truncate(op.OpId, 42),
 			op.SafetyLevel,
 			boolFlag(op.RequiresApproval),
 			boolFlag(op.IsEnabled),
+			tenantFlag(op.TenantEnabled),
 			truncate(strDeref(op.Summary), 70),
 		)
 	}
+}
+
+// tenantFlag renders the reading tenant's own on/off setting for a
+// built-in op (evoila/meho#5029): Y / . like boolFlag, and - when the
+// tenant uses the install default (the `en` column).
+func tenantFlag(v *bool) string {
+	if v == nil {
+		return " - "
+	}
+	return boolFlag(*v)
 }
 
 // enabledOpCount counts the enabled ops in an op list.

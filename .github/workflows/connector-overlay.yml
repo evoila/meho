@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Connector overlay image build check.
+#
+# Builds an overlay image (the public MEHO image plus connector packages)
+# with deploy/connector-overlay/build.sh, from a small made-up connector
+# wheel, then starts MEHO's connector walk in that image and checks that
+# the package is listed and imported. Runs on a throwaway GitHub-hosted
+# runner. The base image is the public image of the main branch, pinned
+# by its digest at the start of the job.
+#
+# The checks of the build itself (clashing library, files outside the
+# connector folder, start-up hooks, the allowlist file) are unit tests in
+# backend/tests/test_connector_overlay_build.py.
+
+name: connector-overlay
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/connector-overlay/**'
+      - 'backend/src/meho_backplane/connector_packages.py'
+      - '.github/workflows/connector-overlay.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/connector-overlay/**'
+      - 'backend/src/meho_backplane/connector_packages.py'
+      - '.github/workflows/connector-overlay.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connector-overlay-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build an overlay image from a made-up wheel and start it
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      IMAGE: meho-connector-overlay:ci
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        # Same pin as ci.yml; raise it there and here together.
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        with:
+          version: "0.13.0"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
+      - name: Pin the public image by its digest
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect ghcr.io/evoila/meho:main --format '{{json .Manifest}}' | jq -r .digest)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no digest for ghcr.io/evoila/meho:main" >&2; exit 1; }
+          echo "BASE_IMAGE=ghcr.io/evoila/meho@${digest}" >> "$GITHUB_ENV"
+          echo "Base image: ghcr.io/evoila/meho@${digest}"
+
+      - name: Build the made-up connector wheel
+        run: uv build --wheel --out-dir "$RUNNER_TEMP/connectors" deploy/connector-overlay/example
+
+      - name: Build the overlay image
+        run: |
+          deploy/connector-overlay/build.sh \
+            --base "$BASE_IMAGE" \
+            --connectors "$RUNNER_TEMP/connectors" \
+            --tag "$IMAGE"
+
+      - name: MEHO loads its connectors and lists the package
+        run: |
+          set -euo pipefail
+          docker run --rm "$IMAGE" cat /app/connector-packages.json
+          out="$(docker run --rm "$IMAGE" python -c '
+          from meho_backplane.connectors.registry import _eager_import_connectors
+          _eager_import_connectors()
+          from meho_backplane.connectors import example_overlay
+          assert example_overlay.EXAMPLE_OVERLAY_LOADED
+          print("example_overlay imported")
+          ' 2>&1)"
+          echo "$out" | grep -E 'connector_packages_allowed|example_overlay imported'
+          echo "$out" | grep 'connector_packages_allowed' | grep -q 'example-overlay-connector'
+          echo "$out" | grep -q 'example_overlay imported'
+
+      - name: uv and pip are not in the image
+        run: |
+          docker run --rm "$IMAGE" sh -c '! command -v uv && ! python -m pip --version'

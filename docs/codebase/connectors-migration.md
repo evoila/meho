@@ -10,8 +10,8 @@ The first part, in this package today:
 
 - **One inventory shape** for every source platform (`contracts.py`).
 - **One assessment result shape** (`contracts.py`).
-- **A loader** that reads stored inventories back by handle id and
-  merges them (`inventory_load.py`).
+- **A loader** that reads stored inventories back by handle id, takes
+  inventories given inline, and merges them (`inventory_load.py`).
 - **The Azure Migrate CSV mapping** (`azure_migrate_csv.py`) and the
   read `migration.inventory.csv` (`ops.py`).
 - **The source adapters**: one multi-step read per source connector that
@@ -114,13 +114,20 @@ two shapes as JSON Schema for the operations' response schemas.
 
 ## Control flow
 
-### Stored inventories
+### Stored and inline inventories
 
 An inventory read returns one envelope. The envelope has two lists
 (`records` and `omissions`), so when it is over the inline size limit the
 JSONFlux reducer stores it **whole** as a document record and the caller
-gets a handle id (see `jsonflux.md`). `load_inventories(operator,
-handle_ids)`:
+gets a handle id (see `jsonflux.md`). An inventory read also declares the
+`result_handle` hint (`llm_instructions["result_handle"] =
+{"always": true}`, #5143): then a small inventory (one VM is about
+1.7 KB) comes back whole **and** with a handle, so it can be exported and
+assessed too. The vCenter read (`vmware.migration.inventory`) declares it.
+
+An inventory can also be given inline in the call, for example one the
+caller already has. `load_inventories(operator, handle_ids,
+inventories=...)`:
 
 1. Reads each handle from `get_result_handle_store()` with the caller's
    tenant id. The store also checks the caller, so another tenant's or
@@ -131,7 +138,14 @@ handle_ids)`:
    is not valid. Validation messages leave out the input values.
 3. Decodes and checks each record in a worker thread
    (`asyncio.to_thread`), because a stored result can be several MB.
-4. Merges the envelopes in handle order (`merge_inventories`). A handle
+4. Checks each inline inventory with the same rules, in the same order:
+   `schema_version` first, then the shape. The message names it
+   `inline inventory <n>` where a stored one says `handle <id>`, and is
+   otherwise the same.
+5. Needs at least one handle or inline inventory, and at most 20 of both
+   together.
+6. Merges the envelopes: stored ones first, in handle order, then inline
+   ones, in the given order (`merge_inventories`). A handle
    given twice is read once. A repeated `source_id`, or a server that
    shares a BIOS UUID or an instance UUID with another record, stays in
    `records` and is listed in `duplicates`; the caller decides what that
@@ -151,10 +165,16 @@ handle_ids)`:
 
 Group `inventory`, `safe`, `requires_approval: false`. It is a typed
 operation, not a multi-step one: it runs no other operation, it only reads
-stored results. In: `inventory_handles` (1 to 20). Out: `csv_lines` (the
+stored results and the inventories given in the call. In:
+`inventory_handles` (handle ids), `inventories` (whole inventories given
+inline), or both; at least one of the two, and at most 20 together. Out:
+`csv_lines` (the
 file, one item per line without the line end, header first), `row_count`,
 `columns`, `left_out`, `renamed`, `skipped_records`, `notes`, `sources`.
-Join `csv_lines` with CRLF to get the file.
+Join `csv_lines` with CRLF to get the file. Each entry of `sources` has
+`origin`: `"stored"` with its `handle_id`, or `"inline"` with no handle id,
+so a report shows which data MEHO stored itself
+(`LoadedInventory.sources()`).
 
 The file is a list of lines on purpose. A large result comes back as a
 handle, and `result_query` returns an array in pages (`offset` and
@@ -319,12 +339,13 @@ A read-only multi-step operation of the vCenter connector
 (`connectors/vmware_rest/composites/_migration_inventory*.py`), registered
 on both vCenter catalogs (`vmware-rest-8.0` and `vmware-rest-9.0`), group
 `migration`, `safe`, no approval. It returns one inventory envelope, always
-as a stored result: the operation's `result_document: {"always": true}`
-hint makes the reducer keep the inventory whole under a handle whatever its
-size, so even a one-VM inventory has a handle for `migration.inventory.csv`.
-The caller sees the reducer's document summary (`result_record`,
-`top_level_fields`, the small scalars) and reads the rest with
-`result_query` and a path (for example `/counts` or `/records`).
+with a handle: the operation's `result_handle: {"always": true}` hint
+(#5143) makes the reducer store a small inventory too, so even a one-VM
+inventory has a handle for `migration.inventory.csv`. A small inventory
+comes back whole next to its handle. A large one comes back as the
+reducer's document summary (`result_record`, `top_level_fields`, the small
+scalars), and the caller reads the rest with `result_query` and a path
+(for example `/counts` or `/records`).
 
 Parameters: `vcf_operations_target` (optional), `utilization_days` (1 to
 365, default 30), and `cluster` or `folder` (an id) to narrow the scope.
@@ -463,15 +484,16 @@ the adapters (`hyperv.vms.guest.list`, `winsrv.system.hardware`,
 fixtures: a Windows VM with three disks, a Linux VM with no utilization,
 the same Linux machine read through its guest OS (same BIOS UUID), a
 Kubernetes workload and an application. Inventories are stored through the
-real JSONFlux reducer and read back through the loader. The golden file
+real JSONFlux reducer and read back through the loader, and given inline
+(the same checks and messages, `origin: "inline"` in `sources`). A one-VM
+inventory reduced with the `result_handle` hint at the default limits gives
+a handle the CSV operation accepts. The golden file
 `backend/tests/data/migration_azure_migrate_golden.csv` pins the CSV
 output; the test also checks its header against Microsoft's template
 header, column for column.
 
 ## Known issues
 
-- Only handles are accepted. The source adapters always store their
-  inventory, so this holds for them.
 - Hyper-V reads one host. A cluster is read node by node; the VM id merges
   the results.
 - A bare-metal Kubernetes node has no disk, firmware or boot data; only the

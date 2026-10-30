@@ -6,8 +6,8 @@
 * ``name`` and each ``aliases`` entry: no blank value, no space, tab, line
   break or other control character, no ``/``.
 * ``host`` and ``fqdn``: the host part MEHO connects to must be a valid
-  IPv4 address, IPv6 address or DNS host name. Port and path shapes stay
-  allowed.
+  IPv4 address, IPv6 address or DNS host name of at most 253 characters.
+  Port and path shapes stay allowed.
 * A row saved before the rules existed still resolves and can be deleted.
 
 The suite-wide SSRF allowlist (``_default_target_ssrf_allowlist`` in
@@ -57,12 +57,21 @@ BAD_NAMES = [
     pytest.param("   ", id="only-spaces"),
 ]
 
+# Every label is valid on its own; only the full length differs.
+LONGEST_DNS_NAME = ".".join(["a" * 63, "b" * 63, "c" * 63, "d" * 61])
+ONE_TOO_LONG_DNS_NAME = ".".join(["a" * 63, "b" * 63, "c" * 63, "d" * 62])
+assert len(LONGEST_DNS_NAME) == 253
+assert len(ONE_TOO_LONG_DNS_NAME) == 254
+
 BAD_HOSTS = [
     pytest.param("10.0.0.", id="ipv4-trailing-dot"),
     pytest.param("10.0.0", id="ipv4-three-parts"),
     pytest.param("10.0.0.300", id="ipv4-out-of-range"),
     pytest.param("not a host", id="spaces"),
     pytest.param("-bad-.example", id="label-starts-with-dash"),
+    pytest.param("a" * 64 + ".example", id="label-too-long"),
+    pytest.param(ONE_TOO_LONG_DNS_NAME, id="name-254-chars"),
+    pytest.param(ONE_TOO_LONG_DNS_NAME + ".", id="name-254-chars-trailing-dot"),
 ]
 
 GOOD_HOSTS = [
@@ -73,6 +82,9 @@ GOOD_HOSTS = [
     "db-01:27017",
     "owner/repo",
     "api.github.com/repos/owner/repo",
+    pytest.param(LONGEST_DNS_NAME, id="name-253-chars"),
+    pytest.param(LONGEST_DNS_NAME + ".", id="name-253-chars-trailing-dot"),
+    pytest.param(LONGEST_DNS_NAME + ":27017", id="name-253-chars-with-port"),
 ]
 
 
@@ -221,6 +233,8 @@ def test_post_good_host_is_201(client: TestClient, value: str) -> None:
         ({"host": "-bad-.example"}, "host"),
         ({"fqdn": "not a host"}, "fqdn"),
         ({"fqdn": "10.0.0"}, "fqdn"),
+        ({"host": ONE_TOO_LONG_DNS_NAME}, "host"),
+        ({"fqdn": ONE_TOO_LONG_DNS_NAME + "."}, "fqdn"),
     ],
 )
 async def test_patch_bad_value_is_422(client: TestClient, body: dict[str, Any], field: str) -> None:

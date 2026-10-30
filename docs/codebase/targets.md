@@ -132,7 +132,9 @@ value gives a 422 that names the field.
   `api.github.com/repos/owner/repo`) still work.
 - The host part must be a valid IPv4 address, a valid IPv6 address, or a
   valid DNS host name: parts of letters, digits and `-`, each 1 to 63
-  characters long, not starting or ending with `-`. A trailing dot is fine.
+  characters long, not starting or ending with `-`. The whole name, in its
+  encoded (ASCII) form, must be at most 253 characters. A trailing dot is
+  fine and does not count.
 - When every part is a number, the value is an IPv4 address and must be
   complete and valid. `10.0.0.` and `10.0.0` are refused.
 - The format check runs first. The SSRF guard then runs unchanged. The

@@ -17,9 +17,9 @@ so the REST API, ``meho targets add``, ``meho targets import`` and the
   :func:`~meho_backplane.targets.ssrf_guard._dialed_host`), so a port after
   the host (``db-01:27017``) and a path after the host (``owner/repo``) keep
   working. That host part must be a valid IPv4 address, a valid IPv6
-  address, or a valid DNS host name. A host whose parts are all numbers is
-  an IPv4 address and must be complete (``10.0.0.`` and ``10.0.0`` are
-  refused).
+  address, or a valid DNS host name of at most 253 characters (a trailing
+  dot not counted). A host whose parts are all numbers is an IPv4 address
+  and must be complete (``10.0.0.`` and ``10.0.0`` are refused).
 
 Rows saved before these rules existed are not touched: the rules run only
 when a create or update body is built.
@@ -39,6 +39,11 @@ __all__ = ["check_target_host", "check_target_name"]
 #: One DNS label: letters, digits and ``-``, 1 to 63 characters, not
 #: starting or ending with ``-``.
 _DNS_LABEL: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", re.I)
+
+#: Longest DNS host name in its encoded (ASCII) form, without a trailing
+#: dot. RFC 1035 caps the wire form at 255 octets, which leaves 253
+#: characters of text.
+_DNS_NAME_MAX_LEN: Final[int] = 253
 
 
 def check_target_name(value: str, field: str) -> str:
@@ -61,8 +66,10 @@ def _is_dns_host_name(host: str) -> bool:
         ascii_host = host.encode("idna").decode("ascii")
     except UnicodeError:
         return False
-    labels = ascii_host.removesuffix(".").split(".")
-    return all(_DNS_LABEL.match(label) for label in labels)
+    ascii_host = ascii_host.removesuffix(".")
+    if len(ascii_host) > _DNS_NAME_MAX_LEN:
+        return False
+    return all(_DNS_LABEL.match(label) for label in ascii_host.split("."))
 
 
 def check_target_host(value: str, field: str) -> str:
@@ -74,7 +81,8 @@ def check_target_host(value: str, field: str) -> str:
     """
     error = (
         f"{field} must be a valid IPv4 address, IPv6 address or DNS host name "
-        "(letters, digits and '-' only, for example node-01.example.com)"
+        "(letters, digits and '-' only, at most 253 characters, "
+        "for example node-01.example.com)"
     )
     literal = value[1:-1] if value.startswith("[") and value.endswith("]") else value
     try:

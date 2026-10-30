@@ -45,10 +45,17 @@ What is never shown
   pods run and with which rights: ``command``, ``args``, ``image``,
   ``securityContext``, ``hostPID`` / ``hostNetwork`` / ``hostIPC``,
   ``nodeName``, ``nodeSelector``, ``tolerations``, ``affinity``,
-  ``volumes`` and ``volumeMounts``. Then the shared params redaction of the
-  generic echo runs over the spec: it hides secret-shaped text anywhere
-  (``--token=...``, ``API_KEY=...``, JWTs, bearer tokens) and the value of
-  a field with a secret-shaped name (a ``secret`` volume, for example). A
+  ``volumes`` and ``volumeMounts``. On each ``command`` and ``args`` list
+  the words stay, but these values are hidden: the value of a
+  ``NAME=VALUE`` or ``--name=value`` whose name holds a secret word
+  (``PGPASSWORD=...``, ``AWS_SECRET_ACCESS_KEY=...``, ``--password=...``,
+  any length), the word after a secret flag (``--password x``,
+  ``--token x``, ``-p x``), the password in ``user:password`` after ``-u``
+  or ``--user``, the password in a URL (``https://user:password@host``)
+  and tokens with a known vendor prefix (``ghp_...``). Then the shared
+  params redaction of the generic echo runs over the spec: it hides
+  secret-shaped text anywhere (JWTs, bearer tokens) and the value of a
+  field with a secret-shaped name (a ``secret`` volume, for example). A
   secret on a command line with no known shape (``mytool hunter2``) is
   shown.
 
@@ -80,11 +87,13 @@ and the park then stores the ``preview_unavailable`` marker with the reason.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from typing import Any
 
 from kubernetes_asyncio import client
 
+from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.connectors.kubernetes.ops_write_dangerous import _parse_manifest
 from meho_backplane.operations._preview import (
     PreviewContext,
@@ -162,12 +171,106 @@ def _parts_bytes(parts: list[Any]) -> int:
     return sum(len(str(part).encode("utf-8")) for part in parts)
 
 
+#: Words that make a variable or flag name secret-shaped on a command line,
+#: also inside a longer name (``PGPASSWORD``, ``AWS_SECRET_ACCESS_KEY``).
+_COMMAND_SECRET_WORDS = ("PASS", "PWD", "SECRET", "TOKEN", "KEY", "CREDENTIAL", "AUTH")
+
+#: Flags whose next word is ``user:password`` (``curl -u``, ``--user``).
+_USER_FLAGS = frozenset({"u", "user"})
+
+#: ``NAME=VALUE``, also as ``--name=value``; a quoted value may hold spaces.
+_ASSIGNMENT = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?P<name>-{0,2}[A-Za-z_][A-Za-z0-9_.-]*)="
+    r"(?P<value>'[^']*'|\"[^\"]*\"|[^\s'\";&|]+)"
+)
+
+#: The password in a URL: ``scheme://user:password@host``.
+_URL_PASSWORD = re.compile(r"(?P<head>[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@]*:)[^\s/@]+@")
+
+#: Tokens with a known vendor prefix (GitHub, GitLab, Slack, AWS key id).
+_KNOWN_TOKEN = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"
+    r"|glpat-[A-Za-z0-9_-]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b"
+)
+
+#: A command-line flag: ``-u``, ``--password``.
+_FLAG = re.compile(r"^--?(?P<name>[A-Za-z][A-Za-z0-9_-]*)$")
+
+
+def _secret_shaped_name(name: str) -> bool:
+    """True when a variable or flag name on a command line can name a secret."""
+    upper = name.upper()
+    return is_secret_param_name(name) or any(word in upper for word in _COMMAND_SECRET_WORDS)
+
+
+def _hide_user_password(value: str) -> str:
+    """``user:password`` with the password hidden; other text as it is."""
+    user, sep, _ = value.partition(":")
+    return f"{user}:{_HIDDEN}" if sep else value
+
+
+def _hide_assignment(match: re.Match[str]) -> str:
+    """Hide the value of a ``NAME=VALUE`` whose name is secret-shaped."""
+    name, value = match["name"], match["value"]
+    if _secret_shaped_name(name):
+        return f"{name}={_HIDDEN}"
+    if name.lstrip("-") in _USER_FLAGS:
+        return f"{name}={_hide_user_password(value)}"
+    return match[0]
+
+
+def _hide_in_text(text: str) -> str:
+    """Hide secret values inside one command-line string."""
+    text = _ASSIGNMENT.sub(_hide_assignment, text)
+    text = _URL_PASSWORD.sub(lambda match: f"{match['head']}{_HIDDEN}@", text)
+    return _KNOWN_TOKEN.sub(_HIDDEN, text)
+
+
+def _hide_command_secrets(parts: list[Any]) -> list[Any]:
+    """Copy a ``command`` / ``args`` list with the secret values on it hidden.
+
+    The words stay, so the approver still reads what runs. Hidden are: the
+    value of a ``NAME=VALUE`` (or ``--name=value``) with a secret-shaped
+    name, the password in a URL, tokens with a known vendor prefix, the
+    word after a secret-shaped flag (``--password x``, ``-p x``) and the
+    password in ``user:password`` after ``-u`` or ``--user``. A flag and
+    its value may be two list items or two words of one string
+    (``sh -c "..."``).
+    """
+    hidden: list[Any] = []
+    pending: str | None = None
+    for part in parts:
+        if not isinstance(part, str):
+            hidden.append(part)
+            continue
+        words = re.split(r"(\s+)", _hide_in_text(part))
+        for index, word in enumerate(words):
+            if not word or word.isspace():
+                continue
+            if pending is not None and not word.startswith("-"):
+                words[index] = _HIDDEN if pending == "secret" else _hide_user_password(word)
+                pending = None
+                continue
+            pending = None
+            flag = _FLAG.match(word)
+            if flag is None:
+                continue
+            name = flag["name"]
+            if name in _USER_FLAGS:
+                pending = "user"
+            elif name == "p" or _secret_shaped_name(name):
+                pending = "secret"
+        hidden.append("".join(words))
+    return hidden
+
+
 def _job_spec_echo(ctx: PreviewContext, spec: Any) -> Any:
     """A Job spec safe to show the approver (see the module docstring).
 
     The ``env`` and ``httpHeaders`` values are hidden by structure; the
-    command lines stay. Then the shared params redaction runs over the
-    result, so secret-shaped text is hidden wherever it is.
+    command lines stay, with their secret values hidden. Then the shared
+    params redaction runs over the result, so secret-shaped text is hidden
+    wherever it is.
     """
     tenant = str(ctx.operator.tenant_id) if ctx.operator.tenant_id is not None else None
     redacted = _redact_echoed_params(
@@ -253,7 +356,8 @@ def _hide_values(node: Any, *, hide_commands: bool = True) -> Any:
       a Secret or a command line nested in such an entry is hidden too.
     * Every ``command`` or ``args`` list becomes ``{"hidden": true, "bytes":
       <size>}``. With ``hide_commands=False`` (the Job previews) the
-      command lines stay, so the approver reads what will run.
+      command lines stay, so the approver reads what will run; only the
+      secret values on them are hidden (:func:`_hide_command_secrets`).
     * Every dict with ``kind: Secret`` keeps only the key names of its
       ``data`` and ``stringData``. This catches a Secret nested in another
       object, not only a top-level Secret document.
@@ -270,8 +374,12 @@ def _hide_values(node: Any, *, hide_commands: bool = True) -> Any:
                     else _hide_values(entry, hide_commands=hide_commands)
                     for entry in item
                 ]
-            elif hide_commands and key in _COMMAND_LISTS and isinstance(item, list):
-                out[key] = {"hidden": True, "bytes": _parts_bytes(item)}
+            elif key in _COMMAND_LISTS and isinstance(item, list):
+                out[key] = (
+                    {"hidden": True, "bytes": _parts_bytes(item)}
+                    if hide_commands
+                    else _hide_command_secrets(item)
+                )
             elif key == "annotations" and isinstance(item, dict) and _LAST_APPLIED in item:
                 out[key] = _hide_values(
                     {**item, _LAST_APPLIED: _HIDDEN}, hide_commands=hide_commands

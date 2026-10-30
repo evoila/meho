@@ -487,12 +487,18 @@ do and with which rights: `command`, `args`, image, pod and container
 (`nodeName`, `nodeSelector`, `tolerations`, `affinity`), service account,
 `volumes` and `volumeMounts`. `ops_write_preview.py` hides every inline
 `env` value and every probe `httpHeaders` value; the name stays, and
-`valueFrom` / `envFrom` references stay. Then the same two-step redaction
-as the generic params echo runs over the spec: it hides secret-shaped text
-anywhere (`--token=...`, `API_KEY=...`, JWTs, bearer tokens) and the value
-of a field with a secret-shaped name (a `secret` volume,
-`imagePullSecrets`). A secret on a command line with no known shape (for
-example `mytool hunter2`) is shown to the approver.
+`valueFrom` / `envFrom` references stay. On `command` and `args` the
+words stay, but these values are hidden: the value of a `NAME=VALUE` or
+`--name=value` whose name holds a secret word (`PGPASSWORD=...`,
+`AWS_SECRET_ACCESS_KEY=...`, `--password=...`, any length), the word after
+a secret flag (`--password x`, `--token x`, `-p x`), the password in
+`user:password` after `-u` or `--user`, the password in a URL
+(`https://user:password@host`) and tokens with a known vendor prefix
+(`ghp_...`). Then the same two-step redaction as the generic params echo
+runs over the spec: it hides secret-shaped text anywhere (JWTs, bearer
+tokens) and the value of a field with a secret-shaped name (a `secret`
+volume, `imagePullSecrets`). A secret on a command line with no known
+shape (for example `mytool hunter2`) is shown to the approver.
 
 **Secret redaction reuses the shipped `credential_write` op-class
 (#1401), not a new mechanism.** `k8s.secret.create` was already in

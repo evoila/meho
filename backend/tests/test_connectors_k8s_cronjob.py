@@ -60,6 +60,8 @@ _BATCH_V1 = "meho_backplane.connectors.kubernetes.ops_cronjob.client.BatchV1Api"
 
 #: A made-up secret. The preview must never show it.
 _SECRET = "made-up-env-Value-4958"
+#: A short made-up password on a command line.
+_SHORT = "Xq9"
 
 
 @pytest.fixture(autouse=True)
@@ -323,7 +325,13 @@ async def test_cronjob_run_preview_shows_job_template_and_active_jobs_not_values
     pod_spec.node_name = "node-01"
     pod_spec.host_pid = True
     pod_spec.containers[0].security_context = V1SecurityContext(privileged=True)
-    pod_spec.containers[0].args = [f"--token={_SECRET}"]
+    pod_spec.containers[0].args = [
+        f"--token={_SECRET}",
+        f"PGPASSWORD={_SHORT} pg_dump -h db app",
+        "--password",
+        _SHORT,
+        f"curl -u admin:{_SHORT} https://bob:{_SHORT}@example.invalid",  # gitleaks:allow
+    ]
     ctx = PreviewContext(
         descriptor=_FakeDescriptor(op_id="k8s.cronjob.run"),  # type: ignore[arg-type]
         connector_instance=_make_connector(),
@@ -338,6 +346,8 @@ async def test_cronjob_run_preview_shows_job_template_and_active_jobs_not_values
     assert effect is not None
     api.create_namespaced_job.assert_not_awaited()
     assert _SECRET not in json.dumps(effect)
+    assert _SHORT not in json.dumps(effect)
+    assert "pg_dump -h db app" in json.dumps(effect)
     preview = effect["preview"]
     assert preview["resource"] == "cronjob_run"
     assert preview["cronjob"] == "db-backup"

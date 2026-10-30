@@ -298,6 +298,53 @@ async def test_k8s_job_create_hides_secret_shapes_anywhere_in_the_spec() -> None
     assert "made-up-secret" not in json.dumps(effect)
 
 
+#: A short made-up password: short values must be hidden too.
+_SHORT = "Xq9"
+
+
+@pytest.mark.parametrize(
+    ("args", "kept"),
+    [
+        (["-c", f"export PGPASSWORD={_SECRET} && pg_dump -h db app"], "pg_dump"),
+        (["-c", f"MYSQL_ROOT_PASSWORD='{_SECRET} {_SHORT}' mysqld"], "mysqld"),
+        ([f"AWS_SECRET_ACCESS_KEY={_SECRET}", f"API_KEY={_SHORT}"], "AWS_SECRET_ACCESS_KEY"),
+        ([f"--password={_SHORT}", f"--token={_SHORT}", "--dry-run"], "--dry-run"),
+        (["--password", _SHORT, "--verbose"], "--verbose"),
+        (["-c", f"mysql -u root -p {_SHORT} app"], "mysql"),
+        (["-c", f"curl -u admin:{_SHORT} https://example.invalid"], "admin:"),  # gitleaks:allow
+        (["curl", "--user", f"admin:{_SHORT}", f"https://bob:{_SHORT}@example.invalid"], "curl"),
+        (["-c", f"git clone https://ghp_{_SECRET.replace('-', '')}@example.invalid/r"], "clone"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_k8s_job_create_hides_secret_values_on_the_command_line(
+    args: list[str], kept: str
+) -> None:
+    """A secret value on the command line is hidden; the command words stay."""
+    effect, preview = await _preview(
+        "k8s.job.create",
+        _job_params({"name": "run", "image": "busybox:1.36", "command": ["sh"], "args": args}),
+    )
+    text = json.dumps(effect)
+    assert _SHORT not in text
+    assert _SECRET.replace("-", "") not in text
+    assert kept in text
+    (container,) = preview["spec"]["template"]["spec"]["containers"]
+    assert len(container["args"]) == len(args)
+
+
+@pytest.mark.asyncio
+async def test_k8s_job_create_keeps_plain_flags_on_the_command_line() -> None:
+    """Flags that carry no secret are shown as they are."""
+    command = ["nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "ps", "-u", "root"]
+    _, preview = await _preview(
+        "k8s.job.create",
+        _job_params({"name": "run", "image": "busybox:1.36", "command": command}),
+    )
+    (container,) = preview["spec"]["template"]["spec"]["containers"]
+    assert container["command"] == command
+
+
 @pytest.mark.parametrize(
     ("op_id", "action"),
     [("sddc.host.validate", "validate"), ("sddc.host.commission", "commission")],

@@ -2291,13 +2291,17 @@ ticket; the `work_ref` argument of `call_operation`, or `--work-ref` on
 the step numbers ("step k of N") are right.
 
 Then tell the approver to use the ordered group action. It ships with
-#3597: the CLI verb `meho approvals approve --work-ref <ref> --in-order`
+#3597: the CLI verb `meho approvals approve --filter-work-ref <ref> --in-order`
+(`--filter-work-ref` picks the group; the global `--work-ref` flag only
+tags new requests with a change ticket)
 and an "Approve group in order" action in the console. It approves the
 group oldest first, one request at a time. It stops at the first step that
 fails, is refused, or was rejected or expired. Each request still gets its
 own decision, its own audit row and its own checks; it is not a bulk
-approval. #3597 also warns when a group does not look like one chain (more
-than one sender, or an order that does not match).
+approval. #3597 also warns when oldest first may not be the right order:
+when the group has requests from more than one requester, or when two
+requests have the same creation time (MEHO then cannot tell which comes
+first).
 
 Until #3597 ships, the approver uses the oldest-first Pending view of the
 ticket and approves one request at a time from the top, checking each run
@@ -2355,7 +2359,7 @@ decision row's primary key (FK to `audit_log.id`).
 `approval.approved` says that a person approved. It does **not** say that
 the run worked. To learn that, read `result_state` / `resume_outcome` on
 the request, or the result on `/result` (see "Ordered and dependent
-approvals" below).
+approvals" above).
 
 ## Audit rows
 

@@ -5,8 +5,8 @@
 # not a credential. The hook sees it in every merge commit that brings
 # the chart workflow and its test in from main.
 .github/workflows/chart.yml:generic-api-key:300
-.github/workflows/chart.yml:generic-api-key:693
 backend/tests/test_chart_core_secrets.py:generic-api-key:65
+.github/workflows/chart.yml:generic-api-key:693
 backend/tests/test_chart_core_openbao.py:generic-api-key:72
 #
 # The example certificate thumbprint in the Entra ID test fixtures. It is

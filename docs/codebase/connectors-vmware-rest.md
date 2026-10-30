@@ -904,6 +904,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   clusters, hosts and datastores in each. `safe`, in its own group
   `vmware-datacenters`, on both catalogs. See **Datacenter list** under
   Control flow.
+- **`vmware.folder.list`** (`typed_ops_folder_list.py`, handler
+  `folder_list`) — the inventory folders of a vCenter, one flat row each, with
+  the datacenter and the parent. `safe`, in its own group `vmware-folders`, on
+  both catalogs. See **Folder list** under Control flow.
 - **`vcenter.sso_admin.api_file.get`** (`typed_ops_sso_admin_api_file.py`,
   handler `sso_admin_api_file_get`) — reads one SSO Admin API description
   file (the WSDL or one of its XSD files) that a vCenter serves. No vendor
@@ -4297,6 +4301,53 @@ lowers a level, grants and the stored-delete review, a person's restore call
 waits for approval; the shelf-gated lane checks every rule against the
 pinned `vcenter.yaml` and `vi-json.yaml` files) and `test_delete_names.py`
 (the vSAN prefixes and the `action=delete` query).
+
+### Folder list (`vmware.folder.list`)
+
+What an operator or agent can do now: list the folders of a vCenter with one
+typed call, and find a folder id by name, type or datacenter. Before this, the
+only way was the ingested `GET:/vcenter/folder`, which has no summary.
+
+| Operation | Risk | vSphere calls | Versions |
+|---|---|---|---|
+| `vmware.folder.list` | `safe`, no approval | REST `GET /vcenter/folder`, REST `GET /vcenter/datacenter`, `Folder.parent` through `PropertyCollector.RetrievePropertiesEx` | vCenter 8.0 and 9.x |
+
+Parameters (all optional): `type` (`DATACENTER`, `DATASTORE`, `HOST`,
+`NETWORK`, `VIRTUAL_MACHINE`), `datacenters`, `parent_folders` and `names`.
+They are the vCenter filters, so `names` is an exact match. Each row:
+`id`, `name`, `type`, `datacenter_id`, `datacenter_name`, `parent_id`,
+`parent_type`, plus one `read_note` for the whole answer.
+
+How it reads:
+
+1. `GET /vcenter/folder` with the filters. This read must work: its error is
+   the error of the operation. vCenter returns at most 1000 folders and
+   refuses a filter that matches more, so the agent guidance says to narrow by
+   `type` or `datacenters`.
+2. The folder summary has no datacenter. The op lists the datacenters and
+   lists the folders again once per datacenter, with the same filters. A
+   folder found there is in that datacenter. Folders above the datacenters
+   (the root folder and the `DATACENTER` folders) have no datacenter.
+3. The summary has no parent either. One property read of `parent` over all
+   listed folders (every page, through `vim_retrieve.retrieve_all_pages`).
+   A top folder of a datacenter has a `Datacenter` parent.
+
+Reads 2 and 3 are best effort. When one fails, its fields are `null` and
+`read_note` says which read failed; the list stays. Read 3 can also fail for
+single folders inside a successful answer: vCenter then puts `parent` in that
+object's `missingSet` with a fault (for example no permission). Such a folder
+gets `null` parent fields, and `read_note` says for how many folders and with
+which fault type (only the type name, never the fault text, #3708), so it does
+not look like a folder with no parent. An empty list sends no extra reads. A long list comes back as a result handle, like every other
+set-shaped answer.
+
+Tests: `test_connectors_vmware_rest_typed_folder_list.py` (the real connector
+over mocked HTTP on vCenter 9.0 and 8.0, the filter names on the wire, the
+best-effort reads including a `missingSet` parent fault, the metadata) and
+`test_connectors_vmware_rest_folder_list_reconcile.py` (the two REST paths and
+their filters against the pinned 9.0 and 8.0 U3 `vcenter.yaml`, the summary
+fields and folder types against 9.0, and `Folder.parent` against the 9.0
+`vi-json.yaml`).
 
 ### Older-API VM power, clone, snapshot and migrate calls wait for approval (#3869)
 

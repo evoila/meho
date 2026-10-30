@@ -550,7 +550,7 @@ digest** and say which digests differ.
   the header existed ran an image without connector packages. A value in
   another shape gets HTTP 400 `runner_package_set_invalid`.
   `assert_runner_scope` stores the digest in
-  `runner_principal.package_set_digest` (migration `0119`). The header
+  `runner_principal.package_set_digest` (migration `0124`). The header
   never refuses a call by itself.
 - **What central assigns.** `materialize_assignment` sets
   `RunnerWorkItem.package_set` to central's own digest when the item's

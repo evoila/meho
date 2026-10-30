@@ -4784,7 +4784,7 @@ class RunnerPrincipal(Base):
     wire_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     # #5038: the digest of the runner's connector packages, sent with each
     # call (the runner list shows it). ``NULL`` until the runner calls after
-    # migration 0119.
+    # migration 0124.
     package_set_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (

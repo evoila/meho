@@ -3,8 +3,8 @@
 
 """Add the runner's connector package set digest to ``runner_principal`` (#5038).
 
-Revision ID: 0119
-Revises: 0118
+Revision ID: 0124
+Revises: 0123
 Create Date: 2026-10-28
 
 One nullable column, ``runner_principal.package_set_digest``: the digest
@@ -23,8 +23,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0119"
-down_revision: str | None = "0118"
+revision: str = "0124"
+down_revision: str | None = "0123"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

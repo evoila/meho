@@ -165,6 +165,9 @@ func runOneShot(cmd *cobra.Command, backplaneURL string, jsonOut bool) error {
 			output.AuthExpired(fmt.Sprintf("backplane rejected stored credentials; run `meho login %s`", backplaneURL)),
 			jsonOut)
 	}
+	if msg, ok := tenantRefusedMessage(resp); ok {
+		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(msg), jsonOut)
+	}
 	if resp.JSON200 == nil {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("HTTP %d from %s", resp.StatusCode(), backplaneURL)),
@@ -205,6 +208,28 @@ func noTenantMessage(resp *api.AuthenticatedHealthApiV1HealthGetResponse) (strin
 		"MEHO role group. Logging in again does not help: ask your admin to put " +
 		"you in exactly one role group, then run `meho login` again. Guide: " +
 		tenantBootstrapGuideURL, true
+}
+
+// tenantRefusedMessage returns the message for a 403 whose detail starts
+// with tenant_not_member or tenant_not_found (#5239): the tenant from
+// `meho tenants use` or MEHO_TENANT is not one the login may work in,
+// for example after the person left it. The backplane's detail lists
+// the person's tenants; the CLI adds how to pick another one.
+func tenantRefusedMessage(resp *api.AuthenticatedHealthApiV1HealthGetResponse) (string, bool) {
+	if resp == nil || resp.StatusCode() != http.StatusForbidden {
+		return "", false
+	}
+	var body struct {
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		return "", false
+	}
+	if !strings.HasPrefix(body.Detail, "tenant_not_member:") && !strings.HasPrefix(body.Detail, "tenant_not_found:") {
+		return "", false
+	}
+	return body.Detail + " Run `meho tenants use` to list your tenants, then " +
+		"`meho tenants use <name>` (or change " + api.TenantEnv + ").", true
 }
 
 // versionCheckTimeout caps the GET /version call so a slow backplane

@@ -253,6 +253,7 @@ func InsufficientBudget(detail string) *StructuredError {
 // also sets SilenceErrors=true: cobra sees a non-nil error and
 // flips to a non-zero return without re-emitting any text.
 func RenderError(stderrW io.Writer, err *StructuredError, jsonOut bool) error {
+	err = withTenantNotChosenHint(err)
 	if jsonOut {
 		// JSON path: serialise the envelope to stderr ourselves.
 		body := jsonError{

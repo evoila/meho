@@ -153,6 +153,7 @@ func NewAuthedClient(_ context.Context, backplaneURL string, opts AuthedClientOp
 		}
 		req.Header.Set("Authorization", authorizationHeader(bearer))
 		SetWorkRefHeader(req)
+		SetTenantHeader(req)
 		return nil
 	}
 

@@ -19,6 +19,10 @@ Every command accepts the global flags below.
 - `--verbose`, `-v` — enable verbose output.
 - `--work-ref` — external change-ticket reference (`gh:<owner>/<repo>#<n>`, default: `$MEHO_WORK_REF`). The CLI sends it as the `Meho-Work-Ref` header on every backplane request, so the audit rows carry it. Five commands have their own `--work-ref` flag that tags the run with the reference: `operation call`, `scheduler create`, `runbook start`, `agent run`, and `broadcast announce`. On those commands only `$MEHO_WORK_REF` is sent as the header. List commands filter by reference with `--filter-work-ref`.
 
+## Current tenant
+
+One login can be in several tenants. MEHO then works in one current tenant, and every command sends it in the `Meho-Tenant` header. Choose it with `meho tenants use <name>`; without a name, `meho tenants use` lists your tenants and marks the current one. No new login is needed. `$MEHO_TENANT` (a tenant name or ID) wins over the stored choice for one shell. A login in one tenant needs none of this.
+
 ## `meho addon`
 
 Manage add-on pairings (pair / list / show / unpair)
@@ -4897,7 +4901,7 @@ meho targets update <name, alias or id> [flags]
 
 ## `meho tenants`
 
-Operate per-tenant policy (flight-recorder capture, mail-recipient allowlist)
+Choose the current tenant and operate per-tenant policy (flight-recorder capture, mail-recipient allowlist)
 
 ```
 meho tenants
@@ -4957,6 +4961,17 @@ meho tenants mail-recipient-policy set [flags]
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
 - `--clear` — clear the per-tenant override back to inheriting the instance floor
 - `--json` — emit the resolved policy as JSON instead of the human summary
+
+### `meho tenants use`
+
+Choose the tenant every command works in; without a name, list your tenants
+
+```
+meho tenants use [<name|id>] [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit the tenants (or the chosen tenant) as JSON instead of the human summary
 
 ## `meho topology`
 

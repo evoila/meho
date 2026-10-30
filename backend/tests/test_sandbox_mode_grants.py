@@ -19,6 +19,12 @@
   ``delete_grant_console_only``; an agent or service token gets 403
   ``human_principal_required``. A console session that holds a machine
   token gets the same 403 on the create and the renew routes.
+* **Mode on, REST, with ``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` on**
+  (#5251) -- a tenant admin who is a person creates a delete grant with
+  the same checks as the console; an ``operator`` gets 403
+  ``grants_require_tenant_admin``; a machine token still gets 403
+  ``human_principal_required``; with the mode off it is still a 422. The
+  audit row says where the grant came from (``created_via``).
 * **Other operations** keep today's rules (expiry optional) in every mode.
 * **Renewal as a set** -- the live delete grants of one service principal
   are renewed together, each checked like a new grant; one failed check
@@ -44,6 +50,7 @@ import tests.test_ui_agent_grants as agent_grants_test
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
+    AuditLog,
     EndpointDescriptor,
     SandboxDeleteGrant,
     ServicePrincipalGrant,
@@ -53,11 +60,14 @@ from meho_backplane.main import app
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate
 from meho_backplane.operations.service_grants import (
     DeleteGrantConsoleOnlyError,
+    DeleteGrantNeedsTenantAdminError,
     GrantValidationError,
     ServicePrincipalGrantService,
 )
 from meho_backplane.sandbox_mode import SANDBOX_DELETE_GRANT_MAX_DAYS
 from meho_backplane.settings import get_settings
+from meho_backplane.ui.auth import SESSION_COOKIE_NAME
+from meho_backplane.ui.csrf import CSRF_COOKIE_NAME
 from tests._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from tests._oidc_jwt_helpers import ISSUER as _ISSUER
 from tests._oidc_jwt_helpers import (
@@ -162,6 +172,19 @@ def _payload(op_id: str, **overrides: Any) -> ServiceGrantCreate:
     return ServiceGrantCreate(**fields)
 
 
+def _allow_delete_grants_from_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MEHO_SANDBOX_DELETE_GRANTS_FROM_API", "true")
+    get_settings.cache_clear()
+
+
+async def _create_audit_payloads(path: str) -> list[dict[str, Any]]:
+    async with get_sessionmaker()() as session:
+        rows = (
+            (await session.execute(select(AuditLog).where(AuditLog.path == path))).scalars().all()
+        )
+    return [row.payload for row in rows if row.payload.get("op_id") == "service_grant.create"]
+
+
 async def _grant_rows(model: Any, op_id: str) -> int:
     async with get_sessionmaker()() as session:
         return len(
@@ -256,6 +279,36 @@ async def test_delete_grant_needs_the_console_mark(monkeypatch: pytest.MonkeyPat
             _TENANT, _CREATOR, _payload("vault.sys.policy.delete")
         )
     assert await rows_in(SandboxDeleteGrant) == 0
+
+
+@pytest.mark.asyncio
+async def test_setting_lets_a_tenant_admin_create_a_delete_grant_outside_the_console(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    turn_sandbox_mode_on(monkeypatch)
+    _allow_delete_grants_from_api(monkeypatch)
+    with pytest.raises(DeleteGrantNeedsTenantAdminError):
+        await ServicePrincipalGrantService().create(
+            _TENANT, _CREATOR, _payload("vault.sys.policy.delete")
+        )
+    assert await rows_in(SandboxDeleteGrant) == 0
+    entry = await ServicePrincipalGrantService().create(
+        _TENANT, _CREATOR, _payload("vault.sys.policy.delete"), by_tenant_admin=True
+    )
+    assert entry.delete_grant is True
+    assert await rows_in(SandboxDeleteGrant) == 1
+
+
+@pytest.mark.asyncio
+async def test_setting_changes_nothing_with_the_mode_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    turn_sandbox_mode_off(monkeypatch)
+    _allow_delete_grants_from_api(monkeypatch)
+    with pytest.raises(GrantValidationError):
+        await ServicePrincipalGrantService().create(
+            _TENANT, _CREATOR, _payload("vault.sys.policy.delete"), by_tenant_admin=True
+        )
+    assert await rows_in(SandboxDeleteGrant) == 0
+    assert await rows_in(ServicePrincipalGrant) == 0
 
 
 @pytest.mark.asyncio
@@ -686,6 +739,139 @@ def test_rest_ordinary_grant_without_expiry_with_the_mode_on(
 
 
 # ---------------------------------------------------------------------------
+# REST with MEHO_SANDBOX_DELETE_GRANTS_FROM_API on (#5251)
+# ---------------------------------------------------------------------------
+
+
+def _admin_person_token(key: Any) -> str:
+    return mint_token(
+        key, sub="op-admin", tenant_role=TenantRole.TENANT_ADMIN.value, tenant_id=str(_TENANT)
+    )
+
+
+def test_rest_setting_on_tenant_admin_creates_a_delete_grant(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    turn_sandbox_mode_on(monkeypatch)
+    _allow_delete_grants_from_api(monkeypatch)
+    key = make_rsa_keypair("kid-api-admin")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        response = _post(
+            client, _admin_person_token(key), {**_DELETE_BODY, "expires_at": soon().isoformat()}
+        )
+    assert response.status_code == 201, response.text
+    assert response.json()["delete_grant"] is True
+    assert asyncio.run(rows_in(SandboxDeleteGrant)) == 1
+    assert asyncio.run(rows_in(ServicePrincipalGrant)) == 0
+    payloads = asyncio.run(_create_audit_payloads(_BASE))
+    assert [p.get("created_via") for p in payloads] == ["api"]
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["no_expiry", "too_late", "wildcard", "duplicate", "no_reason"],
+)
+def test_rest_setting_on_runs_the_console_checks(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    turn_sandbox_mode_on(monkeypatch)
+    _allow_delete_grants_from_api(monkeypatch)
+    body: dict[str, Any] = {**_DELETE_BODY, "expires_at": soon().isoformat()}
+    if fault == "no_expiry":
+        del body["expires_at"]
+    elif fault == "too_late":
+        late = soon(SANDBOX_DELETE_GRANT_MAX_DAYS) + timedelta(hours=1)
+        body["expires_at"] = late.isoformat()
+    elif fault == "wildcard":
+        body["op_id"] = "vault.sys.*.delete"
+    elif fault == "no_reason":
+        body["reason"] = ""
+    key = make_rsa_keypair(f"kid-api-{fault}")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        if fault == "duplicate":
+            first = _post(client, _admin_person_token(key), body)
+            assert first.status_code == 201, first.text
+        response = _post(client, _admin_person_token(key), body)
+    assert response.status_code == 422, response.text
+    assert asyncio.run(rows_in(SandboxDeleteGrant)) == (1 if fault == "duplicate" else 0)
+
+
+def test_rest_setting_on_operator_needs_tenant_admin(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    turn_sandbox_mode_on(monkeypatch)
+    _allow_delete_grants_from_api(monkeypatch)
+    key = make_rsa_keypair("kid-api-operator")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        response = _post(
+            client, _person_token(key), {**_DELETE_BODY, "expires_at": soon().isoformat()}
+        )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"].startswith("grants_require_tenant_admin")
+    assert asyncio.run(rows_in(SandboxDeleteGrant)) == 0
+
+
+@pytest.mark.parametrize("kind", ["agent", "service", "runner"])
+def test_rest_setting_on_machine_token_is_refused(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    turn_sandbox_mode_on(monkeypatch)
+    _allow_delete_grants_from_api(monkeypatch)
+    key = make_rsa_keypair(f"kid-api-{kind}")
+    token = mint_token(
+        key,
+        sub=f"machine-{kind}",
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+        tenant_id=str(_TENANT),
+        principal_kind=kind,
+        runner_id=str(uuid.uuid4()) if kind == "runner" else None,
+    )
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        response = _post(client, token, {**_DELETE_BODY, "expires_at": soon().isoformat()})
+    assert response.status_code == 403, response.text
+    # A runner token is stopped even earlier, by the runner path guard.
+    expected = "runner_scope_violation" if kind == "runner" else "human_principal_required"
+    assert response.json()["detail"].startswith(expected)
+    assert asyncio.run(rows_in(SandboxDeleteGrant)) == 0
+
+
+def test_rest_setting_on_mode_off_still_answers_422(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    turn_sandbox_mode_off(monkeypatch)
+    _allow_delete_grants_from_api(monkeypatch)
+    key = make_rsa_keypair("kid-api-off")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        response = _post(
+            client, _admin_person_token(key), {**_DELETE_BODY, "expires_at": soon().isoformat()}
+        )
+    assert response.status_code == 422, response.text
+    assert asyncio.run(rows_in(SandboxDeleteGrant)) == 0
+
+
+def test_rest_setting_off_tenant_admin_gets_delete_grant_console_only(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    turn_sandbox_mode_on(monkeypatch)
+    key = make_rsa_keypair("kid-api-admin-off")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        response = _post(
+            client, _admin_person_token(key), {**_DELETE_BODY, "expires_at": soon().isoformat()}
+        )
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail.startswith("delete_grant_console_only")
+    assert "MEHO_SANDBOX_DELETE_GRANTS_FROM_API" in detail
+    assert asyncio.run(rows_in(SandboxDeleteGrant)) == 0
+
+
+# ---------------------------------------------------------------------------
 # Console: the grant page creates, lists and refuses delete grants
 # ---------------------------------------------------------------------------
 
@@ -762,6 +948,30 @@ def test_console_creates_and_lists_a_delete_grant(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.usefixtures("_console_env")
+def test_console_create_audit_row_says_console(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The full app (with the audit middleware) records ``created_via=console``."""
+    turn_sandbox_mode_on(monkeypatch)
+    _seed_tenant(_TENANT_A, "tenant-a")
+    keypair, jwks = _make_keypair_and_jwks()
+    session_id = _seed_session_sync(
+        tenant_id=_TENANT_A, access_token=_admin_token(keypair), operator_sub=_OP_A
+    )
+    _, mock, token = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    full_app = TestClient(app, follow_redirects=False)
+    full_app.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+    full_app.cookies.set(CSRF_COOKIE_NAME, token)
+    try:
+        created = full_app.post(
+            "/ui/grants/create", data=_console_form(), headers=_csrf_headers(token)
+        )
+    finally:
+        mock.stop()
+    assert created.status_code == 204, created.text
+    payloads = asyncio.run(_create_audit_payloads("/ui/grants/create"))
+    assert [p.get("created_via") for p in payloads] == ["console"]
+
+
+@pytest.mark.usefixtures("_console_env")
 @pytest.mark.parametrize("expires_at", ["", "far"])
 def test_console_shows_the_expiry_error(monkeypatch: pytest.MonkeyPatch, expires_at: str) -> None:
     turn_sandbox_mode_on(monkeypatch)
@@ -781,6 +991,8 @@ def test_console_shows_the_expiry_error(monkeypatch: pytest.MonkeyPatch, expires
     assert response.status_code == 422
     assert "delete grant" in response.text
     assert "30 days" in response.text
+    # The refusal shows at the top of the form, not only in the sandbox note.
+    assert '<div class="alert alert-error" role="alert">' in response.text
     assert asyncio.run(rows_in(SandboxDeleteGrant)) == 0
 
 

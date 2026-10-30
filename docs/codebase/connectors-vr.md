@@ -39,14 +39,14 @@ REST API gateway. On VCF 9.1 one appliance serves both. They share the
 login, the `x-dr-session` header, the server summary and the API file
 read. This shared part lives in:
 
-- `connectors/_shared/dr_rest.py` -- the base class `DrRestConnector`
+- `connectors/vmware_shared/dr_rest.py` -- the base class `DrRestConnector`
   (login, session cache, `invalidate_session`, version read,
   fingerprint, probe, `server_about`), `DrTargetLike`,
   `DrSessionLoader`, `DrServerVersion`, `parse_server_version`,
   `summarise_server_info`;
-- `connectors/_shared/dr_api_file.py` -- `dr_api_file_get`, the body of
+- `connectors/vmware_shared/dr_api_file.py` -- `dr_api_file_get`, the body of
   both `api_file.get` reads;
-- `connectors/_shared/dr_rest_schemas.py` -- the response schemas and the
+- `connectors/vmware_shared/dr_rest_schemas.py` -- the response schemas and the
   `llm_instructions` texts both connectors use.
 
 `VrConnector` and `SrmConnector` set the product, the version range and
@@ -166,7 +166,7 @@ call is sent.
 
 ## Dependencies
 
-- `connectors/_shared/dr_rest.py`, `dr_api_file.py`, `dr_rest_schemas.py`
+- `connectors/vmware_shared/dr_rest.py`, `dr_api_file.py`, `dr_rest_schemas.py`
   (shared with SRM, see above).
 - `connectors/_shared/api_file_read.py`, `api_file_secrets.py`: the API
   file read steps and the secret check.

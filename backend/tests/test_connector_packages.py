@@ -43,6 +43,7 @@ from meho_backplane.connectors.registry import (
     registered_product_tokens,
 )
 from meho_backplane.operations import typed_register
+from meho_backplane.version import version as version_route
 
 _PKG = "fakemeho_conn"
 _BUILTIN_DIST = "fake-meho-core"
@@ -93,6 +94,12 @@ class _LogRecorder:
 
     def info(self, event: str, **fields: object) -> None:
         self.events.append({"event": event, **fields})
+
+
+@pytest.fixture(autouse=True)
+def _keep_installed_packages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each check below stores what it accepted; put the process's own list back after."""
+    monkeypatch.setattr(connector_packages, "_installed", connector_packages._installed)
 
 
 @pytest.fixture
@@ -290,6 +297,30 @@ def test_listed_package_is_imported_and_registers_its_operations(
             "folders": ["acme_widget"],
         }
     ]
+
+
+async def test_version_lists_a_listed_package(site: Path, tmp_path: Path) -> None:
+    """``GET /version`` shows the package the start-up check accepted (#5036)."""
+    _add_listed_package(site, tmp_path)
+
+    _connectors_pkg()
+
+    body = (await version_route()).model_dump(mode="json")
+    assert body["connector_packages"] == [
+        {
+            "name": _EXTRA_DIST,
+            "version": "2.3.0",
+            "wheel_digest": "sha256:" + "0" * 64,
+            "folders": ["acme_widget"],
+        }
+    ]
+
+
+async def test_version_lists_no_packages_without_an_allowlist(site: Path) -> None:
+    """The plain public image has no allowlist file, so the list is empty (#5036)."""
+    _connectors_pkg()
+
+    assert (await version_route()).connector_packages == []
 
 
 def test_listed_folder_with_a_file_the_package_did_not_install_stops_the_start(

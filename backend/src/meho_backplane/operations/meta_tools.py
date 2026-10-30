@@ -103,6 +103,8 @@ from meho_backplane.operations._lookup import (
     close_connector_ids,
     connector_class_registered,
     connector_exists,
+    enabled_for_tenant_clause,
+    group_visible_for_tenant_clause,
     parse_connector_id,
     visible_scope_clause,
 )
@@ -754,18 +756,21 @@ def _coerce_list_operation_groups_pagination(
 async def _count_ops_per_group(
     session: Any,
     group_ids: list[uuid.UUID],
+    *,
+    tenant_id: uuid.UUID,
 ) -> dict[uuid.UUID, int]:
-    """Count enabled :class:`EndpointDescriptor` rows per group in one query.
+    """Count the ops that are on for *tenant_id*, per group, in one query.
 
-    One SQL round-trip + Python aggregation keeps the
-    application-side group-by portable across PG + SQLite. Excludes
-    NULL ``group_id`` — ungrouped ops don't contribute.
+    "On" is :func:`enabled_for_tenant_clause` (the tenant's own setting
+    first, then the install default, #5029). One SQL round-trip + Python
+    aggregation keeps the application-side group-by portable across PG +
+    SQLite. Excludes NULL ``group_id`` — ungrouped ops don't contribute.
     """
     if not group_ids:
         return {}
     count_stmt = select(EndpointDescriptor.group_id).where(
         EndpointDescriptor.group_id.in_(group_ids),
-        EndpointDescriptor.is_enabled.is_(True),
+        enabled_for_tenant_clause(tenant_id=tenant_id),
     )
     count_rows = (await session.execute(count_stmt)).all()
     counts: dict[uuid.UUID, int] = {}
@@ -805,23 +810,17 @@ def _build_operation_groups_query(
     in sync with ``search_operations`` + dispatch, which already key off
     per-op ``is_enabled``; the marker fields on
     :class:`OperationGroupSummary` tell a fully-enabled group apart from
-    a per-op-only (``partial``) one.
+    a per-op-only (``partial``) one. The predicate lives in
+    :func:`~meho_backplane.operations._lookup.group_visible_for_tenant_clause`
+    so it also reads the tenant's own on/off settings (#5029).
     """
-    has_enabled_op = (
-        select(EndpointDescriptor.id)
-        .where(
-            EndpointDescriptor.group_id == OperationGroup.id,
-            EndpointDescriptor.is_enabled.is_(True),
-        )
-        .exists()
-    )
     stmt = (
         select(OperationGroup)
         .where(
             OperationGroup.product == product,
             OperationGroup.version == version,
             OperationGroup.impl_id == impl_id,
-            (OperationGroup.review_status == "enabled") | has_enabled_op,
+            group_visible_for_tenant_clause(tenant_id=tenant_id),
             visible_scope_clause(
                 OperationGroup,
                 tenant_id=tenant_id,
@@ -977,7 +976,9 @@ async def list_operation_groups(
     )
     async with sessionmaker() as session:
         groups = (await session.execute(group_stmt)).scalars().all()
-        counts = await _count_ops_per_group(session, [g.id for g in groups])
+        counts = await _count_ops_per_group(
+            session, [g.id for g in groups], tenant_id=operator.tenant_id
+        )
     summaries = [
         OperationGroupSummary(
             group_key=g.group_key,
@@ -1042,7 +1043,7 @@ async def _has_enabled_operation(
             EndpointDescriptor.product == product,
             EndpointDescriptor.version == version,
             EndpointDescriptor.impl_id == impl_id,
-            EndpointDescriptor.is_enabled.is_(True),
+            enabled_for_tenant_clause(tenant_id=tenant_id),
         )
         .exists()
     )

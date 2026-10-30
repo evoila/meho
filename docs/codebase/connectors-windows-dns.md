@@ -225,8 +225,9 @@ are safe to run twice.
   how long resolvers keep a "name does not exist" answer (RFC 2308).
 - **`windns.zone.set`** takes `zone` plus `dynamic_update` (`None`, `Secure`,
   `NonsecureAndSecure`), `soa_minimum_ttl_seconds` (0 to 86400), or both.
-  The TTL change follows the documented pattern: read the SOA record, clone
-  it, change the clone, and pass old and new to `Set-DnsServerResourceRecord`.
+  The TTL change follows the documented pattern: read the SOA record, copy
+  it with `[ciminstance]::new`, change the copy, and pass old and new to
+  `Set-DnsServerResourceRecord`.
   Only a primary zone can be changed; `Secure` needs a zone stored in AD.
 - **`windns.forwarder.list`** returns the forwarders in order, the root-hint
   flag, the timeout and the reordering flag.

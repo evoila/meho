@@ -16,7 +16,8 @@ shows the values the server now has. Setting a value it already has changes
 nothing, so the call is safe to run twice.
 
 The SOA change follows the documented ``Set-DnsServerResourceRecord`` pattern:
-read the old record, clone it, change the clone, and pass both objects.
+read the old record, copy it with ``[ciminstance]::new``, change the copy, and
+pass both objects.
 
 Injection safety: the zone name goes into the script only as a single-quoted
 literal (``ps_single_quote``). The dynamic-update value comes from a fixed
@@ -139,7 +140,7 @@ async def windows_dns_zone_set(
         parts.append(
             f"$old = Get-DnsServerResourceRecord -ZoneName {zone_literal} -RRType Soa -Name '@' "
             "| Select-Object -First 1; "
-            "$new = $old.Clone(); "
+            "$new = [ciminstance]::new($old); "
             f"$new.RecordData.MinimumTimeToLive = [System.TimeSpan]::FromSeconds({ttl}); "
             f"Set-DnsServerResourceRecord -ZoneName {zone_literal} "
             "-OldInputObject $old -NewInputObject $new; "

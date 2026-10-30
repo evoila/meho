@@ -138,7 +138,7 @@ async def test_zone_set_dynamic_update_only() -> None:
     assert result["dynamic_update"] == "Secure"
 
 
-async def test_zone_set_soa_minimum_ttl_clones_the_record() -> None:
+async def test_zone_set_soa_minimum_ttl_copies_the_record() -> None:
     _, script = await _call(
         WindowsDnsConnector(),
         windows_dns_zone_set,
@@ -146,7 +146,7 @@ async def test_zone_set_soa_minimum_ttl_clones_the_record() -> None:
         _ZONE,
     )
     assert "Set-DnsServerPrimaryZone" not in script
-    assert "$new = $old.Clone();" in script
+    assert "$new = [ciminstance]::new($old);" in script
     assert "MinimumTimeToLive = [System.TimeSpan]::FromSeconds(300);" in script
     assert "-OldInputObject $old -NewInputObject $new" in script
 

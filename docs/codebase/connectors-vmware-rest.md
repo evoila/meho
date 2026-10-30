@@ -3757,6 +3757,37 @@ that every example validates and every list names its fields.
 call waits for approval, a person's call runs at once. That is the one
 listed exception for these operations in the contract check's gap list.
 
+### Group texts name a safety level only next to an operation (#4120)
+
+The group texts of the multi-step operations live in
+`_WHEN_TO_USE_BY_GROUP` (`composites/_register.py`). Three come from other
+modules: `CONTENT_LIBRARY_WHEN_TO_USE` (`typed_ops_content_library_find.py`),
+`LICENSE_WHEN_TO_USE` and `ALARMS_WHEN_TO_USE`, and
+`MIGRATION_GROUP_WHEN_TO_USE`. The same groups also hold the operations
+ingested from the vSphere API files. Their safety level comes from the HTTP
+method or from the VMware safety floor, not from the group. So a group such as
+`vm` holds safe reads (list VMs, `GET:/api/vcenter/vm`) next to dangerous
+changes.
+
+Each text therefore says:
+
+- the group's main reads and main changes, with the ingested reads a model
+  looks for (for `vm`: list VMs and read one VM);
+- a safety level only next to a named operation, for example
+  `(vm.snapshot.create, caution)`.
+
+No text says "Every op is ...", "All ops are ...", a bare "Read-only.", or
+"Writes (dangerous):". The `list_operation_groups` description also tells the
+model that a group can hold reads and writes, and to check each operation's
+`safety_level` in the `search_operations` results.
+
+`tests/test_operation_group_texts.py` checks this. It fails on "every op is",
+"every other op is" or "all ops are" in any group text MEHO's code writes, of
+every connector. For the `vmware-rest` texts it also fails on a bare
+"Read-only." and on a "Reads (safe):" or "Writes (dangerous):" label. A new
+text reaches running installs at start-up through the group text refresh
+(#4332), unless an operator changed it.
+
 ### Per-entity capacity sensing (`filter_names`, #2758)
 
 `datastore.usage` takes an exact-match `filter_names` param (array of

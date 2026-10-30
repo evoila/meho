@@ -472,6 +472,13 @@ async def _audit_row_count(*, op_id: str) -> int:
         return len(list(result.scalars().all()))
 
 
+async def _receipt_row_path(response: Any) -> str | None:
+    """Return the ``path`` (op id) of the audit row the ``Meho-Audit-Id`` header names (#4976)."""
+    async with get_sessionmaker()() as session:
+        row = await session.get(AuditLog, uuid.UUID(response.headers["meho-audit-id"]))
+        return None if row is None else row.path
+
+
 def _authed(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
@@ -1980,6 +1987,7 @@ async def test_edit_group_updates_and_writes_audit_row(
     assert response.status_code == 204
     audit_count = await _audit_row_count(op_id="meho_connector_edit_group")
     assert audit_count == 1
+    assert await _receipt_row_path(response) == "meho_connector_edit_group"
 
 
 @pytest.mark.asyncio
@@ -2205,6 +2213,7 @@ async def test_enable_transitions_all_groups_and_cascades(
     assert set(statuses.values()) == {"enabled"}
     audit_count = await _audit_row_count(op_id="meho_connector_enable")
     assert audit_count == 1
+    assert await _receipt_row_path(response) == "meho_connector_enable"
 
 
 @pytest.mark.asyncio

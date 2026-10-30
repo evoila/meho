@@ -371,6 +371,13 @@ command and key rotation:
    can `kubectl logs` them. See
    [`codebase/devops.md`](codebase/devops.md#migration-job-templatesmigration-jobyaml).
 2. Only after the migration succeeds does the new Deployment roll.
+3. The new version ends the approval requests that still wait (#5030). A
+   person approves one exact release, so at start-up every `pending`
+   request from an older release expires with the reason
+   `release_changed`, and an approved request from an older release that
+   has not run is refused before any vendor call. The requester asks
+   again. See
+   [`codebase/approvals.md`](codebase/approvals.md#an-approval-covers-one-exact-release-5030).
 
 ### Helm 4 / server-side-apply field-conflict caveat
 

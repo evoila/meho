@@ -110,6 +110,9 @@ from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
 from meho_backplane.connectors.vmware_rest.composites._datastore_list import (
     datastore_file_list_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._datastore_vsan import (
+    datastore_vsan_folder_list_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._drs_group import (
     cluster_drs_group_members_set_composite,
 )
@@ -254,6 +257,7 @@ __all__ = [
     "datastore_mount_nfs_composite",
     "datastore_refresh_composite",
     "datastore_usage_composite",
+    "datastore_vsan_folder_list_composite",
     "disk_mark_flash_composite",
     "event_tail_composite",
     "folder_create_composite",

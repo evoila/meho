@@ -348,6 +348,7 @@ cli/
     │   ├── netdiag.go         # shared DNS / TLS / unreachable classifier for client diagnostics (#3666).
     │   └── netdiag_test.go    # table tests + a real TLS failure.
     ├── output/
+    │   ├── audit_receipt.go   # Meho-Audit-Id header reader + the `audit receipt: <id>` line (#4976).
     │   ├── format.go          # human + JSON formatters + structured exit codes.
     │   └── format_test.go     # human/JSON/exit-code pinning.
     └── version/
@@ -1045,6 +1046,39 @@ that header from one place, so every verb gets it without its own flag.
 - No PersistentPreRun hooks exist below the root. If one is added, it
   must call `applyWorkRef` too (cobra runs only the nearest hook).
 
+## Audit receipt on writes with no body (#4976)
+
+Some write routes answer `204 No Content`. They have no body, so the
+audit id cannot come back in a JSON field the way `operation call`
+gets it. The backplane sends it in a response header instead:
+
+- The audit middleware (`backend/src/meho_backplane/audit.py`) puts
+  `Meho-Audit-Id: <id>` on every buffered response that has an audit
+  record. The id is the first `operation_execution` row the request
+  committed in the caller's name (for example the
+  `meho_connector_edit_group` row). A call allowed by a standing grant
+  saves an approval decision row before the operation runs; the header
+  still names the execution row, the same row as the body's `audit_id`.
+  When the request saved no execution row, it is the first other row it
+  saved in the caller's name (for example a decision row). When it saved
+  none, it is the request row the middleware wrote. A request with no record gets no header.
+- `output.AuditIDFromResponse` reads the header. `output.WriteAuditReceipt`
+  prints `audit receipt: <id>`. `dispatch.WriteAuditReceipt` calls it,
+  so the line is the same for every command.
+
+These commands print the line and put `audit_id` in their `--json`
+output: `connector edit-group`, `connector enable`, `connector disable`,
+`connector delete`, `sensor delete`, `dashboard delete`,
+`conventions delete`, `scheduler cancel` and `topology unannotate`.
+With an older backplane there is no header: the text output has no
+receipt line and `audit_id` is `null`.
+
+`meho audit query --audit-id <id>` returns the row the receipt names.
+`backend/tests/test_audit_wrapper_cutover.py` proves this with the
+wrapper-row cutover on and off, and
+`backend/tests/test_api_v1_connectors_ingest.py` for `edit-group` and
+`enable`.
+
 ## Doctor flow (`meho doctor`, #3666)
 
 `meho doctor` checks the client setup on this machine and says which
@@ -1419,7 +1453,9 @@ narrow-waist contract.
   MCP-only. Whenever the op resolved, the human output also prints one
   plain line with the risk level and what MEHO would do with this call
   for this caller and target (#3973 / #4923) — for example "Risk level:
-  dangerous. This call waits for approval." — and `--json` carries
+  dangerous. This call waits for approval. A second person must approve
+  it." The line says a second person must approve only for `dangerous`
+  and `destructive`, where that is always true (#4963). `--json` carries
   `safety_level`, `requires_approval`, `policy_verdict` and
   `policy_reason`. The verb exits 1 on a non-ok
   envelope (`status="error"` for input faults, `status="unavailable"` for

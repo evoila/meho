@@ -1401,7 +1401,7 @@ def _delete_refusal(
 ) -> dict[str, Any]:
     """Build a structured, fail-closed ``record.delete`` refusal envelope.
 
-    Mirrors the destructive-tier refusal shape of ``vmware.composite.vm.destroy``
+    Follows the destructive-tier refusal shape of the first governed delete
     (#3198): a ``status`` naming the refusal reason, ``deleted=False`` (never
     a silent success), and an operator-actionable ``guidance`` sentence.
     ``candidates`` carries the competing rdata values on the ``ambiguous``

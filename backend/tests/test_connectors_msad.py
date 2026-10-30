@@ -160,17 +160,25 @@ def test_connector_id_triple_round_trips() -> None:
 
 def test_op_surface_ids_and_safety_tiers() -> None:
     by_id = {op.op_id: op for op in MSAD_OPS}
-    assert len(by_id) == 28
+    assert len(by_id) == 34
     dangerous = {k for k, v in by_id.items() if v.safety_level == "dangerous"}
     assert dangerous == {
         "msad.user.delete",
         "msad.group.delete",
         "msad.computer.delete",
     }
-    # Every dangerous op requires approval; nothing else does.
-    assert {k for k, v in by_id.items() if v.requires_approval} == dangerous
+    # The domain-build writes wait for approval too; the older caution
+    # writes do not (yet).
+    build_writes = {
+        "msad.group.create",
+        "msad.ou.grant-create-child",
+        "msad.ou.revoke-create-child",
+        "msad.domain.password-policy.set",
+        "msad.domain.machine-account-quota.set",
+    }
+    assert {k for k, v in by_id.items() if v.requires_approval} == dangerous | build_writes
     caution = {k for k, v in by_id.items() if v.safety_level == "caution"}
-    assert caution == {
+    assert caution == build_writes | {
         "msad.user.create",
         "msad.user.set",
         "msad.user.enable",
@@ -183,14 +191,14 @@ def test_op_surface_ids_and_safety_tiers() -> None:
         "msad.ou.move",
     }
     safe = {k for k, v in by_id.items() if v.safety_level == "safe"}
-    assert len(safe) == 15
+    assert len(safe) == 16
     assert {"msad.about", "msad.domain.info", "msad.user.list"} <= safe
     assert "msad.user.password-expiry" in safe
 
 
 def test_every_group_has_a_curated_when_to_use() -> None:
     groups = {op.group_key for op in MSAD_OPS}
-    assert groups == {"domain", "users", "groups", "computers", "ou"}
+    assert groups == {"domain", "users", "groups", "computers", "ou", "domain-config"}
     assert groups <= set(MSAD_WHEN_TO_USE_BY_GROUP)
 
 
@@ -221,12 +229,16 @@ def test_no_op_exposes_a_secret_value_field() -> None:
 
 def test_no_op_id_is_password_reset() -> None:
     """Password-reset / password-set is deferred by design (secret-hygiene
-    contract). The only op id that mentions a password is the read that
-    reports when it was last set and when it expires."""
+    contract). The op ids that mention a password are the read that reports
+    when it was last set and when it expires, and the op that sets the
+    domain's password rules (it takes and returns no password)."""
     ids = {op.op_id for op in MSAD_OPS}
     assert "msad.user.password-reset" not in ids
     assert not any(op_id.endswith(("password-reset", "password-set")) for op_id in ids)
-    assert {op_id for op_id in ids if "password" in op_id} == {"msad.user.password-expiry"}
+    assert {op_id for op_id in ids if "password" in op_id} == {
+        "msad.user.password-expiry",
+        "msad.domain.password-policy.set",
+    }
 
 
 # ---------------------------------------------------------------------------

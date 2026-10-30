@@ -142,8 +142,10 @@ copy this pattern in G3.x).
    `(tenant_id, id)` key) and builds a `client.CoreV1Api(api_client)`.
 4. `resolve_pod_and_container()` lists pods in the namespace, picks
    the exact match if present, falls back to prefix match. Multi-
-   container pods without `container` raise
-   `MultiContainerAmbiguityError`; pod-not-found / ambiguous prefix
+   container pods without `container`, or a `container` the pod does
+   not have, raise `MultiContainerAmbiguityError`. `k8s.logs` counts
+   init containers as valid `container` values (listed after the app
+   containers) but never auto-picks one; pod-not-found / ambiguous prefix
    raises `PodNotFoundError`. Both carry the candidate list in
    `args[1]` so the dispatcher's `connector_error` envelope can
    surface a "did-you-mean".

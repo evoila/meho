@@ -344,9 +344,9 @@ real operator through the same loader.
 | `k8s.namespace.list`   | safe   | `CoreV1Api.list_namespace()` -- name / status / age.              |
 | `k8s.node.list`        | safe   | `CoreV1Api.list_node()` -- status / roles / version, plus `system_uuid` (the node's BIOS UUID), `os_image`, `architecture`, `cpu_capacity`, `memory_capacity` (`_node_identity.py`). |
 | `k8s.pod.list`         | safe   | Pods with selectors + server-side pagination.                     |
-| `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix.                     |
+| `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix. Includes init containers, their statuses, and `image_pull_secrets` (names only). |
 | `k8s.deployment.list`  | safe   | Deployments with live replica counts + image + strategy.          |
-| `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix.              |
+| `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix. Includes `image_pull_secrets` (names only). |
 | `k8s.job.list`         | safe   | `BatchV1Api.list_namespaced_job()` / `list_job_for_all_namespaces()` -- one row per Job with a one-word `state`, pod counts, `completions`, start / completion times. Same selectors + paging as `k8s.pod.list`. (`ops_job.py`) |
 | `k8s.job.info`         | safe   | One Job by exact name or unique prefix: the row fields plus conditions (reason + message), `backoff_limit`, `active_deadline_seconds`, template containers, `pod_selector` and up to 50 of its pods, newest first. (`ops_job.py`) |
 | `k8s.workload.list`    | safe   | `AppsV1Api` list for one `kind` (Deployment / StatefulSet / DaemonSet): desired `replicas` (DaemonSet: pods it should run), per-container `requests` / `limits` as API quantities, images, `volumes` with `claim_name`, StatefulSet `volume_claim_templates`, and `pod_selector`. `containers` holds the app containers and the sidecars (init containers with `restartPolicy: Always`); plain init containers are left out. Same selectors + paging as `k8s.deployment.list`. (`ops_workload_set.py`) |
@@ -364,7 +364,7 @@ real operator through the same loader.
 | `k8s.auth.can_i`       | safe   | `AuthorizationV1Api.create_self_subject_access_review()` -- may the target's kubeconfig identity do one verb on one resource (or one non-resource path)? `{allowed, denied, reason, evaluation_error}`. Same as `kubectl auth can-i`. (`ops_access.py`, #3840) |
 | `k8s.auth.rules`       | safe   | `AuthorizationV1Api.create_self_subject_rules_review()` -- every rule that identity has in one namespace, one row per rule, plus `incomplete`. Same as `kubectl auth can-i --list`. (`ops_access.py`, #3840) |
 | `k8s.admission_webhook.list` | safe | `AdmissionregistrationV1Api.list_validating_webhook_configuration()` + `list_mutating_webhook_configuration()` -- one row per webhook: rules, selectors, `failure_policy`, `side_effects`, `timeout_seconds`, service or URL. `caBundle` is left out. Optional `type` filter. (`ops_admission.py`, #3840) |
-| `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. |
+| `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. `container` also accepts an init container name. |
 | `k8s.exec`             | **dangerous** (`requires_approval=True`) | `CoreV1Api.connect_get_namespaced_pod_exec()` over the `WsApiClient` websocket transport -- bounded argv command-and-capture: stdout / stderr demuxed from the `v4.channel.k8s.io` channels + exit code parsed from the channel-3 status frame, per-stream 1 MiB cap, bounded timeout. Interactive `-it` deferred. |
 | `k8s.secret.read_to_ref` | **caution** (`requires_approval=True`) | `CoreV1Api.read_namespaced_secret()` -- reads one Secret's `data[data_key]` (default `value`), decodes it, and stages the value to a **tenant-scoped Vault `secret_ref`** via `vault.kv.put`; returns **only** the ref + provenance (SHA-256 / byte length), never the value. Classified `credential_read` (audit + broadcast aggregate-only). The governed VKS guest-kubeconfig read (`ops_secret_read.py`, #3496). |
 
@@ -884,6 +884,28 @@ definition. No secret value can appear in the result. The main use is
 a container waiting with `CreateContainerConfigError`: the status row
 says the container cannot start, and `value_from` / `env_from` say
 which Secret and key it asks for.
+
+### Image pull secrets in `k8s.pod.info` and `k8s.deployment.info` (#3686)
+
+Both ops return `image_pull_secrets`: the names of the Secrets in the pod
+spec's `imagePullSecrets` (for a Deployment, from its pod template), in
+spec order. The list is empty when the spec names none. It answers "is
+the image pulled with the expected pull secret?" without `kubectl get -o
+yaml`. `_image_pull_secret_names()` in `ops_workload.py` copies the names
+only. MEHO does not read the Secrets, so no secret content can appear in
+the result.
+
+### Init container logs in `k8s.logs` (#3686)
+
+`k8s.logs` passes `include_init_containers=True` to
+`resolve_pod_and_container()` in `ops_logs.py`. So an init container
+name (for example a `migrate` step) is a valid `container` value, and
+the `MultiContainerAmbiguityError` candidate list shows the app
+containers first, then the init containers. Auto-pick still looks only
+at the app containers: a pod with one app container and some init
+containers still resolves to the app container. `k8s.exec` uses the same
+resolver with the default (`False`), so its valid set stays the app
+containers.
 
 ### Job reads (`ops_job.py`)
 

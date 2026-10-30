@@ -19,7 +19,7 @@ REST route (see :mod:`meho_backplane.api.v1.operations`). The CLI
 share these handlers verbatim — the wire-shape unification is the point.
 
 Per CLAUDE.md postulate 5, the agent never sees per-op MCP tools like
-``vsphere.vm.list``; it sees a small fixed set of meta-tools and picks
+``k8s.pod.list``; it sees a small fixed set of meta-tools and picks
 operations through them. This module ships three of the ~17 meta-tools
 that comprise that surface:
 
@@ -105,6 +105,7 @@ from meho_backplane.operations._lookup import (
     connector_exists,
     enabled_for_tenant_clause,
     group_visible_for_tenant_clause,
+    installed_owner_clause,
     parse_connector_id,
     visible_scope_clause,
 )
@@ -121,6 +122,7 @@ from meho_backplane.operations.delivery_budget import (
 from meho_backplane.operations.dispatch_limits import rate_limited_read_envelope
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.ingest.list_connectors import next_step_for_registered_connector
+from meho_backplane.operations.op_policy import OpKey, effective_policy_map
 from meho_backplane.retrieval.retriever import RRF_K
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import (
@@ -454,11 +456,11 @@ class CallOperationBody(BaseModel):
     and the MCP handler share validation. ``target`` accepts either
     shape and ``None``:
 
-    * **Bare string** -- ``target: "rdc-vcenter"``. The forward-preferred
+    * **Bare string** -- ``target: "prod-k8s"``. The forward-preferred
       shape; matches ``query_topology`` / ``query_audit`` so an agent
       can carry a target name across the read and the write surfaces
       without reshape. G0.13-T2 (#1132) widening of #780.
-    * **Dict** -- ``target: {"name": "rdc-vcenter"}``. The original
+    * **Dict** -- ``target: {"name": "prod-k8s"}``. The original
       shape; the handler resolves the ``name`` field and (optionally)
       reads ``fqdn`` for vhost routing. Still accepted unchanged.
     * **None** -- the operation does not need a target (typed handlers
@@ -771,6 +773,7 @@ async def _count_ops_per_group(
     count_stmt = select(EndpointDescriptor.group_id).where(
         EndpointDescriptor.group_id.in_(group_ids),
         enabled_for_tenant_clause(tenant_id=tenant_id),
+        installed_owner_clause(),
     )
     count_rows = (await session.execute(count_stmt)).all()
     counts: dict[uuid.UUID, int] = {}
@@ -812,7 +815,9 @@ def _build_operation_groups_query(
     :class:`OperationGroupSummary` tell a fully-enabled group apart from
     a per-op-only (``partial``) one. The predicate lives in
     :func:`~meho_backplane.operations._lookup.group_visible_for_tenant_clause`
-    so it also reads the tenant's own on/off settings (#5029).
+    so it also reads the tenant's own on/off settings (#5029) and hides a
+    group whose rows all belong to a connector package that is not
+    installed (#5037).
     """
     stmt = (
         select(OperationGroup)
@@ -1044,6 +1049,7 @@ async def _has_enabled_operation(
             EndpointDescriptor.version == version,
             EndpointDescriptor.impl_id == impl_id,
             enabled_for_tenant_clause(tenant_id=tenant_id),
+            installed_owner_clause(),
         )
         .exists()
     )
@@ -1365,8 +1371,8 @@ def _normalize_target_arg(
     """Normalise ``call_operation``'s ``target`` to the canonical dict shape.
 
     G0.13-T2 (#1132) additive widening: ``call_operation`` accepts either
-    a bare string ``"rdc-vault"`` (matches ``query_topology`` /
-    ``query_audit``) or the existing dict ``{"name": "rdc-vault"}``.
+    a bare string ``"prod-vault"`` (matches ``query_topology`` /
+    ``query_audit``) or the existing dict ``{"name": "prod-vault"}``.
     Both reduce to the same dict before dispatch so downstream code
     (resolver, connectors, audit) sees one canonical form.
 
@@ -1497,8 +1503,8 @@ async def _call_operation_impl(
 
     ``arguments`` shape: ``{"connector_id": str, "op_id": str,
     "target": str | dict | None, "params": dict}``. The ``target`` value is
-    normalised via :func:`_normalize_target_arg` (bare string ``"rdc-vcenter"``
-    or partial dict ``{"name": "rdc-vcenter"}`` both reduce to the canonical
+    normalised via :func:`_normalize_target_arg` (bare string ``"prod-k8s"``
+    or partial dict ``{"name": "prod-k8s"}`` both reduce to the canonical
     dict form before :func:`~meho_backplane.targets.resolver.resolve_target`
     is called). Passing ``target=None`` is valid for typed operations whose
     handler does not consume a target.
@@ -1612,8 +1618,8 @@ async def call_operation(
     "target": str | dict | None, "params": dict}``.
 
     The handler accepts a ``target`` value as either a bare string
-    ``"rdc-vcenter"`` (matches ``query_topology`` / ``query_audit``) or
-    the partial dict ``{"name": "rdc-vcenter"}``. Both are normalised by
+    ``"prod-k8s"`` (matches ``query_topology`` / ``query_audit``) or
+    the partial dict ``{"name": "prod-k8s"}``. Both are normalised by
     :func:`_normalize_target_arg` to the canonical dict form before
     :func:`~meho_backplane.targets.resolver.resolve_target` is called.
     Passing ``target=None`` is valid for typed operations whose handler
@@ -1774,6 +1780,12 @@ async def describe_descriptor(
         # another tenant collapses to "not found".
         if descriptor.tenant_id is not None and descriptor.tenant_id != operator.tenant_id:
             return None
+        # #4711: show the risk level and approval that apply to this
+        # tenant, with operator overrides, so the console run form and the
+        # REST read match what a call does.
+        policy = (
+            await effective_policy_map(session, tenant_id=operator.tenant_id, rows=[descriptor])
+        )[OpKey.of(descriptor)]
         return OperationDescriptor(
             id=descriptor.id,
             tenant_id=descriptor.tenant_id,
@@ -1797,8 +1809,8 @@ async def describe_descriptor(
             llm_instructions=(
                 dict(descriptor.llm_instructions) if descriptor.llm_instructions else None
             ),
-            safety_level=descriptor.safety_level,
-            requires_approval=descriptor.requires_approval,
+            safety_level=policy.safety_level,
+            requires_approval=policy.requires_approval,
             is_enabled=descriptor.is_enabled,
             custom_description=descriptor.custom_description,
             custom_notes=descriptor.custom_notes,

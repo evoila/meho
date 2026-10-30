@@ -43,8 +43,13 @@ from sqlalchemy import select
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
-from meho_backplane.operations._lookup import enabled_for_tenant_clause, visible_scope_clause
+from meho_backplane.operations._lookup import (
+    enabled_for_tenant_clause,
+    installed_owner_clause,
+    visible_scope_clause,
+)
 from meho_backplane.operations.dispatcher import descriptor_requires_target
+from meho_backplane.operations.op_policy import apply_effective_policy
 from meho_backplane.untrusted_text import VENDOR_TEXT_RULE
 
 __all__ = [
@@ -248,13 +253,15 @@ async def _find_descriptor(
                     EndpointDescriptor.impl_id == impl_id,
                     EndpointDescriptor.op_id == op_id,
                     enabled_for_tenant_clause(tenant_id=tenant_id),
+                    installed_owner_clause(),
                 )
             )
         ).first()
-    if row is None:
-        return None
-    descriptor, group_key = row
-    return descriptor, group_key
+        if row is None:
+            return None
+        descriptor, group_key = row
+        # #4711: the contract shows the risk level and approval that apply.
+        return await apply_effective_policy(session, tenant_id=tenant_id, row=descriptor), group_key
 
 
 async def build_operation_contract(

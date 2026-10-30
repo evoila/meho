@@ -17,7 +17,7 @@ Every command accepts the global flags below.
 
 - `--config` — path to the meho config file (default: `$XDG_CONFIG_HOME/meho/config.json`).
 - `--verbose`, `-v` — enable verbose output.
-- `--work-ref` — external change-ticket reference (`gh:<owner>/<repo>#<n>`, default: `$MEHO_WORK_REF`). The CLI sends it as the `Meho-Work-Ref` header on every backplane request, so the audit rows carry it. Some commands have their own `--work-ref` flag (for example `operation call`, or the filter on `audit query`). On those commands the flag means what that command says, and only `$MEHO_WORK_REF` is sent as the header.
+- `--work-ref` — external change-ticket reference (`gh:<owner>/<repo>#<n>`, default: `$MEHO_WORK_REF`). The CLI sends it as the `Meho-Work-Ref` header on every backplane request, so the audit rows carry it. Five commands have their own `--work-ref` flag that tags the run with the reference: `operation call`, `scheduler create`, `runbook start`, `agent run`, and `broadcast announce`. On those commands only `$MEHO_WORK_REF` is sent as the header. List commands filter by reference with `--filter-work-ref`.
 
 ## `meho addon`
 
@@ -281,7 +281,7 @@ meho agent run <name> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--input` — the user prompt to run the agent on (required; at most 65536 characters)
 - `--json` — emit the raw run response JSON instead of the human summary
-- `--work-ref` — external change-ticket reference to bind the run to; filterable via `meho agent run-list --work-ref`
+- `--work-ref` — external change-ticket reference to bind the run to; filterable via `meho agent run-list --filter-work-ref`
 
 ### `meho agent run-cancel`
 
@@ -308,7 +308,7 @@ meho agent run-events <name> [flags]
 
 ### `meho agent run-list`
 
-List agent runs (filter by --work-ref / --status)
+List agent runs (filter by --filter-work-ref / --status)
 
 ```
 meho agent run-list [flags]
@@ -316,11 +316,11 @@ meho agent run-list [flags]
 
 - `--agent-name` — filter by agent definition name (exact match); an unknown name returns an empty list
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--filter-work-ref` — filter by external change-ticket reference
 - `--json` — emit the raw []AgentRunSummaryResponse JSON instead of the table
 - `--limit` — max runs per page (1..500, server default 100 when omitted)
 - `--offset` — rows to skip for paging into the result set (default 0)
 - `--status` — filter by lifecycle status: pending, running, awaiting_approval, succeeded, failed, or cancelled
-- `--work-ref` — filter by external change-ticket reference
 
 ### `meho agent run-status`
 
@@ -416,11 +416,12 @@ meho approvals list [flags]
 ```
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--filter-work-ref` — filter by external change-ticket reference, exact match
 - `--json` — emit raw JSON array instead of the human table
 - `--limit` — max requests to return (1..500; no limit when omitted)
 - `--offset` — skip this many requests first (default 0)
+- `--order` — sort order: oldest or newest (default: newest; oldest when --filter-work-ref is set)
 - `--status` — filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)
-- `--work-ref` — filter by external change-ticket reference, exact match
 
 ### `meho approvals reject`
 
@@ -676,11 +677,33 @@ meho argocd repo list [flags]
 
 ## `meho audit`
 
-Query the MEHO audit log (query / recent / show / who-touched / my-recent / replay / reflex / trace)
+Query the MEHO audit log (query / count / recent / show / who-touched / my-recent / replay / reflex / trace)
 
 ```
 meho audit
 ```
+
+### `meho audit count`
+
+Count the audit rows that match a filter, per event class
+
+```
+meho audit count [flags]
+```
+
+- `--audit-id` — count only this audit-id (UUID)
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--filter-work-ref` — count only the rows of one change-ticket reference
+- `--json` — print the backplane's answer as it came instead of the summary
+- `--op-class` — count only one op-class (read|write|credential_read|audit_query|other)
+- `--op-id` — count only one op-id (glob with * wildcards)
+- `--parent-audit-id` — count only the rows whose parent is this audit-id (UUID)
+- `--principal` — count only one operator (part of the user id or the name; case does not matter)
+- `--result-status` — count only one result-status (ok|error|denied|pending)
+- `--session-id` — count only one agent session (UUID)
+- `--since` — start of the window; 24h / 7d / 30m / 2w shorthand or ISO-8601 (default: the last 24 hours)
+- `--target` — count only one target (name or alias; server-side resolution)
+- `--until` — end of the window; accepts the same shorthand as --since (default: now)
 
 ### `meho audit my-recent`
 
@@ -706,6 +729,7 @@ meho audit query [flags]
 - `--audit-id` — exact audit-id lookup (UUID)
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--cursor` — opaque forward-pagination cursor from a prior page's NEXT line
+- `--filter-work-ref` — narrow to one external change-ticket reference — "show every write authorised by ticket X"
 - `--json` — emit raw AuditQueryResult JSON instead of the human table
 - `--limit` — max rows per page (1..1000, server default 100 when omitted)
 - `--op-class` — narrow to one op-class (read|write|credential_read|audit_query|other)
@@ -717,7 +741,6 @@ meho audit query [flags]
 - `--since` — earliest occurred_at; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601
 - `--target` — narrow to one target (name or alias; server-side resolution)
 - `--until` — latest occurred_at; accepts the same shorthand as --since
-- `--work-ref` — narrow to one external change-ticket reference — "show every write authorised by ticket X"
 
 ### `meho audit recent`
 
@@ -1096,12 +1119,12 @@ meho broadcast recent [flags]
 - `--actor-sub` — exact delegated-agent filter
 - `--backplane` — backplane URL
 - `--cursor` — ISO-8601 window start, or next_cursor from a previous page
+- `--filter-work-ref` — exact work-reference filter
 - `--json` — emit JSON
 - `--limit` — maximum events (1-1000)
 - `--op-class` — exact op class filter
 - `--principal` — exact principal filter
 - `--target` — exact target filter
-- `--work-ref` — exact work-reference filter
 
 ### `meho broadcast watch`
 
@@ -1195,8 +1218,9 @@ meho connector edit-op <connector_id> <op_id> [flags]
 - `--enable` — set is_enabled=true on this op
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
 - `--no-requires-approval` — clear the requires_approval flag
+- `--reason` — why you make this change; written to the audit row and required to turn approval off
 - `--requires-approval` — mark the op as requiring an approval workflow
-- `--safety` — replacement safety_level: safe | caution | dangerous
+- `--safety` — replacement safety_level: safe | caution | dangerous | destructive (can only raise the level)
 
 ### `meho connector enable`
 
@@ -1240,6 +1264,7 @@ meho connector ingest [flags]
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
 - `--no-wait` — on an async 202 answer, exit 0 with the job handle (job_id + poll URL) instead of polling the job to completion; no effect when the backplane answers synchronously (HTTP 200)
 - `--product` — product name (e.g. vmware, kubernetes); manual mode (required with --version/--impl/--spec)
+- `--save-converted` — manual mode: when a --spec is a Swagger 2.0 file the CLI converts to OpenAPI 3, also write the converted file here so you can check it and keep it next to the original
 - `--spec` — spec URI; repeat for multi-spec merge under one connector_id; manual mode
 - `--spec-info-versions-compatible` — manual mode: declare that the spec's info.version is compatible with --version even when they differ (e.g. a vendor /api/v2 surface self-versioning as info.version=v2 ingested under --version 9.0). Each entry is a glob (2.x, 9.0.x) or a PEP 440 specifier set (>=2,<3); repeatable or comma-separated. Without it, a spec/label major mismatch is rejected; mutually exclusive with --catalog (the catalog row carries its own band)
 - `--tenant-id` — write scope for the ingested rows (works with both modes): omit for the built-in / global scope (tenant_id left unset — visible to every tenant); pass your own tenant UUID for a tenant-curated ingest (another tenant's UUID is rejected with HTTP 403 unless you hold platform_admin)
@@ -1268,6 +1293,31 @@ meho connector list [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 - `--status` — filter by review status: staged | enabled | disabled | all (default all)
+
+### `meho connector overrides`
+
+List operator changes to risk levels and approval, or the operations running with reduced approval
+
+```
+meho connector overrides [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit machine-readable JSON to stdout instead of the human table
+- `--reduced-approval` — list only the operations a platform admin turned approval off for
+
+### `meho connector remove-override`
+
+Remove one operator change to an operation's risk level or approval
+
+```
+meho connector remove-override <connector_id> <op_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit machine-readable JSON to stdout instead of the human summary
+- `--reason` — why you remove it; written to the audit row and required when the removal ends approval
+- `--tenant` — the tenant whose change to remove (a UUID); leave it out for the install-wide change
 
 ### `meho connector review`
 
@@ -3578,7 +3628,7 @@ meho nsx transport-zone list [flags]
 
 ## `meho operation`
 
-operation meta-tool surface (groups / search / call)
+operation meta-tool surface (groups / search / call / preview / result-query / subops)
 
 ```
 meho operation
@@ -3657,6 +3707,18 @@ meho operation search <connector_id> [query] [flags]
 - `--limit` — max hits to return (1..50, clamped by the API at 50)
 - `--op-id` — show this one operation's call contract instead of ranked hits
 - `--scores` — add ranking scores to each hit (honoured for tenant_admin only)
+
+### `meho operation subops`
+
+List the child steps of a multi-step operation and whether a grant may cover each
+
+```
+meho operation subops <op_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--connector` — connector id to ask for (e.g. vmware-rest-8.0); default: the composite's own connector
+- `--json` — print the backplane's answer as it came instead of the table
 
 ## `meho pfsense`
 
@@ -4067,11 +4129,11 @@ meho runbook runs [flags]
 
 - `--assignee` — filter by assignee subject (tenant_admin only; operators see own regardless)
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--filter-work-ref` — filter by external change-ticket reference
 - `--json` — emit raw RunbookListRunsResponse JSON instead of the human table
 - `--limit` — max runs per page (1..500, server default 100 when omitted)
 - `--status` — filter by run state: in_progress, completed, or abandoned
 - `--template-slug` — filter by template slug
-- `--work-ref` — filter by external change-ticket reference
 
 ### `meho runbook show-template`
 
@@ -4204,13 +4266,13 @@ meho scheduler list [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--filter-work-ref` — filter by external change-ticket reference
 - `--json` — emit raw ListResponse JSON instead of the human table
 - `--kind` — filter by trigger kind: cron | one_off | event
 - `--limit` — max triggers per page (1..500, server default 100 when omitted)
 - `--offset` — offset into the result set (default 0)
 - `--status` — filter by trigger status: active | paused | cancelled | fired
 - `--tenant` — target tenant UUID (tenant_admin only; operator role is locked to its own tenant)
-- `--work-ref` — filter by external change-ticket reference
 
 ## `meho sddc-manager`
 
@@ -4684,7 +4746,7 @@ meho status [flags]
 
 ## `meho targets`
 
-Operate the MEHO targets registry (add / update / list / describe / probe / import / discover)
+Operate the MEHO targets registry (add / update / delete / list / describe / probe / import / discover)
 
 ```
 meho targets
@@ -4715,6 +4777,20 @@ meho targets add <name> [flags]
 - `--tls-server-name` — TLS SNI / certificate-verification hostname, decoupled from --host
 - `--verify-tls` — verify the target's TLS certificate; pass --verify-tls=false to opt out
 - `--version` — operator-asserted product version (e.g. 9.0) the resolver consults before the first probe
+- `--vpn-required` — mark that a VPN must be up to reach the target (default: false)
+
+### `meho targets delete`
+
+Delete one target (the row is kept for the audit log)
+
+```
+meho targets delete <name|alias> [flags]
+```
+
+- `--backplane` — backplane URL the target lives in (defaults to the URL recorded by `meho login`)
+- `--confirm` — skip the stdin confirmation prompt
+- `--force` — delete even when topology nodes point at the target (the nodes stay)
+- `--json` — emit a machine-readable envelope instead of the human line
 
 ### `meho targets describe`
 
@@ -4803,6 +4879,7 @@ meho targets update <name|alias> [flags]
 - `--tls-server-name` — TLS SNI / certificate-verification hostname, decoupled from --host
 - `--verify-tls` — verify the target's TLS certificate; pass --verify-tls=false to opt out
 - `--version` — operator-asserted product version
+- `--vpn-required` — mark that a VPN must be up to reach the target; pass --vpn-required=false to clear it
 
 ## `meho tenants`
 

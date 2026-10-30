@@ -23,6 +23,11 @@ they treat a failure:
   structured warning (the digest changes, so the runner self-heals) rather
   than failing the whole fetch.
 
+  An item for an op that a connector package provides (#5038) carries
+  central's package set digest in ``package_set``. When the runner sent
+  another digest, the item is left out of that runner's assignment and the
+  warning names both digests: the runner cannot run code it does not have.
+
 The ``assignment_version`` is a sha256 over the canonical JSON of the fully
 materialised work items — not a stored counter — so "unchanged" means the
 materialisation is byte-identical, catching live target-row drift a counter
@@ -52,6 +57,7 @@ from meho_backplane.gateway.errors import (
 from meho_backplane.gateway.schemas import AssignmentDocument, AuthoredCheckItem
 from meho_backplane.operations._lookup import lookup_descriptor
 from meho_backplane.runner import wire
+from meho_backplane.runner.package_set import local_package_set, package_set_mismatch_message
 from meho_backplane.runner.satellite_tier import SatelliteMintTier, classify_satellite_tier
 from meho_backplane.targets.resolver import (
     AmbiguousTargetError,
@@ -202,12 +208,15 @@ async def materialize_assignment(
     tenant_id: UUID,
     runner_name: str,
     principal: wire.RunnerPrincipal,
+    runner_package_set: str,
 ) -> wire.RunnerAssignment:
     """Materialise the runner's stored document into the versioned wire shape.
 
     Resolves each authored item against the live target + op descriptor;
     drops (with a warning) any item that no longer resolves to a runnable
-    safe op so the runner self-heals on the next poll. The returned
+    safe op so the runner self-heals on the next poll. Also drops an item
+    for a connector package op when *runner_package_set* (the digest the
+    runner sent) differs from central's own (#5038). The returned
     ``assignment_version`` is the content digest over the surviving items.
     """
     row = await repository.get_assignment_row(session, tenant_id=tenant_id, runner_name=runner_name)
@@ -219,7 +228,7 @@ async def materialize_assignment(
         work_item = await _materialize_item(
             session, tenant_id=tenant_id, authored=authored, principal=principal
         )
-        if work_item is not None:
+        if work_item is not None and _package_set_matches(work_item, runner_package_set):
             work_items.append(work_item)
 
     return wire.RunnerAssignment(
@@ -274,6 +283,12 @@ async def _materialize_item(
         return None
     assert descriptor is not None and descriptor.handler_ref is not None
 
+    package_set = local_package_set()
+    needs_package_set = (
+        package_set.digest
+        if package_set.package_for_handler(descriptor.handler_ref) is not None
+        else None
+    )
     return wire.RunnerWorkItem(
         check_ref=authored.check_ref,
         op_id=authored.op,
@@ -285,7 +300,25 @@ async def _materialize_item(
         safety_level=descriptor.safety_level,
         principal=principal,
         target_descriptor=descriptor_from_target(target),
+        package_set=needs_package_set,
     )
+
+
+def _package_set_matches(item: wire.RunnerWorkItem, runner_package_set: str) -> bool:
+    """True when the runner has the package set *item* needs; logs both digests when not."""
+    if item.package_set is None or item.package_set == runner_package_set:
+        return True
+    _log.warning(
+        "assignment_item_dropped",
+        reason="connector_package_set_mismatch",
+        check_ref=item.check_ref,
+        op=item.op_id,
+        package=local_package_set().package_for_handler(item.handler_ref),
+        runner_package_set=runner_package_set,
+        central_package_set=item.package_set,
+        message=package_set_mismatch_message(runner_package_set, item.package_set),
+    )
+    return False
 
 
 def _is_runnable_safe(descriptor: EndpointDescriptor | None) -> bool:

@@ -47,7 +47,7 @@ violation.
   passes through as the bearer credential. Documented but not
   first-class.
 
-Per-target cache scoping mirrors vmware-rest: keyed on the tenant-unique
+Per-target cache scoping is keyed on the tenant-unique
 ``(tenant_id, target.id)`` tuple (#1642/#1672) so two same-named targets
 in different tenants never share a cached token,
 serialised under a single :class:`asyncio.Lock` so two concurrent
@@ -546,9 +546,8 @@ async def _default_loader(
 def _is_acceptable_auth_model(value: object) -> bool:
     """Return ``True`` iff *value* is the SHARED_SERVICE_ACCOUNT model or unset.
 
-    Mirrors the predicate :class:`VmwareRestConnector` uses at its
-    boundary (the vmware-rest precedent the G0.16-T2 reconciliation
-    aligned the gh-rest connector with). Accepts the enum member, the
+    The G0.16-T2 reconciliation set this predicate at the gh-rest
+    connector boundary. Accepts the enum member, the
     equivalent string, and ``None`` (the legacy-row sentinel for
     targets that predate the column-default backfill). Any other
     value (``"per_user"``, ``"impersonation"``, a typo, an int) is
@@ -645,7 +644,7 @@ def _fingerprint_from_repo(
     Returns the repo's identity (``full_name``, ``id``, ``private``)
     plus the owner's account type — sufficient for an operator to
     confirm "yes my App is installed on this repo" without a second
-    call. Inspired by vmware-rest's ``GET /api/about`` shape.
+    call.
     """
     if not isinstance(payload, dict):
         return FingerprintResult(

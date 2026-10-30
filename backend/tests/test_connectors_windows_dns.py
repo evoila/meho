@@ -468,6 +468,10 @@ def test_op_surface_ids_and_safety_levels() -> None:
     assert set(by_id) == {
         "windns.about",
         "windns.zone.list",
+        "windns.zone.get",
+        "windns.zone.set",
+        "windns.forwarder.list",
+        "windns.forwarder.set",
         "windns.record.get",
         "windns.record.add",
         "windns.record.remove",
@@ -484,9 +488,13 @@ def test_op_surface_ids_and_safety_levels() -> None:
     assert remove.safety_level == "destructive"
     assert remove.requires_approval is True
     assert "destructive" in remove.tags
-    # record.remove is the ONLY approval-gated windns op; every other op is
-    # approval-free.
-    assert {op.op_id for op in WINDOWS_DNS_OPS if op.requires_approval} == {"windns.record.remove"}
+    # record.remove and the two server-setting writes wait for approval;
+    # every other op is approval-free.
+    assert {op.op_id for op in WINDOWS_DNS_OPS if op.requires_approval} == {
+        "windns.record.remove",
+        "windns.zone.set",
+        "windns.forwarder.set",
+    }
     # Every op declares a curated when_to_use group the registration walk
-    # can resolve (identity / zone / record).
-    assert {op.group_key for op in WINDOWS_DNS_OPS} == {"identity", "zone", "record"}
+    # can resolve.
+    assert {op.group_key for op in WINDOWS_DNS_OPS} == {"identity", "zone", "record", "forwarder"}

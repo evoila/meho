@@ -28,6 +28,8 @@ from meho_backplane.connectors.vmware_rest.composites._vm_llm_instructions impor
 )
 from meho_backplane.operations._validate import validate_params
 
+_LIBRARY_ITEM_ID = "aaaaaaaa-0000-0000-0000-000000000001"
+
 _PARAMETER_SCHEMAS: dict[str, dict[str, Any]] = {
     "vm.clone": schemas.VM_CLONE_PARAMETER_SCHEMA,
     "vm.clone_from_template": schemas.VM_CLONE_FROM_TEMPLATE_PARAMETER_SCHEMA,
@@ -92,9 +94,9 @@ _LIBRARY_SCHEMAS = {
 @pytest.mark.parametrize(
     ("item", "accepted"),
     [
-        ({"library_item": "<library-item-id>"}, True),
+        ({"library_item": _LIBRARY_ITEM_ID}, True),
         ({"library_item_name": "<item-name>"}, True),
-        ({"library_item": "<library-item-id>", "library_item_name": "<item-name>"}, False),
+        ({"library_item": _LIBRARY_ITEM_ID, "library_item_name": "<item-name>"}, False),
         ({}, False),
     ],
     ids=["id-only", "name-only", "both", "neither"],

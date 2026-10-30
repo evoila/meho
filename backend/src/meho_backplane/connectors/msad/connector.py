@@ -458,6 +458,60 @@ class MsadConnector(SshConnector):
 
         return await _h(self, target, params, operator)
 
+    # -- domain build shims -------------------------------------------------
+
+    async def msad_group_create(
+        self, target: Target, params: dict[str, Any], operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``msad.group.create``."""
+        from meho_backplane.connectors.msad.ops_groups import msad_group_create as _h
+
+        return await _h(self, target, params, operator)
+
+    async def msad_ou_grant_create_child(
+        self, target: Target, params: dict[str, Any], operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``msad.ou.grant-create-child``."""
+        from meho_backplane.connectors.msad.ops_ou_access import msad_ou_grant_create_child as _h
+
+        return await _h(self, target, params, operator)
+
+    async def msad_ou_revoke_create_child(
+        self, target: Target, params: dict[str, Any], operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``msad.ou.revoke-create-child``."""
+        from meho_backplane.connectors.msad.ops_ou_access import msad_ou_revoke_create_child as _h
+
+        return await _h(self, target, params, operator)
+
+    async def msad_domain_settings(
+        self, target: Target, params: dict[str, Any], operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``msad.domain.settings``."""
+        from meho_backplane.connectors.msad.ops_domain_config import msad_domain_settings as _h
+
+        return await _h(self, target, params, operator)
+
+    async def msad_domain_password_policy_set(
+        self, target: Target, params: dict[str, Any], operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``msad.domain.password-policy.set``."""
+        from meho_backplane.connectors.msad.ops_domain_config import (
+            msad_domain_password_policy_set as _h,
+        )
+
+        return await _h(self, target, params, operator)
+
+    async def msad_domain_machine_account_quota_set(
+        self, target: Target, params: dict[str, Any], operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``msad.domain.machine-account-quota.set``."""
+        from meho_backplane.connectors.msad.ops_domain_config import (
+            msad_domain_machine_account_quota_set as _h,
+        )
+
+        return await _h(self, target, params, operator)
+
     @classmethod
     async def register_operations(cls) -> None:
         """Upsert every op in :data:`MSAD_OPS` into ``endpoint_descriptor``.

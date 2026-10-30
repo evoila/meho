@@ -315,6 +315,8 @@ replace), `vault.kv.patch` (merge fields onto the current version), and
 ([`connectors/vault/ops.py`](../../backend/src/meho_backplane/connectors/vault/ops.py)).
 `vault.kv.metadata.delete` (evoila/meho#3424) adds the permanent removal of
 a whole secret: every version and its metadata.
+`vault.kv.folder.delete` (evoila/meho#3939) soft-deletes many secrets under
+one folder with one approval.
 These ops register `requires_approval=True`, so a human/operator write
 parks for a four-eyes review before it executes. **The review is wasted
 if the write then hits Vault `permission denied`** — the templated §2
@@ -377,6 +379,17 @@ path "secret/delete/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
 path "secret/metadata/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
   capabilities = ["read", "delete"]
 }
+
+# Only if this identity may soft-delete a whole folder at once
+# (`vault.kv.folder.delete`, evoila/meho#3939). The op lists the folder
+# again when it runs (`list`) and reads each secret's versions (`read`)
+# on the /metadata/ path. It also needs `update` on the /delete/ path,
+# which the second stanza above already grants. If you also use the
+# permanent-removal stanza above, put all three rights in one block:
+# ["list", "read", "delete"].
+path "secret/metadata/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
+  capabilities = ["list", "read"]
+}
 ```
 
 Notes:
@@ -415,6 +428,16 @@ Notes:
   dedicated teardown role ([vault-provisioning.md](vault-provisioning.md)
   §8). Destroying single versions (`PUT <mount>/destroy/<path>`) is still
   **not** a wired op and needs no grant.
+- **`vault.kv.folder.delete` needs `list` and `read` on the
+  `/metadata/` path and `update` on the `/delete/` path** (the fourth
+  and the second stanza above). `list` lets the op walk the folder.
+  `read` lets it see which versions are still live. `update` on
+  `/delete/` is the same soft delete as `vault.kv.delete`. Before the
+  call waits for approval, MEHO checks these rights for every listed
+  key and every sub-folder the walk visits, and refuses with
+  `write_capability_denied` when one is missing on any of them. When
+  you grant this and permanent removal, use one block with all three
+  rights.
 - The **same per-operator templating constraints** from §2 apply: no
   glob inside the rendered `{{identity...}}` segment; the trailing `/*`
   is a literal glob in the static path portion.
@@ -506,6 +529,11 @@ role the token logs in under is picked in this order (first match wins):
    step;
 4. the deployment-global `VAULT_OIDC_ROLE` (usually `meho-mcp`).
 
+The same order picks the role for the identity operations
+(`vault.identity.*`) and the token operations (`vault.token.*`)
+(evoila/meho#4970). So a vault target whose `vault_role` may change
+identities or tokens also covers those operations.
+
 So the write identity is the operator's JWT together with the role this
 chain selects. When you diagnose a denied write on a target without a
 `vault_role`, check steps 2–4 for the acting operator before you edit a
@@ -525,10 +553,14 @@ caveat). The contract a deploy must satisfy is therefore:
 | Write (`vault.kv.patch`) | same | `read` + `update` on `secret/data/…/{{identity…}}/*` (§6.1); it reads before it writes and never needs `create` |
 | Write (`vault.kv.delete` version soft-delete) | same | `update` on the data path (§6.1) |
 | Write (`vault.kv.metadata.delete` permanent removal) | same | `read` + `delete` on `secret/metadata/…/{{identity…}}/*` (§6.1) |
+| Write (`vault.kv.folder.delete` soft-delete a folder) | same | `list` + `read` on `secret/metadata/…/{{identity…}}/*` and `update` on `secret/delete/…/{{identity…}}/*` (§6.1) |
 | Write (`vault.token.role.write` create or change a token role) | same | `create` + `update` on `auth/token/roles/<role>` (§6.4) |
 | Read (`vault.token.role.read` / `vault.token.role.list`) | same | `read` on `auth/token/roles/<role>`; `list` on `auth/token/roles` (§6.4) |
 | Write (`vault.auth.jwt.role.write` create or change a JWT/OIDC login role) | same | `create` + `read` + `update` on `auth/<mount>/role/<role>` (§6.5) |
 | Read (`vault.auth.jwt.role.read` / `.role.list` / `.config.read`) | same | `read` on `auth/<mount>/role/<role>` and `auth/<mount>/config`; `list` on `auth/<mount>/role` (§6.5) |
+| Write (`vault.sys.policy.delete` delete one Vault policy) | same; use a target whose `vault_role` has this rule, not `meho-mcp` | `delete` on `sys/policy/<name>` ([vault-remove-tenant.md](vault-remove-tenant.md) step 4) |
+| Delete (`vault.identity.oidc.role.delete` / `vault.identity.oidc.key.delete`) | same | `delete` on `identity/oidc/role/<name>` or `identity/oidc/key/<name>` (§6.7) |
+| Read (`vault.identity.oidc.role.*` / `vault.identity.oidc.key.*` list and read) | same | `read` on the role or key path; `list` on `identity/oidc/role` or `identity/oidc/key` (§6.7) |
 
 A deploy that follows only the §2 read grant provisions **read-only** and
 discovers the missing write grant *after* an operator approves a parked
@@ -655,6 +687,121 @@ Notes:
 - **Existing tokens keep their old lifetime.** Only new logins get the new
   settings. A check made with a token from before the change still shows
   the old lease.
+
+### 6.6 Staging a Kubernetes Secret (`k8s.secret.read_to_ref`)
+
+`k8s.secret.read_to_ref` reads one value from a Kubernetes Secret and
+writes it to Vault. It is the way to register a guest cluster from its
+kubeconfig without the kubeconfig reaching the agent. The write goes
+through the same handler as `vault.kv.put`, so it needs the same
+`create` + `update` grant. What is different is **where** it writes.
+
+**The path is fixed.** The op always writes to
+
+```text
+secret/data/tenants/<tenant_id>/<register_as>
+```
+
+`<tenant_id>` is the caller's tenant. `<register_as>` is the target name
+the caller passes. You cannot choose another path, for two reasons:
+
+- `meho targets create --name <register_as>` without a `secret_ref`
+  reads this same path. That is how the staged kubeconfig reaches the new
+  target.
+- The tenant-scope guard (on by default) refuses a Vault write outside
+  `secret/tenants/<tenant_id>/`. A path such as `secret/meho/...` would be
+  refused by MEHO before it reaches Vault.
+
+**Which role writes.** The op writes with no Vault target. So step 1 of
+the §6.3 chain (a target's `vault_role`) never applies. The write uses
+the per-tenant role from `VAULT_OIDC_ROLE_BY_TENANT`, or else the global
+`VAULT_OIDC_ROLE` (usually `meho-mcp`). Running the op on another vault
+target does not change the role.
+
+**The grant it needs.** The policies of that role, or the identity-group
+policies of the caller, must give `create` + `update` on the tenant
+subtree:
+
+```hcl
+path "secret/data/tenants/{{identity.entity.metadata.tenant_id}}/*" {
+  capabilities = ["create", "read", "update"]
+}
+```
+
+The per-tenant policies in
+[`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md)
+already handle this:
+
+- `meho-tenant-admin` grants it. A `tenant_admin` can run the op.
+- `meho-tenant-operator` does **not** grant it. That policy can write
+  only under `tenants/<tenant_id>/rotation/*`. An `operator` gets
+  `write_capability_denied` at park time.
+- `meho-tenant-read-only` does not grant it.
+
+Do not add this grant to the shared `meho-mcp` policy for everyone. Give
+it through the per-tenant policy of the people who register clusters.
+
+**The tenant metadata must be set.** The templated path above only works
+when the caller's Vault entity carries the `tenant_id` metadata
+([`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md)
+§3). Without it, the grant does not apply and Vault denies the write.
+
+**Both people need the grant.** The op needs approval. MEHO checks the
+grant for the person who calls the op, at park time. After approval, the
+write runs with the token of the person who approves (see the §6.2 note
+on the reviewer token). So the approver needs the same grant. Check both
+with §6.2, using the path above:
+
+```bash
+vault token capabilities "secret/data/tenants/<tenant-uuid>/<register_as>"
+# Expect: create read update
+```
+
+### 6.7 Identity token roles and keys (`vault.identity.oidc.*`)
+
+Vault signs identity tokens (JWTs) that another system, such as a cloud
+provider, trusts. A **role** under `identity/oidc/role/<name>` says which
+**key** under `identity/oidc/key/<name>` signs its tokens and who the
+token audience is. MEHO lists, reads and deletes both. The deletes are
+dangerous and wait until a person approves. Like §6.4, the rules go into
+the policy of the role that will manage them (the target's `vault_role`),
+not into the shared read policy of every operator:
+
+```hcl
+# List the names (`vault.identity.oidc.role.list` / `.key.list`).
+path "identity/oidc/role" {
+  capabilities = ["list"]
+}
+path "identity/oidc/key" {
+  capabilities = ["list"]
+}
+
+# Read and delete one role (`vault.identity.oidc.role.read` / `.delete`).
+# Replace <name> with the role this identity may remove.
+path "identity/oidc/role/<name>" {
+  capabilities = ["read", "delete"]
+}
+
+# Read and delete one key (`vault.identity.oidc.key.read` / `.delete`).
+path "identity/oidc/key/<name>" {
+  capabilities = ["read", "delete"]
+}
+```
+
+Notes:
+
+- **Check before approval.** Before MEHO asks for approval of a delete, it
+  runs the §6.2 `sys/capabilities-self` probe on the role or key path under
+  the target's role. When `delete` is missing, the call is refused with
+  `error_code: "write_capability_denied"` and no approval request is
+  written.
+- **Delete the role before its key.** Vault refuses to delete a key while
+  a role still uses it. MEHO then returns `connector_error` with
+  `exception_class: "VaultOidcKeyInUseError"`, and the `remediation` names
+  the roles. Vault never deletes the key named `default`.
+- **The trust on the other side stays.** Deleting the role stops new
+  tokens. The system that trusted those tokens keeps its own trust
+  setting until someone removes it there.
 
 ## Scope note — `shared_service_account` only; `per_user`/`impersonation` deferred
 

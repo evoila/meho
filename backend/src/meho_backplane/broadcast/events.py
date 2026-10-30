@@ -27,8 +27,8 @@ detail is a G6.3 surface; T2 ships the conservative default.
 Why a classifier rather than a per-op annotation:
 
 1. Sensitivity is mostly op-class-shaped. ``vault.kv.read`` is no more
-   sensitive than ``vault.kv.list``; ``vsphere.vm.list`` is no more
-   sensitive than ``vsphere.host.list``. A per-op flag would multiply
+   sensitive than ``vault.kv.list``; ``k8s.pod.list`` is no more
+   sensitive than ``k8s.node.list``. A per-op flag would multiply
    the contract surface for no policy gain.
 2. The classifier is one auditable function. A reviewer can read it in
    one sitting and verify policy compliance; scattered annotations on
@@ -80,6 +80,7 @@ __all__ = [
     "is_secret_param_name",
     "redact_payload",
     "resolve_op_class",
+    "resolve_operation_op_class",
     "scrub_broadcast_params",
     "scrub_secret_named_values",
 ]
@@ -182,6 +183,9 @@ _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
         # flight recorder drop its bodies (the OAuth form carries the session
         # JWT as the ``assertion``; the token response carries the token).
         "vcfa.provider.api_token.create",
+        # The handoff export returns a one-time handoff token: not the value,
+        # but it can fetch the value once. Aggregate-only keeps it off the feed.
+        "secret.handoff.export",
     }
 )
 
@@ -234,6 +238,9 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # k8s.secret.create (inline maps or store refs), so the same pin
         # keeps them off the approval row and the broadcast.
         "k8s.secret.update",
+        # The handoff import carries the one-time handoff token in params.
+        # The pin keeps it off the approval row (stored encrypted) and the feed.
+        "secret.handoff.import",
         "k8s.job.create",
         # G3.13-T4 #1406 — Keycloak user-credential write ops. Both source
         # the password from Vault (it is never an inline param), so the
@@ -396,6 +403,13 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # ``vmware.appliance.local_account.policy.set`` sends only expiry
         # numbers and flags, so it is NOT pinned.
         "vmware.appliance.local_account.password.set",
+        # The Keycloak login test. Its params carry only a Vault *path*
+        # (``password_secret_ref``); the password is read in-process and sent
+        # only in the token request BODY, and the token answer carries an
+        # access and a refresh token. The pin sets body_recorded=false for its
+        # flight-recorder spans, collapses the broadcast to aggregate-only and
+        # keeps a waiting approval's params in the encrypted handoff store.
+        "keycloak.user.check_login",
     }
 )
 
@@ -551,6 +565,11 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
         # sessions) whose ``.logout`` suffix is not a write suffix. Its params
         # are a user id or username only, so plain ``write``.
         "keycloak.user.logout",
+        # phpIPAM address writes: ``.reserve`` / ``.release`` are not write
+        # suffixes. The params carry a subnet id, an address and a host name
+        # only, so plain ``write``.
+        "phpipam.address.reserve",
+        "phpipam.address.release",
         # MEHO's own registry writes, run through the dispatcher on synthetic
         # connectors. None of their verbs is a write suffix, so without a pin
         # they showed as ``other``. Their params carry no secret material
@@ -561,6 +580,16 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
         "topology.bulk_import",
         "topology.create_node",
         "topology.delete_node",
+        # Hand-written ``safe`` operations that are not plain reads: each
+        # makes the target do work (rescan a datastore, save an etcd
+        # snapshot, reload a template list, start an HCX diagnostics run).
+        # Without a pin they would get ``read`` from
+        # :func:`resolve_operation_op_class`, like every other ``safe``
+        # hand-written operation.
+        "vmware.composite.datastore.refresh",
+        "rke2.etcd-snapshot.save",
+        "vcfa.tenant.cloud_account.enumerate_images",
+        "hcx.service_mesh.diagnose",
     }
 )
 
@@ -585,9 +614,9 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
 #: ``.versions``) would otherwise fall through to the full-detail
 #: ``other`` class rather than broadcast at the same ``read`` sensitivity
 #: as its ``harbor.project.info`` sibling. Adding it also reclassifies
-#: the ``vmware.composite.performance.summary`` metrics composite from
-#: ``other`` to ``read`` — the correct class for a non-mutating read;
-#: neither class is sensitive (:data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`),
+#: any other ``*.summary`` metrics read from ``other`` to ``read`` —
+#: the correct class for a non-mutating read; neither class is sensitive
+#: (:data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`),
 #: so the broadcast detail level is unchanged for it. ``.ha_status`` and
 #: ``.autopilot_state`` are the Vault cluster-wide node reads
 #: (``vault.sys.ha_status`` / ``vault.sys.raft.autopilot_state``): like
@@ -877,9 +906,9 @@ def classify_op(op_id: str) -> str:
     'write'
     >>> classify_op("net.tcp_check")
     'read'
-    >>> classify_op("vsphere.vm.list")
+    >>> classify_op("k8s.pod.list")
     'read'
-    >>> classify_op("vsphere.vm.create")
+    >>> classify_op("k8s.namespace.create")
     'write'
     >>> classify_op("argocd.app.set")
     'write'
@@ -990,6 +1019,58 @@ def resolve_op_class(op_id: str, declared: str | None = None) -> str:
     if declared and derived not in _SECRET_SHAPE_CLASSES:
         return declared
     return derived
+
+
+#: Source kinds of hand-written operations: typed operations and multi-step
+#: (composite) operations. Ingested operations get their class from the
+#: HTTP method in their op id instead.
+_HAND_WRITTEN_SOURCE_KINDS: Final[frozenset[str]] = frozenset({"typed", "composite"})
+
+#: Risk levels of an operation that changes something.
+_CHANGE_SAFETY_LEVELS: Final[frozenset[str]] = frozenset({"caution", "dangerous", "destructive"})
+
+
+def resolve_operation_op_class(op_id: str, *, source_kind: str, safety_level: str | None) -> str:
+    """Return the class of one run of a registered operation.
+
+    The dispatcher stores this class on the audit row, and the announce
+    gate, the announce reminder and the target activity warning use it.
+    So all four always agree.
+
+    A hand-written (typed or multi-step) operation states its risk level
+    where it is registered. That risk level is the declared class that goes
+    to :func:`resolve_op_class`. The last word of the op id is not enough:
+    reads like ``vmware.host.usage`` and writes like
+    ``vmware.composite.vm.destroy`` end in words :func:`classify_op` does
+    not know.
+
+    * Risk level ``caution`` or higher: the class is ``write``.
+    * Risk level ``safe``: the class is ``read`` when :func:`classify_op`
+      knows nothing better (``other``). A ``safe`` operation that does make
+      the target do work is pinned in :data:`_WRITE_OPS`.
+    * The credential and audit-query classes always win, as in
+      :func:`resolve_op_class`.
+    * Ingested operations, and a row with no risk level, keep
+      ``classify_op(op_id)``.
+
+    >>> resolve_operation_op_class("vmware.host.usage", source_kind="typed", safety_level="safe")
+    'read'
+    >>> resolve_operation_op_class(
+    ...     "vmware.composite.vm.destroy", source_kind="composite", safety_level="destructive"
+    ... )
+    'write'
+    >>> resolve_operation_op_class("vault.kv.read", source_kind="typed", safety_level="caution")
+    'credential_read'
+    >>> resolve_operation_op_class("POST:/vcenter/vm", source_kind="ingested", safety_level="safe")
+    'write'
+    """
+    declared: str | None = None
+    if source_kind in _HAND_WRITTEN_SOURCE_KINDS:
+        if safety_level in _CHANGE_SAFETY_LEVELS:
+            declared = "write"
+        elif safety_level == "safe" and classify_op(op_id) == "other":
+            declared = "read"
+    return resolve_op_class(op_id, declared)
 
 
 def _maybe_row_count(raw_params: dict[str, Any]) -> int | None:

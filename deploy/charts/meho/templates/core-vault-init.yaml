@@ -1,0 +1,91 @@
+{{- if .Values.coreVault.enabled }}
+{{- if not .Values.coreKeycloak.enabled }}
+{{- fail "coreVault.enabled needs coreKeycloak.enabled: the built-in OpenBao trusts logins from the built-in Keycloak." }}
+{{- end }}
+{{- /*
+The built-in core's `vault-init` Job (#4044):
+it starts OpenBao the first time and sets it up, then revokes the root
+token. Normal release objects, not hooks, so Helm `--wait-for-jobs`,
+klipper-helm and Argo CD all wait for the Job. Details:
+docs/codebase/core-vault-init.md.
+*/}}
+{{- $name := include "meho.core.vaultInitName" . }}
+{{- $policies := (.Files.Glob "files/openbao/policies/*.hcl").AsConfig }}
+{{- $pod := include "meho.core.vaultInitPod" . }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vault-init
+# The token is mounted only on the Job's pod.
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vault-init
+rules:
+  # Kubernetes cannot limit `create` to names.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  # Read and update exactly the Secrets this Job stores. No `list`, no `watch`.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "patch"]
+    resourceNames:
+      {{- range list "vault-unseal" "vault-init" "vault-scheduler" "vault-snapshot" }}
+      - {{ printf "%s-core-%s" $.Release.Name . | quote }}
+      {{- end }}
+  # The short-lived Secret with the root token, deleted when the Job is done.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["delete"]
+    resourceNames:
+      - {{ printf "%s-core-vault-init" .Release.Name | quote }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vault-init
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-policies
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vault-init
+data:
+  {{- $policies | nindent 2 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-%s" $name (print $pod $policies | sha256sum | trunc 8) }}
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vault-init
+spec:
+  # No `ttlSecondsAfterFinished`: Helm and Argo CD would make a removed Job
+  # again. A finished Job stays as the record of the setup.
+  backoffLimit: {{ .Values.migrationJob.backoffLimit }}
+  template:
+    {{- $pod | nindent 4 }}
+{{- end }}

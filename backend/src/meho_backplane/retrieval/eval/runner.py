@@ -175,7 +175,7 @@ def _operations_hits_to_op_ids(hits: list[RetrievalHit]) -> list[str]:
     """Map operations retrieval hits to ``op_id`` strings.
 
     Operation surface ``RetrievalHit.source_id`` is the connector's
-    ``op_id`` (e.g. ``GET:/api/vcenter/cluster``); the corpus's
+    ``op_id`` (e.g. ``GET:/repos/{owner}/{repo}/issues``); the corpus's
     ``expected_op_ids`` field carries the same shape, so this is the
     identity mapping. Kept as a named function for surface symmetry
     + future op_id encoding changes (e.g. when G0.7's spec ingestion

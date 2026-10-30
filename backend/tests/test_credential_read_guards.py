@@ -11,10 +11,11 @@ Two guards, one shared list:
   dispatcher replaces every secret-named field in the answer with
   ``[REDACTED:param_name]`` before the caller sees it.
 
-``bind9.config.show`` gets the same two guards in its op definition. Its
-answer is one text field, so the ``bind_key_secret`` text rule replaces
-the value of every ``secret "..."`` line (TSIG and rndc keys) and the
-rest of the file stays readable.
+``bind9.config.show`` is on the same list. Its answer is one text field,
+so the ``bind_key_secret`` text rule replaces the value of every
+``secret "..."`` line (TSIG and rndc keys) and the rest of the file stays
+readable. Since #5132 it reads only config files (no key files), so it
+runs without approval.
 """
 
 from __future__ import annotations
@@ -49,6 +50,10 @@ _REDACTED = "[REDACTED:param_name]"
 # on the test source.
 _PASSWORD_SECRET = "super-secret" + "-esxi-pw"
 _FAKE_TSIG_VALUE = "exampleTsig" + "Value=="
+_FAKE_BARE_TSIG_VALUE = "exampleBare" + "Value=="
+_FAKE_OLD_TSIG_VALUE = "exampleOld" + "Value=="
+_FAKE_PREVIOUS_TSIG_VALUE = "examplePrevious" + "Value=="
+_FAKE_COOKIE_VALUE = "0123abcd" + "ef" * 12
 
 _SDDC_PRODUCT = "sddc"
 _SDDC_VERSION = "9.0"
@@ -275,30 +280,59 @@ async def test_sddc_ingested_credential_read_response_is_scrubbed(
 # ---------------------------------------------------------------------------
 
 
-def test_bind9_config_show_is_caution_with_approval() -> None:
+def test_bind9_config_show_is_safe_without_approval() -> None:
+    """#5132: the read refuses key files and hides key secrets, so it runs at once."""
     op = next(o for o in BIND9_OPS if o.op_id == "bind9.config.show")
-    assert op.safety_level == "caution"
-    assert op.requires_approval is True
+    assert op.safety_level == "safe"
+    assert op.requires_approval is False
 
 
 def test_bind9_config_show_classifies_credential_read() -> None:
     assert classify_op("bind9.config.show") == "credential_read"
 
 
+# A config BIND accepts, with the shapes a review found risky: a comment
+# that holds the word ``secret`` and an unclosed ``/*`` before the first
+# key block, a ``#`` inside a quoted string, a commented-out old key, and
+# a ``*/`` with a quoted string after it at the end of the file.
 _NAMED_CONF = (
+    "# the secret /* of every key stays on the server\n"
     'key "rndc-key" {\n'
     "    algorithm hmac-sha256;\n"
-    f'    secret "{_FAKE_TSIG_VALUE}";\n'
+    f'    secret /* secret "{_FAKE_PREVIOUS_TSIG_VALUE}"; */ "{_FAKE_TSIG_VALUE}";\n'
     "};\n"
+    'key "transfer-key" {\n'
+    "    algorithm hmac-sha256;\n"
+    f"    secret {_FAKE_BARE_TSIG_VALUE};\n"
+    "};\n"
+    f'// key "old-key" {{ algorithm hmac-md5; secret "{_FAKE_OLD_TSIG_VALUE}"; }};\n'
     "options {\n"
     '    directory "/var/cache/bind";\n'
+    '    version "none # hidden";\n'
+    f"    cookie-secret {_FAKE_COOKIE_VALUE};\n"
     "    allow-transfer { key rndc-key; };\n"
     "};\n"
+    '# */ "end of file"\n'
 )
 
-_NAMED_CONF_REDACTED = _NAMED_CONF.replace(
-    f'secret "{_FAKE_TSIG_VALUE}";', "secret [REDACTED:bind_key_secret];"
+_NAMED_CONF_REDACTED = (
+    _NAMED_CONF.replace(f'"{_FAKE_PREVIOUS_TSIG_VALUE}";', "[REDACTED:bind_key_secret];")
+    .replace(f'"{_FAKE_TSIG_VALUE}";', "[REDACTED:bind_key_secret];")
+    .replace(f"secret {_FAKE_BARE_TSIG_VALUE};", "secret [REDACTED:bind_key_secret];")
+    .replace(f'secret "{_FAKE_OLD_TSIG_VALUE}";', "secret [REDACTED:bind_key_secret];")
+    .replace(f"cookie-secret {_FAKE_COOKIE_VALUE};", "cookie-secret [REDACTED:bind_key_secret];")
 )
+
+
+def _assert_no_bind_secret(dumped: str) -> None:
+    for value in (
+        _FAKE_TSIG_VALUE,
+        _FAKE_PREVIOUS_TSIG_VALUE,
+        _FAKE_BARE_TSIG_VALUE,
+        _FAKE_OLD_TSIG_VALUE,
+        _FAKE_COOKIE_VALUE,
+    ):
+        assert value not in dumped
 
 
 class _NoOpBind9Connector(Connector):
@@ -356,7 +390,12 @@ async def _register_bind9_config_show(embedding_service: AsyncMock) -> None:
 async def test_bind9_config_show_key_secret_is_redacted(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """The key value becomes the placeholder; the rest of the file is unchanged."""
+    """Every key value becomes the placeholder; the rest of the file is unchanged.
+
+    The file holds a quoted secret, a secret without quotes, a
+    ``cookie-secret``, and an old secret in a comment between the
+    ``secret`` keyword and its value. BIND accepts all of them.
+    """
     await _register_bind9_config_show(stub_embedding_service)
 
     result = await dispatch(
@@ -370,4 +409,23 @@ async def test_bind9_config_show_key_secret_is_redacted(
     assert isinstance(result.result, dict)
     assert result.result["file"] == "/etc/bind/named.conf"
     assert result.result["content"] == _NAMED_CONF_REDACTED
-    assert _FAKE_TSIG_VALUE not in result.model_dump_json()
+    _assert_no_bind_secret(result.model_dump_json())
+
+
+async def test_bind9_config_show_key_secret_stays_redacted_with_reveal_secret(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """``reveal_secret`` does not bring any key secret back: the text rule still runs."""
+    await _register_bind9_config_show(stub_embedding_service)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="bind9-ssh-9.x",
+        op_id="bind9.config.show",
+        target=None,
+        params={"path": "named.conf", "reveal_secret": True},
+    )
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    assert result.result["content"] == _NAMED_CONF_REDACTED
+    _assert_no_bind_secret(result.model_dump_json())

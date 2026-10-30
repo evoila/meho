@@ -1119,7 +1119,7 @@ Five synthetic connectors follow this mould (natural key
 | `targets-registry-1.x` | `targets.register` | `meho_targets_register` | #2861 |
 | `targets-registry-1.x` | `targets.remove` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves) | #4623 |
 | `audit-integrity-1.x` | `audit.loose_rows` | (dispatch-only; a `safe` read a Sensor pins) | #4670 |
-| `migration-assess-1.x` | `migration.inventory.csv` | (dispatch-only; a `safe` read of stored or inline inventories) | #5099 |
+| `inventory-1.x` | `inventory.export` | (dispatch-only; a `safe` read that turns stored or inline inventories into a file in a named format) | #5218 |
 
 `meho_targets_register` (#2861,
 `mcp/tools/targets_register.py` + `connectors/targets/`) closes the last

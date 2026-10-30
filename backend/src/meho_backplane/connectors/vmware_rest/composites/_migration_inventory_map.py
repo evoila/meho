@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final, Literal
 
-from meho_backplane.connectors.migration.contracts import (
+from meho_backplane.connectors.inventory.contracts import (
     Disk,
     IdentityHints,
     MissingReason,

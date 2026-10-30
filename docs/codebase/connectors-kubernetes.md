@@ -370,8 +370,8 @@ real operator through the same loader.
 
 The multi-step read `k8s.migration.inventory` (group `migration`, `safe`)
 collects the cluster's nodes and workloads in the common migration inventory
-shape. It lives in `connectors/migration/source_k8s.py`; see
-`connectors-migration.md`.
+shape. It lives in `connectors/inventory/source_k8s.py`; see
+`connectors-inventory.md`.
 
 ### `k8s.exec` -- websocket command-and-capture (`ops_exec.py`)
 

@@ -2255,26 +2255,6 @@ jobs:
           uv run pytest -x -rs -o junit_family=xunit1 \
             --junitxml=pytest-integration-shard.xml "${SHARD_FILES[@]}"
 
-      - name: "TEMPORARY (#5425): run the OpenBao vault-init test 10 times"
-        # Proof for #5425 only; removed again before merge. Each run is a new
-        # pytest process, so each run starts new OpenBao and Keycloak
-        # containers and does a real first setup. Shard 1 runs it after the
-        # k3s tests, shard 2 after its normal tests.
-        if: matrix.shard == 1 || matrix.shard == 2
-        run: |
-          passed=0
-          for i in $(seq 1 10); do
-            if uv run pytest -q -rs -o tmp_path_retention_policy=failed \
-                tests/integration/test_core_vault_init_openbao.py; then
-              passed=$((passed + 1))
-              echo "repeat ${i}/10: passed"
-            else
-              echo "::error::repeat ${i}/10: failed"
-            fi
-          done
-          echo "vault-init repeat: ${passed} of 10 runs passed"
-          test "${passed}" -eq 10
-
       - name: Upload per-test times (input for the shard split)
         # Refresh tests/_integration_shard_durations.json from these
         # artifacts (one per shard) of a green run; the docstring of

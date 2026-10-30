@@ -27,6 +27,8 @@ from meho_backplane.connectors.vmware_rest.composites._supervisor_library_llm_in
 )
 from meho_backplane.operations._validate import validate_params
 
+_LIBRARY_ID = "11111111-1111-1111-1111-111111111111"
+
 _PARAMETER_SCHEMAS: dict[str, dict[str, Any]] = {
     "supervisor.enable": schemas.SUPERVISOR_ENABLE_PARAMETER_SCHEMA,
     "supervisor.disable": schemas.SUPERVISOR_DISABLE_PARAMETER_SCHEMA,
@@ -149,9 +151,9 @@ def test_subscribed_library_op_refuses_a_call_with_no_library(short_id: str) -> 
 @pytest.mark.parametrize(
     "params",
     [
-        {"library_id": "<library-id>"},
+        {"library_id": _LIBRARY_ID},
         {"library_name": "<library-name>"},
-        {"library_id": "<library-id>", "library_name": "<library-name>"},
+        {"library_id": _LIBRARY_ID, "library_name": "<library-name>"},
     ],
 )
 def test_subscribed_library_op_accepts_an_id_a_name_or_both(

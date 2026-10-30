@@ -266,6 +266,7 @@ from typing import Any, Literal
 import httpx
 import hvac.exceptions
 import structlog
+from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
@@ -516,6 +517,33 @@ def descriptor_requires_target(descriptor: EndpointDescriptor) -> bool:
     return False
 
 
+async def _restore_saved_ingest_profiles(target: Any) -> None:
+    """Build missing ingested connector classes for the target's product.
+
+    #5016: another replica may have taken an ingest after this one
+    started, so its class exists only there. Reading the saved login types
+    of the target's product before the resolver runs lets this replica
+    build the class first. This also covers a replica that already holds
+    another connector for the same product: without the read the resolver
+    would pick that one, even when the target prefers the new connector.
+    A row whose key already has a class is skipped, so the read is cheap
+    on the usual path. A database error is logged and the resolver runs
+    on the classes this replica already has. A target without a product
+    slug is left to the resolver, which reports the miss.
+    """
+    from meho_backplane.operations.ingest.ingest_auth_store import (
+        restore_ingested_profiled_connectors,
+    )
+
+    product = getattr(target, "product", None)
+    if not isinstance(product, str) or not product:
+        return
+    try:
+        await restore_ingested_profiled_connectors(product=product)
+    except SQLAlchemyError:
+        _log.warning("ingested_profile_restore_before_call_failed", exc_info=True)
+
+
 async def _resolve_connector_instance(
     descriptor: EndpointDescriptor,
     target: Any,
@@ -580,6 +608,7 @@ async def _resolve_connector_instance(
     (consumer feedback signal 19, ``claude-rdc-hetzner-dc#697``).
     """
     if descriptor.source_kind == "ingested":
+        await _restore_saved_ingest_profiles(target)
         cls, label, exc_message = resolve_connector_or_label(target)
         if label is not None:
             return None, label, exc_message

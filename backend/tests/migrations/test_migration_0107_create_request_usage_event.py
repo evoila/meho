@@ -10,7 +10,7 @@ them, and that the pair round-trips. SQLite is the test driver.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -73,9 +73,11 @@ def _schema(sync_url: str) -> tuple[set[str], set[str], set[str]]:
     return tables, columns, indexes
 
 
-def test_upgrade_creates_table_and_indexes(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_creates_table_and_indexes(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     tables, columns, indexes = _schema(sync_url)
     assert _TABLE in tables
@@ -97,16 +99,20 @@ def test_upgrade_creates_table_and_indexes(alembic_cfg: tuple[Config, str]) -> N
     assert indexes >= _INDEXES
 
 
-def test_downgrade_drops_table(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_drops_table(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
     assert _TABLE not in _schema(sync_url)[0]
 
 
-def test_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     command.downgrade(cfg, _DOWN_REVISION)
     command.upgrade(cfg, _REVISION)
     assert _TABLE in _schema(sync_url)[0]

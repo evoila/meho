@@ -121,7 +121,10 @@ STUBS = {
           shadow) grep "^$2:" "$MEHO_FAKE/shadow" ;;
         esac
         """),
-    "useradd": 'eval "user=\\${$#}"; printf "%s:x:1000:1000::/home/%s:/bin/bash\\n" "$user" "$user" >> "$MEHO_FAKE/passwd"',
+    "useradd": (
+        'eval "user=\\${$#}"; '
+        'printf "%s:x:1000:1000::/home/%s:/bin/bash\\n" "$user" "$user" >> "$MEHO_FAKE/passwd"'
+    ),
     "chpasswd": 'cat > "$MEHO_FAKE/chpasswd_input"',
     "passwd": "",
     "chown": "",
@@ -143,9 +146,11 @@ INSTALL_STUB = 'exit "$(cat "$MEHO_FAKE/install_rc")"\n'
 def ovf_env(fields: dict[str, str]) -> str:
     """An OVF environment as vCenter hands it over, with escaped values."""
     properties = "\n".join(
-        f"    <Property oe:key={quoteattr(key)} oe:value={quoteattr(value)}/>" for key, value in fields.items()
+        f"    <Property oe:key={quoteattr(key)} oe:value={quoteattr(value)}/>"
+        for key, value in fields.items()
     )
-    return textwrap.dedent("""\
+    return (
+        textwrap.dedent("""\
         <?xml version="1.0" encoding="UTF-8"?>
         <Environment xmlns="http://schemas.dmtf.org/ovf/environment/1"
              xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -156,7 +161,10 @@ def ovf_env(fields: dict[str, str]) -> str:
             <Kind>VMware ESXi</Kind>
           </PlatformSection>
           <PropertySection>
-        """) + properties + "\n  </PropertySection>\n</Environment>\n"
+        """)
+        + properties
+        + "\n  </PropertySection>\n</Environment>\n"
+    )
 
 
 def _write_script(path: Path, body: str) -> None:
@@ -247,7 +255,9 @@ class FakeAppliance:
             "MEHO_FAKE": str(self.fake),
             "LC_ALL": "C",
         }
-        return subprocess.run([str(script)], capture_output=True, text=True, env=env, check=False, timeout=60)
+        return subprocess.run(
+            [str(script)], capture_output=True, text=True, env=env, check=False, timeout=60
+        )
 
     def run(self) -> subprocess.CompletedProcess[str]:
         return self._run(FIRSTSTART_SH)

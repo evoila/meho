@@ -43,13 +43,17 @@ class FirstStartTests(FirstStartTestCase):
             "[Time]\nNTP=ntp1.example.com 10.0.0.4\n",
             self.vm.read("/etc/systemd/timesyncd.conf.d/50-meho.conf"),
         )
-        self.assertIn("useradd --create-home --shell /bin/bash --groups sudo admin", self.vm.calls())
+        self.assertIn(
+            "useradd --create-home --shell /bin/bash --groups sudo admin", self.vm.calls()
+        )
         self.assertIn("passwd --expire admin", self.vm.calls())
         self.assertEqual(f"{SSH_KEY}\n", self.vm.read("/home/admin/.ssh/authorized_keys"))
         self.assertEqual(0o600, self.vm.mode("/home/admin/.ssh/authorized_keys"))
         self.assertEqual(0o700, self.vm.mode("/home/admin/.ssh"))
         self.assertEqual(["meho-host admin-network 10.0.50.0/24"], self.vm.calls("meho-host"))
-        self.assertEqual(["install.sh --from-disk --hostname meho.example.com"], self.vm.calls("install.sh"))
+        self.assertEqual(
+            ["install.sh --from-disk --hostname meho.example.com"], self.vm.calls("install.sh")
+        )
         self.assertEqual(ALL_MARKERS, self.vm.markers())
         self.assertTrue(self.vm.host_path("/var/lib/meho/firststart.done").is_file())
 
@@ -106,7 +110,9 @@ class FirstStartTests(FirstStartTestCase):
 
         result = self.vm.run()
 
-        line = self.assert_fails_once(result, "Step 3 (wizard-fields)", "no wizard fields", "ovftool")
+        line = self.assert_fails_once(
+            result, "Step 3 (wizard-fields)", "no wizard fields", "ovftool"
+        )
         self.assertEqual("ubuntu\n", self.vm.read("/etc/hostname"))
         self.assertFalse(self.vm.host_path("/etc/netplan/50-meho.yaml").exists())
         self.assertEqual(ALL_MARKERS[:2], self.vm.markers())
@@ -137,9 +143,15 @@ class FirstStartTests(FirstStartTestCase):
             "net.admin_network empty": ({"net.admin_network": ""}, "admin network"),
             "admin.ssh_key": ({"admin.ssh_key": "not a key"}, "SSH public key"),
             "admin.ssh_key empty": ({"admin.ssh_key": ""}, "SSH public key"),
-            "admin.ssh_key two lines": ({"admin.ssh_key": f"{SSH_KEY}\n{SSH_KEY}"}, "SSH public key"),
+            "admin.ssh_key two lines": (
+                {"admin.ssh_key": f"{SSH_KEY}\n{SSH_KEY}"},
+                "SSH public key",
+            ),
             "admin.password line break": ({"admin.password": "fourteen-chars\nmore"}, "line break"),
-            "cluster.join.address": ({"cluster.join.address": "10.0.0.20"}, "cannot join a cluster"),
+            "cluster.join.address": (
+                {"cluster.join.address": "10.0.0.20"},
+                "cannot join a cluster",
+            ),
             "cluster.join.token": ({"cluster.join.token": JOIN_TOKEN}, "cannot join a cluster"),
         }
         for name, (changes, fragment) in wrong.items():
@@ -159,7 +171,9 @@ class FirstStartTests(FirstStartTestCase):
 
         result = self.vm.run()
 
-        self.assert_fails_once(result, "Step 3 (wizard-fields)", "cannot join a cluster", "empty both join fields")
+        self.assert_fails_once(
+            result, "Step 3 (wizard-fields)", "cannot join a cluster", "empty both join fields"
+        )
         self.assertEqual("ubuntu\n", self.vm.read("/etc/hostname"))
         self.assertEqual([], self.vm.calls("chpasswd"))
         self.assertEqual([], self.vm.calls("install.sh"))
@@ -214,7 +228,9 @@ class FirstStartTests(FirstStartTestCase):
         for rc, succeeds in (("0", True), ("1", True), ("2", False)):
             with self.subTest(growpart_rc=rc):
                 self.vm.answer("growpart_rc", rc)
-                for marker in self.vm.host_path(STATE).glob("*") if self.vm.host_path(STATE).is_dir() else []:
+                for marker in (
+                    self.vm.host_path(STATE).glob("*") if self.vm.host_path(STATE).is_dir() else []
+                ):
                     marker.unlink()
                 self.vm.host_path("/var/lib/meho/firststart.done").unlink(missing_ok=True)
 
@@ -228,7 +244,9 @@ class FirstStartTests(FirstStartTestCase):
     def test_a_failure_before_the_admin_account_exists_says_to_restart_from_vcenter(self) -> None:
         self.vm.answer("growpart_rc", "2")
 
-        line = self.assert_fails_once(self.vm.run(), "Step 2 (disk)", "power the VM off and on in vCenter")
+        line = self.assert_fails_once(
+            self.vm.run(), "Step 2 (disk)", "power the VM off and on in vCenter"
+        )
 
         self.assertNotIn("sudo reboot", line)
 
@@ -269,7 +287,9 @@ class FirstStartTests(FirstStartTestCase):
         self.assertEqual(host_key, self.vm.read("/etc/ssh/ssh_host_ed25519_key"))
         self.assertEqual([], self.vm.calls("ssh-keygen"))
         self.assertEqual([], self.vm.calls("chpasswd"))
-        self.assertEqual(["install.sh --from-disk --hostname meho2.example.com"], self.vm.calls("install.sh"))
+        self.assertEqual(
+            ["install.sh --from-disk --hostname meho2.example.com"], self.vm.calls("install.sh")
+        )
         self.assertEqual(ALL_MARKERS, self.vm.markers())
         self.assertFalse(self.vm.host_path(f"{STATE}/failed").exists())
 
@@ -322,7 +342,9 @@ class BannerTests(FirstStartTestCase):
         self.assertIn("Log in as admin to fix it", self.vm.banner())
 
     def test_a_backslash_in_the_fail_line_is_not_an_escape(self) -> None:
-        self.vm.host_file(f"{STATE}/failed", "[FAIL] Step 3 (wizard-fields): The host name 'a\\4' is wrong.\n")
+        self.vm.host_file(
+            f"{STATE}/failed", "[FAIL] Step 3 (wizard-fields): The host name 'a\\4' is wrong.\n"
+        )
 
         self.assertIn("'a\\\\4'", self.vm.banner())
 

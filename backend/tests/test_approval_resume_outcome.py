@@ -41,6 +41,7 @@ from meho_backplane.operations.approval_outcome import (
     ResumeOutcome,
     resume_outcome,
     resume_outcome_from_envelope,
+    with_approval_guidance,
 )
 from meho_backplane.operations.approval_queue import (
     create_pending_request,
@@ -150,9 +151,7 @@ async def _get_json(path: str) -> Any:
 
 def test_outcome_reads_status_error_code_and_audit_id() -> None:
     envelope = _failed_run().model_dump(mode="json")
-    outcome = resume_outcome_from_envelope(
-        envelope, parked_op_id=_OP_ID, resumed_at="2026-09-12T10:00:00+00:00"
-    )
+    outcome = resume_outcome_from_envelope(envelope, resumed_at="2026-09-12T10:00:00+00:00")
     assert outcome == ResumeOutcome(
         resumed_at="2026-09-12T10:00:00+00:00",
         result_status="error",
@@ -172,9 +171,7 @@ def test_outcome_reads_status_error_code_and_audit_id() -> None:
 )
 def test_outcome_tolerates_odd_envelopes(envelope: dict[str, Any] | None) -> None:
     """The column is plain JSON: an odd field reads as ``None``, never raises."""
-    assert resume_outcome_from_envelope(envelope, parked_op_id=_CDROM_OP_ID) == ResumeOutcome(
-        None, None, None, None, None
-    )
+    assert resume_outcome_from_envelope(envelope) == ResumeOutcome(None, None, None, None, None)
 
 
 @pytest.mark.asyncio
@@ -275,29 +272,69 @@ def _composite_error(
     return failed.model_copy(update={"audit_id": _AUDIT_ID})
 
 
-def test_outcome_keeps_the_guidance_of_a_multi_step_operation_error() -> None:
+def _stored_outcome(envelope: dict[str, Any], *, parked_op_id: str) -> ResumeOutcome:
+    """The summary of *envelope* once the approval store wrote it with the guidance stamp."""
+    return resume_outcome_from_envelope(with_approval_guidance(envelope, parked_op_id=parked_op_id))
+
+
+def test_store_stamps_the_guidance_of_a_multi_step_operation_error() -> None:
     envelope = _composite_error().model_dump(mode="json")
-    outcome = resume_outcome_from_envelope(envelope, parked_op_id=_CDROM_OP_ID)
+    stored = with_approval_guidance(envelope, parked_op_id=_CDROM_OP_ID)
+    assert stored["extras"]["approval_guidance"] == _GUIDANCE
+    assert stored["extras"]["error_code"] == "result_unknown"
+    # The stamp is a copy: the envelope the approver got inline is unchanged.
+    assert "approval_guidance" not in envelope["extras"]
+    outcome = resume_outcome_from_envelope(stored)
     assert outcome.result_status == "error"
     assert outcome.error_code == "result_unknown"
     assert outcome.guidance == _GUIDANCE
 
 
-def test_outcome_has_no_guidance_for_an_ok_run() -> None:
+def test_summary_reads_guidance_only_from_the_stamp() -> None:
+    """A result stored before the stamp existed shows no guidance (older rows).
+
+    Before #5377, a connector could copy vendor error text into the body's
+    ``guidance``. Such a stored result has no stamp, so the summary must not
+    show its body text to every approver.
+    """
+    old_row = _composite_error(
+        guidance="CPU applied; memory update failed: 500 at https://vc.example/api"
+    ).model_dump(mode="json")
+    assert "approval_guidance" not in old_row["extras"]
+    outcome = resume_outcome_from_envelope(old_row)
+    assert outcome.guidance is None
+    assert outcome.error_code == "result_unknown"
+    assert "vc.example" not in str(outcome)
+
+
+def test_store_drops_a_stamp_the_result_brought_along() -> None:
+    """Only the store writes the stamp: a stamp already in ``extras`` does not count."""
+    envelope = {
+        "status": "ok",
+        "op_id": _CDROM_OP_ID,
+        "extras": {"approval_guidance": "do this"},
+        "result": {"guidance": "do this"},
+    }
+    stored = with_approval_guidance(envelope, parked_op_id=_CDROM_OP_ID)
+    assert stored["extras"] == {}
+    assert resume_outcome_from_envelope(stored).guidance is None
+
+
+def test_store_has_no_guidance_for_an_ok_run() -> None:
     envelope = {"status": "ok", "op_id": _CDROM_OP_ID, "result": {"guidance": "do this"}}
-    assert resume_outcome_from_envelope(envelope, parked_op_id=_CDROM_OP_ID).guidance is None
+    assert _stored_outcome(envelope, parked_op_id=_CDROM_OP_ID).guidance is None
 
 
-def test_outcome_has_no_guidance_from_a_body_that_is_not_the_operation_error() -> None:
+def test_store_has_no_guidance_from_a_body_that_is_not_the_operation_error() -> None:
     """A result body whose status is not the error code is not MEHO's own error answer."""
     envelope = _composite_error().model_dump(mode="json")
     envelope["result"]["status"] = "vendor_status"
-    assert resume_outcome_from_envelope(envelope, parked_op_id=_CDROM_OP_ID).guidance is None
+    assert _stored_outcome(envelope, parked_op_id=_CDROM_OP_ID).guidance is None
 
 
-def test_outcome_cuts_a_long_guidance() -> None:
+def test_store_cuts_a_long_guidance() -> None:
     envelope = _composite_error(guidance="x" * 2000).model_dump(mode="json")
-    guidance = resume_outcome_from_envelope(envelope, parked_op_id=_CDROM_OP_ID).guidance
+    guidance = _stored_outcome(envelope, parked_op_id=_CDROM_OP_ID).guidance
     assert guidance is not None
     assert guidance.endswith(" [truncated]")
     assert len(guidance) < 600
@@ -309,7 +346,7 @@ def test_credential_operation_run_summary_has_no_vendor_text_and_no_params() -> 
     failed = result_connector_error(_OP_ID, vendor_error, 7.0).model_copy(
         update={"audit_id": _AUDIT_ID}
     )
-    outcome = resume_outcome_from_envelope(failed.model_dump(mode="json"), parked_op_id=_OP_ID)
+    outcome = _stored_outcome(failed.model_dump(mode="json"), parked_op_id=_OP_ID)
     assert outcome.guidance is None
     assert outcome.error_code == "connector_error"
     assert "hunter2" not in str(outcome)
@@ -318,15 +355,63 @@ def test_credential_operation_run_summary_has_no_vendor_text_and_no_params() -> 
     # The same holds when the credential operation returns its own error answer
     # with a guidance that repeats a param.
     own_error = _composite_error(_OP_ID, status="write_error", guidance="path secret/app: hunter2")
-    outcome = resume_outcome_from_envelope(own_error.model_dump(mode="json"), parked_op_id=_OP_ID)
+    outcome = _stored_outcome(own_error.model_dump(mode="json"), parked_op_id=_OP_ID)
     assert outcome.guidance is None
     assert "hunter2" not in str(outcome)
 
 
-def test_outcome_has_no_guidance_when_the_parked_step_is_a_credential_operation() -> None:
+def test_store_has_no_guidance_when_the_parked_step_is_a_credential_operation() -> None:
     """A multi-step operation that resumed for a parked credential step keeps no guidance."""
     envelope = _composite_error().model_dump(mode="json")
-    assert resume_outcome_from_envelope(envelope, parked_op_id=_OP_ID).guidance is None
+    assert _stored_outcome(envelope, parked_op_id=_OP_ID).guidance is None
+
+
+async def _seed_resume_result(request_id: uuid.UUID, envelope: dict[str, Any]) -> None:
+    """Write *envelope* on the row as is, the way an older MEHO stored it."""
+    async with get_sessionmaker()() as s:
+        row = await get_request(s, tenant_id=_TENANT_ID, request_id=request_id)
+        row.resume_result = envelope
+        row.resumed_at = datetime.now(UTC)
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_result_stored_before_the_stamp_shows_no_guidance_on_show_list_and_mcp() -> None:
+    """Regression: an older stored result keeps its body text off the summary.
+
+    Before #5377, the VM resize step copied the vendor error into the body's
+    ``guidance``. After an upgrade, the list and show views must not show that
+    text to other approvers; it stays on the owner-only ``/result`` read.
+    """
+    request_id = await _park_approved(
+        op_id="vmware.composite.vm.resize", connector_id="vmware-rest-8.0"
+    )
+    old_row = _composite_error(
+        "vmware.composite.vm.resize",
+        status="partial",
+        guidance="CPU applied; memory update failed: 500 at https://vc.example/api/vcenter/vm",
+    ).model_dump(mode="json")
+    assert "approval_guidance" not in old_row["extras"]
+    await _seed_resume_result(request_id, old_row)
+
+    shown = await _get_json(f"/api/v1/approvals/{request_id}")
+    outcome = shown["resume_outcome"]
+    assert shown["result_state"] == "failed"
+    assert outcome["error_code"] == "partial"
+    assert outcome["guidance"] is None
+    assert "vc.example" not in str(shown)
+
+    listed = await _get_json("/api/v1/approvals?status=approved")
+    (row_view,) = [v for v in listed if v["id"] == str(request_id)]
+    assert row_view["resume_outcome"] == outcome
+    assert "vc.example" not in str(listed)
+
+    async with get_sessionmaker()() as s:
+        stored = await get_request(s, tenant_id=_TENANT_ID, request_id=request_id)
+    assert _row_to_dict(stored)["resume_outcome"] == outcome
+    # The body text is still there for the owner-only /result read.
+    assert stored.resume_result is not None
+    assert "vc.example" in stored.resume_result["result"]["guidance"]
 
 
 @pytest.mark.asyncio
@@ -358,3 +443,5 @@ async def test_result_unknown_resume_shows_the_guidance_on_show_list_and_mcp(
     async with get_sessionmaker()() as s:
         stored = await get_request(s, tenant_id=_TENANT_ID, request_id=request_id)
     assert _row_to_dict(stored)["resume_outcome"] == outcome
+    assert stored.resume_result is not None
+    assert stored.resume_result["extras"]["approval_guidance"] == _GUIDANCE

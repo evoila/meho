@@ -41,7 +41,10 @@ from meho_backplane.operations._errors import result_composite_terminal_error
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations._vendor_text import redact_error_result
-from meho_backplane.operations.approval_outcome import resume_outcome_from_envelope
+from meho_backplane.operations.approval_outcome import (
+    resume_outcome_from_envelope,
+    with_approval_guidance,
+)
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.settings import get_settings
 
@@ -693,7 +696,8 @@ async def test_approved_cdrom_timeout_run_summary_names_the_question() -> None:
 
     The composite's answer goes the way the dispatcher sends it: it becomes the
     error result of the run (#3809), passes the secret cleanup, and is stored
-    on the approval request. The run summary then names the question id.
+    on the approval request with the guidance stamp. The run summary then
+    names the question id.
     """
     conn = _FakeConnector(tasks={"task-7": _RUNNING}, write_error=httpx.ReadTimeout("timed out"))
     out = await vm_device_cdrom_composite(
@@ -712,9 +716,10 @@ async def test_approved_cdrom_timeout_run_summary_names_the_question() -> None:
         )
     )
 
-    outcome = resume_outcome_from_envelope(
+    stored = with_approval_guidance(
         result.model_dump(mode="json"), parked_op_id="vmware.composite.vm.device.cdrom"
     )
+    outcome = resume_outcome_from_envelope(stored)
 
     assert outcome.result_status == "error"
     assert outcome.error_code == "result_unknown"

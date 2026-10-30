@@ -1259,9 +1259,12 @@ raises.
 **Where `guidance` comes from (#5377).** A multi-step operation can end with
 its own error answer (#3809): a `result` body with an `error` issue, whose
 `status` word (for example `result_unknown`) the dispatcher copies into
-`extras.error_code`. So `error_code` already carries that word, and
-`guidance` is the body's `guidance` text. The summary takes `guidance` only
-when all of these hold:
+`extras.error_code`. So `error_code` already carries that word. When the
+approval store writes the result on the row (`persist_resume_result`), it
+stamps the body's `guidance` text into `extras.approval_guidance`
+(`with_approval_guidance` in `operations/approval_outcome.py`). The summary
+reads only that stamp, never the body. The stamp is written only when all
+of these hold:
 
 - the run did not end `ok`;
 - the body's `status` equals `error_code`, so the body is MEHO's own error
@@ -1279,6 +1282,14 @@ characters. For
 `vmware.composite.vm.device.cdrom`, the text names the running task ids and
 the question id; the question text and any read error stay in the body
 (`vm_question`, `tasks_error`).
+
+A result stored before the stamp existed has no `extras.approval_guidance`,
+so its summary has no `guidance`. This matters after an upgrade: an older
+connector could copy vendor error text into the body's `guidance` (the VM
+resize step did), and that text must not reach the list and show views.
+It stays on the owner-only `/result` read. The card after an approve in
+the console stamps the fresh result the same way before it reads the
+summary.
 
 Where it shows:
 
@@ -1314,9 +1325,10 @@ poll `/result` to learn whether the run ended.
 
 **Pinned by tests:** `tests/test_approval_resume_outcome.py` (summary
 shape, odd envelopes, a resume that errors shows on REST show, list and
-MCP, the `guidance` rules and a credential operation with no vendor text),
+MCP, the `guidance` stamp rules, a credential operation with no vendor
+text, and a result stored before the stamp that shows no guidance),
 `tests/test_ui_approvals.py` (run badge, failed-run modal, failed approve
-card, the "Next step" line),
+card, the "Next step" line, and no "Next step" for an older stored result),
 `tests/test_connectors_vmware_rest_typed_vm_question.py` (a CD-ROM change
 that times out on a VM question names the question id in the summary) and
 `cli/internal/cmd/approvals/approvals_test.go`.

@@ -24,6 +24,7 @@ from meho_backplane.operations.approval_outcome import (
     ResumeOutcome,
     resume_outcome,
     resume_outcome_from_envelope,
+    with_approval_guidance,
 )
 from meho_backplane.operations.approval_queue import (
     EXPIRED_REASON_MESSAGES,
@@ -103,15 +104,15 @@ def project_run_result(result: Any, *, parked_op_id: str) -> dict[str, Any] | No
     """
     if getattr(result, "status", None) == "already_resumed":
         return None
+    envelope = {
+        "status": getattr(result, "status", None),
+        "extras": getattr(result, "extras", None),
+        "audit_id": getattr(result, "audit_id", None),
+        "op_id": getattr(result, "op_id", None),
+        "result": getattr(result, "result", None),
+    }
     outcome = resume_outcome_from_envelope(
-        {
-            "status": getattr(result, "status", None),
-            "extras": getattr(result, "extras", None),
-            "audit_id": getattr(result, "audit_id", None),
-            "op_id": getattr(result, "op_id", None),
-            "result": getattr(result, "result", None),
-        },
-        parked_op_id=parked_op_id,
+        with_approval_guidance(envelope, parked_op_id=parked_op_id)
     )
     return {
         "result_state": "executed" if outcome.result_status == "ok" else "failed",

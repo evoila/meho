@@ -2670,18 +2670,34 @@ _CDROM_GUIDANCE = (
     "and answer it with vmware.vm.question.answer."
 )
 
-#: The stored envelope of a CD-ROM change that timed out while the VM waits on a question.
+#: The stored envelope of a CD-ROM change that timed out while the VM waits on a
+#: question, with the guidance stamp the approval store writes (#5377).
 _RESULT_UNKNOWN_ENVELOPE: dict[str, object] = {
     "status": "error",
     "op_id": _CDROM_OP_ID,
     "error": "result_unknown: the device change timed out; its result is unknown",
     "duration_ms": 30175.0,
     "audit_id": _RUN_AUDIT_ID,
-    "extras": {"error_code": "result_unknown"},
+    "extras": {"error_code": "result_unknown", "approval_guidance": _CDROM_GUIDANCE},
     "result": {
         "status": "result_unknown",
         "vm_question": {"id": "_vmx1", "text": "The guest has locked the CD-ROM door."},
         "guidance": _CDROM_GUIDANCE,
+    },
+}
+
+#: A VM resize result an older MEHO stored, before the guidance stamp existed:
+#: the body's ``guidance`` carries vendor error text, and there is no stamp.
+_OLD_PARTIAL_ENVELOPE: dict[str, object] = {
+    "status": "error",
+    "op_id": "vmware.composite.vm.resize",
+    "error": "partial: CPU applied; memory update failed",
+    "duration_ms": 900.0,
+    "audit_id": _RUN_AUDIT_ID,
+    "extras": {"error_code": "partial"},
+    "result": {
+        "status": "partial",
+        "guidance": "CPU applied; memory update failed: 500 at https://vc.example/api/vcenter/vm",
     },
 }
 
@@ -2705,6 +2721,25 @@ def test_detail_modal_shows_the_next_step_of_a_failed_run() -> None:
     assert "result_unknown" in body
     # The question text from vCenter stays on the owner-only /result read.
     assert "locked the CD-ROM door" not in body
+
+
+def test_detail_modal_of_a_result_stored_before_the_stamp_has_no_next_step() -> None:
+    """Regression: an older stored result never shows its body text as the next step."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_ran_request(op_id="vmware.composite.vm.resize", resume_result=_OLD_PARTIAL_ENVELOPE)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "partial" in body
+    assert 'data-testid="approval-guidance"' not in body
+    assert "vc.example" not in body
 
 
 def test_detail_modal_of_a_plain_failed_run_has_no_next_step() -> None:

@@ -13,6 +13,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/cmd/workref"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -60,7 +61,7 @@ func newRunsCmd() *cobra.Command {
 			"matching runs as a compact 7-column table. Filters: " +
 			"--assignee (TENANT_ADMIN: any subject; OPERATOR: ignored " +
 			"server-side), --status (in_progress / completed / " +
-			"abandoned), --template-slug, --work-ref (exact-match " +
+			"abandoned), --template-slug, --filter-work-ref (exact-match " +
 			"change-ticket reference), --limit (1..500, server " +
 			"default 100).\n\n" +
 			"Operators see only their own runs (the backend forces " +
@@ -79,7 +80,7 @@ func newRunsCmd() *cobra.Command {
 				Assignee:          assignee,
 				Status:            statusFilter,
 				TemplateSlug:      templateSlug,
-				WorkRef:           workRef,
+				WorkRef:           workref.Filter(cmd, workRef),
 				Limit:             limit,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
@@ -92,7 +93,7 @@ func newRunsCmd() *cobra.Command {
 		"filter by run state: in_progress, completed, or abandoned")
 	cmd.Flags().StringVar(&templateSlug, "template-slug", "",
 		"filter by template slug")
-	cmd.Flags().StringVar(&workRef, "work-ref", "",
+	cmd.Flags().StringVar(&workRef, workref.FilterFlag, "",
 		"filter by external change-ticket reference (exact match, e.g. gh:evoila/meho#9)")
 	cmd.Flags().IntVar(&limit, "limit", 0,
 		"max runs per page (1..500, server default 100 when omitted)")

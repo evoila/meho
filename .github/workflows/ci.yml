@@ -52,6 +52,14 @@
 # an ALLOW-LIST that fails CLOSED: anything the detector cannot prove is
 # docs-only runs the FULL matrix. See the `changes` job's SAFETY NOTE.
 #
+# No-backend path (#5296): on a PR that changes no file under `backend/`
+# (apart from `.md` files) and does not change this file, the `changes`
+# detector sets `backend_python=false`. The same heavy Python lanes skip.
+# One short job, `python-outside-backend` (GitHub-hosted runner), runs only
+# the backend tests that read files outside `backend/` (the Helm chart, the Go
+# CLI, the workflows, the docs). The fan-in requires that job to pass on this
+# path. push and merge_group always run everything.
+#
 # Out of scope (deliberately delegated to existing workflows; do not
 # duplicate here):
 #   * Backplane image build / push  -> .github/workflows/image.yml
@@ -189,6 +197,13 @@ jobs:
     #                heavy Python lanes (`python-lint`, the `python-unit-shard`
     #                matrix, and the `python-integration-shard` matrix) skip
     #                via their own `if:` and report success-by-skip (#3252).
+    #   backend_python — `false` when a PR changes no file under `backend/`
+    #                (except `.md`) and does not change this file (#5296). The
+    #                same heavy Python lanes skip. The job
+    #                `python-outside-backend` runs instead: only the backend
+    #                tests that read files outside `backend/`. Fails CLOSED
+    #                like `docs_only`: it starts `true`, and push, merge_group
+    #                and any diff problem keep it `true` (full run).
     #
     # WHY a `changes`-job + job-level `if:` and NOT `on.paths` (#2140):
     # GitHub treats a job skipped by its own `if:` as **Success** (it
@@ -220,6 +235,7 @@ jobs:
     outputs:
       migrations: ${{ steps.detect.outputs.migrations }}
       docs_only: ${{ steps.detect.outputs.docs_only }}
+      backend_python: ${{ steps.detect.outputs.backend_python }}
     steps:
       - name: Checkout
         # On a PR, HEAD is the test merge: the PR on top of the newest
@@ -236,19 +252,30 @@ jobs:
           # docs-only fast path. Only a positive classification flips either.
           migrations=true
           docs_only=false
+          backend_python=true
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             # push / merge_group: never fast-path; always the full matrix.
-            echo "non-PR event (${{ github.event_name }}) -> migrations=${migrations}, docs_only=${docs_only} (full run)"
+            echo "non-PR event (${{ github.event_name }}) -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python} (full run)"
           # HEAD^1, not `github.event.pull_request.base.sha`: the event's
           # base sha is `main` as of when the PR was opened. Once `main`
           # moves, a diff against it also lists other PRs' files and a
           # docs-only PR loses the fast path (#4657).
-          elif ! changed="$(git diff --name-only --no-renames HEAD^1 HEAD)"; then
+          # core.quotePath=false: git prints a path with non-ASCII bytes
+          # (e.g. `café.json`) as is. By default git wraps such a path in
+          # double quotes and escapes the bytes, and the classifiers below
+          # would not match it (#5310).
+          elif ! changed="$(git -c core.quotePath=false diff --name-only --no-renames HEAD^1 HEAD)"; then
             # Diff unavailable -> keep fail-safe defaults (full run + migration gate on).
             echo "git diff failed -> migrations=${migrations}, docs_only=${docs_only} (fail-safe full run)"
           elif [ -z "${changed}" ]; then
             # No file changes (e.g. an empty / branch-only PR) -> full run, fail-safe.
             echo "empty diff -> migrations=${migrations}, docs_only=${docs_only} (fail-safe full run)"
+          elif grep -q '^"' <<<"${changed}"; then
+            # git still quotes a path that holds a double quote, a backslash
+            # or a control character. The classifiers below work line by
+            # line and cannot read such a path -> keep fail-safe defaults.
+            printf 'changed files (HEAD^1..HEAD):\n%s\n' "${changed}"
+            echo "quoted path in the diff -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python} (fail-safe full run)"
           else
             printf 'changed files (HEAD^1..HEAD):\n%s\n' "${changed}"
             # --- migration classification (#2140, unchanged) ---
@@ -279,9 +306,27 @@ jobs:
               docs_only=true
               echo "all changed files are docs/*.md -> docs_only=true (fast path)"
             fi
+            # --- backend Python classification (#5296) ---
+            # backend_python=false only when no changed path, apart from
+            # `.md` files, is under backend/ or is this workflow file.
+            # grep exits 1 when it selects no line (every file is `.md`);
+            # any other non-zero exit is an error and keeps the full run.
+            rc=0
+            non_md="$(grep -vE '\.md$' <<<"${changed}")" || rc=$?
+            if [ "${rc}" -gt 1 ]; then
+              echo "could not filter the changed files -> backend_python=true (fail-safe full run)"
+            elif grep -qE '^(backend/|\.github/workflows/ci\.yml$)' <<<"${non_md}"; then
+              echo "backend/ or ci.yml change detected -> backend_python=true (full run)"
+            else
+              backend_python=false
+              echo "no backend/ change -> backend_python=false (only the tests that read outside backend/)"
+            fi
           fi
-          echo "migrations=${migrations}" >> "$GITHUB_OUTPUT"
-          echo "docs_only=${docs_only}" >> "$GITHUB_OUTPUT"
+          {
+            echo "migrations=${migrations}"
+            echo "docs_only=${docs_only}"
+            echo "backend_python=${backend_python}"
+          } >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------
   # Required unit lane, sharded (#3251). The pre-#3251 monolithic
@@ -322,12 +367,15 @@ jobs:
     # the shards) so the required unit-lane fan-in reports success-by-skip.
     # `needs: changes` makes `docs_only` readable here; if the detect job
     # fails, this job skip-cascades and the fan-in fails the required context
-    # CLOSED (it asserts `needs.changes.result == 'success'`).
+    # CLOSED (it asserts `needs.changes.result == 'success'`). It also skips
+    # when `backend_python` is `false` (#5296): ruff and mypy read only
+    # backend/.
     needs: changes
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
-       needs.changes.outputs.docs_only != 'true')
+       needs.changes.outputs.docs_only != 'true' &&
+       needs.changes.outputs.backend_python != 'false')
     runs-on: ubuntu-latest
     # Twice the ~1-2 min observed cost, per the file's per-job cap convention.
     timeout-minutes: 10
@@ -398,12 +446,15 @@ jobs:
     # docs-only skip (identical shape to python-lint): a proven docs-only PR
     # skips all four legs → the fan-in reports success-by-skip. `needs:
     # changes` makes `docs_only` readable; a detect-job failure skip-cascades
-    # these legs and the fan-in fails the required context CLOSED.
+    # these legs and the fan-in fails the required context CLOSED. The legs
+    # also skip when `backend_python` is `false` (#5296); the job
+    # `python-outside-backend` then runs the tests that read outside backend/.
     needs: changes
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
-       needs.changes.outputs.docs_only != 'true')
+       needs.changes.outputs.docs_only != 'true' &&
+       needs.changes.outputs.backend_python != 'false')
     # The heavy runner pool (#761); its sizes live outside this repo. Only the
     # pytest sweep is CPU/memory-bound enough to want the extra cores;
     # ruff/mypy run once in python-lint on a GitHub-hosted runner.
@@ -1080,6 +1131,72 @@ jobs:
           echo "::notice title=Peak memory (unit shard ${{ matrix.shard }}/4)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
           exit 0
 
+  python-outside-backend:
+    name: Python tests that read files outside backend
+    # #5296. Runs only on a pull request that changes no file under backend/
+    # (`backend_python` is `false`) and is not docs-only. On such a pull
+    # request python-lint, the four unit shards and python-integration skip.
+    # Some backend tests still read files outside backend/: the Helm chart,
+    # the Go CLI, the workflows, the docs and the examples. This job runs
+    # exactly those test files, from the list in
+    # backend/tests/_outside_backend_tests.py. The guard test
+    # tests/test_outside_backend_tests.py keeps the list complete.
+    #
+    # Non-required check. The python-unit-lane fan-in fails the required
+    # context when this job does not pass on such a pull request.
+    #
+    # GitHub-hosted runner: the listed tests need public tools only (uv, Helm,
+    # jq, Docker for the chart's own PostgreSQL image). A short job must not
+    # wait for a slot on the internal pools.
+    needs: changes
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.changes.outputs.backend_python == 'false' &&
+      needs.changes.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    # About 2 minutes of pytest plus setup; the cap is a hang backstop.
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        # Same pinned uv as the other Python jobs (see python-lint).
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        with:
+          version: "0.13.0"
+          enable-cache: true
+
+      - name: Sync Python environment (locked)
+        run: uv sync --locked --all-groups
+
+      - name: Install Helm
+        # The tests/test_chart_*.py files render the chart with helm. Same pin
+        # as the unit shards; MEHO_REQUIRE_HELM=1 below makes them fail, not
+        # skip, when helm is missing.
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
+        with:
+          version: v3.16.4
+
+      - name: Pytest (tests that read files outside backend)
+        shell: bash
+        env:
+          MEHO_REQUIRE_HELM: "1"
+        run: |
+          set -euo pipefail
+          mapfile -t FILES < <(uv run python tests/_outside_backend_tests.py)
+          echo "${#FILES[@]} test files read files outside backend/"
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "::error::the list of tests that read outside backend/ is empty"
+            exit 1
+          fi
+          uv run pytest -n 3 --dist loadscope \
+            --timeout=180 --timeout-method=signal "${FILES[@]}"
+
   python-unit-lane:
     name: Python (ruff + mypy + pytest)
     # FAN-IN carrying the branch-protection required context (#3251). This job
@@ -1134,7 +1251,10 @@ jobs:
     # GitHub-hosted runner (#4626): this job does no setup and runs one bash
     # step, and it is the last job of every CI run — it must never wait for a
     # slot on the internal pool.
-    needs: [changes, python-lint, python-unit-shard]
+    #  4. No-backend path (#5296). When `backend_python` is `false`, lint and
+    #     the shards skip by their own `if:`, and `python-outside-backend`
+    #     must pass instead. On every other path that job is skipped.
+    needs: [changes, python-lint, python-unit-shard, python-outside-backend]
     if: >-
       always() &&
       (github.event_name != 'pull_request' ||
@@ -1151,9 +1271,12 @@ jobs:
           docs_only='${{ needs.changes.outputs.docs_only }}'
           lint='${{ needs.python-lint.result }}'
           shards='${{ needs.python-unit-shard.result }}'
-          echo "changes (detect): result=${detect}, docs_only=${docs_only}"
+          backend_python='${{ needs.changes.outputs.backend_python }}'
+          outside='${{ needs.python-outside-backend.result }}'
+          echo "changes (detect): result=${detect}, docs_only=${docs_only}, backend_python=${backend_python}"
           echo "python-lint (ruff + ruff format + mypy): ${lint}"
           echo "python-unit-shard (aggregate of all 4 shard legs): ${shards}"
+          echo "python-outside-backend (tests that read outside backend/): ${outside}"
 
           # The detect job MUST have succeeded for its docs_only classification
           # to be trustworthy. If not (failure / cancelled / an unexpected
@@ -1172,12 +1295,24 @@ jobs:
             # their detect-gated `if:` (they never ran). Accept `skipped` (the
             # expected state) or `success` (defensive: if one somehow ran and
             # passed). Anything else — failure/cancelled — still FAILS closed.
+            for r in "${lint}" "${shards}" "${outside}"; do
+              case "${r}" in
+                success|skipped) ;;
+                *) fail=1 ;;
+              esac
+            done
+          elif [ "${backend_python}" = "false" ]; then
+            # NO-BACKEND PATH (#5296) — lint + every shard were skipped by
+            # their `if:`; the tests that read outside backend/ must PASS.
             for r in "${lint}" "${shards}"; do
               case "${r}" in
                 success|skipped) ;;
                 *) fail=1 ;;
               esac
             done
+            if [ "${outside}" != "success" ]; then
+              fail=1
+            fi
           else
             # FULL RUN — require STRICT success. A `skipped` lint/shard here is
             # anomalous (no skip-cascade is possible: `changes` succeeded above,
@@ -1189,15 +1324,22 @@ jobs:
                 *) fail=1 ;;
               esac
             done
+            # python-outside-backend skips on a full run; it must not fail.
+            case "${outside}" in
+              success|skipped) ;;
+              *) fail=1 ;;
+            esac
           fi
 
           if [ "${fail}" -ne 0 ]; then
-            echo "::error title=Python unit lane red::ruff / ruff format / mypy or one or more pytest shards did not pass. This fan-in carries the branch-protection required context 'Python (ruff + mypy + pytest)'; open the 'Python lint + typecheck (ruff + mypy)' / 'Python unit shard N/4' jobs above for the failing detail."
+            echo "::error title=Python unit lane red::ruff / ruff format / mypy, one or more pytest shards, or the tests that read files outside backend did not pass. This fan-in carries the branch-protection required context 'Python (ruff + mypy + pytest)'; open the 'Python lint + typecheck (ruff + mypy)' / 'Python unit shard N/4' / 'Python tests that read files outside backend' jobs above for the failing detail."
             exit 1
           fi
 
           if [ "${docs_only}" = "true" ]; then
             echo "Unit lane GREEN (docs-only fast path #3252) — lint + all 4 pytest shards skipped-by-detect; nothing to test for a pure docs/*.md diff."
+          elif [ "${backend_python}" = "false" ]; then
+            echo "Unit lane GREEN (no backend change, #5296) — lint + all 4 pytest shards skipped; the tests that read files outside backend/ passed."
           else
             echo "Unit lane GREEN — ruff + ruff format + mypy + all 4 pytest shards passed."
           fi
@@ -1855,10 +1997,17 @@ jobs:
     # checks that `changes` succeeded). The CLASSIFIER itself is fail-safe:
     # only a proven-docs-only diff sets `docs_only=true`, so a code PR is
     # never skipped here.
+    #
+    # #5296: the legs also skip when `backend_python` is `false` (a PR that
+    # changes no file under backend/ and not this file), and the fan-in
+    # accepts the skipped legs on that path. A few integration tests read
+    # files outside backend/ (the Keycloak sub-chart, examples/, the CLI);
+    # they need containers, so on such a PR only the merge queue runs them.
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
-       needs.changes.outputs.docs_only != 'true')
+       needs.changes.outputs.docs_only != 'true' &&
+       needs.changes.outputs.backend_python != 'false')
     needs: changes
     # The normal internal pool, not the heavy one: the tests run serially
     # (no xdist) and mostly wait on containers.
@@ -2140,6 +2289,9 @@ jobs:
     #  3. Docs-only PRs: every shard skips by its detect-gated `if:` and
     #     this step accepts `skipped` ONLY when `changes` succeeded and
     #     said docs_only=true. On every other run it needs strict success.
+    #  4. No-backend PRs (#5296): the shards skip the same way when
+    #     `backend_python` is `false`, and this step accepts `skipped` then
+    #     too. The merge queue runs the shards on the merged result.
     # GitHub-hosted runner (#4626): one bash step, no setup; it must never
     # wait for a slot on the internal pool.
     needs: [changes, python-integration-shard]
@@ -2156,8 +2308,9 @@ jobs:
         run: |
           detect='${{ needs.changes.result }}'
           docs_only='${{ needs.changes.outputs.docs_only }}'
+          backend_python='${{ needs.changes.outputs.backend_python }}'
           shards='${{ needs.python-integration-shard.result }}'
-          echo "changes (detect): result=${detect}, docs_only=${docs_only}"
+          echo "changes (detect): result=${detect}, docs_only=${docs_only}, backend_python=${backend_python}"
           echo "python-integration-shard (aggregate of all 4 shard legs): ${shards}"
 
           if [ "${detect}" != "success" ]; then
@@ -2168,6 +2321,13 @@ jobs:
           if [ "${docs_only}" = "true" ]; then
             case "${shards}" in
               success|skipped) echo "Integration lane GREEN (docs-only fast path #3252) — all 4 shards skipped-by-detect." ;;
+              *) echo "::error title=Integration lane red::an integration shard did not pass (${shards}). Open the 'Python integration shard N/4' jobs above for the detail."; exit 1 ;;
+            esac
+          elif [ "${backend_python}" = "false" ]; then
+            # NO-BACKEND PATH (#5296) — the shards were skipped by their
+            # `if:`; the merge queue runs them on the merged result.
+            case "${shards}" in
+              success|skipped) echo "Integration lane GREEN (no backend change, #5296) — all 4 shards skipped-by-detect." ;;
               *) echo "::error title=Integration lane red::an integration shard did not pass (${shards}). Open the 'Python integration shard N/4' jobs above for the detail."; exit 1 ;;
             esac
           elif [ "${shards}" = "success" ]; then

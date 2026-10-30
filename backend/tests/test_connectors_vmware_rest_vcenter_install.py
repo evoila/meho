@@ -103,15 +103,22 @@ _RUNNING = _info(
         },
     },
 )
+
+
+def _error(*texts: str) -> dict[str, Any]:
+    """A vendor error object: ``error_type`` and a stack of messages (the error, then its cause)."""
+    return {"error_type": "ERROR", "messages": [_msg(text) for text in texts]}
+
+
 _FAILED = _info(
     "FAILED",
     "FAILED",
-    error="The setup failed.",
+    error=_error("The setup failed.", "A step did not finish."),
     subtask_order=["<step-sso>"],
     subtasks={
         "<step-sso>": {
             "status": "FAILED",
-            "error": "SSO setup failed.",
+            "error": _error("SSO setup failed."),
             "result": {"errors": [{"id": "e1", "message": _msg("Port 389 is in use.")}]},
         }
     },
@@ -517,9 +524,18 @@ async def test_status_of_a_failed_setup_gives_each_step_with_its_error(
         out = await _status(connector)
 
     assert out["state"] == "failed"
-    assert out["error"] == "The setup failed."
+    assert out["error"] == "The setup failed. A step did not finish."
     assert out["steps"][0]["error"] == "SSO setup failed."
     assert out["steps"][0]["errors"] == ["Port 389 is in use."]
+
+
+def test_error_text_reads_vendor_error_objects_and_plain_texts() -> None:
+    assert deployment_mod.error_text(_error("The setup failed.")) == "The setup failed."
+    assert deployment_mod.error_text({"error_type": "NOT_ALLOWED", "messages": []}) == "NOT_ALLOWED"
+    assert deployment_mod.error_text("plain text") == "plain text"
+    assert deployment_mod.error_text({}) is None
+    assert deployment_mod.error_text("") is None
+    assert deployment_mod.error_text(None) is None
 
 
 @pytest.mark.parametrize(

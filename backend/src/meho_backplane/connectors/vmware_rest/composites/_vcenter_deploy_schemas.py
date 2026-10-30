@@ -176,7 +176,10 @@ APPLIANCE_DEPLOY_PARAMETER_SCHEMA: dict[str, Any] = {
         "folder": {
             "type": "string",
             "pattern": _FOLDER_PATTERN,
-            "description": "Optional VM folder id; default the datacenter's VM folder.",
+            "description": (
+                "VM folder id (group-v...) in the datacenter of the resource pool. Required: "
+                "vCenter takes the appliance only into a VM folder."
+            ),
         },
         "name": {
             "type": "string",
@@ -227,6 +230,7 @@ APPLIANCE_DEPLOY_PARAMETER_SCHEMA: dict[str, Any] = {
     "required": [
         "resource_pool",
         "datastore",
+        "folder",
         "name",
         "port_group",
         "size",
@@ -241,6 +245,7 @@ APPLIANCE_DEPLOY_PARAMETER_SCHEMA: dict[str, Any] = {
             "library_item_name": "<vcenter-appliance-item>",
             "resource_pool": "resgroup-8",
             "datastore": "datastore-15",
+            "folder": "group-v3",
             "port_group": "dvportgroup-21",
             "name": "<new-vcenter-vm-name>",
             "size": "small",
@@ -260,6 +265,7 @@ APPLIANCE_DEPLOY_RESPONSE_SCHEMA: dict[str, Any] = {
                 "deployed",
                 "deploy_failed",
                 "deploy_error",
+                "folder_required",
                 "invalid_reference",
                 "library_not_found",
                 "ambiguous_library",
@@ -270,7 +276,8 @@ APPLIANCE_DEPLOY_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "deployed: imported (and powered on when asked). deploy_failed: vCenter refused "
                 "the file or a setting before any change. deploy_error: the import or the copy "
-                "failed; MEHO aborted it. The others: the library item was not found."
+                "failed; MEHO aborted it. folder_required: the call named no VM folder; nothing "
+                "was sent. The others: the library item was not found."
             ),
         },
         "vm_id": {"type": ["string", "null"], "description": "Id of the new appliance VM."},

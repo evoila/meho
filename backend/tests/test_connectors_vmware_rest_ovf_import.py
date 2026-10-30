@@ -26,6 +26,7 @@ import pytest
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest import ovf_import, ovf_transfer
 from meho_backplane.connectors.vmware_rest.composites import _write
+from meho_backplane.connectors.vmware_rest.library_download import LibraryDownloadError
 from meho_backplane.connectors.vmware_rest.ovf_import import ImportPlacement, LeaseImportResult
 
 
@@ -383,6 +384,28 @@ async def test_upload_fault_aborts_and_maps_to_import_error() -> None:
     result = await _run(conn, source)
     assert isinstance(result, LeaseImportResult)
     assert result.status == "import_error"
+    assert any(p.endswith("/HttpNfcLeaseAbort") for p, _ in conn.vmomi_calls)
+    assert not any(p.endswith("/HttpNfcLeaseComplete") for p, _ in conn.vmomi_calls)
+
+
+async def test_a_disk_that_fails_to_prepare_aborts_the_lease() -> None:
+    """A source error after ImportVApp (a RuntimeError) aborts the lease like an upload fault."""
+
+    class _UnpreparedDisk(_FakeDisk):
+        async def __aenter__(self) -> _FakeDisk:
+            raise LibraryDownloadError("download-session file 'app-disk1.vmdk' failed to prepare")
+
+    conn = _EngineConnector(
+        service_content=_service_content(),
+        import_spec_result=_import_spec_result(),
+        lease_ref=_lease_ref(),
+        lease_polls=[_ready_poll()],
+    )
+    source = _FakeSource("<Envelope/>", {"app-disk1.vmdk": _UnpreparedDisk(b"12345678")})
+    result = await _run(conn, source)
+    assert isinstance(result, LeaseImportResult)
+    assert result.status == "import_error"
+    assert "failed to prepare" in result.issues[-1]["message"]
     assert any(p.endswith("/HttpNfcLeaseAbort") for p, _ in conn.vmomi_calls)
     assert not any(p.endswith("/HttpNfcLeaseComplete") for p, _ in conn.vmomi_calls)
 

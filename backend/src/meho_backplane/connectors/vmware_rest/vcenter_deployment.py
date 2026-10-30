@@ -73,6 +73,7 @@ __all__ = [
     "SecretValueError",
     "StepLog",
     "deployment_view",
+    "error_text",
     "hide_secrets",
     "localized_text",
     "mounted",
@@ -297,6 +298,28 @@ def localized_text(message: Any) -> str | None:
     return message if isinstance(message, str) and message else None
 
 
+def error_text(error: Any) -> str | None:
+    """The text of a vendor ``error``: a text, or an error object with its ``messages``.
+
+    The setup API gives ``error`` as an object (``error_type`` and a stack of
+    ``messages``; the first describes the error, the next ones its cause).
+    """
+    if isinstance(error, str):
+        return error or None
+    if not isinstance(error, dict):
+        return None
+    messages = error.get("messages")
+    texts = [
+        text
+        for text in (localized_text(m) for m in (messages if isinstance(messages, list) else []))
+        if text
+    ]
+    if texts:
+        return " ".join(texts)
+    error_type = error.get("error_type")
+    return error_type if isinstance(error_type, str) and error_type else None
+
+
 def _progress_percent(progress: Any) -> int | None:
     if not isinstance(progress, dict):
         return None
@@ -336,14 +359,13 @@ def _step_rows(info: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(task, dict):
             continue
         result = task.get("result")
-        error = task.get("error")
         rows.append(
             {
                 "name": name,
                 "status": task.get("status") if isinstance(task.get("status"), str) else None,
                 "progress_percent": _progress_percent(task.get("progress")),
                 "description": localized_text(task.get("description")),
-                "error": error if isinstance(error, str) and error else None,
+                "error": error_text(task.get("error")),
                 "errors": _notification_texts(result, "errors"),
                 "warnings": _notification_texts(result, "warnings"),
             }
@@ -355,7 +377,6 @@ def deployment_view(info: dict[str, Any]) -> dict[str, Any]:
     """The flat view of ``GET /vcenter/deployment`` the operations return."""
     vendor_state = info.get("state") if isinstance(info.get("state"), str) else None
     progress = info.get("progress")
-    error = info.get("error")
     return {
         "state": _STATE_WORDS.get(vendor_state or "", "unknown"),
         "vendor_state": vendor_state,
@@ -364,7 +385,7 @@ def deployment_view(info: dict[str, Any]) -> dict[str, Any]:
         "progress_message": (
             localized_text(progress.get("message")) if isinstance(progress, dict) else None
         ),
-        "error": error if isinstance(error, str) and error else None,
+        "error": error_text(info.get("error")),
         "operation": info.get("operation") if isinstance(info.get("operation"), str) else None,
         "started_at": info.get("start_time") if isinstance(info.get("start_time"), str) else None,
         "ended_at": info.get("end_time") if isinstance(info.get("end_time"), str) else None,

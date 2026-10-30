@@ -4510,14 +4510,18 @@ settings such as the SSO domain to the appliance on an import, so the
 appliance stops after its network setup and waits for step 2. When a vCenter
 warning says it did not use a sent setting, the answer names it in
 `settings_not_used`. The size and the storage size become the deployment
-option (`small`, `small-lstorage`, ...).
+option (`small`, `small-lstorage`, ...). The VM folder (`folder`, a
+`group-v...` id) is required: the shared import engine would otherwise use the
+root folder of vCenter, which holds datacenters and takes no VM. A call
+without a folder gets `status: folder_required` and sends nothing.
 
 **Passwords.** The root password (step 1) and the SSO administrator password
 (step 2) come from Vault (`root_password_secret_ref`,
 `sso_admin_password_secret_ref`). MEHO reads them when the call runs, under
 the identity of the person who runs it (after an approval: the approver).
 They are only in the vendor request bodies. A vendor message that holds one
-is replaced. The deploy and the install are pinned as `credential_write`
+is replaced, and so is every URL in an issue text (the upload URLs of the
+lease carry a one-time ticket). The deploy and the install are pinned as `credential_write`
 (`broadcast/events.py`), so the flight recorder keeps no request body, the
 dispatcher keeps no vendor text of a failed call, and the broadcast carries
 no params. The approval request shows the Vault path, never the

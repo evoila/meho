@@ -28,7 +28,13 @@ The root password comes from Vault (``root_password_secret_ref``) and is
 never returned. It is in the ``CreateImportSpec`` and ``ImportVApp`` bodies
 only. A vendor fault text that holds it is replaced. The op is pinned as
 ``credential_write``, so the flight recorder keeps no request body and the
-dispatcher keeps no vendor text of a failed call.
+dispatcher keeps no vendor text of a failed call. A URL in an issue text is
+replaced too: the upload URLs of the lease carry a one-time ticket, and an
+upload error names its URL.
+
+``folder`` (a VM folder id) is required. The shared import engine would fall
+back to the root folder of vCenter, which holds datacenters and takes no VM,
+so a call without a folder is refused before anything is sent.
 
 Clean-up: the download session is cancelled in a ``finally`` block, also after
 an error. A failed copy aborts the lease, and vCenter then removes the
@@ -42,6 +48,7 @@ in ``ImportVApp`` (duplicate name), so delete or rename that VM first.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
@@ -108,6 +115,10 @@ PROP_DNS_SERVERS: Final = _P + "net.dns.servers"
 PROP_HOST_NAME: Final = _P + "net.pnid"
 PROP_ROOT_PASSWORD: Final = _P + "root.passwd"
 
+#: A URL in a vendor or transport text (an upload URL carries a one-time ticket).
+_URL_RE: Final = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+")
+_URL_HIDDEN: Final = "<url hidden>"
+
 #: ``storage_size`` -> the suffix of the appliance file's deployment option id.
 _STORAGE_SUFFIX: Final[dict[str, str]] = {
     "default": "",
@@ -148,7 +159,7 @@ def _placement(params: dict[str, Any], root_password: str) -> ImportPlacement:
         datastore=str(params["datastore"]),
         entity_name=str(params["name"]),
         host=params.get("host"),
-        folder=params.get("folder"),
+        folder=str(params["folder"]),
         network_mappings={ovf_network: str(params["port_group"])},
         ovf_properties=appliance_properties(params, root_password),
         disk_provisioning=str(params.get("disk_mode") or "thin"),
@@ -156,8 +167,33 @@ def _placement(params: dict[str, Any], root_password: str) -> ImportPlacement:
     )
 
 
+def _without_urls(text: str | None) -> str | None:
+    """*text* with every URL replaced, so no upload ticket reaches the result or the audit."""
+    return _URL_RE.sub(_URL_HIDDEN, text) if text is not None else None
+
+
 def _safe_issues(issues: list[dict[str, Any]], secrets: tuple[str, ...]) -> list[dict[str, Any]]:
-    return [{**entry, "message": hide_secrets(entry.get("message"), secrets)} for entry in issues]
+    return [
+        {**entry, "message": _without_urls(hide_secrets(entry.get("message"), secrets))}
+        for entry in issues
+    ]
+
+
+def _folder_refusal(params: dict[str, Any]) -> dict[str, Any] | None:
+    """The answer for a call without a VM folder: nothing is sent."""
+    folder = params.get("folder")
+    if isinstance(folder, str) and folder:
+        return None
+    message = (
+        "folder is required: give the id of a VM folder (group-v...) in the datacenter of "
+        "the resource pool. vCenter takes the appliance only into a VM folder. Nothing was sent."
+    )
+    return _envelope(
+        params,
+        status="folder_required",
+        secrets=(),
+        issues=[issue("placement", "error", message)],
+    )
 
 
 def _settings_not_used(issues: list[dict[str, Any]], sent: list[str]) -> list[str]:
@@ -284,6 +320,9 @@ async def vcenter_appliance_deploy_composite(
         return refusal
     if imported is not None:
         return await _power_on(connector, target, operator, imported)
+    refused = _folder_refusal(params)
+    if refused is not None:
+        return refused
 
     secrets = (await read_secret_param(operator, target, params, prefix="root_password"),)
     try:
@@ -338,6 +377,7 @@ async def vcenter_appliance_deploy_preview(ctx: PreviewContext) -> dict[str, Any
         "resource_pool": params.get("resource_pool"),
         "datastore": params.get("datastore"),
         "host": params.get("host"),
+        "folder": params.get("folder"),
         "port_group": params.get("port_group"),
         "deployment_option": deployment_option(params),
         "disk_mode": params.get("disk_mode") or "thin",

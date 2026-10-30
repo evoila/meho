@@ -50,11 +50,15 @@ from meho_backplane.operations.composite import (
 _ROOT_PASSWORD = 'Root-canary"7f3a-must-not-leak'
 _ITEM_ID = "00000000-0000-0000-0000-0000000004a1"
 _DISK = b"appliance-disk-bytes" * 8
+#: The upload URL of the lease; its path and query carry one-time tickets.
+_TICKET = "52d1-ticket-canary-must-not-leak"
+_UPLOAD_URL = f"https://esx.test.invalid/nfc/{_TICKET}/disk-0.vmdk?ticket={_TICKET}"
 
 _PARAMS: dict[str, Any] = {
     "library_item": _ITEM_ID,
     "resource_pool": "resgroup-8",
     "datastore": "datastore-15",
+    "folder": "group-v3",
     "port_group": "dvportgroup-21",
     "name": "new-vcenter-vm",
     "size": "small",
@@ -83,15 +87,14 @@ class _Operator:
 
 
 class _Resp:
-    def __init__(self, status: int = 200) -> None:
+    """The upload answer; a failure raises the real httpx error, which names the URL."""
+
+    def __init__(self, status: int, url: str) -> None:
         self.status_code = status
+        self._response = httpx.Response(status, request=httpx.Request("PUT", url))
 
     def raise_for_status(self) -> None:
-        if self.status_code >= 400:
-            request = httpx.Request("PUT", "https://esx.test.invalid/nfc/disk")
-            raise httpx.HTTPStatusError(
-                "upload failed", request=request, response=httpx.Response(500, request=request)
-            )
+        self._response.raise_for_status()
 
 
 class _PutClient:
@@ -104,7 +107,7 @@ class _PutClient:
         async for chunk in content:
             received += chunk
         self.puts.append({"url": url, "bytes": received})
-        return _Resp(500 if self._fail else 200)
+        return _Resp(403 if self._fail else 200, url)
 
 
 class _Disk:
@@ -130,22 +133,39 @@ class _Disk:
             yield part
 
 
+class _UnpreparedDisk:
+    """A disk whose download-session preparation fails when it is opened."""
+
+    async def __aenter__(self) -> _UnpreparedDisk:
+        raise library_download.LibraryDownloadError(
+            "download-session file 'appliance-disk1.vmdk' failed to prepare (status=ERROR)"
+        )
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
 class _Source:
     """The content-library download session, in memory."""
 
     instances: list[_Source] = []  # noqa: RUF012 -- reset by each test
 
-    def __init__(self, *, chunk_sleep: float = 0.0, **_kw: Any) -> None:
+    def __init__(
+        self, *, chunk_sleep: float = 0.0, prepare_fails: bool = False, **_kw: Any
+    ) -> None:
         self.keep_alives = 0
         self.closed = False
         self._chunk_sleep = chunk_sleep
+        self._prepare_fails = prepare_fails
         _Source.instances.append(self)
 
     async def read_descriptor(self) -> str:
         return "<Envelope/>"
 
-    def open_disk(self, name: str) -> _Disk:
+    def open_disk(self, name: str) -> Any:
         assert name == "appliance-disk1.vmdk"
+        if self._prepare_fails:
+            return _UnpreparedDisk()
         return _Disk(_DISK, chunk_sleep=self._chunk_sleep)
 
     async def keep_alive(self) -> None:
@@ -165,7 +185,7 @@ def _ready_poll() -> dict[str, Any]:
                 "_typeName": "HttpNfcLeaseDeviceUrl",
                 "key": "/vm-77/disk-0",
                 "importKey": "disk1",
-                "url": "https://esx.test.invalid/nfc/lease-1/disk-0.vmdk",
+                "url": _UPLOAD_URL,
                 "disk": True,
             }
         ],
@@ -231,6 +251,9 @@ class _VCenter:
 
     def spec_body(self) -> dict[str, Any]:
         return next(body for path, body in self.vmomi if path.endswith("/CreateImportSpec"))
+
+    def import_body(self) -> dict[str, Any]:
+        return next(body for path, body in self.vmomi if path.endswith("/ImportVApp"))
 
     def paths(self) -> list[str]:
         return [path for path, _ in self.vmomi]
@@ -324,6 +347,7 @@ async def test_deploy_imports_with_the_appliance_settings_and_powers_on(
         }
     ]
     assert vc.upload_client.puts[0]["bytes"] == _DISK
+    assert vc.import_body()["folder"]["value"] == "group-v3"
     assert vc.paths()[-1].endswith("/HttpNfcLeaseComplete")
     assert _Source.instances[0].closed is True
     assert vc.rest == [("POST", "/api/vcenter/vm/vm-77/power?action=start", None)]
@@ -364,6 +388,65 @@ async def test_a_failed_copy_aborts_the_lease_and_still_cleans_up() -> None:
     assert not any(path.endswith("/HttpNfcLeaseComplete") for path in vc.paths())
     assert _Source.instances[0].closed is True
     assert vc.rest == []
+
+
+async def test_an_upload_error_does_not_show_the_upload_url_or_its_ticket() -> None:
+    """The real httpx error names the upload URL; the result must not."""
+    vc = _VCenter(upload_fail=True)
+    out = await _deploy(vc)
+
+    assert out["status"] == "deploy_error"
+    errors = [issue["message"] for issue in out["issues"] if issue["severity"] == "error"]
+    assert errors and "403" in errors[0]
+    assert "<url hidden>" in errors[0]
+    blob = json.dumps(out)
+    assert _TICKET not in blob
+    assert _UPLOAD_URL not in blob
+    assert "https://" not in blob
+    assert vc.upload_client.puts[0]["url"] == _UPLOAD_URL
+
+
+async def test_a_disk_that_fails_to_prepare_aborts_the_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A download-session error after ImportVApp ends the lease, so no half VM stays."""
+
+    def _failing_source(**kw: Any) -> _Source:
+        return _Source(prepare_fails=True, **kw)
+
+    monkeypatch.setattr(library_download, "LibraryDownloadSource", _failing_source)
+    vc = _VCenter()
+    out = await _deploy(vc)
+
+    assert out["status"] == "deploy_error"
+    assert out["vm_id"] is None
+    assert out["transfer"] == []
+    assert "failed to prepare" in out["issues"][0]["message"]
+    assert vc.upload_client.puts == []
+    assert vc.paths()[-1].endswith("/HttpNfcLeaseAbort")
+    assert not any(path.endswith("/HttpNfcLeaseComplete") for path in vc.paths())
+    assert _Source.instances[0].closed is True
+    assert vc.rest == []
+
+
+async def test_a_call_without_a_folder_is_refused_before_anything_is_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _must_not_run(**_kw: Any) -> Any:
+        raise AssertionError("a refused call must not read Vault")
+
+    monkeypatch.setattr(deployment_mod, "load_param_secret_data", _must_not_run)
+    params = {key: value for key, value in _PARAMS.items() if key != "folder"}
+    vc = _VCenter()
+    out = await _deploy(vc, params)
+
+    assert out["status"] == "folder_required"
+    assert out["vm_id"] is None
+    assert out["issues"][0]["severity"] == "error"
+    assert "folder is required" in out["issues"][0]["message"]
+    assert vc.vmomi == []
+    assert vc.rest == []
+    assert _Source.instances == []
 
 
 async def test_a_vendor_fault_that_echoes_the_password_is_hidden() -> None:
@@ -490,6 +573,7 @@ async def test_the_preview_shows_the_plan_and_never_the_password() -> None:
 
     assert preview is not None
     assert preview["deployment_option"] == "small-lstorage"
+    assert preview["folder"] == "group-v3"
     assert preview["root_password_secret_ref"] == _PARAMS["root_password_secret_ref"]
     assert preview["host_name"] == "new-vcenter.example.test"
     _assert_no_password(preview)

@@ -8,8 +8,8 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 77 hand-authored composites
-that orchestrate cross-spec workflows: 19 read composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 78 hand-authored composites
+that orchestrate cross-spec workflows: 20 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
 in `#2258`; plus the four guest-operations reads `#3100` and the
@@ -19,7 +19,8 @@ the two SUBSCRIBED content-library reads `content_library.subscribed.status` +
 `content_library.subscribed.items.list` / `#3495` + the datastore
 cache-refresh read `datastore.refresh` / `#3789` + the datastore file list
 read `datastore.file.list` / `#3432` + the vSAN folder list
-read `datastore.vsan.folder.list` / `#4022` + the VM limit and
+read `datastore.vsan.folder.list` / `#4022` + the orphan folder check
+`datastore.orphan_dirs` / `#3814` + the VM limit and
 reservation read `vm.resource_allocation.show` / `#3880` + the migration
 inventory read `vmware.migration.inventory`) and 58 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
@@ -496,8 +497,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `vcenter.yaml` by `test_connectors_vmware_rest_library_reconcile.py`.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 77
-  `_CompositeSpec` rows (19 read — incl. the `#3789` datastore
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 78
+  `_CompositeSpec` rows (20 read — incl. the `#3789` datastore
   cache-refresh read `datastore.refresh` — + 46 dangerous/destructive
   writes + 12 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
@@ -1278,8 +1279,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 77 `vmware.composite.*` rows with
-   `source_kind="composite"` — 19 reads (18 with `safety_level="safe"` +
+   queued registrar and upserts: the 78 `vmware.composite.*` rows with
+   `source_kind="composite"` — 20 reads (19 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
    service principals), and 58 writes, all `requires_approval=True`
@@ -1403,6 +1404,7 @@ unchanged consumers read:
 | disk_mark_flash | `HostStorageSystem.MarkAsSsd_Task` / `MarkAsNonSsd_Task` | `configManager.storageSystem` moid | Task MoRef → poll `Task.info` |
 | datastore.refresh (`#3789`) | `Datastore.RefreshDatastore` / `RefreshDatastoreStorageInfo` | Datastore moid (`server:/export` on ESXi) | void (204 / empty) → summary read back via `RetrievePropertiesEx` |
 | datastore.file.list (`#3432`) | `HostDatastoreBrowser.SearchDatastore_Task` / `SearchDatastoreSubFolders_Task` | `Datastore.browser` moid | Task MoRef → poll `Task.info`; `info.result` is the `HostDatastoreBrowserSearchResults` |
+| datastore.orphan_dirs (`#3814`) | `HostDatastoreBrowser.SearchDatastoreSubFolders_Task` (one per datastore, from the root) | `Datastore.browser` moid | Task MoRef → poll `Task.info`; `info.result` is the `HostDatastoreBrowserSearchResults[]` |
 
 *Native primitive typing (the codec crux).* An **explicit** `xsi:type` is
 authoritative (`xsd:boolean` → `bool`, integer → `int`, float → `float`, any
@@ -1675,7 +1677,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 77 composites (19 reads + 58 writes) land as `source_kind="composite"`
+The 78 composites (20 reads + 58 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1772,7 +1774,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 77 composites are hand-authored aggregators the connector ships as
+The 78 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -3414,8 +3416,8 @@ None of the three composites registers a park-time preview builder (matching
 
 ### AI guidance of the storage and network operations
 
-The fourteen storage and network multi-step operations (`datastore.usage`,
-`datastore.refresh`, `datastore.file.list`, `datastore.vsan.folder.list`, `datastore.dir.create`, `datastore.file.delete`, the three
+The sixteen storage and network multi-step operations (`datastore.usage`,
+`datastore.refresh`, `datastore.file.list`, `datastore.vsan.folder.list`, `datastore.orphan_dirs`, `datastore.dir.create`, `datastore.file.delete`, the three
 `storage_policy.*` operations, `network.portgroup.audit` / `.create` /
 `.security.set` / `.vlan.set` / `.delete` and `host.standard_portgroup.delete`)
 keep their AI guidance (`llm_instructions`: `when_to_call`, `preconditions`,
@@ -3781,6 +3783,62 @@ it does not use `resolve_for_path`; it calls `resolve_datastore` and
   been run against a real vSAN datastore.
 - **Later.** The general file list `datastore.file.list` (`#3432`, above)
   covers VMFS and NFS. The two reads can be merged into one op later.
+
+### Orphan folder check (`datastore.orphan_dirs`, #3814)
+
+`vmware.composite.datastore.orphan_dirs` is a read composite (safety `safe`,
+no approval) in `composites/_datastore_orphans.py`. One call on a vCenter
+target answers "which top-level folders on my datastores does no registered
+VM use?" for every datastore, or for the names in `datastores`. It is the
+read half of a storage clean-up; the delete is `datastore.file.delete`.
+
+- **Reads.** `GET /vcenter/datastore` lists the datastores (with
+  `filter.names`, and the names are also filtered in code because some
+  builds ignore a list filter). One `read_many` reads `name`, `summary.type`,
+  `summary.accessible`, `browser` and `vm` of all of them. One `read_many`
+  reads the files of every VM on those datastores (`Datastore.vm`, so
+  templates and VMs with only a disk on a datastore are included) with the
+  props of the delete check (`_datastore_claims._CLAIM_PROPS`). Then, per
+  datastore, one `SearchDatastoreSubFolders_Task` from the root through the
+  shared `_datastore_browse.search`. That one browse gives the top-level
+  folders (the root row) and every file below them.
+- **Rows.** One row per top-level folder: `datastore`, `datastore_moid`,
+  `folder`, `datastore_path`, `size_bytes` and `file_count` (all files in and
+  below the folder), `newest_modified` (latest change), `claimed_by` (VM
+  names) and `classification`. Rows are sorted newest change first.
+- **Classification.** `claimed` when a VM uses a file below the folder, by
+  the rules of the delete check (`_datastore_claims._claim_hits`: `layoutEx`,
+  device backings such as mounted ISO files, the `.vmx`). `system` for names
+  vSphere keeps for itself: a leading `.`, `contentlib-*`, `vsantraces`,
+  `vmkdump`, and `fcd` / `catalog` (first-class disks and their index; no VM
+  lists them). Everything else is `orphan`. `orphan` only means "no VM
+  registered in this vCenter uses it": ISO stores, content library storage
+  and the folders of VMs registered in another vCenter are also unused here.
+  The AI guidance says a row is a candidate to review, never a reason to
+  delete.
+- **vSAN.** The root browse gives each folder a UUID `path` and a
+  `friendlyName`. The row shows the friendly name in `folder` and the UUID
+  in `datastore_path`; a VM uses the folder when its files match either one
+  (as in `datastore.vsan.folder.list`).
+- **Skipped.** A datastore that is not accessible, has a type other than
+  VMFS / NFS / vSAN (vVol), has no readable browser, or whose browse fails
+  (for example a permission fault) goes into `skipped` with a reason. The
+  rest of the answer still comes back. A requested name that does not exist
+  is also listed there.
+- **`vm_check`.** `complete`, or `incomplete` when vCenter answered a read
+  only in part or the files of a VM could not be known. Then an `orphan` row
+  may still be in use.
+- **Answer.** `status` is `ok`, or `unsupported_host_target` for a target
+  that is not a vCenter (a standalone ESXi host: use `datastore.file.list`
+  with `include_usage` there). A long `directories` list becomes a result
+  handle. `llm_instructions.result_scalars` keeps the counts, `vm_check` and
+  `guidance` next to the handle, and `result_digest` names `directories` as
+  the collection (the answer also has the `skipped` list) and adds the
+  per-classification counts. `skipped` is stored with the rows.
+- **Cost.** The browses run one after the other, each bounded by the
+  browse task timeout of `_datastore_browse`. Tests use the shared vim fake
+  (`test_connectors_vmware_rest_composites_datastore_orphans.py`); the op
+  has not been run against a real vCenter yet.
 
 ### AI guidance of the guest, event, performance and typed reads
 

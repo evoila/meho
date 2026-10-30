@@ -149,6 +149,56 @@ STORAGE_NETWORK_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
             ]
         },
     },
+    _P + "datastore.orphan_dirs": {
+        "when_to_call": (
+            "Call to find the top-level datastore folders that no registered VM uses, on "
+            "every datastore of a vCenter in one call: for a storage clean-up review, or to "
+            "find what is left of deleted VMs. vCenter targets only. Read-only."
+        ),
+        "parameter_hints": {
+            "datastores": (
+                "Optional list of datastore names (from datastore.usage). Leave it out to "
+                "check every datastore."
+            ),
+        },
+        "output_shape": (
+            "{status: ok|unsupported_host_target, datastore_count, count, orphan_count, "
+            "system_count, claimed_count, vm_check, directories: [{datastore, "
+            "datastore_moid, folder, datastore_path, size_bytes (all files in and below "
+            "it), file_count, newest_modified, classification: orphan|system|claimed, "
+            "claimed_by: [vm names]}], skipped: [{datastore, reason}], guidance}. Rows are "
+            "newest change first. A long list comes back as a link to the stored result; "
+            "read it with result_query, e.g. filter classification = orphan."
+        ),
+        "next_step": (
+            "orphan only means that no VM registered in THIS vCenter uses the folder. It is "
+            "a candidate to review, never a reason to delete. Legitimate unused folders "
+            "include ISO and media stores, content library storage, and the folders of VMs "
+            "registered in another vCenter that shares the datastore. If vm_check is "
+            "incomplete, an orphan row may still be in use. Look at a folder with "
+            "datastore.file.list (VMFS, NFS) or datastore.vsan.folder.list (vSAN) and ask "
+            "the owner before any delete with datastore.file.delete. A datastore in skipped "
+            "was not checked at all."
+        ),
+        "result_scalars": {
+            "keys": [
+                "status",
+                "target_product",
+                "datastore_count",
+                "count",
+                "orphan_count",
+                "system_count",
+                "claimed_count",
+                "vm_check",
+                "guidance",
+            ]
+        },
+        "result_digest": {
+            "collection": "directories",
+            "status_field": "classification",
+            "name_field": "folder",
+        },
+    },
     _P + "datastore.dir.create": {
         "when_to_call": (
             "Call to create a folder on a datastore, for example for ISO files or install "

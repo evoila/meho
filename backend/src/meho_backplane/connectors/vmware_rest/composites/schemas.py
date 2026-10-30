@@ -91,6 +91,8 @@ __all__ = [
     "DATASTORE_FILE_LIST_PARAMETER_SCHEMA",
     "DATASTORE_FILE_LIST_RESPONSE_SCHEMA",
     "DATASTORE_MOID_PATTERN",
+    "DATASTORE_ORPHAN_DIRS_PARAMETER_SCHEMA",
+    "DATASTORE_ORPHAN_DIRS_RESPONSE_SCHEMA",
     "DATASTORE_PATH_PATTERN",
     "DATASTORE_REFRESH_PARAMETER_SCHEMA",
     "DATASTORE_REFRESH_RESPONSE_SCHEMA",
@@ -8727,6 +8729,138 @@ DATASTORE_VSAN_FOLDER_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
         "guidance": {"type": ["string", "null"], "description": "Why the status is not ok."},
     },
     "required": ["status", "datastore", "count", "entries"],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.datastore.orphan_dirs`` parameter schema (#3814).
+DATASTORE_ORPHAN_DIRS_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "datastores": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1, "maxLength": 255},
+            "minItems": 1,
+            "maxItems": 200,
+            "uniqueItems": True,
+            "description": (
+                "Optional datastore names (exact match). Leave it out to check every "
+                "datastore the vCenter sees. A name that does not exist is listed in skipped."
+            ),
+        },
+    },
+    "required": [],
+    "additionalProperties": False,
+    "examples": [{}, {"datastores": ["<datastore-name>"]}],
+}
+
+#: ``vmware.composite.datastore.orphan_dirs`` response schema (#3814).
+DATASTORE_ORPHAN_DIRS_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["ok", "unsupported_host_target"],
+            "description": (
+                "ok: directories holds the rows. unsupported_host_target: the target is not "
+                "a vCenter (see guidance)."
+            ),
+        },
+        "target_product": {
+            "type": ["string", "null"],
+            "description": "With unsupported_host_target: the product the target reports.",
+        },
+        "datastore_count": {
+            "type": "integer",
+            "description": "Number of datastores that were read (not counting skipped ones).",
+        },
+        "count": {"type": "integer", "description": "Number of rows in directories."},
+        "orphan_count": {"type": "integer", "description": "Rows with classification orphan."},
+        "system_count": {"type": "integer", "description": "Rows with classification system."},
+        "claimed_count": {"type": "integer", "description": "Rows with classification claimed."},
+        "vm_check": {
+            "type": ["string", "null"],
+            "enum": ["complete", "incomplete", None],
+            "description": (
+                "complete: claimed_by is exact. incomplete: vCenter answered only in part, or "
+                "the files of a VM could not be read, so an orphan row may still be in use. "
+                "null: nothing was read (refusal)."
+            ),
+        },
+        "directories": {
+            "type": "array",
+            "description": "One row per top-level datastore folder, newest change first.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "datastore": {"type": "string", "description": "Datastore name."},
+                    "datastore_moid": {"type": "string", "description": "Datastore moid."},
+                    "folder": {
+                        "type": "string",
+                        "description": "Folder name (on vSAN the friendly name).",
+                    },
+                    "datastore_path": {
+                        "type": "string",
+                        "description": (
+                            "'[datastore] folder' as vCenter names it (on vSAN with the UUID)."
+                        ),
+                    },
+                    "size_bytes": {
+                        "type": "integer",
+                        "description": "Size of all files in and below the folder.",
+                    },
+                    "file_count": {
+                        "type": "integer",
+                        "description": "Number of files in and below the folder.",
+                    },
+                    "newest_modified": {
+                        "type": ["string", "null"],
+                        "description": "Latest change of the folder or a file in it (ISO 8601).",
+                    },
+                    "classification": {
+                        "type": "string",
+                        "enum": ["orphan", "system", "claimed"],
+                        "description": (
+                            "claimed: a registered VM or template uses a file in it. system: "
+                            "a folder vSphere keeps for itself. orphan: no VM registered in "
+                            "this vCenter uses it -- a candidate to review, not to delete."
+                        ),
+                    },
+                    "claimed_by": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Names of the registered VMs that use the folder.",
+                    },
+                },
+                "required": [
+                    "datastore",
+                    "datastore_moid",
+                    "folder",
+                    "datastore_path",
+                    "size_bytes",
+                    "file_count",
+                    "newest_modified",
+                    "classification",
+                    "claimed_by",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        "skipped": {
+            "type": "array",
+            "description": "Datastores that were not read, each with the reason.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "datastore": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["datastore", "reason"],
+                "additionalProperties": False,
+            },
+        },
+        "guidance": {"type": ["string", "null"], "description": "Why the status is not ok."},
+    },
+    "required": ["status", "count", "directories", "skipped"],
     "additionalProperties": False,
 }
 

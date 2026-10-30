@@ -26,15 +26,16 @@ the source_kind="composite" persistence.
 Mixed safety posture
 --------------------
 
-The 19 read composites (the five T5 / #508 reads + the datastore
+The 20 read composites (the five T5 / #508 reads + the datastore
 cache-refresh read ``datastore.refresh`` / #3789 + the datastore file list
 ``datastore.file.list`` / #3432 + the vSAN folder list
-``datastore.vsan.folder.list`` / #4022 + the VM allocation read
+``datastore.vsan.folder.list`` / #4022 + the orphan folder check
+``datastore.orphan_dirs`` / #3814 + the VM allocation read
 ``vm.resource_allocation.show`` / #3880 + the 4 guest-ops reads
 ``vm.guest.process.list`` / ``vm.guest.env.read`` / ``vm.guest.net.show``
 / ``vm.guest.file.read`` / #3100 + the Supervisor / namespace /
 storage-policy / content-library ``status`` + ``list`` reads) are
-read-only. 18 of them pass ``safety_level="safe"`` +
+read-only. 19 of them pass ``safety_level="safe"`` +
 ``requires_approval=False`` -- overrides of T4's ``dangerous`` / ``True``
 defaults. The exception is ``vm.guest.file.read``, promoted to
 ``caution`` in #3720 (it can fetch arbitrary guest bytes as the in-guest
@@ -116,6 +117,9 @@ from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
 )
 from meho_backplane.connectors.vmware_rest.composites._datastore_list import (
     datastore_file_list_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._datastore_orphans import (
+    datastore_orphan_dirs_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._datastore_vsan import (
     datastore_vsan_folder_list_composite,
@@ -282,6 +286,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     DATASTORE_FILE_DELETE_RESPONSE_SCHEMA,
     DATASTORE_FILE_LIST_PARAMETER_SCHEMA,
     DATASTORE_FILE_LIST_RESPONSE_SCHEMA,
+    DATASTORE_ORPHAN_DIRS_PARAMETER_SCHEMA,
+    DATASTORE_ORPHAN_DIRS_RESPONSE_SCHEMA,
     DATASTORE_REFRESH_PARAMETER_SCHEMA,
     DATASTORE_REFRESH_RESPONSE_SCHEMA,
     DATASTORE_USAGE_PARAMETER_SCHEMA,
@@ -508,7 +514,9 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "free space and the VMs on each datastore (datastore.usage, safe); the "
         "files in one datastore folder (datastore.file.list, safe); the folders "
         "of a vSAN datastore with their size and the VMs that use them, or the "
-        "files of one such folder (datastore.vsan.folder.list, safe); make ESXi "
+        "files of one such folder (datastore.vsan.folder.list, safe); the "
+        "top-level folders of every datastore that no registered VM uses "
+        "(datastore.orphan_dirs, safe); make ESXi "
         "read a datastore's capacity and free space again (datastore.refresh, "
         "safe); list storage policies (storage_policy.list, safe). Changes: "
         "create a datastore folder (datastore.dir.create, caution); delete a file "
@@ -788,6 +796,24 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS[
             "vmware.composite.datastore.vsan.folder.list"
         ],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.datastore.orphan_dirs",
+        handler=datastore_orphan_dirs_composite,
+        summary="Find the top-level datastore folders that no registered VM uses.",
+        description=(
+            "Checks every datastore of a vCenter (or the named ones) in one call. One row per "
+            "top-level folder with size, file count, latest change, the VMs that use it and a "
+            "classification: orphan, system or claimed. Datastores that cannot be read are "
+            "listed in skipped. vCenter only. Read-only."
+        ),
+        parameter_schema=DATASTORE_ORPHAN_DIRS_PARAMETER_SCHEMA,
+        response_schema=DATASTORE_ORPHAN_DIRS_RESPONSE_SCHEMA,
+        group_key="storage",
+        tags=["composite", "read-only", "storage", "datastore", "cleanup", "vi-json"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS["vmware.composite.datastore.orphan_dirs"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.network.portgroup.audit",

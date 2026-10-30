@@ -128,6 +128,26 @@ def test_malformed_groups_claim_gives_no_flag(raw: Any) -> None:
     assert [e["event"] for e in logs] == ["malformed_groups_claim"]
 
 
+@pytest.mark.parametrize(
+    "groups",
+    [
+        pytest.param(["MEHO-SA-Operators", 42], id="number-after"),
+        pytest.param([None, "MEHO-SA-Operators"], id="none-before"),
+        pytest.param(["MEHO-SA-Operators", ["MEHO-SA-Operators"]], id="nested-list"),
+        pytest.param(["/MEHO-SA-Operators", {"name": "x"}], id="dict-after-path"),
+    ],
+)
+def test_groups_list_with_a_bad_entry_gives_no_flag(groups: list[Any]) -> None:
+    """One bad entry turns the whole ``groups`` claim off, even next to the group."""
+    with capture_logs() as logs:
+        operator = _operator(_claims(groups=groups))
+    assert operator.self_approver is False
+    assert operator.may_self_approve is False
+    assert [(e["event"], e["reason"]) for e in logs] == [
+        ("malformed_groups_claim", "entry_not_a_string")
+    ]
+
+
 def test_custom_group_name(monkeypatch: pytest.MonkeyPatch) -> None:
     """``JWT_SELF_APPROVER_GROUP`` changes the group that counts."""
     monkeypatch.setenv("JWT_SELF_APPROVER_GROUP", "Ops-Self-Approve")
@@ -188,6 +208,34 @@ def test_malformed_tenants_claim_gives_no_flag(raw: Any) -> None:
     """A present but bad list never falls back to the ``groups`` claim."""
     operator = _operator(_claims(groups=["MEHO-SA-Operators"], meho_tenants=raw))
     assert operator.self_approver is False
+
+
+_GOOD_SA_ENTRY = f"{_TENANT_A}:lab-a:SA-Operators"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param([_GOOD_SA_ENTRY, "not-a-uuid:lab-a:SA-Operators"], id="bad-uuid-after"),
+        pytest.param([f"{_TENANT_A}:lab-a", _GOOD_SA_ENTRY], id="two-parts-before"),
+        pytest.param([_GOOD_SA_ENTRY, f"{_TENANT_A}:Lab_A:Readers"], id="bad-tenant-name"),
+        pytest.param([_GOOD_SA_ENTRY, f"{_TENANT_B}:lab-b:Bosses"], id="unknown-group"),
+        pytest.param([_GOOD_SA_ENTRY, 42], id="number"),
+        pytest.param([None, _GOOD_SA_ENTRY], id="none"),
+    ],
+)
+def test_good_entry_next_to_a_bad_entry_gives_no_flag(raw: Any) -> None:
+    """The whole list must be good. One bad entry turns the flag off.
+
+    ``_extract_tenants`` keeps the good entries for ``Operator.tenants``,
+    so the flag cannot trust that list alone (#5394 review).
+    """
+    with capture_logs() as logs:
+        operator = _operator(_claims(meho_tenants=raw))
+    assert operator.self_approver is False
+    assert operator.may_self_approve is False
+    assert [e["event"] for e in logs] == ["malformed_tenant_entry"]
+    assert [t.tenant_id for t in operator.tenants] == [_TENANT_A]
 
 
 def test_two_entries_for_the_current_tenant_give_no_flag() -> None:

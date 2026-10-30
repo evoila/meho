@@ -1428,6 +1428,24 @@ def _extract_approver(claims: Any, settings: Settings) -> bool:
     return False
 
 
+def _self_approver_from_tenants(
+    raw: object, tenants: tuple[TenantMembership, ...], tenant_id: UUID
+) -> bool:
+    """Decide the SA-Operators flag from the ``meho_tenants`` claim as sent.
+
+    The whole claim must be good. A value that is not a list, or a list
+    with any entry that :func:`_parse_tenant_entry` refuses, gives
+    ``False``; :func:`_extract_tenants` already logged that claim or
+    entry. *tenants* holds the good entries of the same claim. Exactly one
+    of them must name *tenant_id*, and its group must give
+    ``self_approval``.
+    """
+    if not isinstance(raw, list) or any(_parse_tenant_entry(entry) is None for entry in raw):
+        return False
+    current = [t for t in tenants if t.tenant_id == tenant_id]
+    return len(current) == 1 and group_grant(current[0].group).self_approval
+
+
 def _extract_self_approver(
     claims: Any,
     settings: Settings,
@@ -1446,14 +1464,18 @@ def _extract_self_approver(
       only the list counts. The flag is on when the list has exactly
       one entry for *tenant_id* and that entry's group gives
       ``self_approval`` (:func:`~meho_backplane.auth.operator.group_grant`).
-      An entry of another tenant never counts. A claim that is not a
-      list, or has no good entry for *tenant_id*, gives ``False``.
+      An entry of another tenant never counts. The whole claim must be
+      good: a claim that is not a list, has any bad entry (also one of
+      another tenant), or has no good entry for *tenant_id*, gives
+      ``False``. :func:`_extract_tenants` keeps the good entries of such
+      a list for :attr:`Operator.tenants`; this flag does not.
     * The token has no ``meho_tenants`` claim (a site with one tenant
       and the older mappers): the flag is on when the ``groups`` claim
       names the group ``JWT_SELF_APPROVER_GROUP`` (default
       ``MEHO-SA-Operators``). A leading ``/`` is ignored on both sides,
       the same as in the one-group check. A ``groups`` claim that is not
-      a list gives ``False`` and logs ``malformed_groups_claim``.
+      a list, or has an entry that is not a string, gives ``False`` and
+      logs ``malformed_groups_claim``.
 
     Both claims come from the shipped login setup
     (``docs/decisions/login-role-groups.md``): the ``groups-claim`` mapper
@@ -1463,16 +1485,21 @@ def _extract_self_approver(
     if principal_kind in MACHINE_PRINCIPAL_KINDS:
         return False
     if settings.jwt_tenants_claim_name in claims:
-        current = [t for t in tenants if t.tenant_id == tenant_id]
-        return len(current) == 1 and group_grant(current[0].group).self_approval
+        raw_tenants = claims[settings.jwt_tenants_claim_name]
+        return _self_approver_from_tenants(raw_tenants, tenants, tenant_id)
     raw = claims.get(_GROUPS_CLAIM_NAME)
     if raw is None:
         return False
+    log = structlog.get_logger(__name__)
     if not isinstance(raw, list):
-        log = structlog.get_logger(__name__)
         log.warning("malformed_groups_claim", claim_name=_GROUPS_CLAIM_NAME, reason="not_a_list")
         return False
-    names = {item.lstrip("/") for item in raw if isinstance(item, str)}
+    if not all(isinstance(item, str) for item in raw):
+        log.warning(
+            "malformed_groups_claim", claim_name=_GROUPS_CLAIM_NAME, reason="entry_not_a_string"
+        )
+        return False
+    names = {item.lstrip("/") for item in raw}
     return settings.jwt_self_approver_group.lstrip("/") in names
 
 

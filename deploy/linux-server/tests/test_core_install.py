@@ -62,7 +62,7 @@ def place_values(
             approverUsername: "{approver}"
         # shortcut: the pod range, so MEHO may reach the built-in PostgreSQL and
         # OpenBao, until the chart derives these from its built-in parts (#4047).
-        # The update (#4736) removes the two keys.
+        # Then the next update removes the two keys.
         networkPolicy:
           postgresCIDR: "{pod_range}"
           vaultCIDR: "{pod_range}"
@@ -238,6 +238,7 @@ class CoreInstallTests(InstallTestCase):
                     "approver_user": "approver",
                     "cluster_cidr": "10.42.0.0/16",
                     "service_cidr": "10.43.0.0/16",
+                    "join_address": "",
                     "from_disk": False,
                 },
             },

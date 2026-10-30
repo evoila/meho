@@ -13,7 +13,7 @@ windows_dns connector (identity canary + per-domain op groups on the
 ``SshConnector`` base) and adopts the rke2 approval-parked-write mold for
 its destructive ops.
 
-Op surface (24 ops across six groups; safety tier per the Initiative #3259
+Op surface (26 ops across seven groups; safety tier per the Initiative #3259
 satellite table — reads ``safe``, recoverable writes ``caution``,
 destructive ``dangerous`` + ``requires_approval``):
 
@@ -41,6 +41,8 @@ destructive ``dangerous`` + ``requires_approval``):
 * ``winsrv.storage.iscsi.list``  [safe]      Get-IscsiTarget (list-shaped → JSONFlux).
 * ``winsrv.storage.iscsi.connect`` [caution] Connect-IscsiTarget.
 * ``winsrv.storage.disk.format`` [caution]   Initialize-Disk + New-Partition + Format-Volume.
+* ``winsrv.time.get``            [safe]      W32Time registry settings + current source.
+* ``winsrv.time.set``            [caution+approval]  w32tm /config /manualpeerlist.
 
 The dataclass + tuple shape mirrors
 :mod:`~meho_backplane.connectors.windows_dns.ops` and
@@ -117,6 +119,13 @@ WINSRV_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "into a volume (both ``caution``). This is the SQL-FCI shared-disk "
         "path: ``iscsi.connect`` then ``disk.format`` (which refuses a "
         "non-RAW disk unless force=true). No CHAP in this cut."
+    ),
+    "time": (
+        "Use for where the server gets its time: read the NTP peers, the sync "
+        "type and the reliable flag (``winsrv.time.get``), and set the NTP "
+        "peers (``winsrv.time.set`` -- a change that waits for a person to "
+        "approve it). On the first domain controller this is the time source "
+        "of the whole domain."
     ),
 }
 
@@ -248,7 +257,8 @@ def _winsrv_ops() -> tuple[WinsrvOp, ...]:
     """Return the merged registration tuple.
 
     Composition: ``winsrv.about`` (identity canary) + the per-domain op
-    tuples (system / services / features / power / localusers / storage).
+    tuples (system / services / features / power / localusers / storage /
+    time).
     Implemented as a function call rather than a literal-and-splat at module
     level so the import order stays linear: ``ops.py`` defines
     :class:`WinsrvOp` + ``_WINSRV_ABOUT_OP`` + :func:`normalise_json_rows`,
@@ -263,6 +273,7 @@ def _winsrv_ops() -> tuple[WinsrvOp, ...]:
     from meho_backplane.connectors.winsrv.ops_services import SERVICE_OPS
     from meho_backplane.connectors.winsrv.ops_storage import STORAGE_OPS
     from meho_backplane.connectors.winsrv.ops_system import SYSTEM_OPS
+    from meho_backplane.connectors.winsrv.ops_time import TIME_OPS
 
     return (
         _WINSRV_ABOUT_OP,
@@ -273,6 +284,7 @@ def _winsrv_ops() -> tuple[WinsrvOp, ...]:
         *POWER_OPS,
         *LOCALUSER_OPS,
         *STORAGE_OPS,
+        *TIME_OPS,
     )
 
 

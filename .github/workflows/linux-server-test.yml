@@ -2,8 +2,8 @@
 # Copyright (c) 2026 evoila Group
 
 # Tests of the form-2 scripts in deploy/linux-server/: the install script
-# (#4733), its host firewall (#4635), RKE2's CIS profile (#4636), and the
-# scripts that build and check the download (#4734).
+# (#4733), its host firewall (#4635), RKE2's CIS profile (#4636), the
+# update (#4736), and the scripts that build and check the download (#4734).
 #
 # shellcheck checks every shell script there: the *.sh files and any file
 # that starts with a shell shebang, so a script without an extension (for
@@ -21,6 +21,12 @@
 # and kernel, in a new user and network namespace, so the runner's own
 # firewall stays as it is. MEHO_REQUIRE_NFT_CHECK=1 makes those tests fail,
 # not skip, when the runner cannot run them.
+#
+# The tests of --os-packages also run the real apt-get and gpg against a
+# small flat apt repository that the test signs, so the signature check and
+# the format of the OS-package file are proven with the apt of the runner.
+# MEHO_REQUIRE_APT_CHECK=1 makes those tests fail, not skip, when apt-get,
+# gpg or gpgv is missing.
 #
 # The chart is a trigger too: a test checks that every image repository of
 # the chart has a licence line for the download
@@ -185,4 +191,5 @@ jobs:
           # The chart render test must run here, not skip.
           MEHO_REQUIRE_HELM: "1"
           MEHO_REQUIRE_NFT_CHECK: '1'
+          MEHO_REQUIRE_APT_CHECK: '1'
         run: python -m unittest discover -s deploy/linux-server/tests -v

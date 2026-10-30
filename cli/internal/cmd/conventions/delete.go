@@ -78,10 +78,13 @@ type deleteOptions struct {
 	BackplaneOverride string
 }
 
-// deleteResult is the structure printed in --json mode.
+// deleteResult is the structure printed in --json mode. AuditID is
+// null when nothing was deleted (the operator declined) or the
+// backplane sent no Meho-Audit-Id header.
 type deleteResult struct {
-	Slug   string `json:"slug"`
-	Status string `json:"status"`
+	Slug    string  `json:"slug"`
+	Status  string  `json:"status"`
+	AuditID *string `json:"audit_id"`
 }
 
 func runDelete(cmd *cobra.Command, opts deleteOptions) error {
@@ -117,11 +120,12 @@ func runDelete(cmd *cobra.Command, opts deleteOptions) error {
 	if resp.StatusCode != http.StatusNoContent {
 		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode, resp.Body, opts.JSONOut)
 	}
-	result := deleteResult{Slug: opts.Slug, Status: "deleted"}
+	result := deleteResult{Slug: opts.Slug, Status: "deleted", AuditID: resp.AuditID}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), result)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "deleted convention %q\n", opts.Slug)
+	output.WriteAuditReceipt(cmd.OutOrStdout(), resp.AuditID)
 	return nil
 }
 

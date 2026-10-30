@@ -3,8 +3,8 @@
 
 """Add ``targets.secret_field_map`` (#3711).
 
-Revision ID: 0120
-Revises: 0119
+Revision ID: 0128
+Revises: 0127
 Create Date: 2026-10-28
 
 One nullable JSON column. It maps the field name a connector reads to the
@@ -23,8 +23,8 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "0120"
-down_revision: str | None = "0119"
+revision: str = "0128"
+down_revision: str | None = "0127"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

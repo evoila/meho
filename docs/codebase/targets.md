@@ -14,7 +14,7 @@ each other's code:
 | Front | Where | Purpose |
 |---|---|---|
 | REST `/api/v1/targets` | `backend/src/meho_backplane/api/v1/targets.py` | list, discover, describe, probe, create, patch, soft-delete |
-| CLI `meho targets …` | `cli/` (Go) over the REST routes | operator verbs; `meho targets list` calls `GET /api/v1/targets` |
+| CLI `meho targets …` | `cli/` (Go) over the REST routes | operator verbs; `meho targets list` calls `GET /api/v1/targets`, `meho targets delete` calls `DELETE /api/v1/targets/{name}` |
 | MCP `list_targets` | `backend/src/meho_backplane/mcp/tools/topology.py` | working-surface enumeration for agents |
 
 `meho_targets_register` (`mcp/tools/targets_register.py`) is the
@@ -22,9 +22,9 @@ operator-plane MCP write; every `target` argument elsewhere resolves
 through `resolve_target` (`targets/resolver.py`). Destination checks
 are covered in [`target-ssrf-guard.md`](target-ssrf-guard.md).
 
-This document covers the two **list** paths and how `list_targets`
-bounds its response (#3858), and the per-target **secret field map**
-(#3711).
+This document covers the two **list** paths, how `list_targets`
+bounds its response (#3858), the per-target **secret field map**
+(#3711), and how a target is deleted.
 
 ## Key types
 
@@ -134,7 +134,7 @@ does not change and does not know the map exists.
 
 | Piece | Where |
 |---|---|
-| Column `targets.secret_field_map` (JSON, nullable, `NULL` = no map) | `db/models.py`, migration `0120` |
+| Column `targets.secret_field_map` (JSON, nullable, `NULL` = no map) | `db/models.py`, migration `0128` |
 | `secret_field_map` on `Target`, `TargetSummary`, `TargetCreate`, `TargetUpdate` | `targets/schemas.py` |
 | Applying the map when a secret is read | `connectors/_shared/vault_creds.py` (`secret_field_map_of`, `_apply_secret_field_map`) |
 | PATCH merge rules and the probe check | `targets/secret_field_map.py` |
@@ -207,6 +207,26 @@ As a shortcut for the most common case, the SSH connector
 `private_key` when `ssh_private_key` is absent. A secret written by an
 automation pack therefore works for SSH key login with no map at all. When
 both fields are present, `ssh_private_key` wins.
+## Control flow — deleting a target
+
+`DELETE /api/v1/targets/{name}` (`tenant_admin`) and the CLI verb
+`meho targets delete <name> [--force] [--confirm]` (#3943) on top of it:
+
+1. The CLI asks y/N first unless `--confirm` is given. Closed stdin
+   counts as no, so a script never deletes by accident.
+2. The route resolves the name or alias in the caller's tenant (404
+   with near-misses, 409 on an ambiguous alias).
+3. It counts the `graph_node` rows that point at the target. Audit rows
+   are not counted: every request against a target writes one.
+4. When that count is above zero and `force` is not set, it answers 409
+   with `detail.kind = "target_has_references"` and
+   `detail.graph_node_refs`. The CLI prints the count and says to run
+   again with `--force`.
+5. Otherwise it sets `deleted_at` (a soft delete) and answers 204. The
+   row stays, so audit rows still point at it; every read path filters
+   it out. With `force`, the topology nodes stay and keep the deleted
+   target's id in `target_id`. The FK's `ON DELETE SET NULL` only acts
+   on a hard delete, which this route never does.
 
 ## Removing a target (`targets.remove`)
 

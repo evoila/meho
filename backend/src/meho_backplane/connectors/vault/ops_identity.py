@@ -306,7 +306,13 @@ IDENTITY_WHEN_TO_USE: str = (
     "maps onto across auth backends; an alias links one auth-method login "
     "to it; a group bundles entities under shared policies. Pair with the "
     "'auth' group (per-backend userpass/approle roles) and the 'sys' "
-    "group (auth-method mount accessors needed for entity_alias.write)."
+    "group (auth-method mount accessors needed for entity_alias.write). "
+    "Identity token roles and the keys that sign their tokens "
+    "(identity/oidc/role, identity/oidc/key) are listed and read with "
+    "vault.identity.oidc.role.list, vault.identity.oidc.role.read, "
+    "vault.identity.oidc.key.list and vault.identity.oidc.key.read, and "
+    "removed with vault.identity.oidc.role.delete and "
+    "vault.identity.oidc.key.delete (approval required)."
 )
 
 #: Per-op registration spec for the identity surface. ``group_key`` is

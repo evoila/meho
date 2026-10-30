@@ -160,8 +160,8 @@ before you upgrade.
   registry, copy every line of the new `images.txt` (see Added).
 
 ### Steps after the upgrade
-- Back up the database first. The eight migrations only add, so an
-  older image can still read the database after a rollback:
+- Back up the database first. The eight migrations only add tables and
+  columns:
   - `0119` adds the approval status `withdrawn` and two columns for it
     (#5004);
   - `0120` adds the table `tenant_operation_setting` (#5172);
@@ -171,6 +171,13 @@ before you upgrade.
   - `0124` adds the connector package set column for runners (#5314);
   - `0125` adds the column `endpoint_descriptor.owner_package` (#5308);
   - `0126` adds the column `approval_request.release_id` (#5170).
+
+  One limit applies to a rollback to 0.38.0. 0.38.0 does not know the
+  approval status `withdrawn` (#5004). Once any request has been
+  withdrawn, 0.38.0 answers with a server error when it reads that
+  request (`meho approvals show`) and when it lists all approvals
+  (`status=all`, `meho approvals list --status all`). A list of one
+  status, such as `pending`, still works.
 - The upgrade ends every approval request that still waits (#5170). At
   start-up, each `pending` request from an older release becomes
   `expired` with the reason `release_changed`. An approved request from

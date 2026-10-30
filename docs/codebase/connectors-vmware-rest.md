@@ -1678,7 +1678,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 77 composites (17 reads + 60 writes) land as `source_kind="composite"`
+The 78 composites (18 reads + 60 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1775,7 +1775,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 77 composites are hand-authored aggregators the connector ships as
+The 78 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the

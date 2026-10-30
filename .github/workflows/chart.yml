@@ -1296,6 +1296,8 @@ jobs:
     # on a PR that does not touch the chart, and a skipped job reports
     # Success. This job is not part of the required `helm-test-gate`.
     name: helm install + helm test (bring-your-own PostgreSQL)
+    permissions:
+      contents: read
     needs: [changes, validate]
     if: >-
       github.event_name != 'pull_request' ||

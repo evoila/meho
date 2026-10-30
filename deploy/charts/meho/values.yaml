@@ -1271,6 +1271,59 @@ coreKeycloak:
     enabled: false
     # -- The second tenant's id (a UUID). Required when `ci.enabled` is true.
     tenantId: ""
+  # The company login (an OpenID Connect login system such as authentik,
+  # Entra ID, Okta or ADFS) in front of the built-in Keycloak. When on, the
+  # bootstrap Job sets it up on every install and upgrade: people log in on
+  # the company login page (with its own second login step) and come back
+  # with a MEHO token from Keycloak. Their company group decides their MEHO
+  # group, and with it their tenant and role. Service accounts stay in
+  # Keycloak. Put each person in one MEHO role group only.
+  #
+  # In the company login system, make a confidential client with this
+  # redirect address (the install notes print it):
+  # `https://<hostname>/auth/realms/meho/broker/<alias>/endpoint`.
+  # It must sign its tokens with a published key (for example RS256).
+  #
+  # Turning `enabled` off later does not remove the login from Keycloak.
+  # To show the Keycloak login form again (the way in with the local
+  # accounts when the company login is down), keep `enabled` on and set
+  # `autoRedirect: false`.
+  companyLogin:
+    enabled: false
+    # -- Short name of the login in Keycloak. It is part of the redirect
+    # address. Letters, digits, `-` and `_`.
+    alias: company
+    # -- Name of the button on the Keycloak login page.
+    displayName: Company login
+    # -- The company login's discovery address, for example
+    # `https://<idp>/application/o/<slug>/.well-known/openid-configuration`.
+    # Keycloak reads it at every install and upgrade. Required when on.
+    discoveryUrl: ""
+    # -- The client id from the company login system. Required when on.
+    clientId: ""
+    # -- The Secret that holds the client secret. Create it before the
+    # install. Required when on.
+    clientSecret:
+      secretName: ""
+      secretKey: client_secret
+    # -- What Keycloak asks the company login for. Keep `profile`: it
+    # usually carries the groups.
+    scopes: openid profile email
+    # -- The token field that lists the person's company groups.
+    groupsClaim: groups
+    # -- Company group name -> MEHO group name, for example
+    # `{"Ops": "MEHO-Operators"}`. Keycloak checks the groups at every
+    # company login and takes a person out of a MEHO group that no longer
+    # matches. A removed line removes its rule.
+    groupMap: {}
+    # -- Skip the Keycloak login page and go straight to the company login.
+    autoRedirect: true
+    # -- Only for a company login with a certificate from a private CA: a
+    # ConfigMap in the release namespace with the CA certificate (PEM).
+    # Keycloak trusts it for its calls to the company login.
+    caBundle:
+      configMapName: ""
+      key: ca.crt
 
 coreVault:
   # -- Built-in OpenBao, the password safe (ADR 0008). When on, the install

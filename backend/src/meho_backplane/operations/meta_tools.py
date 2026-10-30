@@ -122,6 +122,7 @@ from meho_backplane.operations.delivery_budget import (
 from meho_backplane.operations.dispatch_limits import rate_limited_read_envelope
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.ingest.list_connectors import next_step_for_registered_connector
+from meho_backplane.operations.op_policy import OpKey, effective_policy_map
 from meho_backplane.retrieval.retriever import RRF_K
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import (
@@ -1779,6 +1780,12 @@ async def describe_descriptor(
         # another tenant collapses to "not found".
         if descriptor.tenant_id is not None and descriptor.tenant_id != operator.tenant_id:
             return None
+        # #4711: show the risk level and approval that apply to this
+        # tenant, with operator overrides, so the console run form and the
+        # REST read match what a call does.
+        policy = (
+            await effective_policy_map(session, tenant_id=operator.tenant_id, rows=[descriptor])
+        )[OpKey.of(descriptor)]
         return OperationDescriptor(
             id=descriptor.id,
             tenant_id=descriptor.tenant_id,
@@ -1802,8 +1809,8 @@ async def describe_descriptor(
             llm_instructions=(
                 dict(descriptor.llm_instructions) if descriptor.llm_instructions else None
             ),
-            safety_level=descriptor.safety_level,
-            requires_approval=descriptor.requires_approval,
+            safety_level=policy.safety_level,
+            requires_approval=policy.requires_approval,
             is_enabled=descriptor.is_enabled,
             custom_description=descriptor.custom_description,
             custom_notes=descriptor.custom_notes,

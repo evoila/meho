@@ -319,16 +319,17 @@ class Operator(BaseModel):
     approver: bool = False
     runner_id: UUID | None = None
     check_runner_dispatch: bool = False
+    #: The ``auth_time`` claim: when the person last entered their
+    #: credentials (seconds since the epoch, OIDC Core section 2). A token
+    #: refresh keeps it (RFC 9470 section 6.1). ``None`` when the token has
+    #: no such claim, which a service token never has. Read by the fresh
+    #: sign-in check (:mod:`meho_backplane.auth.fresh_sign_in`).
+    auth_time: int | None = None
     #: Every tenant the person is in, with the login group in each, in
     #: token order (#5236). Empty when the token has no ``meho_tenants``
     #: claim, and always empty for a machine login. Not used yet: the
     #: current tenant still comes from ``tenant_id`` / ``tenant_role``.
     tenants: tuple[TenantMembership, ...] = ()
-    #: When the person last typed their credentials, from the ``auth_time``
-    #: claim (seconds since 1970, OIDC Core §2). A refreshed token keeps the
-    #: time of the first sign-in (RFC 9470 §6.1). ``None`` when the token has
-    #: no such claim. An approve over REST needs it to be recent (#3979).
-    auth_time: int | None = None
     #: How the person signed in, from the ``acr`` claim. ``None`` when absent.
     acr: str | None = None
     #: The Keycloak sign-in session id, from the ``sid`` claim. ``None`` when

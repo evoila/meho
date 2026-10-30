@@ -1530,6 +1530,48 @@ sweep: `vmware.composite.vm.guest.env.read` and
 `vmware.composite.vm.guest.process.list`. They are `safe`, so no call of
 theirs waits for approval by default.
 
+## Operator overrides and the fresh sign-in check (#4711)
+
+The `safety_level` and `requires_approval` a dispatch sees are the
+*effective* values: the classification in code or in the API
+description, made stricter by operator overrides
+(`operation_policy_override`; see `spec-ingestion.md`, "Operator
+overrides of risk level and approval"). `lookup_descriptor` applies the
+overrides, so the approval gate, the preview and the parked request all
+use the same values. A destructive operation always waits for approval,
+whatever the overrides say.
+
+Turning approval off for an operation is the one loosening edit. It
+needs `platform_admin`, a written reason, and a person. This holds for
+every edit that ends approval, also removing an override that required
+it (`meho connector remove-override`, `DELETE
+/api/v1/connectors/{id}/operation-overrides/{op_id}`), and also when
+approval ends only for a tenant's own copy of a built-in operation that
+an install-wide override reached: in the console
+the web session is the person (the same rule as an approval click); on
+REST it is the **fresh sign-in check**,
+`auth/fresh_sign_in.py:has_fresh_sign_in`:
+
+* the caller is a human principal (`PrincipalKind.USER`); agents,
+  service principals and runners always fail;
+* the token's `auth_time` claim (now on `Operator.auth_time`) is at
+  most `FRESH_SIGN_IN_MAX_AGE_SECONDS` old (default `300`, from 30 to
+  3600; `get_settings()` reads the environment variable, and the same
+  value sets the check and the `max_age` in the challenge). A token
+  refresh keeps `auth_time` (RFC 9470 section 6.1), so a long-lived
+  refreshed CLI token does not pass; a token without `auth_time` fails.
+
+A failed check answers `401` with `WWW-Authenticate: Bearer
+error="insufficient_user_authentication", max_age=<N>`
+(`fresh_sign_in_challenge`, RFC 9470 section 3). The CLI prints the
+message and says to run `meho login` again. The MCP edit tool never
+loosens, so this check has no MCP path. The check is meant to be shared:
+the approval decision on CLI and REST (#3979) reuses it. Two edits of
+the same operation cannot slip past the check together: edits and
+removals of one operation run one at a time, across all scopes, under
+a per-operation lock (see `spec-ingestion.md`, "Edits of one operation
+run one at a time").
+
 ## Catalog `safety_level` on every envelope (#1855)
 
 The per-op preview hook is opt-in, so before #1855 a parked op with no

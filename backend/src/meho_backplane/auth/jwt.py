@@ -1467,14 +1467,16 @@ def _extract_runner_id(claims: Any, settings: Settings) -> UUID | None:
 def _extract_sign_in_claims(claims: Any) -> tuple[int | None, str | None, str | None]:
     """Read ``auth_time``, ``acr`` and ``sid``: when and how the person signed in.
 
-    The approve check (#3979) needs them. A value of the wrong type reads
-    as missing, so the check refuses the approval (fail closed). A bool is
-    not a time, even though Python counts it as an ``int``.
+    The fresh sign-in check (#4711) and the approve check (#3979) need
+    them. A value of the wrong type reads as missing, so the check refuses
+    (fail closed). ``auth_time`` must be a whole number (OIDC Core §2 says
+    NumericDate; Keycloak sends an integer). A bool is not a time, even
+    though Python counts it as an ``int``.
     """
     raw_time = claims.get("auth_time")
-    auth_time: int | None = None
-    if isinstance(raw_time, (int, float)) and not isinstance(raw_time, bool):
-        auth_time = int(raw_time)
+    auth_time = (
+        raw_time if isinstance(raw_time, int) and not isinstance(raw_time, bool) else None
+    )
     acr = claims.get("acr")
     sid = claims.get("sid")
     return (

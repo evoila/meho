@@ -947,6 +947,49 @@
           },
           "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
           "then": { "properties": { "tenantId": { "minLength": 1 } }, "required": ["tenantId"] }
+        },
+        "companyLogin": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The company login (an OpenID Connect login system such as authentik, Entra ID, Okta or ADFS) in front of the built-in Keycloak. Off by default. When on, the bootstrap Job sets up Keycloak's identity broker on every install and upgrade: the provider from `discoveryUrl`, one group rule per `groupMap` line, and the auto-redirect. See docs/codebase/core-bootstrap.md.",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "alias": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$", "description": "Short name of the login in Keycloak; part of the redirect address `https://<hostname>/auth/realms/meho/broker/<alias>/endpoint`." },
+            "displayName": { "type": "string", "minLength": 1, "description": "Name of the button on the Keycloak login page." },
+            "discoveryUrl": { "type": "string", "pattern": "^(https://\\S+)?$", "description": "The company login's discovery address (https). Required when `enabled` is true." },
+            "clientId": { "type": "string", "description": "The client id from the company login system. Required when `enabled` is true." },
+            "clientSecret": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "The Secret with the client secret. The Job reads it by reference; the value never enters the chart.",
+              "properties": {
+                "secretName": { "type": "string", "description": "Name of the Secret. Required when `enabled` is true." },
+                "secretKey": { "type": "string", "minLength": 1 }
+              }
+            },
+            "scopes": { "type": "string", "pattern": "(^|\\s)openid(\\s|$)", "description": "What Keycloak asks the company login for, space-separated. Must include `openid`." },
+            "groupsClaim": { "type": "string", "minLength": 1, "description": "The token field that lists the person's company groups." },
+            "groupMap": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 }, "description": "Company group name -> MEHO group name. Each line becomes one group rule (sync mode FORCE)." },
+            "autoRedirect": { "type": "boolean", "description": "Skip the Keycloak login page and go straight to the company login." },
+            "caBundle": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Only for a company login with a private CA: a ConfigMap with the CA certificate (PEM). Keycloak trusts it through `KC_TRUSTSTORE_PATHS`.",
+              "properties": {
+                "configMapName": { "type": "string" },
+                "key": { "type": "string", "minLength": 1 }
+              }
+            }
+          },
+          "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+          "then": {
+            "properties": {
+              "discoveryUrl": { "minLength": 1 },
+              "clientId": { "minLength": 1 },
+              "clientSecret": { "properties": { "secretName": { "minLength": 1 } }, "required": ["secretName"] }
+            },
+            "required": ["discoveryUrl", "clientId", "clientSecret"]
+          }
         }
       }
     },

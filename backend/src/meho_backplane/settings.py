@@ -1157,15 +1157,13 @@ class Settings(BaseModel):
         ``docs/codebase/approvals.md``. Reject is always allowed
         regardless of this flag — an operator withdrawing their own
         pending request is never a privilege escalation.
-    approval_fresh_sign_in_max_age_seconds:
-        How old a sign-in may be, in seconds, for an approve on the command
-        line or REST (#3979, ``docs/decisions/approval-groups-and-self-approval.md``).
-        Default ``300`` (5 minutes). The token's ``auth_time`` claim must be
-        no older than this, else MEHO answers ``401`` with
-        ``error="insufficient_user_authentication"`` (RFC 9470 §3). One
-        sign-in allows one approval. A plain API token never approves. The
-        web interface is not affected: the click is the proof. Set via
-        ``APPROVAL_FRESH_SIGN_IN_MAX_AGE_SECONDS``.
+    fresh_sign_in_max_age_seconds:
+        How old a person's sign-in may be for an action that needs a
+        fresh sign-in: turning approval off for an operation over REST
+        (#4711), and approving a waiting change on the command line or
+        REST (#3979). The check reads the token's ``auth_time`` claim; see
+        :mod:`meho_backplane.auth.fresh_sign_in`. Default ``300`` (five
+        minutes). Set via ``FRESH_SIGN_IN_MAX_AGE_SECONDS``.
     approval_one_time_code_acr_values:
         The ``acr`` values that mean "the person entered a one-time code
         from their authenticator app" (#3979). An approve whose token
@@ -1675,10 +1673,11 @@ class Settings(BaseModel):
     # the reason, #3692) are allowed only on lab-class deployments. Default
     # False is fail-closed: production refuses them.
     approval_allow_delegated_decision: bool = False
-    # #3979 -- an approve on the command line or REST needs a sign-in no
-    # older than this, or a one-time code step that sets one of these acr
-    # values. Empty acr list = the one-time code step is off.
-    approval_fresh_sign_in_max_age_seconds: int = Field(default=300, gt=0)
+    # #4711 -- how old a sign-in may be for an action that needs a person
+    # with a fresh sign-in (turning approval off over REST, and with #3979
+    # an approve on the command line or REST).
+    fresh_sign_in_max_age_seconds: int = Field(default=300, ge=30, le=3600)
+    # #3979 -- the acr values that mean a one-time code step. Empty = off.
     approval_one_time_code_acr_values: tuple[str, ...] = ()
     # #4622 -- sandbox mode: a standing grant may also cover deletes, only
     # on an instance for disposable test systems. Both read at boot only.
@@ -2844,11 +2843,11 @@ def get_settings() -> Settings:
         approval_allow_delegated_decision=parse_bool_env(
             os.environ.get("APPROVAL_ALLOW_DELEGATED_DECISION", "false"),
         ),
-        # #3979 -- how fresh a sign-in must be to approve on the command
-        # line or REST, and which acr values mean a one-time code step.
-        approval_fresh_sign_in_max_age_seconds=int(
-            os.environ.get("APPROVAL_FRESH_SIGN_IN_MAX_AGE_SECONDS", "300"),
+        # #4711 -- how old a sign-in may be for an action that needs a person.
+        fresh_sign_in_max_age_seconds=int(
+            os.environ.get("FRESH_SIGN_IN_MAX_AGE_SECONDS", "300"),
         ),
+        # #3979 -- which acr values mean a one-time code step.
         approval_one_time_code_acr_values=tuple(
             chunk.strip()
             for chunk in os.environ.get("APPROVAL_ONE_TIME_CODE_ACR_VALUES", "").split(",")

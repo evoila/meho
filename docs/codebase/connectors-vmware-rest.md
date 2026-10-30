@@ -889,6 +889,11 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `snapshot_list`) — the snapshots of one VM (by `vm` moid) as a flat list in
   tree order. `safe`, in its own group `vmware-snapshot-list`, on both
   catalogs. See **VM snapshot operations** under Control flow.
+- **`vmware.resource_pool.list`** (`typed_ops_resource_pool_list.py`,
+  handler `resource_pool_list`) — the resource pools of a vCenter, with the
+  parent of each pool and its CPU and memory settings. `safe`, in its own
+  group `vmware-resource-pools`, on both catalogs. See **Resource pool list**
+  under Control flow.
 - **`vmware.datacenter.list`** (`typed_ops_datacenter_list.py`, handler
   `datacenter_list`) — the datacenters of a vCenter, with the number of
   clusters, hosts and datastores in each. `safe`, in its own group
@@ -4619,6 +4624,58 @@ a key; flight-recorder spans, with a control case without the tag),
 `tests/test_connectors_vmware_rest_license_reconcile.py` (the pinned 9.0
 `vi-json.yaml`) and the source scan in
 `tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` (8.0 U1, U2, U3).
+
+### Resource pool list (`vmware.resource_pool.list`)
+
+A typed read that lists the resource pools of a vCenter. It is written by
+hand, so it has a clear summary, field descriptions and a risk level. It
+replaces the raw ingested `GET:/vcenter/resource-pool` operation for this
+common task. The pools themselves are made and removed by
+`vmware.composite.resource_pool.create` and `.delete`.
+
+| Operation | What it does | Vendor calls | Risk |
+|---|---|---|---|
+| `vmware.resource_pool.list` | One row per pool: `id` (moid), `name`, `parent_type` (`resource_pool`, `cluster` or `host`), `parent_id`, and for CPU (MHz) and memory (MB) the reservation, limit (`-1` is no limit), expandable reservation, shares level and shares; `read_note`. Optional filters `cluster`, `host`, `parent_pool` (sent to vCenter) and a `name` pattern (`*` and `?`, letter case does not matter, applied in MEHO). | `GET /vcenter/resource-pool` (plus one filtered call when a filter is set); `GET /vcenter/resource-pool/{resource_pool}` per pool; only for root pools `GET /vcenter/cluster`, `GET /vcenter/cluster/{cluster}`, and for roots still open `GET /vcenter/host` and the pools of each standalone host | `safe`; runs at once |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 and its updates (REST only, so no VI-JSON is needed) | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+- **How it finds the parent.** The REST details of a pool have no parent
+  field, only the ids of its child pools. So MEHO reads the details of every
+  pool and takes as parent the pool that names it as a child. A pool with no
+  parent pool is the hidden root pool (often named `Resources`) of a cluster
+  or a standalone host. The cluster details name their root pool
+  (`resource_pool`). A root that is still open after that belongs to a
+  standalone host: MEHO lists the hosts that are not in a cluster and the
+  pools of each one.
+- **How it calls vCenter.** Through the REST mount (`mount_op_path`, `/api`
+  or the legacy `/rest`) on the connector's own session, so it needs no spec
+  ingest. Filters are written as `filter.clusters`, `filter.hosts` and
+  `filter.parent_resource_pools`; `adapt_op_query` sends the bare names on
+  `/api`. The paths, filters and fields are the same in the vCenter 8.0 U3
+  and 9.0 API files (only the name inside `{...}` differs).
+- **Errors.** A failed pool list fails the operation. A failed details read
+  leaves that pool's settings `null` with a `read_note`. When any details
+  read failed, a pool can look like a root by mistake, so the host step is
+  skipped and an open parent is `null` with `parent not known`. A failed
+  cluster or host read stops the parent lookup. The parents found before
+  it stay; the open parents still unknown are `null` with `parent not
+  read`. The other rows stay.
+- **Cost.** One or two list calls, plus one details call per pool in the
+  vCenter. The cluster and host calls run only when a returned pool is a
+  root pool. With no match, no details call runs.
+- **Large lists.** The rows are flat, so a long list comes back as a link to
+  the stored result (a result handle) that the caller reads with
+  `result_query`.
+
+Code: `typed_ops_resource_pool_list.py`. Tests:
+`tests/test_connectors_vmware_rest_typed_resource_pool_list.py` (saved
+answers, no live vCenter) and
+`tests/test_connectors_vmware_rest_resource_pool_list_reconcile.py` (the
+paths, the filters and the fields against the pinned vCenter 8.0 U3 and 9.0
+`vcenter.yaml`).
 
 ### Datacenter list (`vmware.datacenter.list`)
 

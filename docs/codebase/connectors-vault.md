@@ -528,8 +528,9 @@ target registration) is documented in
 | `vault.kv.delete` | `delete_secret_versions` | dangerous | `write` |
 | `vault.kv.metadata.delete` | `delete_metadata_and_all_versions` | destructive | `write` |
 | `vault.kv.folder.delete` | `list_secrets` + `read_secret_metadata` + `delete_secret_versions` | dangerous | `write` |
+| `vault.kv.compare` | `read_secret_version` (per copy) | safe | `credential_read` |
 
-All eight register into operation group `kv`.
+All nine register into operation group `kv`.
 
 **Folder delete (`vault.kv.folder.delete`, `ops_kv_folder.py`).** Soft-deletes
 many secrets under one folder with one approval. Before it, each secret
@@ -582,6 +583,41 @@ needed its own `vault.kv.delete` call and its own approval.
   (`vault_capabilities_preflight`). When one is missing the call is refused
   with `write_capability_denied` naming that path, and no approval is
   requested.
+**Compare copies (`vault.kv.compare`, `kv_compare.py`).** Checks that 2 to
+10 copies of one secret hold the same value, without showing it. Params:
+`paths`, a list of `{path, key, mount?}`. The first item is the reference.
+
+- Each copy is read with the caller's own Vault login (same role and same
+  tenant guard as `vault.kv.read`).
+- The value under `key` becomes a `StoredValue`: its kind (`text` for a
+  string, `json` for any other JSON value) and its bytes (UTF-8 text, or
+  canonical JSON). Two copies match only when the kind and the bytes
+  match, compared by `hmac.compare_digest` (constant time); then the value
+  is dropped. So the string `"123"` never matches the number `123`, and
+  `"null"` never matches `null`.
+- Answer: `{same, copies: [{mount, path, key, found, matches_first,
+  version, reason}]}`. `same` is true only when every copy was found and
+  matches. Never a value, never a hash: a hash of a short password can be
+  guessed offline.
+- A copy that cannot be read does not fail the call. It answers
+  `found: false` with `reason` `forbidden` (Vault 403, or a path outside
+  the caller's tenant), `not_found` (no secret, or the latest version is
+  deleted) or `key_not_found`. A login failure, an unreachable Vault or a
+  path that repeats the mount segment still fails the whole call.
+- The op id is on `_CREDENTIAL_READ_OPS`. The backplane reads secret
+  values to answer it, so the flight recorder never stores a vendor body
+  for it and the broadcast feed shows only the outcome.
+- `read_kv_copy`, `compare_copies` and `text_value` are shared with
+  `k8s.secret.compare_to_ref` (a Kubernetes Secret key against one Vault
+  copy; see `connectors-kubernetes.md`).
+
+**Empty folder (`vault.kv.list`, #5231).** Vault answers a LIST on an
+empty or missing folder with a `404`, which hvac raises as
+`InvalidPath`. Like `vault.identity.list`, `vault.token.list_accessors`
+and `vault.token.role.list`, `vault.kv.list` turns that `404` into
+`{"keys": []}` with `status: ok`, so an agent can tell "the folder is
+empty" from "something broke". A permission denial (`Forbidden`) is
+still an error.
 
 **Permanent delete (`vault.kv.metadata.delete`, #3424).** `kv.delete` is a
 soft delete: Vault keeps the data and an undelete brings it back.
@@ -693,7 +729,8 @@ The G6 broadcast publisher emits an aggregate-only payload for
 `credential_read` and `audit_query` ops. The sensitivity class is
 derived **from the op-id**, not a per-descriptor field:
 `broadcast.events.classify_op` consults the `_CREDENTIAL_READ_OPS`
-allowlist (currently `{vault.kv.read, vault.kv.list}`), the
+allowlist (for this connector `{vault.kv.read, vault.kv.list,
+vault.kv.compare}`), the
 `_CREDENTIAL_WRITE_OPS` allowlist (G11.7-T1 #1401 / G3.15-T1 #1409 —
 `{vault.kv.put, vault.kv.patch, vault.auth.userpass.write,
 vault.auth.userpass.update_password, k8s.secret.create, k8s.job.create}`),

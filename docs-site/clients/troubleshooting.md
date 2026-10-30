@@ -35,7 +35,9 @@ meho doctor
   root, the doctor runs `meho-host check` and shows its lines last: the
   node, the pods, the disk and the certificates of the built-in
   Kubernetes. Without `sudo` it shows one warning and runs nothing. A
-  red server line gives exit code 1.
+  red server line gives exit code 1. With `sudo`, the offline and
+  authenticated lines check root's settings and login, not yours: run
+  `meho doctor` without `sudo` to check your own login.
 
 Use the failure class it prints (`dns`, `tls`, `refresh_rejected`,
 `surface_gap`, ...) to pick the section below. See also the

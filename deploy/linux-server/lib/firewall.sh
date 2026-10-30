@@ -68,11 +68,24 @@ firewall_port_list() {
 }
 
 # firewall_state: say whether the MEHO host firewall is on. It changes
-# nothing, so meho-host check (#4737, #4638) can call it. It prints "on", or
-# "off: <reason>", and returns 0 for on and 1 for off.
+# nothing, so meho-host check (#4638) calls it. It prints "on", or
+# "off: <reason>", and returns 0 for on and 1 for off. On means: the table
+# inet meho is loaded, its chain prerouting filters the hook prerouting with
+# policy drop (the rule that closes the machine), and meho-firewall.service
+# loads it at every start.
 firewall_state() {
+    local chain
+    if ! command -v nft >/dev/null 2>&1; then
+        printf 'off: nft not found, so no firewall rule can be read or loaded\n'
+        return 1
+    fi
     if ! nft list table inet meho >/dev/null 2>&1; then
         printf 'off: the table inet meho is not loaded\n'
+        return 1
+    fi
+    chain=$(nft list chain inet meho prerouting 2>/dev/null) || chain=""
+    if ! grep -qE '^[[:space:]]*type filter hook prerouting priority [^;]+; policy drop;' <<<"$chain"; then
+        printf 'off: the table inet meho has no chain prerouting with policy drop, so it lets every packet in\n'
         return 1
     fi
     if ! systemctl is-enabled --quiet "$MEHO_FIREWALL_UNIT" 2>/dev/null; then

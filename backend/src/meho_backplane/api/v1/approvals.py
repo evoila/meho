@@ -14,7 +14,8 @@ Route inventory
 ---------------
 
 * ``GET /api/v1/approvals`` — list pending requests for the operator's
-  tenant. Optional ``?status=`` filter (default ``pending``). Access:
+  tenant. Optional ``?status=`` filter (default ``pending``) and
+  ``?order=oldest|newest`` sort (default ``newest``). Access:
   approvals-plane (see below).
 * ``POST /api/v1/approvals/{request_id}/approve`` — approve a pending
   request and re-dispatch the original call with the original params.
@@ -96,7 +97,10 @@ from meho_backplane.operations.approval_context import (
 )
 from meho_backplane.operations.approval_outcome import resume_outcome
 from meho_backplane.operations.approval_queue import (
+    EXPIRED_REASON_MESSAGES,
     MAX_REASON_LENGTH,
+    ApprovalExpiredReason,
+    ApprovalListOrder,
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ApprovalRequestExpiredError,
@@ -110,6 +114,7 @@ from meho_backplane.operations.approval_queue import (
     SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
     WithdrawForbiddenError,
+    approval_expired_reason,
     approval_result_state,
     approve_request,
     get_decision_delegation,
@@ -259,6 +264,17 @@ class ApprovalRequestView(BaseModel):
     #: status, error code and the run's audit id. ``None`` until the run
     #: starts, and for a request that is not ``approved``. Additive.
     resume_outcome: ApprovalResumeOutcomeView | None = None
+    #: Why an ``expired`` request expired (#5030): ``deadline_passed`` or
+    #: ``release_changed`` (MEHO was updated while it waited). ``None``
+    #: unless ``status`` is ``expired``. Read off the row. Additive.
+    expired_reason: ApprovalExpiredReason | None = None
+    #: What the requester reads for ``expired_reason``, with the advice to
+    #: ask again (#5030). ``None`` unless ``status`` is ``expired``.
+    expired_message: str | None = None
+    #: The MEHO release the request was made under (#5030): the commit
+    #: hash, plus the chart version when set. ``None`` for a request saved
+    #: before MEHO recorded it, or made by a build with no release identity.
+    release_id: str | None = None
     reviewed_by: str | None
     #: Reviewer display name, resolved alongside ``reviewed_by`` (#3300).
     #: ``None`` before a decision or when the deciding token carried no
@@ -450,6 +466,7 @@ def _view(
     simply absent there. *delegation* (#3692) is likewise single-request
     only -- it is read off the decision audit row.
     """
+    expired_reason = approval_expired_reason(row)
     return ApprovalRequestView(
         id=row.id,
         tenant_id=row.tenant_id,
@@ -466,6 +483,9 @@ def _view(
         status=ApprovalRequestStatus(row.status),
         result_state=approval_result_state(row),
         resume_outcome=_resume_outcome_view(row),
+        expired_reason=expired_reason,
+        expired_message=EXPIRED_REASON_MESSAGES[expired_reason] if expired_reason else None,
+        release_id=row.release_id,
         reviewed_by=row.reviewed_by,
         reviewed_by_name=row.reviewed_by_name,
         decided_at=row.decided_at.isoformat() if row.decided_at else None,
@@ -636,7 +656,15 @@ async def list_approvals(
     offset: int = Query(
         default=0,
         ge=0,
-        description="Skip this many requests first (newest first). Defaults to 0.",
+        description="Skip this many requests first, in the chosen order. Defaults to 0.",
+    ),
+    order: ApprovalListOrder = Query(
+        default="newest",
+        description=(
+            "Sort by creation time. 'newest' (default) lists the newest request "
+            "first; 'oldest' lists the oldest first, which is the order a chain "
+            "of requests under one change ticket was sent in."
+        ),
     ),
     operator: Operator = _require_approvals_access,
 ) -> list[ApprovalRequestView]:
@@ -648,8 +676,11 @@ async def list_approvals(
     state (the same sentinel ``meho_approvals_list`` accepts), and by
     change ticket via
     ``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first
-    (``created_at DESC``). ``limit`` / ``offset`` page through the
-    result; no ``limit`` returns every match.
+    (``created_at DESC``) by default; ``?order=oldest`` returns
+    oldest-first (``created_at ASC``, ties broken on ``id``) so a chain of
+    requests under one change ticket reads in the order it was sent
+    (#3596). ``limit`` / ``offset`` page through the result; no ``limit``
+    returns every match.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id="approval.list",
@@ -676,7 +707,11 @@ async def list_approvals(
             stmt = stmt.where(ApprovalRequest.status == status_filter.value)
         if work_ref is not None:
             stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
-        stmt = stmt.order_by(ApprovalRequest.created_at.desc()).offset(offset)
+        if order == "oldest":
+            stmt = stmt.order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
+        else:
+            stmt = stmt.order_by(ApprovalRequest.created_at.desc())
+        stmt = stmt.offset(offset)
         if limit is not None:
             stmt = stmt.limit(limit)
         result = await session.execute(stmt)
@@ -729,7 +764,7 @@ async def get_approval_result(
 
     Surfaces the reduced / handle-shaped ``OperationResult`` envelope the
     backplane produced when it re-dispatched the approved op, so the consumer
-    that parked a **non-idempotent** op (VCF ``installer.sddc.bringup.start``)
+    that parked a **non-idempotent** op (one that starts a long task)
     can resume in place by poll — read back the resulting task id and continue
     polling it — instead of a second submit that would start a second
     bring-up.

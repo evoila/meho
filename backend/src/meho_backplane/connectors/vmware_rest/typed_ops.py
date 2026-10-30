@@ -76,6 +76,7 @@ if TYPE_CHECKING:
 __all__ = [
     "VCENTER_SSO_ADMIN_API_FILE_GET_OP",
     "VMWARE_ALARM_TRIGGERED_LIST_OP",
+    "VMWARE_DATACENTER_LIST_OP",
     "VMWARE_HOST_DATASTORES_OP",
     "VMWARE_HOST_NETWORK_UPLINKS_OP",
     "VMWARE_HOST_STORAGE_DEVICES_OP",
@@ -396,6 +397,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_content_library_find import
     VMWARE_CONTENT_LIBRARY_FIND_OP,
     VMWARE_CONTENT_LIBRARY_ITEM_FIND_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_datacenter_list import (  # noqa: E402
+    DATACENTER_LIST_GROUP_KEY,
+    DATACENTER_LIST_WHEN_TO_USE,
+    VMWARE_DATACENTER_LIST_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_host_datastores import (  # noqa: E402
     HOST_DATASTORES_GROUP_KEY,
     HOST_DATASTORES_WHEN_TO_USE,
@@ -502,6 +508,7 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     ALARM_TRIGGERED_GROUP_KEY: ALARM_TRIGGERED_WHEN_TO_USE,
     # Shared with the content-library composites: the same key and text.
     CONTENT_LIBRARY_GROUP_KEY: CONTENT_LIBRARY_WHEN_TO_USE,
+    DATACENTER_LIST_GROUP_KEY: DATACENTER_LIST_WHEN_TO_USE,
     PORTGROUP_SHOW_GROUP_KEY: PORTGROUP_SHOW_WHEN_TO_USE,
 }
 
@@ -576,9 +583,10 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: ``alarm.triggered.list`` (#4383); and the VM question read and answer
 #: ``vm.question.get`` / ``vm.question.answer`` (the answer waits for
 #: approval); the two content-library finds ``content_library.find`` +
-#: ``content_library.item.find`` (#3550); and the settings of one
-#: distributed port group ``network.portgroup.show``. The tuple shape lets
-#: future typed ops join without touching the registrar.
+#: ``content_library.item.find`` (#3550); the datacenter list
+#: ``datacenter.list``; and the settings of one distributed port group
+#: ``network.portgroup.show``. The tuple shape lets future typed ops join
+#: without touching the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
@@ -600,6 +608,7 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_VM_QUESTION_ANSWER_OP,
     VMWARE_CONTENT_LIBRARY_FIND_OP,
     VMWARE_CONTENT_LIBRARY_ITEM_FIND_OP,
+    VMWARE_DATACENTER_LIST_OP,
     VMWARE_NETWORK_PORTGROUP_SHOW_OP,
 )
 

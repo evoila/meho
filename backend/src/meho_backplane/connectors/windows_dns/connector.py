@@ -113,12 +113,14 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "transport is functional."
     ),
     "zone": (
-        "Use for zone-level inventory reads: list every zone the server "
-        "hosts (``windns.zone.list``) via ``Get-DnsServerZone``. "
-        "Read-only. The right group when the agent doesn't yet know which "
-        "zone to target, or needs the zone-level context before drilling "
-        "into records. Pair with the 'record' group once a zone is "
-        "identified."
+        "Use for zones: list every zone the server hosts "
+        "(``windns.zone.list``), read one zone's settings and SOA timers "
+        "(``windns.zone.get``), and change who may update names or how long a "
+        "'name does not exist' answer is kept (``windns.zone.set`` -- a "
+        "change that waits for a person to approve it). The right group when "
+        "the agent doesn't yet know which zone to target, or needs the "
+        "zone-level context before drilling into records. Pair with the "
+        "'record' group once a zone is identified."
     ),
     "record": (
         "Use for record-level reads and mutations inside a known zone: "
@@ -128,6 +130,12 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "ops -- the future policy gate keys on their ``caution`` "
         "safety_level. Transport: pwsh-over-SSH driving the DnsServer "
         "cmdlets."
+    ),
+    "forwarder": (
+        "Use for the servers this DNS server asks when it cannot answer a "
+        "name itself: read the forwarder list (``windns.forwarder.list``) "
+        "and replace it (``windns.forwarder.set`` -- a change that waits for "
+        "a person to approve it)."
     ),
 }
 
@@ -416,6 +424,46 @@ class WindowsDnsConnector(SshConnector):
         )
 
         return await _windows_dns_record_remove(self, target, params, operator)
+
+    async def windows_dns_zone_get(
+        self, target: Target, params: dict[str, Any], operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``windns.zone.get`` op."""
+        from meho_backplane.connectors.windows_dns.ops_zone_settings import (
+            windows_dns_zone_get as _h,
+        )
+
+        return await _h(self, target, params, operator)
+
+    async def windows_dns_zone_set(
+        self, target: Target, params: dict[str, Any], operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``windns.zone.set`` op (caution, approval)."""
+        from meho_backplane.connectors.windows_dns.ops_zone_settings import (
+            windows_dns_zone_set as _h,
+        )
+
+        return await _h(self, target, params, operator)
+
+    async def windows_dns_forwarder_list(
+        self, target: Target, params: dict[str, Any], operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``windns.forwarder.list`` op."""
+        from meho_backplane.connectors.windows_dns.ops_forwarder import (
+            windows_dns_forwarder_list as _h,
+        )
+
+        return await _h(self, target, params, operator)
+
+    async def windows_dns_forwarder_set(
+        self, target: Target, params: dict[str, Any], operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``windns.forwarder.set`` op (caution, approval)."""
+        from meho_backplane.connectors.windows_dns.ops_forwarder import (
+            windows_dns_forwarder_set as _h,
+        )
+
+        return await _h(self, target, params, operator)
 
     @classmethod
     async def register_operations(cls) -> None:

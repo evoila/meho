@@ -3,7 +3,7 @@
 
 """JSON Schema 2020-12 parameter + response schemas for gh-rest composites.
 
-Same conventions as the vmware-rest composite schemas module
+Same conventions as the other composite schema modules
 (G3.1-T5 #508 / T6 #509):
 
 * ``additionalProperties=False`` on every parameter schema so an

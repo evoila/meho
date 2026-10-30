@@ -43,7 +43,7 @@ import asyncio
 import uuid
 import warnings
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -61,7 +61,13 @@ from meho_backplane.connectors.secret.ops import register_secret_broker_operatio
 from meho_backplane.connectors.vault import VaultConnector
 from meho_backplane.connectors.vault.ops import register_vault_typed_operations
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
-from meho_backplane.db.models import EndpointDescriptor, OperationGroup, Tenant
+from meho_backplane.db.models import (
+    ApprovalRequest,
+    ApprovalRequestStatus,
+    EndpointDescriptor,
+    OperationGroup,
+    Tenant,
+)
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
@@ -579,6 +585,111 @@ def test_vault_move_awaiting_approval_renders_banner_and_approvals_link(
     assert "/ui/approvals/" in body
     # No secret value reaches the render.
     assert _SECRET_VALUE not in body
+
+
+def _seed_pending_request(*, tenant_id: uuid.UUID, work_ref: str | None, minute: int) -> uuid.UUID:
+    """Seed one pending ``ApprovalRequest`` row created at ``minute`` past noon."""
+    request_id = uuid.uuid4()
+
+    async def _do() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            session.add(
+                ApprovalRequest(
+                    id=request_id,
+                    tenant_id=tenant_id,
+                    run_id=None,
+                    principal_sub=_OP_OPERATOR,
+                    op_id="vault.kv.put",
+                    connector_id="vault-1.x",
+                    target_id=None,
+                    params_hash="0" * 64,
+                    params={},
+                    proposed_effect={"op_id": "vault.kv.put", "connector_id": "vault-1.x"},
+                    status=ApprovalRequestStatus.PENDING.value,
+                    work_ref=work_ref,
+                    created_at=datetime(2026, 6, 1, 12, minute, tzinfo=UTC),
+                )
+            )
+
+    asyncio.run(_do())
+    return request_id
+
+
+def _put_with_parked_request(monkeypatch: pytest.MonkeyPatch, request_id: uuid.UUID) -> str:
+    """POST a put whose dispatch parks as *request_id*; return the result HTML."""
+    envelope = _awaiting_envelope("vault.kv.put")
+    envelope["extras"]["approval_request_id"] = str(request_id)
+    _patch_call_operation(monkeypatch, envelope)
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/vault/put",
+            headers=_csrf_headers(csrf),
+            data={
+                "mount": "secret",
+                "path": _tenant_path(_TENANT_A, "app/db"),
+                "data": '{"password": "new-value"}',
+            },
+        )
+    assert response.status_code == 200, response.text
+    assert 'data-vault-write-status="awaiting_approval"' in response.text
+    return response.text
+
+
+def test_vault_put_parked_as_second_step_links_to_ordered_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3596: a parked step k of N names the step and links to the oldest-first view.
+
+    The parked request shares its change ticket (``work_ref``) with an
+    older pending request, so it is step 2 of 2. The result names the step
+    and its first link opens the Pending tab filtered to the ticket, oldest
+    first. The per-request link stays as the second link.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_vault_descriptor()
+    _register_vault(_make_stub())
+    ticket = "gh:evoila/meho#7"
+    _seed_pending_request(tenant_id=_TENANT_A, work_ref=ticket, minute=1)
+    second = _seed_pending_request(tenant_id=_TENANT_A, work_ref=ticket, minute=2)
+
+    body = _put_with_parked_request(monkeypatch, second)
+
+    assert 'data-approval-chain-step="2"' in body
+    assert "Step 2 of 2 waiting in change ticket" in body
+    grouped = 'href="/ui/approvals?tab=pending&order=oldest&work_ref=gh%3Aevoila/meho%237"'
+    assert grouped in body
+    assert body.index("data-approval-chain-link") < body.index("data-approval-deep-link")
+    assert f"/ui/approvals/{second}" in body
+    assert _SECRET_VALUE not in body
+
+
+def test_vault_put_parked_alone_keeps_per_request_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3596: a parked request with no pending sibling shows no step.
+
+    A lone request under its change ticket, and a request of another tenant
+    under the same ticket, give no step number: the result keeps the plain
+    per-request link.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_vault_descriptor()
+    _register_vault(_make_stub())
+    ticket = "gh:evoila/meho#7"
+    other_tenant = uuid.UUID("22222222-2222-2222-2222-222222222222")
+    _seed_tenant(other_tenant, "tenant-b")
+    _seed_pending_request(tenant_id=other_tenant, work_ref=ticket, minute=1)
+    lone = _seed_pending_request(tenant_id=_TENANT_A, work_ref=ticket, minute=2)
+
+    body = _put_with_parked_request(monkeypatch, lone)
+
+    assert "data-approval-chain-step" not in body
+    assert "data-approval-chain-link" not in body
+    assert f"/ui/approvals/{lone}" in body
+    assert "data-approval-deep-link" in body
 
 
 # ---------------------------------------------------------------------------

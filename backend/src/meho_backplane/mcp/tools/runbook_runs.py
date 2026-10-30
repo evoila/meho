@@ -58,7 +58,7 @@ Same dispatcher mechanism as the kb + template tools -- one
 ``meho_runbook_next`` on an ``operation_call`` verify produces TWO audit
 rows: one outer envelope (dispatcher writes it with
 ``op_class=write``) and one inner verify dispatch (audit op-id is the
-verify's ``op_id``, e.g. ``vmware.host.is_powered_on``, with
+verify's ``op_id``, e.g. ``harbor.health``, with
 ``run_id`` + ``step_id`` populated via the contextvars the service
 binds around :func:`~meho_backplane.operations.meta_tools.call_operation`
 per G12.1-T2 / #1294).

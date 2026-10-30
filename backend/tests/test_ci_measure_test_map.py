@@ -1,0 +1,221 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""Tests for ``scripts/ci/measure_test_map.py`` (#5298).
+
+The script counts how many tests a "run only the tests for the changed
+code" map would pick. These tests check the rules that decide what a
+changed file picks, and that the map is read right from coverage data.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from collections.abc import Iterator
+from pathlib import Path
+from types import ModuleType
+
+import pytest
+from coverage import CoverageData
+
+_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "ci" / "measure_test_map.py"
+
+
+@pytest.fixture(scope="module")
+def tool() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("measure_test_map", _SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_NODEIDS = [
+    "tests/test_a.py::test_one",
+    "tests/test_a.py::test_two[x]",
+    "tests/test_a.py::test_two[y]",
+    "tests/sub/test_b.py::TestB::test_three",
+]
+
+
+def test_function_key_matches_the_coverage_context_name(tool: ModuleType) -> None:
+    assert (
+        tool.function_key("tests/sub/test_b.py::TestB::test_three")
+        == "tests.sub.test_b.TestB.test_three"
+    )
+    assert tool.function_key("tests/test_a.py::test_two[x-1]") == "tests.test_a.test_two"
+
+
+def test_read_collected_keeps_only_node_ids(tool: ModuleType) -> None:
+    text = "\n".join([*_NODEIDS, "", "4 tests collected in 0.1s"])
+    assert tool.read_collected(text) == _NODEIDS
+
+
+def test_select_applies_the_rules_per_changed_file(tool: ModuleType) -> None:
+    suite = tool.Suite.from_nodeids(_NODEIDS)
+    file_map = {
+        "backend/src/pkg/a.py": {"tests.test_a.test_two"},
+        "backend/src/pkg/unused.py": set(),
+    }
+
+    docs_only = tool.select(
+        ["docs/x.md", "README.md", "backend/tests/integration/test_i.py"], file_map, suite
+    )
+    assert docs_only.map_only == set()
+    assert not docs_only.safe_full
+
+    source = tool.select(["backend/src/pkg/a.py", "backend/tests/sub/test_b.py"], file_map, suite)
+    assert source.map_only == {
+        "tests/test_a.py::test_two[x]",
+        "tests/test_a.py::test_two[y]",
+        "tests/sub/test_b.py::TestB::test_three",
+    }
+    assert not source.safe_full
+
+    unknown = tool.select(
+        [
+            "backend/src/pkg/a.py",
+            "backend/src/pkg/unused.py",
+            "backend/src/pkg/new.py",
+            "backend/tests/test_new.py",
+            "backend/tests/conftest.py",
+            "backend/uv.lock",
+        ],
+        file_map,
+        suite,
+    )
+    assert len(unknown.map_only) == 2
+    assert unknown.safe_full
+    # A file the coverage data or the test list does not have at all.
+    assert unknown.not_in_data == ["backend/src/pkg/new.py", "backend/tests/test_new.py"]
+    # A file in the coverage data that no test function ran.
+    assert unknown.no_test_ran == ["backend/src/pkg/unused.py"]
+    assert unknown.other == ["backend/tests/conftest.py", "backend/uv.lock"]
+
+    only_new = tool.select(["backend/src/pkg/new.py"], file_map, suite)
+    assert only_new.safe_full
+    assert only_new.not_in_data == ["backend/src/pkg/new.py"]
+    assert only_new.no_test_ran == []
+
+    only_unused = tool.select(["backend/src/pkg/unused.py"], file_map, suite)
+    assert only_unused.safe_full
+    assert only_unused.not_in_data == []
+    assert only_unused.no_test_ran == ["backend/src/pkg/unused.py"]
+
+
+def test_select_falls_back_when_a_test_name_is_not_in_the_list(tool: ModuleType) -> None:
+    suite = tool.Suite.from_nodeids(_NODEIDS)
+    file_map = {
+        # A decorator wrapped the test, so coverage named it after the decorator's module.
+        "backend/src/pkg/wrapped.py": {"functools.test_one"},
+        # One test is in the list, the other is not: the known one still counts
+        # in "map only", but the file cannot be judged, so "safe" picks the full suite.
+        "backend/src/pkg/mixed.py": {"tests.test_a.test_one", "tests.test_new.test_four"},
+    }
+
+    wrapped = tool.select(["backend/src/pkg/wrapped.py"], file_map, suite)
+    assert wrapped.map_only == set()
+    assert wrapped.safe_full
+    assert wrapped.test_not_in_list == ["backend/src/pkg/wrapped.py"]
+    assert wrapped.not_in_data == []
+    assert wrapped.no_test_ran == []
+
+    mixed = tool.select(["backend/src/pkg/mixed.py"], file_map, suite)
+    assert mixed.map_only == {"tests/test_a.py::test_one"}
+    assert mixed.safe_full
+    assert mixed.test_not_in_list == ["backend/src/pkg/mixed.py"]
+
+    text = tool.report([(2, "t", ["backend/src/pkg/mixed.py"])], file_map, suite, top=1)
+    assert "| #2 | 1 | 1 | 4 | " in text
+
+    text = tool.report([(1, "t", ["backend/src/pkg/wrapped.py"])], file_map, suite, top=1)
+    assert "| #1 | 1 | 0 | 4 | " in text
+    assert "`backend/src/pkg/wrapped.py`" in text
+    assert "test not in list: 1" in text
+
+
+def _pr(number: int, merged_at: str | None, updated_at: str) -> dict[str, object]:
+    return {
+        "number": number,
+        "title": f"pr {number}",
+        "merged_at": merged_at,
+        "updated_at": updated_at,
+    }
+
+
+def test_merged_last_finds_a_merge_newer_than_the_first_page(tool: ModuleType) -> None:
+    # Pages as the API gives them: most recently updated first. The two pull
+    # requests on the first page got a comment after the newest merge, so the
+    # pull request merged last is only on the second page.
+    pages = [
+        [
+            _pr(30, "2026-10-01T00:00:00Z", "2026-10-05T00:00:00Z"),
+            _pr(20, "2026-10-02T00:00:00Z", "2026-10-04T12:00:00Z"),
+        ],
+        [
+            _pr(40, None, "2026-10-04T00:00:00Z"),
+            _pr(10, "2026-10-03T00:00:00Z", "2026-10-03T00:00:01Z"),
+        ],
+    ]
+
+    assert [pr["number"] for pr in tool.merged_last(pages, 2)] == [10, 20]
+    assert [pr["number"] for pr in tool.merged_last(pages, 5)] == [10, 20, 30]
+    assert [pr["number"] for pr in tool.merged_last(pages, 1, "2026-10-03T00:00:00Z")] == [20]
+
+
+def test_merged_last_stops_reading_when_no_later_page_can_hold_a_newer_merge(
+    tool: ModuleType,
+) -> None:
+    read: list[int] = []
+
+    def pages() -> Iterator[list[dict[str, object]]]:
+        # Every pull request here was updated when it was merged. So after
+        # the first page, no later page can hold a newer merge.
+        read.append(1)
+        yield [_pr(20, "2026-10-02T00:00:00Z", "2026-10-02T00:00:00Z")]
+        read.append(2)
+        yield [_pr(10, "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z")]
+
+    assert [pr["number"] for pr in tool.merged_last(pages(), 1)] == [20]
+    assert read == [1]
+    assert [pr["number"] for pr in tool.merged_last(pages(), 2)] == [20, 10]
+
+
+def test_unmatched_functions_finds_tests_missing_from_the_list(tool: ModuleType) -> None:
+    suite = tool.Suite.from_nodeids(_NODEIDS)
+    file_map = {
+        "backend/src/pkg/a.py": {"tests.test_a.test_one", "tests.test_new.test_four"},
+        "backend/src/pkg/b.py": {"tests.sub.test_b.TestB.test_three"},
+        "backend/src/pkg/unused.py": set(),
+    }
+
+    assert tool.unmatched_functions(file_map, suite) == {"tests.test_new.test_four"}
+    assert tool.unmatched_functions({"backend/src/pkg/b.py": set()}, suite) == set()
+
+    text = tool.report([], file_map, suite, top=1)
+    assert "not in the test list: 1." in text
+
+
+def test_load_map_reads_test_contexts_and_drops_the_empty_one(
+    tool: ModuleType, tmp_path: Path
+) -> None:
+    data = CoverageData(str(tmp_path / ".coverage"))
+    data.set_context("")
+    data.add_lines({"src/pkg/a.py": [1, 2], "src/pkg/b.py": [1]})
+    data.set_context("tests.test_a.test_one")
+    data.add_lines({"src/pkg/a.py": [3]})
+    data.set_context("tests.test_a.test_two")
+    data.add_lines({"src/pkg/a.py": [3, 4]})
+    data.write()
+
+    file_map = tool.load_map(str(tmp_path / ".coverage"))
+
+    assert file_map == {
+        "backend/src/pkg/a.py": {"tests.test_a.test_one", "tests.test_a.test_two"},
+        "backend/src/pkg/b.py": set(),
+    }
+    total, shares = tool.touched_by_most(file_map, top=1)
+    assert total == 2
+    assert shares == [("backend/src/pkg/a.py", 1.0)]

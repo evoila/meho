@@ -1375,7 +1375,7 @@ _LIST_TARGETS_INPUT_SCHEMA: Final[dict[str, Any]] = {
             "type": ["string", "null"],
             "description": (
                 "Optional connector filter in the form "
-                '`<impl_id>-<version>` (e.g. "vmware-rest-9.0") or a '
+                '`<impl_id>-<version>` (e.g. "k8s-1.x") or a '
                 'v1-style single-product slug (e.g. "vault"). Only the '
                 "product component is used: the result is narrowed to "
                 "targets whose `product` matches that connector's "
@@ -1442,7 +1442,7 @@ _LIST_TARGETS_DESCRIPTION: Final[str] = (
     "`target`.\n\n"
     "WHEN TO CALL: the operator asks 'what can I act on?', or you need a "
     "concrete target name and only have a product in mind ('list the "
-    "vCenters' → `connector_id=vmware-rest-9.0`). Tenant scope is the "
+    "Kubernetes clusters' → `connector_id=k8s-1.x`). Tenant scope is the "
     "operator's own tenant unless a `platform_admin` passes `tenant`.\n\n"
     "Returns `{targets: [{id, name, aliases, product, host}, ...], "
     "next_cursor: <name|null>}` ordered by name; `next_cursor` is the "
@@ -1467,7 +1467,7 @@ _LIST_TARGETS_REDUCER: Final[JsonFluxReducer] = JsonFluxReducer()
 _LIST_TARGETS_PAGINATION_HINT: Final[dict[str, Any]] = {
     "params": {
         "connector_id": (
-            "Narrow to one connector's product (e.g. `vmware-rest-9.0`); "
+            "Narrow to one connector's product (e.g. `k8s-1.x`); "
             "a page at or under the threshold comes back inline as `targets`."
         ),
         "limit": "Page size (1..500). A smaller page can come back inline.",
@@ -1478,7 +1478,7 @@ _LIST_TARGETS_PAGINATION_HINT: Final[dict[str, Any]] = {
     },
     "example_next_call": {
         "tool": _LIST_TARGETS_NAME,
-        "args": {"connector_id": "vmware-rest-9.0"},
+        "args": {"connector_id": "k8s-1.x"},
     },
 }
 
@@ -1636,8 +1636,8 @@ async def _reject_unknown_connector(tenant_id: uuid.UUID, connector_id: str) -> 
     """Raise the unknown-connector ``-32602`` when no visible connector has the id's product.
 
     Runs only when the ``connector_id`` filter found no target (#4136).
-    Without it, a wrong id such as ``vmware-rest`` (product
-    ``vmware-rest``, which no target has) came back as an empty list with
+    Without it, a wrong id such as ``harbor-rest`` (product
+    ``harbor-rest``, which no target has) came back as an empty list with
     no warning. A known product with no targets still returns the empty
     list. The error is the one ``search_operations`` raises, with the
     close ids the caller can see.
@@ -1923,10 +1923,10 @@ _ANNOTATE_DESCRIPTION: Final[str] = (
     "the empty-tenant bootstrap and for curated inner-graph nodes the "
     "probes cannot derive (vault-role, keycloak-realm, ...).\n\n"
     "WHEN TO CALL: an operator asks 'record that the prod namespace "
-    "authenticates against the rdc-vault role binding' — "
+    "authenticates against the prod-vault role binding' — "
     "`meho_topology_annotate {from_name: prod, kind: "
-    "authenticates-via, to_name: rdc-vault-role-bar}`. After this, "
-    "`query_topology {kind: dependents, target: rdc-vault-role-bar}` "
+    "authenticates-via, to_name: prod-vault-role}`. After this, "
+    "`query_topology {kind: dependents, target: prod-vault-role}` "
     "surfaces the namespace in the blast radius.\n\n"
     "AUTO-DISCOVERABLE KINDS (`runs-on`, `mounts`, `routes-through`, "
     "`belongs-to`) — accepted, with one caveat: when a probe-written "

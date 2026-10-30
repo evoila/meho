@@ -558,7 +558,7 @@ def _legacy_tenant_copy_hint(
     """Return the delete hint for a tenant row stored under a former product name (#4889).
 
     Dispatch reads the product from ``connector_id``; a tenant row whose
-    stored ``product`` differs (``vcf-logs`` rows for ``vrli-rest-9.0``)
+    stored ``product`` differs (rows saved before a product rename)
     can therefore never be called. Such a row is listed so the operator
     can see it, but it is marked not dispatchable and carries this hint
     naming the clean-up verb. ``None`` for built-in rows, for rows whose
@@ -723,13 +723,12 @@ def _class_side_only_items(
     derived from the parser's interpretation of the v2-registry
     ``impl_id``, not the registry's ``product`` field, so the
     ``connector_id`` round-trips losslessly through
-    :func:`parse_connector_id`. For SDDC the v2 registry stores
-    ``product="sddc-manager"`` but the listing emits ``product="sddc"``
-    (consistent with what the dispatcher will derive from
-    ``parse_connector_id("sddc-rest-9.0")`` and what
-    ``SDDC_PRODUCT="sddc"`` already writes into ``endpoint_descriptor``
-    rows). When DB rows eventually land under the same row-product the
-    parser derives, the listing transitions cleanly from
+    :func:`parse_connector_id`. When the v2 registry stores a product
+    spelling that differs from the first segment of ``impl_id``, the
+    listing emits the parser-derived product (consistent with what the
+    dispatcher derives from ``parse_connector_id`` and what ingest
+    writes into ``endpoint_descriptor`` rows). When DB rows eventually
+    land under the same row-product the parser derives, the listing transitions cleanly from
     ``state="registered"`` to ``state="ingested"`` without a
     ``connector_id`` change. Entries whose ``connector_id`` cannot
     round-trip at all (parser-incompatible ``impl_id`` shape) are
@@ -738,9 +737,10 @@ def _class_side_only_items(
     if status not in (None, "all"):
         return []
     # Dedupe against the DB-emitted set using the row-side natural key
-    # (the dispatcher's parsed triple). This keeps the SDDC case clean:
-    # the v2 registry holds ``("sddc-manager", "9.0", "sddc-rest")`` but
-    # DB rows live under ``("sddc", ...)``; matching on the registry
+    # (the dispatcher's parsed triple). This keeps a product-spelling
+    # mismatch clean: when the v2 registry holds a product that differs
+    # from the parser-derived one, DB rows live under the parser-derived
+    # product; matching on the registry
     # triple would miss the dedupe and emit two rows for the same
     # connector (one ``ingested`` from the DB loop, one ``registered``
     # here). Comparing against the parser-derived triple — the same

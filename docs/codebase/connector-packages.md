@@ -251,6 +251,39 @@ allowlist file only once, at start. `installed_connector_packages()` in
 Each entry has the name, version, wheel digest and folders, as in the
 allowlist file. For the plain public image the list is empty, and the CLI
 and the console say "none".
+## When a package is removed
+
+Each operation row records the package that wrote it, in the column
+`endpoint_descriptor.owner_package`. `NULL` means the op is built into
+MEHO (ingested ops are `NULL` too).
+
+- At start, the `connectors` package records the allowed packages and
+  their folders (`record_installed_connector_packages`).
+- When a registrar writes a typed or composite op, MEHO looks at the
+  op's `handler_ref`. If it lies in a folder of an installed package
+  (`meho_backplane.connectors.<folder>....`), the row gets that package's
+  name. Otherwise the row gets `NULL`. Every start writes it again.
+- A row whose package is not installed is hidden. `search_operations`
+  (also its exact-op mode), `list_operation_groups` and the descriptor
+  lookup do not see it. A group that holds only such rows is hidden too.
+- A call or a preview of such an op answers
+  `connector_package_not_installed`, with the package name in
+  `extras.package`.
+- Nothing is deleted or changed. When the package is installed again,
+  the rows are visible again with the operator's settings on them, for
+  example an op the operator turned off stays off.
+- When the package registers its ops again, it can raise an op's risk
+  level or turn on its approval requirement, but never lower them. A
+  stricter value saved on the row, for example one an operator set,
+  stays. To lower it, the operator edits the op.
+
+"Installed" is per MEHO process. Two servers with different images can
+share one database: each one hides only the rows of the packages it does
+not have.
+
+Limit: an op of a package whose handler lives outside the package's own
+folders (for example in a built-in shared module) is recorded as built
+in.
 
 ## Key types
 
@@ -261,6 +294,11 @@ and the console say "none".
   list.
 - `installed_connector_packages()` — the packages the start-up check
   accepted.
+- `installed_connector_package_names()`, `connector_package_of()` — the
+  installed package names, and the package that owns a module path.
+- `installed_owner_clause()`, `package_visible_group_clause()` in
+  `operations/_lookup.py` — the filters that hide a removed package's
+  rows and groups.
 - `CONNECTOR_PACKAGES_FILE`, `BUILTIN_DISTRIBUTION` — the file path and
   the built-in distribution name.
 
@@ -285,6 +323,7 @@ and the console say "none".
 - `backend/src/meho_backplane/connector_packages.py`
 - `backend/src/meho_backplane/connectors/registry.py`
 - `backend/tests/test_connector_packages.py`
+- `backend/tests/test_connector_package_owner.py`
 - `deploy/connector-overlay/` and `backend/tests/test_connector_overlay_build.py`
 - Wheel file format (`RECORD`, `.data` folder):
   https://packaging.python.org/en/latest/specifications/binary-distribution-format/

@@ -461,6 +461,24 @@ class WinsrvConnector(SshConnector):
 
         return await _h(self, target, params, operator)
 
+    # -- time group shims ---------------------------------------------------
+
+    async def winsrv_time_get(
+        self, target: Target, params: dict[str, Any], operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``winsrv.time.get``."""
+        from meho_backplane.connectors.winsrv.ops_time import winsrv_time_get as _h
+
+        return await _h(self, target, params, operator)
+
+    async def winsrv_time_set(
+        self, target: Target, params: dict[str, Any], operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``winsrv.time.set`` (caution, approval)."""
+        from meho_backplane.connectors.winsrv.ops_time import winsrv_time_set as _h
+
+        return await _h(self, target, params, operator)
+
     @classmethod
     async def register_operations(cls) -> None:
         """Upsert every op in :data:`WINSRV_OPS` into ``endpoint_descriptor``.

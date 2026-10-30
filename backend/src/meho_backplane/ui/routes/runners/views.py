@@ -32,6 +32,7 @@ from typing import Final
 
 from meho_backplane.auth.runner_principals import RunnerPrincipalRead
 from meho_backplane.runner import wire
+from meho_backplane.runner.package_set import local_package_set
 from meho_backplane.ui.routes.checks.views import coerce_utc_aware, state_badge_class
 
 __all__ = [
@@ -95,4 +96,11 @@ def project_runner_to_row(
             principal.wire_version is not None and principal.wire_version != wire.SCHEMA_VERSION
         ),
         "central_wire_version": wire.SCHEMA_VERSION,
+        "package_set_digest": principal.package_set_digest,
+        # ``None`` (not called since #5038) is not flagged, like the wire version.
+        "package_set_mismatch": (
+            principal.package_set_digest is not None
+            and principal.package_set_digest != local_package_set().digest
+        ),
+        "central_package_set_digest": local_package_set().digest,
     }

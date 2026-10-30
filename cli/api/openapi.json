@@ -58,7 +58,7 @@
           "version"
         ],
         "summary": "Version",
-        "description": "Return the build-identity payload.\n\nEach field falls back to ``\"unknown\"`` when its env var is unset or\nempty, which keeps local development frictionless without ever\npretending an unknown build is a known one.",
+        "description": "Return the build-identity payload and the installed connector packages.\n\nEach build field falls back to ``\"unknown\"`` when its env var is unset\nor empty, which keeps local development frictionless without ever\npretending an unknown build is a known one. ``connector_packages`` is\nempty for the plain public image.",
         "operationId": "version_version_get",
         "responses": {
           "200": {
@@ -66,12 +66,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "type": "string",
-                    "nullable": true
-                  },
-                  "type": "object",
-                  "title": "Response Version Version Get"
+                  "$ref": "#/components/schemas/VersionResponse"
                 }
               }
             }
@@ -5004,6 +4999,242 @@
         }
       }
     },
+    "/api/v1/connectors/{connector_id}/tenant-settings": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "List Tenant Settings Endpoint",
+        "description": "List the operations the tenant turned on or off for itself, with the install default.",
+        "operationId": "list_tenant_settings_endpoint_api_v1_connectors__connector_id__tenant_settings_get",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "description": "Act on this tenant instead of your own. Needs platform_admin when it is not your tenant.",
+              "title": "Tenant Id"
+            },
+            "description": "Act on this tenant instead of your own. Needs platform_admin when it is not your tenant."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantOperationSettingsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/{connector_id}/tenant-settings/operations/{op_id}": {
+      "put": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Set Tenant Operation Setting Endpoint",
+        "description": "Turn one built-in operation on or off for the tenant, or back to the install default.\n\nThe ``op_id`` path parameter uses the ``:path`` converter so an op id\nwith slashes (``GET:/api/vcenter/cluster``) round-trips.",
+        "operationId": "set_tenant_operation_setting_endpoint_api_v1_connectors__connector_id__tenant_settings_operations__op_id__put",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "op_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Op Id"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "description": "Act on this tenant instead of your own. Needs platform_admin when it is not your tenant.",
+              "title": "Tenant Id"
+            },
+            "description": "Act on this tenant instead of your own. Needs platform_admin when it is not your tenant."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantSettingBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantOperationSettingItem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/{connector_id}/tenant-settings/groups/{group_key}": {
+      "put": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Set Tenant Group Setting Endpoint",
+        "description": "Turn every built-in operation in one group on or off for the tenant, or back to default.",
+        "operationId": "set_tenant_group_setting_endpoint_api_v1_connectors__connector_id__tenant_settings_groups__group_key__put",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "group_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Group Key"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "description": "Act on this tenant instead of your own. Needs platform_admin when it is not your tenant.",
+              "title": "Tenant Id"
+            },
+            "description": "Act on this tenant instead of your own. Needs platform_admin when it is not your tenant."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantSettingBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantGroupSettingResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/kb": {
       "get": {
         "tags": [
@@ -8924,6 +9155,16 @@
               "nullable": true,
               "title": "X-Meho-Runner-Wire-Version"
             }
+          },
+          {
+            "name": "X-MEHO-Runner-Package-Set",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Package-Set"
+            }
           }
         ],
         "responses": {
@@ -8989,6 +9230,16 @@
               "type": "string",
               "nullable": true,
               "title": "X-Meho-Runner-Wire-Version"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Package-Set",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Package-Set"
             }
           }
         ],
@@ -9096,7 +9347,7 @@
           "checks"
         ],
         "summary": "Get Assignment",
-        "description": "Return runner *runner*'s versioned assignment (runner-authenticated).\n\nA runner may fetch only its own assignment\n(:func:`assert_runner_scope`). A runner on another wire version gets a\n409 that names both versions. ``known_version`` matching the current\ncontent digest yields ``304 Not Modified`` (empty body); the runner\nkeeps its cache.",
+        "description": "Return runner *runner*'s versioned assignment (runner-authenticated).\n\nA runner may fetch only its own assignment\n(:func:`assert_runner_scope`). A runner on another wire version gets a\n409 that names both versions. Work for a connector package is left out\nwhen the runner's package set differs from central's (#5038).\n``known_version`` matching the current\ncontent digest yields ``304 Not Modified`` (empty body); the runner\nkeeps its cache.",
         "operationId": "get_assignment_api_v1_checks_assignment_get",
         "parameters": [
           {
@@ -9137,6 +9388,16 @@
               "type": "string",
               "nullable": true,
               "title": "X-Meho-Runner-Wire-Version"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Package-Set",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Package-Set"
             }
           }
         ],
@@ -9191,6 +9452,16 @@
               "type": "string",
               "nullable": true,
               "title": "X-Meho-Runner-Wire-Version"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Package-Set",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Package-Set"
             }
           }
         ],
@@ -10603,7 +10874,7 @@
           "service-principal-grants"
         ],
         "summary": "Create Grant",
-        "description": "Create a standing grant (the operator's upfront review).\n\nOnly a person may create one: a machine principal gets 403\n``human_principal_required`` before this runs.\nReturns 422 when the op is delete-shaped, a scope field carries a\nwildcard, ``expires_at`` is in the past, or an active grant for the\nsame fully-scoped key already exists. On an instance in sandbox mode\n(#4622) a delete-shaped op is a delete grant, which only the web\nconsole creates: this route answers 403 ``delete_grant_console_only``.\nAudited via the audit middleware.",
+        "description": "Create a standing grant (the operator's upfront review).\n\nOnly a person may create one: a machine principal gets 403\n``human_principal_required`` before this runs.\nReturns 422 when the op is delete-shaped, a scope field carries a\nwildcard, ``expires_at`` is in the past, or an active grant for the\nsame fully-scoped key already exists. On an instance in sandbox mode\n(#4622) a delete-shaped op is a delete grant. The web console creates\nit; this route refuses it with 403 ``delete_grant_console_only`` unless\n``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` is on (#5251). With the setting\non, a tenant admin may create it here, with the same checks as the\nconsole; an ``operator`` without ``tenant_admin`` gets 403\n``grants_require_tenant_admin``. Audited via the audit middleware; the\npayload's ``created_via`` is ``api``.",
         "operationId": "create_grant_api_v1_service_principals_grants_post",
         "parameters": [
           {
@@ -23936,6 +24207,11 @@
             "nullable": true,
             "title": "Tenant Id"
           },
+          "tenant_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tenant Name"
+          },
           "principal_sub": {
             "type": "string",
             "title": "Principal Sub"
@@ -24056,7 +24332,7 @@
           "broadcast_event_id"
         ],
         "title": "AuditEntry",
-        "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``work_ref`` \u2190 ``audit_log.work_ref`` (external change-ticket reference;\n  work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat\n  ``work_ref`` filter on :class:`AuditQueryFilters` is exact-match.\n* ``principal_name`` \u2190 ``payload['principal_name']`` when set. The MCP\n  audit-write helper (``write_mcp_audit_row``) populates it from\n  ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain\n  None pending a separate fix to bind ``name`` to contextvars in\n  ``verify_jwt_and_bind``.\n* ``broadcast_event_id`` \u2014 v0.2 placeholder, always None (FK direction\n  is reversed: ``BroadcastEvent.audit_id`` points at the audit row)."
+        "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``tenant_name`` \u2190 LEFT JOIN ``tenant.name`` ON ``audit_log.tenant_id``\n  (#5238). ``None`` when the tenant row is gone; show ``tenant_id`` then.\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``work_ref`` \u2190 ``audit_log.work_ref`` (external change-ticket reference;\n  work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat\n  ``work_ref`` filter on :class:`AuditQueryFilters` is exact-match.\n* ``principal_name`` \u2190 ``payload['principal_name']`` when set. The MCP\n  audit-write helper (``write_mcp_audit_row``) populates it from\n  ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain\n  None pending a separate fix to bind ``name`` to contextvars in\n  ``verify_jwt_and_bind``.\n* ``broadcast_event_id`` \u2014 v0.2 placeholder, always None (FK direction\n  is reversed: ``BroadcastEvent.audit_id`` points at the audit row)."
       },
       "AuditEventClass": {
         "type": "string",
@@ -27141,6 +27417,44 @@
         "title": "ConnectorListResponse",
         "description": "Unified list envelope for ``GET /api/v1/connectors``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. This listing is not\ncursor-paginated, so ``next_cursor`` is always ``None``; the field\nis present so a client reads it without a ``KeyError`` guard and so\nthe endpoint can grow keyset pagination later without a further\nbreaking change."
       },
+      "ConnectorPackage": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Name"
+          },
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Version"
+          },
+          "wheel_digest": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Wheel Digest"
+          },
+          "folders": {
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Folders"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "version",
+          "wheel_digest",
+          "folders"
+        ],
+        "title": "ConnectorPackage",
+        "description": "One connector package named in the allowlist file."
+      },
       "ConnectorReviewDeleteOp": {
         "properties": {
           "op_id": {
@@ -27301,6 +27615,11 @@
             "type": "boolean",
             "title": "Needs Reingest",
             "default": false
+          },
+          "tenant_enabled": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Tenant Enabled"
           }
         },
         "type": "object",
@@ -30431,6 +30750,18 @@
             "type": "array",
             "title": "Features",
             "default": []
+          },
+          "connector_packages": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorPackage"
+            },
+            "type": "array",
+            "title": "Connector Packages",
+            "default": []
+          },
+          "operation_catalog": {
+            "$ref": "#/components/schemas/OperationCatalogStatus",
+            "nullable": true
           }
         },
         "type": "object",
@@ -30441,7 +30772,7 @@
           "mcp_session_id_capture"
         ],
         "title": "HealthResponse",
-        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET.\n\n``pairings`` (#3025) carries the tenant's active add-on pairings \u2014\neach add-on's negotiated contract version, whether it is still\ncontract-compatible with this backplane build, and its last liveness\nheartbeat. The list is empty when nothing is paired; the empty-default\nkeeps response decoders generated against the pre-#3025 shape working.\n\n``granted_scopes`` (#3666) lists the OAuth scope names on the caller's\ntoken, sorted. It carries scope names only, never token material.\n``surface_summary`` (#3666) compares the working-surface tools the\nserver registers with the ones this session lists\n(:class:`SurfaceSummary`). Both have empty defaults so older response\ndecoders keep working; the handler always fills them.\n\n``sandbox_mode`` (#4622) is ``\"on\"`` or ``\"off\"``: whether this\ninstance lets a standing grant made in the web console cover a delete\nby a service principal. ``meho status`` prints one line when it is on.\nThe default ``\"off\"`` keeps older response decoders working.\n\n``readiness``, ``approvals`` and ``features`` (#4830) let an operator\nconfirm an upgrade through MEHO: the same checks ``/ready`` returns\n(:class:`ReadinessStatus`), the approval settings in force\n(:class:`ApprovalsStatus`) and the gated features with the names of\nthe settings they still need (:class:`FeatureStatus`). The route is\nOPERATOR-gated, so unlike ``/ready`` no metrics token is needed.\n``None`` / empty defaults keep older response decoders working; the\nhandler always fills them."
+        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET.\n\n``pairings`` (#3025) carries the tenant's active add-on pairings \u2014\neach add-on's negotiated contract version, whether it is still\ncontract-compatible with this backplane build, and its last liveness\nheartbeat. The list is empty when nothing is paired; the empty-default\nkeeps response decoders generated against the pre-#3025 shape working.\n\n``granted_scopes`` (#3666) lists the OAuth scope names on the caller's\ntoken, sorted. It carries scope names only, never token material.\n``surface_summary`` (#3666) compares the working-surface tools the\nserver registers with the ones this session lists\n(:class:`SurfaceSummary`). Both have empty defaults so older response\ndecoders keep working; the handler always fills them.\n\n``sandbox_mode`` (#4622) is ``\"on\"`` or ``\"off\"``: whether this\ninstance lets a standing grant made in the web console cover a delete\nby a service principal. ``meho status`` prints one line when it is on.\nThe default ``\"off\"`` keeps older response decoders working.\n\n``readiness``, ``approvals`` and ``features`` (#4830) let an operator\nconfirm an upgrade through MEHO: the same checks ``/ready`` returns\n(:class:`ReadinessStatus`), the approval settings in force\n(:class:`ApprovalsStatus`) and the gated features with the names of\nthe settings they still need (:class:`FeatureStatus`). The route is\nOPERATOR-gated, so unlike ``/ready`` no metrics token is needed.\n``None`` / empty defaults keep older response decoders working; the\nhandler always fills them.\n\n``connector_packages`` (#5036) lists the connector packages this image\ncarries, the same list ``GET /version`` shows. It is empty for the\nplain public image.\n\n``operation_catalog`` (#5019) names the release that wrote the shared\noperation rows and says whether it is this pod's release\n(:class:`OperationCatalogStatus`). The ``None`` default keeps older\nresponse decoders working; the handler always fills it."
       },
       "InCompare": {
         "properties": {
@@ -31593,6 +31924,36 @@
         ],
         "title": "OperationCallVerifyResponse",
         "description": "Captured result of a dispatched ``operation_call`` verify step.\n\nThe engine populates this from ``call_operation()``'s return value;\ncallers do not construct it themselves. Stored in\n``runbook_run_step_states.verify_response`` for later replay /\naudit. :attr:`matched` is ``True`` when the structural-equality +\npresence match against the template-side ``expect`` succeeded;\n:attr:`actual` is the call result, retained verbatim for the\nmismatch-case forensics."
+      },
+      "OperationCatalogStatus": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "title": "State"
+          },
+          "this_release": {
+            "type": "string",
+            "title": "This Release"
+          },
+          "written_by_release": {
+            "type": "string",
+            "nullable": true,
+            "title": "Written By Release"
+          },
+          "written_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Written At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "state",
+          "this_release"
+        ],
+        "title": "OperationCatalogStatus",
+        "description": "Which release wrote the shared operation rows (#5019).\n\nThe operation rows hold, for each built-in operation, which code\nruns, the parameter rules, the risk level and the approval flag.\nEvery start writes them, and all pods share them. ``state`` is:\n\n* ``same_release`` -- this pod's release wrote them.\n* ``other_release`` -- another release wrote them, so this pod\n  serves settings that were not made for its code. Usually a sign\n  that two releases run at the same time; see\n  ``docs/acceptance/rollback.md`` for what to do.\n* ``not_recorded`` -- no start since this check shipped has written\n  them yet.\n* ``unknown`` -- the database could not be read (the ``db`` field\n  says more).\n\n``this_release`` and ``written_by_release`` are commit hashes, the\n``git_sha`` value of ``GET /version``."
       },
       "OperationDescriptor": {
         "properties": {
@@ -32918,6 +33279,11 @@
             "nullable": true,
             "title": "Tenant Id"
           },
+          "tenant_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tenant Name"
+          },
           "principal_sub": {
             "type": "string",
             "title": "Principal Sub"
@@ -33936,6 +34302,11 @@
             "type": "string",
             "nullable": true,
             "title": "Wire Version"
+          },
+          "package_set_digest": {
+            "type": "string",
+            "nullable": true,
+            "title": "Package Set Digest"
           }
         },
         "type": "object",
@@ -34070,6 +34441,11 @@
             "format": "date-time",
             "nullable": true,
             "title": "Expires At"
+          },
+          "package_set": {
+            "type": "string",
+            "nullable": true,
+            "title": "Package Set"
           }
         },
         "type": "object",
@@ -34082,7 +34458,7 @@
           "principal"
         ],
         "title": "RunnerWorkItem",
-        "description": "One centrally-authorized operation for the runner to execute.\n\nCarries the fields the runner needs to resolve and invoke a handler\nentirely locally: the dotted ``handler_ref`` (resolved via\n:func:`~meho_backplane.operations._handler_resolve.import_handler`),\nthe ``(product, version, impl_id)`` registry key used to rebind a\nbound-method handler against its connector instance, the validated\n``params``, the ``safety_level`` the runner re-checks (defence in\ndepth), the principal context, and the resolved target descriptor\n(``None`` for targetless synthetic ops such as ``net.*``).\n\nRemote-write signing (#3189): a ``caution`` / ``remote-write`` item\nadditionally carries the centre's Ed25519 ``signature`` over its\ncanonical payload and the ``expires_at`` freshness bound the signature\ncovers, both verified in\n:func:`~meho_backplane.runner.executor._screen_item` before execution.\nBoth are ``None`` for a ``safe`` read item (the recurring assignment\npath materialises only ``safe`` ops and never signs them) -- signing is\na write-tier property, so their absence on a ``safe`` item is correct,\nnot a missing field."
+        "description": "One centrally-authorized operation for the runner to execute.\n\nCarries the fields the runner needs to resolve and invoke a handler\nentirely locally: the dotted ``handler_ref`` (resolved via\n:func:`~meho_backplane.operations._handler_resolve.import_handler`),\nthe ``(product, version, impl_id)`` registry key used to rebind a\nbound-method handler against its connector instance, the validated\n``params``, the ``safety_level`` the runner re-checks (defence in\ndepth), the principal context, and the resolved target descriptor\n(``None`` for targetless synthetic ops such as ``net.*``).\n\nRemote-write signing (#3189): a ``caution`` / ``remote-write`` item\nadditionally carries the centre's Ed25519 ``signature`` over its\ncanonical payload and the ``expires_at`` freshness bound the signature\ncovers, both verified in\n:func:`~meho_backplane.runner.executor._screen_item` before execution.\nBoth are ``None`` for a ``safe`` read item (the recurring assignment\npath materialises only ``safe`` ops and never signs them) -- signing is\na write-tier property, so their absence on a ``safe`` item is correct,\nnot a missing field.\n\nConnector packages (#5038): ``package_set`` is the digest of the\nconnector package set the item needs\n(:func:`~meho_backplane.runner.package_set.package_set_digest`). The\ncentral MEHO sets it only when a connector package provides the op, and\nthe runner refuses the item when its own digest differs. ``None`` for an\nop built into MEHO."
       },
       "RunnerWriteAllowlistEntryRead": {
         "properties": {
@@ -36552,6 +36928,39 @@
         "title": "TenantFlightRecorderPolicyUpdate",
         "description": "``PATCH /api/v1/tenants/flight-recorder-policy`` body.\n\nAll three fields are optional-partial: only fields the client actually\nsends are applied (``model_dump(exclude_unset=True)`` in the handler keys\noff ``model_fields_set``, so a JSON ``null`` is distinguished from an\nabsent key). ``extra='forbid'`` rejects unknown keys with a 422.\n\n* ``flight_recorder_enabled`` (F1) -- Boolean, ``NOT NULL`` at the DB\n  layer. Absent = leave unchanged; ``true`` / ``false`` flips the\n  per-tenant capture default. An explicit ``null`` is rejected (the column\n  has no inherit state) -- the validator fires only when the key is\n  present, so an absent field never trips it.\n* ``flight_recorder_agent_readable`` (F5) -- **tri-state**. Absent = leave\n  unchanged; ``true`` / ``false`` force the agent-read override on / off;\n  ``null`` clears it back to inherit (follow the capture default). This is\n  the JSON-``null``-vs-absent distinction the tri-state needs.\n* ``flight_recorder_retention_days`` (F4) -- nullable, bounded ``1..365``\n  (the reaper window; matches ``Settings.flight_recorder_retention_days_default``'s\n  ``ge=1, le=365``). Absent = leave unchanged; an int sets the per-tenant\n  window; ``null`` clears it back to the global default. The bound applies\n  only to the int arm -- a ``null`` clear is always legal."
       },
+      "TenantGroupSettingResponse": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "group_key": {
+            "type": "string",
+            "title": "Group Key"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TenantOperationSettingItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "tenant_id",
+          "group_key",
+          "items"
+        ],
+        "title": "TenantGroupSettingResponse",
+        "description": "The group's operations after a group write."
+      },
       "TenantMailRecipientPolicy": {
         "properties": {
           "tenant_id": {
@@ -36586,6 +36995,70 @@
         "title": "TenantMailRecipientPolicyUpdate",
         "description": "``PATCH /api/v1/tenants/mail-recipient-policy`` body (#3499).\n\nThe single field is optional-partial (``model_dump(exclude_unset=True)`` in\nthe handler keys off ``model_fields_set``, so a JSON ``null`` is\ndistinguished from an absent key). ``extra='forbid'`` rejects unknown keys\nwith a 422.\n\n* absent = leave the column unchanged.\n* ``null`` = clear back to **inherit** (the instance floor alone governs the\n  tenant's ``mail.send``).\n* ``\"\"`` = **deny** (an empty tenant allowlist refuses every dispatched\n  send) -- the shared-instance containment lever.\n* a comma-separated address/domain string = the tenant's own recipient\n  space. Validated with the same grammar as the instance floor\n  (:func:`~meho_backplane.connectors.mail.allowlist.parse_recipient_allowlist`),\n  so a malformed entry (whitespace, ``foo@``, bare ``@``, ...) is a 422 at\n  write time rather than a silent inert allowlist at dispatch time."
       },
+      "TenantOperationSettingItem": {
+        "properties": {
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "group_key": {
+            "type": "string",
+            "nullable": true,
+            "title": "Group Key"
+          },
+          "default_enabled": {
+            "type": "boolean",
+            "title": "Default Enabled"
+          },
+          "tenant_enabled": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Tenant Enabled"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "op_id",
+          "group_key",
+          "default_enabled",
+          "tenant_enabled",
+          "enabled"
+        ],
+        "title": "TenantOperationSettingItem",
+        "description": "One built-in operation with its install default and the tenant's own setting."
+      },
+      "TenantOperationSettingsResponse": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TenantOperationSettingItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "tenant_id",
+          "items"
+        ],
+        "title": "TenantOperationSettingsResponse",
+        "description": "The tenant settings of one connector, for one tenant."
+      },
       "TenantRole": {
         "type": "string",
         "enum": [
@@ -36595,6 +37068,22 @@
         ],
         "title": "TenantRole",
         "description": "Per-tenant role granted to the operator by the JWT issuer.\n\nThe set is intentionally small in v0.2: a closed three-value enum\nlets the RBAC primitive (Task #234, ``require_role``) make\nexhaustive comparisons without leaking arbitrary string handling\ninto route code. A richer policy engine \u2014 topology-aware\npermissions, ABAC, approval workflows \u2014 is a separate v0.2.next\nGoal; widening this enum is the only ratcheting mechanism in the\ninterim.\n\nValues are the literal strings the Keycloak protocol-mapper recipe\n(Task #235) emits, so a JWT carrying ``\"tenant_admin\"`` materialises\ncleanly as :attr:`TENANT_ADMIN`. ``StrEnum`` (PEP 663, stdlib in\n3.11+) gives the members ``str`` semantics for free, so\n``f\"role={role}\"`` renders as ``\"role=tenant_admin\"`` rather than\n``\"role=TenantRole.TENANT_ADMIN\"``."
+      },
+      "TenantSettingBody": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Enabled"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "title": "TenantSettingBody",
+        "description": "Body of the tenant-setting writes.\n\n``enabled`` is required: ``true`` turns the operation on for the tenant,\n``false`` turns it off, ``null`` removes the setting so the tenant uses\nthe install default again."
       },
       "ThresholdCompare": {
         "properties": {
@@ -37382,6 +37871,39 @@
         ],
         "title": "VaultStatus",
         "description": "Federation-chain status for the deployment's credential backend.\n\nThe field is named ``vault`` on :class:`HealthResponse` for wire\ncompatibility (it predates the credential-backend seam), but the value\nreflects whichever backend ``config.credentialBackend`` selects: the\nVault OIDC-login + KV read on a Vault install, or the configured\nbackend's probe-secret read (``gsm:<project>/<probe-secret>`` on a GSM\ninstall) through the credential-backend seam.\n\n``reachable`` is true when the backend was reached \u2014 on Vault, the OIDC\nlogin succeeded (TCP + TLS + JWT forward); on a seam backend, the store\nwas addressable (config resolved, backend registered). ``read_ok`` is\ntrue when the probe secret read succeeded. ``detail`` carries a short\nstructured string for the CLI to render on failure paths \u2014 a class name\nor error code, never an unbounded exception message or a secret value."
+      },
+      "VersionResponse": {
+        "properties": {
+          "git_sha": {
+            "type": "string",
+            "title": "Git Sha"
+          },
+          "build_date": {
+            "type": "string",
+            "title": "Build Date"
+          },
+          "chart_version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Chart Version"
+          },
+          "connector_packages": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorPackage"
+            },
+            "type": "array",
+            "title": "Connector Packages",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "git_sha",
+          "build_date",
+          "chart_version"
+        ],
+        "title": "VersionResponse",
+        "description": "``GET /version`` response body."
       },
       "WithdrawRequestBody": {
         "properties": {

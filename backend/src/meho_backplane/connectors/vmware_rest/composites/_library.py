@@ -58,6 +58,7 @@ import httpx
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest.composite_issues import issue
+from meho_backplane.connectors.vmware_rest.composites._library_checks import id_problem
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _OP_FIND_LIBRARY,
     _OP_FIND_LIBRARY_ITEM,
@@ -170,16 +171,21 @@ async def _resolve_library_id(
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Resolve the target library id from ``library_id`` or ``library_name``.
 
-    ``library_id`` (an id) short-circuits; otherwise ``library_name`` is
+    ``library_id`` (a UUID) short-circuits; otherwise ``library_name`` is
     resolved via ``Content.Library_find`` (``POST:/content/library?action=find``).
+    A given id or one vCenter returns for the name that is not a UUID is
+    refused (``invalid_reference``) before it can reach a URL path.
     Returns ``(library_id, None)`` on success or ``(None, envelope)`` with a
     terminal ``invalid_reference`` / ``library_not_found`` /
     ``ambiguous_library`` response dict. Shared by the sync / status / items
     composites.
     """
     passthrough = params.get("library_id")
-    if isinstance(passthrough, str) and passthrough:
-        return passthrough, None
+    if passthrough is not None:
+        problem = id_problem(passthrough, "library_id")
+        if problem is not None:
+            return None, _invalid_reference(problem)
+        return str(passthrough), None
 
     library_name = params.get("library_name")
     if not isinstance(library_name, str) or not library_name:
@@ -213,7 +219,17 @@ async def _resolve_library_id(
                 )
             ],
         }
+    if id_problem(library_ids[0], "library id") is not None:
+        return None, _invalid_reference(f"vCenter returned an unexpected id {library_ids[0]!r}")
     return library_ids[0], None
+
+
+def _invalid_reference(message: str) -> dict[str, Any]:
+    return {
+        "status": "invalid_reference",
+        "library_id": None,
+        "issues": [issue("input", "error", message)],
+    }
 
 
 def _build_subscription_info(params: dict[str, Any]) -> dict[str, Any]:
@@ -504,7 +520,13 @@ async def content_library_subscribed_items_list_composite(
         connector, target, operator, op_id=_OP_FIND_LIBRARY_ITEM, spec={"library_id": library_id}
     )
     items: list[dict[str, Any]] = []
+    issues: list[dict[str, Any]] = []
     for item_id in item_ids[:_ITEMS_HARD_CAP]:
+        if id_problem(item_id, "item id") is not None:
+            issues.append(
+                issue("connector", "warning", f"skipped an item with an unexpected id {item_id!r}")
+            )
+            continue
         detail = await _read_sub_op(
             connector, target, operator, _OP_GET_LIBRARY_ITEM, {"libraryItemId": item_id}
         )
@@ -522,4 +544,7 @@ async def content_library_subscribed_items_list_composite(
                 "last_sync_time": model.get("last_sync_time"),
             }
         )
-    return {"library_id": library_id, "item_count": len(items), "items": items}
+    result: dict[str, Any] = {"library_id": library_id, "item_count": len(items), "items": items}
+    if issues:
+        result["issues"] = issues
+    return result

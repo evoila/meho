@@ -58,6 +58,7 @@ type updateFlags struct {
 	verifyTLS     bool
 	tlsCaPin      string
 	tlsServerName string
+	vpnRequired   bool
 	preferredImpl string
 	note          string
 	extras        []string
@@ -68,10 +69,10 @@ type updateFlags struct {
 //
 // CLI shape:
 //
-//	meho targets update <name|alias> [--product p] [--host h] \
+//	meho targets update <name, alias or id> [--product p] [--host h] \
 //	  [--alias a ...] [--version v] [--port n] [--fqdn f] \
 //	  [--secret-ref <ref>] [--auth-model <m>] [--verify-tls=false] \
-//	  [--tls-ca-pin <pin>] [--tls-server-name <sni>] \
+//	  [--tls-ca-pin <pin>] [--tls-server-name <sni>] [--vpn-required=bool] \
 //	  [--preferred-impl <id>] [--note <n>] [--extra key=value ...] \
 //	  [--clear <field> ...] [--json] [--backplane <url>]
 //
@@ -91,7 +92,7 @@ func newUpdateCmd() *cobra.Command {
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
-		Use:   "update <name|alias>",
+		Use:   "update <name, alias or id>",
 		Short: "Change fields on an existing target",
 		Long: "update changes one target via PATCH /api/v1/targets/{name}. " +
 			"Only the flags you pass are sent; every other field keeps its " +
@@ -144,6 +145,8 @@ func registerUpdateFlags(cmd *cobra.Command, f *updateFlags) {
 	fs.StringVar(&f.tlsCaPin, "tls-ca-pin", "", "PEM CA bundle to pin for this target")
 	fs.StringVar(&f.tlsServerName, "tls-server-name", "",
 		"TLS SNI / certificate-verification hostname, decoupled from --host")
+	fs.BoolVar(&f.vpnRequired, "vpn-required", false,
+		"mark that a VPN must be up to reach the target; pass --vpn-required=false to clear it")
 	fs.StringVar(&f.preferredImpl, "preferred-impl", "",
 		"connector impl_id override for the resolver's tie-break")
 	fs.StringVar(&f.note, "note", "", "free-form operator note stored on the target")
@@ -174,6 +177,7 @@ func buildUpdateBody(cmd *cobra.Command, f *updateFlags) (map[string]any, *outpu
 		"verify-tls":      f.verifyTLS,
 		"tls-ca-pin":      f.tlsCaPin,
 		"tls-server-name": f.tlsServerName,
+		"vpn-required":    f.vpnRequired,
 		"preferred-impl":  f.preferredImpl,
 		"note":            f.note,
 	}

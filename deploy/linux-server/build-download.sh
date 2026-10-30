@@ -53,6 +53,24 @@ Settings, from the environment:
   MEHO_DOWNLOAD_MAX_BYTES  The size limit of the tar. Default: 2040109465
                            (1.9 GiB).
 
+An overlay image instead of ghcr.io/evoila/meho (all empty by default):
+  MEHO_OVERLAY_IMAGE       The image repository, for example
+                           registry.example.com/team/meho-overlay. Its tag
+                           is MEHO_IMAGE_TAG.
+  MEHO_OVERLAY_SIGNER      Required with an overlay. The cosign certificate
+                           identity that signed it. No other signer passes.
+  MEHO_OVERLAY_OIDC_ISSUER The OIDC issuer of that identity. Default:
+                           https://token.actions.githubusercontent.com.
+  MEHO_OVERLAY_LICENCE     Required with an overlay. Its line for
+                           LICENSES/README.txt: "<licence files> <source>",
+                           in the format of packaging/image-sources.txt.
+
+A login for a private registry (all three or none):
+  MEHO_REGISTRY            The registry, for example registry.example.com.
+  MEHO_REGISTRY_USERNAME   The user name.
+  MEHO_REGISTRY_PASSWORD   The password or token. It goes to regctl and
+                           cosign on stdin, never on a command line.
+
 Tools on PATH: curl, tar, zstd, jq, sha256sum, regctl and cosign.
 HELP
 }
@@ -79,6 +97,8 @@ main() {
     [[ $max_bytes =~ ^[0-9]+$ ]] || usage_error "MEHO_DOWNLOAD_MAX_BYTES must be a number of bytes."
     [[ -n $CLI_BINARY && -f $CLI_BINARY && -x $CLI_BINARY ]] ||
         usage_error "MEHO_CLI_BINARY must name the executable meho CLI for Linux amd64."
+    read_image_settings
+    check_registry_login
     need_tools curl tar zstd jq sha256sum regctl cosign
     trap 'on_error "$?" "$LINENO" "${BASH_SOURCE[0]##*/}"' ERR
 
@@ -89,6 +109,7 @@ main() {
     # build neither reads nor changes the settings of the user who runs it.
     export HELM_CACHE_HOME=$WORK/helm-home/cache HELM_CONFIG_HOME=$WORK/helm-home/config \
         HELM_DATA_HOME=$WORK/helm-home/data
+    registry_login "$WORK/registry-login" regctl cosign
     name=$(download_name "$VERSION")
     STAGE=$WORK/$name
     mkdir -p "$STAGE"/{lib,storage,rke2,images,chart,bin,LICENSES}

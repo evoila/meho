@@ -146,14 +146,16 @@ func runUnannotate(cmd *cobra.Command, opts unannotateOptions) error {
 			opts.JSONOut)
 	}
 
-	if err := deleteEdge(cmd.Context(), backplaneURL, edgeUUID); err != nil {
+	auditID, err := deleteEdge(cmd.Context(), backplaneURL, edgeUUID)
+	if err != nil {
 		return renderUnannotateDeleteError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(),
-			map[string]string{"deleted": edgeUUID.String()})
+			map[string]any{"deleted": edgeUUID.String(), "audit_id": auditID})
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "deleted edge %s\n", edgeUUID)
+	output.WriteAuditReceipt(cmd.OutOrStdout(), auditID)
 	return nil
 }
 
@@ -340,10 +342,12 @@ func formatAutoEdgeConflict(body string) string {
 // row existed or not — idempotent contract) and 409 + structured
 // detail for an auto-row delete attempt. The caller forwards the
 // returned error to renderUnannotateDeleteError for category mapping.
-func deleteEdge(ctx context.Context, backplaneURL string, edgeID uuid.UUID) error {
+// On success it returns the audit id from the Meho-Audit-Id header
+// (nil when the backplane sent none).
+func deleteEdge(ctx context.Context, backplaneURL string, edgeID uuid.UUID) (*string, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	resp, err := retryOn401(ctx, authed,
 		func(ctx context.Context) (*api.UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse, error) {
@@ -352,10 +356,10 @@ func deleteEdge(ctx context.Context, backplaneURL string, edgeID uuid.UUID) erro
 		func(r *api.UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse) int { return r.StatusCode() },
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if resp.StatusCode() == http.StatusNoContent {
-		return nil
+		return output.AuditIDFromResponse(resp.HTTPResponse), nil
 	}
-	return &httpStatusError{StatusCode: resp.StatusCode(), Body: resp.Body}
+	return nil, &httpStatusError{StatusCode: resp.StatusCode(), Body: resp.Body}
 }

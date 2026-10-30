@@ -211,7 +211,7 @@ from meho_backplane.ui.auth.refresh import (
     verify_access_token_with_refresh,
 )
 from meho_backplane.ui.csrf import mint_csrf_token
-from meho_backplane.ui.routes.approvals.render import set_csrf_cookie
+from meho_backplane.ui.routes.approvals.render import parked_request_chain, set_csrf_cookie
 from meho_backplane.ui.routes.connectors.operator import (
     OperatorRoleProbe,
     resolve_role_probe,
@@ -941,6 +941,10 @@ async def _render_call_result(
         "error_message": None,
         "connector_id": connector_id,
         "op_id": op_id,
+        # Step k of N when the parked request is one of two or more pending
+        # requests under its change ticket (#3596); the notice then links to
+        # the ticket's oldest-first view.
+        "chain": await parked_request_chain(operator.tenant_id, envelope),
     }
     return get_templates().TemplateResponse(request, "operations/_result.html", context)
 
@@ -964,6 +968,7 @@ def _render_call_form_error(
         "error_message": message,
         "connector_id": connector_id,
         "op_id": op_id,
+        "chain": None,
     }
     return get_templates().TemplateResponse(
         request,

@@ -5,7 +5,7 @@
 The tests run the shell functions of packaging/ with bash, offline, and
 change nothing outside a temporary folder:
 
-- PATH holds stub commands for regctl (the registry tool) and zstd, and
+- PATH holds stub commands for regctl (the registry tool), cosign and zstd, and
   links to the real tools the functions need. Each stub answers from one
   file in the "fake" folder and writes its arguments to calls.log.
 - The image archives are small OCI image layouts that the tests build in
@@ -73,6 +73,28 @@ STUBS = {
           "image digest")
             awk -v ref="$3" '$1 == ref { print $2; found = 1 } END { exit !found }' \\
                 "$MEHO_FAKE/regctl_digests" || { echo "regctl: $3 not found" >&2; exit 1; } ;;
+          "registry login")
+            cat > "$MEHO_FAKE/regctl_login_stdin"
+            exit "$(cat "$MEHO_FAKE/regctl_login_rc")" ;;
+          *) exit 1 ;;
+        esac
+        """),
+    # cosign verify passes only for a line "<reference> <identity> <issuer>"
+    # of cosign_signers. cosign login keeps what it read on stdin.
+    "cosign": textwrap.dedent("""\
+        case "$1" in
+          verify)
+            reference=$2; identity=""; issuer=""; shift 2
+            while [ $# -gt 0 ]; do
+              case "$1" in
+                --certificate-identity) identity=$2; shift 2 ;;
+                --certificate-oidc-issuer) issuer=$2; shift 2 ;;
+                *) shift ;;
+              esac
+            done
+            grep -qxF "$reference $identity $issuer" "$MEHO_FAKE/cosign_signers" ||
+                { echo "cosign: none of the signatures matched $identity" >&2; exit 1; } ;;
+          login) cat > "$MEHO_FAKE/cosign_login_stdin" ;;
           *) exit 1 ;;
         esac
         """),
@@ -92,6 +114,8 @@ STUBS = {
 
 DEFAULT_ANSWERS = {
     "regctl_digests": "",
+    "cosign_signers": "",
+    "regctl_login_rc": "0",
     "zstd_rc": "0",
 }
 

@@ -342,6 +342,25 @@ def test_networkpolicy_off_by_default_and_admits_backplane_when_on() -> None:
     assert rule["from"][1] == {
         "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}
     }
+    # The built-in OpenBao fetches the realm's keys; its setup Job waits for the realm.
+    assert rule["from"][3:] == [
+        {
+            "podSelector": {
+                "matchLabels": {
+                    "app.kubernetes.io/instance": "test",
+                    "app.kubernetes.io/name": "openbao",
+                }
+            }
+        },
+        {
+            "podSelector": {
+                "matchLabels": {
+                    "app.kubernetes.io/instance": "test",
+                    "app.kubernetes.io/component": "vault-init",
+                }
+            }
+        },
+    ]
     assert rule["ports"] == [{"port": "http", "protocol": "TCP"}]
 
 

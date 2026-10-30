@@ -75,7 +75,7 @@ update, read with `meho status --first-start`.
 | `lib/checks.sh` | Step 1: one function per check. |
 | `lib/firewall.sh` | The host firewall: the checks of step 1 (`nft`, the admin network), the files and the start in step 2, `firewall_state` and `firewall_port_list`. |
 | `lib/prepare.sh` | Step 2: folders, `config.yaml`, join token, image archive, storage manifest, the Traefik redirect. |
-| `lib/cis.sh` | RKE2's CIS profile: the pod security file that `config.yaml` names, the host steps of step 3 (the `etcd` user and group, the kernel settings), and `cis_state`. |
+| `lib/cis.sh` | RKE2's CIS profile: the pod security file that `config.yaml` names, the host steps of step 3 (the `etcd` user and group with the record of the parts the install created, the kernel settings), and `cis_state`. |
 | `lib/rke2.sh` | Step 3: RKE2's installer, the start, and the wait with one time limit. For the update: the restart, and the wait for the new run of `rke2-server`. |
 | `lib/update.sh` | The update: finding the install, reading `install.json`, the refused options, the version step, the backup question, the OS packages of the appliance, the result lines. |
 | `lib/core.sh` | Steps 4 to 6: the versions of the download, the place values, the Helm call, the two one-time files, the `meho` command, the install record, the result lines. |
@@ -364,9 +364,11 @@ depend on how the chart runs the migrations.
 **What the update leaves alone:** the firewall file and its units (the
 admin network changes only with `meho-host admin-network`), the two
 one-time files (the update does not write them again, also when the
-customer deleted them), the volumes in `/var/lib/meho/volumes`, OpenBao's
-data and the Secrets. It takes no etcd snapshot of its own (design,
-section 7): RKE2 takes one every 12 hours.
+customer deleted them), the record of the `etcd` account
+(`/etc/meho/etcd-account`, see [The host steps](#the-host-steps)), the
+volumes in `/var/lib/meho/volumes`, OpenBao's data and the Secrets. It
+takes no etcd snapshot of its own (design, section 7): RKE2 takes one
+every 12 hours.
 
 A failed step stops the update with one `[FAIL]` line. `install.json`
 still names the old version then, so a second run is again an update. The
@@ -732,6 +734,30 @@ kernel settings file; the step then copies and loads it.
    command, `useradd -r -c "etcd user" -s /sbin/nologin -M -U etcd`. When
    only the group exists, `useradd` gets `-g etcd` instead of `-U`. When
    only the user exists, `groupadd -r etcd` adds the group.
+
+   Right after it creates a part, the step adds it to the record
+   `/etc/meho/etcd-account` (mode 0600): `user`, `group` or both, one per
+   line, below two comment lines. `meho-host uninstall` reads the record
+   before it removes `/etc/meho`, and it removes only the parts that the
+   record names (#5133;
+   [linux-server-meho-host.md](linux-server-meho-host.md)). So an `etcd`
+   user or group that existed before the install is never removed.
+
+   The record is a file of its own, not a key of `install.json`, for two
+   reasons. `install.json` is written only at the end of step 6, but the
+   account is created in step 3. When a run stops between the two, for
+   example at the kernel settings below, the next run is a first install
+   again and finds the user and group. Only a record written at once
+   still says that MEHO created them. And no later run has to carry the
+   answer over: a run that finds a part creates nothing and leaves the
+   record as it is. An update finds the user and group that the first
+   install created, so it keeps the first install's record. A part that a
+   later run creates, because someone removed it, is added to the record.
+
+   An install.sh from before #5133 wrote no record. An update of such an
+   install writes none either, because it cannot know who created the
+   account. `meho-host uninstall` then keeps the account and says how to
+   remove it: never remove what the record does not say MEHO created.
 2. **The kernel settings.** RKE2 ships them as `rke2-cis-sysctl.conf`.
    RKE2's installer puts it in RKE2's share folder:
    `/usr/local/share/rke2/` for the tarball, `/opt/rke2/share/rke2/` for the
@@ -922,7 +948,13 @@ turns that skip into a failure.
 (after the installer, before the start of RKE2), each place of RKE2's
 kernel settings file, values that come from RKE2's file, a later file that
 sets a value again, the existing `etcd` user or group, a second run that
-changes nothing, `--from-disk`, and every answer of `cis_state`.
+changes nothing, `--from-disk`, and every answer of `cis_state`. For the
+record of the `etcd` account it covers each part the install creates, no
+record when both existed or `useradd` failed, the record of a run that
+stopped later, an update that keeps the first install's record, an update
+of an install without a record, and a part that a later run adds.
+`tests/test_meho_host.py` runs the install, the update and
+`meho-host uninstall` one after the other on the same fake machine.
 
 `tests/test_update.py` covers finding the install (the three signs, each
 half-installed case, `--from-disk`), the refused options, the order of the

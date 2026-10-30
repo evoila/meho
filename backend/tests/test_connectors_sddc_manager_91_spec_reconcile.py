@@ -27,6 +27,10 @@ declared set is introspected from the connector's live constants (the
   ``POST /v1/hosts/validations``, ``POST /v1/hosts``,
   ``POST /v1/domains/validations``, ``POST /v1/domains``), each carrying its
   own HTTP method.
+* :mod:`~meho_backplane.connectors.sddc_manager.typed_reads` — the two
+  validation-result reads (#3518, ``GET /v1/domains/validations/{id}`` and
+  ``GET /v1/hosts/validations/{id}``), which poll the result of the two
+  validate writes above.
 
 A red lane here is the guard surfacing a real finding (a fictional or
 renamed write path), not harness noise.
@@ -34,6 +38,7 @@ renamed write path), not harness noise.
 
 from __future__ import annotations
 
+from meho_backplane.connectors.sddc_manager import typed_reads as _typed_reads
 from meho_backplane.connectors.sddc_manager import typed_writes as _typed_writes
 from tests._spec_shelf import (
     assert_op_ids_served,
@@ -46,9 +51,17 @@ _SPEC_FILE = "sddc-manager-openapi.json"
 _SPEC_LABEL = f"{_SPEC_DIR}/{_SPEC_FILE}"
 
 
+def _validation_read_op_ids() -> set[str]:
+    """The ``GET`` paths of the two validation-result reads (#3518)."""
+    return {
+        f"GET:{_typed_reads._DOMAIN_VALIDATION_GET_PATH}",
+        f"GET:{_typed_reads._HOST_VALIDATION_GET_PATH}",
+    }
+
+
 def _declared_op_ids() -> set[str]:
-    """Every hand-coded ``METHOD:/path`` the WLD write ops dispatch."""
-    return set(_typed_writes.TYPED_WRITE_DECLARED_OP_IDS)
+    """Every hand-coded ``METHOD:/path`` the WLD write and poll ops dispatch."""
+    return set(_typed_writes.TYPED_WRITE_DECLARED_OP_IDS) | _validation_read_op_ids()
 
 
 def test_typed_write_declared_op_ids_are_pinned() -> None:
@@ -71,8 +84,16 @@ def test_typed_write_declared_op_ids_are_pinned() -> None:
     )
 
 
+def test_validation_read_op_ids_are_pinned() -> None:
+    """Guard: the two validation-result read paths can't drift unnoticed (#3518)."""
+    assert _validation_read_op_ids() == {
+        "GET:/v1/domains/validations/{id}",
+        "GET:/v1/hosts/validations/{id}",
+    }
+
+
 def test_declared_write_op_ids_are_served_by_the_pinned_91_spec() -> None:
-    """Every hand-coded write op_id is served by the pinned sddc-manager-9.1 spec."""
+    """Every hand-coded write and validation-read op_id is served by the 9.1 spec."""
     spec_path = require_shelf_spec(_SPEC_DIR, _SPEC_FILE)
     served = openapi_served_op_ids(spec_path)
     assert_op_ids_served(_declared_op_ids(), served, spec_label=_SPEC_LABEL)

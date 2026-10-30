@@ -88,6 +88,8 @@ __all__ = [
     "DATASTORE_DIR_CREATE_RESPONSE_SCHEMA",
     "DATASTORE_FILE_DELETE_PARAMETER_SCHEMA",
     "DATASTORE_FILE_DELETE_RESPONSE_SCHEMA",
+    "DATASTORE_FILE_LIST_PARAMETER_SCHEMA",
+    "DATASTORE_FILE_LIST_RESPONSE_SCHEMA",
     "DATASTORE_MOID_PATTERN",
     "DATASTORE_PATH_PATTERN",
     "DATASTORE_REFRESH_PARAMETER_SCHEMA",
@@ -184,6 +186,13 @@ __all__ = [
     "VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA",
     "VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA",
 ]
+
+
+#: vCenter content-library and item ids are UUIDs. Nothing else is accepted,
+#: so an id can never point a REST path at another object.
+CONTENT_LIBRARY_ID_PATTERN: str = (
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 
 #: The ``issues`` field a write composite adds when it did not complete (#3813).
@@ -561,6 +570,157 @@ DATASTORE_REFRESH_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["datastore", "refreshed", "storage_info_refreshed", "summary"],
+}
+
+
+#: ``vmware.composite.datastore.file.list`` parameter schema (#3432).
+#:
+#: One folder of one datastore, by datastore name. ``path`` is relative to
+#: the datastore root (empty = the root); the handler also refuses ``.`` /
+#: ``..`` segments and empty segments.
+DATASTORE_FILE_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "datastore": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "description": (
+                "Datastore name, e.g. 'datastore1'. On vCenter a moid such as "
+                "'datastore-17' also works (use it when two datastores share a name)."
+            ),
+        },
+        "path": {
+            "type": "string",
+            "maxLength": 1024,
+            "pattern": r"^[^\\\[\]*?\x00-\x1f\x7f]*$",
+            "default": "",
+            "description": (
+                "Folder relative to the datastore root, e.g. 'iso' or 'images/esxi'. "
+                "Empty (the default) lists the root."
+            ),
+        },
+        "pattern": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": r"^[^/\\\x00-\x1f\x7f]+$",
+            "description": (
+                "Optional file name pattern, e.g. '*.iso' or 'ks-host??.iso' "
+                "('*' and '?' are wildcards). Leave it out to list everything."
+            ),
+        },
+        "include_usage": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "When true, also sum each folder (size of all files below it, file "
+                "count, latest change) and name the registered VMs that use each "
+                "entry. Slower: it reads the whole folder tree and the VMs of the "
+                "datastore."
+            ),
+        },
+    },
+    "required": ["datastore"],
+    "additionalProperties": False,
+    "examples": [{"datastore": "datastore1", "path": "iso", "pattern": "*.iso"}],
+}
+
+
+#: ``vmware.composite.datastore.file.list`` response schema (#3432).
+DATASTORE_FILE_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "ok",
+                "not_found",
+                "ambiguous",
+                "invalid_request",
+                "unsupported_host_target",
+            ],
+            "description": (
+                "ok: entries holds the folder. not_found: no such datastore or folder. "
+                "ambiguous: two datastores share the name. invalid_request: a bad "
+                "path or pattern. unsupported_host_target: the target is not a "
+                "vCenter or an ESXi host. Each one but ok has guidance."
+            ),
+        },
+        "datastore": {"type": "string", "description": "Datastore name."},
+        "datastore_moid": {"type": ["string", "null"], "description": "Datastore moid."},
+        "datastore_type": {
+            "type": ["string", "null"],
+            "description": "Datastore type, e.g. VMFS, NFS, NFS41, vsan.",
+        },
+        "path": {"type": "string", "description": "The listed folder (relative)."},
+        "datastore_path": {
+            "type": ["string", "null"],
+            "description": "The listed folder as '[datastore] path'.",
+        },
+        "pattern": {"type": ["string", "null"], "description": "The file name pattern used."},
+        "count": {"type": "integer", "description": "Number of entries."},
+        "entries": {
+            "type": "array",
+            "description": "One row per file or folder directly in the listed folder.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "path": {
+                        "type": "string",
+                        "description": "Path relative to the datastore root.",
+                    },
+                    "kind": {"type": "string", "enum": ["file", "folder"]},
+                    "file_type": {
+                        "type": ["string", "null"],
+                        "description": "vSphere file type, e.g. IsoImageFileInfo, FolderFileInfo.",
+                    },
+                    "size_bytes": {
+                        "type": ["integer", "null"],
+                        "description": (
+                            "File size. For a folder: null, or with include_usage the "
+                            "size of all files below it."
+                        ),
+                    },
+                    "modified": {
+                        "type": ["string", "null"],
+                        "description": "Last change (ISO 8601).",
+                    },
+                    "file_count": {
+                        "type": "integer",
+                        "description": "include_usage, folders only: files below the folder.",
+                    },
+                    "latest_modified": {
+                        "type": ["string", "null"],
+                        "description": "include_usage, folders only: newest file change below.",
+                    },
+                    "vms": {
+                        "type": ["array", "null"],
+                        "items": {"type": "string"},
+                        "description": (
+                            "include_usage only: names of registered VMs that use a "
+                            "file at or below this path; null when not checked."
+                        ),
+                    },
+                },
+                "required": ["name", "path", "kind", "file_type", "size_bytes", "modified"],
+                "additionalProperties": False,
+            },
+        },
+        "vm_check": {
+            "type": ["string", "null"],
+            "enum": ["complete", "incomplete", "not_supported", None],
+            "description": (
+                "include_usage only. complete: vms is exact. incomplete: vSphere "
+                "answered only in part, so vms may miss a VM. not_supported: vSAN / "
+                "vVol datastore, vms not checked. null: include_usage was false."
+            ),
+        },
+        "guidance": {"type": ["string", "null"], "description": "Why the status is not ok."},
+    },
+    "required": ["status", "datastore", "path", "count", "entries"],
+    "additionalProperties": True,
 }
 
 
@@ -1390,9 +1550,9 @@ VM_CLONE_PARAMETER_SCHEMA: dict[str, Any] = {
         },
         "library_item": {
             "type": "string",
-            "minLength": 1,
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
             "description": (
-                "Content-library template item id. Rides the deploy path as "
+                "Content-library template item id (a UUID). Rides the deploy path as "
                 "``POST:/vcenter/vm-template/library-items/"
                 "{templateLibraryItem}?action=deploy``."
             ),
@@ -1404,7 +1564,7 @@ VM_CLONE_PARAMETER_SCHEMA: dict[str, Any] = {
         {
             "source_vm": "vm-42",
             "target_name": "<new-vm-name>",
-            "library_item": "<template-library-item-id>",
+            "library_item": "00000000-0000-0000-0000-000000000000",
         }
     ],
 }
@@ -4915,9 +5075,9 @@ VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "library_item": {
             "type": "string",
-            "minLength": 1,
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
             "description": (
-                "Content-library OVF/OVA item id (passthrough). Rides the deploy "
+                "Content-library OVF/OVA item id (a UUID). Rides the deploy "
                 "path as ``POST:/vcenter/ovf/library-item/{ovfLibraryItemId}"
                 "?action=deploy``. Give exactly one of ``library_item`` and "
                 "``library_item_name``; both or neither is refused before the call."
@@ -5207,9 +5367,9 @@ VM_IMPORT_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "library_item": {
             "type": "string",
-            "minLength": 1,
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
             "description": (
-                "Content-library OVF/OVA item id (passthrough). Give exactly one of "
+                "Content-library OVF/OVA item id (a UUID). Give exactly one of "
                 "``library_item`` and ``library_item_name``; both or neither is "
                 "refused before the call."
             ),
@@ -5321,7 +5481,7 @@ VM_IMPORT_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "examples": [
         {
-            "library_item": "<ovf-library-item-id>",
+            "library_item": "00000000-0000-0000-0000-000000000000",
             "resource_pool": "resgroup-8",
             "datastore": "datastore-15",
             "name": "<vm-name>",
@@ -7626,9 +7786,9 @@ CONTENT_LIBRARY_SUBSCRIBED_SYNC_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "library_id": {
             "type": "string",
-            "minLength": 1,
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
             "description": (
-                "Subscribed-library id to synchronise. Supply this **or** "
+                "Subscribed-library id (a UUID) to synchronise. Supply this **or** "
                 "``library_name``; ``library_id`` wins when both are present."
             ),
         },
@@ -7698,9 +7858,9 @@ CONTENT_LIBRARY_SUBSCRIBED_STATUS_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "library_id": {
             "type": "string",
-            "minLength": 1,
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
             "description": (
-                "Subscribed-library id to read. Supply this **or** "
+                "Subscribed-library id (a UUID) to read. Supply this **or** "
                 "``library_name``; ``library_id`` wins when both are present."
             ),
         },
@@ -7814,9 +7974,9 @@ CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "library_id": {
             "type": "string",
-            "minLength": 1,
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
             "description": (
-                "Subscribed-library id whose items to list. Supply this **or** "
+                "Subscribed-library id (a UUID) whose items to list. Supply this **or** "
                 "``library_name``; ``library_id`` wins when both are present."
             ),
         },
@@ -8118,11 +8278,6 @@ CLUSTER_MOID_PATTERN: str = r"^domain-c[0-9]+$"
 #: ``group-n`` network, ``group-d`` datacenter folders). ``group-p`` is a
 #: datastore cluster and is not accepted.
 FOLDER_MOID_PATTERN: str = r"^group-[a-oq-z][0-9]+$"
-#: vCenter content-library and item ids are UUIDs. Nothing else is accepted,
-#: so an id can never point a REST path at another object.
-CONTENT_LIBRARY_ID_PATTERN: str = (
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-)
 
 _TEARDOWN_OBJECT_SCHEMA: dict[str, Any] = {
     "type": ["object", "null"],

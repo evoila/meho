@@ -19,6 +19,7 @@ answer is split into pages the way vCenter may (``tests._vim_pages.PagedVim``).
 from __future__ import annotations
 
 import copy
+import fnmatch
 import json
 from typing import Any
 from uuid import UUID
@@ -87,6 +88,8 @@ class VimFake(PagedVim):
         super().__init__()
         self.objects: dict[tuple[str, str], dict[str, Any]] = {}
         self.files: dict[str, dict[str, int | None]] = {}  # ds name -> {rel path: size|None(dir)}
+        #: ds name -> {rel path: modification time stamp} for the browse answers.
+        self.mtimes: dict[str, dict[str, str]] = {}
         self.calls: list[tuple[str, Any]] = []
         self.task_faults: dict[str, Fault] = {}
         self.running: set[str] = set()
@@ -285,14 +288,18 @@ class VimFake(PagedVim):
         folders = [folder]
         if method == "SearchDatastoreSubFolders_Task":
             folders += [
-                p for p, size in tree.items() if size is None and p.startswith(folder + "/")
+                p
+                for p, size in tree.items()
+                if size is None and (not folder or p.startswith(folder + "/"))
             ]
         results = []
         for current in folders:
             entries = []
             for p, size in sorted(tree.items()):
                 parent, _, base = p.rpartition("/")
-                if parent != current or (pattern is not None and base != pattern):
+                if parent != current or (
+                    pattern is not None and not fnmatch.fnmatchcase(base, pattern)
+                ):
                     continue
                 entry: dict[str, Any] = {
                     "_typeName": "FolderFileInfo" if size is None else "FileInfo",
@@ -300,6 +307,8 @@ class VimFake(PagedVim):
                 }
                 if size is not None:
                     entry["fileSize"] = size
+                if p in self.mtimes.get(name, {}):
+                    entry["modification"] = self.mtimes[name][p]
                 entries.append(entry)
             results.append(
                 {

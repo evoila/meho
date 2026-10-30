@@ -107,6 +107,9 @@ from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
     datastore_dir_create_composite,
     datastore_file_delete_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._datastore_list import (
+    datastore_file_list_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._drs_group import (
     cluster_drs_group_members_set_composite,
 )
@@ -247,6 +250,7 @@ __all__ = [
     "content_library_subscribed_sync_composite",
     "datastore_dir_create_composite",
     "datastore_file_delete_composite",
+    "datastore_file_list_composite",
     "datastore_mount_nfs_composite",
     "datastore_refresh_composite",
     "datastore_usage_composite",

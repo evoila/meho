@@ -428,10 +428,11 @@ def build_unsupported_spec_detail(exc: UnsupportedSpecError) -> dict[str, Any]:
     """Structured detail for :class:`UnsupportedSpecError`.
 
     The exception already carries a remedy-bearing message — for Swagger
-    2.0 it names the ``swagger2openapi`` / ``converter.swagger.io``
-    conversion path, for cross-document ``$ref`` and OpenAPI 4.x it names
-    the offending shape. The builder surfaces the stable ``detail``
-    classifier so a client branches without re-parsing prose, and carries
+    2.0 it names the CLI conversion path (``meho connector ingest`` with a
+    ``file://`` spec) and the local ``swagger2openapi`` fallback; for
+    cross-document ``$ref`` and OpenAPI 4.x it names the offending shape.
+    The builder surfaces the stable ``detail`` classifier so a client
+    branches without re-parsing prose, and carries
     the message verbatim (T11 #1141 shape — detected-vs-expected +
     remedy already live on the message string).
 

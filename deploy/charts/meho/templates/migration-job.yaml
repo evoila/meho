@@ -1,3 +1,13 @@
+{{- /*
+Bring-your-own PostgreSQL only. With the built-in PostgreSQL on
+(`corePostgres.enabled`), Helm would run this pre-install hook before it
+creates the database (a normal release object), so the Job would wait for a
+database that does not exist yet. The same runner then runs as the `migrate`
+init container of the backplane Deployment instead (templates/deployment.yaml,
+#5233). Keep the two container specs in step;
+backend/tests/test_chart_migrate_init_container.py compares them.
+*/}}
+{{- if not .Values.corePostgres.enabled }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -171,3 +181,4 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end }}

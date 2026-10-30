@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for the shared VCF Automation session login (``_shared/vcfa_session.py``).
+"""Tests for the shared VCF Automation session login (``vmware_shared/vcfa_session.py``).
 
 Covered with a respx-mocked VCF Automation answer: the login path per org,
 the ``<user>@<org>`` Basic user, the token header, the end of the token
@@ -24,9 +24,9 @@ import pytest
 import respx
 import structlog
 
-from meho_backplane.connectors._shared import vcfa_session
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError, SessionLoginError
-from meho_backplane.connectors._shared.vcfa_session import (
+from meho_backplane.connectors.vmware_shared import vcfa_session
+from meho_backplane.connectors.vmware_shared.vcfa_session import (
     DEFAULT_LIFETIME_SECONDS,
     RENEW_BEFORE_SECONDS,
     VcfaSessionToken,

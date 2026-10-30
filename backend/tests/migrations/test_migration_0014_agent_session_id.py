@@ -41,7 +41,7 @@ testcontainers replay suite in :mod:`tests.test_migration_rollback`.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -132,10 +132,11 @@ def _audit_log_indexes(sync_url: str) -> set[str]:
 
 def test_upgrade_adds_agent_session_id_column_and_index(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``upgrade head`` lands the nullable column + its named index."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     columns = _audit_log_columns(sync_url)
     assert "agent_session_id" in columns, (
@@ -151,6 +152,7 @@ def test_upgrade_adds_agent_session_id_column_and_index(
 
 def test_downgrade_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``downgrade "0013"`` drops the column + index; ``upgrade head`` restores them.
 
@@ -166,7 +168,7 @@ def test_downgrade_then_upgrade_round_trips(
     the repo convention (``test_targets_fingerprint.py``).
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     # Sanity -- the upgrade landed the column + index before we reverse it.
     assert "agent_session_id" in _audit_log_columns(sync_url)
@@ -188,6 +190,7 @@ def test_downgrade_then_upgrade_round_trips(
 
 def test_parent_audit_id_is_untouched(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """The pre-existing ``parent_audit_id`` column + index survive 0014.
 
@@ -197,7 +200,7 @@ def test_parent_audit_id_is_untouched(
     coexist after upgrade, and neither index may be duplicated.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     columns = _audit_log_columns(sync_url)
     assert "parent_audit_id" in columns, "0006's parent_audit_id must survive 0014"

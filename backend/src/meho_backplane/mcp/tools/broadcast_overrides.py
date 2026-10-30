@@ -152,7 +152,7 @@ register_mcp_tool(
         surface=ToolSurface.OPERATOR,
         description=(
             "List broadcast-detail override rules for the operator's "
-            "tenant (Initiative #376). Tenant-admin only. Optional "
+            "tenant. Tenant-admin only. Optional "
             "op_id_pattern argument filters by exact-match pattern "
             "(not a glob match against an op_id). Returns "
             "{overrides: [row, ...]}."
@@ -226,7 +226,7 @@ register_mcp_tool(
         surface=ToolSurface.OPERATOR,
         description=(
             "Create a broadcast-detail override rule for the operator's "
-            "tenant (Initiative #376). Tenant-admin only. op_id_pattern "
+            "tenant. Tenant-admin only. op_id_pattern "
             "accepts globs (* + literals; regex chars are rejected). "
             "scope_field/scope_value must both be set (scoped rule) or "
             "both omitted (op-wide rule). detail is one of "
@@ -236,7 +236,7 @@ register_mcp_tool(
             "Response shape: {override_id, override: {...}}. The "
             "top-level override_id matches the override_id argument of "
             "meho_broadcast_overrides_remove, so set -> remove round-"
-            "trips with a single read off the response (G0.9.1-T7, #779)."
+            "trips with a single read off the response."
         ),
         inputSchema={
             "type": "object",
@@ -316,7 +316,7 @@ register_mcp_tool(
         surface=ToolSurface.OPERATOR,
         description=(
             "Delete a broadcast-detail override rule by id for the "
-            "operator's tenant (Initiative #376). Tenant-admin only. "
+            "operator's tenant. Tenant-admin only. "
             "Returns {removed: true} on success. A 404-equivalent "
             "error (detail 'broadcast_override_not_found') surfaces "
             "both 'id doesn't exist' and 'id belongs to another "

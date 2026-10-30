@@ -65,17 +65,22 @@ https://developer.broadcom.com/xapis/vmware-cloud-foundation-api/latest/:
   appliance inventory).
 * ``sddc.license.list`` -- ``GET /v1/license-keys`` (the license-key
   inventory). Each key comes back masked, as ``key_masked``.
+* ``sddc.domain.validation.get`` -- ``GET /v1/domains/validations/{id}``
+  and ``sddc.host.validation.get`` -- ``GET /v1/hosts/validations/{id}``
+  (#3518): read the result of a ``sddc.domain.validate`` /
+  ``sddc.host.validate`` run by its id.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import quote
 
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.license_key import mask_license_key
 from meho_backplane.connectors.sddc_manager.session import SddcTargetLike
+from meho_backplane.connectors.vmware_shared.license_key import mask_license_key
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.sddc_manager.connector import SddcManagerConnector
@@ -86,7 +91,9 @@ __all__ = [
     "sddc_credential_list_impl",
     "sddc_domain_list_impl",
     "sddc_domain_status_impl",
+    "sddc_domain_validation_get_impl",
     "sddc_host_list_impl",
+    "sddc_host_validation_get_impl",
     "sddc_license_list_impl",
     "sddc_manager_list_impl",
     "sddc_network_pool_get_impl",
@@ -120,6 +127,8 @@ _SDDC_MANAGERS_PATH = "/v1/sddc-managers"
 _LICENSE_KEYS_PATH = "/v1/license-keys"
 _NETWORK_POOLS_PATH = "/v1/network-pools"
 _NETWORK_POOL_GET_PATH = "/v1/network-pools/{id}"
+_DOMAIN_VALIDATION_GET_PATH = "/v1/domains/validations/{id}"
+_HOST_VALIDATION_GET_PATH = "/v1/hosts/validations/{id}"
 
 #: Sentinel written in place of a scrubbed secret value. A non-empty
 #: marker (rather than dropping the key) keeps the shape stable so the
@@ -416,6 +425,37 @@ async def sddc_task_get_impl(
     return await connector._get_json(target, path, operator=operator)
 
 
+async def sddc_domain_validation_get_impl(
+    connector: SddcManagerConnector,
+    operator: Operator,
+    target: SddcTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``sddc.domain.validation.get`` -- ``GET /v1/domains/validations/{id}``.
+
+    Reads the result of a ``sddc.domain.validate`` run by its id. The
+    returned ``Validation`` carries ``executionStatus`` (is the run done),
+    ``resultStatus`` (did it pass) and the ``validationChecks[]`` list.
+    """
+    path = _DOMAIN_VALIDATION_GET_PATH.format(id=quote(str(params["id"]), safe=""))
+    return await connector._get_json(target, path, operator=operator)
+
+
+async def sddc_host_validation_get_impl(
+    connector: SddcManagerConnector,
+    operator: Operator,
+    target: SddcTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``sddc.host.validation.get`` -- ``GET /v1/hosts/validations/{id}``.
+
+    Reads the result of a ``sddc.host.validate`` run by its id. Same
+    ``Validation`` shape as :func:`sddc_domain_validation_get_impl`.
+    """
+    path = _HOST_VALIDATION_GET_PATH.format(id=quote(str(params["id"]), safe=""))
+    return await connector._get_json(target, path, operator=operator)
+
+
 async def sddc_system_info_impl(
     connector: SddcManagerConnector,
     operator: Operator,
@@ -501,7 +541,7 @@ def _mask_license_keys(node: Any) -> Any:
     In the ``GET /v1/license-keys`` answer only the license rows have a
     ``key`` field, and it holds the license key. ``key_masked`` shows only
     its last 5 characters
-    (:func:`~meho_backplane.connectors._shared.license_key.mask_license_key`).
+    (:func:`~meho_backplane.connectors.vmware_shared.license_key.mask_license_key`).
     The walk covers the whole answer, not only ``elements[]``, so a key in
     an answer of another shape is masked too.
     """

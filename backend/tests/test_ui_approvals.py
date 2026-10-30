@@ -202,6 +202,8 @@ def _seed_request(
     expires_at: datetime | None = None,
     resumed_at: datetime | None = None,
     resume_result: dict[str, object] | None = None,
+    withdrawn_at: datetime | None = None,
+    withdraw_reason: str | None = None,
 ) -> uuid.UUID:
     """Insert one ``approval_request`` row; return its id."""
     rid = request_id or uuid.uuid4()
@@ -238,6 +240,8 @@ def _seed_request(
                     expires_at=stored_expires_at,
                     resumed_at=resumed_at,
                     resume_result=resume_result,
+                    withdrawn_at=withdrawn_at,
+                    withdraw_reason=withdraw_reason,
                 ),
             )
         return rid
@@ -429,6 +433,21 @@ def test_panel_lists_pending_requests() -> None:
     assert f'hx-get="/ui/approvals/{rid}"' in body
     # Fragment, not a full page.
     assert "<!doctype html>" not in body.lower()
+
+
+def test_page_heading_names_the_current_tenant() -> None:
+    """The full approvals page names the current tenant, not "this tenant" (#5238)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert '<span class="font-mono" data-tenant>Tenant tenant-a</span>' in body
+    assert "history for this tenant" not in body
 
 
 def test_panel_empty_state() -> None:
@@ -1758,6 +1777,57 @@ def test_detail_modal_expired_row_shows_expiry_timestamp() -> None:
     assert f'hx-post="/ui/approvals/{rid}/reject"' not in body
 
 
+def _seed_withdrawn(op_id: str = "withdrawn.op") -> uuid.UUID:
+    return _seed_request(
+        tenant_id=_TENANT_A,
+        op_id=op_id,
+        status_value=ApprovalRequestStatus.WITHDRAWN.value,
+        withdrawn_at=datetime(2026, 6, 18, 7, 15, tzinfo=UTC),
+        withdraw_reason="plan changed",
+    )
+
+
+def test_detail_modal_withdrawn_row_names_the_sender_and_has_no_decisions() -> None:
+    """A withdrawn request (#4987) shows who took it back, when and why; no buttons."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_withdrawn()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub="op-99")
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Withdrawn by the sender" in body
+    assert 'datetime="2026-06-18T07:15:00' in body
+    assert "plan changed" in body
+    assert f'hx-post="/ui/approvals/{rid}/approve"' not in body
+    assert f'hx-post="/ui/approvals/{rid}/reject"' not in body
+
+
+def test_history_withdrawn_tab_lists_withdrawn_rows() -> None:
+    """The Withdrawn tab (#4987) lists only withdrawn rows, with time and reason."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A, op_id="pending.op")
+    _seed_withdrawn()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=withdrawn", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "withdrawn.op" in body
+    assert "pending.op" not in body
+    assert "withdrawn by the sender" in body
+    assert "plan changed" in body
+    assert 'datetime="2026-06-18T07:15:00' in body
+
+
 def test_detail_modal_pending_row_still_offers_decisions() -> None:
     """A pending request still renders the approve/deny forms (regression guard)."""
     _seed_tenant(_TENANT_A, "tenant-a")
@@ -1844,6 +1914,52 @@ def test_modal_generic_params_echo_renders_as_a_field_table() -> None:
     assert "widget" in table
     assert "replicas" in table
     assert "<details open" not in body
+
+
+def test_modal_k8s_apply_shows_manifest_and_subject() -> None:
+    """A ``k8s.apply`` card shows the echoed manifest and names the objects (#3877)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="k8s.apply",
+        connector_id="kubernetes-1.x",
+        proposed_effect={
+            "op_id": "k8s.apply",
+            "connector_id": "kubernetes-1.x",
+            "op_class": "other",
+            "preview": {
+                "dry_run": True,
+                "applied": [{"kind": "Secret", "namespace": "prod", "name": "db"}],
+                "subject": "Secret/prod/db",
+                "manifest": [
+                    {
+                        "apiVersion": "v1",
+                        "kind": "Secret",
+                        "metadata": {"name": "db", "namespace": "prod"},
+                        "data": {"pw": "***REDACTED***"},
+                    }
+                ],
+            },
+            "preview_populated": True,
+            "safety_level": "dangerous",
+        },
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+    assert response.status_code == 200, response.text
+    body = response.text
+
+    table = body.split('aria-label="Proposed effect fields"')[1].split("</table>")[0]
+    assert ">manifest<" in table
+    assert '"kind": "Secret"' in table
+    assert "***REDACTED***" in table
+    # The reviewer context names the object the apply touches.
+    assert ">Subject<" in body
+    assert "Secret/prod/db" in body
 
 
 def test_modal_credential_redacted_shows_elevated_risk_notice_and_no_table() -> None:

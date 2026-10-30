@@ -34,7 +34,6 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -47,6 +46,7 @@ from meho_backplane.connectors.vra8 import (
     Vra8Connector,
     Vra8TargetLike,
 )
+from meho_backplane.connectors.vra8.connector import _session_cache_key
 from meho_backplane.settings import get_settings
 
 _CSP_LOGIN_PATH = "/csp/gateway/am/api/login"
@@ -245,7 +245,7 @@ async def test_token_cached_across_calls_against_same_target() -> None:
 
     assert csp.call_count == 1
     assert iaas.call_count == 1
-    assert connector._session_tokens == {target_cache_key(_TARGET_A): "bt-cache"}
+    assert connector._session_tokens == {_session_cache_key(_TARGET_A): "bt-cache"}
     await connector.aclose()
 
 
@@ -273,8 +273,8 @@ async def test_per_target_isolation_keeps_tokens_separate() -> None:
         await connector._vra_get(_TARGET_B, _PROJECTS_PATH, operator=_make_operator())
 
     assert connector._session_tokens == {
-        target_cache_key(_TARGET_A): "bt-a",
-        target_cache_key(_TARGET_B): "bt-b",
+        _session_cache_key(_TARGET_A): "bt-a",
+        _session_cache_key(_TARGET_B): "bt-b",
     }
     await connector.aclose()
 
@@ -313,8 +313,8 @@ async def test_same_name_targets_in_different_tenants_get_distinct_tokens() -> N
         await connector._vra_get(tenant_two, _PROJECTS_PATH, operator=_make_operator())
 
     assert connector._session_tokens == {
-        target_cache_key(tenant_one): "bt-one",
-        target_cache_key(tenant_two): "bt-two",
+        _session_cache_key(tenant_one): "bt-one",
+        _session_cache_key(tenant_two): "bt-two",
     }
     await connector.aclose()
 
@@ -497,7 +497,7 @@ async def test_aclose_clears_tokens_and_pool() -> None:
         mock.get(_PROJECTS_PATH).respond(200, json={"content": []})
         await connector._vra_get(_TARGET_A, _PROJECTS_PATH, operator=_make_operator())
 
-    assert connector._session_tokens == {target_cache_key(_TARGET_A): "bt"}
+    assert connector._session_tokens == {_session_cache_key(_TARGET_A): "bt"}
     await connector.aclose()
     assert connector._session_tokens == {}
     assert connector._clients == {}

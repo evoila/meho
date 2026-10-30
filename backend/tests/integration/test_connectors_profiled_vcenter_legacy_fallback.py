@@ -42,7 +42,7 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.profile import (
     AuthSpec,
@@ -145,7 +145,7 @@ async def test_profiled_vcenter_falls_back_to_legacy_session_end_to_end(
     assert legacy.calls[0].request.read() == b""
     assert legacy.calls[0].request.headers.get("authorization", "").startswith("Basic ")
     # The winning legacy endpoint is recorded for mount + teardown.
-    assert connector._session_login_paths[target_cache_key(vcsim_target)] == LEGACY_SESSION_PATH
+    assert connector._session_login_paths[credential_cache_key(vcsim_target)] == LEGACY_SESSION_PATH
     await connector.aclose()
 
 

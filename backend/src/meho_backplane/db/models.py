@@ -311,6 +311,7 @@ __all__ = [
     "GraphNode",
     "GraphNodeHistory",
     "IdentityBudget",
+    "IngestedAuthProfile",
     "KbRevision",
     "OperationGroup",
     "RequestUsageEvent",
@@ -322,6 +323,7 @@ __all__ = [
     "Tenant",
     "TenantConvention",
     "TenantConventionHistory",
+    "TenantOperationSetting",
     "WebSession",
     "is_valid_kind_slug",
 ]
@@ -1449,6 +1451,11 @@ class OperationGroup(Base):
     group_key: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     when_to_use: Mapped[str] = mapped_column(Text, nullable=False)
+    # SHA-256 hex of the ``when_to_use`` MEHO's code last wrote (#4332).
+    # NULL for texts from spec ingestion and for rows MEHO cannot prove it
+    # wrote. A row whose text still matches this hash gets the new code
+    # text at start-up; an operator edit breaks the match and is kept.
+    code_text_hash: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     review_status: Mapped[str] = mapped_column(
         Text,
         nullable=False,
@@ -1925,6 +1932,53 @@ class EndpointDescriptor(Base):
     )
 
 
+class TenantOperationSetting(Base):
+    """One tenant's own on/off choice for one built-in operation (#5029).
+
+    A built-in :class:`EndpointDescriptor` row (``tenant_id IS NULL``) is
+    shared by every tenant, so its ``is_enabled`` flag is the install
+    default. A row here lets one tenant turn that operation on or off for
+    itself only. No row means the tenant uses the install default.
+
+    The row is keyed on the operation's natural key
+    ``(product, version, impl_id, op_id)``, not on the descriptor ``id``.
+    Start-up registration and spec ingest only write ``endpoint_descriptor``
+    rows, so a restart or an update never changes this table.
+
+    Only built-in operations get a row. A connector the tenant imported for
+    itself has its own descriptor rows, and their ``is_enabled`` flag is
+    the switch. Dispatch, ``search_operations``, ``list_operation_groups``
+    and the console read the effective value through
+    :func:`meho_backplane.operations._lookup.enabled_for_tenant_clause`.
+
+    ``tenant_id`` is a soft reference, no FK, the same discipline as
+    :attr:`EndpointDescriptor.tenant_id`.
+    """
+
+    __tablename__ = "tenant_operation_setting"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    product: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    impl_id: Mapped[str] = mapped_column(Text, nullable=False)
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(sa.Boolean(), nullable=False)
+    set_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "tenant_id",
+            "product",
+            "version",
+            "impl_id",
+            "op_id",
+            name="uq_tenant_operation_setting_op",
+        ),
+    )
+
+
 class SpecProvenance(Base):
     """One row per accepted spec ingest — durable, non-spoofable provenance.
 
@@ -2016,6 +2070,69 @@ class SpecProvenance(Base):
         sa.CheckConstraint(
             "origin IN ('fetched', 'inline', 'shipped')",
             name="ck_spec_provenance_origin",
+        ),
+    )
+
+
+class IngestedAuthProfile(Base):
+    """The login type an operator chose when ingesting a connector (#5016).
+
+    ``meho connector ingest --auth-scheme <name>`` builds a
+    :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector` from
+    the chosen login type and registers it in the in-memory connector
+    table. This row saves that choice so every start of the backplane (and
+    every replica) can build the same class again
+    (:func:`~meho_backplane.operations.ingest.ingest_auth_store.restore_ingested_profiled_connectors`).
+    Without it the connector has no class after a restart and every call
+    fails with ``no_connector``.
+
+    Only the choice is stored: the named scheme and the secret field
+    **names**. Never secret values, and no free-form login config.
+
+    One row per connector scope: ``(tenant_id, product, version,
+    impl_id)``, with ``tenant_id IS NULL`` for a built-in connector. Two
+    partial unique indexes enforce it, the same shape as
+    :class:`SpecProvenance`. A re-ingest with a login type replaces the
+    row. A connector delete removes it.
+    """
+
+    __tablename__ = "ingested_auth_profile"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
+    product: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    impl_id: Mapped[str] = mapped_column(Text, nullable=False)
+    auth_scheme: Mapped[str] = mapped_column(Text, nullable=False)
+    secret_fields: Mapped[list[str]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False
+    )
+    operator_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "ingested_auth_profile_global_idx",
+            "product",
+            "version",
+            "impl_id",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NULL"),
+            sqlite_where=sa.text("tenant_id IS NULL"),
+        ),
+        Index(
+            "ingested_auth_profile_tenant_idx",
+            "tenant_id",
+            "product",
+            "version",
+            "impl_id",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NOT NULL"),
+            sqlite_where=sa.text("tenant_id IS NOT NULL"),
         ),
     )
 
@@ -5869,6 +5986,26 @@ class SandboxModeState(Base):
     __table_args__ = (sa.CheckConstraint("id = 1", name="ck_sandbox_mode_state_single_row"),)
 
 
+class OperationCatalogState(Base):
+    """Which release last wrote the built-in operation rows: one row (#5019).
+
+    Written by :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
+    in the same transaction as the typed and composite
+    :class:`EndpointDescriptor` rows, so it changes only when those rows
+    change. ``written_by_release`` is the commit hash of the build
+    (``GIT_SHA``, as ``GET /version`` reports it). A pod compares it with
+    its own release to notice rows written by another release.
+    """
+
+    __tablename__ = "operation_catalog_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    written_by_release: Mapped[str] = mapped_column(Text, nullable=False)
+    written_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (sa.CheckConstraint("id = 1", name="ck_operation_catalog_state_single_row"),)
+
+
 class ScheduledTriggerKind(StrEnum):
     """Closed enum of trigger shapes the G11.3 scheduler dispatches.
 
@@ -6348,7 +6485,7 @@ class ApprovalRequestStatus(StrEnum):
 
     Initiative #803 (G11.2 Agent permission model), Task #817 (T4). The
     approval queue parks a ``requires_approval`` dispatch durably; the
-    row walks a simple four-state lifecycle enforced by the service
+    row walks a simple five-state lifecycle enforced by the service
     (:mod:`meho_backplane.operations.approval_queue`).
 
     Members:
@@ -6363,10 +6500,15 @@ class ApprovalRequestStatus(StrEnum):
     * :attr:`EXPIRED` -- the ``expires_at`` deadline passed without a
       decision; the expiry sweep transitioned the row and wrote the
       decision audit row. Terminal.
+    * :attr:`WITHDRAWN` -- the sender took its own pending request back
+      (#4987). Not a decision: ``reviewed_by`` stays NULL, and
+      ``withdrawn_at`` / ``withdraw_reason`` say when and why. The
+      original call was not executed. Terminal.
 
     The enum and the ``CHECK (status IN (...))`` constraint on the DB
-    table move in lock-step (migration ``0023``); the drift guard
-    :func:`tests.test_migration_0023_approval_request.test_status_check_matches_enum`
+    table move in lock-step (migration ``0023``, widened by ``0119``); the
+    drift guard
+    :func:`tests.migrations.test_migration_0119_approval_withdrawn.test_status_check_matches_enum`
     asserts equality at unit-test time.
     """
 
@@ -6374,10 +6516,11 @@ class ApprovalRequestStatus(StrEnum):
     APPROVED = "approved"
     REJECTED = "rejected"
     EXPIRED = "expired"
+    WITHDRAWN = "withdrawn"
 
 
 #: Closed ``approval_request.status`` vocabulary derived from the enum --
-#: kept in sync with migration ``0023``'s ``_APPROVAL_REQUEST_STATUSES``
+#: kept in sync with migration ``0119``'s ``_STATUSES_WITH_WITHDRAWN``
 #: literal. The drift guard asserts equality so the two never diverge.
 _APPROVAL_REQUEST_STATUSES: tuple[str, ...] = tuple(s.value for s in ApprovalRequestStatus)
 
@@ -6672,6 +6815,16 @@ class ApprovalRequest(Base):
         nullable=True,
         default=None,
     )
+    # When and why the sender withdrew its own pending request (#4987).
+    # Set only on a ``withdrawn`` row; NULL on every other row and on
+    # pre-0119 rows. A withdrawal is not a decision, so ``decided_at`` and
+    # ``reviewed_by`` stay NULL. Added by migration ``0119``.
+    withdrawn_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    withdraw_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

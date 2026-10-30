@@ -4,7 +4,8 @@
 """Which registered VMs use files on a datastore (#3339).
 
 Used by ``datastore.file.delete`` (refuse a path that holds any file a VM
-uses) and by the content-library deletes (refuse while a VM mounts an item).
+uses), by the content-library deletes (refuse while a VM mounts an item) and
+by ``datastore.file.list`` (show which VMs use each listed entry, #3432).
 
 A VM "uses" a file when it is:
 
@@ -35,7 +36,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.composites._datastore_browse import Datastore
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
-__all__ = ["media_users", "vm_claims"]
+__all__ = ["media_users", "vm_claims", "vm_users"]
 
 _PROP_LAYOUT: Final = "layoutEx.file"
 _PROP_DEVICES: Final = "config.hardware.device"
@@ -122,6 +123,40 @@ async def vm_claims(
         elif hits:
             rows.append({"kind": "vm", "moid": moid, "name": props.get("name"), "files": hits[:10]})
     return rows, complete
+
+
+async def vm_users(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    ds: Datastore,
+    paths: list[str],
+) -> tuple[dict[str, list[str]], bool]:
+    """Names of the registered VMs that use a file at or below each path: ``(by path, complete)``.
+
+    One read of the datastore's VMs, then the same "uses" rules as
+    :func:`vm_claims`. ``complete`` is ``False`` when vCenter paged or left out
+    part of the answer, or a VM's files could not be known.
+    """
+    by_moid, complete = await read_many(
+        connector,
+        target,
+        operator,
+        mo_type=_VIRTUAL_MACHINE_MO_TYPE,
+        moids=ds.vm_moids,
+        props=_CLAIM_PROPS,
+    )
+    users: dict[str, list[str]] = {path: [] for path in paths}
+    for moid, props in by_moid.items():
+        name = str(props.get("name") or moid)
+        for path in paths:
+            hits = _claim_hits(ds, props, path)
+            if hits is None:
+                complete = False
+                break
+            if hits:
+                users[path].append(name)
+    return {path: sorted(names) for path, names in users.items()}, complete
 
 
 async def media_users(

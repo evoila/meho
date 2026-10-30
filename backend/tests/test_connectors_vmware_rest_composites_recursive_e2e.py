@@ -163,6 +163,9 @@ class _DepthRecordingConnector:
     frame's reads/writes (reached via ``dispatch_child``) at depth 1.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(self) -> None:

@@ -8806,15 +8806,21 @@ DATASTORE_ORPHAN_DIRS_RESPONSE_SCHEMA: dict[str, Any] = {
                     },
                     "size_bytes": {
                         "type": "integer",
-                        "description": "Size of all files in and below the folder.",
+                        "description": (
+                            "Size of the files directly inside the folder; sub-folders not counted."
+                        ),
                     },
                     "file_count": {
                         "type": "integer",
-                        "description": "Number of files in and below the folder.",
+                        "description": (
+                            "Number of files directly inside the folder; sub-folders not counted."
+                        ),
                     },
                     "newest_modified": {
                         "type": ["string", "null"],
-                        "description": "Latest change of the folder or a file in it (ISO 8601).",
+                        "description": (
+                            "Latest change of the folder or a file directly inside it (ISO 8601)."
+                        ),
                     },
                     "classification": {
                         "type": "string",

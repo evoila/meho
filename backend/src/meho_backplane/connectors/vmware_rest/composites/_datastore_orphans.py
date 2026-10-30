@@ -5,9 +5,9 @@
 
 One call on a vCenter target answers "which top-level folders on my
 datastores does no registered VM use?". For every datastore (or the ones
-named in ``datastores``) it returns one row per top-level folder with its
-size, file count, latest change, the registered VMs that use it
-(``claimed_by``) and a ``classification``:
+named in ``datastores``) it returns one row per top-level folder with the
+size and count of the files directly inside it, its latest change, the
+registered VMs that use it (``claimed_by``) and a ``classification``:
 
 * ``claimed`` -- a registered VM (templates included) uses a file below it;
 * ``system`` -- a folder vSphere or ESXi keeps for itself (names starting
@@ -26,6 +26,8 @@ How it reads, all through the shared seams:
 3. One ``read_many`` reads the files of every VM on those datastores
    (``Datastore.vm``), with the rules of the delete check
    (:mod:`._datastore_claims`).
+   Both reads follow every page of a paged answer, so a datastore or a VM
+   on a later page is not missed.
 4. Per datastore, one ``SearchDatastoreSubFolders_Task`` from the root
    (:func:`._datastore_browse.search`) gives the top-level folders and the
    files below each.
@@ -163,7 +165,12 @@ def _as_datastore(moid: str, name: str, props: dict[str, Any]) -> Datastore:
 
 
 def _top_folders(ds: Datastore, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One record per top-level folder, with the sizes of all files below it."""
+    """One record per top-level folder, with the size of the files directly inside it.
+
+    Files in sub-folders do not count (as #3814 asks). Folder paths are keyed
+    exactly: on case-sensitive storage ``Backup`` and ``backup`` are two
+    folders.
+    """
     folders: list[dict[str, Any]] = []
     by_key: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -183,12 +190,12 @@ def _top_folders(ds: Datastore, rows: list[dict[str, Any]]) -> list[dict[str, An
                 "claimed_by": [],
             }
             folders.append(folder)
-            by_key[path.casefold()] = folder
+            by_key[path] = folder
     for folder in folders:
-        by_key.setdefault(folder["folder"].casefold(), folder)
+        by_key.setdefault(folder["folder"], folder)
     for row in rows:
         rel = ds.relative(str(row.get("folderPath") or ""))
-        top = by_key.get(rel.split("/", 1)[0].casefold()) if rel else None
+        top = by_key.get(rel) if rel and "/" not in rel else None
         if top is None:
             continue
         for entry in _files_of(row):
@@ -265,6 +272,7 @@ async def _resolve_datastores(
         mo_type=_DATASTORE_MO_TYPE,
         moids=[moid for moid, _name in listed],
         props=_DS_PROPS,
+        all_pages=True,
     )
     datastores: list[Datastore] = []
     for moid, name in listed:
@@ -330,6 +338,7 @@ async def datastore_orphan_dirs_composite(
         mo_type=_VIRTUAL_MACHINE_MO_TYPE,
         moids=vm_moids,
         props=_CLAIM_PROPS,
+        all_pages=True,
     )
     complete = complete and vms_complete
 

@@ -164,8 +164,9 @@ STORAGE_NETWORK_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
         "output_shape": (
             "{status: ok|unsupported_host_target, datastore_count, count, orphan_count, "
             "system_count, claimed_count, vm_check, directories: [{datastore, "
-            "datastore_moid, folder, datastore_path, size_bytes (all files in and below "
-            "it), file_count, newest_modified, classification: orphan|system|claimed, "
+            "datastore_moid, folder, datastore_path, size_bytes (the files directly inside "
+            "it; sub-folders not counted), file_count, newest_modified, classification: "
+            "orphan|system|claimed, "
             "claimed_by: [vm names]}], skipped: [{datastore, reason}], guidance}. Rows are "
             "newest change first. A long list comes back as a link to the stored result; "
             "read it with result_query, e.g. filter classification = orphan."

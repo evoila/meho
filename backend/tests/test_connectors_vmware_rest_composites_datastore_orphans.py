@@ -7,7 +7,8 @@ Driven against the shared vim fake with several datastores: VMFS and NFS
 datastores with claimed, system and orphan folders, a template VM, a VM with a
 disk on a second datastore, a vSAN datastore (UUID folders with friendly
 names), and datastores that are skipped (not accessible, a vVol, a failing
-browse, a name that does not exist). Also covers the non-vCenter refusals, an
+browse, a name that does not exist). Also covers a paged property answer,
+folders whose names differ only in case, the non-vCenter refusals, an
 incomplete VM answer, a many-row answer through the real JSONFlux reducer, and
 the parameter schema.
 """
@@ -37,7 +38,11 @@ from tests._vmware_teardown_fake import VimFake, moref, operator
 
 _OP_ID = "vmware.composite.datastore.orphan_dirs"
 _VALIDATE_OUT = Draft202012Validator(DATASTORE_ORPHAN_DIRS_RESPONSE_SCHEMA).validate
-_READ_METHODS = {"RetrievePropertiesEx", "SearchDatastoreSubFolders_Task"}
+_READ_METHODS = {
+    "RetrievePropertiesEx",
+    "ContinueRetrievePropertiesEx",
+    "SearchDatastoreSubFolders_Task",
+}
 _UUID_WEB = "5f1a0b2c-0000-0000-0000-00000000000a"
 _UUID_GONE = "5f1a0b2c-0000-0000-0000-00000000000b"
 
@@ -280,14 +285,16 @@ async def test_claimed_by_names_vms_templates_and_disks_on_a_second_datastore() 
 async def test_rows_have_sizes_counts_and_newest_change_first() -> None:
     out = await _orphans(_fake())
     old = _by_folder(out)[("ds-a", "old-vm")]
+    # Only the files directly inside the folder count: ``old-vm/logs/vmware.log``
+    # (500 bytes, newer) is in a sub-folder and stays out of the totals.
     assert old == {
         "datastore": "ds-a",
         "datastore_moid": "datastore-11",
         "folder": "old-vm",
         "datastore_path": "[ds-a] old-vm",
-        "size_bytes": 10_500,
-        "file_count": 2,
-        "newest_modified": "2025-02-01T00:00:00Z",
+        "size_bytes": 10_000,
+        "file_count": 1,
+        "newest_modified": "2025-01-02T03:04:05Z",
         "classification": "orphan",
         "claimed_by": [],
     }
@@ -297,6 +304,46 @@ async def test_rows_have_sizes_counts_and_newest_change_first() -> None:
     assert stamps[: len(dated)] == dated  # rows without a date come last
     # A plain file at the root is not a folder row.
     assert ("ds-a", "top-file.txt") not in _by_folder(out)
+
+
+async def test_folders_that_differ_only_in_case_stay_apart() -> None:
+    """VMFS and NFS paths are case-sensitive: ``Backup`` and ``backup`` are two folders."""
+    conn = _fake()
+    conn.files["ds-b"].update({"Backup": None, "Backup/a": 10, "backup": None, "backup/b": 20})
+    conn.mtimes["ds-b"]["backup/b"] = "2026-05-05T00:00:00Z"
+    rows = _by_folder(await _orphans(conn, datastores=["ds-b"]))
+    upper = rows[("ds-b", "Backup")]
+    lower = rows[("ds-b", "backup")]
+    assert (upper["size_bytes"], upper["file_count"], upper["newest_modified"]) == (10, 1, None)
+    assert (lower["size_bytes"], lower["file_count"], lower["newest_modified"]) == (
+        20,
+        1,
+        "2026-05-05T00:00:00Z",
+    )
+    assert upper["datastore_path"] == "[ds-b] Backup"
+    assert lower["datastore_path"] == "[ds-b] backup"
+
+
+async def test_paged_property_answers_are_read_to_the_end() -> None:
+    """A datastore or a VM on a later page is neither missed nor marked orphan."""
+    conn = _fake()
+    conn.page_size = 1
+    out = await _orphans(conn)
+    _VALIDATE_OUT(out)
+    assert out["vm_check"] == "complete"
+    assert out["datastore_count"] == 2
+    classes = {key: row["classification"] for key, row in _by_folder(out).items()}
+    assert classes[("ds-a", "app-01")] == "claimed"
+    assert classes[("ds-a", "tmpl-linux")] == "claimed"
+    assert classes[("ds-b", "db-01")] == "claimed"
+    assert classes[("ds-b", "leftover")] == "orphan"
+    assert {row["datastore"] for row in out["skipped"]} == {"ds-down", "ds-vvol", "ds-locked"}
+    # Five datastores and three VMs: four plus two continuation pages, each
+    # token used once on the session of the first call, nothing left behind.
+    assert len(conn.continue_calls) == 6
+    assert {session for _token, session in conn.continue_calls} == {"<session-1>"}
+    assert conn._pending == {}
+    assert set(conn.methods()) <= _READ_METHODS
 
 
 async def test_one_vm_read_and_one_browse_per_datastore() -> None:

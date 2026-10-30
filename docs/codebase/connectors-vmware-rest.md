@@ -3937,14 +3937,21 @@ read half of a storage clean-up; the delete is `datastore.file.delete`.
   `summary.accessible`, `browser` and `vm` of all of them. One `read_many`
   reads the files of every VM on those datastores (`Datastore.vm`, so
   templates and VMs with only a disk on a datastore are included) with the
-  props of the delete check (`_datastore_claims._CLAIM_PROPS`). Then, per
-  datastore, one `SearchDatastoreSubFolders_Task` from the root through the
-  shared `_datastore_browse.search`. That one browse gives the top-level
-  folders (the root row) and every file below them.
+  props of the delete check (`_datastore_claims._CLAIM_PROPS`). Both reads
+  pass `all_pages=True`, so `read_many` follows every continuation token
+  through `vim_retrieve.retrieve_all_pages` (#4862) and a datastore or VM
+  on a later page is not missed; the deletes keep the default and refuse a
+  paged answer. Then, per datastore, one `SearchDatastoreSubFolders_Task`
+  from the root through the shared `_datastore_browse.search`. That one
+  browse gives the top-level folders (the root row) and the files directly
+  inside each of them (the depth-one rows).
 - **Rows.** One row per top-level folder: `datastore`, `datastore_moid`,
-  `folder`, `datastore_path`, `size_bytes` and `file_count` (all files in and
-  below the folder), `newest_modified` (latest change), `claimed_by` (VM
-  names) and `classification`. Rows are sorted newest change first.
+  `folder`, `datastore_path`, `size_bytes` and `file_count` (the files
+  directly inside the folder, as #3814 asks; files in sub-folders are not
+  counted), `newest_modified` (latest change of the folder or a file
+  directly inside it), `claimed_by` (VM names) and `classification`. Folder
+  paths are matched exactly: on case-sensitive storage `Backup` and
+  `backup` are two rows. Rows are sorted newest change first.
 - **Classification.** `claimed` when a VM uses a file below the folder, by
   the rules of the delete check (`_datastore_claims._claim_hits`: `layoutEx`,
   device backings such as mounted ISO files, the `.vmx`). `system` for names

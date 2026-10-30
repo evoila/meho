@@ -24,8 +24,8 @@ import (
 //	  [--alias a --alias b] [--version v] [--port n] [--fqdn f] \
 //	  [--secret-ref <ref> | --no-secret-ref] [--auth-model <m>] \
 //	  [--verify-tls=false] [--tls-ca-pin <pin>] [--tls-server-name <sni>] \
-//	  [--preferred-impl <id>] [--note <n>] [--extra key=value ...] \
-//	  [--secret-field <connector_field>=<source_field> ...] \
+//	  [--vpn-required] [--preferred-impl <id>] [--note <n>] \
+//	  [--extra key=value ...] [--secret-field <connector_field>=<source_field> ...] \
 //	  [--json] [--backplane <url>]
 //
 // It POSTs a single TargetCreate to POST /api/v1/targets — the same
@@ -75,6 +75,7 @@ func newAddCmd() *cobra.Command {
 		verifyTLS         bool
 		tlsCaPin          string
 		tlsServerName     string
+		vpnRequired       bool
 		preferredImpl     string
 		note              string
 		extras            []string
@@ -161,6 +162,9 @@ func newAddCmd() *cobra.Command {
 			if fs.Changed("tls-server-name") {
 				body["tls_server_name"] = tlsServerName
 			}
+			if fs.Changed("vpn-required") {
+				body["vpn_required"] = vpnRequired
+			}
 			if fs.Changed("preferred-impl") {
 				body["preferred_impl_id"] = preferredImpl
 			}
@@ -212,6 +216,8 @@ func newAddCmd() *cobra.Command {
 		"PEM CA bundle to pin for this target (mutually exclusive with --verify-tls=false)")
 	cmd.Flags().StringVar(&tlsServerName, "tls-server-name", "",
 		"TLS SNI / certificate-verification hostname, decoupled from --host")
+	cmd.Flags().BoolVar(&vpnRequired, "vpn-required", false,
+		"mark that a VPN must be up to reach the target (default: false)")
 	cmd.Flags().StringVar(&preferredImpl, "preferred-impl", "",
 		"connector impl_id override for the G0.6 resolver's tie-break")
 	cmd.Flags().StringVar(&note, "note", "",

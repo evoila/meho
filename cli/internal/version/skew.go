@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
 // ReleaseURLBase is the GitHub release page prefix. The CLI and the
@@ -21,10 +23,14 @@ const ReleaseURLBase = "https://github.com/evoila/meho/releases/tag/"
 
 // Backplane is the build identity GET /version returns.
 // ChartVersion is nil when the backplane runs without the helm chart.
+// ConnectorPackages lists the connector packages the image carries
+// (#5036); it is empty for the plain public image and nil for a
+// backplane older than the field.
 type Backplane struct {
-	GitSHA       string  `json:"git_sha"`
-	BuildDate    string  `json:"build_date"`
-	ChartVersion *string `json:"chart_version"`
+	GitSHA            string                 `json:"git_sha"`
+	BuildDate         string                 `json:"build_date"`
+	ChartVersion      *string                `json:"chart_version"`
+	ConnectorPackages []api.ConnectorPackage `json:"connector_packages"`
 }
 
 // FetchBackplane reads GET <backplaneURL>/version. The route needs no

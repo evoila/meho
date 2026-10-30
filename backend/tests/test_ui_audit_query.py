@@ -350,6 +350,38 @@ def test_audit_results_fragment_omits_page_chrome() -> None:
     assert 'id="audit-filter-form"' not in body
 
 
+def test_audit_rows_name_their_tenant() -> None:
+    """Every row in the list shows the tenant name from the tenant table (#5238)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_audit_row(tenant_id=_TENANT_A, second=0, op_id="k8s.pods.list")
+    _seed_audit_row(tenant_id=_TENANT_A, second=1, op_id="vsphere.vm.list")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/audit/results")
+    assert response.status_code == 200, response.text
+    # The fragment has no sidebar, so each hit is one row's tenant label.
+    assert response.text.count('data-tenant title="Tenant">Tenant tenant-a<') == 2
+
+
+@pytest.mark.parametrize(
+    ("name", "tenant_id", "expected"),
+    [
+        ("Team A", _TENANT_A, "Team A"),
+        (None, _TENANT_A, str(_TENANT_A)),
+        ("", _TENANT_A, str(_TENANT_A)),
+        (None, None, "-"),
+    ],
+)
+def test_tenant_label_falls_back_to_the_id(
+    name: str | None, tenant_id: uuid.UUID | None, expected: str
+) -> None:
+    """The label is the tenant name, else the tenant id (#5238)."""
+    from meho_backplane.ui.routes.audit.routes import _tenant_label
+
+    assert _tenant_label(name, tenant_id) == expected
+
+
 # ===========================================================================
 # AC2(b): forward-cursor paging -- next page + advanced Load-more cursor
 # ===========================================================================

@@ -76,6 +76,7 @@ if TYPE_CHECKING:
 __all__ = [
     "VCENTER_SSO_ADMIN_API_FILE_GET_OP",
     "VMWARE_ALARM_TRIGGERED_LIST_OP",
+    "VMWARE_HOST_DATASTORES_OP",
     "VMWARE_HOST_NETWORK_UPLINKS_OP",
     "VMWARE_HOST_STORAGE_DEVICES_OP",
     "VMWARE_HOST_USAGE_OP",
@@ -389,6 +390,17 @@ from meho_backplane.connectors.vmware_rest.typed_ops_appliance_local_accounts im
     APPLIANCE_LOCAL_ACCOUNTS_OPS,
     APPLIANCE_LOCAL_ACCOUNTS_WHEN_TO_USE,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_content_library_find import (  # noqa: E402
+    CONTENT_LIBRARY_GROUP_KEY,
+    CONTENT_LIBRARY_WHEN_TO_USE,
+    VMWARE_CONTENT_LIBRARY_FIND_OP,
+    VMWARE_CONTENT_LIBRARY_ITEM_FIND_OP,
+)
+from meho_backplane.connectors.vmware_rest.typed_ops_host_datastores import (  # noqa: E402
+    HOST_DATASTORES_GROUP_KEY,
+    HOST_DATASTORES_WHEN_TO_USE,
+    VMWARE_HOST_DATASTORES_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_host_network_uplinks import (  # noqa: E402
     HOST_NETWORK_UPLINKS_GROUP_KEY,
     HOST_NETWORK_UPLINKS_WHEN_TO_USE,
@@ -475,6 +487,7 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     HOST_NETWORK_UPLINKS_GROUP_KEY: HOST_NETWORK_UPLINKS_WHEN_TO_USE,
     HOST_VSAN_HEALTH_GROUP_KEY: HOST_VSAN_HEALTH_WHEN_TO_USE,
     HOST_STORAGE_DEVICES_GROUP_KEY: HOST_STORAGE_DEVICES_WHEN_TO_USE,
+    HOST_DATASTORES_GROUP_KEY: HOST_DATASTORES_WHEN_TO_USE,
     VM_INFO_GROUP_KEY: VM_INFO_WHEN_TO_USE,
     VM_HARDWARE_GROUP_KEY: VM_HARDWARE_WHEN_TO_USE,
     OBJECT_COLLECT_GROUP_KEY: OBJECT_COLLECT_WHEN_TO_USE,
@@ -488,6 +501,8 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     APPLIANCE_LOCAL_ACCOUNTS_GROUP_KEY: APPLIANCE_LOCAL_ACCOUNTS_WHEN_TO_USE,
     ALARM_TRIGGERED_GROUP_KEY: ALARM_TRIGGERED_WHEN_TO_USE,
     RESOURCE_POOL_LIST_GROUP_KEY: RESOURCE_POOL_LIST_WHEN_TO_USE,
+    # Shared with the content-library composites: the same key and text.
+    CONTENT_LIBRARY_GROUP_KEY: CONTENT_LIBRARY_WHEN_TO_USE,
 }
 
 VMWARE_HOST_USAGE_OP = VmwareTypedOp(
@@ -549,7 +564,8 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: startup: ``vmware.host.usage`` (#2257); ``host.network_uplinks`` +
 #: ``host.vsan_health`` (#2258, re-shipped from the former composites);
 #: ``host.storage_devices`` (#3332, per-host raw SCSI devices, vCenter or
-#: standalone-ESXi); and the incident-survival reads ``vm.info`` +
+#: standalone-ESXi); ``host.datastores`` (#3373, the datastores mounted on
+#: one host, vCenter or standalone-ESXi); and the incident-survival reads ``vm.info`` +
 #: ``object.collect`` + ``tasks.recent`` (#2300); ``tasks.history``
 #: (#3701, tasks older than the recent list); the SSO Admin API
 #: description read ``vcenter.sso_admin.api_file.get``; the snapshots of
@@ -559,13 +575,16 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: that wait for approval); the triggered-alarm list
 #: ``alarm.triggered.list`` (#4383); and the VM question read and answer
 #: ``vm.question.get`` / ``vm.question.answer`` (the answer waits for
-#: approval); and the resource pool list ``resource_pool.list``. The tuple
-#: shape lets future typed ops join without touching the registrar.
+#: approval); the resource pool list ``resource_pool.list``; and the two
+#: content-library finds ``content_library.find`` + ``content_library.item.find``
+#: (#3550). The tuple shape lets future typed ops join without touching the
+#: registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
     VMWARE_HOST_VSAN_HEALTH_OP,
     VMWARE_HOST_STORAGE_DEVICES_OP,
+    VMWARE_HOST_DATASTORES_OP,
     VMWARE_VM_INFO_OP,
     VMWARE_VM_HARDWARE_SHOW_OP,
     VMWARE_OBJECT_COLLECT_OP,
@@ -580,6 +599,8 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_VM_QUESTION_GET_OP,
     VMWARE_VM_QUESTION_ANSWER_OP,
     VMWARE_RESOURCE_POOL_LIST_OP,
+    VMWARE_CONTENT_LIBRARY_FIND_OP,
+    VMWARE_CONTENT_LIBRARY_ITEM_FIND_OP,
 )
 
 

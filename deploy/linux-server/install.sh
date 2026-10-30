@@ -6,7 +6,7 @@
 # internet. It runs as root from the unpacked download (form-2 design,
 # section 4, in meho-internal docs/design/2026-10-10-install-forms/).
 #
-# It runs the six steps of the design (section 5):
+# On a machine without MEHO it runs the six steps of the design (section 5):
 #   1. check the machine                        lib/checks.sh, lib/firewall.sh
 #   2. prepare the machine: the host            lib/firewall.sh, lib/prepare.sh
 #      firewall first, then RKE2's files and
@@ -20,17 +20,24 @@
 #
 # RKE2 runs with its CIS hardening profile from the first install (ADR 0009).
 #
+# Before step 1 it finds the install (lib/update.sh). On a machine where MEHO
+# is installed, the run is an update (section 7): it keeps the answers of the
+# install, checks the machine and the version step, asks for a backup,
+# installs the appliance's OS packages with --os-packages, updates RKE2 and
+# the core, and leaves the firewall, the one-time files, the data and the
+# Secrets alone. On a half-installed machine it stops and changes nothing.
+#
 # --from-disk runs only the steps that need the host name: RKE2's settings,
 # the start of RKE2, and steps 4 to 6. Before the start it also runs the
 # host steps of the CIS profile, which change nothing where a full install
-# ran before. It leaves the firewall alone. The appliance's first start
-# uses it.
+# ran before. It leaves the firewall alone and does not look for an install.
+# The appliance's first start uses it.
 #
 # Later Tasks add their steps in main() below: the first-start list to
 # step 6 (#4042).
 #
 # Exit codes:
-#   0  MEHO is installed
+#   0  MEHO is installed or updated
 #   1  a check or a step failed; the [FAIL] line says what to fix
 #   2  wrong usage: an unknown option or a bad value
 #
@@ -65,6 +72,8 @@ source "$DOWNLOAD_DIR/lib/prepare.sh"
 source "$DOWNLOAD_DIR/lib/rke2.sh"
 # shellcheck source=lib/core.sh
 source "$DOWNLOAD_DIR/lib/core.sh"
+# shellcheck source=lib/update.sh
+source "$DOWNLOAD_DIR/lib/update.sh"
 
 HOSTNAME_FQDN=""
 PUBLIC_ADDRESS=""
@@ -77,12 +86,19 @@ JOIN_ADDRESS=""
 JOIN_TOKEN_FILE=""
 ADMIN_NETWORK=""
 FROM_DISK=0
+CONFIRM_BACKUP=0
+OS_PACKAGES_FILE=""
+RECORD_FROM_DISK=0
+# The options of a first install that this run got. An update refuses them.
+INSTALL_OPTIONS_GIVEN=()
+UPDATE_STEP=0
 
 readonly UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 # The user names go into Helm values and the install record as they are,
 # so they take only characters that need no escaping there. Keycloak keeps
 # user names in lower case, so set_option lowers them first.
 readonly USER_NAME_RE='^[a-z0-9][a-z0-9@._-]*$'
+readonly JOIN_ADDRESS_RE='^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$'
 
 usage() {
     cat <<'HELP'
@@ -95,6 +111,12 @@ unseal key to two files for root only, and installs the meho command.
 
 Run it as root from the folder of the unpacked download:
   sudo ./install.sh --hostname meho.example.com --admin-network 10.0.50.0/24
+
+On a machine where MEHO is installed, the script updates MEHO to the
+version of this download. Run it without the options of a first install:
+the update keeps the answers of the install, the firewall, the data, the
+passwords and the keys. Take a VM snapshot or a backup first:
+  sudo ./install.sh --confirm-backup
 
 Options:
   --hostname <fqdn>          The full DNS name of this machine. It must
@@ -133,12 +155,19 @@ Options:
                              settings, start RKE2 and install the core
                              again. It needs no download and does not check
                              the machine. The appliance's first start uses it.
+  --confirm-backup           Only for an update: a VM snapshot or a backup
+                             of this machine exists. Without it, install.sh
+                             asks on the terminal, and stops when there is
+                             no terminal.
+  --os-packages <file>       Only for an update of the MEHO appliance: first
+                             install the OS updates from the appliance's
+                             OS-package file, with no network.
   -h, --help                 Show this help and stop.
 
 Each option with a value also takes the form --option=value.
 
 Exit codes:
-  0  MEHO is installed
+  0  MEHO is installed or updated
   1  a check or a step failed; the [FAIL] line says what to fix
   2  wrong usage: an unknown option or a bad value
 HELP
@@ -157,9 +186,13 @@ set_option() {
         --join-address) JOIN_ADDRESS=$2 ;;
         --join-token-file) JOIN_TOKEN_FILE=$2 ;;
         --admin-network) ADMIN_NETWORK=$2 ;;
+        --os-packages) OS_PACKAGES_FILE=$2 ;;
         *) usage_error "unknown option: $1" ;;
     esac
     [[ -n $2 && $2 != --* ]] || usage_error "$1 needs a value."
+    if [[ $1 != --os-packages ]]; then
+        INSTALL_OPTIONS_GIVEN+=("$1")
+    fi
 }
 
 parse_options() {
@@ -172,6 +205,11 @@ parse_options() {
                 ;;
             --from-disk)
                 FROM_DISK=1
+                shift
+                continue
+                ;;
+            --confirm-backup)
+                CONFIRM_BACKUP=1
                 shift
                 continue
                 ;;
@@ -220,13 +258,20 @@ validate_options() {
     if [[ -n $JOIN_ADDRESS || -n $JOIN_TOKEN_FILE ]]; then
         [[ -n $JOIN_ADDRESS && -n $JOIN_TOKEN_FILE ]] ||
             usage_error "--join-address and --join-token-file go together. Give both, or neither."
-        [[ $JOIN_ADDRESS =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] ||
+        [[ $JOIN_ADDRESS =~ $JOIN_ADDRESS_RE ]] ||
             usage_error "--join-address must be a host name or an IPv4 address."
         [[ -f $JOIN_TOKEN_FILE && -r $JOIN_TOKEN_FILE && -s $JOIN_TOKEN_FILE ]] ||
             usage_error "--join-token-file $JOIN_TOKEN_FILE is not a readable file with a token in it."
     fi
     if ((FROM_DISK)) && [[ -n $PUBLIC_ADDRESS ]]; then
         usage_error "--from-disk runs no DNS check, so --public-address has no effect. Leave it out."
+    fi
+    if ((FROM_DISK)) && { ((CONFIRM_BACKUP)) || [[ -n $OS_PACKAGES_FILE ]]; }; then
+        usage_error "--from-disk installs the core again and updates nothing, so --confirm-backup and --os-packages have no effect. Leave them out."
+    fi
+    if [[ -n $OS_PACKAGES_FILE ]]; then
+        [[ -f $OS_PACKAGES_FILE && -r $OS_PACKAGES_FILE ]] ||
+            usage_error "--os-packages $OS_PACKAGES_FILE is not a readable file. Give the OS-package file of the MEHO appliance."
     fi
 }
 
@@ -242,11 +287,21 @@ on_error() {
     exit 1
 }
 
-check_machine() {
+# find_the_install: the checks every run needs first, then find_install of
+# lib/update.sh, which sets UPDATE.
+find_the_install() {
+    local update_options=0
+    if ((CONFIRM_BACKUP)) || [[ -n $OS_PACKAGES_FILE ]]; then
+        update_options=1
+    fi
     check_root
-    check_os
     check_download "$DOWNLOAD_DIR" "${DOWNLOAD_FILES[@]}"
     read_download_version "$DOWNLOAD_DIR"
+    find_install "$DOWNLOAD_DIR" "$update_options"
+}
+
+check_machine() {
+    check_os
     check_cpus
     check_memory
     check_disk
@@ -272,6 +327,107 @@ prepare_machine() {
     install_meho_host "$DOWNLOAD_DIR"
 }
 
+# use_install_answers: the answers of the install, from its record, in the
+# same names as the options of a first install. The record is install.sh's
+# own file, so a value that breaks the rules of its option means that the
+# file was changed by hand. A record of an older install.sh has no
+# join_address; the install then had no join options.
+use_install_answers() {
+    local key bad=()
+    for key in meho_version rke2_version installed_at hostname first_tenant_id \
+        admin_user approver_user cluster_cidr service_cidr; do
+        [[ -n $(record_value "$key") ]] || bad+=("$key")
+    done
+    ((${#bad[@]} == 0)) ||
+        fail "The install record $MEHO_INSTALL_RECORD has no value for: $(join_by ', ' "${bad[@]}")." \
+            "run 'meho-host support-bundle' and send the file to support."
+    HOSTNAME_FQDN=$(record_value hostname)
+    PUBLIC_ADDRESS=$(record_value public_address)
+    FIRST_TENANT_ID=$(record_value first_tenant_id)
+    ADMIN_USER=$(record_value admin_user)
+    APPROVER_USER=$(record_value approver_user)
+    CLUSTER_CIDR=$(record_value cluster_cidr)
+    SERVICE_CIDR=$(record_value service_cidr)
+    JOIN_ADDRESS=$(record_value join_address)
+    if [[ $(record_value from_disk) == true ]]; then
+        RECORD_FROM_DISK=1
+    fi
+    is_fqdn "$HOSTNAME_FQDN" || bad+=(hostname)
+    [[ -z $PUBLIC_ADDRESS ]] || is_ipv4 "$PUBLIC_ADDRESS" || bad+=(public_address)
+    [[ $FIRST_TENANT_ID =~ $UUID_RE ]] || bad+=(first_tenant_id)
+    [[ $ADMIN_USER =~ $USER_NAME_RE ]] || bad+=(admin_user)
+    [[ $APPROVER_USER =~ $USER_NAME_RE ]] || bad+=(approver_user)
+    is_ipv4_cidr "$CLUSTER_CIDR" || bad+=(cluster_cidr)
+    is_ipv4_cidr "$SERVICE_CIDR" || bad+=(service_cidr)
+    [[ -z $JOIN_ADDRESS || $JOIN_ADDRESS =~ $JOIN_ADDRESS_RE ]] || bad+=(join_address)
+    ((${#bad[@]} == 0)) ||
+        fail "The install record $MEHO_INSTALL_RECORD has values that install.sh cannot use: $(join_by ', ' "${bad[@]}")." \
+            "run 'meho-host support-bundle' and send the file to support."
+}
+
+update_step() {
+    UPDATE_STEP=$((UPDATE_STEP + 1))
+    step "Update step $UPDATE_STEP: $1"
+}
+
+# update_meho: the update of form-2 design, section 7, on a machine where
+# find_install found all three signs of an install. It leaves alone the
+# firewall (its SSH range changes only with meho-host admin-network), the
+# two one-time files, the volumes, OpenBao's data and the Secrets: the
+# chart's secrets Job creates only the Secrets that do not exist.
+update_meho() {
+    local installed_version rke2_run
+    use_install_answers
+    describe_update
+    refuse_install_options "${INSTALL_OPTIONS_GIVEN[@]}"
+    installed_version=$(record_value meho_version)
+
+    update_step "check the machine and the versions"
+    check_os
+    check_cpus
+    check_memory
+    check_disk
+    check_clock
+    check_hostname "$HOSTNAME_FQDN"
+    check_dns "$HOSTNAME_FQDN" "$PUBLIC_ADDRESS"
+    if [[ -n $OS_PACKAGES_FILE ]]; then
+        check_os_packages "$OS_PACKAGES_FILE"
+    fi
+    check_rke2_step "$(record_value rke2_version)" "$RKE2_VERSION"
+    check_meho_step "$installed_version" "$MEHO_VERSION"
+
+    update_step "confirm a backup"
+    confirm_backup "$CONFIRM_BACKUP"
+
+    if [[ -n $OS_PACKAGES_FILE ]]; then
+        update_step "install the OS packages of the appliance"
+        install_os_packages "$OS_PACKAGES_FILE"
+    fi
+
+    update_step "update RKE2"
+    write_rke2_config "$HOSTNAME_FQDN" "$CLUSTER_CIDR" "$SERVICE_CIDR" "$JOIN_ADDRESS"
+    copy_images "$DOWNLOAD_DIR"
+    copy_storage_manifest "$DOWNLOAD_DIR"
+    write_traefik_config
+    install_rke2 "$DOWNLOAD_DIR"
+    prepare_cis_host
+    rke2_run=$(rke2_invocation_id)
+    restart_rke2
+    wait_for_rke2 "$rke2_run"
+
+    update_step "update the MEHO core"
+    write_place_values "$HOSTNAME_FQDN" "$FIRST_TENANT_ID" "$ADMIN_USER" "$APPROVER_USER" "$CLUSTER_CIDR"
+    install_core "$DOWNLOAD_DIR"
+
+    update_step "install the meho command and meho-host, and write the install record"
+    install_cli "$DOWNLOAD_DIR"
+    install_meho_host "$DOWNLOAD_DIR"
+    write_install_record "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "$HOSTNAME_FQDN" "$PUBLIC_ADDRESS" "$FIRST_TENANT_ID" "$ADMIN_USER" "$APPROVER_USER" \
+        "$CLUSTER_CIDR" "$SERVICE_CIDR" "$JOIN_ADDRESS" "$RECORD_FROM_DISK"
+    print_update_result "$HOSTNAME_FQDN" "$installed_version"
+}
+
 main() {
     parse_options "$@"
     validate_options
@@ -291,6 +447,12 @@ main() {
         write_rke2_config "$HOSTNAME_FQDN" "$CLUSTER_CIDR" "$SERVICE_CIDR" "$JOIN_ADDRESS"
         step "Step 3: start RKE2"
     else
+        step "Find the install"
+        find_the_install
+        if ((UPDATE)); then
+            update_meho
+            return 0
+        fi
         step "Step 1: check the machine"
         check_machine
         step "Step 2: prepare the machine"
@@ -318,7 +480,7 @@ main() {
     install_cli "$DOWNLOAD_DIR"
     write_install_record "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         "$HOSTNAME_FQDN" "$PUBLIC_ADDRESS" "$FIRST_TENANT_ID" "$ADMIN_USER" "$APPROVER_USER" \
-        "$CLUSTER_CIDR" "$SERVICE_CIDR" "$FROM_DISK"
+        "$CLUSTER_CIDR" "$SERVICE_CIDR" "$JOIN_ADDRESS" "$FROM_DISK"
     print_result "$HOSTNAME_FQDN" "$unseal_key_written"
 }
 

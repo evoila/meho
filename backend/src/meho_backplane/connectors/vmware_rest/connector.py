@@ -3515,6 +3515,24 @@ class VmwareRestConnector(HttpConnector):
 
         return await license_assigned_list_impl(self, operator, target, params)
 
+    async def cluster_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.cluster.list`` -- the clusters, with datacenter, host count, HA, DRS and vSAN.
+
+        A ``source_kind="typed"`` read. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_cluster_list.cluster_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_cluster_list import (
+            cluster_list_impl,
+        )
+
+        return await cluster_list_impl(self, operator, target, params)
+
     async def resource_pool_list(
         self,
         operator: Operator,

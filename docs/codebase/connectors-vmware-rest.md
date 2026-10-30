@@ -953,6 +953,11 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `snapshot_list`) — the snapshots of one VM (by `vm` moid) as a flat list in
   tree order. `safe`, in its own group `vmware-snapshot-list`, on both
   catalogs. See **VM snapshot operations** under Control flow.
+- **`vmware.cluster.list`** (`typed_ops_cluster_list.py`, handler
+  `cluster_list`) — the clusters of a vCenter, with the datacenter, the
+  number of hosts, and whether HA, DRS and vSAN are on. `safe`, in its own
+  group `vmware-clusters`, on both catalogs. See **Cluster list** under
+  Control flow.
 - **`vmware.resource_pool.list`** (`typed_ops_resource_pool_list.py`,
   handler `resource_pool_list`) — the resource pools of a vCenter, with the
   parent of each pool and its CPU and memory settings. `safe`, in its own
@@ -4811,6 +4816,50 @@ a key; flight-recorder spans, with a control case without the tag),
 `tests/test_connectors_vmware_rest_license_reconcile.py` (the pinned 9.0
 `vi-json.yaml`) and the source scan in
 `tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` (8.0 U1, U2, U3).
+
+### Cluster list (`vmware.cluster.list`)
+
+A typed read that lists the clusters of a vCenter. It is written by hand, so
+it has a clear summary, field descriptions and a risk level. It replaces the
+raw ingested `GET:/vcenter/cluster` operation for this common task.
+
+| Operation | What it does | Vendor calls | Risk |
+|---|---|---|---|
+| `vmware.cluster.list` | One row per cluster: `id` (moid), `name`, `datacenter_id`, `datacenter_name`, `host_count`, `ha_enabled`, `drs_enabled`, `vsan_enabled`, `read_note`. Optional filters: `datacenter` (moid), `folder` (moid), `name` pattern (`*` and `?`, letter case does not matter). | `GET /vcenter/datacenter`; per datacenter `GET /vcenter/cluster` with the `datacenters` filter (and `folders`); one `PropertyCollector.RetrievePropertiesEx` of `ClusterComputeResource` `summary.numHosts` and `configurationEx` for all clusters | `safe`; runs at once |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 and its updates (the host count and vSAN state need VI-JSON, so 8.0 U1 or newer; on older builds they are `null` with a `read_note`) | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+- **How it calls vCenter.** The two lists go through the REST mount
+  (`mount_op_path`, `/api` or the legacy `/rest`) on the connector's own
+  session, so it needs no spec ingest. The filters are written as
+  `filter.datacenters` and `filter.folders`; `adapt_op_query` sends the bare
+  names on `/api`. The REST cluster summary has no datacenter, so the clusters
+  are listed once per datacenter. HA and DRS come from that summary.
+- **Host count and vSAN.** One VI-JSON property read for all listed clusters,
+  through `retrieve_all_pages` (every page). `configurationEx` is read whole
+  because vCenter 8.0 refuses a path inside it; the operation takes
+  `vsanConfigInfo.enabled` from it. A cluster config with no vSAN part counts
+  as vSAN off.
+- **Errors.** A failed datacenter or cluster list fails the operation, so a
+  datacenter's clusters are never missing without an error. The property read
+  is best-effort: when it fails, `host_count` and `vsan_enabled` are `null` and
+  `read_note` names the call and the error. A property that vCenter could not
+  read (a `missingSet` entry) is named in `read_note` too.
+- **Cost.** One call, plus one call per datacenter, plus one property read
+  (more pages only for very many clusters).
+- **Large lists.** The rows are flat, so a long list comes back as a link to
+  the stored result (a result handle) that the caller reads with
+  `result_query`.
+
+Code: `typed_ops_cluster_list.py`. Tests:
+`tests/test_connectors_vmware_rest_typed_cluster_list.py` (saved answers, no
+live vCenter) and `tests/test_connectors_vmware_rest_cluster_list_reconcile.py`
+(the REST paths, filters and summary fields against the pinned vCenter 8.0 U3
+and 9.0 `vcenter.yaml`; the VI-JSON types against the pinned 9.0 and 8.0 U1,
+U2, U3 VI-JSON files; the two properties against the 9.0 file).
 
 ### Resource pool list (`vmware.resource_pool.list`)
 

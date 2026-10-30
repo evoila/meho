@@ -26,16 +26,18 @@
 #   4. the machine: the build user's sessions, the user, its key (also the
 #      copy cloud-init puts in root's authorized_keys) and its sudo rule;
 #      the build's network file; cloud-init's state, logs and the
-#      machine-id; the SSH host keys; SSH closed for every address
-#      (meho-host admin-network none); the logs; fstrim
+#      machine-id; the SSH host keys; the build's host name, a name of the
+#      build network, in /etc/hostname and RKE2's settings; SSH closed for
+#      every address (meho-host admin-network none); the logs; fstrim
 # What stays: server/manifests/, agent/images/, /etc/rancher/rke2/config.yaml,
 # the pod security file /etc/rancher/rke2/meho-pss.yaml and the appliance
 # pieces under /opt/meho/appliance. The preset file that keeps RKE2 off at
 # the first boot is written.
 #
 # Usage:
-#   clean.sh [--build-user <name>]   clean, check, power off
-#   clean.sh --check [--build-user <name>]
+#   clean.sh --build-hostname <fqdn> [--build-user <name>]
+#                                    clean, check, power off
+#   clean.sh --check --build-hostname <fqdn> [--build-user <name>]
 #                                    only the check; exit 1 when anything is left
 #
 # Exit codes:
@@ -81,8 +83,12 @@ readonly BUILD_NETPLAN=/etc/netplan/60-meho-build.yaml
 readonly SUDOERS_CLOUD_INIT=/etc/sudoers.d/90-cloud-init-users
 readonly MACHINE_ID=/etc/machine-id
 readonly ROOT_AUTHORIZED_KEYS=/root/.ssh/authorized_keys
+readonly ETC_HOSTNAME=/etc/hostname
+# The appliance's host name until first start sets the customer's.
+readonly NEUTRAL_HOSTNAME=meho-appliance
 
 BUILD_USER=meho-build
+BUILD_HOSTNAME=""
 CHECK_ONLY=0
 LEFT=0
 
@@ -91,9 +97,12 @@ usage() {
 clean.sh: clean the appliance build VM for copying, check it, power off.
 
 Usage:
-  clean.sh [--build-user <name>]
-  clean.sh --check [--build-user <name>]
+  clean.sh --build-hostname <fqdn> [--build-user <name>]
+  clean.sh --check --build-hostname <fqdn> [--build-user <name>]
 
+  --build-hostname <fqdn>
+                       Required. The host name the build VM was installed
+                       with. The clean replaces it with meho-appliance.
   --build-user <name>  The user the build logs in as. Default: meho-build.
   --check              Only check that nothing is left. Exit 1 when it is.
   -h, --help           Show this help and stop.
@@ -137,10 +146,16 @@ parse_options() {
                 BUILD_USER=$2
                 shift
                 ;;
+            --build-hostname)
+                [[ -n ${2-} && $2 != --* ]] || usage_error "--build-hostname needs a value."
+                BUILD_HOSTNAME=${2,,}
+                shift
+                ;;
             *) usage_error "unknown option: $1" ;;
         esac
         shift
     done
+    [[ -n $BUILD_HOSTNAME ]] || usage_error "--build-hostname is required."
 }
 
 kubectl() {
@@ -218,6 +233,15 @@ clean_machine_identity() {
     cloud-init clean --logs --machine-id
     rm -f "${HOST_ROOT}"/etc/ssh/ssh_host_*
     ok "cloud-init's state, the machine-id and the SSH host keys are gone"
+}
+
+# The build's host name has a DNS record in the build network, so it must not
+# ship. First start sets the customer's name, and its install.sh --from-disk
+# writes RKE2's settings again.
+replace_build_hostname() {
+    printf '%s\n' "$NEUTRAL_HOSTNAME" >"${HOST_ROOT}${ETC_HOSTNAME}"
+    sed -i "s/${BUILD_HOSTNAME//./\\.}/$NEUTRAL_HOSTNAME/gI" "${HOST_ROOT}${RKE2_CONFIG}"
+    ok "the build's host name is replaced with $NEUTRAL_HOSTNAME in $ETC_HOSTNAME and $RKE2_CONFIG"
 }
 
 close_ssh() {
@@ -308,6 +332,12 @@ check_clean() {
     if [[ -s ${HOST_ROOT}${MACHINE_ID} && $(cat "${HOST_ROOT}${MACHINE_ID}") != uninitialized ]]; then
         left "a machine-id in $MACHINE_ID"
     fi
+    [[ $(cat "${HOST_ROOT}${ETC_HOSTNAME}" 2>/dev/null) == "$NEUTRAL_HOSTNAME" ]] ||
+        left "$ETC_HOSTNAME does not say $NEUTRAL_HOSTNAME"
+    # Under /etc only: the logs are empty, and the rest holds no host name.
+    found=$(grep -rlisF -- "$BUILD_HOSTNAME" "${HOST_ROOT}/etc" || true)
+    found=${found//"$HOST_ROOT"/}
+    [[ -z $found ]] || left "the build's host name $BUILD_HOSTNAME in ${found//$'\n'/, }"
     ((LEFT == 0)) ||
         fail "$LEFT thing(s) are still on the machine; see the [LEFT] lines." \
             "fix clean.sh so that it removes them, and run the build again."
@@ -331,6 +361,7 @@ main() {
     step "Step 4: remove the build user, the machine identity and the logs"
     remove_build_user
     clean_machine_identity
+    replace_build_hostname
     close_ssh
     truncate_logs
     step "Step 5: check the machine"

@@ -7,16 +7,18 @@
 #
 # Runs by hand (workflow_dispatch) with a release tag. It fetches the
 # signed form-2 download of that tag from the GitHub release, checks the
-# signature and the checksum, builds the OVA, and keeps the OVA, SHA256SUMS
-# and the build log as workflow artifacts. Publishing is #4814. A run on
-# every release tag comes once the release test exists (#4816).
+# signature and the checksum, builds the OVA, and keeps the OVA and
+# SHA256SUMS as workflow artifacts. Publishing is #4814. A run on every
+# release tag comes once the release test exists (#4816).
 #
 # Runner: the lab's self-hosted pool, which must reach the lab's vCenter
 # and the build VM's address. The lab's test place is an internal ticket.
 # The vCenter login is in repository secrets
 # GOVC_URL, GOVC_USERNAME and GOVC_PASSWORD; where the build VM goes and
-# its network are repository variables (below). The build SSH key is made
-# new for every run and never stored.
+# its network are repository variables (below). The job log of a public
+# repository is public, so the build step masks the variables, and there is
+# no build log file: a mask does not reach a file. The build SSH key is
+# made new for every run and never stored.
 #
 # Permissions: read-only. The job runs no pull-request code.
 
@@ -125,10 +127,18 @@ jobs:
           MEHO_BUILD_DNS: ${{ vars.MEHO_BUILD_DNS }}
         run: |
           set -euo pipefail
+          # The lab's names and addresses stay out of the job log. The
+          # secrets are masked already.
+          IFS=, read -ra dns <<<"${MEHO_BUILD_DNS}"
+          for value in "${GOVC_DATASTORE}" "${GOVC_FOLDER}" "${GOVC_RESOURCE_POOL}" "${GOVC_NETWORK}" \
+            "${MEHO_BUILD_HOSTNAME}" "${MEHO_BUILD_HOSTNAME%%.*}" "${MEHO_BUILD_ADDRESS%/*}" \
+            "${MEHO_BUILD_GATEWAY}" "${dns[@]// /}"; do
+            [[ -z "${value}" ]] || echo "::add-mask::${value}"
+          done
           # A lab vCenter with its own certificate: set the variable to 1.
           [[ -z "${MEHO_LAB_GOVC_INSECURE}" ]] || export GOVC_INSECURE="${MEHO_LAB_GOVC_INSECURE}"
           mkdir -p "${RUNNER_TEMP}/ova"
-          deploy/appliance/build.sh "${TAG#v}" "${RUNNER_TEMP}/ova" 2>&1 | tee "${RUNNER_TEMP}/ova/build.log"
+          deploy/appliance/build.sh "${TAG#v}" "${RUNNER_TEMP}/ova"
 
       - name: Write the summary
         if: always()
@@ -143,19 +153,17 @@ jobs:
               echo "- File: \`meho-appliance-${TAG#v}.ova\` ($(stat -c %s "meho-appliance-${TAG#v}.ova") bytes)"
               echo "- sha256: \`$(cut -d ' ' -f 1 SHA256SUMS)\`"
             else
-              echo "- The build failed. Read build.log in the artifacts."
+              echo "- The build failed. Read the log of the step \"Build the OVA\"."
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Keep the OVA, the checksums and the build log as artifacts
-        if: always()
+      - name: Keep the OVA and the checksums as artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: meho-appliance-ova
           path: |
             ${{ runner.temp }}/ova/meho-appliance-*.ova
             ${{ runner.temp }}/ova/SHA256SUMS
-            ${{ runner.temp }}/ova/build.log
           if-no-files-found: error
           retention-days: 3
           # The disk in the OVA is already compressed (stream-optimized).

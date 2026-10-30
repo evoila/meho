@@ -8,6 +8,8 @@ machine that runs them:
 - MEHO_TEST_ROOT points clean.sh to a temporary root folder that holds a
   machine after the form-2 install: MEHO's data, RKE2's state, the SSH host
   keys, the build user, a machine-id, logs and the appliance pieces.
+- run() passes --build-hostname with the build's host name, which
+  /etc/hostname and RKE2's settings hold.
 - PATH holds only stub commands and links to the few real tools the script
   needs. Each stub writes its arguments to calls.log. The kubectl stub at
   RKE2's own path keeps the Secrets of the cluster in one file, one line
@@ -31,6 +33,7 @@ FAIL_LINE = re.compile(r"^\[FAIL\] .*$", re.MULTILINE)
 LEFT_LINE = re.compile(r"^\[LEFT\] .*$", re.MULTILINE)
 
 BUILD_USER = "meho-build"
+BUILD_HOSTNAME = "meho-build.lab.example"
 RKE2 = "/var/lib/rancher/rke2"
 LABEL = "meho.evoila.com/managed-by=core-bootstrap"
 
@@ -48,6 +51,7 @@ REAL_TOOLS = (
     "awk",
     "mkdir",
     "sleep",
+    "sed",
 )
 
 STUBS = {
@@ -143,7 +147,8 @@ MACHINE_FILES = {
     f"{RKE2}/agent/kubelet.kubeconfig": "fake kubelet kubeconfig\n",
     "/etc/rancher/node/password": "fake-node-password\n",
     "/etc/rancher/rke2/rke2.yaml": "fake kubeconfig\n",
-    "/etc/rancher/rke2/config.yaml": "node-name: build.lab.example\n",
+    "/etc/rancher/rke2/config.yaml": f'tls-san:\n  - "{BUILD_HOSTNAME}"\nprofile: cis\n',
+    "/etc/hostname": f"{BUILD_HOSTNAME}\n",
     "/etc/rancher/rke2/meho-pss.yaml": "fake pod security file\n",
     "/etc/ssh/ssh_host_ed25519_key": "fake host key\n",
     "/etc/ssh/ssh_host_ed25519_key.pub": "fake host key pub\n",
@@ -233,7 +238,7 @@ class FakeBuildVM:
             "LC_ALL": "C",
         }
         return subprocess.run(
-            [str(CLEAN_SH), *args],
+            [str(CLEAN_SH), "--build-hostname", BUILD_HOSTNAME, *args],
             capture_output=True,
             text=True,
             env=env,

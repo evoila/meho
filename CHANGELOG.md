@@ -282,7 +282,9 @@ before you upgrade.
   data, not instructions (#5197).
 - CLI: `meho connector ingest` converts a Swagger 2.0 file to OpenAPI 3
   on the operator's machine; `--save-converted` keeps the copy (#5160).
-  `meho operation subops` and `meho audit count` (#5337).
+  `meho operation subops` and `meho audit count` (#5337). On a form-2
+  Linux server, `meho doctor` run as root also runs `meho-host check` and
+  shows its lines (#5265).
 - Chart: `images.txt` lists every image of the chart except MEHO's own,
   pinned by digest, with its path in your registry, for an install with
   no internet (#5299). `coreKeycloak.companyLogin` connects a company
@@ -382,6 +384,9 @@ before you upgrade.
 - Console: the Issue grant form shows why it was refused (#5268).
 - CLI: writes that answer 204 print their audit receipt, from the new
   `Meho-Audit-Id` header (#5336).
+- Audit: hand-written operations get the class `read` or `write` from
+  their risk level, not `other`, so `meho audit query --op-class read`
+  finds them. Old audit rows stay as they are (#5335).
 - Tests: the readiness pill test counts probe calls instead of timing
   page loads (#5284); the three-faces docs tests stop their background
   loops (#5386); the Postgres connector gets its logger on every call

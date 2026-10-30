@@ -30,6 +30,7 @@ seeded ``operation_group`` / ``endpoint_descriptor`` rows.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import uuid
 import warnings
@@ -57,6 +58,7 @@ from meho_backplane.db.models import (
     AuditLog,
     EndpointDescriptor,
     OperationGroup,
+    OperationPolicyOverride,
     Tenant,
 )
 from meho_backplane.db.models import Target as TargetORM
@@ -981,6 +983,67 @@ def test_operations_ui_run_call_awaiting_approval_deep_links_to_approvals() -> N
     connector = get_or_create_connector_instance(_RecordingHttpConnector)
     assert isinstance(connector, _RecordingHttpConnector)
     assert connector.calls == []
+    # One pending request has no step to show and no grouped link.
+    assert "data-approval-chain-step" not in body
+    assert "data-approval-chain-link" not in body
+
+
+def test_operations_ui_run_call_second_step_of_change_ticket_links_to_ordered_view() -> None:
+    """#3596: a parked step k of N names the step and links to the oldest-first view.
+
+    Real dispatch, twice, under one change ticket (``work_ref``). The first
+    run parks the only request of the ticket: no step, the plain per-request
+    link. The second run parks step 2 of 2: the result names the step and
+    its first link opens the Pending tab filtered to the ticket, oldest
+    first, so the approver meets step 1 before step 2. The per-request link
+    stays as the second link.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(
+        tenant_id=None,
+        op_id="POST:/repos/{owner}/{repo}/locks",
+        path="/repos/{owner}/{repo}/locks",
+        requires_approval=True,
+    )
+    _seed_gh_target(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    ticket = "gh:evoila/meho#7"
+
+    def _run(repo: str) -> str:
+        response = client.post(
+            "/ui/operations/call",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/repos/{owner}/{repo}/locks",
+                "target": "gh-prod",
+                "params": json.dumps({"owner": "evoila", "repo": repo, "body": {}}),
+                "work_ref": ticket,
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert 'data-run-status="awaiting_approval"' in response.text
+        return response.text
+
+    with mock:
+        first = _run("meho")
+        second = _run("meho-docs")
+
+    assert "data-approval-chain-step" not in first
+    assert "data-approval-chain-link" not in first
+
+    assert 'data-approval-chain-step="2"' in second
+    assert "Step 2 of 2 waiting in change ticket" in second
+    assert "Earlier steps of this ticket still wait" in second
+    grouped = 'href="/ui/approvals?tab=pending&order=oldest&work_ref=gh%3Aevoila/meho%237"'
+    assert grouped in second
+    # The grouped link comes first; the per-request link stays after it.
+    assert second.index("data-approval-chain-link") < second.index("data-approval-deep-link")
+    rows = _approval_requests()
+    assert [row.work_ref for row in rows] == [ticket, ticket]
 
 
 _DESTRUCTIVE_OP_ID = "DELETE:/repos/{owner}/{repo}"
@@ -1431,3 +1494,85 @@ def test_operations_ui_run_call_malformed_params_json_is_inline_400() -> None:
         )
     assert response.status_code == 400, response.text
     assert 'data-run-status="form_error"' in response.text
+
+
+def _seed_override(*, tenant_id: uuid.UUID | None, op_id: str, safety_level: str) -> None:
+    """Store an operator override that raises *op_id* (#4711)."""
+
+    async def _do() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            session.add(
+                OperationPolicyOverride(
+                    tenant_id=tenant_id,
+                    product="vault",
+                    version="1.x",
+                    impl_id="vault",
+                    op_id=op_id,
+                    safety_level=safety_level,
+                    set_by_sub="admin",
+                )
+            )
+
+    asyncio.run(_do())
+
+
+def test_operations_ui_typed_op_raised_to_destructive_shows_preview() -> None:
+    """#4711: the drawer and the run window use the risk level after overrides.
+
+    A typed op raised to ``destructive`` by an override must show the
+    preview control (a destructive call needs a preview) and the
+    destructive values, not the stored classification.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _, desc_id = _seed_group_and_op(
+        tenant_id=None,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        group_key="secrets",
+        group_name="Secrets",
+        op_id="vault.kv.delete",
+        safety_level="caution",
+    )
+    _seed_override(tenant_id=_TENANT_A, op_id="vault.kv.delete", safety_level="destructive")
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        drawer = client.get(f"/ui/operations/descriptor/{desc_id}")
+        modal = client.get(f"/ui/operations/run/{desc_id}")
+    assert drawer.status_code == 200, drawer.text
+    assert 'hx-post="/ui/operations/preview"' in drawer.text
+    assert "Destructive — deletes something that cannot be undone" in drawer.text
+    assert modal.status_code == 200, modal.text
+    assert "data-run-preview-step" in modal.text
+    assert 'data-safety-level="destructive"' in modal.text
+
+
+def test_connector_detail_ops_matrix_uses_overrides() -> None:
+    """#4711: the operations list on the connector page shows the values after overrides."""
+    from meho_backplane.ui.routes.connectors.detail import _load_ops_matrix
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_group_and_op(
+        tenant_id=None,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        group_key="secrets",
+        group_name="Secrets",
+        op_id="vault.kv.delete",
+        safety_level="caution",
+    )
+    _seed_override(tenant_id=_TENANT_A, op_id="vault.kv.delete", safety_level="destructive")
+
+    async def _load(tenant_id: uuid.UUID) -> tuple[str, bool]:
+        async with get_sessionmaker()() as session:
+            (group,) = await _load_ops_matrix(
+                session, tenant_id=tenant_id, product="vault", version="1.x", impl_id="vault"
+            )
+        (op,) = group.operations
+        return op.safety_level, op.requires_approval
+
+    assert asyncio.run(_load(_TENANT_A)) == ("destructive", True)
+    assert asyncio.run(_load(uuid.uuid4())) == ("caution", False)

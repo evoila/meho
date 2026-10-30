@@ -630,6 +630,41 @@ file is there.
   mechanics above (CI checkout widened, provenance recorded) and the
   compare test then runs for real.
 
+### phpipam-rest-1.x — no API file exists; the check pins the list (#5070)
+
+The `phpipam-rest-1.x` connector (product `phpipam`) calls the phpIPAM REST
+API with eleven hand-written path constants (thirteen `METHOD:/path` pairs).
+
+- **Check file:** `backend/tests/test_connectors_phpipam_spec_reconcile.py`.
+  It reads the `*_PATH` constants of `connectors/phpipam/_paths.py` live,
+  gives each one its HTTP methods, and pins the full `METHOD:/path` list. It
+  also checks that every path is in the reference list in the docstring of
+  `_paths.py`. All tests run always; there is no compare test.
+- **What was checked (2026-10-29).** phpIPAM documents its API only as web
+  pages: the API reference (<https://phpipam.net/api/api_reference/>) and
+  the API documentation (<https://phpipam.net/api/api_documentation/>),
+  which describe phpIPAM 1.8.2. Neither links an OpenAPI, Swagger or other
+  API description file, and the phpIPAM source at tag `v1.8.2`
+  (<https://github.com/phpipam/phpipam>) has none either: the API is served
+  by the PHP controllers in `api/controllers/`. Every path the connector
+  uses was checked against the reference page and against the controller
+  that serves it (`Subnets.php`, `Addresses.php`, `User.php`), including
+  the answer codes the connector relies on (404 for "nothing found", 409 for
+  a taken address, 201 for a created address). One address is read with
+  `GET /subnets/{subnet_id}/addresses/{ip}/`, not with
+  `GET /addresses/{ip}/{subnet_id}/`: in 1.8.2 the second call finds only the
+  first address row of a subnet (`Addresses.php` filters on an `ip` field that
+  the cache in `class.Common.php` fills in only for that row). The
+  `DELETE /addresses/{ip}/{subnet_id}/` call looks the address up by its value
+  and works for every row.
+- **Residual risk, named.** Without an API file, a renamed path or a changed
+  answer in a later phpIPAM release shows up only in a live call (the
+  connector's lab proof). The pinned list makes sure every path change in
+  MEHO is made on purpose.
+- **Activation:** phpIPAM publishing an API description file. Then the file
+  goes on the shelf, the check gets a compare test, and this entry is
+  withdrawn.
+
 ## Red lane = finding (the protocol)
 
 A red lane on first run against the real shelf is **the guard working**,

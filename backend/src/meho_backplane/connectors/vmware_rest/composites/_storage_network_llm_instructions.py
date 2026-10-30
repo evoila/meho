@@ -107,6 +107,48 @@ STORAGE_NETWORK_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
             ]
         },
     },
+    _P + "datastore.vsan.folder.list": {
+        "when_to_call": (
+            "Call to see the folders of a vSAN datastore, or the files in one of them. Use "
+            "it after vm.destroy to check that the VM's folder is gone, or to find folders "
+            "that no registered VM uses. Read-only."
+        ),
+        "parameter_hints": {
+            "datastore": "Datastore moid of a vSAN datastore, e.g. 'datastore-17'.",
+            "folder": (
+                "Leave it out for the top-level folders. Give the friendly name or the "
+                "uuid_path of a folder to list its files."
+            ),
+        },
+        "output_shape": (
+            "{status: ok|absent|not_found|invalid_request, datastore, datastore_name, "
+            "datastore_type, folder, datastore_path, count, entries, vm_check, guidance}. "
+            "Without folder each entry is a top-level folder: {name (friendly name), "
+            "uuid_path, datastore_path, size_bytes (all files below it), file_count, "
+            "modified, vms (registered VMs that use it)}. With folder each entry is {name, "
+            "kind: file|folder, file_type, size_bytes, modified}. A long list comes back as "
+            "a link to the stored result; read it with result_query."
+        ),
+        "next_step": (
+            "After a VM delete, call with folder set to the VM's folder: absent means it is "
+            "gone. A top-level folder with empty vms and vm_check complete is not used by "
+            "any registered VM. vCenter names vSAN folders by UUID, so compare name and "
+            "uuid_path when you match a folder to a VM."
+        ),
+        "result_scalars": {
+            "keys": [
+                "status",
+                "datastore",
+                "datastore_name",
+                "datastore_type",
+                "folder",
+                "datastore_path",
+                "count",
+                "vm_check",
+                "guidance",
+            ]
+        },
+    },
     _P + "datastore.dir.create": {
         "when_to_call": (
             "Call to create a folder on a datastore, for example for ISO files or install "

@@ -6728,6 +6728,16 @@ class ApprovalRequest(Base):
       Internal resume input only; like ``params`` it is never projected onto a
       read view or a broadcast frame. Added by migration ``0099``.
 
+    * ``release_id`` -- Text nullable. The MEHO release the request was
+      made under (#5030): the full ``GIT_SHA`` plus the ``CHART_VERSION``
+      when set (:func:`~meho_backplane.version.running_release_id`). A
+      person approves one exact release. At start-up a ``pending`` request
+      from another release expires, and an approved request from another
+      release is refused before it runs. NULL on rows saved before this
+      column (they count as an older release) and on rows made by a build
+      with no release identity (local development). Added by migration
+      ``0120``.
+
     Indexes
     -------
 
@@ -6927,6 +6937,9 @@ class ApprovalRequest(Base):
         nullable=True,
         default=None,
     )
+    # The MEHO release the request was made under (#5030). See the class
+    # docstring. Added by migration ``0120``.
+    release_id: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     __table_args__ = (
         Index(

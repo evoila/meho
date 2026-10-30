@@ -23592,6 +23592,15 @@
         "title": "Aggregate",
         "description": "One aggregate output column: ``func(field)`` (``COUNT`` may omit field).\n\n``COUNT`` with no ``field`` compiles to ``COUNT(*)``; every other\nfunction requires a field. The output alias is derived deterministically\n(``count`` / ``sum_<field>`` / ...) and quoted, so callers never inject\nan alias identifier."
       },
+      "ApprovalExpiredReason": {
+        "type": "string",
+        "enum": [
+          "deadline_passed",
+          "release_changed"
+        ],
+        "title": "ApprovalExpiredReason",
+        "description": "Why an ``expired`` request expired (#5030).\n\nRead off the row, never stored, like :class:`ApprovalResultState`.\n\n* :attr:`DEADLINE_PASSED` -- the request waited past ``expires_at``\n  without a decision.\n* :attr:`RELEASE_CHANGED` -- MEHO started with a different release\n  while the request waited (:func:`expire_older_release_requests`).\n  Only this path expires a request before its deadline, so an\n  ``expired`` row with ``decided_at < expires_at`` is this case."
+      },
       "ApprovalRequestStatus": {
         "type": "string",
         "enum": [
@@ -23674,6 +23683,20 @@
           "resume_outcome": {
             "$ref": "#/components/schemas/ApprovalResumeOutcomeView",
             "nullable": true
+          },
+          "expired_reason": {
+            "$ref": "#/components/schemas/ApprovalExpiredReason",
+            "nullable": true
+          },
+          "expired_message": {
+            "type": "string",
+            "nullable": true,
+            "title": "Expired Message"
+          },
+          "release_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Release Id"
           },
           "reviewed_by": {
             "type": "string",

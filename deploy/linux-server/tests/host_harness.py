@@ -15,7 +15,11 @@ network, and they change nothing on the machine that runs them:
   so a test can check that no secret value was on any command line. The
   date stub answers "now" from a file and passes every other call on to the
   real date, which parses the expiry dates of the certificates. The nft
-  stub accepts every file, and the systemctl stub only reloads.
+  stub accepts every file, and the systemctl stub only reloads. userdel and
+  groupdel remove their line from the fake /etc/passwd and /etc/group. Like
+  the real userdel with USERGROUPS_ENAB yes in /etc/login.defs (the default
+  of Ubuntu and RHEL), userdel also removes the group of the same name; the
+  answer usergroups_enab turns that off.
 - Standard input is empty unless a test gives answers (stdin="yes\n"), and
   there is no SSH session unless a test gives one (ssh_client=...).
 
@@ -115,6 +119,34 @@ STUBS = {
     "systemctl": 'case "$1" in daemon-reload) exit 0 ;; *) exit 1 ;; esac',
 }
 
+# userdel and groupdel change the fake /etc/passwd and /etc/group. A failed
+# call prints a message like the real one. The test of install, update and
+# uninstall in test_meho_host.py puts them on the install's fake machine too.
+USERDEL_STUB = textwrap.dedent("""\
+    rc=$(cat "$MEHO_FAKE/userdel_rc")
+    if [ "$rc" != 0 ]; then
+        echo "userdel: user etcd is currently used by process 4242" >&2
+        exit "$rc"
+    fi
+    for name; do :; done
+    sed -i "/^$name:/d" "$MEHO_TEST_ROOT/etc/passwd"
+    if [ "$(cat "$MEHO_FAKE/usergroups_enab")" = yes ]; then
+        sed -i "/^$name:/d" "$MEHO_TEST_ROOT/etc/group"
+    fi
+    """)
+GROUPDEL_STUB = textwrap.dedent("""\
+    rc=$(cat "$MEHO_FAKE/groupdel_rc")
+    if [ "$rc" != 0 ]; then
+        echo "groupdel: cannot remove the primary group of user 'etcd'" >&2
+        exit "$rc"
+    fi
+    for name; do :; done
+    sed -i "/^$name:/d" "$MEHO_TEST_ROOT/etc/group"
+    """)
+ACCOUNT_ANSWERS = {"userdel_rc": "0", "groupdel_rc": "0", "usergroups_enab": "yes"}
+STUBS["userdel"] = USERDEL_STUB
+STUBS["groupdel"] = GROUPDEL_STUB
+
 RKE2_STUB = textwrap.dedent("""\
     case "$1 $2" in
       "certificate check")
@@ -210,6 +242,7 @@ DEFAULT_ANSWERS = {
     "journal_out": "2026-10-23T11:00:00+0000 meho rke2[1234]: fake journal line\n",
     "nft_check_rc": "0",
     "nft_check_out": "",
+    **ACCOUNT_ANSWERS,
 }
 
 

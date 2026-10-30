@@ -40,7 +40,7 @@ names.
   (`groups`, `search`, `call`).
 - `meho connector ...` (G0.7-T5 #405) — spec-ingestion + review
   workflow (`ingest`, `list`, `review`, `edit-group`, `edit-op`,
-  `enable`, `disable`, `delete`).
+  `overrides`, `remove-override`, `enable`, `disable`, `delete`).
 - `meho audit ...` (G8.1-T3 #467) — audit-log query surface
   (`query`, `recent`, `show`, `who-touched`, `my-recent`) wrapping
   the four `/api/v1/audit/*` routes shipped by G8.1-T2 (#466). G8.2-T5
@@ -202,7 +202,9 @@ cli/
     │   ├── doctor.go          # `meho doctor` (#3666) — command, report model, redaction, exit codes.
     │   ├── doctor_offline.go  # offline layer: binary, config, credential store, plugin shim/lock/cache, plugin settings, CA bundle.
     │   ├── doctor_online.go   # authenticated layer: DNS, token + refresh, MCP handshake, working-surface compare.
+    │   ├── doctor_server.go   # server layer (#4740): runs `meho-host check --json` as root on a form-2 server.
     │   ├── doctor_test.go     # offline, credential-store, redaction, and httptest MCP-stub tests.
+    │   ├── doctor_server_test.go # server layer with a fake meho-host: root, not root, laptop, bad answers, time limit.
     │   ├── audit/            # G8.1-T3 #467 — `meho audit …` verb tree.
     │   │   ├── audit.go          # NewRootCmd + shared typed-client helpers (G0.12-T5 #1263).
     │   │   ├── query.go          # `meho audit query` (POST /api/v1/audit/query).
@@ -264,7 +266,9 @@ cli/
     │   │   ├── list.go           # `meho connector list` (GET  /api/v1/connectors). List endpoint returns dict[str, list[dict]] (no response_model on the backend; per-row UUID serialisation), so a package-private listEntry decode lives here.
     │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review). `--prefer tenant|builtin|legacy` (#3799, #4889) is sent as `?prefer=` to pick a row when the id matches both a built-in and a tenant connector (`legacy` picks the tenant's old copy under a former product name); omitted, the 409 stays the default.
     │   │   ├── edit_group.go     # `meho connector edit-group <id> <key>` (PATCH groups/{key}).
-    │   │   ├── edit_op.go        # `meho connector edit-op <id> <op>` (PATCH operations/{op}).
+    │   │   ├── edit_op.go        # `meho connector edit-op <id> <op>` (PATCH operations/{op}). `--safety` takes all four levels and can only raise the level; `--reason` goes to the audit row and is required to turn approval off (#4711). A `401` with `approval_off_needs_fresh_sign_in` prints the server's message and says to run `meho login` again.
+    │   │   ├── overrides.go      # `meho connector overrides [--reduced-approval]` (GET /api/v1/connectors/operation-overrides, #4711) — lists operator changes to risk levels and approval; `--reduced-approval` lists the operations running with approval turned off. The scope column shows the tenant id.
+    │   │   ├── remove_override.go # `meho connector remove-override <id> <op> [--tenant <uuid>] [--reason <text>]` (DELETE /api/v1/connectors/{id}/operation-overrides/{op_id}, #4711) — removes one tenant's or the install-wide change; ending approval needs platform_admin, a reason and a fresh sign-in.
     │   │   ├── enable.go         # `meho connector enable <id>`  + shared transition factory + `disable` + `delete`.
     │   │   ├── enable_reads.go   # `meho connector enable-reads <id>` (POST /enable-reads, G0.25-T7 #1749) — bulk-enable GET/HEAD ingested ops; writes stay default-deny. Renders the ops_enabled count; idempotent. Takes the same `--prefer tenant|builtin|legacy` flag as `review` (#3799, #4889).
     │   │   ├── disable.go        # `meho connector disable <id>` (constructor only; logic in enable.go).
@@ -1157,11 +1161,62 @@ makes exactly the calls it reports, and none with `--no-network`.
    server lists for this session but the client did not see is a
    `surface_gap`.
 
+### Server layer (form-2 server only, #4740)
+
+`runServerChecks` in `doctor_server.go`. It runs last, after the
+authenticated layer. It is the ADR 0007 amendment of 2026-10-16: the
+checks of the built-in Kubernetes (RKE2) live in `meho-host check`, and
+the doctor runs them on the server, so the CLI needs no Kubernetes
+library.
+
+- **No `/usr/local/sbin/meho-host`** (a laptop): no server layer and no
+  line. The output is the same as before #4740. The path is the
+  constant `mehoHostPath`; `install.sh` of install form 2 puts the file
+  there.
+- **`--no-network`**: one `skip` line. `meho-host check` asks the
+  Kubernetes API, and the backplane runs in that same cluster.
+- **Not root** (effective user id is not 0): one `warn` line with the
+  hint "RKE2 checks need root: run `sudo meho doctor`". The doctor does
+  not run `meho-host` and does not ask for a password.
+- **Root**: runs `meho-host check --json` with a 60-second limit
+  (`mehoHostTimeout`) and adds one line per check, in its order, after
+  the doctor's own lines. `meho-host` exits 1 when a line is red. With
+  valid JSON that is a normal answer: the lines decide, not the exit
+  code.
+
+The status words map one to one: `ok`, `warn` and `fail` (the words
+`meho-host` uses), and `skip`. A line with another word becomes a
+`fail` line that names the word. These answers become one `fail` line
+named `meho-host check`, with a hint to run `sudo meho-host check`:
+no output, output that is not valid JSON, an empty list, a command that
+could not start, and the time limit. The detail names the exit status
+and the first line of `meho-host`'s error output, where it prints its
+own `[FAIL]` message.
+
+`exec.CommandContext` stops only `meho-host` itself at the limit. A
+`kubectl` or `rke2` that it started can keep the output pipe open, so
+`Cmd.WaitDelay` (5 seconds) bounds the wait for the output after that.
+Such a child process ends on its own; `kubectl` has a 10-second request
+limit in `meho-host`.
+
+The seams in `doctorDeps` are `stat` (the file check), `geteuid` (the
+user id), `runCommand` (runs the command and returns its standard output
+and standard error) and `serverTimeout`. The human output prints the
+server lines after the summary of the authenticated layer (scopes,
+working surface, session id). The JSON output has them at the end of
+`checks`, with `"layer":"server"`.
+
+Under `sudo`, the doctor runs as root. The offline and authenticated
+layers then read the settings and the login that root sees, which are
+usually not those of the admin's own user.
+
 Failure classes: `dns`, `tls`, `unreachable` (from `internal/netdiag`),
 `not_logged_in`, `refresh_rejected`, `no_refresh_token`, `unauthorized`,
 `surface_gap`, `unexpected`. Exit codes follow the `meho status`
 taxonomy: 2 login problem, 3 network problem, 4 unexpected answer or
-surface gap, 1 an offline check failed, 0 no failure.
+surface gap, 1 an offline or server check failed, 0 no failure. The
+first failed line decides, so a red server line gives 1 only when no
+earlier line failed. Warning lines keep 0.
 
 The scopes shown are the CLI login's scopes. A Claude client logs in on
 its own through `mcp-remote` and can hold other scopes (for example
@@ -1665,8 +1720,8 @@ removes one through `DELETE /api/v1/targets/{name}`.
   The optional flags mirror the `TargetCreate` fields one-for-one
   (`--alias` repeatable, `--version`, `--port`, `--fqdn`,
   `--secret-ref`, `--auth-model`, `--verify-tls`, `--tls-ca-pin`,
-  `--tls-server-name`, `--preferred-impl`, `--note`) and are sent only
-  when set, so the server's defaults apply to the rest — notably an
+  `--tls-server-name`, `--vpn-required`, `--preferred-impl`, `--note`)
+  and are sent only when set, so the server's defaults apply to the rest — notably an
   omitted `--secret-ref` derives the per-tenant default credential path
   (#1723) rather than persisting "no credential". `--no-secret-ref`
   (Task #3854; cannot be combined with `--secret-ref`) sends an
@@ -1687,6 +1742,8 @@ removes one through `DELETE /api/v1/targets/{name}`.
   (Task #3854) — calls `PATCH /api/v1/targets/{name}` (`TargetUpdate`)
   for one target. The field flags have the same names as `add`'s and
   are sent only when set, so every other column keeps its value.
+  For example, `--vpn-required=false` clears the VPN flag, and an
+  update without `--vpn-required` leaves it as it is (#5075).
   `--alias` replaces the whole alias list and `--extra key=value`
   replaces the whole `extras` map, matching the server's PATCH
   semantics. `--clear <field>` (repeatable) sends an explicit JSON null

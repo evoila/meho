@@ -889,6 +889,11 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `snapshot_list`) — the snapshots of one VM (by `vm` moid) as a flat list in
   tree order. `safe`, in its own group `vmware-snapshot-list`, on both
   catalogs. See **VM snapshot operations** under Control flow.
+- **`vmware.datacenter.list`** (`typed_ops_datacenter_list.py`, handler
+  `datacenter_list`) — the datacenters of a vCenter, with the number of
+  clusters, hosts and datastores in each. `safe`, in its own group
+  `vmware-datacenters`, on both catalogs. See **Datacenter list** under
+  Control flow.
 - **`vcenter.sso_admin.api_file.get`** (`typed_ops_sso_admin_api_file.py`,
   handler `sso_admin_api_file_get`) — reads one SSO Admin API description
   file (the WSDL or one of its XSD files) that a vCenter serves. No vendor
@@ -4614,6 +4619,42 @@ a key; flight-recorder spans, with a control case without the tag),
 `tests/test_connectors_vmware_rest_license_reconcile.py` (the pinned 9.0
 `vi-json.yaml`) and the source scan in
 `tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` (8.0 U1, U2, U3).
+
+### Datacenter list (`vmware.datacenter.list`)
+
+A typed read that lists the datacenters of a vCenter. It is written by hand,
+so it has a clear summary, field descriptions and a risk level. It replaces
+the raw ingested `GET:/vcenter/datacenter` operation for this common task.
+
+| Operation | What it does | Vendor calls | Risk |
+|---|---|---|---|
+| `vmware.datacenter.list` | One row per datacenter: `id` (moid), `name`, `cluster_count`, `host_count`, `datastore_count`, `read_note`. Optional `name` pattern (`*` and `?`, letter case does not matter). | `GET /vcenter/datacenter`; per datacenter `GET /vcenter/cluster`, `GET /vcenter/host` and `GET /vcenter/datastore` with the `datacenters` filter | `safe`; runs at once |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 and its updates (REST only, so no VI-JSON is needed) | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+- **How it calls vCenter.** Through the REST mount (`mount_op_path`, `/api`
+  or the legacy `/rest`) on the connector's own session, so it needs no spec
+  ingest. The filter is written as `filter.datacenters`; `adapt_op_query`
+  sends the bare `datacenters` on `/api`. The four paths and the filter are
+  the same in the vCenter 8.0 U3 and 9.0 API files.
+- **Errors.** A failed datacenter list fails the operation. A failed count is
+  `null` and `read_note` names the call and the error; the other counts and
+  rows stay. The name pattern is applied before the counts, so a datacenter
+  that does not match costs no extra call.
+- **Cost.** One call, plus three calls per matching datacenter.
+- **Large lists.** The rows are flat, so a long list comes back as a link to
+  the stored result (a result handle) that the caller reads with
+  `result_query`.
+
+Code: `typed_ops_datacenter_list.py`. Tests:
+`tests/test_connectors_vmware_rest_typed_datacenter_list.py` (saved answers,
+no live vCenter) and
+`tests/test_connectors_vmware_rest_datacenter_list_reconcile.py` (the paths,
+the filter and the summary fields against the pinned vCenter 8.0 U3 and 9.0
+`vcenter.yaml`).
 
 ## Dependencies
 

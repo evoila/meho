@@ -22,7 +22,9 @@
       (no_vault_connector / no_secret_broker_connector).
     * ``status == "awaiting_approval"`` -> the policy gate parked the op and
       created a durable ApprovalRequest. Surface extras.approval_request_id
-      with a DEEP-LINK into /ui/approvals/{id}.
+      with a DEEP-LINK into /ui/approvals/{id}. When ``chain`` is set
+      (#3596), the request is step k of N pending requests under its change
+      ticket: say so and link first to the ticket's oldest-first view.
     * ``status == "ok"`` -> the write executed (uncommon for these governed
       ops). ``move`` renders ONLY {status, value_sha256, length} (value-free);
       put / delete render a plain success.
@@ -40,6 +42,8 @@
                      form/no-connector error
     error_message -- str | None: the inline form-error message (400 branch)
     error_kind    -- str | None: a typed no-connector kind (400 branch)
+    chain         -- dict | None: {work_ref, step, total} when the parked
+                     request is step k of N in its change ticket (#3596)
 -#}
 {% from "_icons.html" import icon %}
 {% from "vault/_envelope_error.html" import vault_envelope_error %}
@@ -85,21 +89,55 @@
         <p class="mt-1 text-xs opacity-70">
           Request id <code data-approval-request-id>{{ approval_id }}</code>
         </p>
-        {#- Deep-link into /ui/approvals/{id}: hx-get the detail modal into the
-            shared app-shell approvals container so the reviewer can open it
-            without leaving the page. The plain href is the fallback for a
-            non-HTMX navigation / a new tab. -#}
-        <a
-          class="btn btn-primary btn-sm mt-2 gap-1"
-          href="/ui/approvals/{{ approval_id }}"
-          hx-get="/ui/approvals/{{ approval_id }}"
-          hx-target="#meho-approvals-modal-container"
-          hx-swap="innerHTML"
-          data-approval-deep-link
-        >
-          {{ icon("external-link", class="size-4") }}
-          Review in approvals
-        </a>
+        {% if chain %}
+          {#- Step k of N (#3596): the parked request is one of two or more
+              pending requests under its change ticket. Name the step and lead
+              to the ticket's oldest-first view (a full-page navigation: the
+              HTMX form of /ui/approvals is the bell panel), so the approver
+              meets step 1 before step k. The per-request modal stays as a
+              second link; it asks for one more confirm when k > 1. -#}
+          <p class="mt-1 text-xs font-semibold" data-approval-chain-step="{{ chain.step }}">
+            Step {{ chain.step }} of {{ chain.total }} waiting in change ticket
+            <code class="[overflow-wrap:anywhere]">{{ chain.work_ref }}</code>.
+            {% if chain.step > 1 %}Earlier steps of this ticket still wait for a decision.{% endif %}
+          </p>
+          <div class="mt-2 flex flex-wrap items-center gap-2">
+            <a
+              class="btn btn-primary btn-sm gap-1"
+              href="/ui/approvals?tab=pending&order=oldest&work_ref={{ chain.work_ref | urlencode }}"
+              data-approval-chain-link
+            >
+              {{ icon("external-link", class="size-4") }}
+              See all {{ chain.total }} steps in order
+            </a>
+            <a
+              class="btn btn-ghost btn-sm gap-1"
+              href="/ui/approvals/{{ approval_id }}"
+              hx-get="/ui/approvals/{{ approval_id }}"
+              hx-target="#meho-approvals-modal-container"
+              hx-swap="innerHTML"
+              data-approval-deep-link
+            >
+              Review this step
+            </a>
+          </div>
+        {% else %}
+          {#- Deep-link into /ui/approvals/{id}: hx-get the detail modal into
+              the shared app-shell approvals container so the reviewer can
+              open it without leaving the page. The plain href is the fallback
+              for a non-HTMX navigation / a new tab. -#}
+          <a
+            class="btn btn-primary btn-sm mt-2 gap-1"
+            href="/ui/approvals/{{ approval_id }}"
+            hx-get="/ui/approvals/{{ approval_id }}"
+            hx-target="#meho-approvals-modal-container"
+            hx-swap="innerHTML"
+            data-approval-deep-link
+          >
+            {{ icon("external-link", class="size-4") }}
+            Review in approvals
+          </a>
+        {% endif %}
       {% else %}
         <a
           class="btn btn-primary btn-sm mt-2 gap-1"

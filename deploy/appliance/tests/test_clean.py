@@ -52,6 +52,10 @@ KEPT = (
     "/etc/cloud/cloud-init.disabled",
     "/opt/meho/appliance/download/install.sh",
     "/opt/meho/appliance/download/VERSION",
+    "/opt/meho/appliance/firststart/firststart.sh",
+    "/opt/meho/appliance/firststart/banner.sh",
+    "/etc/systemd/system/meho-firststart.service",
+    "/etc/systemd/system/meho-banner.service",
 )
 
 
@@ -334,8 +338,13 @@ class CheckTests(CleanTestCase):
             "/etc/rancher/rke2/meho-pss.yaml",
             "/opt/meho/appliance/download/install.sh",
             "/etc/cloud/cloud-init.disabled",
+            "/opt/meho/appliance/firststart/firststart.sh",
+            "/etc/systemd/system/meho-banner.service",
         )
-        for path in must_stay:
+        link = "/etc/systemd/system/multi-user.target.wants/meho-firststart.service"
+        expected = {path: f"{path} is missing; it must stay" for path in must_stay}
+        expected[link] = f"{link} is missing, so first start would not run at the first boot"
+        for path, line in expected.items():
             with self.subTest(path=path):
                 target = self.vm.host_path(path)
                 moved = self.vm.root / "moved"
@@ -344,9 +353,7 @@ class CheckTests(CleanTestCase):
                     result = self.vm.run("--check")
 
                     self.assert_fails_once(result)
-                    self.assertEqual(
-                        [f"[LEFT] {path} is missing; it must stay"], self.left_lines(result)
-                    )
+                    self.assertEqual([f"[LEFT] {line}"], self.left_lines(result))
                 finally:
                     moved.rename(target)
 

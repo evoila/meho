@@ -353,10 +353,18 @@ add_appliance_pieces() {
         sudo rm -rf /opt/meho/appliance/download/rke2 /opt/meho/appliance/download/images &&
         sudo chown -R root:root /opt/meho/appliance &&
         sudo touch /etc/cloud/cloud-init.disabled"
-    # shortcut: the first-start service and its unit (#4812), the console
-    # banner and the OS hardening (#4640) are not built yet; add their
-    # install lines here when they land.
-    ok "the appliance pieces are under /opt/meho/appliance, and cloud-init is off"
+    # The first-start service and the console banner. Enabled now, they run
+    # at the customer's first boot; the build VM does not boot again.
+    scp_build -r "$APPLIANCE_DIR/firststart" "$BUILD_USER@${MEHO_BUILD_ADDRESS%/*}:meho-firststart"
+    ssh_build "sudo install -d -m 0755 /opt/meho/appliance/firststart &&
+        sudo install -m 0755 meho-firststart/firststart.sh meho-firststart/banner.sh /opt/meho/appliance/firststart/ &&
+        sudo install -m 0644 meho-firststart/meho-firststart.service meho-firststart/meho-banner.service /etc/systemd/system/ &&
+        rm -rf meho-firststart &&
+        sudo systemctl daemon-reload &&
+        sudo systemctl enable meho-firststart.service meho-banner.service"
+    # shortcut: the OS hardening (#4640) is not built yet; add its install
+    # lines here when it lands.
+    ok "the appliance pieces are under /opt/meho/appliance, cloud-init is off, and first start runs at the first boot"
 }
 
 run_clean() {

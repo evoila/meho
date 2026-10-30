@@ -29,7 +29,8 @@ what it keeps.
 | `deploy/appliance/clean.sh` | Runs on the build VM as root, outside any SSH session: the deletions, the check (`--check` runs only that), the power-off. |
 | `deploy/appliance/rewrite-ovf.sh` | Replaces the product section of an exported `.ovf` and declares the OVF transports. `awk` does the rewrite. |
 | `deploy/appliance/product-section.xml` | The wizard fields of the form-1 design, section 2, with `@VERSION@`. |
-| `deploy/appliance/tests/` | `test_clean.py` with `clean_harness.py` (a fake build VM), `test_rewrite_ovf.py`, and the Ubuntu cloud image's own `.ovf` as the fixture. |
+| `deploy/appliance/firststart/` | The first-start service and the console banner that step 3 puts into the OVA ([appliance-firststart.md](appliance-firststart.md)). |
+| `deploy/appliance/tests/` | `test_clean.py` with `clean_harness.py` (a fake build VM), `test_rewrite_ovf.py`, and the Ubuntu cloud image's own `.ovf` as the fixture. First start has its own tests; see [appliance-firststart.md](appliance-firststart.md). |
 | `.github/workflows/appliance-build.yml` | The build on the lab runner. |
 | `.github/workflows/linux-server-test.yml` | shellcheck and the unit tests, on every pull request that touches `deploy/appliance/`. |
 
@@ -66,9 +67,12 @@ the tests set it, as `install.sh` does.
    where RKE2 reads them), so `install.sh --from-disk` can run from
    `/opt/meho/appliance/download` at first start; and
    `/etc/cloud/cloud-init.disabled`, so cloud-init never runs on the
-   appliance. The first-start service (#4812), the console banner and the
-   OS hardening (#4640) are not built yet; `add_appliance_pieces` marks
-   where their lines go.
+   appliance; and the first-start service and the console banner
+   (`firststart/`, [appliance-firststart.md](appliance-firststart.md)):
+   the scripts under `/opt/meho/appliance/firststart/`, the two units
+   under `/etc/systemd/system/`, both enabled. They run at the customer's
+   first boot; the build VM does not boot again. The OS hardening (#4640)
+   is not built yet; `add_appliance_pieces` marks where its lines go.
 4. **Clean for copying.** `clean.sh` goes to `/run/meho-clean.sh` (a RAM
    disk, so it is not in the OVA) and starts with
    `systemd-run --unit=meho-clean --collect -p StandardOutput=journal+console`,
@@ -158,8 +162,9 @@ the tests set it, as `install.sh` does.
    and its home; a machine-id other than `uninitialized`. It also checks
    that what must stay is there: `agent/images/`, `server/manifests/`,
    `config.yaml`, `meho-pss.yaml`, the preset file,
-   `/opt/meho/appliance/download/install.sh` and
-   `/etc/cloud/cloud-init.disabled`.
+   `/opt/meho/appliance/download/install.sh`,
+   `/etc/cloud/cloud-init.disabled`, the two first-start scripts and their
+   two unit files, and the links that enable the units.
 6. **Power off:** `sync`, `systemctl poweroff`.
 
 ### `rewrite-ovf.sh <file.ovf> <product-section.xml> <version>`
@@ -180,9 +185,10 @@ The properties of the form-1 design, section 2, in the wizard's order:
 `hostname`, `net.ntp`, `net.mode` (`static` or `dhcp`, default `static`),
 `net.ip`, `net.gateway`, `net.dns`, `net.admin_network`, `admin.password`
 (a password field, `MinLen(14)`), `admin.ssh_key`, `cluster.join.address`,
-`cluster.join.token` (a password field) and `cluster.vip`. Their meaning
-is the first-start service's (#4812); until it lands, an appliance does
-nothing with them.
+`cluster.join.token` (a password field) and `cluster.vip`. The first-start
+service reads them ([appliance-firststart.md](appliance-firststart.md)).
+`cluster.vip` is not used yet, and first start refuses the two join fields:
+this version runs as a single appliance.
 
 ## The workflow
 
@@ -226,11 +232,8 @@ test (#4816).
   reference and the lab's own cloud-image deploys, and wait for the first
   build by hand. The first run will measure the times and may need the
   waits changed.
-- **The first-start service (#4812)**, the console banner and the
-  hardening (#4640) are not in the OVA yet. `add_appliance_pieces` in
-  `build.sh` is where their install lines go. Until #4812 lands, the
-  appliance has no network configuration after the clean (the build's
-  network file is removed) and no SSH host keys; first start writes both.
+- **The hardening (#4640)** is not in the OVA yet. `add_appliance_pieces`
+  in `build.sh` is where its install lines go.
 - **The cloud image's `ubuntu` user** is not made (no `default` in the
   user-data). If a later cloud-init version changes that rule, the check
   finds no such user; add it to `check_clean` if the first build shows one.

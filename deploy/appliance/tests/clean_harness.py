@@ -161,7 +161,15 @@ MACHINE_FILES = {
     f"/home/{BUILD_USER}/.ssh/authorized_keys": "ssh-ed25519 fake build key\n",
     "/opt/meho/appliance/download/install.sh": "#!/usr/bin/env bash\n",
     "/opt/meho/appliance/download/VERSION": "MEHO_VERSION=0.36.0\n",
+    "/opt/meho/appliance/firststart/firststart.sh": "#!/usr/bin/env bash\n",
+    "/opt/meho/appliance/firststart/banner.sh": "#!/usr/bin/env bash\n",
+    "/etc/systemd/system/meho-firststart.service": "[Unit]\n",
+    "/etc/systemd/system/meho-banner.service": "[Unit]\n",
 }
+
+# The links systemctl enable makes for the two units of first start.
+ENABLED_UNITS = ("meho-firststart.service", "meho-banner.service")
+WANTS = "/etc/systemd/system/multi-user.target.wants"
 
 
 def _write_script(path: Path, body: str) -> None:
@@ -192,6 +200,10 @@ class FakeBuildVM:
         _write_script(self.host_path("/usr/local/bin/rke2-killall.sh"), KILLALL_STUB)
         for path, content in MACHINE_FILES.items():
             self.host_file(path, content)
+        for unit in ENABLED_UNITS:
+            link = self.host_path(f"{WANTS}/{unit}")
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(f"/etc/systemd/system/{unit}")
         self.answer("secrets", SECRETS)
         self.answer("secrets_stick", "0")
         self.answer("secrets_get_rc", "0")

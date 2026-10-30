@@ -134,7 +134,8 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
     ``pfsense.filter.rule.delete``, #3850) + ``MGMT_FLOW_OPS`` (the
     management-plane flow classifier ``pfsense.mgmt_flow.summary``) +
     ``USER_WRITE_OPS`` (``pfsense.user.disable`` / ``pfsense.user.enable``,
-    #3937). Twenty-three ops total.
+    #3937) + ``DIAG_OPS`` (the read ``pfsense.diag.ping``, #3965).
+    Twenty-four ops total.
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
@@ -150,6 +151,7 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
     """
     from meho_backplane.connectors.pfsense.ops_config_reads import CONFIG_READ_OPS
     from meho_backplane.connectors.pfsense.ops_delete import DELETE_OPS
+    from meho_backplane.connectors.pfsense.ops_diag import DIAG_OPS
     from meho_backplane.connectors.pfsense.ops_filter_rule import FILTER_RULE_OPS
     from meho_backplane.connectors.pfsense.ops_mgmt_flow import MGMT_FLOW_OPS
     from meho_backplane.connectors.pfsense.ops_read import READ_OPS
@@ -165,6 +167,7 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
         *FILTER_RULE_OPS,
         *MGMT_FLOW_OPS,
         *USER_WRITE_OPS,
+        *DIAG_OPS,
     )
 
 
@@ -186,7 +189,8 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
 #: #3850 adds the firewall rule add / delete (``pfsense.filter.rule.add``,
 #: ``pfsense.filter.rule.delete``) via the ``ops_filter_rule`` module;
 #: #3937 adds the governed user writes (``pfsense.user.disable``,
-#: ``pfsense.user.enable``) via the ``ops_user_write`` module -- 23 ops
+#: ``pfsense.user.enable``) via the ``ops_user_write`` module; #3965 adds
+#: the read ``pfsense.diag.ping`` via the ``ops_diag`` module -- 24 ops
 #: total. The shape of each follow-on PR is "import a new
 #: module-level tuple and splat it into :data:`PFSENSE_OPS` via
 #: :func:`_pfsense_ops`" -- the registration walk in

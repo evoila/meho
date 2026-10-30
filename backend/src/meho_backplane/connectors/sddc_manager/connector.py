@@ -703,6 +703,26 @@ class SddcManagerConnector(HttpConnector):
 
         return await sddc_task_get_impl(self, operator, target, params)
 
+    async def domain_validation_get(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.domain.validation.get`` shim (#3518)."""
+        from meho_backplane.connectors.sddc_manager.typed_reads import (
+            sddc_domain_validation_get_impl,
+        )
+
+        return await sddc_domain_validation_get_impl(self, operator, target, params)
+
+    async def host_validation_get(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.host.validation.get`` shim (#3518)."""
+        from meho_backplane.connectors.sddc_manager.typed_reads import (
+            sddc_host_validation_get_impl,
+        )
+
+        return await sddc_host_validation_get_impl(self, operator, target, params)
+
     async def network_pool_create(
         self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:

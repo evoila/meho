@@ -2193,6 +2193,13 @@ class Settings(BaseModel):
     #: Set via ``VAULT_KV_TENANT_SCOPE_PREFIX``.
     vault_kv_tenant_scope_prefix: str = "secret/tenants/{tenant_id}/"
 
+    #: The most secrets one folder call may walk or delete: ``vault.kv.list``
+    #: with ``recursive=true`` and ``vault.kv.folder.delete``. A bigger folder
+    #: is refused, and the caller picks smaller folders. The delete also
+    #: refuses a ``keys`` list longer than this before it asks for approval.
+    #: Set via ``VAULT_KV_FOLDER_MAX_KEYS``.
+    vault_kv_folder_max_keys: int = Field(default=500, ge=1, le=10000)
+
     @property
     def keycloak_discovery_base(self) -> str:
         """Realm base URL for discovery and token calls, without a trailing slash.
@@ -3049,4 +3056,5 @@ def get_settings() -> Settings:
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"
         ).strip(),
+        vault_kv_folder_max_keys=int(os.environ.get("VAULT_KV_FOLDER_MAX_KEYS", "500")),
     )

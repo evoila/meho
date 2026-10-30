@@ -133,7 +133,12 @@ from meho_backplane.docs_search import (
 from meho_backplane.docs_search.answer import ANSWER_SOURCE_UPSTREAM, answer_docs_question
 from meho_backplane.docs_search.read import DOCS_SOURCE_NOT_FOUND, READ_AROUND_MAX
 from meho_backplane.docs_search.target_scope import TargetDeniedError, apply_target_default
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.server import (
     McpInternalError,
     McpInvalidParamsError,
@@ -487,6 +492,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="doc_collections",
         name="search_docs",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Search a vendor-document collection (manuals, KB articles, "
@@ -703,6 +709,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="doc_collections",
         name="ask_docs",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Answer a vendor-reference question with one composed answer "
@@ -854,6 +861,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="doc_collections",
         name="read_docs",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Read more around a vendor-document hit: the text before and after "

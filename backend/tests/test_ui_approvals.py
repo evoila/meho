@@ -1916,6 +1916,52 @@ def test_modal_generic_params_echo_renders_as_a_field_table() -> None:
     assert "<details open" not in body
 
 
+def test_modal_k8s_apply_shows_manifest_and_subject() -> None:
+    """A ``k8s.apply`` card shows the echoed manifest and names the objects (#3877)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="k8s.apply",
+        connector_id="kubernetes-1.x",
+        proposed_effect={
+            "op_id": "k8s.apply",
+            "connector_id": "kubernetes-1.x",
+            "op_class": "other",
+            "preview": {
+                "dry_run": True,
+                "applied": [{"kind": "Secret", "namespace": "prod", "name": "db"}],
+                "subject": "Secret/prod/db",
+                "manifest": [
+                    {
+                        "apiVersion": "v1",
+                        "kind": "Secret",
+                        "metadata": {"name": "db", "namespace": "prod"},
+                        "data": {"pw": "***REDACTED***"},
+                    }
+                ],
+            },
+            "preview_populated": True,
+            "safety_level": "dangerous",
+        },
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+    assert response.status_code == 200, response.text
+    body = response.text
+
+    table = body.split('aria-label="Proposed effect fields"')[1].split("</table>")[0]
+    assert ">manifest<" in table
+    assert '"kind": "Secret"' in table
+    assert "***REDACTED***" in table
+    # The reviewer context names the object the apply touches.
+    assert ">Subject<" in body
+    assert "Secret/prod/db" in body
+
+
 def test_modal_credential_redacted_shows_elevated_risk_notice_and_no_table() -> None:
     """An identifier-only credential-class envelope surfaces the redaction notice.
 

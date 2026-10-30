@@ -31,6 +31,7 @@ property value of a ``password`` property is never returned.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Final
 
@@ -38,6 +39,7 @@ import httpx
 import structlog
 
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
+from meho_backplane.connectors.vmware_rest._content_library_schemas import FIND_LIBRARY_CALL
 from meho_backplane.connectors.vmware_rest._version_gate import require_vcenter_version
 
 if TYPE_CHECKING:
@@ -76,6 +78,8 @@ _LIBRARY_PATH: Final = "/content/library/{id}"
 _LOCAL_LIBRARY_PATH: Final = "/content/local-library/{id}"
 _SUBSCRIBED_LIBRARY_PATH: Final = "/content/subscribed-library/{id}"
 _ITEMS_PATH: Final = "/content/library/item"
+#: The query parameter of the item list; part of its vendor call id.
+_ITEMS_QUERY: Final = "library_id"
 _ITEM_PATH: Final = "/content/library/item/{id}"
 _ITEM_FILES_PATH: Final = "/content/library/item/{id}/file"
 _ITEM_STORAGE_PATH: Final = "/content/library/item/{id}/storage"
@@ -83,28 +87,46 @@ _OVF_FILTER_PATH: Final = "/vcenter/ovf/library-item/{id}?action=filter"
 _PROBE_PATH: Final = "/content/subscribed-library?action=probe"
 _SUPERVISOR_LIBRARIES_PATH: Final = "/vcenter/namespace-management/lifecycle/content/libraries"
 
-#: The vendor calls, in the ``METHOD:/path`` form the reconcile test checks.
-#: Path placeholders are written ``{}``: the 8.0 and 9.0 files name them
-#: differently (``{library_id}`` and ``{libraryId}``).
+_PLACEHOLDER: Final = re.compile(r"\{[^}]*\}")
+
+
+def _call(method: str, path: str) -> str:
+    """The ``METHOD:/path`` call id of *path*, with every placeholder written ``{}``.
+
+    The 8.0 and 9.0 vendor files name the placeholders differently
+    (``{library_id}`` and ``{libraryId}``), so the reconcile test compares
+    them in this form.
+    """
+    return f"{method}:{_PLACEHOLDER.sub('{}', path)}"
+
+
+#: The vendor calls the reads send, built from the paths the handlers use, so
+#: the reconcile test checks the paths that run. The name lookup is the shared
+#: find of the composites (``resolve_library_id``), which sends
+#: :data:`FIND_LIBRARY_CALL`.
 VENDOR_OP_IDS: Final[frozenset[str]] = frozenset(
     {
-        "POST:/content/library?action=find",
-        "GET:/content/library/{}",
-        "GET:/content/local-library/{}",
-        "GET:/content/subscribed-library/{}",
-        "GET:/content/library/item?library_id",
-        "GET:/content/library/item/{}",
-        "GET:/content/library/item/{}/file",
-        "GET:/content/library/item/{}/storage",
-        "POST:/vcenter/ovf/library-item/{}?action=filter",
-        "POST:/content/subscribed-library?action=probe",
-        f"GET:{_SUPERVISOR_LIBRARIES_PATH}",
+        FIND_LIBRARY_CALL,
+        _call("GET", _LIBRARY_PATH),
+        _call("GET", _LOCAL_LIBRARY_PATH),
+        _call("GET", _SUBSCRIBED_LIBRARY_PATH),
+        _call("GET", f"{_ITEMS_PATH}?{_ITEMS_QUERY}"),
+        _call("GET", _ITEM_PATH),
+        _call("GET", _ITEM_FILES_PATH),
+        _call("GET", _ITEM_STORAGE_PATH),
+        _call("POST", _OVF_FILTER_PATH),
+        _call("POST", _PROBE_PATH),
+        _call("GET", _SUPERVISOR_LIBRARIES_PATH),
     }
 )
 
 _LIBRARY_TYPE_LOCAL: Final = "LOCAL"
 _LIBRARY_TYPE_SUBSCRIBED: Final = "SUBSCRIBED"
 _PROBE_SUCCESS: Final = "SUCCESS"
+_PROBE_INVALID_CREDENTIALS: Final = "INVALID_CREDENTIALS"
+#: The probe sends no login. These two answers both show that vCenter reached
+#: the source: it answered, with or without asking for a login.
+_PROBE_REACHED: Final = frozenset({_PROBE_SUCCESS, _PROBE_INVALID_CREDENTIALS})
 #: The OVF parameter types the options read turns into fields.
 _DEPLOYMENT_OPTION_PARAMS: Final = "DeploymentOptionParams"
 _PROPERTY_PARAMS: Final = "PropertyParams"
@@ -324,7 +346,7 @@ async def content_library_get_impl(
         )
         model = {**model, **typed}
     item_ids = await _get(
-        connector, operator, target, _ITEMS_PATH, missing=missing, query={"library_id": library_id}
+        connector, operator, target, _ITEMS_PATH, missing=missing, query={_ITEMS_QUERY: library_id}
     )
     item_count = len(item_ids) if isinstance(item_ids, list) else None
     _log.info("vmware_content_library_read", target=target.name, item_count=item_count)
@@ -533,8 +555,9 @@ async def subscribed_probe_impl(
     """Implementation of ``vmware.content_library.subscribed.probe``.
 
     Sends the URL with no login (``authentication_method: NONE``). A source
-    that needs a login answers ``INVALID_CREDENTIALS``, which still shows that
-    vCenter reaches it.
+    that needs a login answers ``INVALID_CREDENTIALS``. That still shows that
+    vCenter reaches it, so ``reachable`` is true and ``needs_login`` says that
+    the source wants a user name and password.
     """
     url = params["subscription_url"]
     body = {"subscription_info": {"subscription_url": url, "authentication_method": "NONE"}}
@@ -544,7 +567,8 @@ async def subscribed_probe_impl(
     return {
         "subscription_url": url,
         "status": status,
-        "reachable": status == _PROBE_SUCCESS,
+        "reachable": status in _PROBE_REACHED,
+        "needs_login": status == _PROBE_INVALID_CREDENTIALS,
         "ssl_thumbprint": result.get("ssl_thumbprint"),
         "error_messages": messages,
     }

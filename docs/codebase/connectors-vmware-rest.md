@@ -758,7 +758,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   | `vmware.content_library.item.get` | One item: library, name, type, size in bytes, versions, cached or not, times, source item | `GET /content/library/item/{id}` |
   | `vmware.content_library.item.files.list` | The files of one item: name, size, checksum, cached or not, and the datastores and storage URIs of each file | `GET /content/library/item/{id}/file` and `GET .../storage`, joined by file name |
   | `vmware.content_library.item.ovf_options` | What an OVF item needs before a deploy: size options (the `deployment_option` keys of `vm.deploy_from_library`), networks, storage groups, disk sizes, licence texts, IP settings and properties | `POST /vcenter/ovf/library-item/{id}?action=filter` |
-  | `vmware.content_library.subscribed.probe` | Whether vCenter reaches a subscription URL, the status, the certificate thumbprint and the error texts | `POST /content/subscribed-library?action=probe` |
+  | `vmware.content_library.subscribed.probe` | Whether vCenter reaches a subscription URL, whether the source wants a login, the status, the certificate thumbprint and the error texts | `POST /content/subscribed-library?action=probe` |
   | `vmware.supervisor.content_library.list` | The libraries the Supervisors use, with their status | `GET /vcenter/namespace-management/lifecycle/content/libraries` (vCenter 9.0 and newer) |
 
   - **Ids.** A library or item id goes into a URL path, so it must be a
@@ -775,7 +775,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     raw 8.0 operation's schema puts the fields at the top, which vCenter
     refuses). The `probe` body is `{"subscription_info": {"subscription_url",
     "authentication_method": "NONE"}}`: the probe sends no login, so a source
-    that needs one answers `INVALID_CREDENTIALS`.
+    that needs one answers `INVALID_CREDENTIALS`. That answer still means
+    vCenter reached the source, so `reachable` is true for `SUCCESS` and
+    for `INVALID_CREDENTIALS`, and `needs_login` is true only for the
+    second.
   - **No secrets.** The rows copy named fields only, so the `password`
     fields of the publish and subscription settings never reach the
     result. The value of an OVF property whose type starts with `password`
@@ -785,9 +788,13 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     with `connector_unsupported` before any call.
   - **Long lists.** A long file list goes behind a result handle like any
     other list.
-  - **Group text.** `CONTENT_LIBRARY_WHEN_TO_USE` is shared with the
-    content-library composites (`composites/_register.py`), so the group
-    `content_library` has one text.
+  - **Group text.** `CONTENT_LIBRARY_WHEN_TO_USE` lives in
+    `_content_library_schemas.py` and is shared with the content-library
+    composites (`composites/_register.py`) and the two typed finds, so the
+    group `content_library` has one text.
+  - **Vendor calls.** `VENDOR_OP_IDS` is built from the path constants the
+    handlers use, plus the shared find call `FIND_LIBRARY_CALL`, so the
+    reconcile test checks the paths that run.
 
   Tests: `tests/test_connectors_vmware_rest_typed_content_library.py`
   (saved vCenter answers over mocked HTTP, the result handle, metadata) and

@@ -354,11 +354,21 @@ VMWARE_CONTENT_LIBRARY_SUBSCRIBED_PROBE_OP = VmwareTypedOp(
                 "SUCCESS, INVALID_URL, TIMED_OUT, HOST_NOT_FOUND, RESOURCE_NOT_FOUND, "
                 "INVALID_CREDENTIALS, CERTIFICATE_ERROR or UNKNOWN_ERROR."
             ),
-            "reachable": {"type": "boolean", "description": "True when status is SUCCESS."},
+            "reachable": {
+                "type": "boolean",
+                "description": (
+                    "True when vCenter reached the source: status SUCCESS, or "
+                    "INVALID_CREDENTIALS (the source answered but wants a login)."
+                ),
+            },
+            "needs_login": {
+                "type": "boolean",
+                "description": "True when status is INVALID_CREDENTIALS: the source wants a login.",
+            },
             "ssl_thumbprint": text("The certificate thumbprint the source shows (https)."),
             "error_messages": strings("The error texts vCenter sent."),
         },
-        "required": ["subscription_url", "status", "reachable", "error_messages"],
+        "required": ["subscription_url", "status", "reachable", "needs_login", "error_messages"],
     },
     group_key=CONTENT_LIBRARY_GROUP_KEY,
     tags=(*_TAGS, "subscribed"),
@@ -371,16 +381,16 @@ VMWARE_CONTENT_LIBRARY_SUBSCRIBED_PROBE_OP = VmwareTypedOp(
         ),
         "parameter_hints": {"subscription_url": "The full URL of the published library."},
         "output_shape": (
-            "{subscription_url, status, reachable, ssl_thumbprint, error_messages: [text]}. "
-            "The check sends no login: a source that needs one answers INVALID_CREDENTIALS, "
-            "which still shows that vCenter reaches it."
+            "{subscription_url, status, reachable, needs_login, ssl_thumbprint, "
+            "error_messages: [text]}. The check sends no login: a source that needs one "
+            "answers INVALID_CREDENTIALS. Then reachable is true and needs_login is true."
         ),
         "next_step": (
-            "When reachable is true (or the status is INVALID_CREDENTIALS for a source with a "
-            "login), pass the URL and the ssl_thumbprint to "
-            "vmware.composite.content_library.subscribed.create."
+            "When reachable is true, pass the URL and the ssl_thumbprint to "
+            "vmware.composite.content_library.subscribed.create. When needs_login is true, "
+            "also pass the user name and password of the source."
         ),
-        "result_scalars": {"keys": ["reachable", "status"]},
+        "result_scalars": {"keys": ["reachable", "needs_login", "status"]},
     },
 )
 

@@ -505,26 +505,59 @@ async def test_probe_returns_status_and_thumbprint(
         "subscription_url": url,
         "status": "SUCCESS",
         "reachable": True,
+        "needs_login": False,
         "ssl_thumbprint": "AA:BB:CC",
         "error_messages": [],
     }
     _validate(VMWARE_CONTENT_LIBRARY_SUBSCRIBED_PROBE_OP, out)
 
 
-async def test_probe_of_an_unknown_host(
+async def test_probe_of_a_source_that_wants_a_login_is_reachable(
     connector: VmwareRestConnector, vc: respx.MockRouter
+) -> None:
+    """The probe sends no login. ``INVALID_CREDENTIALS`` still means vCenter reached the source."""
+    url = "https://publisher.example.test/private/lib.json"
+    vc.post("/api/content/subscribed-library", params={"action": "probe"}).respond(
+        200,
+        json={
+            "status": "INVALID_CREDENTIALS",
+            "ssl_thumbprint": "AA:BB:CC",
+            "error_messages": [{"id": "x.auth", "default_message": "Login required."}],
+        },
+    )
+    out = await connector.content_library_subscribed_probe(
+        _operator(), _StubTarget(), {"subscription_url": url}
+    )
+    assert out == {
+        "subscription_url": url,
+        "status": "INVALID_CREDENTIALS",
+        "reachable": True,
+        "needs_login": True,
+        "ssl_thumbprint": "AA:BB:CC",
+        "error_messages": ["Login required."],
+    }
+    _validate(VMWARE_CONTENT_LIBRARY_SUBSCRIBED_PROBE_OP, out)
+
+
+@pytest.mark.parametrize(
+    "status", ["HOST_NOT_FOUND", "TIMED_OUT", "CERTIFICATE_ERROR", "RESOURCE_NOT_FOUND"]
+)
+async def test_probe_of_an_unreached_source(
+    connector: VmwareRestConnector, vc: respx.MockRouter, status: str
 ) -> None:
     vc.post("/api/content/subscribed-library", params={"action": "probe"}).respond(
         200,
         json={
-            "status": "HOST_NOT_FOUND",
+            "status": status,
             "error_messages": [{"id": "x.host", "default_message": "Host not found."}],
         },
     )
     out = await connector.content_library_subscribed_probe(
         _operator(), _StubTarget(), {"subscription_url": "https://nope.example.test/lib.json"}
     )
+    assert out["status"] == status
     assert out["reachable"] is False
+    assert out["needs_login"] is False
     assert out["ssl_thumbprint"] is None
     assert out["error_messages"] == ["Host not found."]
     _validate(VMWARE_CONTENT_LIBRARY_SUBSCRIBED_PROBE_OP, out)

@@ -100,9 +100,11 @@ carry connector packages from other repositories. The release adds the
 phpIPAM connector, Azure VMware Solution and Azure Arc reads, the steps
 that build a Windows domain controller, and new Kubernetes, vSphere,
 Vault, VCF Automation, Holodeck and pfSense operations. Error results
-and traces now hide secret fields.
+and traces now hide secret fields. An admin's change to a risk level or
+an approval flag now stays after a restart, and an edit can only make an
+operation stricter.
 
-The upgrade runs eight database migrations (`0119` to `0126`). They
+The upgrade runs nine database migrations (`0119` to `0127`). They
 only add tables and columns. The upgrade also ends every approval that
 still waits. Read "Breaking changes" and "Steps after the upgrade"
 before you upgrade.
@@ -158,9 +160,20 @@ before you upgrade.
   and `docker.io/busybox` now maps to `<registry>/library/busybox` when
   `global.imageRegistry` is set (#5299). What to do: with your own image
   registry, copy every line of the new `images.txt` (see Added).
+- An edit of an operation's risk level or approval flag can now only
+  make the operation stricter (#5260). A lower risk level than the one
+  in code is refused; that change needs a pull request. Turning approval
+  off needs `platform_admin`, a reason, and a person: the console, or a
+  REST call with a fresh sign-in (at most `FRESH_SIGN_IN_MAX_AGE_SECONDS`
+  old, default 300). It is never allowed for a destructive operation.
+  The MCP tool `meho_connector_edit_op` can no longer turn approval off
+  or lower a level. A service principal, an agent, or a token with an
+  older sign-in gets 401 `insufficient_user_authentication`. What to do:
+  a script that turned approval off with a plain API token or through
+  MCP must use the console, or the CLI right after `meho login`.
 
 ### Steps after the upgrade
-- Back up the database first. The eight migrations only add tables and
+- Back up the database first. The nine migrations only add tables and
   columns:
   - `0119` adds the approval status `withdrawn` and two columns for it
     (#5004);
@@ -170,7 +183,8 @@ before you upgrade.
   - `0123` adds the column `operation_group.code_text_hash` (#5369);
   - `0124` adds the connector package set column for runners (#5314);
   - `0125` adds the column `endpoint_descriptor.owner_package` (#5308);
-  - `0126` adds the column `approval_request.release_id` (#5170).
+  - `0126` adds the column `approval_request.release_id` (#5170);
+  - `0127` adds the table `operation_policy_override` (#5260).
 
   One limit applies to a rollback to 0.38.0. 0.38.0 does not know the
   approval status `withdrawn` (#5004). Once any request has been
@@ -193,6 +207,11 @@ before you upgrade.
 - With the built-in PostgreSQL, run `helm install` and `helm upgrade`
   with `--wait` (#5248). The migration now runs in the MEHO pod, so
   without `--wait` Helm can report success while the pod still fails.
+- Apply again, once, every stricter risk level or approval edit you made
+  before this release, with `meho connector edit-op` (#5260). Those edits
+  were written to the operation row, so the next start or re-ingest puts
+  the value from code back. Then check
+  `meho connector overrides --reduced-approval`.
 - If you copied the `meho-tenant-admin` Vault policy example, add
   `update` on `secret/delete/tenants/...` (#5290). Without it, Vault
   refuses `vault.kv.delete`.
@@ -212,6 +231,12 @@ before you upgrade.
 - Approvals: each request saves the MEHO release it was made under. A
   request from another release never runs (#5170, see Steps after the
   upgrade).
+- Approvals: when two or more requests of one change ticket wait, the
+  bell panel and the Pending tab show them oldest first, with "Step k of
+  N", and the console asks once more before an out-of-order approve.
+  `GET /api/v1/approvals` takes `order=oldest|newest` (default newest),
+  and `meho approvals list --order` is oldest first by default with
+  `--work-ref` (#5338).
 - Tenants: a tenant admin turns a built-in connector's operations or
   groups on or off for their own tenant only, through
   `GET /api/v1/connectors/{connector_id}/tenant-settings`, two `PUT`
@@ -241,7 +266,9 @@ before you upgrade.
   (#5369).
 - Targets: `targets.remove` through `call_operation`, by target UUID,
   `dangerous` and approved by a second person (#5256). `meho targets
-  delete <name>` with `--confirm` and `--force` (#5288).
+  delete <name>` with `--confirm` and `--force` (#5288). `targets.register`
+  and `meho targets add` / `update --vpn-required` record whether a
+  target needs a VPN; MEHO does not act on it (#5340).
 - Grants: on a sandbox instance, the new boot setting
   `MEHO_SANDBOX_DELETE_GRANTS_FROM_API` (chart
   `sandboxMode.deleteGrantsFromApi`, off by default) lets a tenant admin
@@ -258,7 +285,11 @@ before you upgrade.
   `meho operation subops` and `meho audit count` (#5337).
 - Chart: `images.txt` lists every image of the chart except MEHO's own,
   pinned by digest, with its path in your registry, for an install with
-  no internet (#5299).
+  no internet (#5299). `coreKeycloak.companyLogin` connects a company
+  login (an OpenID Connect server) to the built-in Keycloak: people log
+  in there, and their company group decides their MEHO group. An install
+  whose first start had the company login off must give `meho-admin` two
+  more Keycloak roles once; the bootstrap Job names them (#5322).
 - Install form 2: a run of `install.sh` on an installed machine now
   updates it, and `--os-packages <file>` installs signed OS updates with
   no network (#5287).
@@ -286,7 +317,12 @@ before you upgrade.
   `k8s.cr.list` and `k8s.cr.info` read core-group objects, and new
   `k8s.auth.can_i`, `k8s.auth.rules` and `k8s.admission_webhook.list`
   (#5221); custom resource reads show annotations, version, uid and a
-  short status (#5226).
+  short status (#5226); `k8s.secret.list` and `k8s.secret.info` show key
+  names, never values (#5341); `k8s.logs` reads an older time window
+  with `since_time` and `until_time` (#5329).
+- Google Cloud: list workload identity pools and their providers, read a
+  service account's access policy, and, after approval, delete a pool or
+  remove one member from one role (#5326).
 - VMware: `vmware.composite.datastore.file.list` lists a datastore
   folder, also on standalone ESXi (#5195);
   `vmware.content_library.find` and `vmware.content_library.item.find`
@@ -316,7 +352,8 @@ before you upgrade.
   mean") (#5181); a read tool with no arguments ignores extra arguments
   (#5182); a missing target gets one clear `target_required` line
   (#5190); tool and group texts no longer hold issue numbers or planning
-  codes (#5193).
+  codes (#5193); a failed `call_operation` or `preview_operation` is
+  recorded as failed in the audit log, not with status 200 (#5334).
 - VMware: generic older-API VM power, clone, revert and migrate calls
   are now `dangerous` and wait for approval, after the re-ingest in
   Steps after the upgrade (#5255); `vmware.object.collect` names every
@@ -351,6 +388,17 @@ before you upgrade.
   (#5387).
 
 ### Changed
+- Operations: an admin's change to a risk level or an approval flag is
+  stored apart from the value in code, so it stays after a restart and a
+  re-ingest. MEHO uses the stricter of the two. A tenant admin's change
+  to a built-in operation applies to their tenant only. A new report
+  lists operations that run with less approval than in code:
+  `meho connector overrides --reduced-approval` and a console page
+  (#5260, see Breaking changes).
+- bind9: `bind9.config.show` no longer waits for approval. It reads only
+  config files (`named.conf`, `named.conf.*`, `*.conf`), refuses key
+  files and zone files, also behind a symlink, and still hides key
+  secrets (#5342).
 - Connectors: the SOAP fault reader moved to the shared connector code
   (#5302), and the VMware-only shared modules moved to
   `connectors/vmware_shared` (#5303). No behaviour change.

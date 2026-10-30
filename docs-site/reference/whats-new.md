@@ -30,7 +30,11 @@ notes.
 - **Fewer secrets in errors and traces.** Error results, HTTP
   diagnostics and traces hide secret fields before the audit row is
   written.
-- **Before you upgrade.** There are eight database migrations, and a few
+- **Admin edits stay, and only make things stricter.** A change to an
+  operation's risk level or approval flag now stays after a restart. An
+  edit can only make an operation stricter; turning approval off needs
+  a platform admin, a reason and a fresh sign-in.
+- **Before you upgrade.** There are nine database migrations, and a few
   scripts and grants must change. Read "Breaking changes" and "Steps
   after the upgrade" in the release notes.
 

@@ -614,7 +614,10 @@ what to do next:
   (sorted, at most 10), and the message names them, for example "This
   operation exists on connector(s) vmware-rest-9.0". When the list is
   empty, the message tells the caller to use `search_operations` on the
-  connector. `extras.known_op_count` still carries the connector's op
+  connector. When the call has a target, a connector whose catalog check
+  refuses that target is not listed (#5069): for example
+  `vmware-rest-9.0` for a vCenter 8.0.x target, for a generic call that
+  only its catalog has. `extras.known_op_count` still carries the connector's op
   count. A common cause is the other version of the same product; op ids
   can also be spelled differently between versions.
 - **`unknown_connector`** — the `connector_id` matches no connector the
@@ -844,6 +847,53 @@ explicitly.
   registration, doc-collection create/delete, memory promotion,
   approvals **read**, and audit query.
 
+## The current tenant of a session (#5239)
+
+One login can list several tenants (the `meho_tenants` claim). An MCP
+session works in **one** tenant, fixed at the start by the `Meho-Tenant`
+request header (a tenant name or UUID). To switch, the client changes the
+setting and starts a new session. There is no tool to switch tenants, so
+the working surface stays at its size.
+
+- `verify_mcp_jwt` (`mcp/auth.py`) reads the header and calls
+  `verify_jwt_for_audience(..., requested_tenant=..., allow_unchosen=True)`.
+  The rules are the ones of REST (`auth/current_tenant.py`): a header for a
+  tenant the person is not in is `403 tenant_not_member`; a platform admin
+  may name any existing tenant (`403 tenant_not_found` for an unknown one).
+  These refusals are 403, not 401, so they carry no `WWW-Authenticate`.
+- A login with several tenants and **no** header gets an `Operator` with
+  `tenant_chosen=False`. `mcp/tenant_gate.py` then allows only
+  `initialize`, `ping`, `notifications/*`, `tools/list` and
+  `tools/call` of `meho_status`. Every other request gets a JSON-RPC
+  `-32600` error whose message starts with `tenant_not_chosen:` and names
+  the person's tenants. The check is an allow list: a new method or tool
+  is refused until it is added there.
+- The allowed requests do no tenant work. The bind step
+  (`verify_mcp_jwt_and_bind`) binds nothing for such a session, so the
+  chassis audit middleware writes no row and the usage collector no
+  event. `initialize` skips the per-tenant session cap and the tenant
+  preamble; its `instructions` text is the `tenant_not_chosen` message
+  plus how to pick a tenant. `tools/call` of `meho_status` writes no
+  wrapper row and reads no broadcast setting. The operator's tenant
+  fields hold only a placeholder (the first entry) and are never
+  recorded.
+- `tools/list` for such a session lists only `meho_status`.
+- `meho_status` (and `GET /api/v1/health`) then answers with
+  `operator.tenant_id` and `operator.tenant_role` set to `null`,
+  `operator.tenants` (each tenant's `tenant_id`, `name`, `tenant_role`,
+  `current`), `vault.detail = "tenant_not_chosen"` and the database
+  state. It runs no tenant work (no credential check, no add-on
+  pairings, no tool comparison). With a current tenant, `meho_status`
+  answers as before and also lists `operator.tenants`, with `current`
+  set on the current one.
+- MEHO keeps no MCP session store (the session id only correlates audit
+  rows), so nothing is kept per session that could mix tenants. Result
+  links are stored per tenant and per person
+  (`connectors/result_handle_store.py`), so a link made in tenant A is a
+  miss while the session works in tenant B.
+
+Tests: `tests/test_mcp_tenant_gate.py`, `tests/test_auth_current_tenant.py`.
+
 ## Dual-surface tool inventory
 
 This is the **authoritative enumeration** of the MCP agent surface —
@@ -919,7 +969,7 @@ add-on-family gate.
 | `meho_runbook_next` | operator | — | Advance one step of an in-progress run (opacity contract). |
 | `meho_runbook_show_template` | operator | — | Read a runbook template's full body. |
 | `meho_runbook_start` | operator | — | Start a new runbook run (self-assigned). |
-| `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666); since #4830 also the database migration revision (`db.revision` / `db.head`), the `/ready` checks (`readiness`), the approval settings in force (`approvals`) and the gated features (`features`). |
+| `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666); since #4830 also the database migration revision (`db.revision` / `db.head`), the `/ready` checks (`readiness`), the approval settings in force (`approvals`) and the gated features (`features`). Since #5239 also the person's tenants with the role in each (`operator.tenants`); it is the one tool a session without a current tenant may call. |
 | `preview_operation` | operator | — | Preview an operation without running it. |
 | `query_topology` | operator | — | Query the topology graph (dependents, blast radius, timeline). |
 | `read_docs` | operator | `meho-docs` | Read the text around a docs hit, its whole page or its section, through the hit's `read_handle` (#3948). |
@@ -1164,6 +1214,7 @@ Five synthetic connectors follow this mould (natural key
 | Wire `connector_id` | Op | MCP front | Since |
 |---|---|---|---|
 | `secret-broker-1.x` | `secret.move` | (dispatch-only) | #1577 |
+| `secret-broker-1.x` | `secret.handoff.export` / `secret.handoff.import` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves on each instance) | #5228 |
 | `topology-graph-1.x` | `topology.create_node` / `.annotate` / … | `meho_topology_create_node` / `_annotate` / … | #2537 |
 | `targets-registry-1.x` | `targets.register` | `meho_targets_register` | #2861 |
 | `targets-registry-1.x` | `targets.remove` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves) | #4623 |

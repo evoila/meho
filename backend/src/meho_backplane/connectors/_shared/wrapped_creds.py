@@ -73,6 +73,7 @@ import structlog
 
 from meho_backplane.auth.vault import vault_client_for_operator
 from meho_backplane.connectors._shared.credential_backend import (
+    WRAPPED_CREDENTIAL_SCHEME,
     CredentialsReadError,
     register_credential_backend,
 )
@@ -96,11 +97,6 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
-
-#: The credential-seam scheme a per-work-item single-use wrapped credential
-#: rides on: ``wrapped:<vault-wrapping-token>``. Parsed off the target's
-#: ``secret_ref`` by the seam dispatcher exactly like ``vault:`` / ``gsm:``.
-WRAPPED_CREDENTIAL_SCHEME = "wrapped"
 
 #: The runner's outbound Vault address for the just-in-time unwrap. Read from
 #: the environment (not the chassis ``Settings`` the runner cannot build);

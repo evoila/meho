@@ -99,7 +99,7 @@ func newRunCmd() *cobra.Command {
 		"return a run handle immediately instead of blocking for the result")
 	cmd.Flags().StringVar(&workRef, "work-ref", "",
 		"external change-ticket reference to bind the run to (e.g. gh:evoila/meho#11); "+
-			"filterable via `meho agent run-list --work-ref`")
+			"filterable via `meho agent run-list --filter-work-ref`")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit the raw run response JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",

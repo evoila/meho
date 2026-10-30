@@ -63,6 +63,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from sqlalchemy import select
 
+from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.db.models import (
     KIND_SLUG_MAX_LENGTH,
@@ -235,7 +236,7 @@ def _build_audit_row(
         status_code=200,
         request_id=None,
         duration_ms=Decimal("0.00"),
-        payload=payload,
+        payload={**payload, **tenant_role_source_payload(operator)},
     )
 
 

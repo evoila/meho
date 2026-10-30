@@ -91,6 +91,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.approval_sign_in import ApprovalAuth
+from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -130,6 +131,7 @@ from meho_backplane.operations.approval_handoff import (
 from meho_backplane.operations.approval_handoff import (
     store as store_handoff,
 )
+from meho_backplane.operations.approval_outcome import with_approval_guidance
 from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.version import running_release_id
 
@@ -1087,6 +1089,8 @@ async def _write_audit_row(
     # name only, email is never widened onto this surface.
     if operator.name:
         payload["principal_name"] = operator.name
+    # #5239: the role of a platform admin without a group in this tenant.
+    payload.update(tenant_role_source_payload(operator))
     if extra_payload:
         payload.update(extra_payload)
     # policy-gate verdict (#130). The parked "request" row is written on the
@@ -2126,7 +2130,7 @@ async def refuse_resume_if_release_changed(
         running_release=running,
         operator_sub=operator.sub,
     )
-    await persist_resume_result(request.id, refusal)
+    await persist_resume_result(request.id, refusal, parked_op_id=request.op_id)
     return refusal
 
 
@@ -2196,7 +2200,7 @@ def _dump_result_envelope(result: Any) -> dict[str, Any] | None:
     return projection if isinstance(projection, dict) else None
 
 
-async def persist_resume_result(request_id: uuid.UUID, result: Any) -> None:
+async def persist_resume_result(request_id: uuid.UUID, result: Any, *, parked_op_id: str) -> None:
     """Store the approved re-dispatch's reduced result envelope on the row (#3209).
 
     Called on the exactly-one-resumer winning path only, so it runs at most
@@ -2209,6 +2213,13 @@ async def persist_resume_result(request_id: uuid.UUID, result: Any) -> None:
     principal-scoped — via ``GET /api/v1/approvals/{id}/result`` to resume a
     non-idempotent parked op (VCF ``bringup.start``) by poll.
 
+    Before the write, the next step a failed multi-step operation names is
+    stamped into ``extras["approval_guidance"]`` (#5377,
+    :func:`~meho_backplane.operations.approval_outcome.with_approval_guidance`).
+    The run summary on the list and show views reads only that stamp, so a
+    row this code did not write shows no guidance. *parked_op_id* is the op
+    id of the request; a secret-class op gets no stamp.
+
     Fail-soft: the dispatch's own synchronous audit row already committed
     inside :func:`~meho_backplane.operations.dispatcher.dispatch` (the
     v0.1-spec §6 record of what executed), so this convenience-durability write
@@ -2220,6 +2231,7 @@ async def persist_resume_result(request_id: uuid.UUID, result: Any) -> None:
     dumped = _dump_result_envelope(result)
     if dumped is None:
         return
+    dumped = with_approval_guidance(dumped, parked_op_id=parked_op_id)
     from meho_backplane.db.engine import get_sessionmaker
 
     try:
@@ -2282,6 +2294,7 @@ def composite_resume_binding(
     subop_params_hash: str,
     resume_parent: dict[str, Any] | None,
     requester: ResumeRequester | None = None,
+    proposed_effect: dict[str, Any] | None = None,
 ) -> Iterator[tuple[str, dict[str, Any]] | None]:
     """Set up the re-entry of a parent composite for an approved sub-op park.
 
@@ -2312,11 +2325,48 @@ def composite_resume_binding(
     the start. It binds :data:`resume_requester_var` with *requester*, the
     requester of the request being re-run, so a step that waits again is
     saved for that requester on both resume paths (#4217).
-    """
-    if resume_parent is None:
-        yield None
-        return
 
+    For every park, direct or sub-op, the block also binds
+    :data:`~meho_backplane.operations._preview.approved_preview_var` with
+    the approved request's op id and the computed preview its park stored
+    (the ``preview`` body of *proposed_effect*, or ``{}``). A handler reads
+    it with :func:`~meho_backplane.operations._preview.approved_preview`,
+    so a name it resolved at park time is not looked up again after the
+    approval; the re-run acts on the object the approver saw (#5202).
+    """
+    from meho_backplane.operations._preview import approved_preview_var
+
+    preview_token = approved_preview_var.set((subop_op_id, _approved_preview_body(proposed_effect)))
+    try:
+        if resume_parent is None:
+            yield None
+        else:
+            with _composite_parent_binding(
+                subop_op_id=subop_op_id,
+                subop_params_hash=subop_params_hash,
+                resume_parent=resume_parent,
+                requester=requester,
+            ) as parent_call:
+                yield parent_call
+    finally:
+        approved_preview_var.reset(preview_token)
+
+
+def _approved_preview_body(proposed_effect: dict[str, Any] | None) -> dict[str, Any]:
+    """The computed preview a park stored, or ``{}`` when it stored none."""
+    body = (proposed_effect or {}).get("preview")
+    return body if isinstance(body, dict) else {}
+
+
+@contextmanager
+def _composite_parent_binding(
+    *,
+    subop_op_id: str,
+    subop_params_hash: str,
+    resume_parent: dict[str, Any],
+    requester: ResumeRequester | None,
+) -> Iterator[tuple[str, dict[str, Any]]]:
+    """Bind the composite re-entry vars of :func:`composite_resume_binding`."""
     from meho_backplane.operations.composite import (
         CompositeResumeState,
         composite_resume_scope_var,
@@ -2438,6 +2488,7 @@ async def _dispatch_resume_with_bound_context(
                 subop_params_hash=request.params_hash,
                 resume_parent=resume_parent,
                 requester=requester_of(request),
+                proposed_effect=request.proposed_effect,
             ) as parent_call,
         ):
             dispatch_op_id, dispatch_params = (
@@ -2461,7 +2512,7 @@ async def _dispatch_resume_with_bound_context(
     # instead of a second submit (#3209). Reached only by the exactly-one-resumer
     # winner, so the capture runs at most once; fail-soft, never breaks the
     # approve path.
-    await persist_resume_result(request.id, result)
+    await persist_resume_result(request.id, result, parked_op_id=request.op_id)
     return result
 
 

@@ -434,6 +434,27 @@ decode / impersonation / WIF-selection / STS-exchange / error /
 no-secret-in-logs behaviour with a canned payload and a mocked STS endpoint
 — no live GCP (`tests/test_connectors_gsm_creds.py`).
 
+## Secret field map (#3711)
+
+`load_basic_credentials` and `load_vault_secret_data` apply the target's
+optional `secret_field_map` (`{connector_field: source_field}`) to the
+secret before the connector sees it: a read of field `X` returns the
+secret's `map.get(X, X)`. `secret_field_map_of(target)` reads the map with
+`getattr`, so stand-in targets built around another secret ref (op
+parameter refs, `guest_secret_ref`) have no map and are never remapped.
+`missing_secret_field_map_sources` is the probe-time check. Field names
+only, never a value.
+
+The map is applied exactly once between the centre and a satellite runner.
+`broker_wrapped_credential` reads the target's secret through
+`load_vault_secret_data`, so the wrapped payload is already the connector's
+view. When a target's `secret_ref` is a `wrapped:` token, the two loaders
+therefore skip the map (`_field_map_for_read`). Without this, two entries
+that chain (for example `username -> host_login` and
+`guest_username -> username`) would give `guest_username` the host login
+on the runner. Full description:
+[`targets.md`](targets.md#secret-field-map-3711).
+
 ## SSH host-key trust (F08 / #270)
 
 The SSH adapter (`connectors/adapters/ssh.py`) reads its host-key trust

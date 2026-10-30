@@ -82,7 +82,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Final, NamedTuple, cast
+from typing import Any, Final, Literal, NamedTuple, cast
 
 import structlog
 from sqlalchemy import CursorResult, and_, or_, select, update
@@ -92,6 +92,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op
+from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.models import (
     ApprovalRequest,
     ApprovalRequestStatus,
@@ -105,7 +106,11 @@ from meho_backplane.operations._audit import (
     resolve_agent_session_id,
     work_ref_var,
 )
-from meho_backplane.operations._errors import result_already_resumed, result_denied
+from meho_backplane.operations._errors import (
+    result_already_resumed,
+    result_denied,
+    result_release_changed_while_waiting,
+)
 from meho_backplane.operations._validate import (
     params_hash_candidates,
     params_hash_matches,
@@ -123,15 +128,20 @@ from meho_backplane.operations.approval_handoff import (
     store as store_handoff,
 )
 from meho_backplane.operations.reducer import handle_owner_sub_var
+from meho_backplane.version import running_release_id
 
 __all__ = [
+    "EXPIRED_REASON_MESSAGES",
     "EXPIRY_OPERATOR_SUB",
     "MAX_REASON_LENGTH",
     "ApprovalError",
+    "ApprovalExpiredReason",
+    "ApprovalListOrder",
     "ApprovalNotFoundError",
     "ApprovalRequestAlreadyDecidedError",
     "ApprovalRequestExpiredError",
     "ApprovalResultState",
+    "ChainPosition",
     "DelegatedDecisionForbiddenError",
     "DelegatedReasonInvalidError",
     "Delegation",
@@ -143,12 +153,15 @@ __all__ = [
     "SelfApprovalForbiddenError",
     "UnauthorizedApprovalError",
     "WithdrawForbiddenError",
+    "approval_expired_reason",
+    "approval_release_changed",
     "approval_result_state",
     "approve_request",
     "claim_resume",
     "composite_resume_binding",
     "consume_remote_write_approval",
     "create_pending_request",
+    "expire_older_release_requests",
     "expire_stale_requests",
     "expiry_operator",
     "find_remote_write_approval",
@@ -156,8 +169,10 @@ __all__ = [
     "get_request",
     "list_pending",
     "parse_delegation",
+    "pending_chain_positions",
     "read_approval_result",
     "record_approval_step_event",
+    "refuse_resume_if_release_changed",
     "rehydrate_resume_target",
     "reject_request",
     "resume_dispatch_after_approval",
@@ -181,6 +196,9 @@ _APPROVAL_STATUS_CODE: int = 202
 _DECISION_STATUS_CODE_APPROVED: int = 200
 _DECISION_STATUS_CODE_REJECTED: int = 403
 _DECISION_STATUS_CODE_EXPIRED: int = 410
+#: Audit ``status_code`` for an approved run refused because MEHO was
+#: updated while the request waited (#5030).
+_RELEASE_CHANGED_STATUS_CODE: int = 409
 
 
 class ApprovalError(Exception):
@@ -678,6 +696,60 @@ def approval_result_state(request: ApprovalRequest) -> ApprovalResultState | Non
     if request.resumed_at is not None:
         return ApprovalResultState.STARTED
     return ApprovalResultState.NOT_STARTED
+
+
+class ApprovalExpiredReason(StrEnum):
+    """Why an ``expired`` request expired (#5030).
+
+    Read off the row, never stored, like :class:`ApprovalResultState`.
+
+    * :attr:`DEADLINE_PASSED` -- the request waited past ``expires_at``
+      without a decision.
+    * :attr:`RELEASE_CHANGED` -- MEHO started with a different release
+      while the request waited (:func:`expire_older_release_requests`).
+      Only this path expires a request before its deadline, so an
+      ``expired`` row with ``decided_at < expires_at`` is this case.
+    """
+
+    DEADLINE_PASSED = "deadline_passed"
+    RELEASE_CHANGED = "release_changed"
+
+
+#: What the requester reads for each expiry reason (#5030), on every surface.
+EXPIRED_REASON_MESSAGES: Final[dict[ApprovalExpiredReason, str]] = {
+    ApprovalExpiredReason.DEADLINE_PASSED: (
+        "The request waited too long without a decision. Ask again if the change is still needed."
+    ),
+    ApprovalExpiredReason.RELEASE_CHANGED: (
+        "MEHO was updated while the request waited, and an approval covers "
+        "one exact release. Ask again."
+    ),
+}
+
+
+def approval_expired_reason(request: ApprovalRequest) -> ApprovalExpiredReason | None:
+    """Return why *request* expired, or ``None`` when it is not ``expired`` (#5030)."""
+    if request.status != ApprovalRequestStatus.EXPIRED.value:
+        return None
+    if (
+        request.decided_at is not None
+        and request.expires_at is not None
+        and _as_utc(request.decided_at) < _as_utc(request.expires_at)
+    ):
+        return ApprovalExpiredReason.RELEASE_CHANGED
+    return ApprovalExpiredReason.DEADLINE_PASSED
+
+
+def approval_release_changed(request: ApprovalRequest) -> bool:
+    """True when *request* was made under another release than the running one (#5030).
+
+    A request saved before MEHO recorded the release (``release_id IS
+    NULL``) counts as an older release. When the running build has no
+    release identity (a local development run), nothing is bound and this
+    is always ``False``.
+    """
+    running = running_release_id()
+    return running is not None and request.release_id != running
 
 
 #: Statuses in which a request still holds its ``idempotency_key`` (#3486).
@@ -1282,6 +1354,7 @@ async def create_pending_request(
         request_audit_id=request_audit_id,
         resume_parent=stored_resume_parent,
         idempotency_key=idempotency_key,
+        release_id=running_release_id(),
     )
     if idempotency_key is None:
         session.add(request)
@@ -1850,6 +1923,10 @@ async def resume_dispatch_after_approval(
     if effective_params is None and request.execution_handle is None:
         return _resume_pre0036_denied(operator, request)
 
+    release_refusal = await refuse_resume_if_release_changed(operator, request)
+    if release_refusal is not None:
+        return release_refusal
+
     resolved_target, denied = await rehydrate_resume_target(operator, request)
     if denied is not None:
         return denied
@@ -1900,6 +1977,105 @@ async def resume_dispatch_after_approval(
         effective_params=cast(dict[str, Any], effective_params),
         resume_parent_override=resume_parent_override,
     )
+
+
+async def refuse_resume_if_release_changed(
+    operator: Operator,
+    request: ApprovalRequest,
+) -> OperationResult | None:
+    """Refuse an approved run when MEHO was updated while it waited (#5030).
+
+    A person approves one exact release of MEHO. Returns ``None`` when
+    *request* was made under the running release (or the build has no
+    release identity), so the caller runs it as before. Otherwise the
+    operation never runs and the vendor gets no call:
+
+    * The one-resumer claim (:func:`claim_resume`) is taken first, so the
+      request can never run later, on this release or another. A lost
+      claim means another resumer already took the request; the usual
+      ``already_resumed`` result is returned.
+    * The stored run input (the credential-write custody row) is deleted,
+      the same as on every other way a request ends.
+    * One audit row records the refusal (``result_status``
+      ``release_changed_while_waiting``, both releases). A failed audit
+      write is logged; the run is refused either way.
+    * The refusal is stored as the request's run result, so every read
+      surface shows the run as failed with that error code.
+
+    Shared by both resume paths: the operator surfaces
+    (:func:`resume_dispatch_after_approval`) and the in-process agent
+    waiter (:mod:`meho_backplane.agent.approval_wait`).
+    """
+    if not approval_release_changed(request):
+        return None
+    running = cast(str, running_release_id())
+    if not await claim_resume(request.id):
+        return result_already_resumed(request.op_id, request.id, 0.0)
+    await _discard_refused_handoff(request)
+    refusal = result_release_changed_while_waiting(
+        request.op_id,
+        approval_request_id=request.id,
+        request_release=request.release_id,
+        running_release=running,
+    )
+    audit_id = await _audit_release_refusal(operator, request, running)
+    if audit_id is not None:
+        refusal = refusal.model_copy(update={"audit_id": audit_id})
+    _log().warning(
+        "approval_resume_release_changed",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        request_release=request.release_id,
+        running_release=running,
+        operator_sub=operator.sub,
+    )
+    await persist_resume_result(request.id, refusal)
+    return refusal
+
+
+async def _discard_refused_handoff(request: ApprovalRequest) -> None:
+    """Delete the stored run input of a refused request (#5030)."""
+    from meho_backplane.db.engine import get_sessionmaker
+
+    async with get_sessionmaker()() as session:
+        await discard_handoff(session, request.id, request.tenant_id)
+        await session.commit()
+
+
+async def _audit_release_refusal(
+    operator: Operator,
+    request: ApprovalRequest,
+    running: str,
+) -> uuid.UUID | None:
+    """Write the audit row for a refused run (#5030); ``None`` if the write failed."""
+    from meho_backplane.db.engine import get_sessionmaker
+
+    audit_id = uuid.uuid4()
+    try:
+        async with get_sessionmaker()() as session:
+            await _write_audit_row(
+                session,
+                audit_id=audit_id,
+                event_class=AuditEventClass.POLICY_DECISION,
+                operator=operator,
+                request=request,
+                path="approval.resume",
+                status_code=_RELEASE_CHANGED_STATUS_CODE,
+                duration_ms=0.0,
+                extra_payload={
+                    "result_status": "release_changed_while_waiting",
+                    "request_release": request.release_id,
+                    "running_release": running,
+                },
+            )
+            await session.commit()
+    except Exception:
+        _log().exception(
+            "approval_resume_release_changed_audit_failed",
+            approval_request_id=str(request.id),
+        )
+        return None
+    return audit_id
 
 
 def _dump_result_envelope(result: Any) -> dict[str, Any] | None:
@@ -2175,8 +2351,14 @@ async def _dispatch_resume_with_bound_context(
     exception is a step marked ``after_main_effect`` (#4217): it saved where
     to continue, so it may wait again. That new request is saved for the
     requester of *request*, not for the reviewer who runs this re-run.
+
+    #3898: the requester (from the row) is bound for the run
+    (:func:`~meho_backplane.operations.secondary_target_policy.bind_approved_requester`),
+    so an op that writes to a second, caller-named target checks the
+    requester's policy there too, not only the reviewer's.
     """
     from meho_backplane.operations.dispatcher import dispatch
+    from meho_backplane.operations.secondary_target_policy import bind_approved_requester
 
     resume_parent = (
         resume_parent_override if resume_parent_override is not None else request.resume_parent
@@ -2191,6 +2373,7 @@ async def _dispatch_resume_with_bound_context(
     try:
         with (
             structlog.contextvars.bound_contextvars(**_run_audit_context(request)),
+            bind_approved_requester(request),
             composite_resume_binding(
                 subop_op_id=request.op_id,
                 subop_params_hash=request.params_hash,
@@ -2421,6 +2604,63 @@ async def expire_stale_requests(
     return rows
 
 
+async def expire_older_release_requests(
+    session: AsyncSession,
+    *,
+    operator: Operator,
+    release_id: str,
+    now: datetime | None = None,
+) -> list[ApprovalRequest]:
+    """Expire every ``pending`` request made under another release (#5030).
+
+    A person approves one exact release of MEHO. Run once at start-up with
+    the running *release_id*: every ``pending`` request of the operator's
+    tenant whose ``release_id`` differs, or is NULL (saved before MEHO
+    recorded the release), moves to ``expired`` through the same path as
+    :func:`expire_stale_requests`, with one decision audit row each. The
+    audit row carries ``reason="release_changed"`` and both releases. A
+    request already past its deadline expires with no extra reason, as the
+    TTL sweep would expire it.
+
+    Same contract as :func:`expire_stale_requests`: the caller commits,
+    rows a concurrent decision holds are skipped, and each returned row
+    carries ``_audit_id`` for the after-commit step event.
+    """
+    _check_reviewer_role(operator)
+    cutoff = now or _now()
+    default_ttl = _resolve_default_ttl()
+    stmt = (
+        select(ApprovalRequest)
+        .where(ApprovalRequest.status == ApprovalRequestStatus.PENDING.value)
+        .where(ApprovalRequest.tenant_id == operator.tenant_id)
+        .where(
+            or_(
+                ApprovalRequest.release_id.is_(None),
+                ApprovalRequest.release_id != release_id,
+            )
+        )
+        .with_for_update(skip_locked=True)
+    )
+    rows = list((await session.execute(stmt)).scalars().all())
+    for request in rows:
+        extra_payload: dict[str, Any] | None = None
+        if not _deadline_has_passed(request, cutoff, default_ttl):
+            extra_payload = {
+                "reason": ApprovalExpiredReason.RELEASE_CHANGED.value,
+                "request_release": request.release_id,
+                "running_release": release_id,
+            }
+        await _expire_request(
+            session,
+            request,
+            operator=operator,
+            cutoff=cutoff,
+            default_ttl=default_ttl,
+            extra_payload=extra_payload,
+        )
+    return rows
+
+
 async def _expire_request(
     session: AsyncSession,
     request: ApprovalRequest,
@@ -2428,12 +2668,16 @@ async def _expire_request(
     operator: Operator,
     cutoff: datetime,
     default_ttl: timedelta | None,
+    extra_payload: dict[str, Any] | None = None,
 ) -> None:
-    """Move one locked, overdue ``pending`` row to ``expired`` + audit it.
+    """Move one locked ``pending`` row to ``expired`` + audit it.
 
-    Shared by :func:`expire_stale_requests` and the idempotent retry path
-    of :func:`create_pending_request` (#3486), so both write the same
-    decision audit row. The caller holds the row lock and owns the commit.
+    Shared by :func:`expire_stale_requests`, the idempotent retry path
+    of :func:`create_pending_request` (#3486) and
+    :func:`expire_older_release_requests` (#5030), so all write the same
+    decision audit row. *extra_payload* adds keys to that row (the
+    release-change reason). The caller holds the row lock and owns the
+    commit.
     """
     # Backfill a legacy null deadline to the coalesced value so the
     # decision audit row and the persisted row agree on when it expired.
@@ -2454,7 +2698,11 @@ async def _expire_request(
         path="approval.decision",
         status_code=_DECISION_STATUS_CODE_EXPIRED,
         duration_ms=0.0,
-        extra_payload={"decision": "expired", "expires_at": str(request.expires_at)},
+        extra_payload={
+            "decision": "expired",
+            "expires_at": str(request.expires_at),
+            **(extra_payload or {}),
+        },
     )
 
     _log().info(
@@ -2660,6 +2908,11 @@ async def _load_for_tenant(
 # ---------------------------------------------------------------------------
 
 
+#: Sort order of an approval list (#3596): ``"newest"`` is ``created_at``
+#: descending (the long-standing default), ``"oldest"`` is ascending.
+ApprovalListOrder = Literal["oldest", "newest"]
+
+
 async def list_pending(
     session: AsyncSession,
     *,
@@ -2668,6 +2921,7 @@ async def list_pending(
     work_ref: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    order: ApprovalListOrder = "newest",
 ) -> list[ApprovalRequest]:
     """Page through approval requests in *tenant_id*.
 
@@ -2678,17 +2932,78 @@ async def list_pending(
     change ticket (``"gh:evoila/meho#1"``); ``None`` applies no work_ref
     filter. Tenant-isolated by the WHERE clause — cross-tenant ids are
     invisible.
-    """
-    from sqlalchemy import select
 
+    ``order`` (#3596) picks the sort: ``"newest"`` (default) lists the
+    newest request first; ``"oldest"`` lists the oldest first, which is the
+    order a chain of requests under one change ticket was sent in. The
+    oldest-first order breaks ties on ``id`` so it matches the step numbers
+    :func:`pending_chain_positions` gives.
+    """
     stmt = select(ApprovalRequest).where(ApprovalRequest.tenant_id == tenant_id)
     if status is not None:
         stmt = stmt.where(ApprovalRequest.status == status)
     if work_ref is not None:
         stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
-    stmt = stmt.order_by(ApprovalRequest.created_at.desc()).limit(limit).offset(offset)
+    if order == "oldest":
+        stmt = stmt.order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
+    else:
+        stmt = stmt.order_by(ApprovalRequest.created_at.desc())
+    stmt = stmt.limit(limit).offset(offset)
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+@dataclass(frozen=True)
+class ChainPosition:
+    """Where one pending request sits in its change-ticket group (#3596).
+
+    ``step`` is 1 for the oldest pending request of the group; ``total`` is
+    how many requests of the group still wait for a decision.
+    """
+
+    work_ref: str
+    step: int
+    total: int
+
+
+async def pending_chain_positions(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    work_ref: str | None = None,
+) -> dict[uuid.UUID, ChainPosition]:
+    """Number the pending requests of each multi-request change ticket (#3596).
+
+    Requests sent under one ``work_ref`` are often steps of one chain: a
+    later step needs an earlier one to have run. This reads every pending
+    request of *tenant_id* that has a ``work_ref`` (only that ``work_ref``
+    when one is given), groups them by ``work_ref``, and numbers each group
+    oldest first. Only groups with two or more pending requests are
+    returned; a lone request has no order to show. The numbers count
+    pending requests only, so step 1 is always the oldest request that
+    still waits. Tenant-isolated by the WHERE clause.
+    """
+    stmt = (
+        select(ApprovalRequest.id, ApprovalRequest.work_ref)
+        .where(
+            ApprovalRequest.tenant_id == tenant_id,
+            ApprovalRequest.status == ApprovalRequestStatus.PENDING.value,
+            ApprovalRequest.work_ref.is_not(None),
+        )
+        .order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
+    )
+    if work_ref is not None:
+        stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
+    groups: dict[str, list[uuid.UUID]] = {}
+    for request_id, ref in (await session.execute(stmt)).all():
+        groups.setdefault(ref, []).append(request_id)
+    positions: dict[uuid.UUID, ChainPosition] = {}
+    for ref, ids in groups.items():
+        if len(ids) < 2:
+            continue
+        for step, request_id in enumerate(ids, start=1):
+            positions[request_id] = ChainPosition(work_ref=ref, step=step, total=len(ids))
+    return positions
 
 
 async def get_request(
@@ -2822,20 +3137,51 @@ async def record_approval_step_event(
 
     No Broadcast event is published (#3758). The stored approval row is
     what waiters, the approvals bell and the console read.
+
+    A ``pending`` event of a request that shares its ``work_ref`` with
+    other pending requests also carries ``chain_step`` / ``chain_total``
+    (#3596): "this is step k of N waiting under this change ticket".
     """
     from meho_backplane.operations.addon_step_events import AddonStepEventService
 
+    payload: dict[str, object] = {
+        "approval_request_id": str(request.id),
+        "decision": decision,
+        "connector_id": request.connector_id,
+        "approval_op_id": request.op_id,
+        "work_ref": request.work_ref,
+    }
+    if decision == "pending" and request.work_ref is not None:
+        position = await _chain_position_fail_open(tenant_id, request)
+        if position is not None:
+            payload["chain_step"] = position.step
+            payload["chain_total"] = position.total
     await AddonStepEventService().record_if_owned_committed(
         tenant_id=tenant_id,
         owner_principal_sub=request.principal_sub,
         event_kind=f"approval.{decision}",
         work_ref=request.work_ref,
         audit_id=audit_id,
-        payload={
-            "approval_request_id": str(request.id),
-            "decision": decision,
-            "connector_id": request.connector_id,
-            "approval_op_id": request.op_id,
-            "work_ref": request.work_ref,
-        },
+        payload=payload,
     )
+
+
+async def _chain_position_fail_open(
+    tenant_id: uuid.UUID, request: ApprovalRequest
+) -> ChainPosition | None:
+    """Return *request*'s step in its change-ticket group, or ``None`` (#3596).
+
+    Fail-open like the step event itself: a read error only drops the
+    step number from the event.
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+
+    try:
+        async with get_sessionmaker()() as session:
+            positions = await pending_chain_positions(
+                session, tenant_id=tenant_id, work_ref=request.work_ref
+            )
+    except Exception:
+        _log().exception("approval_chain_position_failed", approval_request_id=str(request.id))
+        return None
+    return positions.get(request.id)

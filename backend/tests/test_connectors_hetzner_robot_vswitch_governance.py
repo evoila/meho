@@ -172,39 +172,8 @@ async def _group_ingested_rows() -> None:
     """Group the ingested rows the way the grouping pass would.
 
     Every ``/vswitch`` op — the rename and cancel included — lands in
-    ``robot-networking``; the rest follow :func:`classify_robot_op`. The
-    shipped spec lacks four curated reads (``/ip``, ``/subnet``,
-    ``/failover``, ``/key`` — a known gap, out of scope here), so they are
-    added as plain rows first, as a fuller spec would provide them.
+    ``robot-networking``; the rest follow :func:`classify_robot_op`.
     """
-    async with get_sessionmaker()() as session:
-        present = set((await session.execute(select(EndpointDescriptor.op_id))).scalars())
-        for op in ROBOT_CORE_OPS:
-            if op.op_id in present:
-                continue
-            method, path = op.op_id.split(":", 1)
-            session.add(
-                EndpointDescriptor(
-                    tenant_id=None,
-                    product=ROBOT_PRODUCT,
-                    version=ROBOT_VERSION,
-                    impl_id=ROBOT_IMPL_ID,
-                    op_id=op.op_id,
-                    source_kind="ingested",
-                    method=method,
-                    path=path,
-                    handler_ref=None,
-                    summary=f"Read {path}.",
-                    description=f"Read {path}.",
-                    parameter_schema={"type": "object", "properties": {}},
-                    response_schema={"type": "object"},
-                    safety_level="safe",
-                    requires_approval=False,
-                    is_enabled=False,
-                    tags=[],
-                )
-            )
-        await session.commit()
     async with get_sessionmaker()() as session:
         group_ids: dict[str, UUID] = {}
         for group in ROBOT_CORE_GROUPS:
@@ -235,6 +204,7 @@ async def _group_ingested_rows() -> None:
 
 
 async def test_curation_switches_on_membership_and_keeps_rename_and_cancel_off() -> None:
+    """The shipped spec alone is enough: all 12 curated ops get switched on with guidance."""
     await ingest_shipped_spec(make_embedding_service())
     await _group_ingested_rows()
     admin = Operator(
@@ -248,11 +218,14 @@ async def test_curation_switches_on_membership_and_keeps_rename_and_cancel_off()
     )
     await apply_robot_core_curation(ReviewService(operator=admin), tenant_id=None)
 
-    rows = await load_rows(_EXPECTED_FLOOR)
     guidance = {op.op_id: op.llm_instructions for op in ROBOT_CORE_OPS}
-    for op_id in (ADD_OP, REMOVE_OP):
-        assert rows[op_id].is_enabled is True
-        assert rows[op_id].llm_instructions == guidance[op_id]
+    curated = await load_rows(guidance)
+    assert set(curated) == set(guidance)
+    for op_id, row in curated.items():
+        assert row.is_enabled is True, op_id
+        assert row.llm_instructions == guidance[op_id], op_id
+
+    rows = await load_rows(_EXPECTED_FLOOR)
     for op_id in (RENAME_OP, CANCEL_OP):
         assert rows[op_id].is_enabled is False
     assert rows[CANCEL_OP].safety_level == "destructive"

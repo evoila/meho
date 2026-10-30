@@ -12,19 +12,24 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/cmd/workref"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
 // newListCmd returns the `meho approvals list` command.
 //
-//	meho approvals list [--status pending|approved|rejected|expired|all] [--limit N] [--offset N] [--json] [--backplane <url>]
+//	meho approvals list [--status pending|approved|rejected|expired|all] [--filter-work-ref REF] [--order oldest|newest] [--limit N] [--offset N] [--json] [--backplane <url>]
 //
-// Role: operator. Lists approval requests for the operator's tenant,
-// newest-first, via GET /api/v1/approvals.
+// Role: operator. Lists approval requests for the operator's tenant via
+// GET /api/v1/approvals: newest first, or oldest first with
+// --order oldest. With --filter-work-ref the default is oldest first (#3596), so
+// a chain of requests under one change ticket reads in the order it was
+// sent.
 func newListCmd() *cobra.Command {
 	var (
 		statusFilter      string
 		workRef           string
+		order             string
 		limit             int
 		offset            int
 		jsonOut           bool
@@ -38,9 +43,12 @@ func newListCmd() *cobra.Command {
 			"default it shows only pending requests: the ones that " +
 			"wait for a decision. Use --status all to see requests in " +
 			"every state, or --status approved|rejected|expired for " +
-			"one state. --work-ref filters to the requests " +
+			"one state. --filter-work-ref filters to the requests " +
 			"authorised by an external change ticket (exact match, " +
-			"e.g. gh:evoila/meho#1). --limit caps how many requests " +
+			"e.g. gh:evoila/meho#1). --order oldest|newest picks the " +
+			"sort; the default is newest first, or oldest first when " +
+			"--filter-work-ref is set, so the steps of one change ticket read " +
+			"in the order they were sent. --limit caps how many requests " +
 			"come back (1..500; no limit when omitted). --offset " +
 			"skips that many requests first. --json emits the raw " +
 			"JSON array for jq pipelines.",
@@ -50,7 +58,8 @@ func newListCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runList(cmd, listOpts{
 				StatusFilter:      statusFilter,
-				WorkRef:           workRef,
+				WorkRef:           workref.Filter(cmd, workRef),
+				Order:             order,
 				Limit:             limit,
 				Offset:            offset,
 				JSONOut:           jsonOut,
@@ -60,8 +69,10 @@ func newListCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&statusFilter, "status", "",
 		"filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)")
-	cmd.Flags().StringVar(&workRef, "work-ref", "",
+	cmd.Flags().StringVar(&workRef, workref.FilterFlag, "",
 		"filter by external change-ticket reference, exact match (e.g. gh:evoila/meho#1)")
+	cmd.Flags().StringVar(&order, "order", "",
+		"sort order: oldest or newest (default: newest; oldest when --filter-work-ref is set)")
 	// 0 means "not set": the flag is then left off the request and the
 	// server applies no limit / no offset.
 	cmd.Flags().IntVar(&limit, "limit", 0,
@@ -78,6 +89,7 @@ func newListCmd() *cobra.Command {
 type listOpts struct {
 	StatusFilter      string
 	WorkRef           string
+	Order             string
 	Limit             int
 	Offset            int
 	JSONOut           bool
@@ -96,6 +108,13 @@ func runList(cmd *cobra.Command, opts listOpts) error {
 				"--status must be one of: pending, approved, rejected, expired, withdrawn, all; got %q",
 				opts.StatusFilter,
 			)),
+			opts.JSONOut,
+		)
+	}
+	if opts.Order != "" && opts.Order != "oldest" && opts.Order != "newest" {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("--order must be oldest or newest; got %q", opts.Order)),
 			opts.JSONOut,
 		)
 	}
@@ -163,6 +182,10 @@ func fetchList(
 		w := opts.WorkRef
 		params.WorkRef = &w
 	}
+	if order := listOrder(opts); order != "" {
+		o := api.ListApprovalsApiV1ApprovalsGetParamsOrder(order)
+		params.Order = &o
+	}
 	if opts.Limit > 0 {
 		l := opts.Limit
 		params.Limit = &l
@@ -193,11 +216,25 @@ func fetchList(
 	return *resp.JSON200, nil
 }
 
+// listOrder returns the order to send: --order when set, else "oldest"
+// when --filter-work-ref is set (the steps of one change ticket in the order
+// they were sent, #3596), else "" so the server keeps its newest-first
+// default.
+func listOrder(opts listOpts) string {
+	if opts.Order != "" {
+		return opts.Order
+	}
+	if opts.WorkRef != "" {
+		return "oldest"
+	}
+	return ""
+}
+
 // printListTable renders the list as a compact table.
 // Columns: ID, STATUS, RUN, CONNECTOR, OP, PRINCIPAL, CREATED. RUN (#3543)
 // says whether an approved request ran and how it ended, so a run that
 // failed after the approval does not look like a plain "approved".
-// statusFilter, workRef and offset are the --status, --work-ref and
+// statusFilter, workRef and offset are the --status, --filter-work-ref and
 // --offset values; an empty list names them, so an empty default
 // (pending-only) list, an empty match for one change ticket, or an empty
 // page past the end is not read as "no requests at all".
@@ -224,7 +261,7 @@ func printListTable(w io.Writer, items []api.ApprovalRequestView, statusFilter, 
 
 // emptyListMessage says which state filter, change ticket and offset
 // gave the empty list and how to see more. The server lists only pending
-// requests when --status is not set. With --work-ref, only requests for
+// requests when --status is not set. With --filter-work-ref, only requests for
 // that change ticket count, so the hint is to drop the filter. With an
 // offset, the page is empty because the offset skipped every match, so
 // the hint is a smaller --offset.
@@ -248,10 +285,10 @@ func emptyListMessage(statusFilter, workRef string, offset int) string {
 	}
 	if workRef != "" {
 		if statusFilter == "all" {
-			return fmt.Sprintf("no approval requests%s (remove --work-ref to see every request)", ticket)
+			return fmt.Sprintf("no approval requests%s (remove --filter-work-ref to see every request)", ticket)
 		}
 		return fmt.Sprintf(
-			"no %sapproval requests%s (use --status all or remove --work-ref to see more)",
+			"no %sapproval requests%s (use --status all or remove --filter-work-ref to see more)",
 			state, ticket,
 		)
 	}

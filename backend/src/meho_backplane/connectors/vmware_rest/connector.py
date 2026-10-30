@@ -3215,6 +3215,26 @@ class VmwareRestConnector(HttpConnector):
 
         return await host_storage_devices_impl(self, operator, target, params)
 
+    async def host_datastores(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.datastores`` -- the datastores mounted on one host (#3373).
+
+        A ``source_kind="typed"`` op, like :meth:`host_storage_devices`: works
+        on a vCenter target and on a standalone ESXi host. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_datastores.host_datastores_impl`
+        (imported lazily, same as the other typed reads). Returns
+        ``{"status": ..., "host": ..., "datastores": [...], "datastore_count": ...}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_datastores import (
+            host_datastores_impl,
+        )
+
+        return await host_datastores_impl(self, operator, target, params)
+
     async def vm_info(
         self,
         operator: Operator,
@@ -3475,6 +3495,42 @@ class VmwareRestConnector(HttpConnector):
         )
 
         return await license_assigned_list_impl(self, operator, target, params)
+
+    async def resource_pool_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.resource_pool.list`` -- the resource pools, with parent and settings.
+
+        A ``source_kind="typed"`` read on the REST API. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_resource_pool_list.resource_pool_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_resource_pool_list import (
+            resource_pool_list_impl,
+        )
+
+        return await resource_pool_list_impl(self, operator, target, params)
+
+    async def datacenter_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.datacenter.list`` -- the datacenters, with cluster, host and datastore counts.
+
+        A ``source_kind="typed"`` read on the REST API. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_datacenter_list.datacenter_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_datacenter_list import (
+            datacenter_list_impl,
+        )
+
+        return await datacenter_list_impl(self, operator, target, params)
 
     async def content_library_find(
         self,

@@ -61,6 +61,7 @@ import (
 	vcflogs "github.com/evoila/meho/cli/internal/cmd/vcf-logs"
 	vcfoperations "github.com/evoila/meho/cli/internal/cmd/vcf-operations"
 	"github.com/evoila/meho/cli/internal/cmd/vmware"
+	"github.com/evoila/meho/cli/internal/cmd/workref"
 	"github.com/evoila/meho/cli/internal/discovery"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -657,8 +658,12 @@ func newRootCmdFor(args []string) *cobra.Command {
 // request built from that context then sends the Meho-Work-Ref header.
 //
 // A subcommand that defines its own local --work-ref (operation call,
-// audit query, ...) hides the global flag; for those commands only the
-// environment variable reaches the header.
+// scheduler create, runbook start, agent run, broadcast announce) hides
+// the global flag; for those commands only the environment variable
+// reaches the header. Their local flag has the same meaning: it tags
+// the run with the reference. The read commands that filter by
+// reference use --filter-work-ref instead (TestWorkRefFlagHasOneMeaning
+// keeps it that way).
 //
 // Commands that send no audited backplane request skip the check, so a
 // bad MEHO_WORK_REF does not break help, shell completion, version or
@@ -681,6 +686,15 @@ func applyWorkRef(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 	if !api.ValidWorkRef(ref) {
+		// On a read command that filters by reference, the old
+		// --work-ref spelling still filters for one release when
+		// --filter-work-ref is not given, and a filter value need not
+		// have the tag shape. Skip the tag and let workref.Filter
+		// filter and warn. With --filter-work-ref given, --work-ref
+		// only tags, so a bad value is an error like everywhere else.
+		if source == "--work-ref" && workref.OldFlagFilters(cmd) {
+			return nil
+		}
 		jsonOut := false
 		if f := cmd.Flags().Lookup("json"); f != nil {
 			jsonOut = f.Value.String() == "true"

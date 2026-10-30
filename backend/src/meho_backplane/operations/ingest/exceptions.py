@@ -89,8 +89,7 @@ Review-queue failures (T4 #402) — raised from
   mirroring the doc-collection global-row seat (#3616).
 * :class:`LegacyTenantConnectorCopyError` — the operator's tenant has
   rows for the ``connector_id`` only under a **former product name**
-  (``vcf-logs`` rows for ``vrli-rest-9.0``, whose product is now
-  ``vrli``). Dispatch looks the product up from the id, so that copy
+  (rows saved before a product rename). Dispatch looks the product up from the id, so that copy
   can never be called, and a plain product-scoped probe does not see
   it. The review service raises this instead of falling back to the
   built-in row or answering a misleading 404; the fronts map it to
@@ -170,8 +169,8 @@ class UnsupportedSpecError(ValueError):
     message always names the offending shape so the operator can decide
     whether to file a v0.2.next request or pre-process the spec. For
     Swagger 2.0 specifically the message also names the conversion path
-    (convert to OpenAPI 3.x via ``swagger2openapi`` /
-    ``converter.swagger.io`` and re-ingest) so the operator can
+    (pass the file to ``meho connector ingest`` as ``file://`` so the CLI
+    converts it locally, or convert it with ``swagger2openapi``) so the operator can
     self-serve a 2.0-only vendor surface such as Harbor 2.x (#1532). For
     the ``docs:`` shorthand the message names ``$CLAUDE_RDC_DOCS`` as
     the CLI-side resolution path (#1535).
@@ -543,7 +542,7 @@ class ConnectorNotFoundError(Exception):
     ----------
     connector_id:
         The operator-facing connector identifier (e.g.
-        ``"vmware-rest-9.0"``).
+        ``"k8s-1.x"``).
     tenant_id:
         The tenant scope the caller asked for. ``None`` indicates a
         built-in scope; a UUID indicates a tenant-curated scope.
@@ -601,7 +600,7 @@ class AmbiguousConnectorScopeError(Exception):
     ----------
     connector_id:
         The operator-facing identifier that resolved ambiguously (e.g.
-        ``"vrli-rest-9.0"``).
+        ``"harbor-rest-2.x"``).
     candidates:
         The distinct :class:`ConnectorScopeCandidate` row-scopes the
         label maps to, sorted built-in-first then by ``tenant_id`` so
@@ -696,9 +695,9 @@ class BuiltinConnectorWriteForbiddenError(Exception):
 class LegacyTenantConnectorCopyError(Exception):
     """Raised when the tenant's only copy of a connector sits under a former product name.
 
-    A ``connector_id`` such as ``vrli-rest-9.0`` names the product by its
-    first segment (``vrli``). A tenant copy ingested before the product
-    was renamed (#1814) still carries the old name (``vcf-logs``) on its
+    A ``connector_id`` such as ``harbor-rest-2.x`` names the product by its
+    first segment (``harbor``). A tenant copy ingested before a product
+    was renamed (#1814) still carries the old name on its
     ``endpoint_descriptor`` / ``operation_group`` rows. Dispatch resolves
     the product from the id, so that copy is never used; the usual
     product-scoped resolver does not see it either, so it fell back to
@@ -716,7 +715,7 @@ class LegacyTenantConnectorCopyError(Exception):
     Attributes
     ----------
     connector_id:
-        The operator-facing identifier (``"vrli-rest-9.0"``).
+        The operator-facing identifier (``"harbor-rest-2.x"``).
     legacy_product:
         The former product name the tenant rows are stored under.
     product:
@@ -925,8 +924,8 @@ class ProductImplIdMismatch(ValueError):  # noqa: N818 -- the mismatch *is* the 
     directly — it recovers the product from the rendered ``connector_id``
     via :func:`~meho_backplane.operations._lookup.parse_connector_id`
     (the first hyphen-segment of ``impl_id``). When the two diverge —
-    ``--product vcf-logs --impl-id vrli-rest`` renders ``vrli-rest-9.0``,
-    which parses to product ``vrli`` — rows land in a namespace no
+    ``--product registry --impl-id harbor-rest`` renders ``harbor-rest-2.x``,
+    which parses to product ``harbor`` — rows land in a namespace no
     dispatch probe queries: the silent non-dispatchable-shadow the
     Initiative #1810 exists to eliminate.
 

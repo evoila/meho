@@ -77,6 +77,7 @@ from typing import Any
 import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.vault.kv_tree import folder_max_keys, list_kv_tree
 from meho_backplane.connectors.vault.ops_auth import register_vault_auth_operations
 from meho_backplane.connectors.vault.ops_auth_write import register_vault_auth_write_operations
 from meho_backplane.connectors.vault.target_auth import vault_client_for_target
@@ -89,6 +90,7 @@ __all__ = [
     "VAULT_KV_WRITE_CAPABILITIES",
     "VaultPathShapeError",
     "register_vault_typed_operations",
+    "vault_capabilities_preflight",
     "vault_capability_preflight",
     "vault_kv_delete",
     "vault_kv_list",
@@ -415,7 +417,21 @@ async def vault_kv_read(operator: Operator, target: Any, params: dict[str, Any])
 #: agent call but the value may be a single segment.
 VAULT_KV_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": {"mount": _MOUNT_PROPERTY, "path": _PATH_PROPERTY},
+    "properties": {
+        "mount": _MOUNT_PROPERTY,
+        "path": _PATH_PROPERTY,
+        "recursive": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Optional. True lists every secret under the folder, also in "
+                "sub-folders, as paths relative to the folder (for example "
+                "'run1/token'). Folder entries are then left out. A folder with "
+                "more secrets than the vault_kv_folder_max_keys setting "
+                "(default 500) is refused."
+            ),
+        },
+    },
     "required": ["path"],
     "additionalProperties": False,
 }
@@ -427,7 +443,9 @@ _VAULT_KV_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": {"type": "string"},
             "description": (
-                "Key names directly beneath the path. Folder entries are suffixed with '/'."
+                "Key names directly beneath the path. Folder entries are suffixed "
+                "with '/'. With recursive=true: every secret path under the "
+                "folder, relative to it, and no folder entries."
             ),
         },
     },
@@ -452,9 +470,15 @@ _VAULT_KV_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
             "children to list. Listing a leaf (a secret, not a folder) "
             "returns an empty key list."
         ),
+        "recursive": (
+            "Optional, default false. True returns every secret under the "
+            "folder, also in sub-folders, as paths relative to the folder. "
+            "Use it to get the 'keys' list for vault.kv.folder.delete."
+        ),
     },
     "output_shape": (
-        "On success: {'keys': [<name>, ...]}. On failure: the "
+        "On success: {'keys': [<name>, ...]}; an empty or missing "
+        "folder returns {'keys': []}. On failure: the "
         "dispatcher wraps the raised exception into a connector_error "
         "OperationResult with extras.exception_class set to the "
         "Vault-side error type."
@@ -471,9 +495,20 @@ async def vault_kv_list(operator: Operator, target: Any, params: dict[str, Any])
     key names themselves can leak structure.
 
     Delegates to hvac's ``secrets.kv.v2.list_secrets`` (the underlying
-    ``LIST /v1/<mount>/metadata/<path>`` call). Raises on a malformed
-    hvac payload so the dispatcher's ``connector_error`` branch surfaces
-    a structured error rather than an unhandled exception.
+    ``LIST /v1/<mount>/metadata/<path>`` call). Vault answers a LIST on
+    an empty or missing folder with a 404, which hvac raises as
+    ``InvalidPath``; that is an empty folder, not an error, so it
+    returns ``{"keys": []}``. Any other error (for example a
+    ``Forbidden`` permission denial) is raised unchanged. Raises on a
+    malformed hvac payload so the dispatcher's ``connector_error``
+    branch surfaces a structured error rather than an unhandled
+    exception.
+
+    With ``recursive=true`` it walks every sub-folder
+    (:func:`~meho_backplane.connectors.vault.kv_tree.list_kv_tree`) and
+    returns the secret paths relative to the folder. A folder with more
+    secrets than the ``vault_kv_folder_max_keys`` setting raises
+    :class:`~meho_backplane.connectors.vault.kv_tree.VaultFolderTooLargeError`.
     """
     # Shared mount/path extraction + path-shape pre-flight (#1755).
     mount, path = _extract_mount_and_path("vault.kv.list", params)
@@ -482,11 +517,19 @@ async def vault_kv_list(operator: Operator, target: Any, params: dict[str, Any])
     enforce_tenant_scope(operator, mount=mount, path=path, read_only=True)
 
     async with vault_client_for_target(operator, target) as client:
-        list_payload = await asyncio.to_thread(
-            client.secrets.kv.v2.list_secrets,
-            path=path,
-            mount_point=mount,
-        )
+        if params.get("recursive") is True:
+            tree = await list_kv_tree(
+                client, mount=mount, path=path.strip("/"), max_keys=folder_max_keys()
+            )
+            return {"keys": tree}
+        try:
+            list_payload = await asyncio.to_thread(
+                client.secrets.kv.v2.list_secrets,
+                path=path,
+                mount_point=mount,
+            )
+        except hvac.exceptions.InvalidPath:
+            return {"keys": []}
         # Structural unwrap -- raises KeyError on a malformed hvac
         # payload (missing the nested ``data``/``keys`` keys). The
         # dispatcher's ``connector_error`` branch turns the KeyError
@@ -1217,12 +1260,36 @@ async def vault_capability_preflight(
     turns that failure into an explicit ``will_be_denied`` block with a
     ``probe_failed:<ExceptionClass>`` reason instead.
     """
+    return await vault_capabilities_preflight(
+        operator,
+        op_id,
+        [(auth_path, required)],
+        target,
+        report_probe_failure=report_probe_failure,
+    )
+
+
+async def vault_capabilities_preflight(
+    operator: Operator,
+    op_id: str,
+    checks: list[tuple[str, frozenset[str]]],
+    target: Any = None,
+    *,
+    report_probe_failure: bool = False,
+) -> dict[str, Any] | None:
+    """Ask Vault, in one ``sys/capabilities-self`` call, whether any of *checks* will be denied.
+
+    *checks* holds ``(auth_path, required)`` pairs. Returns the block for the
+    first path Vault would deny, else the block for the last path. When more
+    than one path was probed, the block also carries ``checked_paths``, the
+    number of paths probed. The same fail-soft rule as
+    :func:`vault_capability_preflight` applies: ``None`` when the probe
+    itself fails, unless ``report_probe_failure=True``.
+    """
+    paths = [auth_path for auth_path, _ in checks]
     try:
         async with vault_client_for_target(operator, target) as client:
-            response = await asyncio.to_thread(
-                client.sys.get_capabilities,
-                paths=[auth_path],
-            )
+            response = await asyncio.to_thread(client.sys.get_capabilities, paths=paths)
     except Exception as exc:
         # Fail-soft: the park is the safety-relevant action; a probe that
         # cannot reach Vault (or whose role login transiently fails) must
@@ -1233,7 +1300,7 @@ async def vault_capability_preflight(
         _structlog.get_logger(__name__).warning(
             "vault_capability_preflight_failed",
             op_id=op_id,
-            path=auth_path,
+            path=paths[0],
             operator_sub=operator.sub,
             exc_info=True,
         )
@@ -1241,31 +1308,36 @@ async def vault_capability_preflight(
             return None
         return {
             "check": "vault.capabilities-self",
-            "path": auth_path,
-            "required": sorted(required),
+            "path": paths[0],
+            "required": sorted(checks[0][1]),
             "granted": [],
             "will_be_denied": True,
             "reason": f"probe_failed:{type(exc).__name__}",
             "principal_sub": operator.sub,
         }
 
-    # ``sys/capabilities-self`` returns the per-path capability list under
-    # the path key, with a top-level ``capabilities`` mirror for a single
-    # path. Prefer the path key; fall back to the mirror.
-    granted_raw = response.get(auth_path)
-    if granted_raw is None:
-        granted_raw = response.get("capabilities")
-    granted = [str(c) for c in granted_raw] if isinstance(granted_raw, list) else []
-
-    will_be_denied = not _capabilities_grant_write(granted, required)
-    return {
-        "check": "vault.capabilities-self",
-        "path": auth_path,
-        "required": sorted(required),
-        "granted": sorted(granted),
-        "will_be_denied": will_be_denied,
-        "principal_sub": operator.sub,
-    }
+    result: dict[str, Any] = {}
+    for auth_path, required in checks:
+        # ``sys/capabilities-self`` returns the per-path capability list under
+        # the path key, with a top-level ``capabilities`` mirror for a single
+        # path. Prefer the path key; fall back to the mirror.
+        granted_raw = response.get(auth_path)
+        if granted_raw is None and len(paths) == 1:
+            granted_raw = response.get("capabilities")
+        granted = [str(c) for c in granted_raw] if isinstance(granted_raw, list) else []
+        result = {
+            "check": "vault.capabilities-self",
+            "path": auth_path,
+            "required": sorted(required),
+            "granted": sorted(granted),
+            "will_be_denied": not _capabilities_grant_write(granted, required),
+            "principal_sub": operator.sub,
+        }
+        if result["will_be_denied"]:
+            break
+    if len(checks) > 1:
+        result["checked_paths"] = len(checks)
+    return result
 
 
 async def vault_kv_write_capability_preflight(
@@ -1559,8 +1631,10 @@ async def register_vault_typed_operations(
     kv_when_to_use = (
         "Use for HashiCorp Vault KV-v2 secret CRUD: read a secret, "
         "write a new version, list child paths under a folder, "
-        "enumerate version history, soft-delete a version, or "
-        "permanently remove a whole secret. The right "
+        "enumerate version history, soft-delete a version, soft-delete "
+        "many secrets under a folder with one approval, permanently "
+        "remove a whole secret, or check that copies of one secret hold "
+        "the same value without showing it. The right "
         "group when the question names a specific secret path "
         "(``kubeconfig/<cluster>``, ``oidc/clients/<id>``, etc.) and "
         "the operator wants the value, the existence, or the "
@@ -1570,7 +1644,11 @@ async def register_vault_typed_operations(
         "mountpoint is this secret stored at?' rather than the "
         "value itself."
     )
-    for spec in _KV_OP_SPECS:
+    # Lazy import: kv_compare imports this module's shared schema
+    # fragments, so a top-level import here would be circular.
+    from meho_backplane.connectors.vault.kv_compare import KV_COMPARE_OP_SPEC
+
+    for spec in (*_KV_OP_SPECS, KV_COMPARE_OP_SPEC):
         # Every spec states ``safety_level`` and ``requires_approval``. The
         # mutating KV ops (put / patch / delete) set it True so the
         # dispatcher routes human principals to the approval queue rather
@@ -1587,6 +1665,15 @@ async def register_vault_typed_operations(
     # Identity-read group (Task #547) -- registered from its own
     # module so the auth surface stays independently reviewable while
     # the package keeps a single lifespan-driven registrar entry.
+    # The folder delete (one approval for many secrets) lives in its own
+    # module; imported here because that module imports from this one.
+    from meho_backplane.connectors.vault.ops_kv_folder import (
+        register_vault_kv_folder_operations,
+    )
+
+    await register_vault_kv_folder_operations(
+        when_to_use=kv_when_to_use, embedding_service=embedding_service
+    )
     await register_vault_auth_operations(embedding_service=embedding_service)
     # Auth credential-lifecycle write group (G3.15-T3 #1411) -- the
     # userpass/approle write half (create/update/delete + secret-id

@@ -167,13 +167,18 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "in which ConfigMap?'. The list / info split is deliberate -- the "
         "agent surveys keys cheaply via list, then fetches values only "
         "for the specific ConfigMap it needs. Secrets: "
+        "``k8s.secret.list`` lists Secrets with their type and key names, "
+        "and ``k8s.secret.info`` shows one Secret's keys, value sizes, "
+        "labels, annotation names and owners; both are safe reads. "
         "``k8s.secret.create`` makes a new Secret, ``k8s.secret.update`` "
         "changes the values of an existing one (rotate a token or "
         "password), ``k8s.secret.delete`` removes one after a preview "
         "that lists the workloads using it, and ``k8s.secret.read_to_ref`` "
         "copies a Secret value into the credential store and returns only "
-        "a reference. No Secret op ever shows a value; all of them wait "
-        "for approval."
+        "a reference; these four wait for approval. "
+        "``k8s.secret.compare_to_ref`` checks that a Secret key holds the "
+        "same value as its Vault copy and answers only same or different; "
+        "it is a safe read. No Secret op ever shows a value."
     ),
     "events": (
         "Use for cluster-event observability and troubleshooting: "
@@ -229,7 +234,20 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "excerpt). The right group when the operator's question names a "
         "resource kind no built-in op covers ('which MetalLB pool "
         "ranges are allocated?'). Start with ``k8s.crd.list`` to learn "
-        "the arguments the read ops need."
+        "the arguments the read ops need. For a built-in kind with no "
+        "dedicated op, pass its group (``''`` for the core group, e.g. "
+        "``namespaces``) to ``k8s.cr.list`` / ``k8s.cr.info``."
+    ),
+    "access": (
+        "Use when a write was refused, changed, or did nothing and the "
+        "question is 'was it allowed, and who looked at it?'. "
+        "``k8s.auth.can_i`` asks the API server whether MEHO's identity on "
+        "this cluster may do one action (``kubectl auth can-i``); "
+        "``k8s.auth.rules`` lists everything that identity may do in one "
+        "namespace; ``k8s.admission_webhook.list`` lists the validating and "
+        "mutating admission webhooks with their rules, selectors and "
+        "failure policy. All read-only. Pair with the 'events' group for "
+        "the refusal message itself."
     ),
 }
 
@@ -417,8 +435,8 @@ class KubernetesConnector(Connector):
     # operator surface (CLI alias verbs / meta-tool dispatch) bakes.
     # A future EKS-specific transport lands as a sibling row under
     # ``("k8s", "1.x", "<impl-id>")`` and selects via
-    # ``target.preferred_impl_id`` -- the same shape vmware-rest's
-    # multi-impl-ready substrate already supports.
+    # ``target.preferred_impl_id`` -- the multi-impl shape the
+    # v2 registry already supports.
     product = "k8s"
     version = "1.x"
     impl_id = "k8s"
@@ -1104,7 +1122,8 @@ class KubernetesConnector(Connector):
         ``CustomObjectsApi.list_namespaced_custom_object(...)`` and
         ``CustomObjectsApi.list_cluster_custom_object(...)`` -- the
         cluster form lists a namespaced CRD across every namespace, or a
-        cluster-scoped CRD's objects. CustomObjectsApi returns a plain
+        cluster-scoped CRD's objects. ``group=""`` (the core group) goes
+        to ``/api/{version}`` instead (#3840). CustomObjectsApi returns a plain
         dict (CRs have no typed model), so the ``items`` list is read
         with ``.get`` and each object projects through
         :func:`~meho_backplane.connectors.kubernetes.ops_customresource.custom_resource_row`
@@ -1113,6 +1132,10 @@ class KubernetesConnector(Connector):
         ``operator`` is forwarded to :meth:`_get_api_client`; see
         :meth:`about` for the threading rationale.
         """
+        from meho_backplane.connectors.kubernetes.ops_core_objects import (
+            list_core_objects,
+            list_items,
+        )
         from meho_backplane.connectors.kubernetes.ops_customresource import custom_resource_row
 
         group: str = params["group"]
@@ -1121,7 +1144,11 @@ class KubernetesConnector(Connector):
         namespace: str | None = params.get("namespace")
         api_client = await self._get_api_client(target, operator)
         custom = client.CustomObjectsApi(api_client)
-        if namespace:
+        if group == "":
+            resp = await list_core_objects(
+                api_client, version=version, plural=plural, namespace=namespace
+            )
+        elif namespace:
             resp = await custom.list_namespaced_custom_object(
                 group=group, version=version, namespace=namespace, plural=plural
             )
@@ -1129,7 +1156,7 @@ class KubernetesConnector(Connector):
             resp = await custom.list_cluster_custom_object(
                 group=group, version=version, plural=plural
             )
-        items = resp.get("items") or []
+        items = list_items(resp, group=group, plural=plural)
         rows = [custom_resource_row(obj) for obj in items]
         return {"rows": rows, "total": len(rows)}
 
@@ -1144,7 +1171,8 @@ class KubernetesConnector(Connector):
         Op-id: ``k8s.cr.info``. Branches on whether a ``namespace`` is
         supplied between
         ``CustomObjectsApi.get_namespaced_custom_object(...)`` and
-        ``CustomObjectsApi.get_cluster_custom_object(...)`` and returns
+        ``CustomObjectsApi.get_cluster_custom_object(...)`` (or the
+        ``/api/{version}`` core root when ``group=""``, #3840) and returns
         the single-object projection from
         :func:`~meho_backplane.connectors.kubernetes.ops_customresource.custom_resource_row`
         (a flat dict, not a rows/total envelope -- the counterpart to
@@ -1162,7 +1190,13 @@ class KubernetesConnector(Connector):
         namespace: str | None = params.get("namespace")
         api_client = await self._get_api_client(target, operator)
         custom = client.CustomObjectsApi(api_client)
-        if namespace:
+        if group == "":
+            from meho_backplane.connectors.kubernetes.ops_core_objects import get_core_object
+
+            obj = await get_core_object(
+                api_client, version=version, plural=plural, name=name, namespace=namespace
+            )
+        elif namespace:
             obj = await custom.get_namespaced_custom_object(
                 group=group, version=version, namespace=namespace, plural=plural, name=name
             )
@@ -1658,6 +1692,41 @@ class KubernetesConnector(Connector):
 
         return await k8s_secret_read_to_ref(self, target, operator, params)
 
+    async def k8s_secret_list(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.secret.list`` (key names only, never a value)."""
+        from meho_backplane.connectors.kubernetes.ops_secret_list import k8s_secret_list
+
+        return await k8s_secret_list(self, target, operator, params)
+
+    async def k8s_secret_info(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.secret.info`` (key names and sizes, never a value)."""
+        from meho_backplane.connectors.kubernetes.ops_secret_list import k8s_secret_info
+
+        return await k8s_secret_info(self, target, operator, params)
+
+    async def k8s_secret_compare_to_ref(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.secret.compare_to_ref``."""
+        from meho_backplane.connectors.kubernetes.ops_secret_compare import (
+            k8s_secret_compare_to_ref,
+        )
+
+        return await k8s_secret_compare_to_ref(self, target, operator, params)
+
     async def k8s_secret_update(
         self,
         operator: Operator,
@@ -1679,6 +1748,41 @@ class KubernetesConnector(Connector):
         from meho_backplane.connectors.kubernetes.ops_secret_write import k8s_secret_delete
 
         return await k8s_secret_delete(self, target, operator, params)
+
+    async def k8s_auth_can_i(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.auth.can_i`` (#3840)."""
+        from meho_backplane.connectors.kubernetes.ops_access import k8s_auth_can_i
+
+        return await k8s_auth_can_i(self, target, operator, params)
+
+    async def k8s_auth_rules(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.auth.rules`` (#3840)."""
+        from meho_backplane.connectors.kubernetes.ops_access import k8s_auth_rules
+
+        return await k8s_auth_rules(self, target, operator, params)
+
+    async def k8s_admission_webhook_list(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.admission_webhook.list`` (#3840)."""
+        from meho_backplane.connectors.kubernetes.ops_admission import (
+            k8s_admission_webhook_list,
+        )
+
+        return await k8s_admission_webhook_list(self, target, operator, params)
 
     @classmethod
     async def register_operations(cls) -> None:

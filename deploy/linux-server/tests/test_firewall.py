@@ -18,7 +18,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from harness import LINUX_SERVER, InstallTestCase
+from harness import LINUX_SERVER, PREROUTING_CHAIN, InstallTestCase
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 RULES = "/etc/meho/firewall.nft"
@@ -221,6 +221,7 @@ class RulesFileTests(FirewallTestCase):
                 self.machine.ssh_connection = session
 
                 self.assert_succeeds(self.machine.run(*args))
+                self.machine.remove_install_record()
 
                 rules = self.host_text(RULES)
                 self.assertIn(f"    # {note}", rules)
@@ -333,6 +334,7 @@ class FirewallStartTests(FirewallTestCase):
                 (self.machine.fake / "calls.log").write_text("")
 
                 result = self.machine.run(*ADMIN_NETWORK)
+                self.machine.remove_install_record()
 
                 self.assert_succeeds(result)
                 self.assertLess(self.index_of(FIREWALL_VERIFY), self.index_of(FIREWALLD_OFF))
@@ -427,6 +429,7 @@ class AdminNetworkCheckTests(FirewallTestCase):
         for value, line in cases.items():
             with self.subTest(admin_network=value):
                 result = self.machine.run("--admin-network", value)
+                self.machine.remove_install_record()
 
                 self.assert_succeeds(result)
                 self.assertIn(line, result.stdout)
@@ -482,6 +485,7 @@ class AdminNetworkCheckTests(FirewallTestCase):
         joined = self.machine.run(
             *ADMIN_NETWORK, "--join-address", "10.0.0.20", "--join-token-file", str(token_file)
         )
+        self.machine.remove_install_record()
         alone = self.machine.run(*ADMIN_NETWORK)
 
         self.assert_succeeds(joined)
@@ -565,31 +569,57 @@ class PortListTests(FirewallTestCase):
         )
 
     def test_firewall_state_reports_on_and_off(self) -> None:
+        no_drop = (
+            "off: the table inet meho has no chain prerouting with policy drop, so it lets every"
+            " packet in"
+        )
         cases = {
-            "on": ("0", "meho-firewall.service\n", 0, "on"),
+            "on": ("0", PREROUTING_CHAIN, "meho-firewall.service\n", 0, "on"),
             "table missing": (
                 "1",
+                PREROUTING_CHAIN,
                 "meho-firewall.service\n",
                 1,
                 "off: the table inet meho is not loaded",
             ),
+            "chain missing": ("0", "", "meho-firewall.service\n", 1, no_drop),
+            "chain with policy accept": (
+                "0",
+                PREROUTING_CHAIN.replace("policy drop;", "policy accept;"),
+                "meho-firewall.service\n",
+                1,
+                no_drop,
+            ),
             "unit disabled": (
                 "0",
+                PREROUTING_CHAIN,
                 "",
                 1,
                 "off: meho-firewall.service is not enabled, so the next start of the machine"
                 " loads no firewall",
             ),
         }
-        for case, (table_rc, enabled, returncode, line) in cases.items():
+        for case, (table_rc, chain, enabled, returncode, line) in cases.items():
             with self.subTest(case=case):
                 self.machine.answer("nft_table_rc", table_rc)
+                self.machine.answer("nft_chain_out", chain)
+                self.machine.answer("nft_chain_rc", "0" if chain else "1")
                 self.machine.answer("enabled_units", enabled)
 
                 result = self.run_lib("firewall_state")
 
                 self.assertEqual(returncode, result.returncode, result.stderr)
                 self.assertEqual(line + "\n", result.stdout)
+
+    def test_firewall_state_names_a_missing_nft(self) -> None:
+        (self.machine.stubs / "nft").unlink()
+
+        result = self.run_lib("firewall_state")
+
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertEqual(
+            "off: nft not found, so no firewall rule can be read or loaded\n", result.stdout
+        )
 
 
 class TraefikRedirectTests(FirewallTestCase):

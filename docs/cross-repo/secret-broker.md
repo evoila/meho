@@ -353,6 +353,118 @@ byte count — here a 14-byte credential. An auditor can confirm the value
 that landed at the sink matches the value read from the source by
 comparing this digest, without ever seeing the value.)
 
+## 5. Move a target to another MEHO instance
+
+A target has two parts, and each part moves in its own way:
+
+1. **The target row** — name, host, port, product, `secret_ref` and the
+   other settings. The row never holds the login itself, only
+   `secret_ref`, the path to it. Write the targets to a file and load
+   that file on the new instance with `meho targets import`
+   ([`import.go`](../../cli/internal/cmd/targets/import.go)). A
+   `meho targets export` command is planned
+   ([#4048](https://github.com/evoila/meho/issues/4048)); until then,
+   write the file by hand or from `meho targets list --json`.
+2. **The login** — the value at `secret_ref` in the old instance's
+   Vault. `secret.move` cannot do this: it only works inside one
+   instance. Use the two handoff steps below. Nobody sees the value.
+
+In this section, **A** is the instance that has the login now, and
+**B** is the instance that gets it.
+
+### 5.1 How the handoff works
+
+- **On A, `secret.handoff.export`** reads the value and puts it into a
+  one-time **handoff** in A's Vault (a Vault response-wrapping token).
+  The handoff is not the value. It works **once**, and it expires after
+  `ttl_seconds` (default one hour, at most one day). The value stays in
+  A's Vault until the handoff is used.
+- **On B, `secret.handoff.import`** uses the handoff once at A's Vault
+  and writes the value into B's store. B reaches A's Vault through a
+  target registered on B (product `vault`, host = A's Vault or OpenBao).
+  B needs no other login for A's Vault: the handoff is the only key.
+- Both steps are `dangerous` with `requires_approval: true`. Each one
+  waits until a second person approves it on its own instance.
+- Both results carry only the status, the value's SHA-256 and its
+  length (the export also carries the handoff). Each instance writes an
+  audit record for its own step, and the **two records carry the same
+  SHA-256**, so an auditor can match them.
+
+### 5.2 Steps
+
+1. **On B**, register a target that points at A's Vault, if there is
+   none yet. For example: name `instance-a-vault`, product `vault`, host
+   and port of A's Vault. Use `verify_tls` as for any target; a pinned
+   CA (`tls_ca_pin`) is not supported for this step yet.
+2. **On A**, run the export. Use the target's `secret_ref` as the
+   source:
+
+   ```text
+   call_operation(connector_id="secret-broker-1.x",
+                  op_id="secret.handoff.export",
+                  params={"from": "vault:tenants/<tenant-a>/targets/db#password",
+                          "ttl_seconds": 3600,
+                          "reason": "move target db to instance B"})
+   ```
+
+   A second person on A approves it. The result is
+   `{status: "exported", value_sha256, length, handoff_token,
+   handoff_ttl_seconds}`.
+3. **On B**, run the import before the handoff expires. Set
+   `expect_sha256` to the export's `value_sha256`:
+
+   ```text
+   call_operation(connector_id="secret-broker-1.x",
+                  op_id="secret.handoff.import",
+                  params={"handoff_token": "<handoff_token from step 2>",
+                          "store": "instance-a-vault",
+                          "to": "vault:tenants/<tenant-b>/targets/db#password",
+                          "expect_sha256": "<value_sha256 from step 2>",
+                          "reason": "move target db from instance A"})
+   ```
+
+   A second person on B approves it. The result is
+   `{status: "imported", value_sha256, length}`. Check that
+   `value_sha256` is the same as in step 2.
+4. **On B**, import the target row (`meho targets import`) with
+   `secret_ref` set to the sink path from step 3.
+
+### 5.3 Rules that still hold
+
+- **The value is never shown.** It is not in the params, the results, a
+  log event, a broadcast or an audit record, on either instance.
+- **Tenant checks on both sides.** On A, a `vault:` source must be
+  inside the operator's tenant path. On B, a `vault:` sink must be
+  inside B's tenant path. B checks the sink **before** it uses the
+  handoff, so a wrong sink path does not use it up.
+- **The handoff is handled as a credential.** The export is pinned
+  `credential_mint` and the import `credential_write`, so the handoff
+  stays off the activity feed. While the import waits for approval, its
+  params are stored encrypted, and the approver sees only the store
+  target, the sink and `expect_sha256`, never the handoff.
+
+### 5.4 When it fails
+
+Every error names the store, the Vault path
+(`sys/wrapping/wrap` on A, `sys/wrapping/unwrap` on B) and the next
+step, never the value. Both steps send a secret, so the error result
+hides the raised message; read the details in `extras.remediation`.
+
+| What you see | What it means | What to do |
+|---|---|---|
+| could not reach the store | wrong address, network or TLS problem | on A: check A's own store, then export again; on B: fix the store target on B, then import again with the same handoff |
+| the store's address is not dialed | the store target points at, or now resolves to, an address MEHO does not dial (not a public address); nothing was sent | fix the store target's host, or add the address to the allowlist if it is trusted |
+| the store answered with a redirect | B does not follow redirects | register the store target with the address the store itself listens on |
+| the store refused the login or the call | the operator's Vault login or policy does not allow the call | fix the Vault role or policy |
+| the source or sink is outside this operator's tenant path | the `from` or `to` path is not under the operator's tenant; nothing was read or sent | use a path under the tenant, then run the step again |
+| the source could not be read | the `from` path or field does not exist | check the path and the field name, then export again |
+| the store did not accept the handoff | the handoff was already used, expired, or was made by another store | run the export on A again |
+| SHA-256 does not match | the value is not the one the export reported | nothing was written; find out why, then export again |
+| the handoff was used, but writing failed | the sink write on B failed after the handoff was used | fix the sink, then export again |
+
+If an import says the handoff was **already used** and you did not use
+it, someone else did. Treat the login as exposed and change it.
+
 ## References
 
 - Engineering companion (mechanism, control flow, synthetic identity):
@@ -365,6 +477,10 @@ comparing this digest, without ever seeing the value.)
   [`backend/src/meho_backplane/connectors/secret/vault_endpoint.py`](../../backend/src/meho_backplane/connectors/secret/vault_endpoint.py)
 - Keycloak sink (write-only, `<target>/<realm>/<user>#password`):
   [`backend/src/meho_backplane/connectors/keycloak/secret_endpoint.py`](../../backend/src/meho_backplane/connectors/keycloak/secret_endpoint.py)
+- Handoff steps that move a secret to another MEHO instance (§5):
+  [`backend/src/meho_backplane/connectors/secret/handoff.py`](../../backend/src/meho_backplane/connectors/secret/handoff.py),
+  [`handoff_ops.py`](../../backend/src/meho_backplane/connectors/secret/handoff_ops.py),
+  [`handoff_preview.py`](../../backend/src/meho_backplane/connectors/secret/handoff_preview.py)
 - Ref-only park-time `proposed_effect`:
   [`backend/src/meho_backplane/connectors/secret/move_preview.py`](../../backend/src/meho_backplane/connectors/secret/move_preview.py)
 - CLI verb (references-not-values, `awaiting_approval` rendering):

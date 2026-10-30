@@ -156,6 +156,10 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.datastore.dir.create",
     "vmware.composite.content_library.delete",
     "vmware.composite.content_library.item.delete",
+    # Local content-library create + add a file from a URL: caution + approval,
+    # special-cased in the tier assertion below.
+    "vmware.composite.content_library.create",
+    "vmware.composite.content_library.item.upload",
     # The destructive DRS rule delete; special-cased in the tier assertion below.
     "vmware.composite.cluster.drs_rule.delete",
     # Licence assign: dangerous + approval (the default tier).
@@ -175,6 +179,8 @@ _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.datastore.refresh",
     # Datastore file list read (#3432).
     "vmware.composite.datastore.file.list",
+    # vSAN folder list read (#4022).
+    "vmware.composite.datastore.vsan.folder.list",
     "vmware.composite.network.portgroup.audit",
     # VM CPU / memory limit + reservation read (#3880).
     "vmware.composite.vm.resource_allocation.show",
@@ -396,6 +402,14 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
         "meho_backplane.connectors.vmware_rest.composites."
         "_library_delete.content_library_item_delete_composite"
     ),
+    "vmware.composite.content_library.create": (
+        "meho_backplane.connectors.vmware_rest.composites."
+        "_library_local.content_library_create_composite"
+    ),
+    "vmware.composite.content_library.item.upload": (
+        "meho_backplane.connectors.vmware_rest.composites."
+        "_library_upload.content_library_item_upload_composite"
+    ),
     "vmware.composite.cluster.drs_rule.delete": (
         "meho_backplane.connectors.vmware_rest.composites."
         "_drs_rule_delete.cluster_drs_rule_delete_composite"
@@ -459,6 +473,8 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.datastore.dir.create": "storage",
     "vmware.composite.content_library.delete": "content_library",
     "vmware.composite.content_library.item.delete": "content_library",
+    "vmware.composite.content_library.create": "content_library",
+    "vmware.composite.content_library.item.upload": "content_library",
     "vmware.composite.cluster.drs_rule.delete": "cluster",
 }
 
@@ -638,6 +654,8 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
         "vmware.composite.vm.cdrom.mount_library_iso",
         "vmware.composite.vm.cdrom.unmount_library_iso",
         "vmware.composite.vm.snapshot.create",
+        "vmware.composite.content_library.create",
+        "vmware.composite.content_library.item.upload",
     }
     for row in rows:
         if row.op_id in (
@@ -1067,6 +1085,27 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "precondition_failed",
             "still_present",
             "timeout",
+        },
+        # Local content-library create + add a file from a URL.
+        "vmware.composite.content_library.create": {
+            "created",
+            "unchanged",
+            "precondition_failed",
+            "datastore_not_found",
+            "ambiguous_datastore",
+            "refused",
+            "not_verified",
+        },
+        "vmware.composite.content_library.item.upload": {
+            "uploaded",
+            "unchanged",
+            "in_progress",
+            "upload_failed",
+            "invalid_request",
+            "library_not_found",
+            "precondition_failed",
+            "refused",
+            "not_verified",
         },
         # Licence assign: the write, the no-op, and three refusals before any change.
         "vmware.composite.license.assign": {

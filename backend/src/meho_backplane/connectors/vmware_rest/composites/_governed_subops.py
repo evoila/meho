@@ -37,6 +37,8 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _host,
     _library,
     _library_delete,
+    _library_local,
+    _library_upload,
     _license,
     _namespace,
     _snapshot,
@@ -169,6 +171,11 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.content_library.item.delete": (
         _library_delete._SUB_OPS_CONTENT_LIBRARY_ITEM_DELETE
         + _library_delete._VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK
+    ),
+    # Local content-library create + add a file from a URL (caution writes).
+    "vmware.composite.content_library.create": _library_local._SUB_OPS_CONTENT_LIBRARY_CREATE,
+    "vmware.composite.content_library.item.upload": (
+        _library_upload._SUB_OPS_CONTENT_LIBRARY_ITEM_UPLOAD
     ),
     "vmware.composite.license.assign": _license._VIM_SUB_OPS_LICENSE_ASSIGN,
     # #4383 alarm changes: one AlarmManager write each, after two reads.

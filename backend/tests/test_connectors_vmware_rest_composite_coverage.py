@@ -41,7 +41,8 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.cluster.drs_recommendations",
         "vmware.composite.event.tail",
         "vmware.composite.datastore.usage",
-        "vmware.composite.datastore.refresh",
+        # ``datastore.refresh`` is pinned ``write`` in ``_WRITE_OPS``: it is
+        # ``safe`` but makes the host rescan, so it is not a plain read.
         "vmware.composite.network.portgroup.audit",
         "vmware.composite.vm.clone",
         "vmware.composite.vm.deploy_from_library",
@@ -87,6 +88,8 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.namespace.status",
         "vmware.composite.content_library.subscribed.sync",
         "vmware.composite.content_library.subscribed.status",
+        # ``.upload`` is not a classifier suffix -> ``other``.
+        "vmware.composite.content_library.item.upload",
         # #4383: ``.acknowledge`` / ``.reset`` are not classifier suffixes ->
         # ``other``, like ``host.service_control``.
         "vmware.composite.alarm.acknowledge",

@@ -44,23 +44,29 @@ by its `connector_id`, exactly as in the first-operations ladder.
 
 **Windows Server (`winsrv`).** System facts, service start/stop/restart,
 Windows feature install and removal, reboot and shutdown, local users,
-and disk / iSCSI-initiator storage. The reboot, shutdown, feature-removal,
-and local-user-delete operations park for a human; everything else is a
-read or a recoverable write.
+disk / iSCSI-initiator storage, and the server's NTP time source. The
+reboot, shutdown, feature-removal, local-user-delete and time-source
+operations wait for a person to approve them; everything else is a read or
+a recoverable write.
 
 **Active Directory (`msad`).** Domain, forest, and DC topology reads, AD
 replication metadata, plus guarded day-2 writes over users, groups,
 computers, and organizational units. The SSH target *is* the domain
 controller — the AD cmdlets contact the local directory. Object deletes
 (`user.delete`, `group.delete`, `computer.delete`) park; a computer
-"unjoin" is a recoverable disable, not a delete.
+"unjoin" is a recoverable disable, not a delete. For building a new domain
+there are a read of the password rules and the join limit, and changes that
+wait for a person to approve them: create a group, set the password rules,
+set the join limit, and let a group create computers in an OU (and undo it).
 
 **Windows DNS (`windns`).** Read the zones on an AD-integrated DNS server,
 read records, add A and CNAME records, and remove a record set. The
 record removal is a permanent delete. You preview it first to get a
 preview hash. The preview does not list the records. MEHO reads them
 when you send the call, and the approver sees them on the approval
-request before it runs.
+request before it runs. You can also read a zone's settings and the
+server's forwarders, and change them. Those changes wait for a person to
+approve them.
 
 **Failover Clustering (`wsfc`).** Cluster, node, clustered-role, resource,
 and quorum state, plus cluster validation and guarded role moves. The

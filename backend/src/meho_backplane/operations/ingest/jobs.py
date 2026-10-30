@@ -6,7 +6,7 @@
 The ingest pipeline (parser + register + LLM grouping) blocks the event
 loop long enough on real-world vendor specs that the kubelet's liveness
 probe times out and the pod is graceful-killed -- a 7.5 MB / 1275-op
-``vmware/9.0.0.0`` spec took 30 s of CPU + DB time inline on the
+vendor spec took 30 s of CPU + DB time inline on the
 request thread before the probe deadline expired
 (see ``claude-rdc-hetzner-dc#771`` Finding 20, and
 ``docs/codebase/api-shape-conventions.md`` §1 for the strategic

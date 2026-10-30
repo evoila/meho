@@ -104,6 +104,7 @@ from meho_backplane.connectors.gcloud.session import (
     _contains_sa_key_fields,
     load_credentials_from_vault,
 )
+from meho_backplane.connectors.gcloud.workload_identity import WorkloadIdentityOps
 from meho_backplane.connectors.schemas import (
     AuthModel,
     FingerprintResult,
@@ -168,9 +169,23 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Use for IAM questions: which service accounts exist on the project? "
         "Which principals have which roles? ``gcloud.iam.service_accounts.list`` "
         "enumerates SAs; ``gcloud.iam.policy.read`` returns the full project-level "
-        "policy with all role bindings. The right group when the agent needs to "
+        "policy with all role bindings; ``gcloud.iam.service_accounts.policy.read`` "
+        "shows who may use or act as one service account, and "
+        "``gcloud.iam.service_accounts.binding.remove`` takes one member out of one "
+        "role there (a person must approve). The right group when the agent needs to "
         "verify a permission, pick an impersonation SA, or produce an access-review "
         "report. Pair with the 'identity' group when onboarding a new target."
+    ),
+    "workload_identity": (
+        "Use for workload identity pools: the Google setting that lets an outside "
+        "system (for example Vault or a CI runner) get Google access without a key "
+        "file. ``gcloud.iam.workload_identity_pools.list`` lists the pools; "
+        "``gcloud.iam.workload_identity_pools.providers.list`` shows which outside "
+        "issuer a pool trusts (issuerUri) and on which condition "
+        "(attributeCondition); ``gcloud.iam.workload_identity_pools.delete`` marks an "
+        "old pool deleted (a person must approve; Google keeps it 30 days and it can "
+        "be restored). Pair with the 'iam' group to remove the service-account "
+        "binding that lets the pool act as an account."
     ),
     "compute": (
         "Use for Compute Engine resource inventory: VMs, VPC networks, and subnets. "
@@ -223,7 +238,7 @@ def _subnet_row(sn: dict[str, Any], *, region: str) -> dict[str, Any]:
     }
 
 
-class GcloudConnector(HttpConnector):
+class GcloudConnector(WorkloadIdentityOps, HttpConnector):
     """GCP REST connector with ADC + service-account impersonation.
 
     Auth: ``google.auth.default()`` for ADC source credentials, wrapped

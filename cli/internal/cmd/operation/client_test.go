@@ -42,6 +42,7 @@ type fakeOperationsClient struct {
 	lastSearchParams      *api.GetSearchApiV1OperationsSearchGetParams
 	lastResultQueryParams *api.PostResultQueryApiV1OperationsResultQueryPostParams
 	lastResultQueryBody   *api.ResultQueryBody
+	lastSubopsParams      *api.GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams
 
 	// Sequenced canned responses — pop one per call (per verb). Tests
 	// register two responses on the auth-refresh scenarios (first a
@@ -52,6 +53,7 @@ type fakeOperationsClient struct {
 	groupsResponses      []*api.GetGroupsApiV1OperationsGroupsGetResponse
 	searchResponses      []*api.GetSearchApiV1OperationsSearchGetResponse
 	resultQueryResponses []*api.PostResultQueryApiV1OperationsResultQueryPostResponse
+	subopsResponses      []*api.GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse
 
 	// Per-verb transport-error queues. Drain in the same order as
 	// the response queues so a refresh-then-transport-failure scenario
@@ -61,6 +63,7 @@ type fakeOperationsClient struct {
 	groupsErrors      []error
 	searchErrors      []error
 	resultQueryErrors []error
+	subopsErrors      []error
 
 	// refreshCount tracks how many times Refresh was invoked across
 	// the whole client's lifetime. The 401 dance asserts this hits
@@ -111,6 +114,19 @@ func (f *fakeOperationsClient) GetSearchApiV1OperationsSearchGetWithResponse(
 ) (*api.GetSearchApiV1OperationsSearchGetResponse, error) {
 	f.lastSearchParams = params
 	return popSearchResp(&f.searchResponses), popErr(&f.searchErrors)
+}
+
+func (f *fakeOperationsClient) GetGovernedSubopsApiV1OperationsGovernedSubopsGetWithResponse(
+	_ context.Context,
+	params *api.GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams,
+	_ ...api.RequestEditorFn,
+) (*api.GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse, error) {
+	f.lastSubopsParams = params
+	var r *api.GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse
+	if len(f.subopsResponses) > 0 {
+		r, f.subopsResponses = f.subopsResponses[0], f.subopsResponses[1:]
+	}
+	return r, popErr(&f.subopsErrors)
 }
 
 // PostResultQueryApiV1OperationsResultQueryPost turns the canned typed

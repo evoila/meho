@@ -29,6 +29,11 @@ three steps in a throwaway build stage:
    allowlist file (``/app/connector-packages.json``) that MEHO checks at
    start.
 
+``check-reviews`` runs before an image is signed for the appliance (tier
+2), outside the image build. Every connector wheel needs a review record
+by a person for its exact name, version and wheel digest. A changed wheel
+has another digest, so it needs a new review.
+
 Only the standard library is used. Run it with ``python -I -S`` so that no
 ``.pth`` file of the environment being checked can run code in this process.
 
@@ -40,6 +45,7 @@ from __future__ import annotations
 import argparse
 import base64
 import csv
+import datetime
 import hashlib
 import io
 import json
@@ -61,6 +67,17 @@ _MODULE_SUFFIXES = (".py", ".pyc", ".pyw", ".pyd", ".so")
 _FOLDER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RECORD_SIGNATURES = frozenset({"RECORD.jws", "RECORD.p7s"})
 _MAX_NAMED = 10
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# The points a reviewer confirms in a review record. The checklist in
+# docs/codebase/connector-packages.md explains each one.
+REVIEW_CHECKLIST = (
+    "operation_contracts",
+    "risk_levels",
+    "secrets_removed",
+    "target_address_only",
+    "licences",
+    "no_startup_hooks",
+)
 
 
 class BuildError(Exception):
@@ -246,6 +263,84 @@ def check_wheels(connectors_dir: Path, deps_dir: Path | None) -> list[Wheel]:
                 )
             owner[folder] = wheel.path.name
     return connectors
+
+
+@dataclass(frozen=True)
+class Review:
+    """One review record: a person reviewed one wheel of a connector package."""
+
+    path: Path
+    name: str
+    version: str
+    wheel_digest: str
+    reviewer: str
+    date: str
+
+
+def _text_field(data: dict[str, object], key: str, where: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise BuildError(f"{where} has no {key!r}.")
+    return value.strip()
+
+
+def read_review(path: Path) -> Review:
+    """Read and check one review record file (JSON)."""
+    where = f"review record {path.name}"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise BuildError(f"{where} cannot be read: {exc}") from exc
+    if not isinstance(data, dict):
+        raise BuildError(f"{where} must be a JSON object.")
+    name, version, digest, reviewer, date = (
+        _text_field(data, key, where)
+        for key in ("name", "version", "wheel_digest", "reviewer", "date")
+    )
+    if not _DIGEST_RE.match(digest):
+        raise BuildError(f"{where}: wheel_digest must be sha256:<64 hex>, got {digest!r}.")
+    if reviewer.lower().endswith("[bot]"):
+        raise BuildError(f"{where}: the reviewer {reviewer!r} is a bot. A person must review.")
+    try:
+        datetime.date.fromisoformat(date)
+    except ValueError:
+        raise BuildError(f"{where}: date must be YYYY-MM-DD, got {date!r}.") from None
+    checklist = data.get("checklist")
+    if not isinstance(checklist, dict):
+        checklist = {}
+    open_points = [point for point in REVIEW_CHECKLIST if checklist.get(point) is not True]
+    if open_points:
+        raise BuildError(f"{where}: the reviewer did not confirm: {', '.join(open_points)}.")
+    return Review(path, name, version, digest, reviewer, date)
+
+
+def check_reviews(connectors_dir: Path, reviews_dir: Path) -> list[tuple[Wheel, Review]]:
+    """Every connector wheel needs a review record for its exact name, version and digest."""
+    if not reviews_dir.is_dir():
+        raise BuildError(f"the review folder {reviews_dir} does not exist.")
+    reviews = [read_review(p) for p in sorted(reviews_dir.glob("*.json"))]
+    found: list[tuple[Wheel, Review]] = []
+    for wheel in check_wheels(connectors_dir, None):
+        same = [
+            r
+            for r in reviews
+            if canonical_name(r.name) == canonical_name(wheel.name) and r.version == wheel.version
+        ]
+        exact = [r for r in same if r.wheel_digest == wheel.digest]
+        if exact:
+            found.append((wheel, exact[0]))
+            continue
+        if same:
+            raise BuildError(
+                f"the review of {wheel.name} {wheel.version} is for another wheel "
+                f"({same[0].wheel_digest}), but this wheel is {wheel.digest}. "
+                "The wheel changed, so a person must review it again."
+            )
+        raise BuildError(
+            f"no review record for {wheel.name} {wheel.version} (wheel {wheel.digest}). "
+            "A person must review the package and add a record before it is signed."
+        )
+    return found
 
 
 def site_packages(venv: Path) -> Path:
@@ -454,18 +549,28 @@ def main(argv: list[str] | None = None) -> int:
     fi.add_argument("--before", type=Path, required=True)
     fi.add_argument("--connectors", type=Path, required=True)
     fi.add_argument("--out", type=Path, required=True)
+    cr = sub.add_parser("check-reviews", help="check the review records before signing")
+    cr.add_argument("--connectors", type=Path, required=True)
+    cr.add_argument("--reviews", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "check-wheels":
             for wheel in check_wheels(args.connectors, args.deps):
                 print(f"connector wheel ok: {wheel.name} {wheel.version} {wheel.folders}")
+        elif args.command == "check-reviews":
+            for wheel, review in check_reviews(args.connectors, args.reviews):
+                print(
+                    f"review ok: {wheel.name} {wheel.version} {wheel.digest} "
+                    f"by {review.reviewer} on {review.date} ({review.path.name})"
+                )
         elif args.command == "snapshot":
             args.out.write_text(json.dumps(snapshot(args.venv)), encoding="utf-8")
         else:
             entries = finish(args.venv, args.before, args.connectors, args.out)
             print("allowlist:", json.dumps({"packages": entries}))
     except BuildError as exc:
-        print(f"connector overlay build refused: {exc}", file=sys.stderr)
+        step = "signing" if args.command == "check-reviews" else "build"
+        print(f"connector overlay {step} refused: {exc}", file=sys.stderr)
         return 1
     return 0
 

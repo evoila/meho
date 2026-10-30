@@ -33,8 +33,9 @@ are covered in [`target-ssrf-guard.md`](target-ssrf-guard.md).
 
 This document covers the two **list** paths, how `list_targets`
 bounds its response (#3858), how the single-target REST routes find a
-target, how a target is removed, and what a target change does to the
-logins connectors keep (#3879).
+target, the per-target **secret field map** (#3711), how a target is
+removed, and what a target change does to the logins connectors keep
+(#3879).
 
 ## Finding one target: describe, update, probe, delete
 
@@ -211,6 +212,106 @@ End-to-end call time (warm median of 7 calls each, same setup) was
 about the same in both versions: about 6–8 ms for an 89-row page and
 about 12 ms for a 500-row page.
 
+## Secret field map (#3711)
+
+### What it is for
+
+Many connectors read fixed field names from the target's secret. The SSH
+family reads `ssh_private_key`, `username` and `password`. The vSphere
+guest operations read `guest_username` and `guest_password`. A secret that
+already holds the right values under other names could not back the
+target before this change. The only way out was a copy of the secret with
+new key names.
+
+A target can now carry `secret_field_map`: a map from the field name the
+connector reads to the field name the secret really uses.
+
+```json
+{"ssh_private_key": "private_key", "guest_username": "username", "guest_password": "password"}
+```
+
+When a connector reads field `X`, MEHO reads the secret's field
+`map.get(X, X)`. Fields that are not in the map are read by their own name,
+as before. The map holds field names only, never a value. Connector code
+does not change and does not know the map exists.
+
+### Where it lives
+
+| Piece | Where |
+|---|---|
+| Column `targets.secret_field_map` (JSON, nullable, `NULL` = no map) | `db/models.py`, migration `0128` |
+| `secret_field_map` on `Target`, `TargetSummary`, `TargetCreate`, `TargetUpdate` | `targets/schemas.py` |
+| Applying the map when a secret is read | `connectors/_shared/vault_creds.py` (`secret_field_map_of`, `_apply_secret_field_map`) |
+| PATCH merge rules and the probe check | `targets/secret_field_map.py` |
+| Map carried to a satellite runner | `runner/wire.py` (`ResolvedTargetDescriptor`), `gateway/assignment_service.py` |
+
+The map is applied in `load_basic_credentials` and
+`load_vault_secret_data`, so it works for every credential backend
+(`vault:`, `gsm:`). It is applied exactly once. A `wrapped:` credential for
+a satellite runner is brokered at the centre from the mapped view of the
+secret, so the runner that unwraps it does not apply the map again. The map
+only applies to the target's **own** secret. Readers that build a small stand-in target around another secret
+ref (for example `guest_secret_ref` or a `password_secret_ref` op
+parameter) do not copy the map, so it never applies there.
+
+If a mapped source field is missing from the secret, the connector field is
+missing too. `load_basic_credentials` then fails with an error that names
+both field names (never a value).
+
+### Writing the map
+
+- **Create** (`POST /api/v1/targets`): `secret_field_map` is an object of
+  field names. Names are 1 to 200 characters; at most 50 entries.
+- **Update** (`PATCH /api/v1/targets/{name}`): entries are **merged** into
+  the stored map. A string value adds or replaces that entry. A `null`
+  value removes that entry. `"secret_field_map": null` removes the whole
+  map. Leaving the field out keeps the map as it is.
+- **CLI**:
+  - `meho targets add <name> ... --secret-field <connector_field>=<source_field>`
+    (repeatable).
+  - `meho targets update <name> --secret-field <connector_field>=<source_field>`
+    adds or replaces one entry. `--secret-field <connector_field>=` removes
+    one entry. `--clear secret-field` removes the whole map.
+  - `meho targets import <file>` reads a `secret_field_map:` key on each
+    entry. `--secret-field <connector_field>=<source_field>` (repeatable)
+    adds the entry to every target in the file and wins over the YAML.
+  - `meho targets describe` shows the map as
+    `secret_field_map: connector_field=source_field, ...`.
+
+Example for an SSH host whose secret, written by an automation pack, holds
+`private_key` and `login`:
+
+```bash
+meho targets add web-01 --product linux --host web-01.example.com \
+  --secret-ref tenants/<tenant-id>/web-01 \
+  --secret-field ssh_private_key=private_key --secret-field username=login
+meho targets probe web-01
+```
+
+### Check at probe time
+
+`POST /api/v1/targets/{name}/probe` (`meho targets probe`) reads the
+target's secret when the target has a map, and checks that every mapped
+**source** field exists. If one is missing, the probe fails with a 422 and
+does not save a fingerprint:
+
+```json
+{"detail": {"kind": "secret_field_map_source_missing",
+            "missing_source_fields": ["login"],
+            "message": "target 'web-01': the secret has no field named 'login', ..."}}
+```
+
+The error holds field names only. A target with no map skips this read. A
+failed secret read during the check is reported like any other probe
+failure (500, `fingerprint_failed`).
+
+### SSH `private_key` alias
+
+As a shortcut for the most common case, the SSH connector
+(`connectors/adapters/ssh.py`, `_auth_config`) also accepts a field named
+`private_key` when `ssh_private_key` is absent. A secret written by an
+automation pack therefore works for SSH key login with no map at all. When
+both fields are present, `ssh_private_key` wins.
 ## Control flow — deleting a target
 
 `DELETE /api/v1/targets/{name}` (`tenant_admin`) and the CLI verb
@@ -353,6 +454,8 @@ empty follow-up page. The REST route avoids this by over-fetching
 - [`mcp.md`](mcp.md) (tool inventory, `structuredContent` emission, #2774).
 - [`api-shape-conventions.md`](api-shape-conventions.md) §14 (MCP list-tool
   `limit` / `cursor` parity).
+- #3711 (secret field map). Related work: #3364 (`guest_secret_ref` picks
+  *which* secret a guest operation reads; the map picks *which field*).
 - #134 (preview serialized once, on `handle.sample_rows`); #1312 (REST
   `limit + 1` over-fetch); #1641 (cross-tenant listing gated to
   `platform_admin`).

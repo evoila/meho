@@ -389,7 +389,7 @@ meho agent-principal revoke <name> [flags]
 
 ## `meho approvals`
 
-Manage approval requests (list / show / approve / reject / withdraw)
+Manage approval requests (list / show / result / approve / reject / withdraw)
 
 ```
 meho approvals
@@ -434,6 +434,17 @@ meho approvals reject <id> [flags]
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw JSON response instead of summary
 - `--reason` — optional rationale for the rejection; the command help explains the Instructed-by: layout
+
+### `meho approvals result`
+
+Show the output of an approved operation
+
+```
+meho approvals result <id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit the raw JSON answer instead of the human-readable view
 
 ### `meho approvals show`
 
@@ -4772,6 +4783,7 @@ meho targets add <name> [flags]
 - `--port` — connection port (default: the connector's product default)
 - `--preferred-impl` — connector impl_id override for the resolver's tie-break
 - `--product` — connector product slug (required; must match a registered connector — see `meho connector list`)
+- `--secret-field` — connector_field=source_field: read source_field from the secret when the connector asks for connector_field (repeatable)
 - `--secret-ref` — Vault path of the target's credential (omit to derive the per-tenant default)
 - `--tls-ca-pin` — PEM CA bundle to pin for this target (mutually exclusive with --verify-tls=false)
 - `--tls-server-name` — TLS SNI / certificate-verification hostname, decoupled from --host
@@ -4827,6 +4839,7 @@ meho targets import <file> [flags]
 - `--backplane` — backplane URL to import into (defaults to the URL recorded by `meho login`)
 - `--dry-run` — print the plan (read-only: one GET, no writes); does not apply
 - `--json` — output the plan as JSON (use with --dry-run)
+- `--secret-field` — connector_field=source_field to add to every target's secret field map (repeatable)
 - `--update` — PATCH existing targets instead of erroring on duplicate names
 
 ### `meho targets list`
@@ -4865,7 +4878,7 @@ meho targets update <name, alias or id> [flags]
 - `--alias` — alias the target resolves by (repeatable; replaces the whole alias list)
 - `--auth-model` — per-target identity model
 - `--backplane` — backplane URL the target lives in (defaults to the URL recorded by `meho login`)
-- `--clear` — field to remove (repeatable; sends null, or an empty list for alias and an empty map for extra): alias, extra, fqdn, note, port, preferred-impl, secret-ref, tls-ca-pin, tls-server-name, version
+- `--clear` — field to remove (repeatable; sends null, or an empty list for alias and an empty map for extra): alias, extra, fqdn, note, port, preferred-impl, secret-field, secret-ref, tls-ca-pin, tls-server-name, version
 - `--extra` — key=value for the target's extras map, e.g. scheme=http (repeatable; replaces the whole map)
 - `--fqdn` — fully-qualified domain name, when distinct from --host
 - `--host` — new host or IP the connector dials
@@ -4874,6 +4887,7 @@ meho targets update <name, alias or id> [flags]
 - `--port` — connection port
 - `--preferred-impl` — connector impl_id override for the resolver's tie-break
 - `--product` — new connector product slug
+- `--secret-field` — connector_field=source_field to add or replace in the secret field map; connector_field= removes it (repeatable)
 - `--secret-ref` — Vault path of the target's credential
 - `--tls-ca-pin` — PEM CA bundle to pin for this target
 - `--tls-server-name` — TLS SNI / certificate-verification hostname, decoupled from --host
@@ -6237,11 +6251,47 @@ meho vmware operation search <query> [flags]
 
 ### `meho vmware vm`
 
-vSphere VM verbs (list / info / create)
+vSphere VM verbs (list / info / create / cdrom)
 
 ```
 meho vmware vm
 ```
+
+#### `meho vmware vm cdrom`
+
+VM CD drive verbs (mount-library-iso / unmount-library-iso)
+
+```
+meho vmware vm cdrom
+```
+
+##### `meho vmware vm cdrom mount-library-iso`
+
+Mount an ISO from a content library on a VM, as a new CD drive
+
+```
+meho vmware vm cdrom mount-library-iso <vm-name-or-id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--library-item` — id of the content-library item that holds the ISO file
+- `--library-item-name` — name of the library item, looked up on the backend; refused when it fits 0 or >1 items
+- `--library-name` — library to look --library-item-name up in (optional)
+- `--target` — target slug to dispatch against
+
+##### `meho vmware vm cdrom unmount-library-iso`
+
+Unmount a content-library ISO from a VM and remove its CD drive
+
+```
+meho vmware vm cdrom unmount-library-iso <vm-name-or-id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--cdrom` — id of the CD drive, as mount-library-iso returned it; required
+- `--json` — emit the full OperationResult envelope as JSON
+- `--target` — target slug to dispatch against
 
 #### `meho vmware vm create`
 

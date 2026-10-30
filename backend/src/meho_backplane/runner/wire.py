@@ -164,6 +164,9 @@ class ResolvedTargetDescriptor(BaseModel):
     verify_tls: bool = True
     tls_ca_pin: str | None = None
     tls_server_name: str | None = None
+    # #3711. Secret field names map the credential reader applies to the
+    # target's own secret. Field names only, never a value.
+    secret_field_map: dict[str, str] = Field(default_factory=dict)
     extras: dict[str, Any] = Field(default_factory=dict)
     # When the target row last changed (#3879). The runner compares it with
     # the value it saw last and drops the login it keeps for the target when

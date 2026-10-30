@@ -551,6 +551,10 @@ removed by G0.6-T11 (#412) and bind9 has never shipped behind it.
   reason values, the register_operations upsert + idempotency loop,
   and the execute() dispatcher shim's unknown / valid / invalid
   branches.
+- `backend/tests/test_connectors_sudo_argv_gate.py` -- scans every
+  connector folder for `sudo` command lines outside the safe-sudo
+  primitives. Kept out of the bind9 suite so the one-connector unit run
+  can run it for any connector.
 - `backend/tests/test_connectors_bind9_reads.py` -- T2 unit suite.
   Pure-parser tests for `parse_named_checkconf_zones`,
   `parse_zonefile`, `parse_dig_answer` (both shapes), and

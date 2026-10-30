@@ -205,6 +205,7 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 		fmt.Fprintf(w, "Refs:         %s\n", strings.Join(dl.Refs, ", "))
 	}
 	printRunOutcome(w, d)
+	printResultHint(w, d)
 	if d.ProposedEffect != nil {
 		b, _ := json.MarshalIndent(d.ProposedEffect, "  ", "  ")
 		fmt.Fprintf(w, "Effect:\n  %s\n", string(b))
@@ -235,6 +236,18 @@ func printRunOutcome(w io.Writer, d *api.ApprovalRequestView) {
 	}
 	if o.AuditId != nil {
 		fmt.Fprintf(w, "Run audit:    %s (meho audit show %s)\n", o.AuditId.String(), o.AuditId.String())
+	}
+}
+
+// printResultHint names the command that prints the output of a run
+// that is done (#5313). Only the sender can read it.
+func printResultHint(w io.Writer, d *api.ApprovalRequestView) {
+	if d.ResultState == nil {
+		return
+	}
+	switch *d.ResultState {
+	case api.ApprovalResultStateExecuted, api.ApprovalResultStateFailed:
+		fmt.Fprintf(w, "Run output:   meho approvals result %s (only the sender can read it)\n", d.Id.String())
 	}
 }
 

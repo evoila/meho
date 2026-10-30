@@ -331,6 +331,16 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 	identity := formatOperatorIdentity(resp.Operator)
 	fmt.Fprintf(stdoutW, "Logged in as %s\n", identity)
 
+	// The person's tenants and the role in each (#5239). A login with
+	// several tenants that chose none gets only this list, the hint and
+	// the DB line: the backplane did no tenant work for it.
+	fmt.Fprint(stdoutW, formatTenants(resp.Operator))
+	if tenantNotChosen(resp.Operator) {
+		fmt.Fprintln(stdoutW, "  No tenant chosen. Choose one with `meho tenants use <name>`.")
+		fmt.Fprintf(stdoutW, "  DB:    %s\n", formatDB(resp.Db))
+		return nil
+	}
+
 	// Vault subsystem. reachable + read_ok plus optional detail.
 	fmt.Fprintf(stdoutW, "  Vault: %s\n", formatVault(resp.Vault))
 
@@ -372,6 +382,31 @@ func PrintHealth(stdoutW io.Writer, resp *api.HealthResponse) error {
 		fmt.Fprintln(stdoutW, line)
 	}
 	return nil
+}
+
+// tenantNotChosen reports a status answer for a login with several
+// tenants that named none (#5239): no current tenant, but a list.
+func tenantNotChosen(op api.OperatorIdentity) bool {
+	return op.TenantId == nil && op.Tenants != nil && len(*op.Tenants) > 0
+}
+
+// formatTenants renders the person's tenants, one per line, with the
+// role and a mark on the current one. Empty when the backplane sends
+// no list (a login without a tenant list, or an older backplane).
+func formatTenants(op api.OperatorIdentity) string {
+	if op.Tenants == nil || len(*op.Tenants) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("  Tenants:\n")
+	for _, t := range *op.Tenants {
+		mark := ""
+		if t.Current {
+			mark = "  (current)"
+		}
+		fmt.Fprintf(&b, "    %s  %s%s\n", t.Name, t.TenantRole, mark)
+	}
+	return b.String()
 }
 
 // formatOperationCatalog returns the warning line for operation rows

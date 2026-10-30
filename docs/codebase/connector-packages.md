@@ -192,15 +192,22 @@ sign it, and the appliance does not accept it.
 ### Tier 2: an image evoila signs
 
 Only evoila's own connector packages go into an image that evoila signs.
-A person reviews each package before it is signed (a separate step, not
-part of this build).
+In the appliance, connector code runs inside the server process, with all
+of the server's rights. So a person reviews each package version as
+carefully as MEHO's own code, and the review is recorded. An approval by a
+bot does not count.
 
-1. Run the same build in evoila's CI, with `--push --sign`. `--sign` runs
+1. A person reviews the wheel with the checklist below and adds a review
+   record for it (see "The review record").
+2. Run the same build in evoila's CI, with `--push --sign --reviews <folder>`.
+   Before the build starts, `build.sh` checks that each connector wheel has
+   a review record for its exact name, version and wheel digest. Without
+   one, it stops with a message that names the package. `--sign` runs
    `cosign sign --yes <image>@<digest>` on the pushed digest. In GitHub
    Actions this is keyless signing with the workflow's identity, the same
    way the public image is signed (`image.yml`). The job needs
    `id-token: write`.
-2. Check the signature before deploying:
+3. Check the signature before deploying:
 
    ```bash
    cosign verify <image>@<digest> \
@@ -208,7 +215,63 @@ part of this build).
      --certificate-oidc-issuer https://token.actions.githubusercontent.com
    ```
 
-3. Deploy by digest, as for tier 1.
+4. Deploy by digest, as for tier 1.
+
+#### The review checklist
+
+The reviewer checks each point and confirms it in the record. The key in
+brackets is the name of the point in the record.
+
+- Every operation passes the operation contract check
+  (`backend/tests/test_operation_contracts.py`). (`operation_contracts`)
+- The risk levels and approval flags fit what each operation does. A write
+  is not marked as a safe read. (`risk_levels`)
+- Secrets are removed from results, from errors and from test captures.
+  (`secrets_removed`)
+- The code calls only the target's own address, and no other host.
+  (`target_address_only`)
+- The licences of the package and of all its dependencies fit.
+  (`licences`)
+- The package has no start-up hooks: no `.pth` file, no `sitecustomize`
+  or `usercustomize`, and no code that runs at import beyond registering
+  its operations. (`no_startup_hooks`)
+
+#### The review record
+
+A review record is one JSON file for one package version. It lives in the
+release repository, in the folder that CI passes to `--reviews`. The
+reviewer adds it with a signed-off commit (`git commit -s`), so the
+history of the release repository also names the reviewer.
+
+```json
+{
+  "name": "example-connectors",
+  "version": "1.2.0",
+  "wheel_digest": "sha256:<64 hex>",
+  "reviewer": "Jane Example",
+  "date": "2026-10-30",
+  "checklist": {
+    "operation_contracts": true,
+    "risk_levels": true,
+    "secrets_removed": true,
+    "target_address_only": true,
+    "licences": true,
+    "no_startup_hooks": true
+  }
+}
+```
+
+- `wheel_digest` is the sha256 of the wheel file, the same value as in the
+  allowlist file: `sha256sum <wheel>`, with `sha256:` in front.
+- The check (`overlay_check.py check-reviews`) stops when:
+  - no record has the wheel's name and version;
+  - the record has another wheel digest. A changed wheel needs a new
+    review, even with the same version;
+  - a field is missing, the date is not `YYYY-MM-DD`, or a checklist
+    point is not `true`;
+  - the reviewer name ends in `[bot]`.
+- Any record file in the folder that cannot be read also stops the check.
+- `--reviews` without `--sign` runs the same check as a dry run.
 
 ## Control flow
 
@@ -325,6 +388,8 @@ in.
 - `backend/tests/test_connector_packages.py`
 - `backend/tests/test_connector_package_owner.py`
 - `deploy/connector-overlay/` and `backend/tests/test_connector_overlay_build.py`
+- `backend/tests/test_connector_overlay_review.py` — the review record
+  check and `build.sh --sign`
 - Wheel file format (`RECORD`, `.data` folder):
   https://packaging.python.org/en/latest/specifications/binary-distribution-format/
 - `uv pip install`: https://docs.astral.sh/uv/reference/cli/#uv-pip-install

@@ -101,6 +101,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest import library_download, ovf_import_control
+from meho_backplane.connectors.vmware_rest._content_library_schemas import FIND_LIBRARY_CALL
 from meho_backplane.connectors.vmware_rest.composite_issues import issue
 from meho_backplane.connectors.vmware_rest.composites.schemas import CONTENT_LIBRARY_ID_PATTERN
 from meho_backplane.connectors.vmware_rest.ovf_import import (
@@ -273,7 +274,7 @@ _OP_FILTER_OVF_LIBRARY_ITEM = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}
 # and a typed pyvmomi ``HttpNfcLease`` import (#2890) would uncouple completion
 # from a single blocking read entirely.
 _LIBRARY_ITEM_DEPLOY_TIMEOUT = httpx.Timeout(connect=5.0, read=10800.0, write=10800.0, pool=5.0)
-_OP_FIND_LIBRARY = "POST:/content/library?action=find"
+_OP_FIND_LIBRARY = FIND_LIBRARY_CALL
 _OP_FIND_LIBRARY_ITEM = "POST:/content/library/item?action=find"
 # Content-library item type discriminator for OVF/OVA templates — the find
 # filter that keeps a colliding non-OVF item name (ISO, other) from matching.

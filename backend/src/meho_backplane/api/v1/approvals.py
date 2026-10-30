@@ -729,7 +729,7 @@ async def get_approval_result(
 
     Surfaces the reduced / handle-shaped ``OperationResult`` envelope the
     backplane produced when it re-dispatched the approved op, so the consumer
-    that parked a **non-idempotent** op (VCF ``installer.sddc.bringup.start``)
+    that parked a **non-idempotent** op (one that starts a long task)
     can resume in place by poll — read back the resulting task id and continue
     polling it — instead of a second submit that would start a second
     bring-up.

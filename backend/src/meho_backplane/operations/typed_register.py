@@ -1431,7 +1431,7 @@ async def register_composite_operation(
         :func:`register_typed_operation`. ``op_id`` is the dotted
         identifier composites are surfaced under -- by convention
         ``"<product>.composite.<verb>.<noun>"`` (e.g.
-        ``"vmware.composite.vm.create"``); the dispatcher treats it
+        ``"gh.composite.repo_create"``); the dispatcher treats it
         as opaque.
     handler
         The async callable the dispatcher routes the composite to.
@@ -1460,8 +1460,8 @@ async def register_composite_operation(
         cluster patching, host evacuation -- and the safe-by-default
         for the operator is the assume-dangerous posture. Per-op
         overrides at the call site for read-only composites
-        (``vmware.composite.vm.info``,
-        ``vmware.composite.performance.summary``).
+        (``gh.composite.repo_view``,
+        ``gh.composite.pr_status_summary``).
     requires_approval
         Defaults to ``True`` (vs. typed's ``False`` default). Same
         rationale: composites' blast radius is larger by construction

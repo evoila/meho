@@ -83,7 +83,7 @@ __all__ = [
 
 
 # Pattern for connector ids of the form ``"<head>-<version>"`` where
-# ``head`` may itself contain hyphens (``"vmware-rest"`` etc.) and
+# ``head`` may itself contain hyphens (``"harbor-rest"`` etc.) and
 # ``version`` is the tail segment. The version segment is pinned to
 # ``[0-9][A-Za-z0-9._]*`` so it always starts with a digit -- this
 # avoids ambiguous splits like ``"foo-bar"`` (no version) and keeps
@@ -96,8 +96,8 @@ def parse_connector_id(connector_id: str) -> tuple[str, str, str]:
 
     The connector_id convention from the parent Initiative (#388):
 
-    * ``"vmware-rest-9.0"`` -> product=``"vmware"``, version=``"9.0"``,
-      impl_id=``"vmware-rest"``.
+    * ``"harbor-rest-2.x"`` -> product=``"harbor"``, version=``"2.x"``,
+      impl_id=``"harbor-rest"``.
     * ``"vault"`` (v1-style, single-key product) -> product=``"vault"``,
       version=``""``, impl_id=``""``. Backward-compatible with the
       shipped v1 registrations.
@@ -118,8 +118,8 @@ def parse_connector_id(connector_id: str) -> tuple[str, str, str]:
     head = match.group("head")
     version = match.group("version")
     # ``head`` is the full impl_id including a possible product prefix
-    # (``"vmware-rest"``). The product is the first hyphen segment of
-    # the impl_id (``"vmware"``); the rest carries the impl
+    # (``"harbor-rest"``). The product is the first hyphen segment of
+    # the impl_id (``"harbor"``); the rest carries the impl
     # discriminator. Single-segment heads (``"vault-1.x"``) produce
     # impl_id == product, matching how typed registrations encode the
     # single-impl case.
@@ -641,7 +641,7 @@ async def close_connector_ids(*, tenant_id: UUID, connector_id: str) -> list[str
     """Return up to 5 caller-visible connector ids close to *connector_id* (#4136).
 
     Runs only on the unknown-connector error path. A close id is one that
-    starts with the given text (``vmware-rest`` -> ``vmware-rest-9.0``) or
+    starts with the given text (``harbor-rest`` -> ``harbor-rest-2.x``) or
     has a close spelling (``linux-ssh-1.0`` -> ``linux-ssh-1.x``). The
     match ignores case. Closest ids come first.
 

@@ -164,9 +164,9 @@ def _version_looks_like_epoch(version: str) -> bool:
 #: #3061 shape, where the epoch rides the ``impl_id`` tail rather than
 #: the ``version``. The ``-probe-`` anchor plus the trailing digit run
 #: keep it off every legitimate connector: the stable probe impls end in
-#: a bare ``-probe`` with no epoch (``net-probe`` / ``nsx-rest-probe`` /
-#: ``fleet-rest-probe``), and no real product-line impl_id
-#: (``fleet-rest`` / ``vmware-rest`` / ``vcd``) carries a
+#: a bare ``-probe`` with no epoch (for example ``net-probe``), and no
+#: real product-line impl_id (``harbor-rest`` / ``gh-rest`` / ``k8s``)
+#: carries a
 #: ``-probe-<digits>`` tail at all. ``[0-9]`` (not ``\d``) keeps it
 #: ASCII-exact, identical to the migration's POSIX-regex reap predicate.
 _PROBE_EPOCH_IMPL_ID_RE = re.compile(rf"-probe-[0-9]{{{_EPOCH_VERSION_MIN_DIGITS},}}$")
@@ -178,7 +178,7 @@ def _impl_id_looks_like_probe_epoch(impl_id: str) -> bool:
     The #3061 companion to :func:`_version_looks_like_epoch`: the
     consumer probe-then-ingest loop that keeps a *stable* ``version``
     (``9.0``) instead mints a per-run epoch into the ``impl_id``
-    (``fleet-rest-probe-<epoch>``), so a changed ``impl_id`` renders a
+    (``<impl>-probe-<epoch>``), so a changed ``impl_id`` renders a
     fresh ``(product, version, impl_id)`` triple on every run — the same
     unbounded-catalog defect #2977 fixed for the ``version`` column.
     """
@@ -192,7 +192,7 @@ class IngestRequest(BaseModel):
     :func:`register_ingested_operations` once per spec under the same
     ``(product, version, impl_id)`` connector triple, then run
     :func:`run_llm_grouping` once for the whole connector. Multi-spec
-    ingestion (vCenter's ``vcenter.yaml`` + ``vi-json.yaml``) lands as
+    ingestion (a product whose API is split across several spec files) lands as
     multiple ``SpecSource`` entries in one request.
 
     Two mutually-exclusive request shapes:
@@ -534,7 +534,7 @@ class IngestRequest(BaseModel):
         A connector version is a stable product-line label (``9.0`` /
         ``2.x`` / ``2026-04``), never a per-run timestamp. The
         consumer-side probe-then-ingest loop that filed #2977 stamped the
-        probe run's epoch as ``version`` (rendering ``fleet-rest-probe-<epoch>``),
+        probe run's epoch as ``version`` (rendering ``<impl>-probe-<epoch>``),
         so every run produced a fresh ``(product, version, impl_id)``
         triple — a new catalog row per probe, accumulating without bound
         because nothing reaps them (the dedup upsert is keyed on that
@@ -573,8 +573,8 @@ class IngestRequest(BaseModel):
         loop that stamps the epoch as ``version``, but the loop that filed
         #3061 keeps a *legitimate* ``version`` (``9.0``) and mints the
         per-run epoch into the ``impl_id`` instead
-        (``fleet-rest-probe-<epoch>``, rendering
-        ``connector_id="fleet-rest-probe-<epoch>-9.0"``). ``9.0`` is a real
+        (``<impl>-probe-<epoch>``, rendering
+        ``connector_id="<impl>-probe-<epoch>-9.0"``). ``9.0`` is a real
         product-line version, so the ``version`` guard never fires — yet a
         changed ``impl_id`` still renders a fresh ``(product, version,
         impl_id)`` triple, so the upsert INSERTs a new connector per run
@@ -597,7 +597,7 @@ class IngestRequest(BaseModel):
             raise ValueError(
                 "connector_impl_id_probe_epoch_rejected: impl_id "
                 f"{value!r} ends in a '-probe-<epoch>' Unix-epoch tail, not a "
-                "stable impl_id (e.g. 'fleet-rest', 'fleet-rest-probe'). A "
+                "stable impl_id (e.g. 'harbor-rest', 'net-probe'). A "
                 "per-run epoch renders a fresh connector_id on every ingest, "
                 "minting the unbounded '<impl>-probe-<epoch>' catalog rows "
                 "#3061 fixes. Re-ingest under a stable impl_id. "
@@ -897,8 +897,8 @@ class ConnectorListItem(BaseModel):
     (the dispatchability flag that survives connector-level
     enable/disable cycles via operator overrides). Useful for the
     CLI's ``meho connector list --status staged`` summary view and
-    for an LLM browsing the catalog: ``vmware-rest-9.0`` ingests
-    ~2,211 ops of which only a fraction are enabled, and before the
+    for an LLM browsing the catalog: a big ingested connector
+    can carry thousands of ops of which only a fraction are enabled, and before the
     split nothing on the row said which of the two numbers
     ``operation_count`` was.
 
@@ -923,7 +923,7 @@ class ConnectorListItem(BaseModel):
     object on ``state="registered"`` rows and ``None`` on
     ``state="ingested"`` rows (no operator action remains for an
     ingested connector) — with one exception: a tenant row stored under
-    a former product name (``vcf-logs`` rows for ``vrli-rest-9.0``,
+    a former product name (rows saved before a product rename,
     #4889) can never be called, so it ships ``dispatchable=False`` plus
     a ``next_step`` naming ``meho connector delete <id>`` as the
     clean-up. For registered rows the hint is computed against the curated

@@ -107,25 +107,33 @@ Two settings then make every pod pull from there (#4100):
 
 The steps:
 
-1. List the images, with the values file you will install with:
+1. Get the chart. Its file `images.txt` lists every image of the chart
+   except MEHO's own. Each line holds the image, pinned by digest, and its
+   path in your registry, with a tag. The list also holds images you may
+   not need, for example the built-in parts when you bring your own;
+   copying them does no harm.
 
    ```bash
-   helm template meho oci://ghcr.io/evoila/meho-chart --version <version> -f values.yaml \
-     | awk '$1 == "image:" { gsub(/"/, "", $2); print $2 }' | sort -u
+   helm pull oci://ghcr.io/evoila/meho-chart --version <version> --untar
+   cat meho-chart/images.txt
    ```
 
-2. Copy each image into your registry. Leave out the registry host of the
-   source, and write `library/<name>` for a one-word Docker Hub name.
-   `--all` copies every CPU type. `--preserve-digests` keeps the digest, so
-   the chart's `@sha256:` addresses still work, even though you copy to a
-   tag. First log in once: `skopeo login` asks for the password and writes
-   the login to a file, so the password is never on a command line:
+2. Copy each image into your registry, and then the MEHO image of the
+   version you install (`image.tag`). First log in once: `skopeo login`
+   asks for the password and writes the login to a file, so the password
+   is never on a command line. `--all` copies every CPU type.
+   `--preserve-digests` keeps the digest, so the chart's `@sha256:`
+   addresses still work, even though you copy to a tag. The tag is only a
+   label in your registry; the pods pull by digest.
 
    ```bash
    skopeo login --authfile registry-auth.json -u <user> harbor.example.com
+   while read -r source path; do
+     skopeo copy --all --preserve-digests --dest-authfile registry-auth.json \
+       "docker://$source" "docker://harbor.example.com/meho/$path"
+   done < meho-chart/images.txt
    skopeo copy --all --preserve-digests --dest-authfile registry-auth.json \
-     docker://quay.io/keycloak/keycloak@sha256:<digest> \
-     docker://harbor.example.com/meho/keycloak/keycloak:<tag>
+     docker://ghcr.io/evoila/meho:<image tag> docker://harbor.example.com/meho/evoila/meho:<image tag>
    ```
 
 3. Create the pull secret from the same login file, and install. If the
@@ -487,6 +495,19 @@ each lives inline in
   trust-bundle mount point (`SSL_CERT_FILE`) and any other operator env.
   Applied to **both** the backplane container and the migration Job
   container.
+- **`sandboxMode.*`** — only for an instance that holds disposable test
+  systems ([decision](decisions/sandbox-mode.md)). All three are read at
+  boot only; no request can change them.
+  - `sandboxMode.enabled` → `MEHO_SANDBOX_MODE` (default `false`). Turns
+    sandbox mode on: a tenant admin may give a service principal a grant
+    that also covers deletes (a delete grant). Fixed for the life of the
+    database.
+  - `sandboxMode.confirmHost` → `MEHO_SANDBOX_MODE_CONFIRM`. Must equal
+    `ingress.host`, and that host needs a part that is exactly `sandbox`.
+  - `sandboxMode.deleteGrantsFromApi` → `MEHO_SANDBOX_DELETE_GRANTS_FROM_API`
+    (default `false`). Lets a tenant admin create a delete grant through
+    REST and the CLI too, not only in the web console. Rendered only when
+    `sandboxMode.enabled` is `true`.
 
 ## In-cluster webhook senders
 

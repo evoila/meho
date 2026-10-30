@@ -37,7 +37,12 @@ from typing import Any
 
 from meho_backplane.api.v1.health import build_health_response
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 
 
 async def _meho_status_handler(
@@ -64,6 +69,7 @@ register_mcp_tool(
         # (the _READY_ENTRY_FEATURE ``mcp``-entry precedent).
         feature=None,
         name="meho_status",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Returns the operator's identity (sub, name, email, tenant_id, "

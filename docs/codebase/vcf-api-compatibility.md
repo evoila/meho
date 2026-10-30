@@ -237,7 +237,10 @@ the ingested-catalog boundary.
   op, `unqualified_target_version` is reported before `invalid_params`.
   `preview_operation` makes the same choice (without an audit row), so its
   envelope names the sibling's `connector_id` and its `preview_hash` matches
-  the call. A destructive op can then use the fallback too. The fallback
+  the call. A destructive op can then use the fallback too. When no
+  catalog serves the target, the preview is refused with the same
+  `unqualified_target_version` error, reason and target fields as the call
+  (#4984). It writes no audit row and gives no `preview_hash`. The fallback
   is for a fresh call only. When an approved request resumes, the call
   stays on the catalog the approval request stored. If the target's
   detected version moved while the request waited and that catalog no

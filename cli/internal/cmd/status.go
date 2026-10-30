@@ -5,6 +5,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -136,6 +137,9 @@ func runOneShot(cmd *cobra.Command, backplaneURL string, jsonOut bool) error {
 	}
 
 	resp, err := client.GetHealth(cmd.Context())
+	if msg, ok := noTenantMessage(resp); ok {
+		return output.RenderError(cmd.ErrOrStderr(), output.AuthExpired(msg), jsonOut)
+	}
 	if err != nil {
 		if api.IsRefreshRejected(err) {
 			// A refresh_token was present but the IdP rejected it as
@@ -173,6 +177,34 @@ func runOneShot(cmd *cobra.Command, backplaneURL string, jsonOut bool) error {
 		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
 	}
 	return output.PrintHealth(cmd.OutOrStdout(), resp.JSON200)
+}
+
+// tenantBootstrapGuideURL is the guide that explains how a person gets
+// a tenant: through exactly one MEHO role group.
+const tenantBootstrapGuideURL = "https://evoila.github.io/meho/latest/guides/tenant-bootstrap/"
+
+// noTenantMessage returns the message for a 401 whose detail starts with
+// missing_tenant_claim (#3872). The login worked, but the token carries
+// no tenant, so "run meho login" would not help. Older backplanes send
+// the bare code, so the CLI writes its own text instead of passing the
+// server detail through.
+func noTenantMessage(resp *api.AuthenticatedHealthApiV1HealthGetResponse) (string, bool) {
+	if resp == nil || resp.StatusCode() != http.StatusUnauthorized {
+		return "", false
+	}
+	var body struct {
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		return "", false
+	}
+	if body.Detail != "missing_tenant_claim" && !strings.HasPrefix(body.Detail, "missing_tenant_claim:") {
+		return "", false
+	}
+	return "missing_tenant_claim: your login has no tenant. Usually you are in no " +
+		"MEHO role group. Logging in again does not help: ask your admin to put " +
+		"you in exactly one role group, then run `meho login` again. Guide: " +
+		tenantBootstrapGuideURL, true
 }
 
 // versionCheckTimeout caps the GET /version call so a slow backplane

@@ -3771,8 +3771,10 @@ changes.
 
 Each text therefore says:
 
-- the group's main reads and main changes, with the ingested reads a model
-  looks for (for `vm`: list VMs and read one VM);
+- the group's main reads and main changes, with the ingested operations a
+  model looks for (for `vm`: list VMs and read one VM; for `events` and
+  `performance`, which have one hand-written read each: also the ingested
+  writes, such as `LogUserEvent` and `UpdatePerfInterval`);
 - a safety level only next to a named operation, for example
   `(vm.snapshot.create, caution)`.
 

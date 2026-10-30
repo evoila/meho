@@ -132,11 +132,10 @@ def test_handler_ref_resolves() -> None:
     assert not handler_ref_resolves("")
 
 
-def test_retired_list_names_the_two_vmware_composites() -> None:
-    assert {op.op_id for op in RETIRED_OPS} == _RETIRED_COMPOSITES
-    assert {(op.product, op.version, op.impl_id) for op in RETIRED_OPS} == {
-        ("vmware", "9.0", "vmware-rest")
-    }
+def test_retired_list_names_the_retired_ops() -> None:
+    expected = {RetiredOp("vmware", "9.0", "vmware-rest", op_id) for op_id in _RETIRED_COMPOSITES}
+    expected.add(RetiredOp("migration", "1.x", "migration-assess", "migration.inventory.csv"))
+    assert expected == RETIRED_OPS
 
 
 @pytest.mark.asyncio

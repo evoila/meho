@@ -4772,6 +4772,7 @@ meho targets add <name> [flags]
 - `--port` — connection port (default: the connector's product default)
 - `--preferred-impl` — connector impl_id override for the resolver's tie-break
 - `--product` — connector product slug (required; must match a registered connector — see `meho connector list`)
+- `--secret-field` — connector_field=source_field: read source_field from the secret when the connector asks for connector_field (repeatable)
 - `--secret-ref` — Vault path of the target's credential (omit to derive the per-tenant default)
 - `--tls-ca-pin` — PEM CA bundle to pin for this target (mutually exclusive with --verify-tls=false)
 - `--tls-server-name` — TLS SNI / certificate-verification hostname, decoupled from --host
@@ -4827,6 +4828,7 @@ meho targets import <file> [flags]
 - `--backplane` — backplane URL to import into (defaults to the URL recorded by `meho login`)
 - `--dry-run` — print the plan (read-only: one GET, no writes); does not apply
 - `--json` — output the plan as JSON (use with --dry-run)
+- `--secret-field` — connector_field=source_field to add to every target's secret field map (repeatable)
 - `--update` — PATCH existing targets instead of erroring on duplicate names
 
 ### `meho targets list`
@@ -4865,7 +4867,7 @@ meho targets update <name, alias or id> [flags]
 - `--alias` — alias the target resolves by (repeatable; replaces the whole alias list)
 - `--auth-model` — per-target identity model
 - `--backplane` — backplane URL the target lives in (defaults to the URL recorded by `meho login`)
-- `--clear` — field to remove (repeatable; sends null, or an empty list for alias and an empty map for extra): alias, extra, fqdn, note, port, preferred-impl, secret-ref, tls-ca-pin, tls-server-name, version
+- `--clear` — field to remove (repeatable; sends null, or an empty list for alias and an empty map for extra): alias, extra, fqdn, note, port, preferred-impl, secret-field, secret-ref, tls-ca-pin, tls-server-name, version
 - `--extra` — key=value for the target's extras map, e.g. scheme=http (repeatable; replaces the whole map)
 - `--fqdn` — fully-qualified domain name, when distinct from --host
 - `--host` — new host or IP the connector dials
@@ -4874,6 +4876,7 @@ meho targets update <name, alias or id> [flags]
 - `--port` — connection port
 - `--preferred-impl` — connector impl_id override for the resolver's tie-break
 - `--product` — new connector product slug
+- `--secret-field` — connector_field=source_field to add or replace in the secret field map; connector_field= removes it (repeatable)
 - `--secret-ref` — Vault path of the target's credential
 - `--tls-ca-pin` — PEM CA bundle to pin for this target
 - `--tls-server-name` — TLS SNI / certificate-verification hostname, decoupled from --host

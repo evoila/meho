@@ -149,6 +149,9 @@ func printTargetSummary(w io.Writer, t *api.Target) {
 	if t.SecretRef != nil && *t.SecretRef != "" {
 		fmt.Fprintf(w, "%-18s %s\n", "secret_ref:", *t.SecretRef)
 	}
+	if t.SecretFieldMap != nil && len(*t.SecretFieldMap) > 0 {
+		fmt.Fprintf(w, "%-18s %s\n", "secret_field_map:", formatSecretFieldMap(*t.SecretFieldMap))
+	}
 	if t.PreferredImplId != nil && *t.PreferredImplId != "" {
 		fmt.Fprintf(w, "%-18s %s\n", "preferred_impl_id:", *t.PreferredImplId)
 	} else {
@@ -166,6 +169,21 @@ func printTargetSummary(w io.Writer, t *api.Target) {
 	// view show byte-identical strings.
 	fmt.Fprintf(w, "%-18s %s\n", "created_at:", t.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	fmt.Fprintf(w, "%-18s %s\n", "updated_at:", t.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"))
+}
+
+// formatSecretFieldMap renders the secret field map as a sorted
+// `connector_field=source_field, ...` list (field names only).
+func formatSecretFieldMap(m map[string]string) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = k + "=" + m[k]
+	}
+	return strings.Join(parts, ", ")
 }
 
 // formatFingerprint renders the cached fingerprint as a one-line

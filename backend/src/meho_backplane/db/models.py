@@ -1451,6 +1451,11 @@ class OperationGroup(Base):
     group_key: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     when_to_use: Mapped[str] = mapped_column(Text, nullable=False)
+    # SHA-256 hex of the ``when_to_use`` MEHO's code last wrote (#4332).
+    # NULL for texts from spec ingestion and for rows MEHO cannot prove it
+    # wrote. A row whose text still matches this hash gets the new code
+    # text at start-up; an operator edit breaks the match and is kept.
+    code_text_hash: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     review_status: Mapped[str] = mapped_column(
         Text,
         nullable=False,
@@ -4784,6 +4789,10 @@ class RunnerPrincipal(Base):
     # the version does not match, so an operator can see which runner is on
     # another version. ``NULL`` until the runner calls after migration 0118.
     wire_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # #5038: the digest of the runner's connector packages, sent with each
+    # call (the runner list shows it). ``NULL`` until the runner calls after
+    # migration 0124.
+    package_set_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         Index(
@@ -5982,6 +5991,26 @@ class SandboxModeState(Base):
     stored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (sa.CheckConstraint("id = 1", name="ck_sandbox_mode_state_single_row"),)
+
+
+class OperationCatalogState(Base):
+    """Which release last wrote the built-in operation rows: one row (#5019).
+
+    Written by :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
+    in the same transaction as the typed and composite
+    :class:`EndpointDescriptor` rows, so it changes only when those rows
+    change. ``written_by_release`` is the commit hash of the build
+    (``GIT_SHA``, as ``GET /version`` reports it). A pod compares it with
+    its own release to notice rows written by another release.
+    """
+
+    __tablename__ = "operation_catalog_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    written_by_release: Mapped[str] = mapped_column(Text, nullable=False)
+    written_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (sa.CheckConstraint("id = 1", name="ck_operation_catalog_state_single_row"),)
 
 
 class ScheduledTriggerKind(StrEnum):

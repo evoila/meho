@@ -2489,9 +2489,37 @@ Each `ConnectorReviewGroup` carries `advisory`
 * `flags` — short, plain notes, at most five, without repeats:
   * the text makes a safety claim the ops break: "read-only" (or "no
     side effects", "does not modify") while an op is not `safe` or needs
-    approval; "non-destructive" while an op is `destructive`; "all ...
-    dangerous/destructive" while an op is at another level, higher or
-    lower; "all ... require approval" while an op does not;
+    approval; "non-destructive" while an op is `destructive`;
+  * an approval claim ("approval-required", "require(s) approval",
+    "need(s) approval") or a level claim ("dangerous", "destructive")
+    that the ops it is about break (#4971). Each sentence is checked on
+    its own, and the subject of the sentence decides which ops it is
+    about:
+    * a sentence that names a read ("All read and write operations
+      require approval.", "Reads and writes are dangerous."), or that has
+      "all" or "every" and names no change ("All operations are
+      approval-required.", "Every call is dangerous."), is about every op
+      in the group. The approval claim is flagged while an op does not
+      need approval. The level claim is flagged while an op is at another
+      level, higher or lower;
+    * any other sentence ("Write operations are approval-required.",
+      "Every change requires approval.", "Delete operations are
+      dangerous.") is about the changes: the ops that are not `safe`, or
+      every op when all of them are `safe`. The approval claim is flagged
+      while a change op does not need approval. The level claim is
+      flagged while a change op is below the named level.
+
+    So with one `safe` read without approval and one `caution` write
+    that needs approval, "Every change requires approval." is true, and
+    both "All operations are approval-required." and "All read and
+    write operations require approval." are flagged. A change is named
+    by a word such as "write", "change", "update", "create", "delete",
+    "remove", "edit", "modify", or "mutate". A read is named by a word
+    such as "read", "get", "list", "query", "fetch", "retrieve", "view",
+    "inspect", or "search". A sentence that says one thing about reads
+    and another about writes ("Reads run at once, writes need
+    approval.") is checked against every op as a whole; two sentences
+    say it better;
   * the text shares no word with the op ids and summaries.
 
 A `staged` group has no enabled op until the operator enables it. Then
@@ -2521,6 +2549,40 @@ new connector `version` with its own rows next to the old ones. The same
 `OpIdCollision`. `test_operations_ingest_review.py` pins all of this
 (`-k override_preserved_on_reingest`,
 `-k breaking_change_new_version_identity`).
+
+### Group text check at ingest (#4971)
+
+Pass 1 sends the model only `op_id`, `summary`, and `tags` for each op.
+It never sees a risk level, so it can write "Write operations are
+approval-required." for a group whose writes run at once. An agent or an
+operator who trusts that text expects a second person to check a change
+that nobody checks.
+
+So the grouping run checks each new text before it is stored:
+
+1. The members of a group are known only after Pass 2. So the check runs
+   in `_create_groups_and_assign` right after Pass 2, for every group
+   this run created (full runs and extend runs).
+2. `drop_unsupported_claims` in `group_truth.py` splits the text into
+   sentences. It removes each sentence that makes a safety claim the
+   group's ops break. It uses the same word match and the same claim
+   subjects as the review advice above, with the real `safety_level` and
+   `requires_approval` of the member ops. A true claim stays: a group
+   whose every change needs approval may say "Every change requires
+   approval.", even when it also holds reads that run at once. The same
+   group may not say "All operations are approval-required.".
+3. When no sentence is left, the group gets the plain text
+   `Operations for <name>.` A group with no member ops keeps its text.
+4. Each changed text logs `llm_grouping_unsupported_claims_dropped`.
+
+Why remove sentences instead of asking the model to rewrite the text:
+removing is the same on every run, adds no model call (so
+`expected_llm_call_count` stays true), and cannot add a new wrong claim.
+The cost is that a sentence with a broken claim is lost as a whole.
+
+Groups that already exist are never checked or changed here, so a text
+an operator edited with `meho connector edit-group` stays as it is.
+`test_operations_ingest_group_text_check.py` pins this.
 
 ### T2 control flow
 
@@ -2599,7 +2661,8 @@ run_llm_grouping
 │  ├─ parse_proposal_response       # GroupProposal schema validation
 │  ├─ drop proposals with an existing key
 │  ├─ _persist_proposed_groups      # session.add per row + flush
-│  └─ _assign_and_apply             # Pass 2
+│  ├─ _assign_and_apply             # Pass 2
+│  └─ _check_new_group_texts        # drop broken safety claims (#4971)
 │
 │  _assign_and_apply:
 │  ├─ _assign_ops_in_batches        # one LLM call per `batch_size` ops

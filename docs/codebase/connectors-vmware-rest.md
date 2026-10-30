@@ -1811,7 +1811,8 @@ The write composites build their `/api` request bodies as the vSphere
 Automation `*Spec` **at the top level** of the JSON body —
 `{"placement": {…}}` for relocate, `{"count": …, "cores_per_socket": …}`
 for the CPU PATCH, and so on. `_split_sub_op` substitutes the
-`{vm}` / `{nic}` / `{cdrom}` path variables into the URL and posts every
+`{vm}` / `{nic}` / `{cdrom}` path variables into the URL (each value
+percent-encoded as one path segment) and posts every
 remaining key verbatim as the body, so a handler passes the `*Spec` fields
 alongside the path vars (e.g. `{"vm": vm_moid, "placement": {"host": …}}`).
 
@@ -2535,9 +2536,17 @@ Code: `composites/_teardown.py` (shared plan helpers + `folder.delete`),
 listed in `_governed_subops.py`; the vim paths are reconciled against the
 pinned `vi-json.yaml` and the REST paths against `vcenter.yaml`.
 
-Follow-up (not in #3339): `_write._split_sub_op` puts path values into URLs
-without percent-encoding. The new ops validate every id first; the older
-library ops (`content_library.subscribed.status` / `.sync`) do not yet.
+The older library ops use the same id rule (#3938):
+`content_library.subscribed.sync` / `.status` / `.items.list` (the
+`library_id`, the id found for a `library_name`, and the item ids vCenter
+lists), `vm.deploy_from_library` and `vm.import_from_library` (the
+`library_item`, and the item id found for a `library_item_name`), and
+`vm.clone` (`library_item`). Each is checked in the input schema and in the
+handler, before any request. The items list skips an item whose id is not a
+UUID and adds a `warning` issue. As a second layer, `_write._split_sub_op`
+percent-encodes each path value as one segment (`_write._path_segment`):
+`/`, `%`, `?`, `#` and a bare `.` / `..` are encoded, while moids, UUIDs and
+`urn:...` ids keep the same URL as before.
 
 ### Governed DRS rule delete (`cluster.drs_rule.delete`)
 
@@ -3837,7 +3846,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.snapshot.create` | `{action, vm, snapshot_name, memory, quiesce}` echo | param echo, no I/O |
 | `vm.snapshot.delete` | mandatory `blast_radius` from the handler's own plan: the snapshot, and the snapshots below it when `remove_children` is set | live read (vim `RetrievePropertiesEx` of `VirtualMachine.snapshot`) |
 | `vm.migrate` | `{vm, cluster, target_host, target_host_source}` | param echo, no I/O |
-| `vm.power` | `{vm, verb, power_kind}` echo (`power_kind` = `hard` vs Tools-soft `guest`) | param echo, no I/O |
+| `vm.power` | `{vm, name, power_state, verb, power_kind}` (`power_kind` = `hard` vs Tools-soft `guest`); a failed read keeps the moid, sets `name` / `power_state` to `null` and adds an `unavailable` note -- the request is still created (#3942) | live read, best-effort (`GET:/vcenter/vm/{vm}`) |
 | `cluster.drs_rule.create` | `{cluster, cluster_name, rule_type, rule_name, enabled, resolved, total_resolved}` | live read (`GET:/vcenter/vm` + `GET:/vcenter/cluster/{cluster}`) |
 | `folder.create` | `{parent_folder` / `parent_folder_id, datacenter?, new_folder_name}` echo | param echo, no I/O |
 

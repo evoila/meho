@@ -188,6 +188,13 @@ __all__ = [
 ]
 
 
+#: vCenter content-library and item ids are UUIDs. Nothing else is accepted,
+#: so an id can never point a REST path at another object.
+CONTENT_LIBRARY_ID_PATTERN: str = (
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
 #: The ``issues`` field a write composite adds when it did not complete (#3813).
 #: An ``error``-severity entry makes the dispatcher record the call as failed
 #: (``status="error"``, audit ``result_status="error"``), not ``ok``.
@@ -1543,9 +1550,9 @@ VM_CLONE_PARAMETER_SCHEMA: dict[str, Any] = {
         },
         "library_item": {
             "type": "string",
-            "minLength": 1,
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
             "description": (
-                "Content-library template item id. Rides the deploy path as "
+                "Content-library template item id (a UUID). Rides the deploy path as "
                 "``POST:/vcenter/vm-template/library-items/"
                 "{templateLibraryItem}?action=deploy``."
             ),
@@ -1557,7 +1564,7 @@ VM_CLONE_PARAMETER_SCHEMA: dict[str, Any] = {
         {
             "source_vm": "vm-42",
             "target_name": "<new-vm-name>",
-            "library_item": "<template-library-item-id>",
+            "library_item": "00000000-0000-0000-0000-000000000000",
         }
     ],
 }
@@ -5021,9 +5028,9 @@ VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "library_item": {
             "type": "string",
-            "minLength": 1,
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
             "description": (
-                "Content-library OVF/OVA item id (passthrough). Rides the deploy "
+                "Content-library OVF/OVA item id (a UUID). Rides the deploy "
                 "path as ``POST:/vcenter/ovf/library-item/{ovfLibraryItemId}"
                 "?action=deploy``. Give exactly one of ``library_item`` and "
                 "``library_item_name``; both or neither is refused before the call."
@@ -5313,9 +5320,9 @@ VM_IMPORT_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "library_item": {
             "type": "string",
-            "minLength": 1,
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
             "description": (
-                "Content-library OVF/OVA item id (passthrough). Give exactly one of "
+                "Content-library OVF/OVA item id (a UUID). Give exactly one of "
                 "``library_item`` and ``library_item_name``; both or neither is "
                 "refused before the call."
             ),
@@ -5427,7 +5434,7 @@ VM_IMPORT_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "examples": [
         {
-            "library_item": "<ovf-library-item-id>",
+            "library_item": "00000000-0000-0000-0000-000000000000",
             "resource_pool": "resgroup-8",
             "datastore": "datastore-15",
             "name": "<vm-name>",
@@ -7732,9 +7739,9 @@ CONTENT_LIBRARY_SUBSCRIBED_SYNC_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "library_id": {
             "type": "string",
-            "minLength": 1,
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
             "description": (
-                "Subscribed-library id to synchronise. Supply this **or** "
+                "Subscribed-library id (a UUID) to synchronise. Supply this **or** "
                 "``library_name``; ``library_id`` wins when both are present."
             ),
         },
@@ -7804,9 +7811,9 @@ CONTENT_LIBRARY_SUBSCRIBED_STATUS_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "library_id": {
             "type": "string",
-            "minLength": 1,
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
             "description": (
-                "Subscribed-library id to read. Supply this **or** "
+                "Subscribed-library id (a UUID) to read. Supply this **or** "
                 "``library_name``; ``library_id`` wins when both are present."
             ),
         },
@@ -7920,9 +7927,9 @@ CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "library_id": {
             "type": "string",
-            "minLength": 1,
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
             "description": (
-                "Subscribed-library id whose items to list. Supply this **or** "
+                "Subscribed-library id (a UUID) whose items to list. Supply this **or** "
                 "``library_name``; ``library_id`` wins when both are present."
             ),
         },
@@ -8224,11 +8231,6 @@ CLUSTER_MOID_PATTERN: str = r"^domain-c[0-9]+$"
 #: ``group-n`` network, ``group-d`` datacenter folders). ``group-p`` is a
 #: datastore cluster and is not accepted.
 FOLDER_MOID_PATTERN: str = r"^group-[a-oq-z][0-9]+$"
-#: vCenter content-library and item ids are UUIDs. Nothing else is accepted,
-#: so an id can never point a REST path at another object.
-CONTENT_LIBRARY_ID_PATTERN: str = (
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-)
 
 _TEARDOWN_OBJECT_SCHEMA: dict[str, Any] = {
     "type": ["object", "null"],

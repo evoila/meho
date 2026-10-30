@@ -5838,6 +5838,11 @@ type HTTPValidationError struct {
 // “connector_packages“ (#5036) lists the connector packages this image
 // carries, the same list “GET /version“ shows. It is empty for the
 // plain public image.
+//
+// “operation_catalog“ (#5019) names the release that wrote the shared
+// operation rows and says whether it is this pod's release
+// (:class:`OperationCatalogStatus`). The “None“ default keeps older
+// response decoders working; the handler always fills it.
 type HealthResponse struct {
 	// Approvals The approval settings in force (#4830).
 	//
@@ -5881,6 +5886,26 @@ type HealthResponse struct {
 	GrantedScopes       *[]string        `json:"granted_scopes,omitempty"`
 	McpProtocolVersion  *string          `json:"mcp_protocol_version,omitempty"`
 	McpSessionIdCapture string           `json:"mcp_session_id_capture"`
+
+	// OperationCatalog Which release wrote the shared operation rows (#5019).
+	//
+	// The operation rows hold, for each built-in operation, which code
+	// runs, the parameter rules, the risk level and the approval flag.
+	// Every start writes them, and all pods share them. ``state`` is:
+	//
+	// * ``same_release`` -- this pod's release wrote them.
+	// * ``other_release`` -- another release wrote them, so this pod
+	//   serves settings that were not made for its code. Usually a sign
+	//   that two releases run at the same time; see
+	//   ``docs/acceptance/rollback.md`` for what to do.
+	// * ``not_recorded`` -- no start since this check shipped has written
+	//   them yet.
+	// * ``unknown`` -- the database could not be read (the ``db`` field
+	//   says more).
+	//
+	// ``this_release`` and ``written_by_release`` are commit hashes, the
+	// ``git_sha`` value of ``GET /version``.
+	OperationCatalog *OperationCatalogStatus `json:"operation_catalog,omitempty"`
 
 	// Operator Operator identity surface exposed to the CLI and MCP ``meho_status``.
 	//
@@ -6844,6 +6869,31 @@ type OperationCallVerifyResponse struct {
 	Actual  map[string]interface{} `json:"actual"`
 	Matched bool                   `json:"matched"`
 	Type    string                 `json:"type"`
+}
+
+// OperationCatalogStatus Which release wrote the shared operation rows (#5019).
+//
+// The operation rows hold, for each built-in operation, which code
+// runs, the parameter rules, the risk level and the approval flag.
+// Every start writes them, and all pods share them. “state“ is:
+//
+//   - “same_release“ -- this pod's release wrote them.
+//   - “other_release“ -- another release wrote them, so this pod
+//     serves settings that were not made for its code. Usually a sign
+//     that two releases run at the same time; see
+//     “docs/acceptance/rollback.md“ for what to do.
+//   - “not_recorded“ -- no start since this check shipped has written
+//     them yet.
+//   - “unknown“ -- the database could not be read (the “db“ field
+//     says more).
+//
+// “this_release“ and “written_by_release“ are commit hashes, the
+// “git_sha“ value of “GET /version“.
+type OperationCatalogStatus struct {
+	State            string     `json:"state"`
+	ThisRelease      string     `json:"this_release"`
+	WrittenAt        *time.Time `json:"written_at"`
+	WrittenByRelease *string    `json:"written_by_release"`
 }
 
 // OperationDescriptor Full :class:`~meho_backplane.db.models.EndpointDescriptor` read shape.
@@ -8198,6 +8248,7 @@ type RunnerPrincipalRead struct {
 	LastSeenAt         *time.Time         `json:"last_seen_at"`
 	Name               string             `json:"name"`
 	OwnerSub           string             `json:"owner_sub"`
+	PackageSetDigest   *string            `json:"package_set_digest"`
 	Revoked            bool               `json:"revoked"`
 	TenantId           openapi_types.UUID `json:"tenant_id"`
 	UpdatedAt          time.Time          `json:"updated_at"`
@@ -8255,12 +8306,20 @@ type RunnerResultBatch struct {
 // path materialises only “safe“ ops and never signs them) -- signing is
 // a write-tier property, so their absence on a “safe“ item is correct,
 // not a missing field.
+//
+// Connector packages (#5038): “package_set“ is the digest of the
+// connector package set the item needs
+// (:func:`~meho_backplane.runner.package_set.package_set_digest`). The
+// central MEHO sets it only when a connector package provides the op, and
+// the runner refuses the item when its own digest differs. “None“ for an
+// op built into MEHO.
 type RunnerWorkItem struct {
 	CheckRef   string                  `json:"check_ref"`
 	ExpiresAt  *time.Time              `json:"expires_at"`
 	HandlerRef string                  `json:"handler_ref"`
 	ImplId     *string                 `json:"impl_id,omitempty"`
 	OpId       string                  `json:"op_id"`
+	PackageSet *string                 `json:"package_set"`
 	Params     *map[string]interface{} `json:"params,omitempty"`
 
 	// Principal Principal context an executed op runs under, carried on each item.
@@ -10938,6 +10997,7 @@ type GetAssignmentApiV1ChecksAssignmentGetParams struct {
 	KnownVersion           *string `form:"known_version,omitempty" json:"known_version,omitempty"`
 	Authorization          *string `json:"authorization,omitempty"`
 	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
+	XMEHORunnerPackageSet  *string `json:"X-MEHO-Runner-Package-Set,omitempty"`
 }
 
 // PutAssignmentApiV1ChecksAssignmentRunnerPutParams defines parameters for PutAssignmentApiV1ChecksAssignmentRunnerPut.
@@ -10974,6 +11034,7 @@ type GetDashboardApiV1ChecksDashboardsDashboardIdGetParams struct {
 type PostResultsApiV1ChecksResultsPostParams struct {
 	Authorization          *string `json:"authorization,omitempty"`
 	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
+	XMEHORunnerPackageSet  *string `json:"X-MEHO-Runner-Package-Set,omitempty"`
 }
 
 // ListEndpointApiV1ConnectorsGetParams defines parameters for ListEndpointApiV1ConnectorsGet.
@@ -11186,12 +11247,14 @@ type PollNextCommandApiV1GatewayRunnerNextGetParams struct {
 	Wait                   *int    `form:"wait,omitempty" json:"wait,omitempty"`
 	Authorization          *string `json:"authorization,omitempty"`
 	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
+	XMEHORunnerPackageSet  *string `json:"X-MEHO-Runner-Package-Set,omitempty"`
 }
 
 // ReportCommandResultApiV1GatewayRunnerResultPostParams defines parameters for ReportCommandResultApiV1GatewayRunnerResultPost.
 type ReportCommandResultApiV1GatewayRunnerResultPostParams struct {
 	Authorization          *string `json:"authorization,omitempty"`
 	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
+	XMEHORunnerPackageSet  *string `json:"X-MEHO-Runner-Package-Set,omitempty"`
 }
 
 // AuthenticatedHealthApiV1HealthGetParams defines parameters for AuthenticatedHealthApiV1HealthGet.
@@ -26405,6 +26468,17 @@ func NewGetAssignmentApiV1ChecksAssignmentGetRequest(server string, params *GetA
 			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
 		}
 
+		if params.XMEHORunnerPackageSet != nil {
+			var headerParam2 string
+
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam2)
+		}
+
 	}
 
 	return req, nil
@@ -26824,6 +26898,17 @@ func NewPostResultsApiV1ChecksResultsPostRequestWithBody(server string, params *
 			}
 
 			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
+		}
+
+		if params.XMEHORunnerPackageSet != nil {
+			var headerParam2 string
+
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam2)
 		}
 
 	}
@@ -28992,6 +29077,17 @@ func NewPollNextCommandApiV1GatewayRunnerNextGetRequest(server string, runner st
 			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
 		}
 
+		if params.XMEHORunnerPackageSet != nil {
+			var headerParam2 string
+
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam2)
+		}
+
 	}
 
 	return req, nil
@@ -29063,6 +29159,17 @@ func NewReportCommandResultApiV1GatewayRunnerResultPostRequestWithBody(server st
 			}
 
 			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
+		}
+
+		if params.XMEHORunnerPackageSet != nil {
+			var headerParam2 string
+
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam2)
 		}
 
 	}

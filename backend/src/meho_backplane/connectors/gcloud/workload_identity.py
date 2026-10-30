@@ -74,7 +74,6 @@ MEMBER_PATTERN: Final[str] = (
 )
 
 _IAM_API: Final[str] = "https://iam.googleapis.com/v1"
-_CRM_API: Final[str] = "https://cloudresourcemanager.googleapis.com/v1"
 
 #: How often, and how many times at most, the pool delete asks Google
 #: whether its operation has finished before it answers ``DELETE_PENDING``.

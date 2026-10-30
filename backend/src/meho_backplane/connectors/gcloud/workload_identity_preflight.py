@@ -29,7 +29,6 @@ import httpx
 
 from meho_backplane.connectors.gcloud.session import GcloudTargetLike
 from meho_backplane.connectors.gcloud.workload_identity import (
-    _CRM_API,
     _IAM_API,
     _pool_id,
     _pools_name,
@@ -41,6 +40,8 @@ from meho_backplane.operations._preview import PreviewContext, register_permissi
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.gcloud.connector import GcloudConnector
+
+_CRM_API: Final[str] = "https://cloudresourcemanager.googleapis.com/v1"
 
 _POOL_DELETE_OP_ID: Final[str] = "gcloud.iam.workload_identity_pools.delete"
 _BINDING_REMOVE_OP_ID: Final[str] = "gcloud.iam.service_accounts.binding.remove"

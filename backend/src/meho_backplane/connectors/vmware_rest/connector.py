@@ -156,6 +156,7 @@ from meho_backplane.connectors.vmware_rest.soap import (
     build_mark_ssd_envelope,
     build_query_boot_devices_envelope,
     build_retrieve_properties_ex_envelope,
+    build_search_datastore_envelope,
     build_service_content_envelope,
     parse_boot_devices,
     parse_moref_result,
@@ -2427,10 +2428,18 @@ class VmwareRestConnector(HttpConnector):
             return build_datastore_refresh_envelope(
                 moid, storage_info=(method == "RefreshDatastoreStorageInfo")
             )
+        if method in ("SearchDatastore_Task", "SearchDatastoreSubFolders_Task"):
+            return build_search_datastore_envelope(
+                moid,
+                method,
+                str(body.get("datastorePath", "")),
+                body.get("searchSpec", {}) or {},
+            )
         raise RuntimeError(
             f"vmware vim method {method!r} has no SOAP builder — the standalone-ESXi "
             f"SOAP transport (#3363) implements RetrievePropertiesEx / QueryBootDevices "
-            f"/ CreateNasDatastore / MarkAs*_Task / RefreshDatastore(StorageInfo) only"
+            f"/ CreateNasDatastore / MarkAs*_Task / RefreshDatastore(StorageInfo) / "
+            f"SearchDatastore(SubFolders)_Task only"
         )
 
     @staticmethod
@@ -2455,7 +2464,7 @@ class VmwareRestConnector(HttpConnector):
             return parse_boot_devices(xml)
         if method in ("RefreshDatastore", "RefreshDatastoreStorageInfo"):
             return {}
-        # CreateNasDatastore / MarkAs*_Task -> a MoRef returnval.
+        # CreateNasDatastore / MarkAs*_Task / SearchDatastore*_Task -> a MoRef returnval.
         return parse_moref_result(xml, method) or {}
 
     def _soap_fault_error(
@@ -3206,6 +3215,26 @@ class VmwareRestConnector(HttpConnector):
 
         return await host_storage_devices_impl(self, operator, target, params)
 
+    async def host_datastores(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.datastores`` -- the datastores mounted on one host (#3373).
+
+        A ``source_kind="typed"`` op, like :meth:`host_storage_devices`: works
+        on a vCenter target and on a standalone ESXi host. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_datastores.host_datastores_impl`
+        (imported lazily, same as the other typed reads). Returns
+        ``{"status": ..., "host": ..., "datastores": [...], "datastore_count": ...}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_datastores import (
+            host_datastores_impl,
+        )
+
+        return await host_datastores_impl(self, operator, target, params)
+
     async def vm_info(
         self,
         operator: Operator,
@@ -3484,6 +3513,42 @@ class VmwareRestConnector(HttpConnector):
         )
 
         return await cluster_list_impl(self, operator, target, params)
+
+    async def content_library_find(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.content_library.find`` -- library ids by name or type.
+
+        A ``source_kind="typed"`` read. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_content_library_find.content_library_find_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_content_library_find import (
+            content_library_find_impl,
+        )
+
+        return await content_library_find_impl(self, operator, target, params)
+
+    async def content_library_item_find(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.content_library.item.find`` -- library item ids by name, library or type.
+
+        A ``source_kind="typed"`` read. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_content_library_find.content_library_item_find_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_content_library_find import (
+            content_library_item_find_impl,
+        )
+
+        return await content_library_item_find_impl(self, operator, target, params)
 
     # The four ``vmware.appliance.local_account.*`` typed ops. Each delegates to
     # :mod:`.appliance_local_accounts` (imported lazily, like the other typed ops).

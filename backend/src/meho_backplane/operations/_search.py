@@ -37,7 +37,11 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
-from meho_backplane.operations._lookup import visible_scope_clause
+from meho_backplane.operations._lookup import (
+    enabled_for_tenant_clause,
+    group_visible_for_tenant_clause,
+    visible_scope_clause,
+)
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RRF_K
 
@@ -61,11 +65,26 @@ _VISIBLE_SCOPE_SQL = """
                  AND owned.version = :version
                  AND owned.impl_id = :impl_id)))"""
 
-# The two candidate queries spell the visible-scope predicate out in full,
-# so each ``text()`` argument is a plain string literal (the
+# Raw-SQL twin of :func:`~meho_backplane.operations._lookup.enabled_for_tenant_clause`
+# for the same queries: on a built-in row the tenant's own on/off setting wins
+# over the install default ``is_enabled`` (#5029); a tenant's own row uses its
+# own flag. The queries are already pinned to one connector, so the setting is
+# matched on the bound triple plus the row's ``op_id``.
+_ENABLED_FOR_TENANT_SQL = """
+          AND (CASE WHEN tenant_id IS NULL THEN COALESCE((
+               SELECT setting.enabled FROM tenant_operation_setting setting
+               WHERE setting.tenant_id = :tenant_id
+                 AND setting.product = :product
+                 AND setting.version = :version
+                 AND setting.impl_id = :impl_id
+                 AND setting.op_id = endpoint_descriptor.op_id), is_enabled)
+               ELSE is_enabled END)"""
+
+# The two candidate queries spell the visible-scope and enabled predicates
+# out in full, so each ``text()`` argument is a plain string literal (the
 # ``avoid-sqlalchemy-text`` rule rejects f-strings). ``_VISIBLE_SCOPE_SQL``
-# stays the one canonical copy; ``_assert_scope_inlined`` below fails at
-# import if either query drifts from it.
+# and ``_ENABLED_FOR_TENANT_SQL`` stay the canonical copies;
+# ``_assert_scope_inlined`` below fails at import if either query drifts.
 _BM25_CANDIDATES_SQL = text(
     """
         SELECT id, ts_rank_cd(
@@ -84,7 +103,14 @@ _BM25_CANDIDATES_SQL = text(
           AND product = :product
           AND version = :version
           AND impl_id = :impl_id
-          AND is_enabled = TRUE
+          AND (CASE WHEN tenant_id IS NULL THEN COALESCE((
+               SELECT setting.enabled FROM tenant_operation_setting setting
+               WHERE setting.tenant_id = :tenant_id
+                 AND setting.product = :product
+                 AND setting.version = :version
+                 AND setting.impl_id = :impl_id
+                 AND setting.op_id = endpoint_descriptor.op_id), is_enabled)
+               ELSE is_enabled END)
           AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
           AND to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(description, ''))
               @@ plainto_tsquery('english', :query)
@@ -108,7 +134,14 @@ _COSINE_CANDIDATES_SQL = text(
           AND product = :product
           AND version = :version
           AND impl_id = :impl_id
-          AND is_enabled = TRUE
+          AND (CASE WHEN tenant_id IS NULL THEN COALESCE((
+               SELECT setting.enabled FROM tenant_operation_setting setting
+               WHERE setting.tenant_id = :tenant_id
+                 AND setting.product = :product
+                 AND setting.version = :version
+                 AND setting.impl_id = :impl_id
+                 AND setting.op_id = endpoint_descriptor.op_id), is_enabled)
+               ELSE is_enabled END)
           AND embedding IS NOT NULL
           AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
         ORDER BY embedding <=> CAST(:emb AS vector)
@@ -121,20 +154,25 @@ def _assert_scope_inlined() -> None:
     """Fail at import if a candidate query no longer holds the scope predicate.
 
     Whitespace is normalised, then each query must contain
-    :data:`_VISIBLE_SCOPE_SQL` word for word. An edit to one copy that is
+    :data:`_VISIBLE_SCOPE_SQL` and :data:`_ENABLED_FOR_TENANT_SQL` word for
+    word. An edit to one copy that is
     not made to the others is a loud ``AssertionError`` at import, not a
     silent change in which rows a tenant can see.
     """
-    scope = " ".join(_VISIBLE_SCOPE_SQL.split())
-    for name, statement in (
-        ("_BM25_CANDIDATES_SQL", _BM25_CANDIDATES_SQL),
-        ("_COSINE_CANDIDATES_SQL", _COSINE_CANDIDATES_SQL),
+    for canonical_name, canonical in (
+        ("_VISIBLE_SCOPE_SQL", _VISIBLE_SCOPE_SQL),
+        ("_ENABLED_FOR_TENANT_SQL", _ENABLED_FOR_TENANT_SQL),
     ):
-        if scope not in " ".join(str(statement.text).split()):
-            raise AssertionError(
-                f"{name} no longer contains _VISIBLE_SCOPE_SQL word for word; "
-                "keep the inlined predicate identical to it."
-            )
+        predicate = " ".join(canonical.split())
+        for name, statement in (
+            ("_BM25_CANDIDATES_SQL", _BM25_CANDIDATES_SQL),
+            ("_COSINE_CANDIDATES_SQL", _COSINE_CANDIDATES_SQL),
+        ):
+            if predicate not in " ".join(str(statement.text).split()):
+                raise AssertionError(
+                    f"{name} no longer contains {canonical_name} word for word; "
+                    "keep the inlined predicate identical to it."
+                )
 
 
 _assert_scope_inlined()
@@ -167,15 +205,7 @@ async def resolve_group_id(
     hits — :func:`hybrid_search` already filters per-op ``is_enabled``,
     so the resolved staged-group id then yields exactly its enabled ops.
     """
-    has_enabled_op = (
-        select(EndpointDescriptor.id)
-        .where(
-            EndpointDescriptor.group_id == OperationGroup.id,
-            EndpointDescriptor.is_enabled.is_(True),
-        )
-        .exists()
-    )
-    visible = (OperationGroup.review_status == "enabled") | has_enabled_op
+    visible = group_visible_for_tenant_clause(tenant_id=tenant_id)
     result = await session.execute(
         select(OperationGroup.id).where(
             visible_scope_clause(
@@ -323,7 +353,7 @@ async def _hybrid_search_fallback(
             EndpointDescriptor.product == product,
             EndpointDescriptor.version == version,
             EndpointDescriptor.impl_id == impl_id,
-            EndpointDescriptor.is_enabled.is_(True),
+            enabled_for_tenant_clause(tenant_id=tenant_id),
         )
         .order_by(EndpointDescriptor.op_id)
         .limit(CANDIDATE_LIMIT)

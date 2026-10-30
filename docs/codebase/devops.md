@@ -726,10 +726,26 @@ points the readiness probe at `/healthz`, because the kind cluster has no
 Keycloak and no Vault and `/ready` stays 503 there; it then checks that
 the init container exited 0 and that the `db` check of `/ready` is ok,
 runs `helm test`, and checks the roles, the fencing, `vector` and a
-reconcile after a changed Secret plus a pod restart. The bring-your-own
-hook Job is covered by the render tests (the golden render,
-`test_chart_migrate_job_no_sa.py`) and its runner by
-`backend/tests/migrations/test_migrate_runner.py`.
+reconcile after a changed Secret plus a pod restart.
+
+A second kind job, `helm-test-byo` (#5412), installs the bring-your-own
+way at the same time, so the hook Job runs in CI too. It applies the
+chart's PostgreSQL objects outside the release (`helm template
+--show-only`, plus the three Secrets made with `kubectl`), checks that
+`meho` is not a superuser, and installs with `corePostgres` off, as the
+namespace admin, with `--wait --wait-for-jobs`. The other flags are the
+same as in `helm-test`. One more flag, `broadcast.image.digest=`, lets
+kind use the Valkey image the job loaded. The `pre-install` hook Job
+runs every migration as `meho`. Helm deletes the Job once it succeeds, so
+the job reads Helm's record of the hook run (`helm status -o json`,
+`last_run.phase` is `Succeeded`). It also checks that the Deployment has
+no init container and that the `db` check of `/ready` reports
+`revision=<head>`, then runs `helm test`. The required `helm-test-gate`
+needs this job as well as `helm-test`, so a broken bring-your-own install
+stops a chart PR. The render tests (the golden render,
+`test_chart_migrate_job_no_sa.py`) and
+`backend/tests/migrations/test_migrate_runner.py` still cover the Job's
+render and its runner.
 
 ### Built-in Keycloak subchart (`charts/keycloak/`)
 
@@ -1469,9 +1485,9 @@ form 3). Two checks keep it that way:
   `scripts/ci/check_chart_namespace_scope.py`. It fails on any object whose
   kind is not in the script's `NAMESPACED_KINDS` allow-list, and on any
   object in another namespace. A new namespaced kind is added to that list.
-- `helm-test` binds the user `meho-installer` to the built-in `admin` role
-  in `meho-test` only, then runs `helm install` and `helm test` with
-  `--kube-as-user meho-installer`.
+- `helm-test` and `helm-test-byo` bind the user `meho-installer` to the
+  built-in `admin` role in `meho-test` only, then run `helm install` and
+  `helm test` with `--kube-as-user meho-installer`.
 
 ### Version stamping
 

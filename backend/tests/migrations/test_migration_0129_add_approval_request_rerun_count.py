@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``0128_add_approval_request_rerun_count`` (#5417).
+"""Behavioural tests for ``0129_add_approval_request_rerun_count`` (#5417).
 
 The migration adds one column, ``approval_request.rerun_count``: how many
 times the requester ran an approved request again after its run failed.
 It is NOT NULL, and rows saved before it get ``0``.
 
-Every step targets this migration's own revision (``0128``) and its
-``down_revision`` (``0127``), never ``head``, so a later migration cannot
+Every step targets this migration's own revision (``0129``) and its
+``down_revision`` (``0128``), never ``head``, so a later migration cannot
 break these tests.
 """
 
@@ -27,8 +27,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0128"
-_DOWN_REVISION = "0127"
+_REVISION = "0129"
+_DOWN_REVISION = "0128"
 _COLUMN = "rerun_count"
 
 
@@ -38,7 +38,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0128.db"
+    db_path = tmp_path / "migration_0129.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

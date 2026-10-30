@@ -1008,7 +1008,7 @@ re-run of a credential write must send the params again. They must match
 **Runs once.** The re-run has its own claim, because `resumed_at` stays
 the one-way latch of the first run. The claim is one conditional `UPDATE`:
 it sets `resume_result` to NULL and adds one to `rerun_count` (migration
-`0128`), only while the stored result is a failure. Two re-runs sent at the
+`0129`), only while the stored result is a failure. Two re-runs sent at the
 same time: one wins, the other gets 409. While the re-run runs,
 `result_state` reads `started`.
 
@@ -1037,7 +1037,7 @@ in `refusal`, and `status_code` `409` or `422`.
 `dispatch_status`, `dispatch_op_id`, `dispatch_result`, `dispatch_error`.
 
 **Pinned by tests:** `tests/test_approval_rerun.py` and
-`tests/migrations/test_migration_0128_add_approval_request_rerun_count.py`.
+`tests/migrations/test_migration_0129_add_approval_request_rerun_count.py`.
 
 ## Surfacing the approved dispatch's result to the originating consumer (#3209)
 

@@ -7029,7 +7029,7 @@ class ApprovalRequest(Base):
     # so two re-runs sent at the same time cannot both run, and the audit
     # row names the attempt (``rerun_count + 1``; the first run is attempt
     # 1). ``resumed_at`` stays a one-way latch for the first run. Added by
-    # migration ``0128``.
+    # migration ``0129``.
     rerun_count: Mapped[int] = mapped_column(
         sa.Integer(), nullable=False, default=0, server_default=sa.text("0")
     )

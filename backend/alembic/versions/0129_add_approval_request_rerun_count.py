@@ -3,8 +3,8 @@
 
 """Add ``approval_request.rerun_count`` (#5417).
 
-Revision ID: 0128
-Revises: 0127
+Revision ID: 0129
+Revises: 0128
 Create Date: 2026-10-30
 
 One column: how many times the requester ran an approved request again
@@ -24,8 +24,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0128"
-down_revision: str | None = "0127"
+revision: str = "0129"
+down_revision: str | None = "0128"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

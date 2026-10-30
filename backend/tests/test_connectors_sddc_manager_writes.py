@@ -68,12 +68,14 @@ from meho_backplane.connectors.sddc_manager.typed_ops import (
     SDDC_TYPED_WHEN_TO_USE_BY_GROUP,
 )
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.jsonflux.query.result_catalog import AdmissionGuard
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
     reset_handler_cache,
 )
 from meho_backplane.operations._validate import validate_params
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.settings import get_settings
 
 _SDDC_HOST = "sddc-writes.test.invalid"
@@ -288,9 +290,17 @@ def test_task_get_registration_shape() -> None:
     assert "FAILED" in instr["result_digest"]["failed_states"]
 
 
+_VALIDATION_OP_IDS = (
+    SDDC_HOST_VALIDATE_OP_ID,
+    SDDC_DOMAIN_VALIDATE_OP_ID,
+    "sddc.host.validation.get",
+    "sddc.domain.validation.get",
+)
+
+
 def test_validation_ops_carry_result_scalars() -> None:
     """The validation ops keep the Validation poll keys on a reduced result."""
-    for op_id in (SDDC_HOST_VALIDATE_OP_ID, SDDC_DOMAIN_VALIDATE_OP_ID):
+    for op_id in _VALIDATION_OP_IDS:
         op = next(o for o in SDDC_TYPED_OPS if o.op_id == op_id)
         assert op.llm_instructions is not None
         assert op.llm_instructions["result_scalars"]["keys"] == [
@@ -299,6 +309,59 @@ def test_validation_ops_carry_result_scalars() -> None:
             "executionStatus",
             "resultStatus",
         ]
+
+
+def _completed_validation(check_count: int, failed: int) -> dict[str, Any]:
+    """A COMPLETED vendor ``Validation`` whose first *failed* checks FAILED."""
+    return {
+        "id": "6d1c8a4e-42d7-4f1b-9c58-0f8a2b3c4d5e",
+        "description": "Validate the domain creation spec",
+        "executionStatus": "COMPLETED",
+        "resultStatus": "FAILED" if failed else "SUCCEEDED",
+        "validationChecks": [
+            {
+                "description": f"check-{i} " + "x" * 200,
+                "severity": "ERROR",
+                "resultStatus": "FAILED" if i < failed else "SUCCEEDED",
+                "errorResponse": {"message": f"check {i} failed"} if i < failed else None,
+            }
+            for i in range(check_count)
+        ],
+    }
+
+
+@pytest.mark.parametrize("op_id", ["sddc.domain.validation.get", "sddc.host.validation.get"])
+@pytest.mark.parametrize("check_count", [20, 60])
+@pytest.mark.asyncio
+async def test_validation_read_keeps_the_result_when_checks_become_a_handle(
+    op_id: str, check_count: int
+) -> None:
+    """#3518: a big Validation reduces to a handle, but the result stays in the answer.
+
+    20 checks with long text pass the byte limit; 60 checks pass the row
+    limit. In both cases ``validationChecks[]`` goes to a handle, and
+    ``id`` / ``executionStatus`` / ``resultStatus`` stay top-level, so a
+    caller reads the result without ``result_query``. The hint is read off
+    the registered op, never typed again here.
+    """
+    op = next(o for o in SDDC_TYPED_OPS if o.op_id == op_id)
+    assert op.llm_instructions is not None
+    context = {"op_id": op_id, "result_scalars": op.llm_instructions["result_scalars"]}
+    payload = _completed_validation(check_count, failed=2)
+    reducer = JsonFluxReducer(
+        admission_guard=AdmissionGuard(), sample_size=5, sample_byte_budget=4096
+    )
+
+    reduced, handle = await reducer.reduce(dict(payload), None, context)
+
+    assert handle is not None, "the checks must go to a handle"
+    assert handle.total_rows == check_count
+    assert handle.fetch_more is not None, "the caller can drill into the checks"
+    assert reduced["source_key"] == "validationChecks"
+    assert "validationChecks" not in reduced
+    assert reduced["id"] == payload["id"]
+    assert reduced["executionStatus"] == "COMPLETED"
+    assert reduced["resultStatus"] == "FAILED"
 
 
 # ---------------------------------------------------------------------------

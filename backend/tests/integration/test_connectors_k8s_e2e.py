@@ -186,6 +186,10 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     # Check a Secret key against its Vault copy (safe; answers only
     # same or different).
     "k8s.secret.compare_to_ref",
+    # #3840 access checks and admission webhook read (safe reads).
+    "k8s.auth.can_i",
+    "k8s.auth.rules",
+    "k8s.admission_webhook.list",
 )
 
 

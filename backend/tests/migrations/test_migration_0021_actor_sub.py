@@ -15,7 +15,7 @@ test driver and the migration uses only generic DDL, so PG parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -87,10 +87,12 @@ def _audit_log_indexes(sync_url: str) -> set[str]:
     return {str(row[1]) for row in rows}
 
 
-def test_upgrade_adds_actor_sub_column_and_index(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_actor_sub_column_and_index(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade head`` lands the nullable column + its named index."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     assert "actor_sub" in _audit_log_columns(sync_url), (
         "migration 0021 must add audit_log.actor_sub on upgrade head"
@@ -103,10 +105,12 @@ def test_upgrade_adds_actor_sub_column_and_index(alembic_cfg: tuple[Config, str]
     )
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0020"`` drops column + index; ``upgrade head`` restores them."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     assert "actor_sub" in _audit_log_columns(sync_url)
     assert "audit_log_actor_sub_idx" in _audit_log_indexes(sync_url)
 
@@ -121,10 +125,12 @@ def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> 
     assert "audit_log_actor_sub_idx" in _audit_log_indexes(sync_url)
 
 
-def test_agent_session_id_is_untouched(alembic_cfg: tuple[Config, str]) -> None:
+def test_agent_session_id_is_untouched(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """The pre-existing ``agent_session_id`` column + index survive 0021."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
 
     columns = _audit_log_columns(sync_url)
     assert "agent_session_id" in columns, "0014's agent_session_id must survive 0021"

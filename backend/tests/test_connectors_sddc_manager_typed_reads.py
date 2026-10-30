@@ -340,6 +340,57 @@ async def test_network_pool_get_builds_path_from_id_and_passes_capacity_through(
     assert route.called and route.call_count == 1
 
 
+@pytest.mark.parametrize(
+    ("op_id", "path"),
+    [
+        ("sddc.domain.validation.get", "/v1/domains/validations/val-7"),
+        ("sddc.host.validation.get", "/v1/hosts/validations/val-7"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_validation_get_reads_the_result_by_id(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    op_id: str,
+    path: str,
+) -> None:
+    """#3518: each validation read puts the id in the path and returns the Validation."""
+    await _register_and_resolve(_stub_embedding)
+    validation = {
+        "id": "val-7",
+        "description": "Validate the spec",
+        "executionStatus": "COMPLETED",
+        "resultStatus": "FAILED",
+        "validationChecks": [{"description": "DNS", "resultStatus": "FAILED"}],
+    }
+
+    async with respx.mock(base_url=_SDDC_BASE_URL, assert_all_called=False) as mock:
+        mock.post(_TOKEN_PATH).respond(200, json={"accessToken": _ACCESS_TOKEN})
+        route = mock.get(path).respond(200, json=validation)
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=SDDC_CONNECTOR_ID,
+            op_id=op_id,
+            target=_SddcReadTarget(),
+            params={"id": "val-7"},
+        )
+
+    assert result.status == "ok", result.error
+    assert result.result == validation
+    assert route.called and route.call_count == 1
+    assert route.calls[0].request.headers.get("authorization") == f"Bearer {_ACCESS_TOKEN}"
+
+
+@pytest.mark.parametrize("op_id", ["sddc.domain.validation.get", "sddc.host.validation.get"])
+@pytest.mark.parametrize("bad_id", ["..", "a/b", "a?b"])
+def test_validation_get_rejects_an_id_that_is_not_one_path_part(op_id: str, bad_id: str) -> None:
+    """The validation id goes into the URL path, so it must be one plain path part."""
+    op = next(o for o in SDDC_TYPED_OPS if o.op_id == op_id)
+    validator = Draft202012Validator(op.parameter_schema)
+    assert list(validator.iter_errors({"id": bad_id})), bad_id
+    assert not list(validator.iter_errors({"id": "6d1c8a4e-42d7-4f1b-9c58-0f8a2b3c4d5e"}))
+
+
 @pytest.mark.asyncio
 async def test_filters_forwarded_as_query_params(
     _stub_embedding: AsyncMock,
@@ -560,8 +611,9 @@ async def test_registered_ops_are_visible_to_search_operations(
 
 
 #: The read subset of the typed-op table — the #2306 audited reads, the
-#: #2837 network-pool pre-flight reads, and the #3497 ``sddc.task.get`` build
-#: poll. Every op here is ``safe`` / no-approval / ``read-only``.
+#: #2837 network-pool pre-flight reads, the #3497 ``sddc.task.get`` build
+#: poll, and the #3518 validation-result reads. Every op here is ``safe`` /
+#: no-approval / ``read-only``.
 _EXPECTED_OP_IDS = {
     "sddc.domain.list",
     "sddc.domain.status",
@@ -574,6 +626,8 @@ _EXPECTED_OP_IDS = {
     "sddc.credential.list",
     "sddc.task.list",
     "sddc.task.get",
+    "sddc.domain.validation.get",
+    "sddc.host.validation.get",
     "sddc.system.info",
     "sddc.vcf_service.list",
     "sddc.manager.list",

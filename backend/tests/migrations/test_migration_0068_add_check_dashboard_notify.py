@@ -22,7 +22,7 @@ DDL through ``batch_alter_table``, so PG parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -112,10 +112,12 @@ def _insert_pre_0068_dashboard(sync_url: str) -> None:
         sync_eng.dispose()
 
 
-def test_upgrade_adds_notify_columns(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_adds_notify_columns(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0068`` lands both columns with the right nullability."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     columns = _columns(sync_url)
     for column in _NOTIFY_COLUMNS:
@@ -127,14 +129,16 @@ def test_upgrade_adds_notify_columns(alembic_cfg: tuple[Config, str]) -> None:
     assert not _column_is_nullable(sync_url, "notify_min_state")
 
 
-def test_existing_row_backfills_silent_and_critical(alembic_cfg: tuple[Config, str]) -> None:
+def test_existing_row_backfills_silent_and_critical(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """A row inserted at ``0067`` backfills NULL email + ``'critical'`` floor.
 
     The behaviour-preserving property: no pre-#2719 Dashboard starts emailing
     when the migration lands, because the recipient column is the off switch.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _DOWN_REVISION)
+    copy_migrated_db(cfg, _DOWN_REVISION)
     _insert_pre_0068_dashboard(sync_url)
 
     command.upgrade(cfg, _REVISION)
@@ -154,10 +158,11 @@ def test_existing_row_backfills_silent_and_critical(alembic_cfg: tuple[Config, s
 
 def test_notify_min_state_check_rejects_out_of_vocabulary(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """The CHECK admits only ``degraded`` / ``critical`` -- not ``ok``."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     sync_eng = sa_create_engine(sync_url)
     try:
@@ -176,14 +181,16 @@ def test_notify_min_state_check_rejects_out_of_vocabulary(
         sync_eng.dispose()
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0067"`` drops the columns; ``upgrade "0068"`` restores them.
 
     Pinned to this migration's own revision on both legs (never ``head``) so a
     future head migration cannot break the round-trip.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert set(_NOTIFY_COLUMNS) <= _columns(sync_url)
 
     command.downgrade(cfg, _DOWN_REVISION)

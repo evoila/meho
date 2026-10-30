@@ -196,7 +196,7 @@ async def _page_through(
             return collected
         assert result["truncated_end"] == "end"
         since_time = result["next_since_time"]
-    pytest.fail("paging did not reach the end of the log")
+    raise AssertionError("paging did not reach the end of the log")
 
 
 # ---------------------------------------------------------------------------

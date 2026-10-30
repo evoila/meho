@@ -3571,6 +3571,85 @@ class VmwareRestConnector(HttpConnector):
 
         return await datacenter_list_impl(self, operator, target, params)
 
+    # The six content-library typed reads. Each delegates to
+    # :mod:`.content_library_reads` (imported lazily, like the other typed ops).
+
+    async def content_library_get(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.content_library.get`` -- one content library in full."""
+        from meho_backplane.connectors.vmware_rest.content_library_reads import (
+            content_library_get_impl,
+        )
+
+        return await content_library_get_impl(self, operator, target, params)
+
+    async def content_library_item_get(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.content_library.item.get`` -- one content library item."""
+        from meho_backplane.connectors.vmware_rest.content_library_reads import item_get_impl
+
+        return await item_get_impl(self, operator, target, params)
+
+    async def content_library_item_files_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.content_library.item.files.list`` -- the files of one item."""
+        from meho_backplane.connectors.vmware_rest.content_library_reads import (
+            item_files_list_impl,
+        )
+
+        return await item_files_list_impl(self, operator, target, params)
+
+    async def content_library_item_ovf_options(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.content_library.item.ovf_options`` -- the deploy options of an OVF item."""
+        from meho_backplane.connectors.vmware_rest.content_library_reads import (
+            item_ovf_options_impl,
+        )
+
+        return await item_ovf_options_impl(self, operator, target, params)
+
+    async def content_library_subscribed_probe(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.content_library.subscribed.probe`` -- check a subscription URL."""
+        from meho_backplane.connectors.vmware_rest.content_library_reads import (
+            subscribed_probe_impl,
+        )
+
+        return await subscribed_probe_impl(self, operator, target, params)
+
+    async def supervisor_content_library_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.supervisor.content_library.list`` -- the Supervisor libraries (9.0+)."""
+        from meho_backplane.connectors.vmware_rest.content_library_reads import (
+            supervisor_content_library_list_impl,
+        )
+
+        return await supervisor_content_library_list_impl(self, operator, target, params)
+
     async def content_library_find(
         self,
         operator: Operator,

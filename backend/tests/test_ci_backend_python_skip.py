@@ -135,7 +135,12 @@ def test_pull_request_with_backend_or_ci_change_runs_everything(
 
 def test_docs_only_pull_request_is_also_no_backend(tmp_path: Path) -> None:
     outputs = _detect(tmp_path, "pull_request", ["docs/x.md", "backend/README.md"])
-    assert outputs == {"migrations": "false", "docs_only": "true", "backend_python": "false"}
+    assert outputs == {
+        "migrations": "false",
+        "docs_only": "true",
+        "backend_python": "false",
+        "single_connector": "",
+    }
 
 
 @pytest.mark.parametrize("event", ["push", "merge_group"])
@@ -166,7 +171,12 @@ def test_quoted_path_runs_everything(tmp_path: Path) -> None:
     # git always quotes a path that holds a double quote; the detector then
     # keeps every fail-safe default.
     outputs = _detect(tmp_path, "pull_request", ['cli/internal/cmd/say "hi".go'])
-    assert outputs == {"migrations": "true", "docs_only": "false", "backend_python": "true"}
+    assert outputs == {
+        "migrations": "true",
+        "docs_only": "false",
+        "backend_python": "true",
+        "single_connector": "",
+    }
 
 
 # --- Job gates ----------------------------------------------------------------
@@ -219,6 +229,7 @@ def _fan_in(
         "${{ needs.changes.result }}": detect,
         "${{ needs.changes.outputs.docs_only }}": docs_only,
         "${{ needs.changes.outputs.backend_python }}": backend_python,
+        "${{ needs.changes.outputs.single_connector }}": "",
         "${{ needs.python-lint.result }}": lint,
         "${{ needs.python-unit-shard.result }}": shards,
         "${{ needs.python-outside-backend.result }}": outside,

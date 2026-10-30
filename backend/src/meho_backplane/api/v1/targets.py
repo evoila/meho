@@ -134,7 +134,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Any, Final, NoReturn
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -173,6 +173,10 @@ from meho_backplane.targets.schemas import (
     TargetListResponse,
     TargetUpdate,
     project_target_to_summary,
+)
+from meho_backplane.targets.secret_field_map import (
+    check_secret_field_map_sources,
+    merge_secret_field_map,
 )
 
 __all__ = ["count_graph_node_refs", "router", "soft_delete_target"]
@@ -395,6 +399,7 @@ def _to_full(t: TargetORM) -> Target:
         verify_tls=t.verify_tls,
         tls_ca_pin=t.tls_ca_pin,
         tls_server_name=t.tls_server_name,
+        secret_field_map=t.secret_field_map or {},
         extras=t.extras,
         notes=t.notes,
         fingerprint=t.fingerprint,
@@ -1201,6 +1206,31 @@ async def describe_target(
     return _to_full(t)
 
 
+def _raise_fingerprint_failed(
+    exc: Exception, *, cls: type[Connector], t: TargetORM, operator: Operator
+) -> NoReturn:
+    """Turn a probe failure into the structured ``fingerprint_failed`` 500.
+
+    G0.15-T1 #1210: a connector that raises mid-fingerprint used to bubble
+    past the route and surface as FastAPI's bare 500 with a ``text/plain``
+    body. Catch + convert to a structured 500 via
+    :func:`_build_fingerprint_failed_detail` (the builder mirrors the
+    dispatcher's ``connector_error`` envelope). Full stacktrace lands in
+    the structured log via :meth:`_log.exception`; only the capped
+    exception message reaches the response body.
+    """
+    detail = _build_fingerprint_failed_detail(exc=exc, cls=cls, target_name=t.name)
+    _log.exception(
+        "probe_fingerprint_failed",
+        target_id=str(t.id),
+        target_name=t.name,
+        tenant_id=str(operator.tenant_id),
+        connector_id=detail["connector_id"],
+        exception_class=detail["exception_class"],
+    )
+    raise HTTPException(status_code=500, detail=detail) from exc
+
+
 @router.post("/{name}/probe", response_model=FingerprintResult)
 async def probe_target(
     name: str,
@@ -1259,26 +1289,14 @@ async def probe_target(
         # per-target Vault credentials under the operator's identity, the
         # same code path the dispatch surface uses (G0.16-T4 #1306).
         # Connectors whose fingerprint does not touch Vault ignore it.
+        # #3711: a mis-mapped secret_field_map fails here with a 422 naming
+        # the missing source fields, not later in the middle of a dispatch.
+        await check_secret_field_map_sources(t, operator)
         fp = await cls().fingerprint(t, operator=operator)
+    except HTTPException:
+        raise
     except Exception as exc:
-        # G0.15-T1 #1210: a connector that raises mid-fingerprint used
-        # to bubble past the route and surface as FastAPI's bare 500
-        # with a ``text/plain`` body. Catch + convert to a structured
-        # 500 via :func:`_build_fingerprint_failed_detail` (the
-        # builder mirrors the dispatcher's ``connector_error``
-        # envelope). Full stacktrace lands in the structured log via
-        # :meth:`_log.exception`; only the capped exception message
-        # reaches the response body.
-        detail = _build_fingerprint_failed_detail(exc=exc, cls=cls, target_name=t.name)
-        _log.exception(
-            "probe_fingerprint_failed",
-            target_id=str(t.id),
-            target_name=t.name,
-            tenant_id=str(operator.tenant_id),
-            connector_id=detail["connector_id"],
-            exception_class=detail["exception_class"],
-        )
-        raise HTTPException(status_code=500, detail=detail) from exc
+        _raise_fingerprint_failed(exc, cls=cls, t=t, operator=operator)
     # ``model_dump(mode='json')`` produces a JSONB-safe dict (datetime
     # → ISO string, enum → value, UUID → str). Plain ``model_dump()``
     # would leak Python-native types into the JSON column, breaking
@@ -1379,6 +1397,8 @@ async def create_target(
     # default; an explicit ``{"secret_ref": null}`` persists verbatim. See
     # :func:`_resolve_create_secret_ref`.
     create_fields["secret_ref"] = _resolve_create_secret_ref(body, operator)
+    # #3711: an empty map is stored as NULL ("no map").
+    create_fields["secret_field_map"] = body.secret_field_map or None
     t = TargetORM(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
@@ -1431,7 +1451,7 @@ def _validate_update_body_fields(
 
     Extracted from :func:`update_target` so the handler stays within the
     function-size budget while the validation phase reads as one unit.
-    Three checks, all raising *before* the row is mutated:
+    Four checks, all raising *before* the row is mutated:
 
     * **product** — G0.14-T4 (#1145) / G0.18-T2 (#1355). Reject
       ``{"product": null}`` and validate a changed product against the
@@ -1447,11 +1467,19 @@ def _validate_update_body_fields(
       for an explicit non-null ``secret_ref``; an explicit null (clear)
       and an absent field pass through. See
       :func:`_enforce_secret_ref_tenant_scope`.
+    * **secret_field_map** — #3711. The sent entries are merged into the
+      stored map (``null`` entry removes, ``null`` map clears) and
+      ``updates`` is rewritten to the merged result; a merged map above
+      the entry limit is a 422. See :func:`merge_secret_field_map`.
     """
     effective_product = _apply_product_patch(updates, t.product)
     _validate_preferred_impl_id(updates.get("preferred_impl_id"), effective_product)
     if updates.get("secret_ref") is not None:
         _enforce_secret_ref_tenant_scope(updates["secret_ref"], operator, t.name)
+    if "secret_field_map" in updates:
+        updates["secret_field_map"] = merge_secret_field_map(
+            t.secret_field_map, updates["secret_field_map"]
+        )
 
 
 @router.patch("/{name}", response_model=Target)

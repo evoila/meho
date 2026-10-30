@@ -329,9 +329,10 @@ class Settings(BaseModel):
         ``3f0c...:lab-a:Operators``; ``verify_jwt`` reads the list into
         :attr:`~meho_backplane.auth.operator.Operator.tenants`. The claim
         is optional: no claim means an empty list. Bad entries are left
-        out and logged. Nothing uses the list yet; the current tenant
-        still comes from ``jwt_tenant_claim_name``. See
-        ``docs/decisions/2026-10-28-several-tenants-per-person.md``.
+        out and logged. When the list is not empty, the current tenant is
+        picked from it per request (``Meho-Tenant`` header, #5239) and
+        ``jwt_tenant_claim_name`` / ``jwt_tenant_role_claim_name`` are not
+        used. See ``docs/decisions/2026-10-28-several-tenants-per-person.md``.
     jwt_tenant_role_claim_name:
         Name of the JWT claim that carries the operator's
         :class:`~meho_backplane.auth.operator.TenantRole`. Default
@@ -349,7 +350,9 @@ class Settings(BaseModel):
         claim and refuses a token that names two or more of these
         groups with ``401 multiple_role_groups`` (#4594). A token with
         no ``groups`` claim (service accounts, agents, check runners) is
-        not checked. A name with and without a leading ``/`` is the
+        not checked, and neither is a token with a ``meho_tenants`` list:
+        that token gets the one-group-per-tenant check instead (#5239).
+        A name with and without a leading ``/`` is the
         same group, because the group-membership mapper can send full
         group paths. Override with ``JWT_ROLE_GROUPS`` (comma-separated)
         when a site renames the groups; a blank value keeps the default.

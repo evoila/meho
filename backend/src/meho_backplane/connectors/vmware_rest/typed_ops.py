@@ -85,6 +85,7 @@ __all__ = [
     "VMWARE_HOST_VSAN_HEALTH_OP",
     "VMWARE_LICENSE_ASSIGNED_LIST_OP",
     "VMWARE_LICENSE_LIST_OP",
+    "VMWARE_NETWORK_LIST_OP",
     "VMWARE_OBJECT_COLLECT_OP",
     "VMWARE_RESOURCE_POOL_LIST_OP",
     "VMWARE_SNAPSHOT_LIST_OP",
@@ -434,6 +435,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_license import (  # noqa: E
     VMWARE_LICENSE_ASSIGNED_LIST_OP,
     VMWARE_LICENSE_LIST_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_network_list import (  # noqa: E402
+    NETWORK_LIST_GROUP_KEY,
+    NETWORK_LIST_WHEN_TO_USE,
+    VMWARE_NETWORK_LIST_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_object_collect import (  # noqa: E402
     OBJECT_COLLECT_GROUP_KEY,
     OBJECT_COLLECT_WHEN_TO_USE,
@@ -513,6 +519,7 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     APPLIANCE_LOCAL_ACCOUNTS_GROUP_KEY: APPLIANCE_LOCAL_ACCOUNTS_WHEN_TO_USE,
     ALARM_TRIGGERED_GROUP_KEY: ALARM_TRIGGERED_WHEN_TO_USE,
     RESOURCE_POOL_LIST_GROUP_KEY: RESOURCE_POOL_LIST_WHEN_TO_USE,
+    NETWORK_LIST_GROUP_KEY: NETWORK_LIST_WHEN_TO_USE,
     FOLDER_LIST_GROUP_KEY: FOLDER_LIST_WHEN_TO_USE,
     # Shared with the content-library composites: the same key and text.
     CONTENT_LIBRARY_GROUP_KEY: CONTENT_LIBRARY_WHEN_TO_USE,
@@ -589,11 +596,12 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: that wait for approval); the triggered-alarm list
 #: ``alarm.triggered.list`` (#4383); the VM question read and answer
 #: ``vm.question.get`` / ``vm.question.answer`` (the answer waits for
-#: approval); the resource pool list ``resource_pool.list``; the two
-#: content-library finds ``content_library.find`` + ``content_library.item.find``
-#: (#3550); the datacenter list ``datacenter.list``; and the inventory
-#: folder list ``folder.list``. The tuple shape lets future typed ops
-#: join without touching the registrar.
+#: approval); the resource pool list ``resource_pool.list``; the list of
+#: all networks ``network.list``; the two content-library finds
+#: ``content_library.find`` + ``content_library.item.find`` (#3550); the
+#: datacenter list ``datacenter.list``; and the inventory folder list
+#: ``folder.list``. The tuple shape lets future typed ops join without
+#: touching the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
@@ -614,6 +622,7 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_VM_QUESTION_GET_OP,
     VMWARE_VM_QUESTION_ANSWER_OP,
     VMWARE_RESOURCE_POOL_LIST_OP,
+    VMWARE_NETWORK_LIST_OP,
     VMWARE_CONTENT_LIBRARY_FIND_OP,
     VMWARE_CONTENT_LIBRARY_ITEM_FIND_OP,
     VMWARE_DATACENTER_LIST_OP,

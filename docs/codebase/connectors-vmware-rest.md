@@ -904,6 +904,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   clusters, hosts and datastores in each. `safe`, in its own group
   `vmware-datacenters`, on both catalogs. See **Datacenter list** under
   Control flow.
+- **`vmware.network.list`** (`typed_ops_network_list.py`, handler
+  `network_list`) — every network of a vCenter (standard port groups,
+  distributed port groups, opaque networks) with its datacenter and, for a
+  distributed port group, its switch, VLAN and whether it is an NSX
+  segment. `safe`, in its own group `vmware-networks`, on both catalogs.
+  See **Network list** under Control flow.
 - **`vmware.folder.list`** (`typed_ops_folder_list.py`, handler
   `folder_list`) — the inventory folders of a vCenter, one flat row each, with
   the datacenter and the parent. `safe`, in its own group `vmware-folders`, on
@@ -4771,6 +4777,64 @@ no live vCenter) and
 `tests/test_connectors_vmware_rest_datacenter_list_reconcile.py` (the paths,
 the filter and the summary fields against the pinned vCenter 8.0 U3 and 9.0
 `vcenter.yaml`).
+
+### Network list (`vmware.network.list`)
+
+A typed read that lists every network of a vCenter that a VM can use. It is
+written by hand, so it has a clear summary, field descriptions and a risk
+level. It replaces the raw ingested `GET:/vcenter/network` operation for this
+common task.
+
+| Operation | What it does | Vendor calls | Risk |
+|---|---|---|---|
+| `vmware.network.list` | One row per network: `id` (moid), `name`, `type` (`STANDARD_PORTGROUP`, `DISTRIBUTED_PORTGROUP` or `OPAQUE_NETWORK`, a network managed outside vSphere such as one on the older host-level NSX switch), `datacenter` and `datacenter_name`, and for a distributed port group `switch_id`, `switch_name`, `vlan_mode` (`access` or `trunk`), `vlan_id`, `vlan_trunk_ranges` (for example `100-200,300`) and `nsx_segment` (true when NSX made the port group); `read_note`. Optional filters `type`, `datacenter`, `folder` (sent to vCenter) and a `name` pattern (`*` and `?`, letter case does not matter, applied in MEHO). | `GET /vcenter/datacenter`; `GET /vcenter/network` once per datacenter; for the distributed port groups one `RetrievePropertiesEx` of `config.distributedVirtualSwitch`, `config.defaultPortConfig` and `config.backingType`, then one for the switch names | `safe`; runs at once |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 and its updates | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+- **How it finds the datacenter.** The REST network summary has only
+  `network`, `name` and `type`. So MEHO lists the datacenters and asks for
+  the networks of each one with the `datacenters` filter. A `datacenter`
+  filter asks for that one only.
+- **NSX segments.** On vSphere 7.0 and later an NSX segment is a
+  distributed port group on the vSphere distributed switch, made by NSX
+  Manager. Its `config.backingType` is `nsx` (a port group made by vCenter
+  has `standard`, the vendor default when the value is unset). The REST list
+  gives it the type `DISTRIBUTED_PORTGROUP`, so MEHO reads the backing type
+  and sets `nsx_segment` to true. `OPAQUE_NETWORK` is only the older form: a
+  network on the host-level NSX switch. The backing type is read only by this
+  operation, not by the portgroup audit.
+- **Switch and VLAN.** Only a distributed port group has them. MEHO reads
+  them with the same code as `vmware.composite.network.portgroup.audit`
+  (`read_portgroup_switch_vlan_and_backing` in `composites/_read.py`): the
+  whole `config.defaultPortConfig` is read and `vlan` is picked in code, because
+  vCenter 8.0.x fails on the deep `config.defaultPortConfig.vlan` path. A
+  private VLAN, or a shape MEHO does not know, gives `vlan_mode` `null`. The
+  VLAN of a standard port group is set on each host, so it is not shown.
+- **How it calls vCenter.** The REST calls go through the REST mount
+  (`mount_op_path`, `/api` or the legacy `/rest`) on the connector's own
+  session, so it needs no spec ingest. Filters are written as
+  `filter.types`, `filter.folders` and `filter.datacenters`;
+  `adapt_op_query` sends the bare names on `/api`. The vim read goes to the
+  VI/JSON base like the other vim reads.
+- **Errors.** A failed datacenter or network list fails the operation. A
+  failed vim read keeps every row; the switch, VLAN and `nsx_segment` of each
+  distributed port group are `null` and its `read_note` says why.
+- **Cost.** One datacenter list, one network list per datacenter, and two vim
+  reads (in chunks of 50 port groups) when a distributed port group is in the
+  answer.
+- **Large lists.** The rows are flat, so a long list comes back as a link to
+  the stored result (a result handle) that the caller reads with
+  `result_query`.
+
+Code: `typed_ops_network_list.py`. Tests:
+`tests/test_connectors_vmware_rest_typed_network_list.py` (saved answers, no
+live vCenter) and `tests/test_connectors_vmware_rest_network_list_reconcile.py`
+(the paths, the filters, the fields and the type enum against the pinned
+vCenter 8.0 U3 and 9.0 `vcenter.yaml`; the vim read, the `backingType`
+field and its `standard` / `nsx` values against the pinned VI/JSON files).
 
 ## Dependencies
 

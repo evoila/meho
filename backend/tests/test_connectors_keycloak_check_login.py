@@ -510,3 +510,38 @@ async def test_refused_login_leaks_nothing_even_when_keycloak_echoes_the_passwor
         "the flight-recorder spans",
         json.dumps([dataclasses.asdict(span) for span in spans], default=str),
     )
+
+
+async def test_unknown_error_code_is_dropped_even_when_it_echoes_the_password(
+    kc: KeycloakConnector, spans: list[Any]
+) -> None:
+    """A body whose ``error`` is not an RFC 6749 code is not an OAuth2 error.
+
+    A proxy in front of Keycloak may answer with its own JSON that echoes
+    the request. Such text must reach neither the result nor the audit row.
+    """
+    echo = {"error": f"bad password {_PASSWORD}", "error_description": "proxy says no"}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        mock.post(_TOKEN_PATH).respond(502, json=echo)
+        result = await _run(_PARAMS)
+    assert result.status == "ok", result.error
+    assert result.result["result"] == "error"
+    assert result.result["http_status"] == 502
+    assert result.result["error"] is None
+    assert result.result["error_description"] is None
+    _assert_nothing_leaks("the result", result.model_dump_json())
+    _assert_nothing_leaks("the audit rows", await _audit_rows_json())
+    _assert_nothing_leaks(
+        "the flight-recorder spans",
+        json.dumps([dataclasses.asdict(span) for span in spans], default=str),
+    )
+
+
+async def test_non_json_error_body_gives_no_error_fields(kc: KeycloakConnector) -> None:
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        mock.post(_TOKEN_PATH).respond(503, text="<html>gateway down</html>")
+        result = await _run(_PARAMS)
+    assert result.status == "ok", result.error
+    assert result.result["result"] == "error"
+    assert result.result["error"] is None
+    assert result.result["error_description"] is None

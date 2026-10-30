@@ -452,7 +452,12 @@ password must be `accepted` and the old one `refused`.
   `invalid_grant` answer: 401 `Invalid user credentials` (wrong password)
   or 400 `Account disabled`. Any other answer is `error`, for example
   400 `unauthorized_client` when the client has no direct access grants.
-  The answer never carries the password or a token.
+  The answer never carries the password or a token. `error` and
+  `error_description` are copied only from a real OAuth2 error body: JSON
+  whose `error` is one of the six RFC 6749 §5.2 codes (the same gate as
+  `KeycloakAdminTokenError`). Any other body gives `null` for both, so a
+  proxy page that echoes the request never reaches the result or the
+  audit row. The description is cut short and the password masked.
 - The client must be public and allow direct access grants. `admin-cli` in
   `master` has them by default.
 - Risk level `caution`, approval required, group `user_login_check`. The op

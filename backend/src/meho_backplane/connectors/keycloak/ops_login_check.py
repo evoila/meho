@@ -20,7 +20,10 @@ How it works
    ``POST /realms/{realm}/protocol/openid-connect/logout`` and the refresh
    token, so no session is left behind.
 4. The answer holds ``result``, ``http_status`` and Keycloak's ``error`` /
-   ``error_description``. Never the password, never a token.
+   ``error_description``. Never the password, never a token. The two error
+   fields are copied only from a real OAuth2 error body: JSON whose ``error``
+   is one of the six RFC 6749 §5.2 codes. Any other body, for example a
+   proxy page that echoes the request, gives ``null`` for both.
 
 Keycloak answers a wrong password with 401 ``invalid_grant`` and a disabled
 user with 400 ``invalid_grant``; both are ``refused``. Any other answer (for
@@ -49,6 +52,7 @@ import httpx
 import structlog
 
 from meho_backplane.connectors.keycloak._paths import _LOGOUT_PATH, _TOKEN_PATH, fill_path
+from meho_backplane.connectors.keycloak.connector import _OAUTH2_TOKEN_ERROR_CODES
 from meho_backplane.connectors.keycloak.ops_read import KeycloakOp
 from meho_backplane.connectors.keycloak.ops_write import _read_password_from_vault
 from meho_backplane.connectors.keycloak.ops_write_preview import _managed_realm, _opt_str
@@ -225,9 +229,14 @@ LOGIN_CHECK_OPS: tuple[KeycloakOp, ...] = (
 def _error_fields(response: httpx.Response, password: str) -> tuple[str | None, str | None]:
     """Return Keycloak's ``(error, error_description)`` from an OAuth2 error body.
 
-    Only the two string fields are read. The description is cut to a short
-    length, and the password is masked should a proxy ever echo it.
+    Both fields come back only when the body is a JSON object whose ``error``
+    is one of the RFC 6749 §5.2 codes (the same gate as the admin token
+    request). So the ``error`` field can never carry free text, such as a
+    proxy echoing the request. The description is cut to a short length,
+    and the password is masked should Keycloak or a proxy ever echo it.
     """
+    if "application/json" not in response.headers.get("content-type", "").lower():
+        return None, None
     try:
         body = response.json()
     except ValueError:
@@ -235,12 +244,13 @@ def _error_fields(response: httpx.Response, password: str) -> tuple[str | None, 
     if not isinstance(body, dict):
         return None, None
     error = body.get("error")
+    if not isinstance(error, str) or error not in _OAUTH2_TOKEN_ERROR_CODES:
+        return None, None
     description = body.get("error_description")
-    error_text = error if isinstance(error, str) and error else None
     description_text = None
     if isinstance(description, str) and description:
         description_text = description.replace(password, "***")[:_MAX_ERROR_DESCRIPTION_CHARS]
-    return error_text, description_text
+    return error, description_text
 
 
 async def _end_session(

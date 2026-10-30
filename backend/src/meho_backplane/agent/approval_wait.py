@@ -79,10 +79,10 @@ __all__ = [
 _log = structlog.get_logger(__name__)
 
 #: One :class:`Literal` return shape per outcome the caller switches on.
-#: ``approved`` / ``rejected`` / ``expired`` mirror the terminal states of the
+#: ``approved`` / ``rejected`` / ``expired`` / ``withdrawn`` mirror the terminal states of the
 #: stored approval row; ``timeout`` means no decision was seen before the
 #: deadline (the row was still ``pending``, or could not be read).
-ApprovalDecision = Literal["approved", "rejected", "expired", "timeout"]
+ApprovalDecision = Literal["approved", "rejected", "expired", "withdrawn", "timeout"]
 
 #: Gap between two reads of the stored approval row while the wait runs.
 #: Bounds how late an agent sees a decision. One primary-key read per
@@ -126,7 +126,7 @@ async def _read_stored_decision(
             error_class=type(exc).__name__,
         )
         return None
-    if status in ("approved", "rejected", "expired"):
+    if status in ("approved", "rejected", "expired", "withdrawn"):
         _log.info(
             "approval_wait_durable_decision_observed",
             approval_request_id=str(approval_request_id),
@@ -158,7 +158,8 @@ async def wait_for_approval_decision(
 
     Returns:
         ``"approved"`` (the caller tries the resume claim and re-dispatches),
-        ``"rejected"`` or ``"expired"`` (the caller never dispatches), or
+        ``"rejected"``, ``"expired"`` or ``"withdrawn"`` (the caller never
+        dispatches), or
         ``"timeout"`` (the final read still found the row ``pending``, or
         could not read it).
 
@@ -313,6 +314,29 @@ def _build_expired_envelope(
     return annotated
 
 
+def _build_withdrawn_envelope(
+    *,
+    original_envelope: dict[str, Any],
+    approval_request_id: uuid.UUID,
+) -> dict[str, Any]:
+    """Annotate the original envelope when the sender withdrew the request.
+
+    Same shape as :func:`_build_rejected_envelope`: ``status`` stays
+    ``"awaiting_approval"``, ``extras["error_code"] = "approval_withdrawn"``
+    and ``extras["decision"] = "withdrawn"``. The op was not run (#4987).
+    """
+    annotated = dict(original_envelope)
+    annotated["error"] = (
+        f"awaiting_approval: the sender withdrew approval request {approval_request_id}. "
+        "The operation was not run."
+    )
+    extras = dict(original_envelope.get("extras") or {})
+    extras["error_code"] = "approval_withdrawn"
+    extras["decision"] = "withdrawn"
+    annotated["extras"] = extras
+    return annotated
+
+
 def _build_already_resumed_envelope(
     *,
     original_envelope: dict[str, Any],
@@ -414,6 +438,7 @@ async def _resume_approved_or_already_resumed(
         claim_resume,
         get_request,
         persist_resume_result,
+        refuse_resume_if_release_changed,
         rehydrate_resume_target,
     )
 
@@ -429,6 +454,17 @@ async def _resume_approved_or_already_resumed(
             tenant_id=operator.tenant_id,
             request_id=approval_request_id,
         )
+
+    # #5030: an approval covers one exact MEHO release. A request made under
+    # another release is refused here and never runs.
+    release_refusal = await refuse_resume_if_release_changed(operator, request)
+    if release_refusal is not None:
+        if release_refusal.status == "already_resumed":
+            return _build_already_resumed_envelope(
+                original_envelope=awaiting_envelope,
+                approval_request_id=approval_request_id,
+            )
+        return release_refusal.model_dump(mode="json")
 
     # A composite re-entry dispatches against the target the row saved by id,
     # the same check the operator surface runs, not the name the agent used
@@ -624,14 +660,18 @@ async def resume_or_surface_awaiting_approval(
             approval_request_id=approval_request_id,
         )
 
-    if decision in ("rejected", "expired"):
+    if decision in ("rejected", "expired", "withdrawn"):
         _log.info(
             f"approval_wait_{decision}_surfaced_to_agent",
             approval_request_id=str(approval_request_id),
             tenant_id=str(operator.tenant_id),
             op_id=awaiting_envelope.get("op_id"),
         )
-        build = _build_rejected_envelope if decision == "rejected" else _build_expired_envelope
+        build = {
+            "rejected": _build_rejected_envelope,
+            "expired": _build_expired_envelope,
+            "withdrawn": _build_withdrawn_envelope,
+        }[decision]
         return build(original_envelope=awaiting_envelope, approval_request_id=approval_request_id)
 
     # decision == "timeout"

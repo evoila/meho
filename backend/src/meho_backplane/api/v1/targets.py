@@ -58,9 +58,9 @@ the v1 :func:`~meho_backplane.connectors.registry.get_connector` lookup
 while dispatch consulted v2's
 :func:`~meho_backplane.connectors.resolve_connector`, producing
 disagreeing yes/no answers for the same target (consumer feedback
-signal 19 in ``claude-rdc-hetzner-dc#697`` — ``rdc-vcenter`` got 501
+signal 19 in ``claude-rdc-hetzner-dc#697`` — a target got 501
 from ``/probe`` while ``POST /operations/call`` resolved the same
-target's ``vmware-rest-9.0`` connector cleanly).
+target's connector cleanly).
 
 Resolver outcomes map to HTTP status as follows:
 
@@ -167,7 +167,7 @@ from meho_backplane.targets.schemas import (
     project_target_to_summary,
 )
 
-__all__ = ["router"]
+__all__ = ["count_graph_node_refs", "router", "soft_delete_target"]
 
 _log = structlog.get_logger(__name__)
 
@@ -206,7 +206,7 @@ def _connector_id_for(cls: type[Connector]) -> str:
     """Build the canonical ``connector_id`` string for a resolved connector.
 
     Matches the dispatcher's ``connector_id`` form (e.g. ``"k8s-1.x"``,
-    ``"vmware-rest-9.0"``) — used in the ``fingerprint_failed`` 500
+    ``"harbor-rest-2.x"``) — used in the ``fingerprint_failed`` 500
     envelope (G0.15-T1 #1210) and the structured log line so operator-
     facing diagnostics name the *specific* impl that failed, not just
     the product slug. Falls back to the bare product token when
@@ -686,7 +686,7 @@ def _registered_impl_ids(product: str) -> set[str]:
     G0.16-T6 review-iter-1 B1 (#1312). The set is **product-scoped**.
     A global allowlist (the pre-B1 shape) accepted any impl_id
     registered for *any* product, so a ``k8s`` target could pass
-    validation with ``preferred_impl_id="vmware-rest-9.0"`` and the
+    validation with ``preferred_impl_id="harbor-rest-2.x"`` and the
     resolver would silently ignore it at dispatch time -- the exact
     foot-gun G0.15-T6 (#1215) was created to close. The filter is
     consulted at both POST (``body.product``) and PATCH (the
@@ -703,15 +703,15 @@ def _registered_impl_ids(product: str) -> set[str]:
     registry.
 
     G0.16-T6 Finding C (#1312). The set includes BOTH the base
-    ``impl_id`` (``"nsx-rest"``) AND the versioned form
-    ``"{impl_id}-{version}"`` (``"nsx-rest-4.2"``) for every triple
+    ``impl_id`` (``"harbor-rest"``) AND the versioned form
+    ``"{impl_id}-{version}"`` (``"harbor-rest-2.x"``) for every triple
     with a non-empty ``version``. The versioned form is the canonical
     shape per ``docs/codebase/api-shape-conventions.md`` §3 because
     it's more specific (disambiguates when multiple connector versions
     ship in one release) and it matches the ``connector_id`` string
     the dispatcher's ``parse_connector_id`` round-trips through. The
     base form stays accepted so existing operators / fixtures that
-    pin ``preferred_impl_id="nsx-rest"`` aren't broken. The resolver
+    pin ``preferred_impl_id="harbor-rest"`` aren't broken. The resolver
     (:func:`meho_backplane.connectors.resolver._run_tie_break_ladder`)
     normalizes both forms to the base ``impl_id`` before matching
     candidates, so picking either form selects the same connector
@@ -758,7 +758,7 @@ def _build_unknown_preferred_impl_detail(
             f"preferred_impl_id={preferred_impl_id!r} is not registered; "
             f"pick one of {valid_impl_ids!r} or register a connector for "
             f"it before retrying. The canonical form is versioned "
-            f"(e.g. 'nsx-rest-4.2'); the base form ('nsx-rest') stays "
+            f"(e.g. 'harbor-rest-2.x'); the base form ('harbor-rest') stays "
             f"accepted for backward compatibility. The resolver silently "
             f"ignores unknown impl_id overrides; this 422 surfaces the "
             f"foot-gun at write time. See "
@@ -777,7 +777,7 @@ def _validate_preferred_impl_id(preferred_impl_id: str | None, product: str) -> 
     always valid; a non-``None`` value must match an impl_id registered in
     the v2 connector registry **for the target's product** (G0.16-T6
     review-iter-1 B1 #1312 -- a cross-product allowlist let a ``k8s``
-    target pin ``vmware-rest-9.0`` and the resolver would silently ignore
+    target pin ``harbor-rest-2.x`` and the resolver would silently ignore
     it at dispatch). ``valid_impl_ids`` is empty when no connector is
     registered for the product (test isolation / pre-lifespan state, or a
     not-yet-registered product); validation is skipped in that case for
@@ -1110,7 +1110,7 @@ async def discover_targets(
     for cls, label in impls.items():
         connector = get_or_create_connector_instance(cls)
         try:
-            candidates = await connector.list_candidates(seed)
+            candidates = await connector.list_candidates(seed, operator=operator)
         except Exception as exc:
             # One bad connector must not abort the whole sweep — record
             # the failure and continue with the remaining connectors.
@@ -1219,9 +1219,8 @@ async def probe_target(
         # probe path passed nothing (so the connector synthesised a
         # system operator with a placeholder JWT) and Vault rejected
         # the JWT/OIDC login as ``malformed jwt: must have three
-        # parts`` on the four connectors whose fingerprint authenticates
-        # via Vault (k8s-1.x, vmware-rest-9.0, sddc-rest-9.0,
-        # nsx-rest-4.2). The wider ABC widening (with
+        # parts`` on the connectors whose fingerprint authenticates
+        # via Vault (for example k8s-1.x). The wider ABC widening (with
         # ``operator: Operator | None = None``) keeps this call
         # backwards-compatible: connectors whose fingerprint does not
         # touch Vault accept the parameter and ignore it.
@@ -1629,19 +1628,42 @@ async def delete_target(
         audit_op_class="write",
     )
     t = await resolve_target(session, operator.tenant_id, name)
+    await soft_delete_target(session, t, operator=operator, force=force)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    # Cascade count -- only graph_node references. The audit_log
-    # table accumulates a row per authenticated request against
-    # the target; counting them would block every DELETE forever
-    # and is not the intent of the cascade check.
-    count_stmt = (
-        select(func.count())
-        .select_from(GraphNode)
-        .where(
-            GraphNode.target_id == t.id,
-        )
-    )
-    graph_node_ref_count = int((await session.execute(count_stmt)).scalar_one())
+
+async def count_graph_node_refs(session: AsyncSession, target_id: uuid.UUID) -> int:
+    """Count the ``graph_node`` rows that point at *target_id*.
+
+    The cascade check of :func:`soft_delete_target` uses this count, and
+    the ``targets.remove`` preview shows it. Audit rows are not counted:
+    every authenticated request against a target writes one, so counting
+    them would block every delete.
+    """
+    count_stmt = select(func.count()).select_from(GraphNode).where(GraphNode.target_id == target_id)
+    return int((await session.execute(count_stmt)).scalar_one())
+
+
+async def soft_delete_target(
+    session: AsyncSession,
+    t: TargetORM,
+    *,
+    operator: Operator,
+    force: bool,
+) -> int:
+    """Soft-delete the live target row *t* and return its ``graph_node`` count.
+
+    The one delete service. ``DELETE /api/v1/targets/{name}`` and the
+    ``targets.remove`` typed op both call it after they have looked the row
+    up in the caller's tenant, so the checks cannot drift apart.
+
+    When ``graph_node`` rows point at the target and *force* is false, it
+    raises a 409 :class:`fastapi.HTTPException` with the count and the
+    ``force=true`` hint. Otherwise it stamps ``deleted_at`` and flushes; the
+    caller owns the transaction. The row, its Vault secret and the system
+    itself stay; only the registry entry stops resolving.
+    """
+    graph_node_ref_count = await count_graph_node_refs(session, t.id)
 
     if graph_node_ref_count > 0 and not force:
         raise HTTPException(
@@ -1671,4 +1693,4 @@ async def delete_target(
         graph_node_refs=graph_node_ref_count,
         force=force,
     )
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return graph_node_ref_count

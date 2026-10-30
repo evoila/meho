@@ -172,14 +172,30 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 	}
 	fmt.Fprintf(w, "Params hash:  %s\n", d.ParamsHash)
 	fmt.Fprintf(w, "Created:      %s\n", d.CreatedAt)
+	// The MEHO release the request was made under (#5030). An approval
+	// covers one exact release; an update ends waiting requests.
+	if d.ReleaseId != nil && *d.ReleaseId != "" {
+		fmt.Fprintf(w, "Release:      %s\n", *d.ReleaseId)
+	}
 	if d.ExpiresAt != nil {
 		fmt.Fprintf(w, "Expires:      %s\n", *d.ExpiresAt)
+	}
+	// Why an expired request expired, with the advice to ask again (#5030).
+	if d.ExpiredMessage != nil && *d.ExpiredMessage != "" {
+		fmt.Fprintf(w, "Expired:      %s\n", *d.ExpiredMessage)
 	}
 	if d.ReviewedBy != nil {
 		fmt.Fprintf(w, "Reviewed by:  %s\n", principalLabel(*d.ReviewedBy, d.ReviewedByName))
 	}
 	if d.DecidedAt != nil {
 		fmt.Fprintf(w, "Decided at:   %s\n", *d.DecidedAt)
+	}
+	// Withdrawn by the sender (#4987): not a decision, so no reviewer.
+	if d.WithdrawnAt != nil {
+		fmt.Fprintf(w, "Withdrawn:    by the sender at %s\n", *d.WithdrawnAt)
+	}
+	if d.WithdrawReason != nil && *d.WithdrawReason != "" {
+		fmt.Fprintf(w, "Reason:       %s\n", *d.WithdrawReason)
 	}
 	// Delegated decision (#3692): the reviewer acted on another human's
 	// written instruction, read off the decision audit row.

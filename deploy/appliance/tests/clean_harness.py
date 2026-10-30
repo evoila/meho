@@ -144,6 +144,7 @@ MACHINE_FILES = {
     "/etc/rancher/node/password": "fake-node-password\n",
     "/etc/rancher/rke2/rke2.yaml": "fake kubeconfig\n",
     "/etc/rancher/rke2/config.yaml": "node-name: build.lab.example\n",
+    "/etc/rancher/rke2/meho-pss.yaml": "fake pod security file\n",
     "/etc/ssh/ssh_host_ed25519_key": "fake host key\n",
     "/etc/ssh/ssh_host_ed25519_key.pub": "fake host key pub\n",
     "/etc/ssh/sshd_config": "PasswordAuthentication no\n",

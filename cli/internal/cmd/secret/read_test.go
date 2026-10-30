@@ -6,6 +6,7 @@ package secret
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -388,5 +389,46 @@ func TestVaultConnectorFrozen(t *testing.T) {
 	}
 	if opKVRead != "vault.kv.read" {
 		t.Fatalf("opKVRead drifted: got %q want vault.kv.read", opKVRead)
+	}
+}
+
+// TestSecretReadNotFoundExitsOne — a status=not_found dispatch (#3591,
+// #4986) is a known failed read: the envelope goes to stderr, stdout
+// stays empty, and the exit is 1 via the shared sentinel (not exit 4).
+func TestSecretReadNotFoundExitsOne(t *testing.T) {
+	errMsg := "not_found: secret/p does not exist"
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/operations/call": func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(t, w, 200, dispatch.CallResult{
+				Status: dispatch.StatusNotFound, OpID: opKVRead, Error: &errMsg,
+				Extras: json.RawMessage(`{"error_code":"not_found","resource_ids":["secret/p"]}`),
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+	withStdoutTTY(t, false)
+
+	cmd := newReadCmd()
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{
+		"--target", "v", "--field", "password", "--backplane", srv.URL, "secret", "p",
+	})
+	err := cmd.Execute()
+	if !errors.Is(err, dispatch.ErrOpError) {
+		t.Fatalf("not_found must exit 1 via dispatch.ErrOpError; got %v", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout must be empty on not_found; got %q", out.String())
+	}
+	for _, want := range []string{"not found: secret/p", "does not exist"} {
+		if !strings.Contains(errBuf.String(), want) {
+			t.Errorf("stderr missing %q; got %q", want, errBuf.String())
+		}
+	}
+	if strings.Contains(errBuf.String(), "upgrade") {
+		t.Errorf("not_found must not ask for a CLI upgrade; got %q", errBuf.String())
 	}
 }

@@ -6,7 +6,9 @@
 install.sh runs on the fake machine and writes the file. Then the real nft
 checks it ("nft -c", check only) and loads it, in a new user and network
 namespace (unshare --map-root-user --net). The namespace has its own empty
-firewall, so the machine that runs the tests keeps its own rules.
+firewall, so the machine that runs the tests keeps its own rules. One test
+then changes the SSH rule with meho-host admin-network, which checks and
+loads the new file with the real nft too.
 
 One test also loads the variant of the MEHO appliance, where the chains
 input, forward and output have policy drop, and opens a TCP connection over
@@ -29,7 +31,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness import InstallTestCase
+from harness import LINUX_SERVER, InstallTestCase
 
 RULES = "/etc/meho/firewall.nft"
 REQUIRED = os.environ.get("MEHO_REQUIRE_NFT_CHECK") == "1"
@@ -124,6 +126,8 @@ class NftCheckTests(InstallTestCase):
         self.machine.ssh_connection = session
         result = self.machine.run(*args)
         self.assert_succeeds(result)
+        # The next call is a first install again, not an update.
+        self.machine.remove_install_record()
         return self.machine.host_path(RULES)
 
     def test_nft_accepts_the_file_for_each_admin_network(self) -> None:
@@ -144,6 +148,33 @@ class NftCheckTests(InstallTestCase):
                 result = in_namespace("nft", "-c", "-f", str(rules))
 
                 self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_nft_accepts_the_file_after_meho_host_admin_network(self) -> None:
+        # meho-host runs the real nft -c -f and nft -f in the namespace, where
+        # the mapped user is root. No SSH session, so it never asks.
+        rules = self.rules_file("--admin-network", "10.0.0.0/24")
+        installed = rules.read_text()
+        cases = {"10.0.60.0/24": "elements = { 10.0.60.0/24 }", "none": None}
+        for value, elements in cases.items():
+            with self.subTest(admin_network=value):
+                rules.write_text(installed)
+
+                result = in_namespace(
+                    "sh",
+                    "-c",
+                    'unset SSH_CLIENT SSH_CONNECTION; MEHO_TEST_ROOT="$1" "$2" admin-network "$3"'
+                    " && nft list set inet meho admin_network",
+                    "sh",
+                    str(self.machine.root),
+                    str(LINUX_SERVER / "meho-host"),
+                    value,
+                )
+
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                if elements is None:
+                    self.assertNotIn("elements", result.stdout)
+                else:
+                    self.assertIn(elements, result.stdout)
 
     def test_loading_twice_replaces_only_the_meho_table(self) -> None:
         rules = self.rules_file("--admin-network", "10.0.0.0/24")

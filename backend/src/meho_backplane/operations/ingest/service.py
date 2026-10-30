@@ -81,6 +81,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.db.connector_usage_lock import lock_connector_usage_exclusive
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations.ingest._internals import (
     _UNSET,
@@ -139,9 +140,19 @@ from meho_backplane.operations.ingest.payload import (
     ConnectorReviewProvenance,
 )
 from meho_backplane.operations.ingest.spec_provenance import load_spec_provenance
+from meho_backplane.operations.op_policy import (
+    EffectivePolicy,
+    OpKey,
+    PolicyEditResult,
+    apply_policy_edit,
+    effective_policy_map,
+    remove_override,
+)
+from meho_backplane.operations.tenant_operation_settings import load_tenant_settings
+from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
 
     from meho_backplane.connectors.base import Connector
     from meho_backplane.db.models import EndpointDescriptor
@@ -152,18 +163,38 @@ __all__ = ["ReviewService"]
 _log = structlog.get_logger(__name__)
 
 
-def _review_op(op: EndpointDescriptor) -> ConnectorReviewOp:
-    """Project one descriptor row into its review-payload shape."""
+def _scope_name(tenant_id: UUID | None) -> Literal["tenant", "install"]:
+    """Name the scope of a change for the audit row: one tenant or the whole install."""
+    return "install" if tenant_id is None else "tenant"
+
+
+def _review_op(
+    op: EndpointDescriptor,
+    policies: dict[OpKey, EffectivePolicy] | None = None,
+    tenant_settings: Mapping[str, bool] | None = None,
+) -> ConnectorReviewOp:
+    """Project one descriptor row into its review-payload shape.
+
+    ``safety_level`` / ``requires_approval`` are the effective values from
+    *policies* (the operator's overrides applied, #4711); the
+    ``classified_*`` fields keep the value in code or in the API description.
+    *tenant_settings* is the reading tenant's own ``{op_id: enabled}``
+    settings for a built-in connector (#5029); empty otherwise.
+    """
+    policy = (policies or {}).get(OpKey.of(op))
     return ConnectorReviewOp(
         op_id=op.op_id,
         summary=op.summary,
         description=op.description,
         custom_description=op.custom_description,
-        safety_level=op.safety_level,
-        requires_approval=op.requires_approval,
+        safety_level=policy.safety_level if policy else op.safety_level,
+        requires_approval=policy.requires_approval if policy else op.requires_approval,
+        classified_safety_level=op.safety_level,
+        classified_requires_approval=op.requires_approval,
         is_enabled=op.is_enabled,
         tags=list(op.tags),
         needs_reingest=op.needs_reingest,
+        tenant_enabled=(tenant_settings or {}).get(op.op_id),
     )
 
 
@@ -193,7 +224,12 @@ def _authoring_kind_for_payload(
     )
 
 
-def _render_groups(groups: list[Any], ops: list[Any]) -> list[ConnectorReviewGroup]:
+def _render_groups(
+    groups: list[Any],
+    ops: list[Any],
+    policies: dict[OpKey, EffectivePolicy],
+    tenant_settings: Mapping[str, bool] | None = None,
+) -> list[ConnectorReviewGroup]:
     """Pack *ops* under their group rows for the review payload.
 
     Each group also gets its review advice (#3671), built from the ops
@@ -205,7 +241,7 @@ def _render_groups(groups: list[Any], ops: list[Any]) -> list[ConnectorReviewGro
             ops_by_group[op.group_id].append(op)
     rendered: list[ConnectorReviewGroup] = []
     for group in groups:
-        group_ops = [_review_op(op) for op in ops_by_group[group.id]]
+        group_ops = [_review_op(op, policies, tenant_settings) for op in ops_by_group[group.id]]
         rendered.append(
             ConnectorReviewGroup(
                 group_key=group.group_key,
@@ -218,6 +254,27 @@ def _render_groups(groups: list[Any], ops: list[Any]) -> list[ConnectorReviewGro
             )
         )
     return rendered
+
+
+async def _reading_tenant_settings(
+    session: AsyncSession,
+    scope: ConnectorScope,
+    reading_tenant_id: UUID | None,
+) -> dict[str, bool]:
+    """Return the reading tenant's own on/off settings for a built-in connector (#5029).
+
+    Shown next to the install default in the review payload. Empty for a
+    tenant's own connector copy or when no tenant reads.
+    """
+    if scope.tenant_id is not None or reading_tenant_id is None:
+        return {}
+    return await load_tenant_settings(
+        session,
+        tenant_id=reading_tenant_id,
+        product=scope.product,
+        version=scope.version,
+        impl_id=scope.impl_id,
+    )
 
 
 class ReviewService:
@@ -608,8 +665,14 @@ class ReviewService:
         session: AsyncSession,
         *,
         probe: Callable[[AsyncSession, ConnectorScope], Awaitable[bool]] = scope_has_groups,
+        builtin_needs_platform_admin: bool = True,
     ) -> ConnectorScope:
         """Resolve ``(connector_id, tenant_id)`` for a mutating state/edit action.
+
+        *builtin_needs_platform_admin* ``False`` skips the ``platform_admin``
+        gate on a built-in row. :meth:`edit_op` passes it for an edit of only
+        the risk level and approval flag (#4711): that edit does not change
+        the shared row, it stores an override for the operator's tenant.
 
         The write counterpart to :meth:`_resolve_existing_scope` for the
         transition + edit paths (:meth:`enable_connector`,
@@ -677,7 +740,8 @@ class ReviewService:
             tenant_id=None,
         )
         if await probe(session, builtin_scope):
-            self._require_platform_admin_for_builtin(connector_id, builtin_scope)
+            if builtin_needs_platform_admin:
+                self._require_platform_admin_for_builtin(connector_id, builtin_scope)
             return builtin_scope
         raise ConnectorNotFoundError(
             connector_id=connector_id,
@@ -749,13 +813,17 @@ class ReviewService:
                 prefer=prefer,
                 allow_legacy_tenant_copy=True,
             )
-            return await self._render_payload(connector_id, scope, session)
+            return await self._render_payload(
+                connector_id, scope, session, reading_tenant_id=tenant_id
+            )
 
     async def _render_payload(
         self,
         connector_id: str,
         scope: ConnectorScope,
         session: AsyncSession,
+        *,
+        reading_tenant_id: UUID | None = None,
     ) -> ConnectorReviewPayload:
         """Load groups + ops for *scope* and pack them into the payload.
 
@@ -773,7 +841,7 @@ class ReviewService:
             scope,
             [group.id for group in groups],
         )
-        rendered_groups = _render_groups(groups, ops)
+        tenant_settings = await _reading_tenant_settings(session, scope, reading_tenant_id)
         # #3870: list every op outside the rendered groups too, with its
         # enabled state and safety level, so the review shows the whole
         # op set dispatch can serve — not only the grouped part.
@@ -782,6 +850,12 @@ class ReviewService:
             scope,
             [group.id for group in groups],
         )
+        # #4711: show the risk level and approval the operator's tenant
+        # actually gets, with the operator's overrides applied.
+        policies = await effective_policy_map(
+            session, tenant_id=self._operator.tenant_id, rows=[*ops, *ungrouped_ops]
+        )
+        rendered_groups = _render_groups(groups, ops, policies, tenant_settings)
         has_code_shipped_op = any(op.source_kind in ("typed", "composite") for op in ops)
         kind, dispatchable = _authoring_kind_for_payload(
             scope, rendered_groups, has_code_shipped_op=has_code_shipped_op
@@ -824,7 +898,7 @@ class ReviewService:
             groups=rendered_groups,
             total_op_count=grouped_op_count,
             ungrouped_op_count=max(all_op_count - grouped_op_count, 0),
-            ungrouped_ops=[_review_op(op) for op in ungrouped_ops],
+            ungrouped_ops=[_review_op(op, policies, tenant_settings) for op in ungrouped_ops],
             needs_reingest_op_count=needs_reingest_op_count,
             delete_ops_below_destructive=delete_review,
             delete_ops_needing_correction_count=sum(
@@ -904,8 +978,15 @@ class ReviewService:
         requires_approval: bool | None = None,
         is_enabled: bool | None = None,
         llm_instructions: dict[str, object] | None = None,
+        reason: str | None = None,
+        person_present: bool = False,
+        tighten_only: bool = False,
     ) -> list[EditOpWarning]:
         """Update operator-controlled overrides on one :class:`EndpointDescriptor`.
+
+        ``safety_level`` / ``requires_approval`` are stored as an override,
+        not on the row (#4711); *reason*, *person_present* and
+        *tighten_only* feed its rules. See :meth:`_apply_policy_edit`.
 
         Passing none of the five fields raises :class:`ValueError`.
         Out-of-enum ``safety_level`` raises :class:`ValueError`.
@@ -944,7 +1025,12 @@ class ReviewService:
         operators wanting to un-author the field should disable the op instead.
 
         Writes one audit row with payload
-        ``{connector_id, op_id, fields_updated, is_enabled_set_to?}``.
+        ``{connector_id, op_id, fields_updated, changes, scope, reason,
+        is_enabled_set_to?}``. ``changes`` holds ``{"old", "new"}`` for the
+        risk level, the approval flag and ``is_enabled`` (#4711); ``scope``
+        is ``"tenant"`` or ``"install"``; ``approval_ended_for_tenants``
+        lists the tenants whose own copy of a built-in operation lost its
+        approval requirement through an install-wide change.
         The ``is_enabled_set_to`` key is included verbatim only
         when ``is_enabled`` was edited — that's the key the cascade
         query reads. The ``llm_instructions`` value itself is NOT
@@ -959,17 +1045,70 @@ class ReviewService:
             is_enabled=is_enabled,
             llm_instructions=llm_instructions,
         )
+        scope = await self._write_op_edit(
+            connector_id,
+            op_id,
+            tenant_id,
+            custom_description=custom_description,
+            safety_level=safety_level,
+            requires_approval=requires_approval,
+            is_enabled=is_enabled,
+            llm_instructions=llm_instructions,
+            reason=reason,
+            person_present=person_present,
+            tighten_only=tighten_only,
+        )
+        # Probe only after the write landed: a 404/400 path above must
+        # never emit an advisory for an edit that didn't happen.
+        if is_enabled is True:
+            return enable_time_auto_shim_warnings(connector_id, op_id, scope)
+        return []
+
+    async def _write_op_edit(
+        self,
+        connector_id: str,
+        op_id: str,
+        tenant_id: UUID | None,
+        *,
+        custom_description: str | _UnsetType | None,
+        safety_level: str | None,
+        requires_approval: bool | None,
+        is_enabled: bool | None,
+        llm_instructions: dict[str, object] | None,
+        reason: str | None,
+        person_present: bool,
+        tighten_only: bool,
+    ) -> ConnectorScope:
+        """Apply one :meth:`edit_op` and its audit row in one transaction; return the scope."""
+        row_edit = custom_description is not _UNSET or is_enabled is not None
+        row_edit = row_edit or llm_instructions is not None
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
             scope = await self._resolve_writable_scope(
-                connector_id, tenant_id, session, probe=scope_has_rows
+                connector_id,
+                tenant_id,
+                session,
+                probe=scope_has_rows,
+                builtin_needs_platform_admin=row_edit,
             )
             op_row = await load_op(session, scope, connector_id, op_id)
-            fields_updated = apply_op_overrides(
+            policy = await self._apply_policy_edit(
+                session,
                 op_row,
-                custom_description=custom_description,
+                scope,
                 safety_level=safety_level,
                 requires_approval=requires_approval,
+                reason=reason,
+                person_present=person_present,
+                tighten_only=tighten_only,
+            )
+            changes = dict(policy.changes)
+            if is_enabled is not None:
+                changes["is_enabled"] = {"old": op_row.is_enabled, "new": is_enabled}
+            fields_updated = [*policy.changes]
+            fields_updated += apply_op_overrides(
+                op_row,
+                custom_description=custom_description,
                 is_enabled=is_enabled,
                 llm_instructions=llm_instructions,
             )
@@ -977,6 +1116,10 @@ class ReviewService:
                 "connector_id": connector_id,
                 "op_id": op_id,
                 "fields_updated": fields_updated,
+                "changes": changes,
+                "scope": policy.scope if policy.changes else _scope_name(scope.tenant_id),
+                "approval_ended_for_tenants": [str(t) for t in policy.approval_ended_for_tenants],
+                "reason": reason,
             }
             if is_enabled is not None:
                 payload["is_enabled_set_to"] = is_enabled
@@ -988,11 +1131,118 @@ class ReviewService:
                 payload=payload,
             )
             await session.commit()
-        # Probe only after the write landed: a 404/400 path above must
-        # never emit an advisory for an edit that didn't happen.
-        if is_enabled is True:
-            return enable_time_auto_shim_warnings(connector_id, op_id, scope)
-        return []
+        return scope
+
+    async def _apply_policy_edit(
+        self,
+        session: AsyncSession,
+        op_row: EndpointDescriptor,
+        scope: ConnectorScope,
+        *,
+        safety_level: str | None,
+        requires_approval: bool | None,
+        reason: str | None,
+        person_present: bool,
+        tighten_only: bool,
+    ) -> PolicyEditResult:
+        """Store a risk level / approval edit as an override; return what changed.
+
+        The override goes to the row's own tenant for a tenant row. For a
+        built-in row it goes to the whole install for a platform admin and to
+        the operator's tenant otherwise. Neither field edited → no changes.
+
+        The rules are in :func:`~meho_backplane.operations.op_policy.apply_policy_edit`:
+        the risk level can only go up; turning approval off needs
+        ``platform_admin``, a reason and *person_present* (a fresh sign-in on
+        REST, the web session in the console) and is never allowed for a
+        destructive operation; *tighten_only* (the MCP tool) refuses every
+        loosening.
+        """
+        if safety_level is None and requires_approval is None:
+            return PolicyEditResult(changes={}, scope=_scope_name(scope.tenant_id))
+        if scope.tenant_id is not None:
+            scope_tenant_id: UUID | None = scope.tenant_id
+        else:
+            scope_tenant_id = None if self._operator.platform_admin else self._operator.tenant_id
+        return await apply_policy_edit(
+            session,
+            row=op_row,
+            scope_tenant_id=scope_tenant_id,
+            operator=self._operator,
+            safety_level=safety_level,
+            requires_approval=requires_approval,
+            reason=reason,
+            person_present=person_present,
+            tighten_only=tighten_only,
+            max_age_seconds=get_settings().fresh_sign_in_max_age_seconds,
+        )
+
+    async def remove_op_override(
+        self,
+        connector_id: str,
+        op_id: str,
+        *,
+        override_tenant_id: UUID | None,
+        reason: str | None,
+        person_present: bool,
+    ) -> None:
+        """Remove one stored risk level / approval override (#4711).
+
+        *override_tenant_id* names the override: a tenant UUID or ``None``
+        for the install-wide one. A platform admin can remove any of them.
+        A tenant admin can remove only their own tenant's; another tenant's
+        is :class:`ConnectorNotFoundError` (the usual cross-tenant answer)
+        and the install-wide one is
+        :class:`BuiltinConnectorWriteForbiddenError`.
+
+        When the removal ends approval in that scope, or for a tenant whose
+        own copy of the operation the install-wide override reached, it
+        passes the same checks as turning approval off: ``platform_admin``,
+        a reason and *person_present* (:class:`OpPolicyEditError`
+        otherwise). A scope without an override raises
+        :class:`~meho_backplane.operations.op_policy.OverrideNotFoundError`.
+
+        Writes one ``meho_connector_edit_op`` audit row with
+        ``override_removed=True``, ``override_tenant_id`` and
+        ``approval_ended_for_tenants``.
+        """
+        scope = self._resolve_scope(
+            connector_id, override_tenant_id, allow_platform_admin_cross_tenant=True
+        )
+        self._require_platform_admin_for_builtin(connector_id, scope)
+        key = OpKey(scope.product, scope.version, scope.impl_id, op_id)
+        async with self._sessionmaker()() as session:
+            result = await remove_override(
+                session,
+                key=key,
+                scope_tenant_id=override_tenant_id,
+                operator=self._operator,
+                reason=reason,
+                person_present=person_present,
+                max_age_seconds=get_settings().fresh_sign_in_max_age_seconds,
+            )
+            await write_audit_row(
+                session,
+                operator_sub=self._operator.sub,
+                operator_tenant_id=self._operator.tenant_id,
+                op_id=OP_EDIT_OP,
+                payload={
+                    "connector_id": connector_id,
+                    "op_id": op_id,
+                    "fields_updated": [*result.changes],
+                    "changes": result.changes,
+                    "scope": result.scope,
+                    "approval_ended_for_tenants": [
+                        str(t) for t in result.approval_ended_for_tenants
+                    ],
+                    "reason": reason,
+                    "override_removed": True,
+                    "override_tenant_id": (
+                        None if override_tenant_id is None else str(override_tenant_id)
+                    ),
+                },
+            )
+            await session.commit()
 
     # -- public write API: profile stamping -------------------------------
 
@@ -1125,7 +1375,7 @@ class ReviewService:
         leaving every write-shaped verb (POST / PUT / PATCH / DELETE)
         and every typed / composite op **default-deny**. The point is
         broad governed *read* coverage on big ingested surfaces
-        (``vmware-rest-9.0`` is 3000+ ops, mostly staged GETs) without
+        (a big ingested connector can carry thousands of ops, mostly staged GETs) without
         a per-op death-march; writes keep their per-op / composite
         curation by design — that's the governance boundary.
 
@@ -1316,7 +1566,11 @@ class ReviewService:
         ``meho_connector_delete`` audit row commits atomically with the
         row deletes; the registry pop runs strictly after the commit so
         a failed transaction never leaves the process-local registry
-        ahead of the database. A connector that still had enabled
+        ahead of the database. A connector that is still used by a
+        sensor, runbook template, hosted agent, schedule, waiting approval
+        or queued operation run is not deleted: the call raises
+        :class:`ConnectorInUseError`, which lists each user (#5027). A
+        connector that still had enabled
         operations is deleted anyway and the returned
         :attr:`DeleteConnectorResult.warnings` carries the advisory
         (warnings never block the write — the
@@ -1337,11 +1591,21 @@ class ReviewService:
         scope = self._resolve_scope(connector_id, tenant_id)
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
+            # #5027: the first statement, so no new sensor, runbook template,
+            # hosted agent or schedule can be saved between the in-use check
+            # and the row delete (see db/connector_usage_lock.py).
+            await lock_connector_usage_exclusive(session)
             if tenant_id is not None:
                 legacy = await self._find_legacy_tenant_copy(scope, session)
                 if legacy is not None:
                     scope = legacy
-            staged = await stage_connector_delete(session, scope, connector_id)
+            staged = await stage_connector_delete(
+                session,
+                scope,
+                connector_id,
+                viewer_tenant_id=self._operator.tenant_id,
+                viewer_sees_all_tenants=self._operator.platform_admin,
+            )
             await write_audit_row(
                 session,
                 operator_sub=self._operator.sub,

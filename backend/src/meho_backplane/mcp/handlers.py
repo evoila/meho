@@ -119,6 +119,7 @@ from meho_backplane.mcp.server import (
     McpPermissionDeniedError,
     register_method,
 )
+from meho_backplane.operations._errors import status_code_for_result
 from meho_backplane.operations._validate import compute_audit_params_hash
 from meho_backplane.operations.delivery_budget import tool_result_text
 from meho_backplane.request_usage.collector import (
@@ -154,6 +155,57 @@ _ERROR_STATUSES: Final[frozenset[str]] = frozenset({"error", "denied", "rate_lim
 def _tool_result_is_error(name: str, result: dict[str, Any]) -> bool:
     """Return the MCP ``isError`` flag for a handler's result."""
     return name in _OPERATION_RESULT_TOOLS and result.get("status") in _ERROR_STATUSES
+
+
+#: ``error_code`` values that mean the operation or connector was not found.
+_NOT_FOUND_ERROR_CODES: Final[frozenset[str]] = frozenset({"unknown_op", "unknown_connector"})
+
+
+def _operation_result_audit(name: str, result: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """Return the audit ``status_code`` and payload fields for a handler's result (#4751).
+
+    A call that fails before any operation runs (unknown op, unknown
+    connector, bad params) writes no operation row, so the tool-call row
+    is its only record. That row follows the same rule as ``isError``:
+    ``error`` is ``404`` when the op or connector was not found and
+    ``400`` otherwise, ``denied`` is ``403``, ``rate_limited`` is ``429``.
+    An ``error`` that carries an ``audit_id`` comes from a call that did
+    run; the dispatcher wrote its own row with ``500``, so the tool-call
+    row says ``500`` too. Every other status, and every other tool, keeps
+    ``200``. The payload fields carry the result status and the
+    ``extras.error_code``, so a query can filter on them.
+    """
+    if name not in _OPERATION_RESULT_TOOLS:
+        return 200, {}
+    status = result.get("status")
+    extras = result.get("extras")
+    error_code = extras.get("error_code") if isinstance(extras, dict) else None
+    fields: dict[str, Any] = {"result_status": status}
+    if isinstance(error_code, str):
+        fields["error_code"] = error_code
+    if status == "denied":
+        return 403, fields
+    if status == "rate_limited":
+        return 429, fields
+    if status == "error":
+        if result.get("audit_id") is not None:
+            return status_code_for_result("error"), fields
+        return (404 if error_code in _NOT_FOUND_ERROR_CODES else 400), fields
+    return 200, fields
+
+
+def _drop_empty_optional_text(arguments: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+    """Return *arguments* without top-level optional values that are empty or blank text.
+
+    A key the schema lists in its top-level ``required`` stays, so an
+    empty required field is still refused by the schema check.
+    """
+    required = set(schema.get("required", ()))
+    return {
+        key: value
+        for key, value in arguments.items()
+        if key in required or not (isinstance(value, str) and not value.strip())
+    }
 
 
 def _schema_error_text(exc: jsonschema.ValidationError) -> str:
@@ -477,6 +529,19 @@ async def handle_tools_call(
                     },
                 )
 
+        # A read tool that takes no arguments ignores any it is sent
+        # (#4137): small models often add junk keys, and a refused call
+        # only costs a retry. Tools with arguments and write tools keep
+        # the strict check. ``params_hash`` above still covers what was sent.
+        if defn.op_class == "read" and not defn.inputSchema.get("properties"):
+            arguments = {}
+
+        # Read tools treat an empty optional text argument as "not given"
+        # (#4110): small models fill unused filters with "", and a filter
+        # on "" silently matches nothing. Required fields keep the check.
+        if defn.op_class == "read":
+            arguments = _drop_empty_optional_text(arguments, defn.inputSchema)
+
         # Validate arguments against the tool's inputSchema. ``cls`` is
         # pinned to :class:`jsonschema.Draft202012Validator` to make the
         # "JSON Schema 2020-12" contract called out in :class:`ToolDefinition`
@@ -510,7 +575,8 @@ async def handle_tools_call(
             ) from exc
 
         result = await handler(operator, arguments)
-        status_code = 200
+        status_code, result_fields = _operation_result_audit(name, result)
+        audit_payload.update(result_fields)
 
         # MCP §Tool Result: every successful tools/call response carries a
         # ``content`` array — a single text block with the JSON-serialised

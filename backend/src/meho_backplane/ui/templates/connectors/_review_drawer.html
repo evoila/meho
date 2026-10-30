@@ -11,8 +11,8 @@
   ``showModal()`` on ``htmx:afterSwap`` and dismisses on close / ESC /
   backdrop (#1803).
 
-  Big-payload guard (the load-bearing constraint): the vmware-rest review
-  payload is THOUSANDS of ops, so this shell renders each group as a
+  Big-payload guard (the load-bearing constraint): a big ingested connector's
+  review payload is THOUSANDS of ops, so this shell renders each group as a
   COLLAPSED ``<details>`` carrying ONLY ``name`` / ``review_status`` /
   ``op_count`` -- it does NOT render the per-op rows. Each group's body
   lazy-loads its ops via ``hx-get=".../review/groups/{group_key}"`` fired

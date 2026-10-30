@@ -56,6 +56,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_appliance_local_accounts im
     APPLIANCE_LOCAL_ACCOUNTS_GROUP_KEY,
     APPLIANCE_LOCAL_ACCOUNTS_OPS,
 )
+from meho_backplane.operations._errors import result_connector_error
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.redaction.flight_recorder import SECRET_FAMILY_OMITTED_MARKER
@@ -80,6 +81,26 @@ _ROOT_INFO: dict[str, Any] = {
     "min_days_between_password_change": 0,
     "max_days_between_password_change": 90,
     "warn_days_before_password_expiration": 7,
+}
+_GROUP = "SystemConfiguration.BashShellAdministrators"
+#: What vCenter answers to a caller without the SSO group.
+_UNAUTHORIZED_BODY: dict[str, Any] = {
+    "error_type": "UNAUTHORIZED",
+    "messages": [
+        {
+            "default_message": "Unable to authorize user",
+            "id": "vapi.security.authorization.invalid",
+        }
+    ],
+}
+_FAILED_FETCH_USER_BODY: dict[str, Any] = {
+    "error_type": "ERROR",
+    "messages": [
+        {
+            "default_message": "Failed to get user details for root.",
+            "id": "com.vmware.appliance.failed_fetch_user",
+        }
+    ],
 }
 _ALICE_INFO: dict[str, Any] = {
     "roles": ["operator"],
@@ -223,6 +244,19 @@ def test_no_parameter_can_carry_the_password_itself() -> None:
     assert response_fields == {"username", "password_set", "password_expires_at", "read_note"}
 
 
+def _op_texts(op: Any) -> str:
+    return " ".join([op.summary, op.description, json.dumps(op.llm_instructions)])
+
+
+@pytest.mark.parametrize("op", APPLIANCE_LOCAL_ACCOUNTS_OPS, ids=lambda op: op.op_id)
+def test_every_op_text_names_the_sso_group(op: Any) -> None:
+    texts = _op_texts(op)
+    assert _GROUP in texts
+    assert "for this operation" in texts
+    assert "Changes need" not in texts
+    assert "for this change" not in texts
+
+
 @pytest.mark.parametrize("op", APPLIANCE_LOCAL_ACCOUNTS_OPS, ids=lambda op: op.op_id)
 def test_every_example_validates(op: Any) -> None:
     for example in op.parameter_schema["examples"]:
@@ -301,10 +335,60 @@ async def test_list_keeps_going_when_one_account_read_fails() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_raises_when_the_list_itself_is_refused() -> None:
-    connector = _FakeConnector(answers={("GET", _LIST): _http_error(403, "GET", _LIST)})
-    with pytest.raises(httpx.HTTPStatusError):
+async def test_list_refused_names_the_sso_group_and_keeps_the_403() -> None:
+    refusal = _http_error(403, "GET", _LIST, _UNAUTHORIZED_BODY)
+    connector = _FakeConnector(answers={("GET", _LIST): refusal})
+    with pytest.raises(ConnectorUpstreamError) as caught:
         await local_account_list_impl(connector, _operator(), _Target(), {})  # type: ignore[arg-type]
+    error = caught.value
+    assert error.http_status == 403
+    assert str(error) == (
+        f"{LIST_OP_ID}: vCenter answered HTTP 403 when MEHO tried to list the local accounts. "
+        "vCenter refused the read. The service account needs the appliance super "
+        f"administrator level: membership in the SSO group {_GROUP}. After a group change, "
+        "MEHO's next login to vCenter (by default within 20 minutes) carries the new group."
+    )
+    assert error.upstream_message == "UNAUTHORIZED; Unable to authorize user"
+    assert error.__context__ is None
+    assert [call[1] for call in connector.calls] == [_LIST]
+
+
+@pytest.mark.parametrize("status", [401, 500, 503])
+@pytest.mark.asyncio
+async def test_list_other_errors_are_raised_as_they_are(status: int) -> None:
+    original = _http_error(status, "GET", _LIST, {"error_type": "ERROR", "messages": []})
+    connector = _FakeConnector(answers={("GET", _LIST): original})
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        await local_account_list_impl(connector, _operator(), _Target(), {})  # type: ignore[arg-type]
+    assert caught.value is original
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "hint"),
+    [
+        (403, _UNAUTHORIZED_BODY, "vCenter refused the read. The service account needs"),
+        (500, _FAILED_FETCH_USER_BODY, "The service account may lack"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_list_row_of_a_refused_account_read_names_the_sso_group(
+    status: int, body: dict[str, Any], hint: str
+) -> None:
+    connector = _FakeConnector(
+        answers={
+            ("GET", _LIST): ["root", "alice"],
+            ("GET", _ROOT): _http_error(status, "GET", _ROOT, body),
+            ("GET", _ALICE): _ALICE_INFO,
+        }
+    )
+    result = await local_account_list_impl(connector, _operator(), _Target(), {})  # type: ignore[arg-type]
+
+    root = next(row for row in result["accounts"] if row["username"] == "root")
+    note = root["read_note"]
+    assert note.startswith(f"the read failed: HTTP {status} ({body['error_type']}). {hint}")
+    assert _GROUP in note
+    alice = next(row for row in result["accounts"] if row["username"] == "alice")
+    assert alice["read_note"] is None
 
 
 @pytest.mark.asyncio
@@ -333,6 +417,79 @@ async def test_get_of_a_missing_account_is_not_found() -> None:
             {"username": "root"},
         )
     assert caught.value.resource_ids == ["root"]
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "hint", "upstream"),
+    [
+        (
+            403,
+            _UNAUTHORIZED_BODY,
+            "vCenter refused the read. The service account needs",
+            "UNAUTHORIZED; Unable to authorize user",
+        ),
+        (
+            500,
+            _FAILED_FETCH_USER_BODY,
+            "The service account may lack",
+            "ERROR; Failed to get user details for root.",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_get_refused_names_the_sso_group_and_keeps_the_status(
+    status: int, body: dict[str, Any], hint: str, upstream: str
+) -> None:
+    connector = _FakeConnector(answers={("GET", _ROOT): _http_error(status, "GET", _ROOT, body)})
+    with pytest.raises(ConnectorUpstreamError) as caught:
+        await local_account_get_impl(
+            connector,  # type: ignore[arg-type]
+            _operator(),
+            _Target(),
+            {"username": "root"},
+        )
+    error = caught.value
+    assert error.http_status == status
+    assert str(error).startswith(
+        f"{GET_OP_ID}: vCenter answered HTTP {status} when MEHO tried to read the local "
+        f"account 'root'. {hint}"
+    )
+    assert _GROUP in str(error)
+    assert error.upstream_message == upstream
+    assert error.__context__ is None
+
+
+def test_a_refusal_reaches_the_caller_with_the_group_and_the_status() -> None:
+    """The dispatcher cuts long messages; ``remediation`` keeps the group hint whole."""
+    long_name = "a" * 64
+    read_error = accounts._read_error(long_name, op_id=GET_OP_ID)(
+        _http_error(500, "GET", _ROOT, _FAILED_FETCH_USER_BODY)
+    )
+    change = _password_change_error(_http_error(403, "PATCH", _ROOT, _UNAUTHORIZED_BODY))
+    for op_id, error, status in ((GET_OP_ID, read_error, 500), (PASSWORD_SET_OP_ID, change, 403)):
+        result = result_connector_error(op_id, error, 1.0)
+        assert result.extras["http_status"] == status
+        assert _GROUP in result.extras["remediation"]
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (401, _UNAUTHORIZED_BODY),
+        (500, {"error_type": "ERROR", "messages": [{"default_message": "x", "id": "other"}]}),
+        (503, None),
+    ],
+)
+def test_get_other_errors_are_raised_as_they_are(status: int, body: Any) -> None:
+    original = _http_error(status, "GET", _ROOT, body)
+    assert accounts._read_error("root", op_id=GET_OP_ID)(original) is original
+
+
+def test_a_legacy_rest_failed_fetch_user_answer_is_seen() -> None:
+    body = {"type": "ERROR", "value": {"messages": _FAILED_FETCH_USER_BODY["messages"]}}
+    error = accounts._read_error("root", op_id=GET_OP_ID)(_http_error(500, "GET", _ROOT, body))
+    assert isinstance(error, ConnectorUpstreamError)
+    assert "may lack" in str(error)
 
 
 @pytest.mark.asyncio

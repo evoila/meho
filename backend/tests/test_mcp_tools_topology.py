@@ -520,6 +520,8 @@ def test_query_topology_dependencies_untracked_echoes_node_kind_when_supplied(
     assert payload["name"] == "vc-prod"
     assert payload["node_kind"] == "target"
     assert payload["nodes"] == []
+    assert "not a sign that nothing depends on it" in payload["detail"]
+    assert "meho_topology_annotate" in payload["detail"]
 
 
 @pytest.mark.parametrize(

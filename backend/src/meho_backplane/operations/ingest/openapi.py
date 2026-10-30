@@ -24,12 +24,13 @@ Supported spec dialects:
 Out of scope (no conversion performed in-process):
 
 * Swagger 2.0 — rejected with an actionable :exc:`UnsupportedSpecError`
-  that names the conversion path (convert to OpenAPI 3.x with
-  ``swagger2openapi`` / ``converter.swagger.io`` and re-ingest). The
-  parser stays 3.x-only on purpose: the maintained 2.0→3.0 converters
-  are Node/web-service tools, and a hand-rolled converter is a large
-  correctness surface the operator review queue can't backstop. See
-  the Harbor 2.x ``swagger.yaml`` exemplar (#1532).
+  that names the conversion path: pass the file to ``meho connector
+  ingest`` as ``file://`` and the CLI converts it to OpenAPI 3 on the
+  operator's machine (#5028), or convert it locally with
+  ``swagger2openapi`` and ingest the result. The backplane stays
+  3.x-only on purpose: the conversion runs in the CLI, so the vendor's
+  file never goes to an outside converter. See the Harbor 2.x
+  ``swagger.yaml`` exemplar (#1532).
 * GraphQL SDL / WSDL / protobuf — separate parsers; v0.2.next.
 * Cross-document ``$ref`` (``$ref: "other.yaml#/..."``) — raises
   :exc:`UnsupportedSpecError`.
@@ -86,7 +87,10 @@ from openapi_spec_validator.schemas import (
 )
 
 from meho_backplane.connectors._shared.pinned_transport import build_pinned_sync_transport
-from meho_backplane.delete_names import is_destructive_action_name
+from meho_backplane.delete_names import (
+    destructive_action_name_in_path,
+    is_destructive_action_name,
+)
 from meho_backplane.operations._rfc6570 import split_path_operator
 from meho_backplane.operations.ingest.exceptions import (
     InvalidSchemaError,
@@ -233,19 +237,20 @@ _SpecYamlLoader.add_constructor(
 _SUPPORTED_OPENAPI_RE = re.compile(r"^3\.(0|1)(\.\d+)?$")
 
 # Operator-facing remediation appended to the Swagger-2.0 rejection.
-# The parser stays OpenAPI-3.x-only on purpose (no spec-conversion
-# dependency in the Python backend — the de-facto 2.0→3.0 converters
-# are Node/web-service tools, and a hand-rolled converter is a large
-# correctness surface the review queue can't backstop). Instead of a
-# bare "not supported", the rejection names the concrete conversion
-# path so the operator can self-serve: run a converter, then re-ingest
-# the OpenAPI-3.x output through the same path. ``swagger2openapi`` /
-# the hosted ``converter.swagger.io`` are the maintained converters.
+# The parser stays OpenAPI-3.x-only on purpose: the conversion runs in
+# the CLI on the operator's machine (#5028), so no spec-conversion
+# dependency lands in the backplane. The CLI converts only files it
+# reads itself (file:// and docs:), so a Swagger 2.0 file reached here
+# either came over https:// (the backplane fetched it) or from a client
+# that does not convert. The CLI path comes first; a local converter
+# is the fallback. No hosted converter is named: it would send the
+# vendor's file to an outside service.
 _SWAGGER_2_CONVERSION_REMEDIATION = (
-    "convert it to OpenAPI 3.x first (e.g. the swagger2openapi CLI "
-    "`npx swagger2openapi swagger.yaml -o openapi.yaml`, or the hosted "
-    "converter at https://converter.swagger.io/), then ingest the "
-    "converted 3.x document"
+    "download the file and pass it to `meho connector ingest --spec "
+    "file:///path/to/swagger.yaml`; the CLI converts Swagger 2.0 to "
+    "OpenAPI 3 on your machine before the upload. Or convert it to "
+    "OpenAPI 3 yourself with a local tool (e.g. `npx swagger2openapi "
+    "swagger.yaml -o openapi.yaml`) and ingest the converted document"
 )
 
 # Operator-facing remediation appended to the SSRF-guard rejections
@@ -930,9 +935,9 @@ def _validate_openapi_version(spec: dict[str, Any]) -> None:
     ``swagger: "2.0"`` (no ``openapi`` key) and are rejected with an
     actionable :exc:`UnsupportedSpecError` that names the conversion
     path (a 2.0-only surface such as Harbor 2.x's ``swagger.yaml`` is
-    onboarded by converting it to OpenAPI 3.x and re-ingesting the
-    output). Newer specs with future major versions raise the same
-    error type without the conversion remedy.
+    onboarded through the CLI, which converts it to OpenAPI 3 locally).
+    Newer specs with future major versions raise the same error type
+    without the conversion remedy.
     """
     if "swagger" in spec:
         version = spec.get("swagger", "<missing>")
@@ -1195,8 +1200,9 @@ def default_safety_posture(
 ) -> tuple[SafetyLevel, bool]:
     """Return the parser's ``(safety_level, requires_approval)`` for one operation.
 
-    The verb heuristic sets the level. A ``DELETE`` (#3827) or a destructive
-    action name (``Destroy``, ``Delete``, ``Remove``, ``Unregister``) turns
+    The verb heuristic sets the level. A ``DELETE`` (#3827), a destructive
+    action name (``Destroy``, ``Delete``, ``Remove``, ``Unregister``, also
+    after a vSAN prefix) or an ``action=delete`` query (#4973) turns
     approval on and lifts the level to at least ``dangerous``. The review
     report for stored deletes calls this with the row's method and path to
     say what a fresh ingest would assign, before any connector floor.
@@ -1224,14 +1230,14 @@ def _has_destructive_action_hint(*, operation_id: str | None, path: str) -> bool
 
     OpenAPI's ``operationId`` is the author-provided semantic identifier. A
     VI-JSON path also ends with the managed-object method, so inspect both: a
-    vendor can omit ``operationId`` without bypassing the safety posture. The
+    vendor can omit ``operationId`` without bypassing the safety posture. A
+    path whose query is ``action=delete`` is a delete sent as ``POST``. The
     word list and the rule live in :mod:`meho_backplane.delete_names`, shared
     with the grant checks, the flight recorder and the stored-delete review.
     """
-    candidates = (operation_id, path.rsplit("/", maxsplit=1)[-1])
-    return any(
-        candidate is not None and is_destructive_action_name(candidate) for candidate in candidates
-    )
+    if operation_id is not None and is_destructive_action_name(operation_id):
+        return True
+    return destructive_action_name_in_path(path) is not None
 
 
 def _raise_safety_level(current: SafetyLevel, floor: SafetyLevel) -> SafetyLevel:

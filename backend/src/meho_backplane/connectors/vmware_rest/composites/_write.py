@@ -91,7 +91,9 @@ import asyncio
 import re
 import secrets
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, NamedTuple
+from urllib.parse import quote
 
 import httpx
 import structlog
@@ -100,6 +102,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest import library_download, ovf_import_control
 from meho_backplane.connectors.vmware_rest.composite_issues import issue
+from meho_backplane.connectors.vmware_rest.composites.schemas import CONTENT_LIBRARY_ID_PATTERN
 from meho_backplane.connectors.vmware_rest.ovf_import import (
     ImportPlacement,
     LeaseImportResult,
@@ -139,6 +142,7 @@ __all__ = [
     "guest_customization_spec_create_composite",
     "host_detach_from_vds_composite",
     "host_evacuate_composite",
+    "host_maintenance_exit_composite",
     "network_portgroup_create_composite",
     "network_portgroup_security_set_composite",
     "resource_pool_create_composite",
@@ -162,10 +166,18 @@ __all__ = [
 _log = structlog.get_logger(__name__)
 
 
-# Connector_id every write composite governs its sub-ops against (fed to
-# :func:`enforce_subop_policy` for the in-memory descriptor + the
-# ``vmware.composite.vm.migrate`` recursion routed through ``dispatch_child``).
-_CONNECTOR_ID = "vmware-rest-9.0"
+def _step_connector_id(connector: VmwareRestConnector) -> str:
+    """The connector id a write step is checked under (#4991).
+
+    *connector* is the instance the resolver picked for the target, so this
+    is the target's own connector: ``vmware-rest-8.0`` for a vCenter 8.0.x
+    target, ``vmware-rest-9.0`` for 9.x. A step grant must name this id.
+    Used by :func:`enforce_subop_policy` and by the
+    ``vmware.composite.vm.migrate`` call ``host.evacuate`` makes through
+    ``dispatch_child``.
+    """
+    return f"{connector.impl_id}-{connector.version}"
+
 
 # Declared governance for every raw-REST *write* sub-op. ``dangerous`` is
 # the intrinsic-risk label; ``requires_approval=False`` keeps the top-level
@@ -174,10 +186,11 @@ _CONNECTOR_ID = "vmware-rest-9.0"
 _WRITE_SAFETY_LEVEL = "dangerous"
 _WRITE_REQUIRES_APPROVAL = False
 
-# ``{var}`` path-template placeholder pattern. vCenter moids are bare
-# ``[A-Za-z0-9-]`` tokens, so a plain ``str.format`` matches the RFC6570
-# simple-expansion the ingested path did.
+# ``{var}`` path-template placeholder pattern. Each value is percent-encoded
+# as one path segment (see :func:`_path_segment`); vCenter moids, UUIDs and
+# ``urn:...`` ids need no encoding, so their URLs are unchanged.
 _PATH_VAR_RE = re.compile(r"\{([^{}]+)\}")
+_CONTENT_LIBRARY_ID_RE: Final = re.compile(CONTENT_LIBRARY_ID_PATTERN)
 
 # vCenter REST op_ids (canonical METHOD:/path keys from vcenter.yaml).
 #
@@ -852,6 +865,22 @@ _VM_POWER_STATE_ON = "POWERED_ON"
 _HOST_MAINTENANCE_SPEC_TYPE = "HostMaintenanceSpec"
 _VSAN_HOST_DECOMMISSION_MODE_TYPE = "VsanHostDecommissionMode"
 _VSAN_MODE_DEFAULT = "ensureObjectAccessibility"
+# host.maintenance.exit (#4967): the ``HostRuntimeInfo`` leaves read before
+# and after the exit. ``dasHostState`` is a ``ClusterDasFdmHostState`` whose
+# ``state`` is the vSphere HA availability state; vCenter leaves it out on a
+# host outside an HA cluster.
+_PROP_HOST_NAME = "name"
+_PROP_HOST_CONNECTION_STATE = "runtime.connectionState"
+_PROP_HOST_IN_MAINTENANCE_MODE = "runtime.inMaintenanceMode"
+_PROP_HOST_DAS_HOST_STATE = "runtime.dasHostState"
+_HOST_MAINTENANCE_STATE_PATH_SET: tuple[str, ...] = (
+    _PROP_HOST_NAME,
+    _PROP_HOST_CONNECTION_STATE,
+    _PROP_HOST_IN_MAINTENANCE_MODE,
+    _PROP_HOST_DAS_HOST_STATE,
+)
+# ``HostSystemConnectionState`` value of a host vCenter can send a call to.
+_HOST_CONNECTION_STATE_CONNECTED = "connected"
 
 # Wall-clock bounds for the #2970 vim task polls + the cluster.patch cis
 # task poll -- the 600s ``vm.disk.grow`` / ``vm.clone_from_template``
@@ -881,6 +910,10 @@ _VIM_SUB_OPS_VM_DESTROY: tuple[str, ...] = (
 _VIM_SUB_OPS_HOST_EVACUATE: tuple[str, ...] = (
     _OP_RETRIEVE_PROPERTIES,
     _OP_ENTER_MAINTENANCE_TASK,
+)
+_VIM_SUB_OPS_HOST_MAINTENANCE_EXIT: tuple[str, ...] = (
+    _OP_RETRIEVE_PROPERTIES,
+    _OP_EXIT_MAINTENANCE_TASK,
 )
 _VIM_SUB_OPS_CLUSTER_PATCH: tuple[str, ...] = (
     _OP_RETRIEVE_PROPERTIES,
@@ -1248,6 +1281,23 @@ def _unwrap_value(payload: Any) -> Any:
     return payload
 
 
+def _path_segment(value: Any) -> str:
+    """*value* encoded as one URL path segment.
+
+    ``/``, ``%``, ``?`` and ``#`` are percent-encoded, and so is a bare ``.``
+    or ``..``, so a value can never add, remove or climb path segments.
+    """
+    text = str(value)
+    if text in {".", ".."}:
+        return text.replace(".", "%2E")
+    return quote(text, safe=":@")
+
+
+def _is_content_library_id(value: Any) -> bool:
+    """Whether *value* is a vCenter content-library or item id (a UUID)."""
+    return isinstance(value, str) and _CONTENT_LIBRARY_ID_RE.fullmatch(value) is not None
+
+
 def _split_sub_op(op_id: str, params: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
     """Split *op_id* + *params* into ``(method, spec-relative path, remainder)``.
 
@@ -1261,7 +1311,8 @@ def _split_sub_op(op_id: str, params: dict[str, Any]) -> tuple[str, str, dict[st
     method, _, path_template = op_id.partition(":")
     var_names = _PATH_VAR_RE.findall(path_template)
     path_params = {name: params[name] for name in var_names}
-    path = path_template.format(**path_params) if path_params else path_template
+    segments = {name: _path_segment(value) for name, value in path_params.items()}
+    path = path_template.format(**segments) if segments else path_template
     remainder = {k: v for k, v in params.items() if k not in path_params}
     return method, path, remainder
 
@@ -1339,7 +1390,7 @@ async def _write_sub_op(
     """
     gate = await enforce_subop_policy(
         operator=operator,
-        connector_id=_CONNECTOR_ID,
+        connector_id=_step_connector_id(connector),
         op_id=op_id,
         safety_level=_WRITE_SAFETY_LEVEL,
         requires_approval=_WRITE_REQUIRES_APPROVAL,
@@ -1407,7 +1458,7 @@ async def _write_vmomi_sub_op(
     """
     gate = await enforce_subop_policy(
         operator=operator,
-        connector_id=_CONNECTOR_ID,
+        connector_id=_step_connector_id(connector),
         op_id=op_id,
         safety_level=_WRITE_SAFETY_LEVEL,
         requires_approval=_WRITE_REQUIRES_APPROVAL,
@@ -2873,6 +2924,11 @@ async def vm_clone_composite(
     source_vm = params["source_vm"]
     target_name = params["target_name"]
     library_item = params["library_item"]
+    if not _is_content_library_id(library_item):
+        raise ValueError(
+            "vm.clone: library_item must be a vCenter content-library item id (a UUID); "
+            f"got {library_item!r}. Nothing was sent."
+        )
 
     # Source config drives CloneSpec; the read is a no-op when the
     # source VM lookup fails (httpx.HTTPError surfaces upstream).
@@ -3034,15 +3090,29 @@ async def _resolve_deploy_library_item(
     Returns ``(item_id, None)`` on success or ``(None, envelope)`` with a
     terminal response dict on failure (``invalid_reference`` /
     ``library_not_found`` / ``ambiguous_library`` / ``item_not_found`` /
-    ``ambiguous_item``). ``library_item`` (an id) short-circuits; otherwise
+    ``ambiguous_item``). ``library_item`` (a UUID) short-circuits; otherwise
     ``library_item_name`` is resolved via ``Content.Library.Item_find``
     (filtered to ``type=ovf``), optionally scoped to the library
     ``library_name`` resolves to via ``Content.Library_find``. Ambiguity is
     refused before any deploy so the operator re-dispatches by explicit id.
+    A given id or one vCenter returns for a name that is not a UUID is
+    refused before it can reach a URL path.
     """
     passthrough = params.get("library_item")
-    if isinstance(passthrough, str) and passthrough:
-        return passthrough, None
+    if passthrough is not None:
+        if not _is_content_library_id(passthrough):
+            return None, _deploy_failure(
+                "invalid_reference",
+                issues=[
+                    issue(
+                        "input",
+                        "error",
+                        "library_item must be a vCenter content-library item id (a UUID); "
+                        f"got {passthrough!r}",
+                    )
+                ],
+            )
+        return str(passthrough), None
 
     item_name = params.get("library_item_name")
     if not isinstance(item_name, str) or not item_name:
@@ -3100,6 +3170,11 @@ async def _resolve_deploy_library_item(
             issues=[
                 issue("input", "error", f"OVF item {item_name!r} matched {len(item_ids)} items")
             ],
+        )
+    if not _is_content_library_id(item_ids[0]):
+        return None, _deploy_failure(
+            "invalid_reference",
+            issues=[issue("input", "error", f"vCenter returned an unexpected id {item_ids[0]!r}")],
         )
     return item_ids[0], None
 
@@ -4467,7 +4542,7 @@ def _import_vapp_gate(
     async def _gate(params: dict[str, Any]) -> OperationResult | None:
         return await enforce_subop_policy(
             operator=operator,
-            connector_id=_CONNECTOR_ID,
+            connector_id=_step_connector_id(connector),
             op_id=_OP_IMPORT_VAPP_GOVERNANCE,
             safety_level=_WRITE_SAFETY_LEVEL,
             requires_approval=_WRITE_REQUIRES_APPROVAL,
@@ -5751,7 +5826,7 @@ async def host_evacuate_composite(
             if vm_entry.get("power_state") != _VM_POWER_STATE_ON:
                 continue
             migrate_result = await dispatch_child(
-                connector_id=_CONNECTOR_ID,
+                connector_id=_step_connector_id(connector),
                 op_id=_OP_COMPOSITE_VM_MIGRATE,
                 params={"vm": vm_moid, "cluster": cluster_moid},
             )
@@ -5790,6 +5865,225 @@ async def host_evacuate_composite(
         failed=failed,
         outcome=outcome,
         moved_by=moved_by,
+    )
+
+
+# ===========================================================================
+# host.maintenance.exit
+# ===========================================================================
+
+
+@dataclass(frozen=True)
+class _HostMaintenanceState:
+    """The host leaves read before and after a maintenance-mode exit (#4967)."""
+
+    name: str | None
+    connection_state: str | None
+    in_maintenance_mode: bool | None
+    ha_state: str | None
+
+    @property
+    def connected(self) -> bool:
+        return self.connection_state == _HOST_CONNECTION_STATE_CONNECTED
+
+    def as_fields(self) -> dict[str, Any]:
+        """The envelope fields the operator reads."""
+        return {
+            "name": self.name,
+            "connection_state": self.connection_state,
+            "in_maintenance_mode": self.in_maintenance_mode,
+            "ha_state": self.ha_state,
+        }
+
+
+async def _read_host_maintenance_state(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    host_moid: str,
+) -> _HostMaintenanceState:
+    """One ``RetrievePropertiesEx`` read of the host's name, connection and maintenance state.
+
+    The HA state is ``runtime.dasHostState.state``; a host outside a vSphere
+    HA cluster has no ``dasHostState``, so it reads as ``None``.
+    """
+    payload = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=retrieve_properties_body(
+            _HOST_SYSTEM_MO_TYPE, [host_moid], _HOST_MAINTENANCE_STATE_PATH_SET
+        ),
+    )
+    name = _extract_single_prop(payload, _PROP_HOST_NAME)
+    connection_state = _extract_single_prop(payload, _PROP_HOST_CONNECTION_STATE)
+    in_maintenance = _extract_single_prop(payload, _PROP_HOST_IN_MAINTENANCE_MODE)
+    das_state = _extract_single_prop(payload, _PROP_HOST_DAS_HOST_STATE)
+    ha_state = das_state.get("state") if isinstance(das_state, dict) else None
+    return _HostMaintenanceState(
+        name=name if isinstance(name, str) else None,
+        connection_state=connection_state if isinstance(connection_state, str) else None,
+        in_maintenance_mode=in_maintenance if isinstance(in_maintenance, bool) else None,
+        ha_state=ha_state if isinstance(ha_state, str) else None,
+    )
+
+
+def _maintenance_exit_envelope(
+    *,
+    status: str,
+    host_moid: str,
+    state: _HostMaintenanceState,
+    maintenance_task: str | None = None,
+    guidance: str | None = None,
+) -> dict[str, Any]:
+    envelope: dict[str, Any] = {
+        "status": status,
+        "host": host_moid,
+        **state.as_fields(),
+        "maintenance_task": maintenance_task,
+    }
+    if guidance is not None:
+        envelope["guidance"] = guidance
+    return envelope
+
+
+async def _maintenance_exit_timed_out(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    host_moid: str,
+    task: str,
+) -> dict[str, Any]:
+    """The ``timeout`` answer: the task still runs, the call did not fail (a warning issue).
+
+    The host read after the timeout is best effort. MEHO already stopped
+    waiting, so a failed read must not turn the answer into a failed call
+    that loses the task id. The answer then keeps the ``timeout`` status and
+    the task id, leaves the four state fields ``None`` and says the current
+    host state is unavailable (the fault class only, like the preview).
+    """
+    seconds = int(_MAINTENANCE_TASK_TIMEOUT_SECONDS)
+    guidance = (
+        f"MEHO stopped waiting after {seconds}s, but the exit-maintenance-mode task {task} "
+        "still runs on vCenter. The call did not fail. Check the task (vmware.tasks.recent) "
+        "and read the host again before you put VMs on it."
+    )
+    issues = [
+        issue(
+            "connector",
+            "warning",
+            f"exit-maintenance-mode task {task} on host {host_moid!r} still runs after "
+            f"{seconds}s; the host may still be in maintenance mode",
+        )
+    ]
+    try:
+        state = await _read_host_maintenance_state(
+            connector=connector, target=target, operator=operator, host_moid=host_moid
+        )
+    except Exception as exc:
+        state = _HostMaintenanceState(
+            name=None, connection_state=None, in_maintenance_mode=None, ha_state=None
+        )
+        guidance += (
+            " The current host state is unavailable: the host read after the timeout "
+            "failed, so the state fields are empty."
+        )
+        issues.append(
+            issue(
+                "connector",
+                "warning",
+                f"the host read after the timeout failed ({type(exc).__name__}); the current "
+                f"state of host {host_moid!r} is unavailable",
+            )
+        )
+    envelope = _maintenance_exit_envelope(
+        status="timeout",
+        host_moid=host_moid,
+        state=state,
+        maintenance_task=task,
+        guidance=guidance,
+    )
+    envelope["issues"] = issues
+    return envelope
+
+
+async def host_maintenance_exit_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """End maintenance mode on one host, after approval.
+
+    Op-id: ``vmware.composite.host.maintenance.exit``. Steps (#4967):
+
+    1. Read the host's connection state and maintenance state (vim). A host
+       that is not connected is refused before any change
+       (``not_connected``). A host that is not in maintenance mode answers
+       ``unchanged`` and sends nothing, so the call is safe to run twice.
+    2. Send ``ExitMaintenanceMode_Task`` with ``{"timeout": 0}`` through the
+       governed vim seam (the same call ``cluster.patch`` sends as its last
+       step) and poll it.
+    3. Read the host again and return its maintenance state, connection
+       state and vSphere HA state. A poll timeout is the ``timeout`` status
+       with the task id, not a failure, and its host read is best effort;
+       a faulted task is a failed call.
+    """
+    host_moid = params["host"]
+    before = await _read_host_maintenance_state(
+        connector=connector, target=target, operator=operator, host_moid=host_moid
+    )
+    if not before.connected:
+        return _maintenance_exit_envelope(
+            status="not_connected",
+            host_moid=host_moid,
+            state=before,
+            guidance=(
+                f"host {host_moid!r} is {before.connection_state or 'in an unknown state'}, "
+                "not connected to vCenter, so it cannot leave maintenance mode. Nothing was "
+                "changed. Reconnect the host first (check its management network and the "
+                "host agent), then call again."
+            ),
+        )
+    if before.in_maintenance_mode is False:
+        return _maintenance_exit_envelope(
+            status="unchanged",
+            host_moid=host_moid,
+            state=before,
+            guidance=f"host {host_moid!r} is not in maintenance mode. Nothing was sent.",
+        )
+
+    outcome = await _run_host_maintenance_task(
+        connector=connector,
+        target=target,
+        operator=operator,
+        host_moid=host_moid,
+        op_id=_OP_EXIT_MAINTENANCE_TASK,
+    )
+    if isinstance(outcome, OperationResult):
+        return outcome
+    if outcome.state == TASK_STATE_ERROR:
+        # A faulted task is a failed call; the dispatcher wraps the fault text
+        # as ``connector_error`` (the host.evacuate convention, #4895).
+        reason = _maintenance_task_failure(outcome, _OP_EXIT_MAINTENANCE_TASK, host_moid)
+        raise RuntimeError(f"host.maintenance.exit: {reason}")
+
+    if outcome.timed_out:
+        return await _maintenance_exit_timed_out(
+            connector=connector,
+            target=target,
+            operator=operator,
+            host_moid=host_moid,
+            task=outcome.task,
+        )
+    after = await _read_host_maintenance_state(
+        connector=connector, target=target, operator=operator, host_moid=host_moid
+    )
+    return _maintenance_exit_envelope(
+        status="exited", host_moid=host_moid, state=after, maintenance_task=outcome.task
     )
 
 

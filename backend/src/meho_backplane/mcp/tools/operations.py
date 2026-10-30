@@ -57,7 +57,12 @@ from __future__ import annotations
 from typing import Any
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools._call_operation_async import poll_call, submit_async_call
 from meho_backplane.operations.meta_tools import (
@@ -99,15 +104,11 @@ def _connector_error_to_invalid_params(
       — the connector exists but awaits ingest; ``next_step.verb`` is the
       ``meho connector ingest …`` command to run.
     * :class:`UnknownConnectorError` →
-      ``{"reason": "unknown_connector", "connector_id"}`` — no such
-      connector on this deploy.
+      ``{"reason": "unknown_connector", "connector_id", "did_you_mean"}``
+      — no such connector on this deploy; ``did_you_mean`` lists up to 5
+      close ids (#4136).
     """
-    if isinstance(exc, ConnectorNotIngestedError):
-        return McpInvalidParamsError(str(exc), data=exc.as_error_data())
-    return McpInvalidParamsError(
-        str(exc),
-        data={"reason": "unknown_connector", "connector_id": exc.connector_id},
-    )
+    return McpInvalidParamsError(str(exc), data=exc.as_error_data())
 
 
 async def _list_operation_groups_handler(
@@ -188,16 +189,19 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="list_operation_groups",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "List enabled operation groups for a connector. Each group "
             "carries a `when_to_use` blurb explaining what the group is "
             "for so you can pick the right group before searching its "
-            "operations. Call this FIRST when you don't know which "
+            "operations. A group can hold reads and writes. Check each "
+            "operation's `safety_level` in the `search_operations` results. "
+            "Call this FIRST when you don't know which "
             "operation to invoke -- it narrows the search space from "
             "hundreds of operations to a handful of relevant ones. "
             "Argument: `connector_id` in `<impl_id>-<version>` form "
-            '(e.g. "vmware-rest-9.0", "vault-1.x") -- NOT the bare '
+            '(e.g. "k8s-1.x", "vault-1.x") -- NOT the bare '
             "product name. Returns groups in `group_key` order. An "
             "UNKNOWN connector_id is an error (no such connector, "
             "`-32602` with `data.reason=unknown_connector`); a "
@@ -210,8 +214,8 @@ register_mcp_tool(
             "own review is still staged but that holds ≥1 per-op-enabled "
             "operation IS listed, flagged `partial=true` with a non-zero "
             "`enabled_op_count` — only those ops are live and "
-            "dispatchable; `search_operations` will find them. Pagination "
-            "(G0.18-T5 #1358): keyset on `group_key`; "
+            "dispatchable; `search_operations` will find them. Pagination: "
+            "keyset on `group_key`; "
             "default `limit=100`, max 500; pass the response's "
             "`next_cursor` back as the next call's `cursor` to fetch "
             "the next page. A `null` `next_cursor` is the end."
@@ -223,7 +227,7 @@ register_mcp_tool(
                     "type": "string",
                     "description": (
                         "Connector identifier in the form "
-                        '`<impl_id>-<version>` (e.g. "vmware-rest-9.0", '
+                        '`<impl_id>-<version>` (e.g. "k8s-1.x", '
                         '"vault-1.x") -- NOT the bare product name. A '
                         "value naming no registered connector is an error."
                     ),
@@ -237,7 +241,7 @@ register_mcp_tool(
                     "description": (
                         "Page size. Default 100; max 500. Matches "
                         "`list_targets` paging — sibling list tools share "
-                        "one upper bound (G0.18-T5 #1358)."
+                        "one upper bound."
                     ),
                 },
                 "cursor": {
@@ -248,7 +252,7 @@ register_mcp_tool(
                         "next. Results are ordered by `group_key` "
                         "ascending. Matches `cursor` on `query_audit` / "
                         "`query_topology` / `list_targets` / "
-                        "`meho_broadcast_recent` (G0.18-T5 #1358)."
+                        "`meho_broadcast_recent`."
                     ),
                     "maxLength": 256,
                 },
@@ -431,6 +435,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="search_operations",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Hybrid BM25 + cosine retrieval over a connector's enabled "
@@ -550,27 +555,22 @@ register_mcp_tool(
         name="call_operation",
         surface=ToolSurface.WORKING,
         description=(
-            "Invoke an operation. Use ONLY after `search_operations` has "
-            "returned an op_id and you've confirmed the operation is "
-            "appropriate (check `safety_level` and `requires_approval` "
-            "on the hit). The dispatcher validates `params` against the "
-            "operation's parameter_schema and either returns the result "
-            '(`status="ok"`) or a structured error in the same envelope '
-            '(`status="error"` + `error="<code>: ..."`). DO NOT retry '
-            "an `invalid_params` error verbatim -- inspect "
-            "`extras.validation_errors` and fix the params shape first. "
-            "Arguments: `connector_id` (required), `op_id` (required), "
-            "`target` (optional, accepts EITHER a bare string "
-            '`"rdc-vcenter"` -- preferred forward shape, matches '
-            "`query_topology` / `query_audit` -- OR a dict "
-            '`{"name": "rdc-vcenter"}`; required for ops that act on a '
-            "target), `params` (operation-specific). Returns the full "
-            "OperationResult shape. For a long call (a deploy or another "
-            "multi-step operation that can take minutes) pass `async: true`: "
-            'you get `status="pending"` and `extras.run_id` at once, and the '
-            "call runs in the background. Then call `call_operation` again "
-            "with the same `connector_id`, `op_id` and that `run_id` to check "
-            "it; once it is done you get its normal result."
+            "Run an operation. Use ONLY after `search_operations` gave you "
+            "the `op_id` and you checked its `safety_level` and "
+            "`requires_approval`. MEHO checks `params` against the "
+            'operation\'s parameter schema and returns `status` ("ok", '
+            '"error", "denied", "awaiting_approval", ...) and `result`. '
+            "Do NOT retry an `invalid_params` error unchanged: read "
+            "`extras.validation_errors` and fix `params` first. `target` "
+            "is a target's `name` from `list_targets` (not its id), as "
+            '`"<target-name>"` or `{"name": "<target-name>"}`; do not '
+            "guess it. It is required for operations that act on a "
+            "target. If `delivery` is `partial`, read the full result with "
+            "`result_query` and `handle`; the operation already ran, so do "
+            "not call it again. For a long call (a deploy, a multi-step "
+            'operation) pass `async: true`: you get `status="pending"` and '
+            "`extras.run_id`; call again with the same `connector_id`, "
+            "`op_id` and that `run_id` to check it."
         ),
         inputSchema={
             "type": "object",
@@ -580,38 +580,18 @@ register_mcp_tool(
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Operation id as returned by `search_operations`. "
-                        'Examples: "GET:/api/vcenter/cluster", '
-                        '"vault.kv.read", "vmware.composite.vm.create".'
+                        "Operation id from `search_operations`, e.g. "
+                        '"vault.kv.read" or "GET:/repos/{owner}/{repo}/issues".'
                     ),
                 },
                 "target": {
                     "type": ["string", "object", "null"],
                     "description": (
-                        "Target reference. Two shapes are accepted; "
-                        "either reduces to the same dispatch:\n"
-                        '  * Bare string -- e.g. `"rdc-vcenter"`. '
-                        "The forward-preferred shape; matches "
-                        "`query_topology` / `query_audit` so a target "
-                        "name carried across read and write surfaces "
-                        "needs no reshape.\n"
-                        '  * Dict -- e.g. `{"name": "rdc-vcenter"}`. '
-                        "The original shape; supports the optional "
-                        "`fqdn` field below for per-call vhost "
-                        "override. Use this form when you need the "
-                        "override.\n"
-                        "Pass null for operations that do not act on "
-                        "a target. The dispatcher resolves `name` "
-                        "against the targets registry; aliases are "
-                        "accepted. See `docs/architecture/mcp.md` "
-                        "('Target-reference shape convention') for "
-                        "the cross-tool convention. The optional "
-                        "`fqdn` field (dict-shape only) is a per-call "
-                        "override for the resolved target's vhost "
-                        "name; honoured by connectors that route by "
-                        "`Host:` header (notably `vcfa-rest-9.0` "
-                        "where reaching the appliance by IP without "
-                        "an `fqdn` returns 404 with empty body)."
+                        "Target `name` from `list_targets`, as "
+                        '`"<target-name>"` or `{"name": "<target-name>"}`. '
+                        "Do not guess it. Use the dict form with `fqdn` "
+                        "only when you must override the host name for "
+                        "this call. Null for operations without a target."
                     ),
                     "minLength": 1,
                     "properties": {
@@ -619,68 +599,35 @@ register_mcp_tool(
                         "fqdn": {
                             "type": "string",
                             "minLength": 1,
-                            "description": (
-                                "Per-call override for the resolved "
-                                "target's `fqdn` column. Threaded into "
-                                "the connector for vhost routing; the "
-                                "DB row is not modified. Dict-shape "
-                                "only -- bare-string callers must "
-                                "switch to the dict to opt in."
-                            ),
+                            "description": "Host name to use for this call only.",
                         },
                     },
                 },
                 "params": {
                     "type": "object",
                     "description": (
-                        "Operation-specific parameters. The dispatcher "
-                        "validates against the operation's parameter_schema "
-                        "before invoking the handler; unknown fields are "
-                        "rejected at the schema layer. One reserved key is "
-                        "handled by the dispatcher itself and never reaches "
-                        "the op schema: `reveal_secret` (bool). A "
-                        "credential_read op (e.g. `vault.kv.read`) returns a "
-                        "key-name-scrubbed response by default -- secret "
-                        "values are replaced so they never enter this agent "
-                        "transcript. Pass `reveal_secret: true` ONLY when you "
-                        "must pipe the raw value onward; the raw value is "
-                        "then returned AND the reveal is stamped on the audit "
-                        "row. Prefer `secret.move` to relocate a credential "
-                        "without it transiting your context."
+                        "The operation's parameters. Unknown fields are "
+                        "refused. A credential read hides secret values by "
+                        "default; add `reveal_secret: true` only when you "
+                        "must pass the raw value on (the reveal is audited)."
                     ),
                 },
                 "work_ref": {
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Optional external change-ticket reference for "
-                        "this operation -- an opaque typed-URI string "
-                        '(e.g. `"gh:evoila/meho#7"`, a Jira key, a CR '
-                        "id) correlating the governed write to the "
-                        "change record that authorised it. Stamped onto "
-                        "the operation's `audit_log.work_ref` so "
-                        "`meho audit query --work-ref ...` can later find "
-                        "every row bound to that ticket. Scoped to this "
-                        "single call (no leakage to the next); a per-op "
-                        "value here overrides any ambient `Meho-Work-Ref` "
-                        "request header. Opaque -- not validated and "
-                        "never sent to the tracker."
+                        "Optional change-ticket reference (e.g. "
+                        '`"gh:org/repo#7"`), stored on the audit row.'
                     ),
                 },
                 "preview_hash": {
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Preview-result-hash binding for a destructive-tier "
-                        "delete (#3197). REQUIRED when the op is "
-                        "`safety_level='destructive'`: first call "
-                        "`preview_operation` with the identical `connector_id` "
-                        "/ `op_id` / `target` / `params`, take the `preview_hash` "
-                        "it returns, and pass it here. The dispatcher recomputes "
-                        "the preview server-side and refuses to queue the "
-                        "approval (fail-closed) unless the hashes match — so "
-                        "the human approver sees exactly what will be destroyed. "
-                        "Ignored for every non-destructive op."
+                        "REQUIRED for a `destructive` operation: the "
+                        "`preview_hash` from `preview_operation` called with "
+                        "the same `connector_id`, `op_id`, `target` and "
+                        "`params`. Ignored otherwise."
                     ),
                 },
                 "idempotency_key": {
@@ -688,37 +635,22 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": 200,
                     "description": (
-                        "Optional retry key for a call that waits for approval. "
-                        "Send the same key with the identical call again (for "
-                        "example after a restart) and you get the same "
-                        "`approval_request_id` back "
-                        "(`extras.approval_request_reused: true`) instead of a "
-                        "second approval request. The same key with a different "
-                        "call is refused with `idempotency_key_conflict`."
+                        "Optional retry key for a call that waits for "
+                        "approval. The same key with the same call returns "
+                        "the same approval request instead of a new one."
                     ),
                 },
                 "async": {
                     "type": "boolean",
                     "default": False,
-                    "description": (
-                        "Start the call in the background. Use it for long "
-                        "calls (deploys, multi-step operations) that can take "
-                        "minutes. The answer comes at once with "
-                        '`status="pending"` and `extras.run_id`; the policy '
-                        "checks, approvals and audit rows are the same as for "
-                        "a normal call. Check the call later with `run_id`."
-                    ),
+                    "description": "Start the call in the background. See the tool description.",
                 },
                 "run_id": {
                     "type": "string",
                     "format": "uuid",
                     "description": (
-                        "Check a call you started with `async: true`. Send the "
-                        "same `connector_id` and `op_id` and the `extras.run_id` "
-                        'you got. While it runs: `status="pending"` or '
-                        '`"running"`, with `extras.started_at`. When it is done: '
-                        "the call's normal result. A run that failed or was "
-                        'cancelled gives `status="error"`. Nothing is run again.'
+                        "Check a call started with `async: true` (send its "
+                        "`extras.run_id`). Nothing is run again."
                     ),
                 },
             },
@@ -824,6 +756,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="preview_operation",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Preview an operation WITHOUT running it. Resolves the same "
@@ -859,8 +792,9 @@ register_mcp_tool(
             "nothing is written. Arguments mirror "
             "`call_operation`: "
             "`connector_id` (required), `op_id` (required), `target` "
-            '(optional; bare string `"rdc-vcenter"` or dict '
-            '`{"name": "rdc-vcenter"}`), `params` (operation-specific).'
+            '(optional; bare string `"<target-name>"` or dict '
+            '`{"name": "<target-name>"}`; use a `name` returned by '
+            "`list_targets`, do not guess), `params` (operation-specific)."
         ),
         inputSchema={
             "type": "object",
@@ -872,15 +806,16 @@ register_mcp_tool(
                     "description": (
                         "Operation id as returned by `search_operations`. "
                         'Examples: "POST:/repos/{owner}/{repo}/issues", '
-                        '"GET:/api/vcenter/cluster".'
+                        '"GET:/repos/{owner}/{repo}/pulls".'
                     ),
                 },
                 "target": {
                     "type": ["string", "object", "null"],
                     "description": (
-                        "Target reference. Same two shapes as "
-                        '`call_operation`: a bare string `"rdc-vcenter"` '
-                        'or a dict `{"name": "rdc-vcenter"}` (with an '
+                        "Target reference. Use a `name` returned by "
+                        "`list_targets`. Do not guess. Same two shapes as "
+                        '`call_operation`: a bare string `"<target-name>"` '
+                        'or a dict `{"name": "<target-name>"}` (with an '
                         "optional `fqdn` override). Pass null for ops that "
                         "do not act on a target. Resolving the target lets "
                         "the preview reflect the same connector + mount "
@@ -950,7 +885,7 @@ register_mcp_tool(
                 "preview_hash": {
                     "type": "string",
                     "description": (
-                        "Preview-result-hash binding (#3197, status=ok): a "
+                        "Preview-result-hash binding (status=ok): a "
                         "stable SHA-256 over the resolved request. Present it "
                         "as `call_operation`'s `preview_hash` arg to govern a "
                         "destructive-tier delete."

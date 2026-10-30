@@ -24,6 +24,16 @@
   gate (NOT RBAC) is what escalates a ``requires_approval`` op to
   ``awaiting_approval`` once dispatched.
 
+  A ``destructive`` op (a delete that cannot be undone) gets a preview step
+  inside the form (#5015). MEHO stores the approval request for such an op
+  only when the run carries the ``preview_hash`` of a preview of the exact
+  same call (#3197). The Preview button posts the form to
+  ``/ui/operations/preview``; the preview fragment carries a hidden
+  ``preview_hash`` input, so the next Run sends it. Editing the target or the
+  params aborts a preview that is still in flight (``htmx:abort`` sent to the
+  Preview button) and clears the preview, so a stale hash is never shown or
+  sent -- not even when the old response arrives after the edit.
+
   Context:
     descriptor            -- OperationDescriptor: the full read shape
     connector_id          -- str: the dispatchable <impl_id>-<version> id,
@@ -33,6 +43,12 @@
     csrf_token            -- str: minted double-submit token for the call POST
 -#}
 {% from "_icons.html" import icon %}
+{#- Shared by the target + params inputs of a destructive op. Abort first:
+    a late response to an earlier preview would otherwise fill the region
+    with a hash for values the person has already changed. -#}
+{% set clear_preview_js -%}
+htmx.trigger(this.form.querySelector('[data-action=run-preview]'), 'htmx:abort'); document.getElementById('operations-run-preview-region').replaceChildren()
+{%- endset %}
 <dialog id="operations-drawer" class="modal" aria-label="Run operation">
   <div class="modal-box max-w-2xl">
     <div class="flex items-start justify-between gap-4">
@@ -61,14 +77,16 @@
     {% if requires_confirmation %}
       <div
         role="alert"
-        class="alert {{ 'alert-error' if safety == 'dangerous' else 'alert-warning' }} mt-4 items-start"
+        class="alert {{ 'alert-error' if safety in ('dangerous', 'destructive') else 'alert-warning' }} mt-4 items-start"
         data-run-gate="confirm"
         data-safety-level="{{ safety }}"
       >
         {{ icon("shield-check", class="size-5 shrink-0") }}
         <div>
           <h4 class="text-sm font-semibold">
-            {% if safety == "dangerous" %}
+            {% if safety == "destructive" %}
+              Destructive operation &mdash; deletes something that cannot be undone
+            {% elif safety == "dangerous" %}
               Dangerous operation &mdash; irreversible or high-impact
             {% elif safety == "caution" %}
               State-changing operation
@@ -83,9 +101,13 @@
               running it parks a request for a reviewer rather than executing
               immediately.
             {% endif %}
+            {% if safety == "destructive" %}
+              Preview the exact call first. A second person must approve it
+              before it runs.
+            {% endif %}
           </p>
           <div class="mt-2 flex flex-wrap items-center gap-2">
-            <span class="badge badge-sm {{ 'badge-error' if safety == 'dangerous' else 'badge-warning' }}" data-run-safety>
+            <span class="badge badge-sm {{ 'badge-error' if safety in ('dangerous', 'destructive') else 'badge-warning' }}" data-run-safety>
               safety: {{ safety }}
             </span>
             {% if descriptor.requires_approval %}
@@ -119,6 +141,7 @@
       hx-swap="innerHTML"
       hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
       hx-disabled-elt="find button[data-action='run']"
+      hx-disinherit="hx-disabled-elt"
     >
       <input type="hidden" name="connector_id" value="{{ connector_id }}" />
       <input type="hidden" name="op_id" value="{{ descriptor.op_id }}" />
@@ -130,9 +153,10 @@
           name="target"
           maxlength="256"
           class="input input-bordered input-sm w-full font-mono"
-          placeholder="e.g. rdc-vcenter"
+          placeholder="e.g. prod-k8s"
           aria-label="Target name"
           autocomplete="off"
+          {% if safety == "destructive" %}data-clears-preview hx-on:input="{{ clear_preview_js }}"{% endif %}
         />
       </label>
 
@@ -145,6 +169,7 @@
           class="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
           placeholder='{"path": "secret/data/app"}'
           aria-label="Operation params as JSON"
+          {% if safety == "destructive" %}data-clears-preview hx-on:input="{{ clear_preview_js }}"{% endif %}
         ></textarea>
       </label>
 
@@ -163,6 +188,34 @@
         />
       </label>
 
+      {#- Preview step for a destructive op (#5015). The button posts this
+          form to the preview route (HTMX includes the enclosing form for a
+          non-GET request) and carries its own CSRF echo. The preview lands
+          inside this form, so its hidden ``preview_hash`` input is sent with
+          the Run. -#}
+      {% if safety == "destructive" %}
+        <div class="rounded border border-base-300 p-3" data-run-preview-step>
+          <p class="mb-2 text-xs opacity-70">
+            Step 1: preview this exact call. Nothing is sent. If you change the
+            target or the params, preview again.
+          </p>
+          <button
+            type="button"
+            class="btn btn-outline btn-sm gap-1"
+            data-action="run-preview"
+            hx-post="/ui/operations/preview"
+            hx-target="#operations-run-preview-region"
+            hx-swap="innerHTML"
+            hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+            hx-disabled-elt="this"
+          >
+            {{ icon("search", class="size-4") }}
+            Preview
+          </button>
+          <div id="operations-run-preview-region" class="mt-3"></div>
+        </div>
+      {% endif %}
+
       <div class="flex items-center justify-end gap-2 pt-1">
         <button
           type="button"
@@ -174,10 +227,10 @@
         <button
           type="submit"
           data-action="run"
-          class="btn btn-sm gap-1 {{ 'btn-error' if safety == 'dangerous' else ('btn-warning' if requires_confirmation else 'btn-primary') }}"
+          class="btn btn-sm gap-1 {{ 'btn-error' if safety in ('dangerous', 'destructive') else ('btn-warning' if requires_confirmation else 'btn-primary') }}"
         >
           {{ icon("zap", class="size-4") }}
-          {% if descriptor.requires_approval %}Run (request approval){% else %}Confirm &amp; run{% endif %}
+          {% if descriptor.requires_approval or safety == "destructive" %}Run (request approval){% else %}Confirm &amp; run{% endif %}
         </button>
       </div>
     </form>

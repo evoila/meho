@@ -89,6 +89,7 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         # VM CPU / memory limit + reservation (#3880): live-read from->to.
         "vmware.composite.vm.resource_allocation.set",
         "vmware.composite.host.evacuate",
+        "vmware.composite.host.maintenance.exit",
         "vmware.composite.host.detach_from_vds",
         "vmware.composite.cluster.patch",
         "vmware.composite.cluster.drs_rule.create",
@@ -232,9 +233,23 @@ class _RecordingConnector:
         self.responses: dict[str, Any] = {}
         self.failures: dict[str, str] = {}
         self.calls: list[tuple[str, str, Any]] = []
+        #: ``RetrievePropertiesEx`` answers keyed by the queried object type
+        #: (the host read of the host.maintenance.exit preview, #4967). An
+        #: unkeyed type raises, which models a failed vim read.
+        self.vmomi_responses: dict[str, Any] = {}
+        self.vmomi_calls: list[tuple[str, Any]] = []
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         return f"{self._MOUNT}{path}"
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        self.vmomi_calls.append((path, json))
+        spec_type = json["specSet"][0]["propSet"][0]["type"]
+        if spec_type in self.vmomi_responses:
+            return self.vmomi_responses[spec_type]
+        raise RuntimeError(f"vim read of {spec_type} failed: vCenter unavailable")
 
     async def adapt_op_query(
         self, target: Any, query: dict[str, Any] | None, operator: Operator
@@ -488,6 +503,7 @@ async def test_live_read_builders_decline_without_a_connector_instance() -> None
     for builder, params in (
         (_write_preview._vm_power_bulk_preview, {"action": "stop"}),
         (_write_preview._host_evacuate_preview, {"host": "host-1"}),
+        (_write_preview._host_maintenance_exit_preview, {"host": "host-1"}),
         (
             _write_preview._host_detach_from_vds_preview,
             {"host": "host-1", "dvs": "dvs-1", "fallback_network": "net"},
@@ -759,14 +775,106 @@ async def test_vm_migrate_preview_names_target_host_resolution() -> None:
     }
 
 
-async def test_vm_power_preview_names_the_hard_vs_soft_power_kind() -> None:
-    """The single-VM power echo surfaces the soft-vs-hard distinction to the approver."""
-    hard = await _write_preview._vm_power_preview(_make_preview_ctx({"vm": "vm-1", "verb": "off"}))
-    assert hard == {"vm": "vm-1", "verb": "off", "power_kind": "hard"}
-    soft = await _write_preview._vm_power_preview(
-        _make_preview_ctx({"vm": "vm-1", "verb": "guest_shutdown"})
+async def test_vm_power_preview_shows_name_power_state_and_power_kind() -> None:
+    """The power card names the VM and its power state, not only the moid (#3942)."""
+    recorder = _RecordingConnector()
+    recorder.responses["/vcenter/vm/vm-1"] = {
+        "value": {"name": "web-01", "power_state": "POWERED_ON"}
+    }
+    hard = await _write_preview._vm_power_preview(
+        _make_preview_ctx({"vm": "vm-1", "verb": "off"}, connector_instance=recorder)
     )
-    assert soft == {"vm": "vm-1", "verb": "guest_shutdown", "power_kind": "guest"}
+    assert hard == {
+        "vm": "vm-1",
+        "name": "web-01",
+        "power_state": "POWERED_ON",
+        "verb": "off",
+        "power_kind": "hard",
+    }
+    soft = await _write_preview._vm_power_preview(
+        _make_preview_ctx({"vm": "vm-1", "verb": "guest_shutdown"}, connector_instance=recorder)
+    )
+    assert soft is not None
+    assert soft["power_kind"] == "guest"
+    assert soft["name"] == "web-01"
+    # Only the VM read fired -- never the power verb.
+    assert recorder.calls == [("GET", "/vcenter/vm/vm-1", None)] * 2
+
+
+async def test_vm_power_preview_keeps_the_moid_when_the_vm_read_fails() -> None:
+    """A failed name read keeps the moid and names the gap; it never raises."""
+    recorder = _RecordingConnector()
+    recorder.failures["/vcenter/vm/vm-1"] = "vCenter refused the read"
+    preview = await _write_preview._vm_power_preview(
+        _make_preview_ctx({"vm": "vm-1", "verb": "reset"}, connector_instance=recorder)
+    )
+    assert preview == {
+        "vm": "vm-1",
+        "name": None,
+        "power_state": None,
+        "verb": "reset",
+        "power_kind": "hard",
+        "unavailable": ["the VM name and power state: the VM read failed (RuntimeError)"],
+    }
+    # The fault text never reaches the durable row.
+    assert "refused" not in str(preview)
+
+
+async def test_vm_power_preview_without_a_connector_names_the_gap() -> None:
+    """No connector session: the card still shows the moid and says the name is missing."""
+    preview = await _write_preview._vm_power_preview(
+        _make_preview_ctx({"vm": "vm-1", "verb": "on"}, connector_instance=None)
+    )
+    assert preview == {
+        "vm": "vm-1",
+        "name": None,
+        "power_state": None,
+        "verb": "on",
+        "power_kind": "hard",
+        "unavailable": ["the VM name and power state: no connector session to read the VM"],
+    }
+
+
+async def test_vm_power_park_shows_the_vm_name_and_power_state(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A person's power-off waits for approval; the row names the VM (#3942)."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses["/vcenter/vm/vm-42"] = {
+        "value": {"name": "app-42", "power_state": "POWERED_ON"}
+    }
+
+    _, row = await _park("vmware.composite.vm.power", {"vm": "vm-42", "verb": "off"})
+
+    preview = row.proposed_effect["preview"]
+    assert preview == {
+        "vm": "vm-42",
+        "name": "app-42",
+        "power_state": "POWERED_ON",
+        "verb": "off",
+        "power_kind": "hard",
+    }
+    assert all(verb == "GET" for verb, _, _ in recorder.calls)
+
+
+async def test_vm_power_park_is_still_created_when_the_vm_read_fails(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A failed name read does not block the approval request."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.failures["/vcenter/vm/vm-42"] = "vCenter unavailable"
+
+    _, row = await _park("vmware.composite.vm.power", {"vm": "vm-42", "verb": "off"})
+
+    effect = row.proposed_effect
+    assert effect["preview_populated"] is True
+    assert "preview_unavailable" not in effect
+    assert effect["preview"]["vm"] == "vm-42"
+    assert effect["preview"]["name"] is None
+    assert effect["preview"]["unavailable"] == [
+        "the VM name and power state: the VM read failed (RuntimeError)"
+    ]
+    assert "vCenter unavailable" not in str(effect)
 
 
 async def test_echo_builders_decline_on_malformed_params() -> None:
@@ -780,7 +888,125 @@ async def test_echo_builders_decline_on_malformed_params() -> None:
     assert await _write_preview._vm_power_preview(_make_preview_ctx({})) is None
     assert await _write_preview._vm_power_bulk_preview(_make_preview_ctx({})) is None
     assert await _write_preview._host_evacuate_preview(_make_preview_ctx({})) is None
+    assert await _write_preview._host_maintenance_exit_preview(_make_preview_ctx({})) is None
     assert await _write_preview._host_detach_from_vds_preview(_make_preview_ctx({})) is None
+
+
+# ===========================================================================
+# host.maintenance.exit preview — the host and the VMs on it (#4967)
+# ===========================================================================
+
+_WHAT_HAPPENS_NEXT = (
+    "After the host leaves maintenance mode, vSAN copies back the data that changed "
+    "while the host was away, and DRS may move running VMs onto the host."
+)
+
+
+def _host_runtime_result(host_moid: str, *, with_ha_state: bool = True) -> dict[str, Any]:
+    """A ``HostSystem`` RetrievePropertiesEx answer with the leaves the preview reads."""
+    prop_set: list[dict[str, Any]] = [
+        {"name": "name", "val": "esx-01"},
+        {"name": "runtime.connectionState", "val": "connected"},
+        {"name": "runtime.inMaintenanceMode", "val": True},
+    ]
+    if with_ha_state:
+        prop_set.append(
+            {
+                "name": "runtime.dasHostState",
+                "val": {"_typeName": "ClusterDasFdmHostState", "state": "connectedToMaster"},
+            }
+        )
+    return {"objects": [{"obj": {"type": "HostSystem", "value": host_moid}, "propSet": prop_set}]}
+
+
+async def test_host_maintenance_exit_park_shows_the_host_and_its_vms(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A person's call waits for approval; the row shows the host state and the VMs on it."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.vmomi_responses["HostSystem"] = _host_runtime_result("host-1")
+    recorder.responses["/vcenter/vm"] = {
+        "value": [
+            {"vm": "vm-a", "name": "app-a", "power_state": "POWERED_OFF"},
+            {"vm": "vm-b", "name": "app-b", "power_state": "POWERED_ON"},
+        ]
+    }
+
+    _, row = await _park("vmware.composite.host.maintenance.exit", {"host": "host-1"})
+
+    assert _strip_uniform_identity(
+        row.proposed_effect, op_id="vmware.composite.host.maintenance.exit"
+    ) == {
+        "op_class": "other",
+        "preview": {
+            "host": "host-1",
+            "name": "esx-01",
+            "connection_state": "connected",
+            "in_maintenance_mode": True,
+            "ha_state": "connectedToMaster",
+            "resolved": [
+                {"vm": "vm-a", "name": "app-a", "power_state": "POWERED_OFF"},
+                {"vm": "vm-b", "name": "app-b", "power_state": "POWERED_ON"},
+            ],
+            "total_resolved": 2,
+            "what_happens_next": _WHAT_HAPPENS_NEXT,
+        },
+        "preview_populated": True,
+        "safety_level": "dangerous",
+    }
+    # One host read and one listing read fired -- never the exit task.
+    assert [p for p, _ in recorder.vmomi_calls] == [
+        "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+    ]
+    assert recorder.read_calls == [("/vcenter/vm", {"hosts": ["host-1"]})]
+    assert all(verb == "GET" for verb, _, _ in recorder.calls)
+
+
+async def test_host_maintenance_exit_park_still_shows_a_preview_when_the_host_read_fails(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A failed host read does not block the approval: the VMs stay, the gap is named."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses["/vcenter/vm"] = {
+        "value": [{"vm": "vm-a", "name": "app-a", "power_state": "POWERED_ON"}]
+    }
+
+    _, row = await _park("vmware.composite.host.maintenance.exit", {"host": "host-1"})
+
+    effect = row.proposed_effect
+    assert effect["preview_populated"] is True
+    assert "preview_unavailable" not in effect
+    assert effect["preview"] == {
+        "host": "host-1",
+        "resolved": [{"vm": "vm-a", "name": "app-a", "power_state": "POWERED_ON"}],
+        "total_resolved": 1,
+        "what_happens_next": _WHAT_HAPPENS_NEXT,
+        "unavailable": ["the host state: the host read failed (RuntimeError)"],
+    }
+    # The fault text never reaches the durable row.
+    assert "vCenter unavailable" not in str(effect)
+
+
+async def test_host_maintenance_exit_preview_keeps_the_host_when_the_vm_listing_fails() -> None:
+    """The other way round: the host state stays, the VM gap is named."""
+    recorder = _RecordingConnector()
+    recorder.vmomi_responses["HostSystem"] = _host_runtime_result("host-1", with_ha_state=False)
+    recorder.failures["/vcenter/vm"] = "listing refused"
+
+    preview = await _write_preview._host_maintenance_exit_preview(
+        _make_preview_ctx({"host": "host-1"}, connector_instance=recorder)
+    )
+
+    assert preview == {
+        "host": "host-1",
+        "name": "esx-01",
+        "connection_state": "connected",
+        "in_maintenance_mode": True,
+        "ha_state": None,
+        "what_happens_next": _WHAT_HAPPENS_NEXT,
+        "unavailable": ["the VMs on the host: the VM listing failed (RuntimeError)"],
+    }
+    assert "listing refused" not in str(preview)
 
 
 # ===========================================================================

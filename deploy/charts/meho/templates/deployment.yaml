@@ -33,9 +33,9 @@ spec:
     spec:
       serviceAccountName: {{ include "meho.serviceAccountName" . }}
       automountServiceAccountToken: false
-      {{- with .Values.imagePullSecrets }}
+      {{- with include "meho.core.imagePullSecrets" . }}
       imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
+        {{- . | nindent 8 }}
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -52,6 +52,48 @@ spec:
           - name: net.ipv4.ping_group_range
             value: {{ . | quote }}
         {{- end }}
+      {{- if .Values.corePostgres.enabled }}
+      initContainers:
+        # The database migration, with the built-in PostgreSQL (#5233).
+        # The pre-install hook Job (templates/migration-job.yaml) would run
+        # before Helm creates the database, so in this mode the Job is not
+        # rendered and every backplane pod migrates before it starts. The
+        # runner waits for the database (`MIGRATION_DB_WAIT_SECONDS`,
+        # default 300 s) and holds a PostgreSQL advisory lock while it
+        # migrates, so a second replica waits and then changes nothing. A
+        # failed migration keeps the pod out of Ready: `helm --wait` fails
+        # and, on upgrade, the old pods keep serving. An older image after
+        # `helm rollback` leaves a newer schema alone (rollback contract,
+        # docs/codebase/migrations.md). Same container as the Job: image
+        # and digest pin, command, environment, security context, volumes
+        # and `migrationJob.resources`.
+        - name: migrate
+          image: {{ include "meho.core.image" (dict "image" .Values.image "global" .Values.global) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "meho_backplane.db.migrate"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "meho.fullname" . }}-config
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.credentialsSecret }}
+                  key: url
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.migrationJob.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      {{- end }}
       containers:
         - name: backplane
           # Image reference deliberately offers no `default .Chart.AppVersion`
@@ -66,11 +108,7 @@ spec:
           # checks the signature against. `tag` stays the human-readable label
           # of that release; the digest takes precedence in the rendered
           # reference. With no digest set, fall back to the schema-required tag.
-          {{- if .Values.image.digest }}
-          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
-          {{- else }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          {{- end }}
+          image: {{ include "meho.core.image" (dict "image" .Values.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http

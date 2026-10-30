@@ -23,7 +23,9 @@ Test matrix
   / ``expires_at``) permit NULL; the NOT NULL columns (``tenant_id`` /
   ``principal_sub`` / ``op_id`` / ``connector_id`` / ``params_hash`` /
   ``proposed_effect`` / ``status`` / ``created_at``) reject it.
-* **Status check constraint matches the ORM enum.**
+* The status drift guard (CHECK values == ORM enum) lives in
+  ``test_migration_0119_approval_withdrawn``, the newest migration that
+  changed the status rule.
 
 The tests follow the synchronous pattern of
 :mod:`tests.test_migration_0017_agent_run`.
@@ -31,7 +33,7 @@ The tests follow the synchronous pattern of
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -42,7 +44,6 @@ from sqlalchemy import text
 
 from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
-from meho_backplane.db.models import ApprovalRequestStatus
 from meho_backplane.settings import get_settings
 
 
@@ -121,19 +122,21 @@ def _table_indexes(sync_url: str, table: str) -> set[str]:
 
 def test_upgrade_creates_approval_request_table(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``upgrade head`` creates the ``approval_request`` table."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     assert "approval_request" in _table_names(sync_url)
 
 
 def test_upgrade_creates_expected_columns(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``approval_request`` has every documented column after upgrade."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     cols = _table_columns(sync_url, "approval_request")
     expected = {
         "id",
@@ -157,10 +160,11 @@ def test_upgrade_creates_expected_columns(
 
 def test_upgrade_creates_named_indexes(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Three named indexes exist after upgrade."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     idx = _table_indexes(sync_url, "approval_request")
     assert "approval_request_tenant_created_at_idx" in idx
     assert "approval_request_status_idx" in idx
@@ -169,10 +173,11 @@ def test_upgrade_creates_named_indexes(
 
 def test_reversibility_round_trip(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """downgrade to 0022 drops the table; upgrade recreates it."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     assert "approval_request" in _table_names(sync_url)
 
     command.downgrade(cfg, "0022")
@@ -184,10 +189,11 @@ def test_reversibility_round_trip(
 
 def test_audit_log_untouched_after_upgrade(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """The migration must not disturb the pre-existing ``audit_log`` table."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     tables = _table_names(sync_url)
     assert "audit_log" in tables
     # The 0014 column must still be present.
@@ -197,10 +203,11 @@ def test_audit_log_untouched_after_upgrade(
 
 def test_nullable_columns_permit_null(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Nullable columns permit NULL; NOT NULL columns reject it."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    copy_migrated_db(cfg, "head")
     nullable = ("run_id", "principal_act", "target_id", "reviewed_by", "decided_at", "expires_at")
     not_null = (
         "id",
@@ -221,39 +228,3 @@ def test_nullable_columns_permit_null(
         assert not _column_is_nullable(sync_url, "approval_request", col), (
             f"expected {col!r} to be NOT NULL"
         )
-
-
-def _load_migration_0023() -> object:
-    """Load migration ``0023`` as a module via its file path.
-
-    Alembic version files are digit-prefixed and not importable as normal
-    dotted modules. Loading by file path with :mod:`importlib.util` is the
-    robust way to reach the migration's recorded literal tuples.
-    """
-    import importlib.util
-    from pathlib import Path
-
-    path = (
-        Path(__file__).resolve().parent.parent.parent
-        / "alembic"
-        / "versions"
-        / "0023_create_approval_request.py"
-    )
-    spec = importlib.util.spec_from_file_location("_migration_0023", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)  # type: ignore[union-attr]
-    return module
-
-
-def test_status_check_matches_enum() -> None:
-    """The migration's status vocabulary matches :class:`ApprovalRequestStatus`.
-
-    Drift guard: if a new member is added to the enum without a migration
-    update, this test catches the mismatch.
-    """
-    migration = _load_migration_0023()
-
-    model_values = {s.value for s in ApprovalRequestStatus}
-    migration_values = set(migration._APPROVAL_REQUEST_STATUSES)  # type: ignore[attr-defined]
-    assert model_values == migration_values

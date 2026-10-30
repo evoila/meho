@@ -14,7 +14,8 @@ Route inventory
 ---------------
 
 * ``GET /api/v1/approvals`` — list pending requests for the operator's
-  tenant. Optional ``?status=`` filter (default ``pending``). Access:
+  tenant. Optional ``?status=`` filter (default ``pending``) and
+  ``?order=oldest|newest`` sort (default ``newest``). Access:
   approvals-plane (see below).
 * ``POST /api/v1/approvals/{request_id}/approve`` — approve a pending
   request and re-dispatch the original call with the original params.
@@ -24,6 +25,10 @@ Route inventory
   request; the original dispatch is not executed. Body:
   :class:`RejectRequestBody` (optional ``reason`` string). Access:
   approvals-plane.
+* ``POST /api/v1/approvals/{request_id}/withdraw`` — the sender takes
+  back its own pending request (#4987). Not a decision. Body:
+  :class:`WithdrawRequestBody` (optional ``reason``). Access: any
+  authenticated principal, but only the sender of the request.
 
 Access model — approve-only, decoupled from dispatch (#3243)
 ------------------------------------------------------------
@@ -92,7 +97,10 @@ from meho_backplane.operations.approval_context import (
 )
 from meho_backplane.operations.approval_outcome import resume_outcome
 from meho_backplane.operations.approval_queue import (
+    EXPIRED_REASON_MESSAGES,
     MAX_REASON_LENGTH,
+    ApprovalExpiredReason,
+    ApprovalListOrder,
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ApprovalRequestExpiredError,
@@ -105,6 +113,8 @@ from meho_backplane.operations.approval_queue import (
     ResultAccessForbiddenError,
     SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
+    WithdrawForbiddenError,
+    approval_expired_reason,
     approval_result_state,
     approve_request,
     get_decision_delegation,
@@ -113,6 +123,7 @@ from meho_backplane.operations.approval_queue import (
     record_approval_step_event,
     reject_request,
     resume_dispatch_after_approval,
+    withdraw_request,
 )
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 
@@ -253,12 +264,29 @@ class ApprovalRequestView(BaseModel):
     #: status, error code and the run's audit id. ``None`` until the run
     #: starts, and for a request that is not ``approved``. Additive.
     resume_outcome: ApprovalResumeOutcomeView | None = None
+    #: Why an ``expired`` request expired (#5030): ``deadline_passed`` or
+    #: ``release_changed`` (MEHO was updated while it waited). ``None``
+    #: unless ``status`` is ``expired``. Read off the row. Additive.
+    expired_reason: ApprovalExpiredReason | None = None
+    #: What the requester reads for ``expired_reason``, with the advice to
+    #: ask again (#5030). ``None`` unless ``status`` is ``expired``.
+    expired_message: str | None = None
+    #: The MEHO release the request was made under (#5030): the commit
+    #: hash, plus the chart version when set. ``None`` for a request saved
+    #: before MEHO recorded it, or made by a build with no release identity.
+    release_id: str | None = None
     reviewed_by: str | None
     #: Reviewer display name, resolved alongside ``reviewed_by`` (#3300).
     #: ``None`` before a decision or when the deciding token carried no
     #: ``name`` claim (fail-open to the ``reviewed_by`` GUID). Additive.
     reviewed_by_name: str | None = None
     decided_at: str | None
+    #: When the sender withdrew the request (#4987). ``None`` unless
+    #: ``status`` is ``withdrawn``. A withdrawal is not a decision, so
+    #: ``reviewed_by`` and ``decided_at`` stay ``None``. Additive.
+    withdrawn_at: str | None = None
+    #: The sender's reason for the withdrawal, or ``None``. Additive.
+    withdraw_reason: str | None = None
     created_at: str
     expires_at: str | None
     work_ref: str | None
@@ -352,6 +380,18 @@ class RejectRequestBody(BaseModel):
     )
 
 
+class WithdrawRequestBody(BaseModel):
+    """POST body for ``…/withdraw`` (#4987)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(
+        default="",
+        max_length=_MAX_REASON_LENGTH,
+        description="Optional reason why the sender takes the request back.",
+    )
+
+
 class ApproveResponseBody(BaseModel):
     """Response for a successful approve + re-dispatch."""
 
@@ -426,6 +466,7 @@ def _view(
     simply absent there. *delegation* (#3692) is likewise single-request
     only -- it is read off the decision audit row.
     """
+    expired_reason = approval_expired_reason(row)
     return ApprovalRequestView(
         id=row.id,
         tenant_id=row.tenant_id,
@@ -442,9 +483,14 @@ def _view(
         status=ApprovalRequestStatus(row.status),
         result_state=approval_result_state(row),
         resume_outcome=_resume_outcome_view(row),
+        expired_reason=expired_reason,
+        expired_message=EXPIRED_REASON_MESSAGES[expired_reason] if expired_reason else None,
+        release_id=row.release_id,
         reviewed_by=row.reviewed_by,
         reviewed_by_name=row.reviewed_by_name,
         decided_at=row.decided_at.isoformat() if row.decided_at else None,
+        withdrawn_at=row.withdrawn_at.isoformat() if row.withdrawn_at else None,
+        withdraw_reason=row.withdraw_reason,
         created_at=row.created_at.isoformat(),
         expires_at=row.expires_at.isoformat() if row.expires_at else None,
         work_ref=row.work_ref,
@@ -588,7 +634,9 @@ async def list_approvals(
     status: str = Query(
         default="pending",
         description=(
-            "Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'."
+            "Filter by status. One of: pending, approved, rejected, expired, "
+            "withdrawn, all. 'all' returns requests in every state. "
+            "Defaults to 'pending'."
         ),
     ),
     work_ref: str | None = Query(
@@ -599,39 +647,73 @@ async def list_approvals(
             "(work_ref I2-T1 #1659). Omit for no work_ref filter."
         ),
     ),
+    limit: int | None = Query(
+        default=None,
+        ge=1,
+        le=500,
+        description="Return at most this many requests (1..500). Omit for no limit.",
+    ),
+    offset: int = Query(
+        default=0,
+        ge=0,
+        description="Skip this many requests first, in the chosen order. Defaults to 0.",
+    ),
+    order: ApprovalListOrder = Query(
+        default="newest",
+        description=(
+            "Sort by creation time. 'newest' (default) lists the newest request "
+            "first; 'oldest' lists the oldest first, which is the order a chain "
+            "of requests under one change ticket was sent in."
+        ),
+    ),
     operator: Operator = _require_approvals_access,
 ) -> list[ApprovalRequestView]:
     """List approval requests for the operator's tenant.
 
     Defaults to listing only ``pending`` requests. Supports filtering
     by status via ``?status=approved`` / ``?status=rejected`` /
-    ``?status=expired`` and by change ticket via
+    ``?status=expired`` / ``?status=withdrawn``, ``?status=all`` for every
+    state (the same sentinel ``meho_approvals_list`` accepts), and by
+    change ticket via
     ``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first
-    (``created_at DESC``).
+    (``created_at DESC``) by default; ``?order=oldest`` returns
+    oldest-first (``created_at ASC``, ties broken on ``id``) so a chain of
+    requests under one change ticket reads in the order it was sent
+    (#3596). ``limit`` / ``offset`` page through the result; no ``limit``
+    returns every match.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id="approval.list",
         audit_op_class="read",
     )
-    # Validate status value against the closed enum.
-    try:
-        status_filter = ApprovalRequestStatus(status)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"unknown status {status!r}; choose from: pending, approved, rejected, expired",
-        ) from exc
+    # Validate status value against the closed enum; "all" means no filter.
+    status_filter: ApprovalRequestStatus | None = None
+    if status != "all":
+        try:
+            status_filter = ApprovalRequestStatus(status)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"unknown status {status!r}; "
+                    "choose from: pending, approved, rejected, expired, withdrawn, all"
+                ),
+            ) from exc
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        stmt = (
-            select(ApprovalRequest)
-            .where(ApprovalRequest.tenant_id == operator.tenant_id)
-            .where(ApprovalRequest.status == status_filter.value)
-        )
+        stmt = select(ApprovalRequest).where(ApprovalRequest.tenant_id == operator.tenant_id)
+        if status_filter is not None:
+            stmt = stmt.where(ApprovalRequest.status == status_filter.value)
         if work_ref is not None:
             stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
-        stmt = stmt.order_by(ApprovalRequest.created_at.desc())
+        if order == "oldest":
+            stmt = stmt.order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
+        else:
+            stmt = stmt.order_by(ApprovalRequest.created_at.desc())
+        stmt = stmt.offset(offset)
+        if limit is not None:
+            stmt = stmt.limit(limit)
         result = await session.execute(stmt)
         rows = list(result.scalars().all())
 
@@ -682,7 +764,7 @@ async def get_approval_result(
 
     Surfaces the reduced / handle-shaped ``OperationResult`` envelope the
     backplane produced when it re-dispatched the approved op, so the consumer
-    that parked a **non-idempotent** op (VCF ``installer.sddc.bringup.start``)
+    that parked a **non-idempotent** op (one that starts a long task)
     can resume in place by poll — read back the resulting task id and continue
     polling it — instead of a second submit that would start a second
     bring-up.
@@ -974,6 +1056,66 @@ async def reject_approval_request(
         decision="rejected",
         reason=body.reason,
     )
+
+
+@router.post("/{request_id}/withdraw", response_model=ApprovalRequestView)
+async def withdraw_approval_request(
+    request_id: Annotated[uuid.UUID, Path()],
+    body: WithdrawRequestBody,
+    operator: Operator = Depends(verify_jwt_and_bind),
+) -> ApprovalRequestView:
+    """The sender takes back its own pending request (#4987).
+
+    Not a decision, so this route is not on the approvals-plane gate and
+    not human-only: a person, an agent or a service principal may withdraw
+    a request **it sent** (``operator.sub == principal_sub``). The request
+    moves to ``withdrawn`` and the operation never runs. One
+    ``approval.withdraw`` audit row records it. The response is the updated
+    request, so a sender without approvals-plane access still sees the
+    result.
+
+    HTTP status codes:
+
+    * 200 — withdrawn.
+    * 403 — the caller did not send the request (an approver included).
+    * 404 — request not found (or belongs to another tenant).
+    * 409 — the request is already closed (decided, expired or withdrawn).
+    * 422 — a reason over 2000 characters.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="approval.withdraw",
+        audit_op_class="write",
+        audit_approval_request_id=str(request_id),
+    )
+    sessionmaker = get_sessionmaker()
+    try:
+        async with sessionmaker() as session:
+            request = await withdraw_request(
+                session, request_id, operator=operator, reason=body.reason
+            )
+            await session.commit()
+    except ApprovalNotFoundError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="approval_request_not_found",
+        ) from exc
+    except WithdrawForbiddenError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="not_request_sender",
+        ) from exc
+    except ApprovalRequestAlreadyDecidedError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=f"approval_request_already_{exc.status}",
+        ) from exc
+    await record_approval_step_event(
+        tenant_id=operator.tenant_id,
+        request=request,
+        decision="withdrawn",
+        audit_id=request._audit_id,  # type: ignore[attr-defined]
+    )
+    return _view(request)
 
 
 # ---------------------------------------------------------------------------

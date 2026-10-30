@@ -224,6 +224,9 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # ``0110``, #3753), so it must be truncated in the same statement.
     "kb_revision",
     "endpoint_descriptor",
+    # ``operation_policy_override`` (migration ``0120``, #4711) holds the
+    # operator's stricter risk levels; reset it with the descriptors.
+    "operation_policy_override",
     # ``event_outbox.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
     # migration ``0027`` (G11.3-T3 #824). PG rejects truncating ``tenant``
     # unless every referencing table is listed in the same statement, so
@@ -344,6 +347,10 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # FK from migration ``0115`` (#4622 sandbox mode delete grants), the
     # same shape as ``service_principal_grant`` above.
     "sandbox_delete_grant",
+    # ``service_principal_read_scope.tenant_id`` is a real ``REFERENCES
+    # tenant(id)`` FK from migration ``0117`` (#4992 read scope), the same
+    # shape as ``service_principal_grant`` above.
+    "service_principal_read_scope",
     # ``addon_pairing.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
     # migration ``0079`` (#3025 add-on pairing handshake). PG rejects
     # truncating ``tenant`` unless every referencing table is listed in the

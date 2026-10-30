@@ -160,11 +160,15 @@ func newCreateCmd() *cobra.Command {
 			if resp.StatusCode() != http.StatusCreated {
 				return renderHTTPStatus(cmd, url, resp.StatusCode(), resp.Body, jsonOut)
 			}
-			return renderGrantEntry(cmd.OutOrStdout(), resp.JSON201, jsonOut, "created")
+			if err := renderGrantEntry(cmd.OutOrStdout(), resp.JSON201, jsonOut, "created"); err != nil {
+				return err
+			}
+			printCompositeGrantNote(cmd, body, jsonOut)
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&principal, "principal", "", "JWT sub of the service principal (required)")
-	cmd.Flags().StringVar(&opID, "op-id", "", "exact operation id; globs are refused, and a delete operation is refused (delete grants are made in the web console, only in sandbox mode) (required)")
+	cmd.Flags().StringVar(&opID, "op-id", "", "exact operation id; globs are refused. A delete operation needs a delete grant: only in sandbox mode, by a tenant admin, with --expires within 30 days. REST and the CLI refuse it unless MEHO_SANDBOX_DELETE_GRANTS_FROM_API is on; the server decides (required)")
 	cmd.Flags().StringVar(&connectorID, "connector-id", "", "exact connector id; globs are refused (required)")
 	cmd.Flags().StringVar(&target, "target", "", "target UUID (optional; targetless is not a wildcard)")
 	cmd.Flags().StringVar(&targetProduct, "target-product", "", "exact target-product selector (optional)")
@@ -185,12 +189,6 @@ func buildGrantCreateBody(principal, opID, connectorID, target, targetProduct, t
 	}
 	if target != "" && (targetProduct != "" || targetNamePattern != "") {
 		return api.ServiceGrantCreate{}, fmt.Errorf("--target is mutually exclusive with --target-product and --target-name-pattern")
-	}
-	if isDeleteShaped(opID) {
-		return api.ServiceGrantCreate{}, fmt.Errorf("--op-id %q is a delete operation. A delete grant is made in the web console, by a tenant admin, and only on an instance in sandbox mode; the CLI cannot create one", opID)
-	}
-	if strings.Contains(opID, ".composite.") {
-		return api.ServiceGrantCreate{}, fmt.Errorf("--op-id %q is a composite; create one grant for each governed child operation instead", opID)
 	}
 	body := api.ServiceGrantCreate{PrincipalSub: principal, OpId: opID, ConnectorId: connectorID, Reason: reason}
 	if target != "" {
@@ -216,6 +214,32 @@ func buildGrantCreateBody(principal, opID, connectorID, target, targetProduct, t
 	return body, nil
 }
 
+// isCompositeOp reports whether opID names a multi-step operation. MEHO checks
+// such an operation twice: once on the operation itself, before any step
+// runs, and once on each write step. A service principal needs a grant for
+// both, so the grant on the operation is accepted and a note names the
+// second kind.
+func isCompositeOp(opID string) bool { return strings.Contains(opID, ".composite.") }
+
+// compositeGrantNote tells the operator that each write step of a multi-step
+// operation needs its own grant, and where to list the steps.
+func compositeGrantNote(opID, connectorID string) string {
+	return fmt.Sprintf("This is a multi-step operation. Each of its write steps needs its own grant too. List them with GET /api/v1/operations/governed-subops?op_id=%s&connector_id=%s", opID, connectorID)
+}
+
+// printCompositeGrantNote prints the note after a grant on a multi-step
+// operation. With --json the note goes to stderr so stdout stays valid JSON.
+func printCompositeGrantNote(cmd *cobra.Command, body api.ServiceGrantCreate, jsonOut bool) {
+	if !isCompositeOp(body.OpId) {
+		return
+	}
+	w := cmd.OutOrStdout()
+	if jsonOut {
+		w = cmd.ErrOrStderr()
+	}
+	fmt.Fprintln(w, compositeGrantNote(body.OpId, body.ConnectorId))
+}
+
 // hasGlob rejects glob operators that cannot be part of an exact identifier.
 // A literal '?' is permitted: GET-style operation identifiers commonly carry
 // query strings and the server accepts it as an exact character.
@@ -224,10 +248,6 @@ func hasGlob(value string) bool { return strings.ContainsAny(value, "*[") }
 func isAffirmative(answer string) bool {
 	answer = strings.ToLower(strings.TrimSpace(answer))
 	return answer == "y" || answer == "yes"
-}
-
-func isDeleteShaped(opID string) bool {
-	return strings.HasPrefix(opID, "DELETE:") || strings.HasSuffix(opID, ".delete") || strings.HasSuffix(opID, ".destroy") || strings.HasSuffix(opID, ".remove") || strings.HasSuffix(opID, ".purge")
 }
 
 func createGrant(ctx context.Context, url string, body api.ServiceGrantCreate) (*api.CreateGrantApiV1ServicePrincipalsGrantsPostResponse, error) {

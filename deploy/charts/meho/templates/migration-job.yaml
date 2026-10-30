@@ -1,3 +1,13 @@
+{{- /*
+Bring-your-own PostgreSQL only. With the built-in PostgreSQL on
+(`corePostgres.enabled`), Helm would run this pre-install hook before it
+creates the database (a normal release object), so the Job would wait for a
+database that does not exist yet. The same runner then runs as the `migrate`
+init container of the backplane Deployment instead (templates/deployment.yaml,
+#5233). Keep the two container specs in step;
+backend/tests/test_chart_migrate_init_container.py compares them.
+*/}}
+{{- if not .Values.corePostgres.enabled }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -88,9 +98,9 @@ spec:
       # the running Deployment, and any hook-delete-policy would delete it
       # out from under that Deployment.
       automountServiceAccountToken: false
-      {{- with .Values.imagePullSecrets }}
+      {{- with include "meho.core.imagePullSecrets" . }}
       imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
+        {{- . | nindent 8 }}
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -105,11 +115,7 @@ spec:
           # digest pin (#284): when `image.digest` is set the Job runs the
           # same content-addressed digest the Deployment does, not a tag
           # that could resolve to different bytes.
-          {{- if .Values.image.digest }}
-          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
-          {{- else }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          {{- end }}
+          image: {{ include "meho.core.image" (dict "image" .Values.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           # The runner takes no CLI flags by design — its contract is
           # `alembic upgrade head` against the env-supplied DATABASE_URL.
@@ -175,3 +181,4 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end }}

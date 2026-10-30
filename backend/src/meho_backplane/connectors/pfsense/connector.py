@@ -47,7 +47,9 @@ change. #3954 adds the allow-listed config reads ``pfsense.user.list``
 and ``pfsense.route.static.list`` via
 :mod:`~meho_backplane.connectors.pfsense.ops_config_reads`. #3937 adds
 the governed user writes ``pfsense.user.disable`` / ``pfsense.user.enable``
-via :mod:`~meho_backplane.connectors.pfsense.ops_user_write`.
+via :mod:`~meho_backplane.connectors.pfsense.ops_user_write`. #3965 adds
+the read ``pfsense.diag.ping`` (a short ping from one of the firewall's own
+addresses) via :mod:`~meho_backplane.connectors.pfsense.ops_diag`.
 """
 
 from __future__ import annotations
@@ -259,7 +261,17 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "gateway / static-route config, never interfaces), so they are safe "
         "against a perimeter firewall carrying the operator's own access path. "
         "Read the current state first with ``pfsense.gateway.list`` / "
-        "``pfsense.route.static.list``."
+        "``pfsense.route.static.list``. Both ``add`` ops take an optional "
+        "one-line ``descr``. To prove that a new route carries traffic, ping "
+        "through it with ``pfsense.diag.ping``."
+    ),
+    "diagnostics": (
+        "Use to check from the firewall itself that traffic passes: "
+        "``pfsense.diag.ping`` sends a few pings from one of the firewall's own "
+        "addresses (for example its VPN-side address) to a host, and returns "
+        "sent, received and loss. Use it after a route or gateway change to "
+        "prove that the path works. It is a ``safe`` read: no approval, no "
+        "change on the firewall."
     ),
     "users": (
         "Use for pfSense local-user questions: which local users exist, "
@@ -790,6 +802,23 @@ class PfSenseConnector(SshConnector):
         )
 
         return await _pfsense_route_static_list(self, target, params, operator)
+
+    async def diag_ping(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Handler shim for ``pfsense.diag.ping``.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_diag.pfsense_diag_ping`.
+        """
+        from meho_backplane.connectors.pfsense.ops_diag import (
+            pfsense_diag_ping as _pfsense_diag_ping,
+        )
+
+        return await _pfsense_diag_ping(self, target, params, operator)
 
     async def mgmt_flow_summary(
         self,

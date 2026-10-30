@@ -7,13 +7,17 @@ What is covered, with a respx-mocked Orchestrator and no ingested catalog:
 
 * the two logins: HTTP Basic (the default) and the Aria Automation token
   (``extras.login = automation``); a ``401`` drops the login of that
-  target and the read then succeeds; an unknown login mode stops early;
+  target and the read then succeeds; automation targets share a login
+  only when the login domain is the same; an unknown login mode stops early;
   a system or unauthenticated caller never reads or fills the login cache;
 * every read through ``dispatch()``: ``vro.about``, ``vro.health``,
   ``vro.workflow.list`` (flat rows, the name and category conditions,
   paging), ``vro.workflow.get`` (both calls, no default values),
   ``vro.execution.list``, ``vro.execution.get`` (secret values replaced,
-  also API key and secret key names, in parameters and Properties entries)
+  also API key and secret key names, in parameters and Properties entries;
+  a refused connection or a time-out gives ``outcome: not_reachable``, a
+  certificate that is not trusted gives the normal certificate error, a
+  destination MEHO refused gives the normal connector error)
   and ``vro.execution.logs`` (line and text caps; a labelled secret that
   crosses the text cut is removed before the cut);
 * every call asks for JSON; a vendor error reaches the answer; an id with
@@ -26,9 +30,10 @@ Fixture values are made up; no real host, user or id appears here.
 from __future__ import annotations
 
 import json
+import ssl
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import httpx
@@ -36,9 +41,11 @@ import pytest
 import respx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from tenacity import wait_none
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
+from meho_backplane.connectors.adapters.http import SsrfBlockedError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.resolver import resolve_connector
 from meho_backplane.connectors.vro import (
@@ -362,6 +369,40 @@ async def test_system_caller_does_not_reuse_a_cached_automation_login() -> None:
     assert callers == ["op-reads-vro", "system:connector-probe"]
 
 
+@pytest.mark.asyncio
+async def test_automation_targets_share_a_login_only_when_the_domain_is_the_same(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """One secret and one host: the same domain shares one login, another domain logs in alone."""
+    await _register(_stub_embedding)
+    first, second, other = (_Target(login="automation") for _ in range(3))
+    first.extras["domain"] = "domain-a"
+    second.extras["domain"] = "domain-a"
+    other.extras["domain"] = "domain-b"
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        csp = mock.post("/csp/gateway/am/api/login").respond(
+            200, json={"refresh_token": "made-up-refresh"}
+        )
+        iaas = mock.post("/iaas/api/login")
+        iaas.side_effect = [
+            httpx.Response(200, json={"tokenType": "Bearer", "token": _TOKEN}),
+            httpx.Response(200, json={"tokenType": "Bearer", "token": "vro-reads-bearer-2"}),
+        ]
+        about = mock.get(_ABOUT).respond(200, json=_ABOUT_PAYLOAD)
+        for target in (first, second, other):
+            assert (await _dispatch("vro.about", target=target)).status == "ok"
+
+    assert [json.loads(call.request.content)["domain"] for call in csp.calls] == [
+        "domain-a",
+        "domain-b",
+    ]
+    assert [call.request.headers["authorization"] for call in about.calls] == [
+        f"Bearer {_TOKEN}",
+        f"Bearer {_TOKEN}",
+        "Bearer vro-reads-bearer-2",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Server reads
 # ---------------------------------------------------------------------------
@@ -438,11 +479,12 @@ async def test_workflow_list_returns_flat_rows_and_sends_the_conditions(
     assert result.status == "ok", result.error
     params = route.calls[0].request.url.params
     assert params.get_list("conditions") == ["name~<part>", "categoryName=<category>"]
-    assert params["maxResult"] == "50"
+    assert params["maxResult"] == "51"
     assert params["startIndex"] == "0"
     body = result.result
     assert body["total"] == 1
     assert body["count"] == 1
+    assert body["more_rows"] is False
     assert body["items"][0]["id"] == _WF
     assert body["items"][0]["categoryName"] == "<category>"
     assert body["items"][0]["href"].endswith(f"/{_WF}/")
@@ -621,6 +663,98 @@ async def test_execution_get_replaces_secret_values_in_properties_entries(
         assert "<host-name>" in rendered
         for secret in (_PASSWORD, "made-up-tok"):
             assert secret not in rendered
+
+
+def _tls_verify_connect_error() -> httpx.ConnectError:
+    """The error httpx raises when the server answers with an untrusted certificate."""
+    message = "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate"
+    error = httpx.ConnectError(message)
+    error.__cause__ = ssl.SSLCertVerificationError(1, message)
+    return error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transport_error",
+    [httpx.ConnectError("[Errno 111] Connection refused"), httpx.ReadTimeout("timed out")],
+    ids=["refused", "timeout"],
+)
+async def test_execution_get_is_not_reachable_when_the_server_does_not_answer(
+    _stub_embedding: AsyncMock, session: AsyncSession, transport_error: httpx.TransportError
+) -> None:
+    connector = await _register(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        route = mock.get(_RUN_PATH).mock(side_effect=transport_error)
+        with patch.object(
+            connector._request_json.retry,
+            "wait",
+            wait_none(),
+        ):
+            result = await _dispatch(
+                "vro.execution.get", {"workflow_id": _WF, "execution_id": _RUN}
+            )
+
+    assert result.status == "ok", result.error
+    assert route.called
+    body = result.result
+    assert body["outcome"] == "not_reachable"
+    assert body["id"] == _RUN
+    assert body["checked_at"]
+    assert body["state"] is None
+    assert body["error"] is None
+    assert body["inputs"] == []
+
+
+@pytest.mark.asyncio
+async def test_execution_get_keeps_the_certificate_error(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """An untrusted certificate is not "not reachable": the server answered."""
+    connector = await _register(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        mock.get(_RUN_PATH).mock(side_effect=_tls_verify_connect_error())
+        with patch.object(
+            connector._request_json.retry,
+            "wait",
+            wait_none(),
+        ):
+            result = await _dispatch(
+                "vro.execution.get", {"workflow_id": _WF, "execution_id": _RUN}
+            )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("connector_tls_verify_failed:")
+    assert result.extras["error_code"] == "connector_tls_verify_failed"
+    assert result.extras["host"] == _HOST
+    assert "tls_ca_pin" in result.error
+    assert "not_reachable" not in json.dumps(result.result)
+
+
+@pytest.mark.asyncio
+async def test_execution_get_keeps_the_blocked_destination_error(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """A destination MEHO refused is not "not reachable": no request was sent."""
+    connector = await _register(_stub_embedding)
+    guard_message = "target host resolves to a private address; dispatch refused"
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        route = mock.get(_RUN_PATH).mock(side_effect=SsrfBlockedError(guard_message))
+        with patch.object(
+            connector._request_json.retry,
+            "wait",
+            wait_none(),
+        ):
+            result = await _dispatch(
+                "vro.execution.get", {"workflow_id": _WF, "execution_id": _RUN}
+            )
+
+    assert result.status == "error"
+    assert result.error == "connector_error: SsrfBlockedError"
+    assert result.extras["error_code"] == "connector_error"
+    assert result.extras["exception_message"] == guard_message
+    assert route.call_count == 1, "a refused destination is not tried again"
+    assert "not_reachable" not in json.dumps(result.result)
 
 
 @pytest.mark.asyncio

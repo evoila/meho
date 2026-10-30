@@ -31,6 +31,7 @@ from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDenied
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
     BuiltinConnectorWriteForbiddenError,
+    ConnectorInUseError,
     ConnectorNotFoundError,
     InvalidSchemaError,
     InvalidSpecError,
@@ -68,7 +69,7 @@ _OP_CLASS_WRITE: Final[str] = "write"
 # one string instead of six.
 _CONNECTOR_ID_DESCRIPTION: Final[str] = (
     "Operator-facing connector identifier — '<impl_id>-<version>' "
-    "(e.g. 'vmware-rest-9.0', 'vault-1.x'). Split into the parsed "
+    "(e.g. 'k8s-1.x', 'vault-1.x'). Split into the parsed "
     "(product, version, impl_id) triple by the same rule the CLI "
     "uses."
 )
@@ -285,6 +286,19 @@ def raise_invalid_params_for_legacy_tenant_copy(
         str(exc),
         data=build_connector_legacy_tenant_copy_detail(exc),
     ) from exc
+
+
+def raise_invalid_params_for_connector_in_use(exc: ConnectorInUseError) -> NoReturn:
+    """Map :class:`ConnectorInUseError` onto :class:`McpInvalidParamsError` (#5027).
+
+    ``meho_connector_delete`` raises it when a sensor, runbook template,
+    hosted agent, schedule, waiting approval or queued operation run still
+    uses the connector. The REST sibling answers ``409``; MCP's structured
+    handler-error channel is ``-32602``, with the same ``connector_in_use``
+    envelope as ``data``. The message lists each user, so it is forwarded
+    verbatim.
+    """
+    raise McpInvalidParamsError(str(exc), data=dict(exc.detail)) from exc
 
 
 def raise_invalid_params_for_edit_value_error(exc: ValueError) -> NoReturn:

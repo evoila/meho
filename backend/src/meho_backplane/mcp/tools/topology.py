@@ -116,16 +116,22 @@ from meho_backplane.connectors.topology.schemas import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphEdgeKind, Tenant
 from meho_backplane.db.models import Target as TargetORM
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.server import (
     McpInternalError,
     McpInvalidParamsError,
     McpPermissionDeniedError,
 )
 from meho_backplane.mcp.tools._topology_answer import COMPLETENESS_SCHEMA, bounded_answer
-from meho_backplane.operations._lookup import parse_connector_id
+from meho_backplane.operations._lookup import connector_product_known, parse_connector_id
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.operations.meta_tools import UnknownConnectorError
 from meho_backplane.settings import get_settings
 from meho_backplane.topology.evidence import (
     FRESHNESS_COPY,
@@ -219,77 +225,28 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "diff",
                 "history",
             ],
-            "description": (
-                "Which read shape to run. `dependents` = reverse closure "
-                "(what depends on `target`); `dependencies` = forward "
-                "closure (what `target` depends on); `path` = shortest "
-                "unweighted route between `from_name` and `to_name`; "
-                "`edges` = flat tenant-scoped listing of `graph_edge` "
-                "rows (the inventory-survey shape, replaces a "
-                "standalone `list_edges` meta-tool); `timeline` = "
-                "tenant-wide chronological feed of graph changes from "
-                "the G9.3 `graph_node_history` + `graph_edge_history` "
-                "tables, cursor-paginated -- 'what's been happening in "
-                "the graph in the last hour?' without rooting at a "
-                "specific resource; `diff` = net per-resource delta "
-                "between two timestamps (`ts1` exclusive, `ts2` "
-                "inclusive) -- 'what changed between 9am and 11am?'. "
-                "Output is hard-capped at 1000 entries with a "
-                "truncation marker + 'narrow the time window' hint; "
-                "`history` = per-resource history "
-                "walk for one named node (and optionally its incident "
-                "edges via `include_edges=true`) -- 'when did THIS "
-                "resource start depending on X, and what changed?' -- "
-                "carries the full `snapshot.before` / `snapshot.after` "
-                "JSONB per row."
-            ),
+            "description": "Which read to run. See the tool description.",
         },
         "target": {
             "type": ["string", "null"],
-            "description": (
-                "Root node name for `dependents` / `dependencies`. "
-                "Resolved against `graph_node.name` scoped to the "
-                "operator's tenant. Required when `kind` is `dependents` "
-                "or `dependencies`; ignored for `path`. "
-                "NOTE: this tool's `target` is a bare string because "
-                "the read path only needs the name; `call_operation` "
-                "wraps the same concept in a `{name: ...}` dict to "
-                "leave room for future selector fields. See "
-                "`docs/architecture/mcp.md` ('Target-reference shape "
-                "convention')."
-            ),
+            "description": "Node name. Required for `dependents`, `dependencies` and `history`.",
             "maxLength": 256,
         },
         "from_name": {
             "type": ["string", "null"],
-            "description": (
-                "Path start node name. Required when `kind` is `path`. "
-                "For `kind=edges`, optional filter restricting the "
-                "listing to edges whose `from` endpoint resolves to "
-                "this node. Ignored for the closure kinds."
-            ),
+            "description": "Start node name. Required for `path`. Optional filter for `edges`.",
             "maxLength": 256,
         },
         "to_name": {
             "type": ["string", "null"],
-            "description": (
-                "Path end node name. Required when `kind` is `path`. "
-                "For `kind=edges`, optional filter restricting the "
-                "listing to edges whose `to` endpoint resolves to this "
-                "node. Ignored for the closure kinds."
-            ),
+            "description": "End node name. Required for `path`. Optional filter for `edges`.",
             "maxLength": 256,
         },
         "kind_filter": {
             "type": ["string", "null"],
             "description": (
-                "Optional `graph_edge.kind` filter. For the closure "
-                "kinds, restricts the walk to edges of that kind "
-                "(e.g. `runs-on`, `mounts`, `routes-through`, "
-                "`belongs-to`). For `kind=edges`, restricts the flat "
-                "listing to edges of that kind. The vocabulary is "
-                f"open; well-known kinds: {_EDGE_KIND_VALUES}. "
-                "Ignored for `path`."
+                "Keep only edges of this kind (closures and `edges`). "
+                f"Well-known kinds: {_EDGE_KIND_VALUES}."
             ),
             "maxLength": 64,
         },
@@ -297,23 +254,14 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
             "type": ["string", "null"],
             "enum": [None, "auto", "curated"],
             "description": (
-                "Optional `graph_edge.source` filter for `kind=edges`: "
-                "`auto` for probe-derived edges (G9.1 refresh service), "
-                "`curated` for operator-asserted ones "
-                "(`meho_topology_annotate`). Omit to list both. "
-                "Ignored for the closure kinds and `path`."
+                "`edges` only: `auto` = found by a refresh, `curated` = "
+                "added by an operator. Omit for both."
             ),
         },
         "conflicts": {
             "type": "boolean",
             "default": False,
-            "description": (
-                "When `true` with `kind=edges`, restrict the listing to "
-                "edges carrying a non-empty `properties.conflicts_with` "
-                "marker — the recoverability view for §6 conflicts "
-                "(annotations contradicting probe-derived auto edges). "
-                "Ignored for the closure kinds and `path`."
-            ),
+            "description": "`edges` only: keep only edges that conflict with another edge.",
         },
         "limit": {
             "type": "integer",
@@ -333,45 +281,29 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
             # into pre-populating the edges default on every call,
             # over-requesting timeline / history pages.
             "description": (
-                f"Page size for paginated facets. `kind=edges` defaults "
-                f"to {_EDGES_LIMIT_DEFAULT} (ceiling {_EDGES_LIMIT_MAX}); "
-                f"`kind=timeline` defaults to {_TIMELINE_LIMIT_DEFAULT} "
-                f"(ceiling {_TIMELINE_LIMIT_MAX}); `kind=history` "
-                f"defaults to {_HISTORY_LIMIT_MAX} (also the ceiling -- "
-                "per-resource history is bounded by retention so the "
-                "default IS the cap). Ignored for the closure kinds and "
-                "`path`."
+                f"Page size. `edges`: default {_EDGES_LIMIT_DEFAULT}, max "
+                f"{_EDGES_LIMIT_MAX}. `timeline`: default "
+                f"{_TIMELINE_LIMIT_DEFAULT}, max {_TIMELINE_LIMIT_MAX}. "
+                f"`history`: default and max {_HISTORY_LIMIT_MAX}."
             ),
         },
         "offset": {
             "type": "integer",
             "minimum": 0,
             "default": 0,
-            "description": (
-                "Rows to skip before the first returned edge "
-                "(`kind=edges` only). Combined with the substrate's "
-                "stable `(last_seen DESC NULLS LAST, id)` order, a "
-                "paged sweep reassembles to the unpaged result with no "
-                "gaps. Ignored for the closure kinds and `path`."
-            ),
+            "description": "`edges` only: rows to skip.",
         },
         "node_kind": {
             "type": ["string", "null"],
             "description": (
-                "Disambiguates the anchor when a name resolves to more "
-                "than one node kind in the tenant (e.g. a `target` and a "
-                "`vm` both named `app`). Pins the root to "
-                "`(tenant, node_kind, name)`. For `path` this pins the "
-                "`from_name` endpoint; pass `to_node_kind` for the other."
+                "Node kind of the named node (for `path`, of `from_name`), "
+                "when the name matches more than one kind."
             ),
             "maxLength": 64,
         },
         "to_node_kind": {
             "type": ["string", "null"],
-            "description": (
-                "Like `node_kind` but pins the `to_name` endpoint. Only "
-                "meaningful when `kind` is `path`."
-            ),
+            "description": "`path` only: node kind of `to_name`.",
             "maxLength": 64,
         },
         "depth": {
@@ -379,137 +311,74 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
             "minimum": 1,
             "maximum": _DEPTH_MAX,
             "default": _DEPTH_DEFAULT,
-            "description": (
-                "Max traversal depth for `dependents` / `dependencies`. "
-                f"Default {_DEPTH_DEFAULT}; hard ceiling {_DEPTH_MAX}. "
-                "Ignored for `path`."
-            ),
+            "description": "Max depth for `dependents` / `dependencies`.",
         },
         "max_hops": {
             "type": "integer",
             "minimum": 1,
             "maximum": _MAX_HOPS_MAX,
             "default": _MAX_HOPS_DEFAULT,
-            "description": (
-                "Max hops for `path`. Default "
-                f"{_MAX_HOPS_DEFAULT}; hard ceiling {_MAX_HOPS_MAX}. "
-                "Ignored for the closure kinds."
-            ),
+            "description": "Max hops for `path`.",
         },
         "path_direction": {
             "type": "string",
             "enum": list(_PATH_DIRECTIONS),
             "default": "undirected",
             "description": (
-                "How `kind=path` walks stored edges. Every edge is stored "
-                "as `from --kind--> to`. `undirected` (the default) walks "
-                "edges both ways: 'is there any route?'. `forward` follows "
-                "edges only from `from` to `to`, starting at `from_name`. "
-                "`reverse` follows them only from `to` to `from`. The "
-                "response echoes the direction it used. Ignored for the "
-                "other kinds."
+                "`path` only. `undirected` walks edges both ways; `forward` "
+                "follows `from -> to`; `reverse` follows `to -> from`."
             ),
         },
         "relation_class": {
             "type": ["string", "null"],
             "enum": [None, *RELATION_CLASSES],
             "description": (
-                "Keep only edges of one relation class. For `dependents` "
-                "/ `dependencies` / `path` / `edges`. `containment` = "
-                "`belongs-to` (a member of a group, for example a pod in "
-                "a namespace); `placement` = `runs-on` (where a workload "
-                "runs); `dependency` = `authenticates-via` (needs another "
-                "system to work); `unknown` = every other edge kind. Only "
-                "these three kinds are mapped; MEHO never guesses that "
-                "another kind is a dependency. Containment and placement "
-                "are not service dependencies."
+                "Keep only one relation class (closures, `path`, `edges`). "
+                "`containment` = `belongs-to`, `placement` = `runs-on`, "
+                "`dependency` = `authenticates-via`, `unknown` = any other kind."
             ),
         },
         "include_stale": {
             "type": "boolean",
             "default": True,
             "description": (
-                "For `dependents` / `dependencies` / `path`: when "
-                "`true` (the default), soft-deleted nodes and edges "
-                "stay reachable (last-refresh-wins — the row was real "
-                "at the last observation). Pass `false` to restrict "
-                "the walk to live rows only, matching the `edges` "
-                "inventory view. Ignored for the other kinds."
+                "Closures and `path`: `false` walks only rows the latest refresh still reported."
             ),
         },
         "since": {
             "type": ["string", "null"],
-            "description": (
-                "ISO-8601 absolute lower bound on `valid_from` for "
-                "`kind=timeline`. Inclusive. Pair with `until` to "
-                "scope the timeline to one window. Ignored for the "
-                "closure / path / edges kinds."
-            ),
+            "description": "Start of the window (inclusive) for `timeline` and `history`.",
             "format": "date-time",
         },
         "until": {
             "type": ["string", "null"],
-            "description": (
-                "ISO-8601 absolute upper bound on `valid_from` for "
-                "`kind=timeline`. Inclusive. Ignored for the closure "
-                "/ path / edges kinds."
-            ),
+            "description": "End of the window (inclusive) for `timeline` and `history`.",
             "format": "date-time",
         },
         "cursor": {
             "type": ["string", "null"],
-            "description": (
-                "Opaque forward-pagination token from a prior "
-                "`kind=timeline` page's `next_cursor`. Encodes "
-                "`(valid_from, history_id, source)`; stable under "
-                "concurrent inserts from the G9.3 diff-on-write hook. "
-                "Ignored for non-timeline kinds."
-            ),
+            "description": "`timeline` only: the `next_cursor` of the previous page.",
             "maxLength": 1024,
         },
         "ts1": {
             "type": ["string", "null"],
-            "description": (
-                "ISO-8601 EXCLUSIVE lower bound for `kind=diff` -- "
-                "rows with `valid_from > ts1` enter the fold. Required "
-                "for `kind=diff`; ignored for the other kinds. Must "
-                "be strictly less than `ts2`; an inverted window "
-                "returns -32602."
-            ),
+            "description": "`diff` only: start time (exclusive). Must be before `ts2`.",
             "format": "date-time",
         },
         "ts2": {
             "type": ["string", "null"],
-            "description": (
-                "ISO-8601 INCLUSIVE upper bound for `kind=diff` -- "
-                "rows with `valid_from <= ts2` enter the fold. Required "
-                "for `kind=diff`."
-            ),
+            "description": "`diff` only: end time (inclusive).",
             "format": "date-time",
         },
         "changed_only": {
             "type": "boolean",
             "default": False,
-            "description": (
-                "When `true` with `kind=diff`, suppress `updated` "
-                "entries whose every in-window history row was a "
-                "`last_seen`-only refresh heartbeat (the refresh "
-                "service's 'I observed this row again at T+15m' "
-                "emission). `created` / `removed` entries always "
-                "surface. Ignored for the other kinds."
-            ),
+            "description": "`diff` only: leave out updates where only `last_seen` changed.",
         },
         "include_edges": {
             "type": "boolean",
             "default": False,
-            "description": (
-                "For `kind=history` only: when `true`, also walk every "
-                "history row for edges incident to the anchor node "
-                "(joined via `edge_id IN (SELECT id FROM graph_edge "
-                "WHERE from_node_id = anchor OR to_node_id = "
-                "anchor)`). Default `false` -- the node-side history "
-                "is the common case. Ignored for the other kinds."
-            ),
+            "description": "`history` only: also return the history of the node's edges.",
         },
     },
     "required": ["kind"],
@@ -562,141 +431,43 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
 
 
 _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
-    "Query the topology graph. Use `kind=dependents` BEFORE recommending "
-    "a destructive op on a resource — it answers 'what depends on this "
-    "resource that I'd break?' (the blast-radius check: call this "
-    "*before* recommending a destructive op). Use `kind=dependencies` to "
-    "understand what a resource needs. Use `kind=path` to trace "
-    "connectivity between two specific resources. Use `kind=edges` for "
-    "the flat inventory survey — list curated / auto edges with "
-    "optional filters; pair with `conflicts=true` to surface §6 "
-    "conflicts that need operator review. Tenant-scoped automatically.\n\n"
-    "WHEN TO CALL: before suggesting any delete/shutdown/detach — "
-    "'is it safe to delete namespace customer-a-prod-foo?' → "
-    "`query_topology {kind: dependents, target: customer-a-prod-foo}` "
-    "returns every service / ingress / database that would break. Also "
-    "for impact reasoning ('what does this VM run on?') and reachability "
-    "('is there any route from this ingress to that datastore?'). For "
-    "`kind=edges`: 'show the curated edges in this tenant' → "
-    "`{kind: edges, source: curated}`; 'are any annotations in conflict?'"
-    " → `{kind: edges, conflicts: true}`.\n\n"
-    "PARAMETRIC: `kind` is the discriminator — `dependents` / "
-    "`dependencies` need `target`; `path` needs `from_name` + "
-    "`to_name`; `edges` has no required field (every filter is "
-    "optional). The four shapes are one tool, not four: there is no "
-    "separate `topology.dependents` / `list_edges` tool. If a name is "
-    "ambiguous in the tenant (same name as both, e.g., a target and a "
-    "vm) pass `node_kind` to pin the anchor; an ambiguous bare name "
-    "returns -32602 naming the candidate kinds.\n\n"
-    "EDGE MEANING: closures follow stored edge direction (`dependents` "
-    "walks `reverse`, `dependencies` walks `forward`), and every edge "
-    "kind counts, so a closure can mix group membership, placement and "
-    "real dependencies. Each row says which: `via_relation_class` (and "
-    "`relation_class` on `edges` rows) is `containment` (`belongs-to`), "
-    "`placement` (`runs-on`), `dependency` (`authenticates-via`) or "
-    "`unknown` (every other kind). Only `dependency` is a service "
-    "dependency. Pass `relation_class` to keep one class.\n\n"
-    "FRESHNESS: rows carry `source` (`auto` = found by a refresh, "
-    "`curated` = stated by an operator), `source_scope` (which source "
-    "the node belongs to), `last_seen` and a `freshness` value "
-    "(`via_edge_freshness` for the edge walked): `observed`, "
-    "`old_observation` (last seen more than two refresh cycles ago), "
-    "`stale` (the latest refresh no longer reported it) or `asserted` "
-    "(curated). `last_seen` is MEHO's own time, not the vendor's: the "
-    "last refresh that reported an `auto` row, or when an operator "
-    "entered a `curated` row (a later refresh that also observes it "
-    "moves it forward). Rows from different systems are not one "
-    "consistent snapshot. The `evidence` block says which stale view "
-    "the answer used (`stale_rows`, `stale_rows_note`) and explains each "
-    "freshness value in the answer.\n\n"
-    "Returns `{kind, direction, relation_class, query, root, node_count, "
-    "edge_count, nodes: [TopologyNode, ...], completeness, delivery, "
-    "evidence}` for the closure kinds "
-    "(root at depth 0, so a one-element list with `completeness.state: "
-    "complete` means 'exists but nothing depends on it'). Rows are ordered "
-    "(depth, name, id).\n\n"
-    "LIMITS: a closure stops at a node limit, a byte limit and a time "
-    "limit, as well as at `depth`. `completeness.state` says `complete`, "
-    "`incomplete` (a limit cut the answer; you have the first part in "
-    "row order) or `unavailable` (no rows can be read; for "
-    "`time_budget` the traversal ran out of time). `completeness."
-    "limits_hit` names each limit (`hop_limit` = more nodes exist past "
-    "`depth`) and `guidance` says how to narrow the query. Never read an "
-    "`incomplete` or `unavailable` answer as everything that is affected. "
-    "A large answer has no inline `nodes`: it has `handle` and a short "
-    "preview in `handle.sample_rows`; read every row with `result_query` "
-    "and `handle_id`. `kind=history` answers work the same way, with "
-    "`rows` instead of `nodes`, and the handle preview leaves out "
-    "`snapshot`.\n\n"
-    "Each non-root node carries `parent_node_id` + "
-    "`via_edge_id` — the node it hangs off and the exact edge walked — "
-    "so the dependency chain reconstructs from the flat list without "
-    "extra calls. Soft-deleted rows stay reachable by default; pass "
-    "`include_stale: false` to walk live rows only (the anchor you "
-    "named is always returned, even when stale; the `evidence` block "
-    "says so). When the anchor is "
-    "not tracked in the topology "
-    'graph for this tenant, returns `{kind, status: "node_untracked", '
-    "name, nodes: []}` (and `node_kind` when `node_kind=` was supplied) "
-    "rather than -32602 — auto-discovery is k8s-only today, so every "
-    "registered non-k8s target (vault, vcenter, nsx, sddc-manager, "
-    "gh) surfaces as untracked until non-k8s populators or a curated "
-    "annotation lands. *Do not* read an `node_untracked` response as "
-    "'safe to delete'; the call has produced no blast-radius signal. "
-    "The recovery is `meho topology refresh <target>` for a k8s "
-    "target or `meho_topology_annotate` for cross-system relationships "
-    "the probes can't infer (G0.18-T4 #1357, RDC #789 N2). "
-    'For `path`: `{kind: "path", status, direction, relation_class, '
-    "path: TopologyPath|null, evidence}`. `status` is `found`, "
-    "`node_untracked` (an endpoint is not in the graph; `name` says "
-    "which) or `no_route` (both ends exist but there is no route within "
-    "`max_hops` under the selected direction, relation class and stale "
-    "view). `detail` explains the last two. Every outcome carries "
-    "`evidence`, so the stale view the search used is never implicit. "
-    "`path_direction` picks `undirected` (default, edges both ways), "
-    "`forward` or `reverse`. "
-    '`{kind: "edges", relation_class, edges: [TopologyEdge, ...], '
-    "evidence}` for `edges` "
-    "(flat list, ordered by `last_seen DESC NULLS LAST, id`; stale "
-    "edges are never listed).\n\n"
-    "For `kind=timeline`: tenant-wide chronological feed of graph "
-    "changes -- 'what changed in the graph since 9am?' → "
-    "`query_topology {kind: timeline, since: 2026-05-22T09:00:00Z}`. "
-    "Use `since` / `until` to bound the window. Cursor-paginated "
-    "(default `limit: 50`); a non-null `next_cursor` in the response "
-    "means more rows exist -- pass it back as `cursor` on the next "
-    "call to walk forward. Returns "
-    '`{kind: "timeline", rows: [TopologyTimelineEntry, ...], '
-    "next_cursor: <token|null>}`.\n\n"
-    "For `kind=diff`: graph-level net delta between two timestamps -- "
-    "'what changed between 9am and 11am?' → `query_topology {kind: "
-    "diff, ts1: 2026-05-22T09:00:00Z, ts2: 2026-05-22T11:00:00Z}`. "
-    "Each entry is one resource's NET change in `(ts1, ts2]` "
-    "(`created` / `updated` / `removed`); a resource created and "
-    "removed in the same window nets to `removed`. Use "
-    "`changed_only: true` to suppress refresh-heartbeat updates "
-    "(rows whose only mutation was a `last_seen` bump). Output is "
-    "hard-capped at 1000 entries -- when the cap fires, "
-    "`truncated: true` and `truncation_hint` carries the canonical "
-    "'narrow the time window' message; the operator narrows `ts1` / "
-    "`ts2` or filters by `kind_filter` and retries. Returns "
-    '`{kind: "diff", entries: [TopologyDiffEntry, ...], '
-    "truncated: bool, truncation_hint: <str|null>}`.\n\n"
-    "For `kind=history`: per-resource history walk for one named "
-    "node -- 'when did service-X start depending on database-Y, and "
-    "what changed each time?' → `query_topology {kind: history, "
-    "target: service-X, include_edges: true}`. Required: `target` "
-    "(the node name); optional: `node_kind` to disambiguate, `since` "
-    "/ `until` to bound the window, `include_edges=true` to also "
-    "walk every history row for edges incident to the anchor. "
-    "Carries the full `snapshot.before` / `snapshot.after` JSONB "
-    "per row (unlike `timeline`, which truncates to a one-line "
-    "summary) -- use for forensic 'what was the exact state before "
-    "this change?' questions. Unknown / cross-tenant target returns "
-    '-32602 `node_not_found`. Returns `{kind: "history", rows: '
-    "[TopologyHistoryEntry, ...], anchor_node_id: <uuid>, "
-    "include_edges: <bool>, completeness, delivery}` (`handle` "
-    "instead of `rows` when the answer is large; see LIMITS)."
+    "Read the topology graph: what depends on what. Scoped to your tenant.\n\n"
+    "WHEN TO CALL: call `kind=dependents` *before* recommending a destructive "
+    "op (delete, shutdown, detach): `{kind: dependents, target: <name>}` "
+    "shows what would break. Also "
+    "for impact ('what does this VM run on?') and routes between two "
+    "resources.\n\n"
+    "KINDS (one tool; `kind` picks the shape):\n"
+    "- `dependents` / `dependencies`: what depends on `target` / what "
+    "`target` needs. Need `target`.\n"
+    "- `path`: shortest route from `from_name` to `to_name`. Needs both.\n"
+    "- `edges`: flat list of edges. Every filter is optional, e.g. "
+    "`source: curated`, or `conflicts: true` for annotations that "
+    "contradict discovered edges.\n"
+    "- `timeline`: graph changes in the tenant, in time order; bound "
+    "it with `since` / `until`. If `next_cursor` is not null, pass it as "
+    "`cursor` for the next page.\n"
+    "- `diff`: net change per resource between `ts1` (exclusive) and "
+    "`ts2` (inclusive). Needs both. If `truncated` is true, narrow the "
+    "window.\n"
+    "- `history`: every change of one node (`target`), with full before "
+    "and after snapshots; `include_edges: true` adds its edges.\n\n"
+    "RULES:\n"
+    "- If a name matches nodes of more than one kind, the call fails and "
+    "names the kinds; pass `node_kind` (and `to_node_kind` for `path`).\n"
+    '- `status: "node_untracked"` means MEHO has no graph data for that '
+    "name. It is NOT 'safe to delete': there is no impact answer.\n"
+    "- Closures follow every edge kind. `via_relation_class` on each row "
+    "says `containment`, `placement`, `dependency` or `unknown`; only "
+    "`dependency` is a service dependency. Pass `relation_class` to keep "
+    "one class.\n"
+    "- If `completeness.state` is not `complete`, the answer is cut short "
+    "or missing. Never read it as everything that is affected; "
+    "`completeness.guidance` says how to narrow.\n"
+    "- A large answer has a `handle` instead of rows; read every row with "
+    "`result_query`.\n"
+    "- Rows carry `freshness`; the `evidence` block explains each value "
+    "in your answer."
 )
 
 
@@ -1015,6 +786,13 @@ def _node_untracked_envelope(
         "direction": _closure_direction(kind),
         "relation_class": relation_class,
         "nodes": [],
+        "detail": (
+            f"{exc.name!r} is not in the topology graph for this tenant. This "
+            "is not a sign that nothing depends on it: MEHO has no impact "
+            "answer for it. Run `meho topology refresh <target>` for a "
+            "Kubernetes target, or add the relationship with "
+            "`meho_topology_annotate`."
+        ),
         "evidence": _RowShaper().evidence(
             include_stale=include_stale, named_rows=_CLOSURE_NAMED_ROWS
         ),
@@ -1289,6 +1067,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="topology",
         name=_QUERY_TOPOLOGY_NAME,
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=_QUERY_TOPOLOGY_DESCRIPTION,
         inputSchema=_QUERY_TOPOLOGY_INPUT_SCHEMA,
@@ -1317,8 +1096,7 @@ register_mcp_tool(
                         "`meho_backplane.topology.schemas.TopologyNode`. "
                         "A larger answer has `handle` instead. "
                         "When the anchor is untracked the array is empty "
-                        "and `status` carries `node_untracked` (G0.18-T4 "
-                        "#1357)."
+                        "and `status` carries `node_untracked`."
                     ),
                 },
                 "status": {
@@ -1333,17 +1111,17 @@ register_mcp_tool(
                         "one-element `[root]` in `nodes`). Auto-discovery "
                         "is k8s-only today; non-k8s targets surface here "
                         "until a populator or curated annotation lands. "
-                        "(G0.18-T4 #1357, RDC #789 N2.) `kind=path`: "
+                        "`kind=path`: "
                         "always present — `found`, `node_untracked` (an "
                         "endpoint is not in the graph) or `no_route` "
-                        "(both ends exist, no route) (#3760)."
+                        "(both ends exist, no route)."
                     ),
                 },
                 "detail": {
                     "type": "string",
                     "description": (
-                        "Present for `kind=path` when `status` is "
-                        "`node_untracked` or `no_route`: a plain-language "
+                        "Present when `status` is `node_untracked` (any "
+                        "kind) or `no_route` (`kind=path`): a plain-language "
                         "explanation of what the answer does and does "
                         "not say."
                     ),
@@ -1597,7 +1375,7 @@ _LIST_TARGETS_INPUT_SCHEMA: Final[dict[str, Any]] = {
             "type": ["string", "null"],
             "description": (
                 "Optional connector filter in the form "
-                '`<impl_id>-<version>` (e.g. "vmware-rest-9.0") or a '
+                '`<impl_id>-<version>` (e.g. "k8s-1.x") or a '
                 'v1-style single-product slug (e.g. "vault"). Only the '
                 "product component is used: the result is narrowed to "
                 "targets whose `product` matches that connector's "
@@ -1611,19 +1389,16 @@ _LIST_TARGETS_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "Cross-tenant scope. Omit / null → the operator's own "
                 "tenant. A tenant slug OR UUID naming a DIFFERENT tenant "
                 "selects that tenant's targets and REQUIRES the "
-                "`platform_admin` capability (#1641); a caller who is "
+                "`platform_admin` capability; a caller who is "
                 "not a platform-admin passing a foreign tenant gets "
                 "-32602 (naming your own tenant explicitly is always "
-                "allowed). Canonical name "
-                "(G0.18-T5 #1358); matches `tenant_id` on "
+                "allowed). Canonical name; matches `tenant_id` on "
                 "`meho_connector_*` / `meho_scheduler_create`. "
                 "NOTE: `list_targets.tenant_id` accepts a slug OR a "
                 "UUID; the connector / scheduler tools accept UUID-"
                 "only because they cannot resolve slugs from inside "
                 "their service layer (cross-tenant slug resolution "
-                "requires a session). The accepted-shape asymmetry "
-                "is documented in "
-                "`docs/codebase/api-shape-conventions.md` §14."
+                "requires a session)."
             ),
             "maxLength": 256,
         },
@@ -1667,7 +1442,7 @@ _LIST_TARGETS_DESCRIPTION: Final[str] = (
     "`target`.\n\n"
     "WHEN TO CALL: the operator asks 'what can I act on?', or you need a "
     "concrete target name and only have a product in mind ('list the "
-    "vCenters' → `connector_id=vmware-rest-9.0`). Tenant scope is the "
+    "Kubernetes clusters' → `connector_id=k8s-1.x`). Tenant scope is the "
     "operator's own tenant unless a `platform_admin` passes `tenant`.\n\n"
     "Returns `{targets: [{id, name, aliases, product, host}, ...], "
     "next_cursor: <name|null>}` ordered by name; `next_cursor` is the "
@@ -1692,7 +1467,7 @@ _LIST_TARGETS_REDUCER: Final[JsonFluxReducer] = JsonFluxReducer()
 _LIST_TARGETS_PAGINATION_HINT: Final[dict[str, Any]] = {
     "params": {
         "connector_id": (
-            "Narrow to one connector's product (e.g. `vmware-rest-9.0`); "
+            "Narrow to one connector's product (e.g. `k8s-1.x`); "
             "a page at or under the threshold comes back inline as `targets`."
         ),
         "limit": "Page size (1..500). A smaller page can come back inline.",
@@ -1703,7 +1478,7 @@ _LIST_TARGETS_PAGINATION_HINT: Final[dict[str, Any]] = {
     },
     "example_next_call": {
         "tool": _LIST_TARGETS_NAME,
-        "args": {"connector_id": "vmware-rest-9.0"},
+        "args": {"connector_id": "k8s-1.x"},
     },
 }
 
@@ -1780,7 +1555,10 @@ async def _list_targets_handler(
     ``connector_id`` is canonicalised through
     :func:`~meho_backplane.operations._lookup.parse_connector_id` and
     only its product component drives a ``TargetORM.product`` exact-match
-    filter (targets carry a product slug, not a connector id).
+    filter (targets carry a product slug, not a connector id). When that
+    filter finds nothing and no connector the caller can see has the
+    product, the id is wrong: the answer is the unknown-connector
+    ``-32602`` with close ids, not an empty list (#4136).
 
     Soft-deleted targets (``deleted_at IS NOT NULL``, G0.14-T4 #1145)
     are excluded — same filter the REST list route applies so MCP and
@@ -1835,6 +1613,9 @@ async def _list_targets_handler(
         result = await session.execute(stmt)
         rows = result.all()
 
+    if not rows and connector_id:
+        await _reject_unknown_connector(scope_tenant_id, connector_id)
+
     targets = [
         {
             "id": str(t.id),
@@ -1849,6 +1630,23 @@ async def _list_targets_handler(
     # name as the keyset cursor. A short page is definitively the end.
     next_cursor = targets[-1]["name"] if len(targets) == limit else None
     return await _reduce_target_page(operator, {"targets": targets, "next_cursor": next_cursor})
+
+
+async def _reject_unknown_connector(tenant_id: uuid.UUID, connector_id: str) -> None:
+    """Raise the unknown-connector ``-32602`` when no visible connector has the id's product.
+
+    Runs only when the ``connector_id`` filter found no target (#4136).
+    Without it, a wrong id such as ``harbor-rest`` (product
+    ``harbor-rest``, which no target has) came back as an empty list with
+    no warning. A known product with no targets still returns the empty
+    list. The error is the one ``search_operations`` raises, with the
+    close ids the caller can see.
+    """
+    product, _version, _impl_id = parse_connector_id(connector_id)
+    if await connector_product_known(tenant_id=tenant_id, product=product):
+        return
+    exc = await UnknownConnectorError.for_caller(tenant_id=tenant_id, connector_id=connector_id)
+    raise McpInvalidParamsError(f"list_targets: {exc}", data=exc.as_error_data())
 
 
 async def _reduce_target_page(operator: Operator, page: dict[str, Any]) -> dict[str, Any]:
@@ -1889,6 +1687,7 @@ register_mcp_tool(
         # registry entry, not Topology v2's.
         feature="targets",
         name=_LIST_TARGETS_NAME,
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=_LIST_TARGETS_DESCRIPTION,
         inputSchema=_LIST_TARGETS_INPUT_SCHEMA,
@@ -2124,17 +1923,17 @@ _ANNOTATE_DESCRIPTION: Final[str] = (
     "the empty-tenant bootstrap and for curated inner-graph nodes the "
     "probes cannot derive (vault-role, keycloak-realm, ...).\n\n"
     "WHEN TO CALL: an operator asks 'record that the prod namespace "
-    "authenticates against the rdc-vault role binding' — "
+    "authenticates against the prod-vault role binding' — "
     "`meho_topology_annotate {from_name: prod, kind: "
-    "authenticates-via, to_name: rdc-vault-role-bar}`. After this, "
-    "`query_topology {kind: dependents, target: rdc-vault-role-bar}` "
+    "authenticates-via, to_name: prod-vault-role}`. After this, "
+    "`query_topology {kind: dependents, target: prod-vault-role}` "
     "surfaces the namespace in the blast radius.\n\n"
     "AUTO-DISCOVERABLE KINDS (`runs-on`, `mounts`, `routes-through`, "
     "`belongs-to`) — accepted, with one caveat: when a probe-written "
     "**auto** edge already exists for the same pair, the curated row "
-    "lands as a §6 conflict marker (`conflicts_with`) for operator "
+    "lands as a conflict marker (`conflicts_with`) for operator "
     "review. Today only the Kubernetes connector populates auto edges "
-    "(G0.18-T4 #1357 — every other shipped connector inherits the "
+    "(every other shipped connector inherits the "
     "no-op `Connector.discover_topology` from the ABC), so on a "
     "non-k8s pair (or any pair no probe covers) the curated row "
     "inserts clean (`source: curated, conflicts: []`) and is the "
@@ -2197,7 +1996,7 @@ register_mcp_tool(
 
 
 _UNANNOTATE_DESCRIPTION: Final[str] = (
-    "Hard-delete a curated `graph_edge` and clear its reciprocal §6 "
+    "Hard-delete a curated `graph_edge` and clear its reciprocal conflict "
     "markers (tenant_admin only). Pass either `edge_id` OR the full "
     "`(from_name, kind, to_name)` triple — both forms, partial triples, "
     "or empty strings are rejected at the inputSchema layer (-32602) "
@@ -2207,7 +2006,7 @@ _UNANNOTATE_DESCRIPTION: Final[str] = (
     "but it turns out the real dependency is `database-Z`. "
     "`meho_topology_unannotate {from_name: service-X, kind: depends-on, "
     "to_name: database-Y}` removes the curated row and re-promotes any "
-    "auto edge it had marked superseded (§6 recoverability invariant). "
+    "auto edge it had marked superseded. "
     "After this, blast-radius checks no longer include the wrong edge.\n\n"
     "Refuses to delete an `source='auto'` edge — those resurrect on the "
     "next refresh, making manual deletion meaningless. The refusal "

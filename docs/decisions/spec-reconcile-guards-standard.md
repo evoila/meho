@@ -554,6 +554,117 @@ Path existence is version-stable across the 8.x↔9.x boundary, so the modern
   ship its own served-set (or manifest-pin) lane at that point — the op-set
   drift guard is what surfaces the divergence.
 
+### azure-arm-2026.10 — the public Retail Prices API is excluded (no spec exists) (#5088)
+
+The Azure connector's lane (`backend/tests/test_connectors_azure_spec_reconcile.py`)
+compares every `*_PATH` constant of `connectors/azure/_paths.py` with the
+pinned Azure Resource Manager spec files. One call of the connector is not
+an Azure Resource Manager call: `azure.price.list` reads the public Azure
+Retail Prices API at `https://prices.azure.com/api/retail/prices`. It needs
+no login, and MEHO sends it no token.
+
+- **Excluded (1 URL: `GET https://prices.azure.com/api/retail/prices`).**
+  What was checked, on 2026-10-27: (1) a GitHub code search of
+  [`Azure/azure-rest-api-specs`](https://github.com/Azure/azure-rest-api-specs)
+  for `api/retail/prices` and for `prices.azure.com` found no file; (2)
+  Microsoft documents the API only on a conceptual page
+  (<https://learn.microsoft.com/en-us/rest/api/cost-management/retail-prices/azure-retail-prices>),
+  with no API description file; (3) the manifest of the pinned
+  `azure-arm-2026.10` shelf records it as an API with no spec. So no file
+  can serve as the reference for this URL.
+- **How the lane stays honest about it.** The address is a full-URL
+  constant (`RETAIL_PRICES_URL`), not a `*_PATH` constant, so the lane does
+  not sweep it and cannot fail on it. Its API version is
+  `RETAIL_PRICES_API_VERSION`. Unit tests in
+  `backend/tests/test_connectors_azure_cost.py` pin what the lane cannot:
+  the host and path, the query MEHO builds, the next-page rule (only the
+  `$skip` number is read from Azure's link), and that no request to the
+  host carries an `Authorization` header.
+- **Residual risk, named:** without a spec, a change to the API's answer
+  shape shows up only in a live call (the connector's lab proof).
+- **Activation:** Microsoft publishing an API description file for the
+  Retail Prices API. Then the file goes on the shelf, the constant becomes
+  a `*_PATH` on the lane, and this entry is withdrawn.
+
+### entra-graph-1.0 — spec exists but is too big for the shelf; check ships skipping (#5097)
+
+The `entra-graph-1.0` connector (product `entra`) calls Microsoft Graph
+v1.0 with eight hand-written `GET` paths. Microsoft publishes an OpenAPI
+3.0 file for all of Graph v1.0, so a spec exists. It is not on the shelf
+yet only because of its size. The check file ships now and skips until the
+file is there.
+
+- **Check file:** `backend/tests/test_connectors_entra_spec_reconcile.py`.
+  It reads the `*_PATH` constants of `connectors/entra/_paths.py` live,
+  gives each one its HTTP method (all `GET`), and fails when a constant has
+  no method. These tests run always. The compare test reads
+  `entra-graph-1.0/openapi.yaml` from the shelf and skips while it is
+  missing. It reads the file with a YAML loader itself (not with MEHO's
+  spec ingest, whose size limit is 20 MiB), puts the `servers[0].url`
+  prefix `/v1.0` in front of every spec path, and ignores parameter names
+  (`{group-id}` in the spec, `{group_id}` in the connector).
+- **What was checked (2026-10-28).** The file
+  `openapi/v1.0/openapi.yaml` in
+  [`microsoftgraph/msgraph-metadata`](https://github.com/microsoftgraph/msgraph-metadata)
+  (MIT license) at commit `29d027ab701b8d16c5fafc8cee31bb22d29eecad`
+  (the last commit that changed the file, 2026-10-20). Size 44,457,302
+  bytes, sha256
+  `69de68b2c895bc608a58229e662e2b3eeb23524385516afc250ff0b8f165ff29`,
+  OpenAPI 3.0.4, 11,582 paths, server `https://graph.microsoft.com/v1.0`.
+  All eight paths are in it with a `get` operation: `/organization`,
+  `/users`, `/groups`, `/groups/{group-id}/members/$count`,
+  `/roleManagement/directory/roleAssignments`,
+  `/roleManagement/directory/roleDefinitions`, `/applications`,
+  `/servicePrincipals`. The compare test passed against this file with
+  `MEHO_CONSUMER_DOCS_ROOT` pointed at a local folder that held it.
+- **Why it is not pinned.** About 44 MB for eight paths. That is far more
+  than any other shelf file, and every CI job would check it out. A trimmed
+  copy is possible but needs its own provenance note.
+- **Residual risk, named.** Until the file is on the shelf, CI does not
+  compare a new or renamed path with Graph. The always-on tests still make
+  sure every new `*_PATH` constant gets a method and shows up in the pinned
+  list, so a change cannot slip past the check without an edit here.
+- **Activation:** the file, or a trimmed copy of it with a provenance note
+  (source commit and sha256), lands on the shelf at
+  `entra-graph-1.0/openapi.yaml`. The activating task runs the extension
+  mechanics above (CI checkout widened, provenance recorded) and the
+  compare test then runs for real.
+
+### phpipam-rest-1.x — no API file exists; the check pins the list (#5070)
+
+The `phpipam-rest-1.x` connector (product `phpipam`) calls the phpIPAM REST
+API with eleven hand-written path constants (thirteen `METHOD:/path` pairs).
+
+- **Check file:** `backend/tests/test_connectors_phpipam_spec_reconcile.py`.
+  It reads the `*_PATH` constants of `connectors/phpipam/_paths.py` live,
+  gives each one its HTTP methods, and pins the full `METHOD:/path` list. It
+  also checks that every path is in the reference list in the docstring of
+  `_paths.py`. All tests run always; there is no compare test.
+- **What was checked (2026-10-29).** phpIPAM documents its API only as web
+  pages: the API reference (<https://phpipam.net/api/api_reference/>) and
+  the API documentation (<https://phpipam.net/api/api_documentation/>),
+  which describe phpIPAM 1.8.2. Neither links an OpenAPI, Swagger or other
+  API description file, and the phpIPAM source at tag `v1.8.2`
+  (<https://github.com/phpipam/phpipam>) has none either: the API is served
+  by the PHP controllers in `api/controllers/`. Every path the connector
+  uses was checked against the reference page and against the controller
+  that serves it (`Subnets.php`, `Addresses.php`, `User.php`), including
+  the answer codes the connector relies on (404 for "nothing found", 409 for
+  a taken address, 201 for a created address). One address is read with
+  `GET /subnets/{subnet_id}/addresses/{ip}/`, not with
+  `GET /addresses/{ip}/{subnet_id}/`: in 1.8.2 the second call finds only the
+  first address row of a subnet (`Addresses.php` filters on an `ip` field that
+  the cache in `class.Common.php` fills in only for that row). The
+  `DELETE /addresses/{ip}/{subnet_id}/` call looks the address up by its value
+  and works for every row.
+- **Residual risk, named.** Without an API file, a renamed path or a changed
+  answer in a later phpIPAM release shows up only in a live call (the
+  connector's lab proof). The pinned list makes sure every path change in
+  MEHO is made on purpose.
+- **Activation:** phpIPAM publishing an API description file. Then the file
+  goes on the shelf, the check gets a compare test, and this entry is
+  withdrawn.
+
 ## Red lane = finding (the protocol)
 
 A red lane on first run against the real shelf is **the guard working**,

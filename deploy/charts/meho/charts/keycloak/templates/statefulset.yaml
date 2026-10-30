@@ -19,6 +19,10 @@ spec:
         {{- include "coreKeycloak.selectorLabels" . | nindent 8 }}
     spec:
       automountServiceAccountToken: false
+      {{- with include "meho.core.imagePullSecrets" . }}
+      imagePullSecrets:
+        {{- . | nindent 8 }}
+      {{- end }}
       securityContext:
         {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.podSecurityContext "global" .Values.global) | nindent 8 }}
       initContainers:
@@ -28,7 +32,7 @@ spec:
         # user, which fails under a user id that has no passwd entry (as on
         # OpenShift), and then it never reports ready.
         - name: wait-for-database
-          image: {{ include "meho.core.image" .Values.waitForDatabase.image | quote }}
+          image: {{ include "meho.core.image" (dict "image" .Values.waitForDatabase.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.waitForDatabase.image.pullPolicy }}
           command:
             - /bin/sh
@@ -49,7 +53,7 @@ spec:
             {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.waitForDatabase.securityContext "global" .Values.global) | nindent 12 }}
       containers:
         - name: keycloak
-          image: {{ include "meho.core.image" .Values.image | quote }}
+          image: {{ include "meho.core.image" (dict "image" .Values.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - start
@@ -116,6 +120,8 @@ spec:
               value: {{ printf "https://%s" .Values.hostname | quote }}
             - name: MEHO_REALM_TENANT_ID
               value: {{ .Values.firstTenantId | quote }}
+            - name: MEHO_REALM_TENANT_NAME
+              value: {{ .Values.tenantName | quote }}
             - name: MEHO_REALM_ADMIN_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
@@ -131,6 +137,16 @@ spec:
                 secretKeyRef:
                   name: {{ include "coreKeycloak.coreSecret" (dict "root" . "kind" "check-runner") }}
                   key: client_secret
+            {{- if .Values.companyLogin.enabled }}
+            {{- with .Values.companyLogin.caBundle }}
+            {{- if .configMapName }}
+            # The private CA of the company login, added to the CAs Keycloak
+            # trusts for its calls to it (token, keys, user info).
+            - name: KC_TRUSTSTORE_PATHS
+              value: {{ printf "/opt/keycloak/conf/company-login-ca/%s" .key | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
           ports:
             - name: http
               containerPort: 8080
@@ -169,10 +185,23 @@ spec:
             - name: realm
               mountPath: /opt/keycloak/data/import
               readOnly: true
+            {{- if and .Values.companyLogin.enabled .Values.companyLogin.caBundle.configMapName }}
+            - name: company-login-ca
+              mountPath: /opt/keycloak/conf/company-login-ca
+              readOnly: true
+            {{- end }}
       volumes:
         - name: realm
           configMap:
             name: {{ include "coreKeycloak.fullname" . }}-realm
+        {{- if and .Values.companyLogin.enabled .Values.companyLogin.caBundle.configMapName }}
+        - name: company-login-ca
+          configMap:
+            name: {{ .Values.companyLogin.caBundle.configMapName }}
+            items:
+              - key: {{ .Values.companyLogin.caBundle.key }}
+                path: {{ .Values.companyLogin.caBundle.key }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

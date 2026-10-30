@@ -66,6 +66,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     guest_customization_spec_create_composite,
     host_detach_from_vds_composite,
     host_evacuate_composite,
+    host_maintenance_exit_composite,
     network_portgroup_create_composite,
     network_portgroup_security_set_composite,
     network_portgroup_vlan_set_composite,
@@ -111,6 +112,13 @@ from tests._vmware_cluster_config_fake import (
 # ---------------------------------------------------------------------------
 
 
+_ITEM_1 = "aaaaaaaa-0000-0000-0000-000000000001"
+_ITEM_3 = "aaaaaaaa-0000-0000-0000-000000000003"
+_ITEM_7 = "aaaaaaaa-0000-0000-0000-000000000007"
+_ITEM_OVF = "aaaaaaaa-0000-0000-0000-00000000000f"
+_ITEM_RESOLVED = "aaaaaaaa-0000-0000-0000-0000000000e0"
+
+
 def _make_operator() -> Operator:
     """Synthetic operator for composite-handler unit tests."""
     return Operator(
@@ -135,6 +143,9 @@ class _RecordingConnector:
     value that is an :class:`Exception` is raised -- how the transport-fault
     partial-failure paths are exercised.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     def __init__(
         self,
@@ -2325,7 +2336,7 @@ async def test_vm_clone_happy_path_synchronous_deploy(gate: _GateRecorder) -> No
     conn = _RecordingConnector(
         {
             "/api/vcenter/vm/vm-src": {"name": "src"},
-            "/api/vcenter/vm-template/library-items/li-7?action=deploy": "vm-clone-1",
+            f"/api/vcenter/vm-template/library-items/{_ITEM_7}?action=deploy": "vm-clone-1",
         }
     )
     out = await vm_clone_composite(
@@ -2334,7 +2345,7 @@ async def test_vm_clone_happy_path_synchronous_deploy(gate: _GateRecorder) -> No
         params={
             "source_vm": "vm-src",
             "target_name": "vm-clone-1",
-            "library_item": "li-7",
+            "library_item": _ITEM_7,
         },
         connector=conn,  # type: ignore[arg-type]
     )
@@ -2343,7 +2354,7 @@ async def test_vm_clone_happy_path_synchronous_deploy(gate: _GateRecorder) -> No
     assert out["vm_id"] == "vm-clone-1"
     assert [(c["method"], c["path"]) for c in conn.calls] == [
         ("GET", "/api/vcenter/vm/vm-src"),
-        ("POST", "/api/vcenter/vm-template/library-items/li-7?action=deploy"),
+        ("POST", f"/api/vcenter/vm-template/library-items/{_ITEM_7}?action=deploy"),
     ]
     # The template item rides the path (#2970); the body is only the DeploySpec.
     assert conn.calls[1]["body"] == {"spec": {"name": "vm-clone-1"}}
@@ -2364,13 +2375,13 @@ async def test_vm_clone_deploy_issued_with_long_timeout(gate: _GateRecorder) -> 
     conn = _RecordingConnector(
         {
             "/api/vcenter/vm/vm-src": {"name": "src"},
-            "/api/vcenter/vm-template/library-items/li-7?action=deploy": "vm-clone-1",
+            f"/api/vcenter/vm-template/library-items/{_ITEM_7}?action=deploy": "vm-clone-1",
         }
     )
     out = await vm_clone_composite(
         operator=_make_operator(),
         target=object(),
-        params={"source_vm": "vm-src", "target_name": "vm-clone-1", "library_item": "li-7"},
+        params={"source_vm": "vm-src", "target_name": "vm-clone-1", "library_item": _ITEM_7},
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "completed"
@@ -2387,13 +2398,13 @@ async def test_vm_clone_legacy_value_envelope_unwraps(gate: _GateRecorder) -> No
     conn = _RecordingConnector(
         {
             "/api/vcenter/vm/vm-src": {"name": "src"},
-            "/api/vcenter/vm-template/library-items/li-3?action=deploy": {"value": "vm-88"},
+            f"/api/vcenter/vm-template/library-items/{_ITEM_3}?action=deploy": {"value": "vm-88"},
         }
     )
     out = await vm_clone_composite(
         operator=_make_operator(),
         target=object(),
-        params={"source_vm": "vm-src", "target_name": "tgt", "library_item": "li-3"},
+        params={"source_vm": "vm-src", "target_name": "tgt", "library_item": _ITEM_3},
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "completed"
@@ -2407,14 +2418,14 @@ async def test_vm_clone_non_string_deploy_payload_raises(gate: _GateRecorder) ->
     conn = _RecordingConnector(
         {
             "/api/vcenter/vm/vm-src": {},
-            "/api/vcenter/vm-template/library-items/li-1?action=deploy": {"task": "task-bad"},
+            f"/api/vcenter/vm-template/library-items/{_ITEM_1}?action=deploy": {"task": "task-bad"},
         }
     )
     with pytest.raises(RuntimeError, match="no VM id"):
         await vm_clone_composite(
             operator=_make_operator(),
             target=object(),
-            params={"source_vm": "vm-src", "target_name": "tgt", "library_item": "li-1"},
+            params={"source_vm": "vm-src", "target_name": "tgt", "library_item": _ITEM_1},
             connector=conn,  # type: ignore[arg-type]
         )
 
@@ -2429,8 +2440,8 @@ _RENAME_VAPP_OP = "POST:/VirtualApp/{moId}/Rename_Task"
 _DELETE_VM_OP = "DELETE:/vcenter/vm/{vm}"
 _FIND_LIBRARY_PATH = "/api/content/library?action=find"
 _FIND_ITEM_PATH = "/api/content/library/item?action=find"
-_DEPLOY_PATH = "/api/vcenter/ovf/library-item/li-ovf?action=deploy"
-_FILTER_PATH = "/api/vcenter/ovf/library-item/li-ovf?action=filter"
+_DEPLOY_PATH = f"/api/vcenter/ovf/library-item/{_ITEM_OVF}?action=deploy"
+_FILTER_PATH = f"/api/vcenter/ovf/library-item/{_ITEM_OVF}?action=filter"
 _LIST_VMS_PATH = "/api/vcenter/vm"
 # The deploy token every #3697 test pins, and the unique deploy names it yields.
 _DEPLOY_TOKEN = "0123456789"
@@ -2543,13 +2554,13 @@ async def test_deploy_from_library_id_passthrough_deployed(
     out = await vm_deploy_from_library_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        params={"library_item": _ITEM_OVF, "resource_pool": "resgroup-8"},
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "deployed"
     assert out["vm_id"] == "vm-ovf-1"
     assert out["resource_type"] == "VirtualMachine"
-    assert out["library_item_id"] == "li-ovf"
+    assert out["library_item_id"] == _ITEM_OVF
     assert out["powered_on"] is False
     assert out["issues"] == []
     # No name-resolution reads on the id path; the summary is an un-gated
@@ -2617,7 +2628,7 @@ async def test_deploy_from_library_read_timeout_names_exception_type(gate: _Gate
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "deploy_error"
-    assert out["library_item_id"] == "li-ovf"
+    assert out["library_item_id"] == _ITEM_OVF
     assert len(out["issues"]) == 1
     message = out["issues"][0]["message"]
     assert "transport fault (ReadTimeout)" in message
@@ -2643,7 +2654,7 @@ async def test_deploy_from_library_deploy_body_shape(
         operator=_make_operator(),
         target=object(),
         params={
-            "library_item": "li-ovf",
+            "library_item": _ITEM_OVF,
             "name": "router-01",
             "resource_pool": "resgroup-8",
             "host": "host-19",
@@ -2728,9 +2739,9 @@ async def test_deploy_from_library_name_resolution_scoped_by_library(gate: _Gate
     conn = _RecordingConnector(
         {
             _FIND_LIBRARY_PATH: ["lib-7"],
-            _FIND_ITEM_PATH: ["li-resolved"],
-            "/api/vcenter/ovf/library-item/li-resolved?action=filter": _OVF_SUMMARY,
-            "/api/vcenter/ovf/library-item/li-resolved?action=deploy": _deployment_result(
+            _FIND_ITEM_PATH: [_ITEM_RESOLVED],
+            f"/api/vcenter/ovf/library-item/{_ITEM_RESOLVED}?action=filter": _OVF_SUMMARY,
+            f"/api/vcenter/ovf/library-item/{_ITEM_RESOLVED}?action=deploy": _deployment_result(
                 succeeded=True, vm_id="vm-ovf-2"
             ),
         },
@@ -2747,14 +2758,14 @@ async def test_deploy_from_library_name_resolution_scoped_by_library(gate: _Gate
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "deployed"
-    assert out["library_item_id"] == "li-resolved"
+    assert out["library_item_id"] == _ITEM_RESOLVED
     # Library find, then item find (scoped + type=ovf), the OVF summary for the
     # default name (no ``name`` given), then the deploy.
     assert [(c["method"], c["path"]) for c in conn.calls] == [
         ("POST", _FIND_LIBRARY_PATH),
         ("POST", _FIND_ITEM_PATH),
-        ("POST", "/api/vcenter/ovf/library-item/li-resolved?action=filter"),
-        ("POST", "/api/vcenter/ovf/library-item/li-resolved?action=deploy"),
+        ("POST", f"/api/vcenter/ovf/library-item/{_ITEM_RESOLVED}?action=filter"),
+        ("POST", f"/api/vcenter/ovf/library-item/{_ITEM_RESOLVED}?action=deploy"),
     ]
     # The find bodies are the FindSpec at the top level of the /api body (#3071),
     # NOT the legacy /rest {"spec": {...}} envelope vCenter 8.x 400s.
@@ -2869,7 +2880,7 @@ async def test_deploy_from_library_deploy_failed_surfaces_report_issues(
     )
     assert out["status"] == "deploy_failed"
     assert out["vm_id"] is None
-    assert out["library_item_id"] == "li-ovf"
+    assert out["library_item_id"] == _ITEM_OVF
     assert out["issues"] == [
         {"category": "INPUT", "severity": "error", "message": "network 'nat' not mapped"},
         {"category": "SERVER", "severity": "error", "message": "host busy"},
@@ -2883,7 +2894,7 @@ async def test_deploy_from_library_deploy_error_on_http_fault(gate: _GateRecorde
     fault = httpx.HTTPStatusError(
         "not found",
         request=httpx.Request(
-            "POST", "https://vc/api/vcenter/ovf/library-item/li-ovf?action=deploy"
+            "POST", f"https://vc/api/vcenter/ovf/library-item/{_ITEM_OVF}?action=deploy"
         ),
         response=httpx.Response(
             404,
@@ -2901,7 +2912,7 @@ async def test_deploy_from_library_deploy_error_on_http_fault(gate: _GateRecorde
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "deploy_error"
-    assert out["library_item_id"] == "li-ovf"
+    assert out["library_item_id"] == _ITEM_OVF
     assert len(out["issues"]) == 1
     assert out["issues"][0]["category"] == "placement"
     # The structured message carries the HTTP status, the vAPI error_type, and
@@ -2912,7 +2923,7 @@ async def test_deploy_from_library_deploy_error_on_http_fault(gate: _GateRecorde
 
 
 _DEPLOY_PARAMS_NAMED = {
-    "library_item": "li-ovf",
+    "library_item": _ITEM_OVF,
     "name": "router-01",
     "resource_pool": "resgroup-8",
 }
@@ -3198,7 +3209,7 @@ async def test_deploy_from_library_rename_not_authorized_stays_deployed(
         "deployed": {
             "vm_id": "vm-ovf-1",
             "resource_type": "VirtualMachine",
-            "library_item_id": "li-ovf",
+            "library_item_id": _ITEM_OVF,
             "name": "router-01",
             "step": "rename",
             "issues": [],
@@ -3315,11 +3326,11 @@ async def test_deploy_from_library_without_name_summary_fault_refuses_before_dep
     out = await vm_deploy_from_library_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        params={"library_item": _ITEM_OVF, "resource_pool": "resgroup-8"},
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "resolve_error"
-    assert out["library_item_id"] == "li-ovf"
+    assert out["library_item_id"] == _ITEM_OVF
     assert out["issues"][0]["category"] == "resolve"
     assert "404" in out["issues"][0]["message"]
     assert [(c["method"], c["path"]) for c in conn.calls] == [("POST", _FILTER_PATH)]
@@ -3335,11 +3346,11 @@ async def test_deploy_from_library_without_name_and_no_ovf_name_refuses(
     out = await vm_deploy_from_library_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        params={"library_item": _ITEM_OVF, "resource_pool": "resgroup-8"},
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "invalid_reference"
-    assert out["library_item_id"] == "li-ovf"
+    assert out["library_item_id"] == _ITEM_OVF
     assert out["issues"][0]["category"] == "input"
     assert "set name" in out["issues"][0]["message"]
     assert [(c["method"], c["path"]) for c in conn.calls] == [("POST", _FILTER_PATH)]
@@ -3383,7 +3394,7 @@ async def test_deploy_from_library_deployment_option_sent_as_selected_key(
         operator=_make_operator(),
         target=object(),
         params={
-            "library_item": "li-ovf",
+            "library_item": _ITEM_OVF,
             "name": "router-01",
             "resource_pool": "resgroup-8",
             "ovf_properties": {"guestinfo.hostname": "router-01"},
@@ -3424,7 +3435,7 @@ async def test_deploy_from_library_deployment_option_without_name_uses_one_summa
         operator=_make_operator(),
         target=object(),
         params={
-            "library_item": "li-ovf",
+            "library_item": _ITEM_OVF,
             "resource_pool": "resgroup-8",
             "deployment_option": "large",
         },
@@ -3457,7 +3468,7 @@ async def test_deploy_from_library_unknown_deployment_option_refused(
         operator=_make_operator(),
         target=object(),
         params={
-            "library_item": "li-ovf",
+            "library_item": _ITEM_OVF,
             "name": "router-01",
             "resource_pool": "resgroup-8",
             "deployment_option": "huge",
@@ -3465,7 +3476,7 @@ async def test_deploy_from_library_unknown_deployment_option_refused(
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "invalid_reference"
-    assert out["library_item_id"] == "li-ovf"
+    assert out["library_item_id"] == _ITEM_OVF
     assert out["vm_id"] is None
     assert out["candidates"] == offered
     assert out["issues"][0]["category"] == "input"
@@ -3484,7 +3495,7 @@ async def test_deploy_from_library_deployment_option_summary_fault_is_resolve_er
         operator=_make_operator(),
         target=object(),
         params={
-            "library_item": "li-ovf",
+            "library_item": _ITEM_OVF,
             "name": "router-01",
             "resource_pool": "resgroup-8",
             "deployment_option": "small",
@@ -3507,7 +3518,7 @@ async def test_deploy_from_library_without_name_cleans_up_by_deploy_name(
     out = await vm_deploy_from_library_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        params={"library_item": _ITEM_OVF, "resource_pool": "resgroup-8"},
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "deploy_error"
@@ -4618,7 +4629,7 @@ def _deployed_state(step: str, *, issues: list[dict[str, Any]] | None = None) ->
         "deployed": {
             "vm_id": "vm-ovf-1",
             "resource_type": "VirtualMachine",
-            "library_item_id": "li-ovf",
+            "library_item_id": _ITEM_OVF,
             "name": "router-01",
             "step": step,
             "issues": issues or [],
@@ -4689,7 +4700,7 @@ async def test_deploy_from_library_resume_of_a_cleanup_deletes_and_deploys_nothi
         "deploy_name": _SAVED_DEPLOY_NAME,
         "failed": {
             "status": "deploy_error",
-            "library_item_id": "li-ovf",
+            "library_item_id": _ITEM_OVF,
             "reported": None,
             "issues": first_issues,
             "removal": ["vm-partial", "VirtualMachine"],
@@ -4704,7 +4715,7 @@ async def test_deploy_from_library_resume_of_a_cleanup_deletes_and_deploys_nothi
             connector=conn,  # type: ignore[arg-type]
         )
     assert out["status"] == "deploy_error"
-    assert out["library_item_id"] == "li-ovf"
+    assert out["library_item_id"] == _ITEM_OVF
     assert out["issues"] == [
         *first_issues,
         _write.issue("cleanup", "info", "removed VM vm-partial left by the failed deploy"),
@@ -4728,7 +4739,7 @@ async def test_deploy_from_library_resume_of_a_vapp_destroy_destroys_only_the_sa
         "deploy_name": _SAVED_DEPLOY_NAME,
         "failed": {
             "status": "deploy_failed",
-            "library_item_id": "li-ovf",
+            "library_item_id": _ITEM_OVF,
             "reported": ["resgroup-v9", _VAPP_TYPE],
             "issues": [],
             "removal": ["resgroup-v9", _VAPP_TYPE],
@@ -4767,7 +4778,7 @@ async def test_deploy_from_library_resume_of_a_vapp_destroy_destroys_only_the_sa
                 "deploy_name": _SAVED_DEPLOY_NAME,
                 "failed": {
                     "status": "deploy_error",
-                    "library_item_id": "li-ovf",
+                    "library_item_id": _ITEM_OVF,
                     "reported": None,
                     "issues": [],
                 },
@@ -4822,7 +4833,7 @@ async def test_deploy_from_library_deploy_park_saves_its_resolved_parameters(
     assert out["status"] == "deployed"
     deploy_call = gate.calls[0]
     assert deploy_call["op_id"] == _DEPLOY_OVF_OP
-    assert deploy_call["params"]["ovfLibraryItemId"] == "li-ovf"
+    assert deploy_call["params"]["ovfLibraryItemId"] == _ITEM_OVF
     assert deploy_call["params"]["deployment_spec"]["name"] == _DEPLOY_NAME
     assert deploy_call["resume_state"] == {
         "deploy_name": _DEPLOY_NAME,
@@ -4845,7 +4856,7 @@ async def test_deploy_from_library_resumed_deploy_reuses_its_resolved_parameters
     saved item is served here; a find or an OVF summary read would fail.
     """
     deploy_params = {
-        "ovfLibraryItemId": "li-ovf",
+        "ovfLibraryItemId": _ITEM_OVF,
         "deployment_spec": {"accept_all_EULA": True, "name": _SAVED_DEPLOY_NAME},
         "target": {"resource_pool_id": "resgroup-8"},
     }
@@ -4876,7 +4887,7 @@ async def test_deploy_from_library_resumed_deploy_reuses_its_resolved_parameters
         composite_resume_state_var.reset(state_token)
         composite_resume_scope_var.reset(scope_token)
     assert out["status"] == "deployed"
-    assert out["library_item_id"] == "li-ovf"
+    assert out["library_item_id"] == _ITEM_OVF
     assert [(c["method"], c["path"]) for c in conn.calls] == [("POST", _DEPLOY_PATH)]
     assert conn.calls[0]["body"] == {
         "deployment_spec": deploy_params["deployment_spec"],
@@ -5793,6 +5804,415 @@ async def test_host_evacuate_gated_maintenance_write_returns_the_gate(
     )
     assert out is parked
     assert _enter_maintenance_bodies(conn) == []
+
+
+# ===========================================================================
+# host.maintenance.exit (#4967)
+# ===========================================================================
+
+_EXIT_MAINTENANCE_OP = "POST:/HostSystem/{moId}/ExitMaintenanceMode_Task"
+
+
+def _host_state_result(
+    host_moid: str,
+    *,
+    connection_state: str = "connected",
+    in_maintenance: bool | None = True,
+    ha_state: str | None = "connectedToMaster",
+    name: str | None = "esx-01",
+) -> dict[str, Any]:
+    """A ``HostSystem`` RetrievePropertiesEx result with the four runtime leaves.
+
+    ``None`` leaves a property out, as vCenter does for ``dasHostState`` on a
+    host outside an HA cluster.
+    """
+    prop_set: list[dict[str, Any]] = []
+    if name is not None:
+        prop_set.append({"_typeName": "DynamicProperty", "name": "name", "val": name})
+    prop_set.append(
+        {
+            "_typeName": "DynamicProperty",
+            "name": "runtime.connectionState",
+            "val": connection_state,
+        }
+    )
+    if in_maintenance is not None:
+        prop_set.append(
+            {
+                "_typeName": "DynamicProperty",
+                "name": "runtime.inMaintenanceMode",
+                "val": in_maintenance,
+            }
+        )
+    if ha_state is not None:
+        prop_set.append(
+            {
+                "_typeName": "DynamicProperty",
+                "name": "runtime.dasHostState",
+                "val": {"_typeName": "ClusterDasFdmHostState", "state": ha_state},
+            }
+        )
+    return {
+        "_typeName": "RetrieveResult",
+        "objects": [
+            {
+                "_typeName": "ObjectContent",
+                "obj": {
+                    "_typeName": "ManagedObjectReference",
+                    "type": "HostSystem",
+                    "value": host_moid,
+                },
+                "propSet": prop_set,
+            }
+        ],
+    }
+
+
+class _MaintenanceExitConnector:
+    """Recording double for host.maintenance.exit: sequential host reads + the exit task.
+
+    The handler reads the host before and after the exit, so the two
+    ``HostSystem`` reads are served in order from *host_reads*; an exception
+    in that list is raised by its read, so a test can fail one read. The task
+    poll serves *task_state* (``success`` / ``error`` / ``running``); the
+    ``ExitMaintenanceMode_Task`` POST is recorded so a refused call is
+    provably off the wire.
+    """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
+
+    def __init__(
+        self,
+        host_reads: list[dict[str, Any] | Exception],
+        *,
+        task_state: str = "success",
+        task_error: str | None = None,
+        task_moid: str = "task-exit-1",
+    ) -> None:
+        self._host_reads = list(host_reads)
+        self._task_state = task_state
+        self._task_error = task_error
+        self._task_moid = task_moid
+        self.vmomi_calls: list[tuple[str, Any]] = []
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        self.vmomi_calls.append((path, json))
+        if path.endswith("/ExitMaintenanceMode_Task"):
+            return _task_moref(self._task_moid)
+        spec_type = json["specSet"][0]["propSet"][0]["type"]
+        if spec_type == "HostSystem":
+            read = self._host_reads.pop(0)
+            if isinstance(read, Exception):
+                raise read
+            return read
+        if spec_type == "Task":
+            return _task_info_result(self._task_moid, self._task_state, self._task_error)
+        raise AssertionError(f"unexpected RetrievePropertiesEx type {spec_type!r}")
+
+    @property
+    def exit_calls(self) -> list[tuple[str, Any]]:
+        return [(p, b) for p, b in self.vmomi_calls if p.endswith("/ExitMaintenanceMode_Task")]
+
+    @property
+    def host_read_path_sets(self) -> list[list[str]]:
+        return [
+            b["specSet"][0]["propSet"][0]["pathSet"]
+            for p, b in self.vmomi_calls
+            if p.endswith("/RetrievePropertiesEx")
+            and b["specSet"][0]["propSet"][0]["type"] == "HostSystem"
+        ]
+
+
+async def _run_maintenance_exit(
+    conn: _MaintenanceExitConnector, params: dict[str, Any]
+) -> dict[str, Any] | OperationResult:
+    return await host_maintenance_exit_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=params,
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_sends_the_exit_task_and_reports_the_new_state(
+    gate: _GateRecorder,
+) -> None:
+    """Connected host in maintenance mode: one gated exit with {"timeout": 0}, then a re-read."""
+    conn = _MaintenanceExitConnector(
+        [
+            _host_state_result("host-1", in_maintenance=True, ha_state=None),
+            _host_state_result("host-1", in_maintenance=False, ha_state="connectedToMaster"),
+        ]
+    )
+    out = await _run_maintenance_exit(conn, {"host": "host-1"})
+    assert isinstance(out, dict)
+    assert out == {
+        "status": "exited",
+        "host": "host-1",
+        "name": "esx-01",
+        "connection_state": "connected",
+        "in_maintenance_mode": False,
+        "ha_state": "connectedToMaster",
+        "maintenance_task": "task-exit-1",
+    }
+    assert conn.exit_calls == [("/HostSystem/host-1/ExitMaintenanceMode_Task", {"timeout": 0})]
+    assert (
+        conn.host_read_path_sets
+        == [
+            ["name", "runtime.connectionState", "runtime.inMaintenanceMode", "runtime.dasHostState"]
+        ]
+        * 2
+    )
+    # The exit is the one governed write, gated with the shared sub-op posture.
+    assert gate.calls == [
+        {
+            "op_id": _EXIT_MAINTENANCE_OP,
+            "connector_id": "vmware-rest-9.0",
+            "safety_level": "dangerous",
+            "requires_approval": False,
+            "params": {"host": "host-1"},
+            "resume_state": None,
+            "after_main_effect": False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_not_in_maintenance_mode_answers_unchanged(
+    gate: _GateRecorder,
+) -> None:
+    """A host that is not in maintenance mode: ``unchanged``, nothing sent, no gate."""
+    conn = _MaintenanceExitConnector([_host_state_result("host-2", in_maintenance=False)])
+    out = await _run_maintenance_exit(conn, {"host": "host-2"})
+    assert isinstance(out, dict)
+    assert out["status"] == "unchanged"
+    assert out["in_maintenance_mode"] is False
+    assert out["maintenance_task"] is None
+    assert "not in maintenance mode" in out["guidance"]
+    assert conn.exit_calls == []
+    assert len(conn.host_read_path_sets) == 1
+    assert gate.calls == []
+
+
+@pytest.mark.parametrize("connection_state", ["notResponding", "disconnected"])
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_host_not_connected_stops_before_any_change(
+    gate: _GateRecorder, connection_state: str
+) -> None:
+    """A host vCenter cannot reach is refused with a clear message; nothing is sent."""
+    conn = _MaintenanceExitConnector(
+        [_host_state_result("host-3", connection_state=connection_state, in_maintenance=True)]
+    )
+    out = await _run_maintenance_exit(conn, {"host": "host-3"})
+    assert isinstance(out, dict)
+    assert out["status"] == "not_connected"
+    assert out["connection_state"] == connection_state
+    assert out["in_maintenance_mode"] is True
+    assert out["maintenance_task"] is None
+    assert f"host 'host-3' is {connection_state}, not connected to vCenter" in out["guidance"]
+    assert "Nothing was changed" in out["guidance"]
+    assert conn.exit_calls == []
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_unknown_maintenance_state_still_sends_the_exit(
+    gate: _GateRecorder,
+) -> None:
+    """When vCenter leaves ``inMaintenanceMode`` out, MEHO sends the exit; vCenter decides."""
+    conn = _MaintenanceExitConnector(
+        [
+            _host_state_result("host-1", in_maintenance=None),
+            _host_state_result("host-1", in_maintenance=False),
+        ]
+    )
+    out = await _run_maintenance_exit(conn, {"host": "host-1"})
+    assert isinstance(out, dict)
+    assert out["status"] == "exited"
+    assert len(conn.exit_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_task_fault_fails_the_call_with_the_fault_text(
+    gate: _GateRecorder,
+) -> None:
+    """A faulted exit task is a failed call; the fault text reaches the answer."""
+    conn = _MaintenanceExitConnector(
+        [_host_state_result("host-1", in_maintenance=True)],
+        task_state="error",
+        task_error="The operation is not allowed in the current state.",
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        await _run_maintenance_exit(conn, {"host": "host-1"})
+    message = str(excinfo.value)
+    assert message.startswith(
+        "host.maintenance.exit: ExitMaintenanceMode_Task on host 'host-1' faulted: "
+    )
+    assert "The operation is not allowed in the current state." in message
+    # No second host read after a fault: the answer is the error.
+    assert len(conn.host_read_path_sets) == 1
+
+
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_poll_timeout_reports_the_running_task(
+    gate: _GateRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When MEHO stops waiting while the task runs, the answer says so with the task id."""
+    monkeypatch.setattr(_write, "_MAINTENANCE_TASK_TIMEOUT_SECONDS", 0.0)
+    conn = _MaintenanceExitConnector(
+        [
+            _host_state_result("host-1", in_maintenance=True),
+            _host_state_result("host-1", in_maintenance=True),
+        ],
+        task_state="running",
+        task_moid="task-exit-9",
+    )
+    out = await _run_maintenance_exit(conn, {"host": "host-1"})
+    assert isinstance(out, dict)
+    assert out["status"] == "timeout"
+    assert out["maintenance_task"] == "task-exit-9"
+    assert out["in_maintenance_mode"] is True
+    assert "task task-exit-9 still runs" in out["guidance"]
+    assert "did not fail" in out["guidance"]
+    assert out["issues"] == [
+        {
+            "category": "connector",
+            "severity": "warning",
+            "message": (
+                "exit-maintenance-mode task task-exit-9 on host 'host-1' still runs after 0s; "
+                "the host may still be in maintenance mode"
+            ),
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_poll_timeout_keeps_the_task_id_when_the_host_read_fails(
+    gate: _GateRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed host read after the timeout never loses the timeout answer or the task id."""
+    monkeypatch.setattr(_write, "_MAINTENANCE_TASK_TIMEOUT_SECONDS", 0.0)
+    conn = _MaintenanceExitConnector(
+        [
+            _host_state_result("host-1", in_maintenance=True),
+            httpx.ReadTimeout("read timed out"),
+        ],
+        task_state="running",
+        task_moid="task-exit-9",
+    )
+    out = await _run_maintenance_exit(conn, {"host": "host-1"})
+    assert isinstance(out, dict)
+    assert out["status"] == "timeout"
+    assert out["maintenance_task"] == "task-exit-9"
+    assert out["host"] == "host-1"
+    assert out["name"] is None
+    assert out["connection_state"] is None
+    assert out["in_maintenance_mode"] is None
+    assert out["ha_state"] is None
+    assert "task task-exit-9 still runs" in out["guidance"]
+    assert "did not fail" in out["guidance"]
+    assert "current host state is unavailable" in out["guidance"]
+    assert [i["severity"] for i in out["issues"]] == ["warning", "warning"]
+    assert out["issues"][1] == {
+        "category": "connector",
+        "severity": "warning",
+        "message": (
+            "the host read after the timeout failed (ReadTimeout); the current state of "
+            "host 'host-1' is unavailable"
+        ),
+    }
+    assert "read timed out" not in json.dumps(out)
+    assert len(conn.exit_calls) == 1
+    assert len(conn.host_read_path_sets) == 2
+
+
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_parked_gate_returns_the_result_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked gate on the exit write short-circuits: nothing reaches the wire."""
+    parked = _awaiting(_EXIT_MAINTENANCE_OP)
+    _install_gate(monkeypatch, _GateRecorder({_EXIT_MAINTENANCE_OP: parked}))
+    conn = _MaintenanceExitConnector([_host_state_result("host-1", in_maintenance=True)])
+    out = await _run_maintenance_exit(conn, {"host": "host-1"})
+    assert out is parked
+    assert conn.exit_calls == []
+
+
+@pytest.mark.parametrize(
+    ("about_version", "vijson"),
+    [("8.0.3", "/sdk/vim25/8.0.3.0"), ("9.0.0", "/sdk/vim25/9.0.0.0")],
+    ids=["vcenter-8", "vcenter-9"],
+)
+@pytest.mark.asyncio
+async def test_host_maintenance_exit_through_a_fake_vcenter_respx(
+    monkeypatch: pytest.MonkeyPatch, about_version: str, vijson: str
+) -> None:
+    """respx-verified on the vCenter 8 and 9 VI-JSON paths: host read -> exit -> poll -> read.
+
+    Drives the real handler through a real ``VmwareRestConnector`` over an
+    httpx (respx) transport. The gate auto-executes here (its park path is
+    proven in the gate test above and in the e2e lane) so the exit reaches
+    the wire; the task is polled through ``running`` to ``success``.
+    """
+
+    async def _auto_execute(**_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(_write, "enforce_subop_policy", _auto_execute)
+    monkeypatch.setattr(_write, "_MAINTENANCE_TASK_TIMEOUT_SECONDS", 30.0)
+
+    base = "https://vc-grow.test.invalid"
+    connector = VmwareRestConnector(session_loader=_stub_loader)
+    _patch_no_revoke_aclose(connector)
+    try:
+        async with respx.mock(base_url=base) as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": about_version})
+            retrieve = mock.post(
+                f"{vijson}/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+            ).mock(
+                side_effect=[
+                    httpx.Response(200, json=_host_state_result("host-7", in_maintenance=True)),
+                    httpx.Response(200, json=_task_info_result("task-exit-7", "running")),
+                    httpx.Response(200, json=_task_info_result("task-exit-7", "success")),
+                    httpx.Response(
+                        200,
+                        json=_host_state_result("host-7", in_maintenance=False, ha_state="master"),
+                    ),
+                ]
+            )
+            exit_task = mock.post(f"{vijson}/HostSystem/host-7/ExitMaintenanceMode_Task").respond(
+                200, json=_task_moref("task-exit-7")
+            )
+            out = await host_maintenance_exit_composite(
+                operator=_make_operator(),
+                target=_StubTarget(),
+                params={"host": "host-7"},
+                connector=connector,
+            )
+        assert isinstance(out, dict)
+        assert out["status"] == "exited"
+        assert out["in_maintenance_mode"] is False
+        assert out["connection_state"] == "connected"
+        assert out["ha_state"] == "master"
+        assert out["maintenance_task"] == "task-exit-7"
+        assert exit_task.call_count == 1
+        assert json.loads(exit_task.calls[0].request.content) == {"timeout": 0}
+        assert retrieve.call_count == 4
+        first_read = json.loads(retrieve.calls[0].request.content)
+        assert first_read["specSet"][0]["propSet"][0]["pathSet"] == [
+            "name",
+            "runtime.connectionState",
+            "runtime.inMaintenanceMode",
+            "runtime.dasHostState",
+        ]
+    finally:
+        await connector.aclose()
 
 
 # ===========================================================================
@@ -6840,6 +7260,9 @@ class _DiskGrowConnector:
     keys them by.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     def __init__(
         self,
         *,
@@ -7211,6 +7634,9 @@ class _DiskAttachConnector:
     every ``ReconfigVM_Task`` add so a parked/refused write is provably off
     the wire.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     def __init__(
         self,
@@ -7680,6 +8106,9 @@ class _CloneFromTemplateConnector:
     ``RetrievePropertiesEx`` reads are keyed apart by the request body's
     ``specSet`` object type — exactly the seam a real vCenter keys them by.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     _MOUNT = "/api"
 
@@ -8213,6 +8642,9 @@ class _DrsRuleConnector:
     works, a path into it fails with HTTP 500 ``InvalidProperty``.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(
@@ -8579,6 +9011,9 @@ class _FolderCreateConnector:
     Folder MoRef directly, so **no** ``RetrievePropertiesEx`` poll ever fires.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(
@@ -8857,6 +9292,9 @@ class _ResourcePoolConnector:
     serves the ``ClusterComputeResource.resourcePool`` root-pool read.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(
@@ -8952,6 +9390,9 @@ class _VmHostRuleConnector:
     The cluster read answers like vCenter 8.0.x: the whole ``configurationEx``
     works, a path into it fails with HTTP 500 ``InvalidProperty``.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     _MOUNT = "/api"
 

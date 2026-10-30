@@ -23,6 +23,19 @@ global:
   # id from the project's range (it refuses a fixed one outside it). On
   # other clusters keep false: the pods run with fixed, non-root user ids.
   openshift: false
+  # -- Your own image registry, for an install with no internet (#4100).
+  # Every pod of the chart then pulls from it. It replaces the registry host
+  # of each image and keeps the path, the tag and the digest:
+  # `quay.io/keycloak/keycloak@sha256:…` -> `<registry>/keycloak/keycloak@sha256:…`.
+  # An image with no host is a Docker Hub image: `valkey/valkey` ->
+  # `<registry>/valkey/valkey`, `busybox` -> `<registry>/library/busybox`.
+  # It may hold a path, for example `harbor.example.com/meho`. Empty = every
+  # image is pulled from where it is published.
+  imageRegistry: ""
+  # -- Pull secrets (the login for your registry) for every pod of the
+  # chart, written as `[{name: <secret>}]`. The parent chart's own
+  # `imagePullSecrets` below are added too.
+  imagePullSecrets: []
 
 # -- Number of backplane replicas. v0.1 is single-replica; HA lands in v0.2.
 replicaCount: 1
@@ -1018,6 +1031,11 @@ sandboxMode:
   # otherwise. Rendered into `MEHO_SANDBOX_MODE_CONFIRM`, which the
   # backplane checks against the host of its MCP resource URI at boot.
   confirmHost: ""
+  # -- Lets a tenant admin create a delete grant through REST and the CLI
+  # too, not only in the web console (#5251). Rendered into
+  # `MEHO_SANDBOX_DELETE_GRANTS_FROM_API` only when `enabled` is true as
+  # well. Default false: delete grants are made only in the web console.
+  deleteGrantsFromApi: false
 
 # Operator-console (`/ui/*`) OAuth confidential credentials (#2594,
 # Goal #336). The browser BFF login flow served at `/ui/auth/*` needs two
@@ -1203,6 +1221,16 @@ coreKeycloak:
   hostname: ""
   # -- The first tenant's id (a UUID). Pick one per install and keep it.
   firstTenantId: ""
+  # -- The first tenant's short name (lowercase letters, digits, dashes).
+  # The five role groups carry it in the `meho_tenant` attribute.
+  tenantName: main
+  # -- More tenants, as a list of `{name, id}` (`id` is a UUID you pick and
+  # keep). The bootstrap Job makes five groups for each one:
+  # `MEHO-<name>-Readers`, `-Operators`, `-SA-Operators`, `-Admins` and
+  # `-Approvers`. Empty by default: a site with one tenant needs nothing
+  # here. Putting people in these groups waits for a second person's
+  # approval when done through MEHO.
+  tenants: []
   ingress:
     # -- Also route the admin console (`/auth/admin`, `/auth/realms/master`)
     # on the MEHO host. Default false: the admin console is then not
@@ -1232,6 +1260,59 @@ coreKeycloak:
     enabled: false
     # -- The second tenant's id (a UUID). Required when `ci.enabled` is true.
     tenantId: ""
+  # The company login (an OpenID Connect login system such as authentik,
+  # Entra ID, Okta or ADFS) in front of the built-in Keycloak. When on, the
+  # bootstrap Job sets it up on every install and upgrade: people log in on
+  # the company login page (with its own second login step) and come back
+  # with a MEHO token from Keycloak. Their company group decides their MEHO
+  # group, and with it their tenant and role. Service accounts stay in
+  # Keycloak. Put each person in one MEHO role group only.
+  #
+  # In the company login system, make a confidential client with this
+  # redirect address (the install notes print it):
+  # `https://<hostname>/auth/realms/meho/broker/<alias>/endpoint`.
+  # It must sign its tokens with a published key (for example RS256).
+  #
+  # Turning `enabled` off later does not remove the login from Keycloak.
+  # To show the Keycloak login form again (the way in with the local
+  # accounts when the company login is down), keep `enabled` on and set
+  # `autoRedirect: false`.
+  companyLogin:
+    enabled: false
+    # -- Short name of the login in Keycloak. It is part of the redirect
+    # address. Letters, digits, `-` and `_`.
+    alias: company
+    # -- Name of the button on the Keycloak login page.
+    displayName: Company login
+    # -- The company login's discovery address, for example
+    # `https://<idp>/application/o/<slug>/.well-known/openid-configuration`.
+    # Keycloak reads it at every install and upgrade. Required when on.
+    discoveryUrl: ""
+    # -- The client id from the company login system. Required when on.
+    clientId: ""
+    # -- The Secret that holds the client secret. Create it before the
+    # install. Required when on.
+    clientSecret:
+      secretName: ""
+      secretKey: client_secret
+    # -- What Keycloak asks the company login for. Keep `profile`: it
+    # usually carries the groups.
+    scopes: openid profile email
+    # -- The token field that lists the person's company groups.
+    groupsClaim: groups
+    # -- Company group name -> MEHO group name, for example
+    # `{"Ops": "MEHO-Operators"}`. Keycloak checks the groups at every
+    # company login and takes a person out of a MEHO group that no longer
+    # matches. A removed line removes its rule.
+    groupMap: {}
+    # -- Skip the Keycloak login page and go straight to the company login.
+    autoRedirect: true
+    # -- Only for a company login with a certificate from a private CA: a
+    # ConfigMap in the release namespace with the CA certificate (PEM).
+    # Keycloak trusts it for its calls to the company login.
+    caBundle:
+      configMapName: ""
+      key: ca.crt
 
 coreVault:
   # -- Built-in OpenBao, the password safe (ADR 0008). When on, the install
@@ -1269,6 +1350,10 @@ broadcast:
   image:
     repository: valkey/valkey
     tag: "9.0-alpine"
+    # -- Digest of the `9.0-alpine` image index; the digest wins over the tag.
+    # To change the tag or the repository, set `digest` too, or set
+    # `digest: ""` to use the tag.
+    digest: "sha256:2d04268dfa26ab31cfa3fdc538866e76438b2d00e41db41b8cb86d780ac5a416"
     pullPolicy: IfNotPresent
   # -- Replica count. Hard-capped at 1 in v0.1 (no Sentinel, ephemeral
   # streams); the schema rejects any higher value.
@@ -1329,6 +1414,10 @@ resultCache:
   image:
     repository: valkey/valkey
     tag: "9.0-alpine"
+    # -- Digest of the `9.0-alpine` image index; the digest wins over the tag.
+    # To change the tag or the repository, set `digest` too, or set
+    # `digest: ""` to use the tag.
+    digest: "sha256:2d04268dfa26ab31cfa3fdc538866e76438b2d00e41db41b8cb86d780ac5a416"
     pullPolicy: IfNotPresent
   # -- Replica count. Capped at 1 (no persistence, no Sentinel).
   replicas: 1
@@ -1385,6 +1474,13 @@ resultCache:
 # Failed Jobs are NOT garbage-collected by the hook delete policy so the
 # operator can inspect logs; the k8s-side `ttlSecondsAfterFinished` is
 # the backstop.
+#
+# With `corePostgres.enabled: true` the Job is not rendered: Helm would run
+# it before it creates the built-in database. The same runner then runs as
+# the `migrate` init container of the backplane Deployment, with
+# `resources` from this block (#5233). `backoffLimit` and
+# `ttlSecondsAfterFinished` apply to the Job only; the kubelet restarts a
+# failed init container, and the pod is not Ready until it succeeds.
 migrationJob:
   # -- Number of times Kubernetes retries the migration Job on non-zero
   # exit. Alembic migrations are idempotent; the retries catch transient

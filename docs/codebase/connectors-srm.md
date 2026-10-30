@@ -26,8 +26,8 @@ Package: `backend/src/meho_backplane/connectors/srm/`.
 The login, the session cache, the version read and both reads are shared
 with the vSphere Replication connector (`docs/codebase/connectors-vr.md`).
 Both APIs are served by the same REST API gateway, so the shared part
-lives in `connectors/_shared/dr_rest.py` (the base class
-`DrRestConnector`) and `connectors/_shared/dr_api_file.py` (the read).
+lives in `connectors/vmware_shared/dr_rest.py` (the base class
+`DrRestConnector`) and `connectors/vmware_shared/dr_api_file.py` (the read).
 `SrmConnector` sets the SRM paths.
 
 | Operation | What it does | Vendor call | Risk | Versions |
@@ -68,15 +68,16 @@ other modes raise `NotImplementedError`.
 ## Key types
 
 - `SrmConnector` (`connector.py`) -- the connector class, a subclass of
-  `DrRestConnector` (`connectors/_shared/dr_rest.py`). It sets the SRM
+  `DrRestConnector` (`connectors/vmware_shared/dr_rest.py`). It sets the SRM
   paths (`api_base`, `session_path`, `info_path`, `api_files`) and
   defines the entry methods `about` and `api_file_get`, which call the
   shared code. The entry methods live on this class, not on the base, so
   the stored handler of `srm.about` names `SrmConnector`. MEHO binds it
   only to an `SrmConnector`, so an `srm.*` operation cannot run on a `vr`
   target (the call ends with a `connector_error` before any HTTP
-  request). The base caches one session id per target and tenant
-  (`target_cache_key`).
+  request). The base caches one session id per credential
+  (`credential_cache_key`: tenant, secret and login host), so two SRM
+  targets that share one credential share one session.
 - `SrmTargetLike` (`session.py`) -- the minimum target shape: `id`,
   `tenant_id`, `name`, `host`, `port`, `secret_ref`, `auth_model`.
 - `SrmSessionLoader` (`session.py`) -- an async callable
@@ -84,14 +85,14 @@ other modes raise `NotImplementedError`.
   `load_session_credentials_from_vault`, reads the target's `secret_ref`
   from Vault under the operator's identity. Tests inject a static loader.
 - `DrServerVersion`, `parse_server_version`, `summarise_server_info`
-  (`connectors/_shared/dr_rest.py`) -- the version read and the
+  (`connectors/vmware_shared/dr_rest.py`) -- the version read and the
   `srm.about` answer.
 - `SrmTypedOp`, `SRM_TYPED_OPS`, `register_srm_typed_operations`
   (`typed_ops.py`) -- the op metadata and the registrar. The response
   schemas and the shared `llm_instructions` texts come from
-  `connectors/_shared/dr_rest_schemas.py`.
+  `connectors/vmware_shared/dr_rest_schemas.py`.
 - `API_FILES` (`api_file.py`) -- the two files the read can fetch.
-- `dr_api_file_get` (`connectors/_shared/dr_api_file.py`) -- the read's
+- `dr_api_file_get` (`connectors/vmware_shared/dr_api_file.py`) -- the read's
   body, shared with `vr.api_file.get`.
 - `connectors/_shared/api_file_read.py` -- the vendor-neutral steps of an
   API file read (bounded fetch, text check, parts, size check, one
@@ -163,6 +164,16 @@ The vendor-neutral steps live in `connectors/_shared/api_file_read.py`.
 They are the same steps the `fleet.api_file.get` read uses
 (`docs/codebase/connectors-vcf-fleet.md`):
 
+- the fetch and the file check are one step, `fetch_checked_api_file`;
+  the size check of the stored record, the last redaction check and the
+  flight recorder call are a second step, `finish_api_file_read`. The
+  flight recorder (the stored record of each vendor call) gets the
+  checked copy of the file, never the body as it came, and only after
+  every check has passed: a file the read refuses, for any reason, is
+  recorded with no body. A `401` body goes through the same check before
+  the error is raised, or the error is raised with no body, also when
+  the body is too big or cannot be decoded; the status and the headers
+  stay, so the login retry still runs;
 - the body is read in a stream; `gzip` and `deflate` are decoded in
   bounded steps, so a small compressed body that decodes past the limit
   stops at the limit; a cut stream is refused;
@@ -236,7 +247,8 @@ call is sent.
   session, registration shape, fingerprint. One test reads the pinned 9.1 files through
   `srm.api_file.get`; it runs only when the spec shelf is present.
 - `backend/tests/test_connectors_shared_api_file_read.py` -- the shared
-  read steps, including `text_redactor`.
+  read steps, including `text_redactor` and what the flight recorder and
+  a raised `401` carry.
 - `backend/tests/test_connectors_srm_spec_reconcile.py` -- the login and
   `server/info` paths against the pinned 9.1 file
   (`vcf-protection-and-recovery-9.1/recovery-srm-v2.yaml` on the spec

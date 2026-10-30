@@ -74,7 +74,13 @@ from typing import Any, Final
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.kb.schemas import InvalidKbSlugError, KbEntrySearchHit
 from meho_backplane.kb.service import KbService
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
+from meho_backplane.mcp.resources.kb import read_kb_entry
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from meho_backplane.settings import get_settings
@@ -155,8 +161,19 @@ async def _search_knowledge_handler(
     e.g. ``{"kind": "kb-entry", "source_kind": "evoila-distilled"}``
     to scope hits to the curated slice; missing keys exclude rows
     (PG ``@>`` semantics), multi-key dicts behave as an intersection.
+
+    With ``slug`` the handler reads that one entry instead, through the
+    same code as the ``meho://kb/{slug}`` resource (#4138). This gives a
+    full-text read to clients that offer the model only tools.
     """
-    query: str = arguments["query"]
+    slug = arguments.get("slug")
+    if slug is not None:
+        return {"entry": await read_kb_entry(operator, slug)}
+    query = arguments.get("query")
+    if query is None:
+        raise McpInvalidParamsError(
+            "search_knowledge: pass `query` to search, or `slug` to read one entry"
+        )
     filters = arguments.get("filters")
     limit: int = int(arguments.get("limit", _DEFAULT_SEARCH_LIMIT))
 
@@ -266,6 +283,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="memory_knowledge",
         name="search_knowledge",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Search the tenant's knowledge base for distilled operator "
@@ -286,6 +304,8 @@ register_mcp_tool(
             "infrastructure, conventions, or past incidents, not only "
             "when the operator explicitly asks you to search: the answer "
             "is often already captured here. "
+            "For the full text of a hit, call this tool again with `slug`; "
+            "it returns `{entry: {...}}` and ignores the other arguments. "
             "To read more around a passage, call `resources/read` on the "
             "locator's `uri` (`meho://kb/id/{entry}/revision/{revision}`, "
             "the exact body the passage came from); `meho://kb/{slug}` "
@@ -324,6 +344,14 @@ register_mcp_tool(
                         f"Capped at {_MAX_QUERY_CHARS} characters."
                     ),
                 },
+                "slug": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Slug of one entry (from a hit). Returns that "
+                        "entry's full text instead of searching."
+                    ),
+                },
                 "filters": {
                     "type": ["object", "null"],
                     "description": (
@@ -347,7 +375,6 @@ register_mcp_tool(
                     "description": "Maximum number of ranked hits to return.",
                 },
             },
-            "required": ["query"],
             "additionalProperties": False,
         },
         required_role=TenantRole.OPERATOR,
@@ -382,7 +409,7 @@ register_mcp_tool(
             "body — the same-slug re-add updates in place via the "
             "body-hash short-circuit). "
             "Do NOT use this for ephemeral session notes — those belong "
-            "in `add_to_memory` (G5). The kb is durable team knowledge. "
+            "in `add_to_memory`. The kb is durable team knowledge. "
             "Surface-name note: every non-MCP MEHO surface calls this "
             "substrate `kb`, not `knowledge` — REST is `/api/v1/kb` "
             "(`GET`/`POST /api/v1/kb`, `GET`/`DELETE /api/v1/kb/{slug}`), "

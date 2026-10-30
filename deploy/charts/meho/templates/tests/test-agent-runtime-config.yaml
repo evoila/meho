@@ -44,12 +44,16 @@ metadata:
 spec:
   restartPolicy: Never
   serviceAccountName: {{ include "meho.serviceAccountName" . }}
+  {{- with include "meho.core.imagePullSecrets" . }}
+  imagePullSecrets:
+    {{- . | nindent 4 }}
+  {{- end }}
   containers:
     - name: agent-runtime-env-check
       # Minimal busybox-class image; only `sh` + `printenv` are needed.
       # Matches the test-pgvector pod's posture of pinning a small,
       # well-known base.
-      image: busybox:1.37
+      image: {{ include "meho.core.image" (dict "image" (dict "repository" "busybox" "tag" "1.37" "digest" "sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e") "global" .Values.global) }}
       imagePullPolicy: IfNotPresent
       env:
         # Mirror the backplane's own env wiring so this Pod sees the

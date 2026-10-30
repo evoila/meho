@@ -60,7 +60,7 @@ def id_schema(description: str) -> dict[str, Any]:
 
 
 def page_response_schema(description: str, row_properties: dict[str, Any]) -> dict[str, Any]:
-    """A ``{items: [row, ...], total, start_index, count}`` response schema."""
+    """A ``{items: [row, ...], total, start_index, count, more_rows}`` response schema."""
     return {
         "type": "object",
         "properties": {
@@ -82,5 +82,9 @@ def page_response_schema(description: str, row_properties: dict[str, Any]) -> di
                 "description": "Index of the first row in this page.",
             },
             "count": {"type": "integer", "description": "How many rows came back."},
+            "more_rows": {
+                "type": "boolean",
+                "description": "True when the server has more rows than came back.",
+            },
         },
     }

@@ -39,7 +39,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import structlog
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Response
 from fastapi.routing import iter_route_contexts
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -538,6 +538,38 @@ async def _system_recorded(operator: Operator = Depends(verify_jwt_and_bind)) ->
     return {"recorded": "by-system"}
 
 
+@_probe.post("/recorded", status_code=204, response_class=Response)
+async def _recorded(operator: Operator = Depends(verify_jwt_and_bind)) -> Response:
+    """A MEHO change that writes its own record in the caller's name, answering 204."""
+    await _store(_classified_row(operator_sub=operator.sub, path="probe.recorded"), commit=True)
+    return Response(status_code=204)
+
+
+@_probe.post("/granted", status_code=204, response_class=Response)
+async def _granted(operator: Operator = Depends(verify_jwt_and_bind)) -> Response:
+    """A call a standing grant allows: the decision row commits first, then the execution row."""
+    await _store(
+        _classified_row(
+            AuditEventClass.APPROVAL_DECISION, operator_sub=operator.sub, path="probe.grant"
+        ),
+        commit=True,
+    )
+    await _store(_classified_row(operator_sub=operator.sub, path="probe.granted"), commit=True)
+    return Response(status_code=204)
+
+
+@_probe.post("/decided", status_code=204, response_class=Response)
+async def _decided(operator: Operator = Depends(verify_jwt_and_bind)) -> Response:
+    """A request that saves only a decision row in the caller's name."""
+    await _store(
+        _classified_row(
+            AuditEventClass.APPROVAL_DECISION, operator_sub=operator.sub, path="probe.decided"
+        ),
+        commit=True,
+    )
+    return Response(status_code=204)
+
+
 class _Caller:
     """The REST caller; tests switch its role."""
 
@@ -911,14 +943,24 @@ async def _rolled_back_tool_handler(
         raise McpExecutionFailedError(str(exc)) from exc
 
 
-def _register_tool(name: str, handler: Any, *, op_class: str = "write") -> None:
+def _register_tool(
+    name: str,
+    handler: Any,
+    *,
+    op_class: str = "write",
+    properties: dict[str, Any] | None = None,
+) -> None:
     register_mcp_tool(
         ToolDefinition(
             feature=None,
             surface=ToolSurface.WORKING,
             name=name,
             description="Test tool for the wrapper cutover.",
-            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+            inputSchema={
+                "type": "object",
+                "properties": properties or {},
+                "additionalProperties": False,
+            },
             required_role=TenantRole.OPERATOR,
             op_class=op_class,
         ),
@@ -931,9 +973,17 @@ async def test_mcp_reads_and_validation_failures_write_no_audit_row(
 ) -> None:
     client, _holder = mcp
     _register_tool("test.cutover_read", _write_tool_handler, op_class="read")
+    # A read tool with no arguments ignores extra ones (#4137), so the
+    # schema failure uses a read tool that takes one argument.
+    _register_tool(
+        "test.cutover_read_with_args",
+        _write_tool_handler,
+        op_class="read",
+        properties={"limit": {"type": "integer"}},
+    )
     assert "result" in _tool_call(client, "test.cutover_read", {})
     assert "error" in _tool_call(client, "no_such_tool", {}, 2)
-    assert "error" in _tool_call(client, "test.cutover_read", {"unexpected": 1}, 3)
+    assert "error" in _tool_call(client, "test.cutover_read_with_args", {"limit": "x"}, 3)
     read = post_mcp(
         client,
         {
@@ -1351,3 +1401,60 @@ async def test_mcp_failed_write_keeps_one_execution_row(
     row_class = "operation_execution" if retired else "legacy_request"
     assert _shape(rows) == [(row_class, "MCP", "/mcp/tools/call/meho_agent_principals_revoke")]
     assert rows[0].status_code == 502
+
+
+# ===========================================================================
+# Audit receipt header (#4976)
+# ===========================================================================
+
+
+def _receipt(response: Any) -> uuid.UUID | None:
+    raw = response.headers.get("meho-audit-id")
+    return None if raw is None else uuid.UUID(raw)
+
+
+async def test_rest_response_names_its_audit_record(retired: bool) -> None:
+    """``Meho-Audit-Id`` names the row ``meho audit query --audit-id`` returns.
+
+    A change with its own record names that record, with or without the
+    cutover (the legacy wrapper row is not the receipt). A change with no
+    record of its own names the wrapper row. A routine read names its
+    legacy row, or nothing after the cutover.
+    """
+    client, caller = _rest_client()
+    recorded = client.post("/api/v1/cutover-probe/recorded")
+    created = client.post("/api/v1/cutover-probe/things")
+    read = client.get(f"/api/v1/operations/groups?connector_id={_CONNECTOR}")
+    assert (recorded.status_code, created.status_code) == (204, 201)
+
+    rows = {row.id: row for row in await _audit_rows()}
+    recorded_row = rows[_receipt(recorded)]
+    assert recorded_row.path == "probe.recorded"
+    assert recorded_row.event_class == "operation_execution"
+    created_row = rows[_receipt(created)]
+    assert (created_row.method, created_row.path) == ("POST", "/api/v1/cutover-probe/things")
+    assert created_row.operator_sub == caller.sub
+    if retired:
+        assert _receipt(read) is None
+    else:
+        assert rows[_receipt(read)].path == "/api/v1/operations/groups"
+
+
+async def test_rest_receipt_prefers_the_execution_row(retired: bool) -> None:
+    """``Meho-Audit-Id`` names the execution row even when a decision row commits first.
+
+    A call a standing grant allows saves its approval decision row before
+    the operation runs. The receipt must name the execution row, the same
+    row as the ``audit_id`` in the response body. With no execution row,
+    the receipt falls back to the first row the request saved.
+    """
+    client, _caller = _rest_client()
+    granted = client.post("/api/v1/cutover-probe/granted")
+    decided = client.post("/api/v1/cutover-probe/decided")
+    assert (granted.status_code, decided.status_code) == (204, 204)
+
+    rows = {row.id: row for row in await _audit_rows()}
+    granted_row = rows[_receipt(granted)]
+    assert (granted_row.path, granted_row.event_class) == ("probe.granted", "operation_execution")
+    decided_row = rows[_receipt(decided)]
+    assert (decided_row.path, decided_row.event_class) == ("probe.decided", "approval_decision")

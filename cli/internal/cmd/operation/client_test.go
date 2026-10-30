@@ -42,6 +42,7 @@ type fakeOperationsClient struct {
 	lastSearchParams      *api.GetSearchApiV1OperationsSearchGetParams
 	lastResultQueryParams *api.PostResultQueryApiV1OperationsResultQueryPostParams
 	lastResultQueryBody   *api.ResultQueryBody
+	lastSubopsParams      *api.GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams
 
 	// Sequenced canned responses — pop one per call (per verb). Tests
 	// register two responses on the auth-refresh scenarios (first a
@@ -52,6 +53,7 @@ type fakeOperationsClient struct {
 	groupsResponses      []*api.GetGroupsApiV1OperationsGroupsGetResponse
 	searchResponses      []*api.GetSearchApiV1OperationsSearchGetResponse
 	resultQueryResponses []*api.PostResultQueryApiV1OperationsResultQueryPostResponse
+	subopsResponses      []*api.GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse
 
 	// Per-verb transport-error queues. Drain in the same order as
 	// the response queues so a refresh-then-transport-failure scenario
@@ -61,6 +63,7 @@ type fakeOperationsClient struct {
 	groupsErrors      []error
 	searchErrors      []error
 	resultQueryErrors []error
+	subopsErrors      []error
 
 	// refreshCount tracks how many times Refresh was invoked across
 	// the whole client's lifetime. The 401 dance asserts this hits
@@ -111,6 +114,19 @@ func (f *fakeOperationsClient) GetSearchApiV1OperationsSearchGetWithResponse(
 ) (*api.GetSearchApiV1OperationsSearchGetResponse, error) {
 	f.lastSearchParams = params
 	return popSearchResp(&f.searchResponses), popErr(&f.searchErrors)
+}
+
+func (f *fakeOperationsClient) GetGovernedSubopsApiV1OperationsGovernedSubopsGetWithResponse(
+	_ context.Context,
+	params *api.GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams,
+	_ ...api.RequestEditorFn,
+) (*api.GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse, error) {
+	f.lastSubopsParams = params
+	var r *api.GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse
+	if len(f.subopsResponses) > 0 {
+		r, f.subopsResponses = f.subopsResponses[0], f.subopsResponses[1:]
+	}
+	return r, popErr(&f.subopsErrors)
 }
 
 // PostResultQueryApiV1OperationsResultQueryPost turns the canned typed
@@ -682,7 +698,7 @@ func TestReducedCallResultRendersHandleAndResultQueryAcceptsIt(t *testing.T) {
 	f := &fakeOperationsClient{resultQueryResponses: []*api.PostResultQueryApiV1OperationsResultQueryPostResponse{{
 		HTTPResponse: makeHTTPResp(200), Body: queryResponse,
 	}}}
-	if _, err := postResultQuery(context.Background(), f, makeHandleUUID(t, handleID), 0, 50, nil); err != nil {
+	if _, err := postResultQuery(context.Background(), f, makeHandleUUID(t, handleID), 0, nil, nil); err != nil {
 		t.Fatalf("result-query must accept the rendered handle: %v", err)
 	}
 	if f.lastResultQueryBody == nil || f.lastResultQueryBody.HandleId.String() != handleID {
@@ -1170,7 +1186,8 @@ func TestPostResultQueryPassesTypedBody(t *testing.T) {
 		},
 	}
 	handle := makeHandleUUID(t, "11111111-1111-1111-1111-111111111111")
-	got, err := postResultQuery(context.Background(), f, handle, 5, 50, nil)
+	limit := 50
+	got, err := postResultQuery(context.Background(), f, handle, 5, &limit, nil)
 	if err != nil {
 		t.Fatalf("postResultQuery: %v", err)
 	}
@@ -1203,7 +1220,7 @@ func TestPostResultQueryRefreshOn401(t *testing.T) {
 		},
 	}
 	handle := makeHandleUUID(t, "11111111-1111-1111-1111-111111111111")
-	if _, err := postResultQuery(context.Background(), f, handle, 0, 50, nil); err != nil {
+	if _, err := postResultQuery(context.Background(), f, handle, 0, nil, nil); err != nil {
 		t.Fatalf("postResultQuery after refresh: %v", err)
 	}
 	if f.refreshCount != 1 {
@@ -1223,7 +1240,7 @@ func TestPostResultQueryNotFoundClassifiesAsApiResponseError(t *testing.T) {
 		},
 	}
 	handle := makeHandleUUID(t, "11111111-1111-1111-1111-111111111111")
-	_, err := postResultQuery(context.Background(), f, handle, 0, 50, nil)
+	_, err := postResultQuery(context.Background(), f, handle, 0, nil, nil)
 	if err == nil {
 		t.Fatalf("expected non-2xx error; got nil")
 	}
@@ -1242,7 +1259,7 @@ func TestPostResultQueryTransportErrorPropagates(t *testing.T) {
 	transportErr := errors.New("dial tcp: connection refused")
 	f := &fakeOperationsClient{resultQueryErrors: []error{transportErr}}
 	handle := makeHandleUUID(t, "11111111-1111-1111-1111-111111111111")
-	_, err := postResultQuery(context.Background(), f, handle, 0, 50, nil)
+	_, err := postResultQuery(context.Background(), f, handle, 0, nil, nil)
 	if !errors.Is(err, transportErr) {
 		t.Fatalf("expected transport error to propagate verbatim; got %v", err)
 	}
@@ -1555,5 +1572,66 @@ func TestPostCallPreviewHashNilWhenOmitted(t *testing.T) {
 	}
 	if f.lastCallBody.PreviewHash != nil {
 		t.Fatalf("omitted --preview-hash should leave body.PreviewHash=nil; got %+v", f.lastCallBody.PreviewHash)
+	}
+}
+
+// TestRunCallNotFoundExitsOne — status=not_found is a known result
+// (#3591, #4986): the operation ran and the connector confirmed the
+// object does not exist. `operation call` prints the envelope, names
+// the ids from extras.resource_ids in plain words, exits 1 via
+// errOpError (not exit 4), and never says the CLI needs an upgrade.
+func TestRunCallNotFoundExitsOne(t *testing.T) {
+	for _, jsonOut := range []bool{false, true} {
+		errText := "not_found: VirtualMachine vm-123 does not exist"
+		cr, _ := json.Marshal(CallResult{
+			Status: "not_found", OpID: "vmware.object.collect", Error: &errText,
+			Extras: json.RawMessage(`{"error_code":"not_found","resource_ids":["vm-123"],"resource_id":"vm-123"}`),
+		})
+		f := &fakeOperationsClient{
+			callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+				{HTTPResponse: makeHTTPResp(200), Body: cr},
+			},
+		}
+		withFakeClient(t, f)
+
+		cmd := newCallCmd()
+		var out, errBuf bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errBuf)
+		args := []string{"vmware-rest-9.0", "vmware.object.collect", "--backplane", "https://x"}
+		if jsonOut {
+			args = append(args, "--json")
+		}
+		cmd.SetArgs(args)
+		err := cmd.Execute()
+		if !errors.Is(err, errOpError) {
+			t.Fatalf("json=%t: not_found must exit 1 via errOpError; got %v", jsonOut, err)
+		}
+		var ec output.ExitCoder
+		if errors.As(err, &ec) {
+			t.Fatalf("json=%t: not_found must not carry exit code %d", jsonOut, ec.ExitCode())
+		}
+		if errBuf.Len() != 0 {
+			t.Errorf("json=%t: stderr must stay empty; got %q", jsonOut, errBuf.String())
+		}
+		if jsonOut {
+			var decoded map[string]any
+			if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+				t.Fatalf("decode --json output: %v; got %q", err, out.String())
+			}
+			if decoded["status"] != "not_found" {
+				t.Errorf("--json status: got %v want not_found", decoded["status"])
+			}
+			continue
+		}
+		for _, want := range []string{
+			"status=not_found",
+			"meho: connector error: not_found: VirtualMachine vm-123 does not exist",
+			"not found: vm-123\n",
+		} {
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("stdout missing %q; got %q", want, out.String())
+			}
+		}
 	}
 }

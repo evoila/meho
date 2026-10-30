@@ -17,8 +17,15 @@ non-success status; the loop treats that uniformly as "reuse the cached
 assignment / spool the batch". The central routes land in #2499; this
 module is exercised against :class:`httpx.MockTransport` here.
 
-Every request carries ``Authorization: Bearer <MEHO_RUNNER_TOKEN>`` and a
-bounded timeout so a hung central cannot stall a tick indefinitely.
+Every request carries ``Authorization: Bearer <MEHO_RUNNER_TOKEN>``, the
+runner's wire version (:data:`~meho_backplane.runner.wire.SCHEMA_VERSION`
+in the :data:`~meho_backplane.runner.wire.WIRE_VERSION_HEADER` header), the
+digest of its connector packages (in the
+:data:`~meho_backplane.runner.package_set.PACKAGE_SET_HEADER` header, #5038) and
+a bounded timeout so a hung central cannot stall a tick indefinitely. When
+central refuses the wire version, both calls raise
+:class:`RunnerWireVersionMismatchError` with central's text, which names
+both versions.
 """
 
 from __future__ import annotations
@@ -28,12 +35,15 @@ from typing import Final
 import httpx
 import structlog
 
+from meho_backplane.runner import wire
+from meho_backplane.runner.package_set import PACKAGE_SET_HEADER, local_package_set
 from meho_backplane.runner.wire import RunnerAssignment, RunnerResultBatch
 
 __all__ = [
     "ASSIGNMENT_UNCHANGED",
     "RunnerClient",
     "RunnerClientError",
+    "RunnerWireVersionMismatchError",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -50,6 +60,29 @@ class RunnerClientError(RuntimeError):
     or spools the batch (post) — a down uplink is an expected condition,
     not a crash.
     """
+
+
+class RunnerWireVersionMismatchError(RunnerClientError):
+    """Central refused the call because the runner speaks another wire version.
+
+    The message is central's refusal text and names both versions. The tick
+    loop logs it and runs no work, because it cannot read central's work
+    correctly. A subclass of :class:`RunnerClientError`, so a refused result
+    batch is still spooled like any failed post.
+    """
+
+
+def _raise_for_wire_version_mismatch(resp: httpx.Response) -> None:
+    """Raise :class:`RunnerWireVersionMismatchError` on central's version refusal."""
+    if resp.status_code != httpx.codes.CONFLICT:
+        return
+    try:
+        body = resp.json()
+    except ValueError:
+        return
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, str) and detail.startswith(wire.WIRE_VERSION_MISMATCH):
+        raise RunnerWireVersionMismatchError(detail)
 
 
 class _AssignmentUnchanged:
@@ -82,7 +115,11 @@ class RunnerClient:
         self._runner_id = runner_id
         self._client = httpx.AsyncClient(
             base_url=central_url.rstrip("/"),
-            headers={"Authorization": f"Bearer {token}"},
+            headers={
+                "Authorization": f"Bearer {token}",
+                wire.WIRE_VERSION_HEADER: wire.SCHEMA_VERSION,
+                PACKAGE_SET_HEADER: local_package_set().digest,
+            },
             timeout=httpx.Timeout(timeout),
             transport=transport,
         )
@@ -109,6 +146,7 @@ class RunnerClient:
             raise RunnerClientError(f"assignment fetch failed: {exc!r}") from exc
         if resp.status_code == httpx.codes.NOT_MODIFIED:
             return ASSIGNMENT_UNCHANGED
+        _raise_for_wire_version_mismatch(resp)
         if resp.status_code != httpx.codes.OK:
             raise RunnerClientError(f"assignment fetch returned status {resp.status_code}")
         try:
@@ -122,5 +160,6 @@ class RunnerClient:
             resp = await self._client.post(_RESULTS_PATH, json=batch.model_dump(mode="json"))
         except httpx.HTTPError as exc:
             raise RunnerClientError(f"results post failed: {exc!r}") from exc
+        _raise_for_wire_version_mismatch(resp)
         if not resp.is_success:
             raise RunnerClientError(f"results post returned status {resp.status_code}")

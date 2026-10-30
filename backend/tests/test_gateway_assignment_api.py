@@ -51,6 +51,11 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.gateway.assignment_service import descriptor_from_target
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.runner import wire
+from meho_backplane.runner.package_set import (
+    EMPTY_PACKAGE_SET_DIGEST,
+    PACKAGE_SET_HEADER,
+    package_set_mismatch_message,
+)
 
 # Autouse fixtures (settings env, JWKS cache reset, connector-registry reset).
 from ._oidc_jwt_helpers import (
@@ -576,3 +581,380 @@ async def test_runner_scoping(client: TestClient) -> None:
     assert runner_put.status_code == 403
     assert unauth_get.status_code == 401
     assert unauth_post.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Wire version check (#5020)
+# ---------------------------------------------------------------------------
+
+
+async def _runner_a_row() -> RunnerPrincipal:
+    async with get_sessionmaker()() as session:
+        return (
+            await session.execute(select(RunnerPrincipal).where(RunnerPrincipal.id == _RUNNER_A_ID))
+        ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_same_or_missing_wire_version_is_served_and_stored(client: TestClient) -> None:
+    """A runner on the central version, and one that sends no version, work as before."""
+    await _seed_identities()
+    key = make_rsa_keypair("kid-A")
+
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        auth = {"Authorization": f"Bearer {_runner_token(key, runner_id=_RUNNER_A_ID)}"}
+        same = client.get(
+            "/api/v1/checks/assignment?runner=runner-a",
+            headers={**auth, wire.WIRE_VERSION_HEADER: wire.SCHEMA_VERSION},
+        )
+        missing = client.get("/api/v1/checks/assignment?runner=runner-a", headers=auth)
+        posted = client.post(
+            "/api/v1/checks/results", json=_result_batch("runner-a", "w-1"), headers=auth
+        )
+
+    assert same.status_code == 200
+    assert missing.status_code == 200
+    assert posted.status_code == 200
+    # A missing header counts as version 1, the version every older runner spoke.
+    assert (await _runner_a_row()).wire_version == wire.WIRE_VERSION_WHEN_MISSING == "1"
+
+
+@pytest.mark.asyncio
+async def test_other_wire_version_is_refused_with_both_versions(client: TestClient) -> None:
+    """A runner on another wire version gets a 409 naming both versions; nothing is served."""
+    await _seed_identities()
+    key = make_rsa_keypair("kid-A")
+    before = (await _runner_a_row()).last_seen_at
+
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        headers = {
+            "Authorization": f"Bearer {_runner_token(key, runner_id=_RUNNER_A_ID)}",
+            wire.WIRE_VERSION_HEADER: "2",
+        }
+        got = client.get("/api/v1/checks/assignment?runner=runner-a", headers=headers)
+        posted = client.post(
+            "/api/v1/checks/results", json=_result_batch("runner-a", "w-2"), headers=headers
+        )
+
+    for resp in (got, posted):
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == (
+            "runner_wire_version_mismatch: runner wire version 2, "
+            "central MEHO needs 1: update the central MEHO"
+        )
+    row = await _runner_a_row()
+    # The runner list shows the version the runner sent ...
+    assert row.wire_version == "2"
+    # ... but a runner that cannot do its work does not count as alive.
+    assert row.last_seen_at == before
+    async with get_sessionmaker()() as session:
+        assert (await session.execute(select(RunnerCheckResult))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_other_wire_version_is_refused_before_the_result_body_is_read(
+    client: TestClient,
+) -> None:
+    """A result body the central models cannot read still gets the 409, not a bare 422.
+
+    This is the case the check exists for: the other wire version changed a
+    required result field. The runner must read both versions, and the
+    version it sent must be stored.
+    """
+    await _seed_identities()
+    key = make_rsa_keypair("kid-A")
+    before = (await _runner_a_row()).last_seen_at
+    unreadable = {"runner_id": "runner-a", "results": [{"result_uid": "w-3"}]}
+
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        auth = {"Authorization": f"Bearer {_runner_token(key, runner_id=_RUNNER_A_ID)}"}
+        refused = client.post(
+            "/api/v1/checks/results",
+            json=unreadable,
+            headers={**auth, wire.WIRE_VERSION_HEADER: "2"},
+        )
+        # The same body on the central version is the usual body validation error.
+        same_version = client.post("/api/v1/checks/results", json=unreadable, headers=auth)
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == (
+        "runner_wire_version_mismatch: runner wire version 2, "
+        "central MEHO needs 1: update the central MEHO"
+    )
+    assert same_version.status_code == 422
+    row = await _runner_a_row()
+    assert row.wire_version == "2"
+    assert row.last_seen_at == before
+
+
+@pytest.mark.asyncio
+async def test_central_route_compares_with_schema_version(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a ``SCHEMA_VERSION`` bump, an old runner (no header) is told to update."""
+    await _seed_identities()
+    key = make_rsa_keypair("kid-A")
+    monkeypatch.setattr(wire, "SCHEMA_VERSION", "2")
+
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        resp = client.get(
+            "/api/v1/checks/assignment?runner=runner-a",
+            headers={"Authorization": f"Bearer {_runner_token(key, runner_id=_RUNNER_A_ID)}"},
+        )
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == (
+        "runner_wire_version_mismatch: runner wire version 1, "
+        "central MEHO needs 2: update the runner"
+    )
+
+
+@pytest.mark.asyncio
+async def test_malformed_wire_version_is_rejected_and_not_stored(client: TestClient) -> None:
+    """A wire version that is not a short number is a 400 and never reaches the row."""
+    await _seed_identities()
+    key = make_rsa_keypair("kid-A")
+
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        resp = client.get(
+            "/api/v1/checks/assignment?runner=runner-a",
+            headers={
+                "Authorization": f"Bearer {_runner_token(key, runner_id=_RUNNER_A_ID)}",
+                wire.WIRE_VERSION_HEADER: "1; drop",
+            },
+        )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"].startswith("runner_wire_version_invalid")
+    assert (await _runner_a_row()).wire_version is None
+
+
+@pytest.mark.asyncio
+async def test_runner_client_gets_clear_refusal_from_central(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real runner client, on another wire version, gets central's refusal end to end."""
+    from meho_backplane.runner.client import RunnerClient, RunnerWireVersionMismatchError
+
+    await _seed_identities()
+    key = make_rsa_keypair("kid-A")
+    # The runner is built with version 2; central still needs 1.
+    monkeypatch.setattr(wire, "SCHEMA_VERSION", "2")
+    runner_client = RunnerClient(
+        central_url="http://central.test",
+        runner_id="runner-a",
+        token=_runner_token(key, runner_id=_RUNNER_A_ID),
+    )
+    monkeypatch.setattr(wire, "SCHEMA_VERSION", "1")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        mock_router.route(host="central.test").mock(
+            side_effect=lambda request: _forward(client, request)
+        )
+        async with runner_client:
+            with pytest.raises(RunnerWireVersionMismatchError) as exc_info:
+                await runner_client.fetch_assignment(known_version=None)
+
+    assert str(exc_info.value) == (
+        "runner_wire_version_mismatch: runner wire version 2, "
+        "central MEHO needs 1: update the central MEHO"
+    )
+
+
+def _forward(client: TestClient, request: Any) -> Any:
+    """Replay an outgoing runner request against the in-process central app."""
+    import httpx
+
+    resp = client.request(
+        request.method,
+        request.url.raw_path.decode(),
+        headers=dict(request.headers),
+        content=request.content,
+    )
+    return httpx.Response(resp.status_code, headers=resp.headers, content=resp.content)
+
+
+# ---------------------------------------------------------------------------
+# Connector package set (#5038)
+# ---------------------------------------------------------------------------
+
+_OTHER_PACKAGE_SET = "sha256:" + "ab" * 32
+
+
+class _LogRecorder:
+    """Keeps the warnings of the assignment service, without structlog set-up."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    def warning(self, event: str, **fields: Any) -> None:
+        self.events.append({"event": event, **fields})
+
+
+@pytest.fixture
+def central_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """Central carries a made-up connector package that owns the ``checkprod`` folder.
+
+    Yields central's package set digest.
+    """
+    from meho_backplane import connector_packages
+    from meho_backplane.runner.package_set import local_package_set
+
+    allowlist = tmp_path / "connector-packages.json"
+    allowlist.write_text(
+        json.dumps(
+            {
+                "packages": [
+                    {
+                        "name": "acme-checkprod",
+                        "version": "1.0.0",
+                        "wheel_digest": "sha256:" + "1" * 64,
+                        "folders": ["checkprod"],
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(connector_packages, "CONNECTOR_PACKAGES_FILE", allowlist)
+    local_package_set.cache_clear()
+    yield local_package_set().digest
+    local_package_set.cache_clear()
+
+
+@pytest.fixture
+def assignment_log(monkeypatch: pytest.MonkeyPatch) -> _LogRecorder:
+    from meho_backplane.gateway import assignment_service
+
+    recorder = _LogRecorder()
+    monkeypatch.setattr(assignment_service, "_log", recorder)
+    return recorder
+
+
+async def _fetch_assignment_with_package_set(
+    client: TestClient, package_set: str | None
+) -> dict[str, Any]:
+    await _seed_identities()
+    await _seed_target()
+    await _seed_descriptor(op_id=_OP_SAFE)
+    _register_connector()
+    key = make_rsa_keypair("kid-A")
+    await _author_via_put(client, key)
+    headers = {"Authorization": f"Bearer {_runner_token(key, runner_id=_RUNNER_A_ID)}"}
+    if package_set is not None:
+        headers[PACKAGE_SET_HEADER] = package_set
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        resp = client.get("/api/v1/checks/assignment?runner=runner-a", headers=headers)
+    assert resp.status_code == 200, resp.text
+    body: dict[str, Any] = resp.json()
+    return body
+
+
+@pytest.mark.asyncio
+async def test_package_op_is_assigned_to_a_runner_with_the_same_package_set(
+    client: TestClient, central_package: str, assignment_log: _LogRecorder
+) -> None:
+    """Same digest: the item is served and names the package set it needs."""
+    body = await _fetch_assignment_with_package_set(client, central_package)
+
+    (item,) = body["items"]
+    assert item["handler_ref"] == _HANDLER_REF
+    assert item["package_set"] == central_package
+    assert assignment_log.events == []
+    assert (await _runner_a_row()).package_set_digest == central_package
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runner_package_set", [_OTHER_PACKAGE_SET, None])
+async def test_package_op_is_not_assigned_to_a_runner_with_another_package_set(
+    client: TestClient,
+    central_package: str,
+    assignment_log: _LogRecorder,
+    runner_package_set: str | None,
+) -> None:
+    """Another digest (or none, which counts as no packages): the item is left out.
+
+    The warning names both digests.
+    """
+    body = await _fetch_assignment_with_package_set(client, runner_package_set)
+
+    assert body["items"] == []
+    sent = runner_package_set or EMPTY_PACKAGE_SET_DIGEST
+    (event,) = assignment_log.events
+    assert event["event"] == "assignment_item_dropped"
+    assert event["reason"] == "connector_package_set_mismatch"
+    assert event["package"] == "acme-checkprod"
+    assert event["runner_package_set"] == sent
+    assert event["central_package_set"] == central_package
+    assert event["message"] == package_set_mismatch_message(sent, central_package)
+    assert (await _runner_a_row()).package_set_digest == sent
+
+
+@pytest.mark.asyncio
+async def test_built_in_op_ignores_the_package_set(
+    client: TestClient, assignment_log: _LogRecorder
+) -> None:
+    """An op built into MEHO carries no package set and runs on any runner."""
+    body = await _fetch_assignment_with_package_set(client, _OTHER_PACKAGE_SET)
+
+    (item,) = body["items"]
+    assert item["package_set"] is None
+    assert assignment_log.events == []
+
+
+@pytest.mark.asyncio
+async def test_malformed_package_set_is_rejected_and_not_stored(client: TestClient) -> None:
+    """A package set header in another shape is a 400 and never reaches the row."""
+    await _seed_identities()
+    key = make_rsa_keypair("kid-A")
+
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        resp = client.post(
+            "/api/v1/checks/results",
+            json=_result_batch("runner-a", "p-1"),
+            headers={
+                "Authorization": f"Bearer {_runner_token(key, runner_id=_RUNNER_A_ID)}",
+                PACKAGE_SET_HEADER: "sha256:not-hex",
+            },
+        )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"].startswith("runner_package_set_invalid")
+    assert (await _runner_a_row()).package_set_digest is None
+
+
+@pytest.mark.asyncio
+async def test_runner_client_sends_its_package_set_to_central(
+    client: TestClient, central_package: str
+) -> None:
+    """The real runner client sends this image's digest; central stores it and serves the item."""
+    from meho_backplane.runner.client import RunnerClient
+
+    await _seed_identities()
+    await _seed_target()
+    await _seed_descriptor(op_id=_OP_SAFE)
+    _register_connector()
+    key = make_rsa_keypair("kid-A")
+    await _author_via_put(client, key)
+    runner_client = RunnerClient(
+        central_url="http://central.test",
+        runner_id="runner-a",
+        token=_runner_token(key, runner_id=_RUNNER_A_ID),
+    )
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        mock_router.route(host="central.test").mock(
+            side_effect=lambda request: _forward(client, request)
+        )
+        async with runner_client:
+            assignment = await runner_client.fetch_assignment(known_version=None)
+
+    assert isinstance(assignment, wire.RunnerAssignment)
+    assert [item.package_set for item in assignment.items] == [central_package]
+    assert (await _runner_a_row()).package_set_digest == central_package

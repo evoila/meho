@@ -78,7 +78,7 @@ the tests set it, as `install.sh` does.
    `systemd-run --unit=meho-clean --collect -p StandardOutput=journal+console`,
    outside the SSH session, because it deletes the build user and closes
    SSH. Its lines go to the VM console as well as the journal. The build
-   polls `govc vm.info` until the VM is powered off. When it is still on
+   reads the VM's power state (`govc object.collect`) until it is off. When it is still on
    after 20 minutes, the script stopped or its check found something, and
    the build fails with the advice to read the console. `--from-step 4`
    works only when `clean.sh` stopped in its step 1, while RKE2 still
@@ -121,12 +121,10 @@ the tests set it, as `install.sh` does.
    folders, with the on-disk `emptyDir` volumes of the core's Jobs), as
    RKE2's own uninstall script does. **Kept:** `server/manifests/` (the
    storage manifest of the form-2 install), `agent/images/` (the image
-   archives) and `/etc/rancher/rke2/config.yaml`. The pod-security file
-   `/etc/rancher/rke2/meho-pss.yaml` must stay too, but the install does
-   not write it before #4636, so the check does not require it yet. RKE2
-   makes new certificate
-   authorities, a new Secrets key and a new token at first start, and
-   imports the archives again.
+   archives), `/etc/rancher/rke2/config.yaml` and the pod security file
+   `/etc/rancher/rke2/meho-pss.yaml` of the CIS profile. RKE2 makes new
+   certificate authorities, a new Secrets key and a new token at first
+   start, and imports the archives again.
 3. **MEHO's data**, now that no pod writes to it. Everything under
    `/var/lib/meho/`: the data volumes (PostgreSQL, OpenBao with its init,
    Valkey), the two one-time files, support bundles. The folder itself
@@ -163,7 +161,8 @@ the tests set it, as `install.sh` does.
    sudo rule; `rke2-server` enabled; an SSH host key; the build user
    and its home; a machine-id other than `uninitialized`. It also checks
    that what must stay is there: `agent/images/`, `server/manifests/`,
-   `config.yaml`, the preset file, `/opt/meho/appliance/download/install.sh`,
+   `config.yaml`, `meho-pss.yaml`, the preset file,
+   `/opt/meho/appliance/download/install.sh`,
    `/etc/cloud/cloud-init.disabled`, the two first-start scripts and their
    two unit files, and the links that enable the units.
 6. **Power off:** `sync`, `systemctl poweroff`.
@@ -210,31 +209,29 @@ test (#4816).
 ## Dependencies
 
 - `govc` v0.56.2 (vmware/govmomi), pinned with its sha256 in the workflow.
-  Commands used: `import.ova`, `vm.change`, `device.ls`, `vm.disk.change`,
-  `vm.power`, `vm.info`, `vm.upgrade`, `export.ovf`, `vm.destroy`.
+  Commands used: `find`, `import.ova`, `vm.change`, `device.ls`,
+  `vm.disk.change`, `vm.power`, `object.collect`, `vm.upgrade`,
+  `export.ovf`, `vm.destroy`. No `vm.info`: it also reads the VM's host,
+  so it fails for a login that has rights only on the folder, the pool,
+  the datastore and the network, and none on the host.
 - The Ubuntu 24.04 cloud image OVA, serial `release-20261017`, pinned with
   its sha256 in `build.sh`. Its properties and its cloud-init are used
   only at the build; the appliance has cloud-init off.
-- The form-2 download of the same version, with `install.sh --hostname`
-  and `--from-disk`, and `meho-host admin-network none`.
+- The form-2 download of the same version, v0.38.0 or later: the first
+  release with `meho-host admin-network none` (#4739) and the pod security
+  file of the CIS profile (#4636). The clean of an older download fails
+  after SSH is closed. `install.sh --hostname` and `--from-disk` are used.
 - On the runner: `ssh`, `scp`, `ssh-keygen`, `curl`, `tar`, `sha256sum`,
   GNU `base64`. No `ovftool`: `govc export.ovf` plus our own manifest and
   `tar` make the OVA.
 
 ## Known issues
 
-- **Not run against vCenter yet.** The lab's test place (an internal
-  ticket) is not set up, so steps 1, 2 and 5 are
-  written from the `govc` reference and the lab's own cloud-image deploys,
-  and wait for the first build by hand. The first run will measure the
-  times and may need the waits changed.
-- **`meho-host admin-network none`** is in evoila/meho#5066, not merged
-  yet. A build from a form-2 download without it fails in the clean step,
-  loudly, with the VM still on.
-- **`/etc/rancher/rke2/meho-pss.yaml` is not in the OVA yet.** The form-2
-  install writes it with the CIS profile (#4636), which is open. When it
-  does, add the file to the must-stay list of `check_clean` and to the
-  fake machine of the tests.
+- **Not run against vCenter yet.** The lab's test place is ready, but
+  steps 1, 2 and 5 have not run. They are written from the `govc`
+  reference and the lab's own cloud-image deploys, and wait for the first
+  build by hand. The first run will measure the times and may need the
+  waits changed.
 - **The hardening (#4640)** is not in the OVA yet. `add_appliance_pieces`
   in `build.sh` is where its install lines go.
 - **The cloud image's `ubuntu` user** is not made (no `default` in the

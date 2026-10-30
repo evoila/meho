@@ -103,6 +103,12 @@ from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
     datastore_dir_create_composite,
     datastore_file_delete_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._datastore_list import (
+    datastore_file_list_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._datastore_vsan import (
+    datastore_vsan_folder_list_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
     cluster_drs_rule_delete_composite,
 )
@@ -177,6 +183,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     guest_customization_spec_create_composite,
     host_detach_from_vds_composite,
     host_evacuate_composite,
+    host_maintenance_exit_composite,
     network_portgroup_create_composite,
     network_portgroup_security_set_composite,
     network_portgroup_vlan_set_composite,
@@ -234,9 +241,11 @@ __all__ = [
     "content_library_subscribed_sync_composite",
     "datastore_dir_create_composite",
     "datastore_file_delete_composite",
+    "datastore_file_list_composite",
     "datastore_mount_nfs_composite",
     "datastore_refresh_composite",
     "datastore_usage_composite",
+    "datastore_vsan_folder_list_composite",
     "disk_mark_flash_composite",
     "event_tail_composite",
     "folder_create_composite",
@@ -250,6 +259,7 @@ __all__ = [
     "guest_program_run_composite",
     "host_detach_from_vds_composite",
     "host_evacuate_composite",
+    "host_maintenance_exit_composite",
     "host_standard_portgroup_delete_composite",
     "license_assign_composite",
     "namespace_create_composite",

@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
@@ -73,6 +73,10 @@ from meho_backplane.operations.approval_queue import (
 )
 from meho_backplane.settings import get_settings
 from tests._vmware_cluster_config_fake import cluster_config_ex, reject_config_ex_member_paths
+
+_ITEM_1 = "aaaaaaaa-0000-0000-0000-000000000001"
+_ITEM_2 = "aaaaaaaa-0000-0000-0000-000000000002"
+_TEMPLATE_ITEM = "bbbbbbbb-0000-0000-0000-000000000001"
 
 _CONNECTOR_ID = "vmware-rest-9.0"
 _TENANT_ID = UUID("00000000-0000-0000-0000-00000000a0a3")
@@ -258,6 +262,9 @@ class _RecordingVmwareConnector:
     resolve the same class), so one call log captures the whole tree.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(self) -> None:
@@ -324,7 +331,10 @@ class _RecordingVmwareConnector:
         if path.endswith("/RetrievePropertiesEx"):
             spec_type = json["specSet"][0]["propSet"][0]["type"]
             if spec_type in self.vmomi_responses:
-                return self.vmomi_responses[spec_type]
+                response = self.vmomi_responses[spec_type]
+                # An iterator answers one read after the other (a host whose
+                # state changes between the read before and after a write).
+                return next(response) if isinstance(response, Iterator) else response
             if spec_type == "Task":
                 task_moid = json["specSet"][0]["objectSet"][0]["obj"]["value"]
                 return _vmomi_retrieve_result("Task", task_moid, "info", {"state": "success"})
@@ -414,10 +424,10 @@ def _benign_params_for(composite_op_id: str) -> dict[str, Any]:
         "vmware.composite.vm.clone": {
             "source_vm": "vm-1",
             "target_name": "vm-clone",
-            "library_item": "lib-1",
+            "library_item": _TEMPLATE_ITEM,
         },
         "vmware.composite.vm.deploy_from_library": {
-            "library_item": "li-1",
+            "library_item": _ITEM_1,
             "resource_pool": "resgroup-8",
         },
         "vmware.composite.vm.snapshot.revert": {
@@ -475,15 +485,17 @@ def _benign_responses_for(composite_op_id: str) -> dict[str, Any]:
             "/vcenter/vm": {"value": "vm-benign"},
         },
         "vmware.composite.vm.clone": {
-            "/vcenter/vm-template/library-items/lib-1?action=deploy": {"value": "vm-benign"},
+            f"/vcenter/vm-template/library-items/{_TEMPLATE_ITEM}?action=deploy": {
+                "value": "vm-benign"
+            },
         },
         # deploy_from_library: id passthrough → no finds; the synchronous OVF
         # deploy returns a DeploymentResult that succeeds → status='deployed'.
         "vmware.composite.vm.deploy_from_library": {
             # No ``name`` in the benign params: the OVF summary supplies the
             # default VM name the deploy name is built from (#3697).
-            "/vcenter/ovf/library-item/li-1?action=filter": {"name": "ovf-default"},
-            "/vcenter/ovf/library-item/li-1?action=deploy": {
+            f"/vcenter/ovf/library-item/{_ITEM_1}?action=filter": {"name": "ovf-default"},
+            f"/vcenter/ovf/library-item/{_ITEM_1}?action=deploy": {
                 "succeeded": True,
                 "resource_id": {"type": "VirtualMachine", "id": "vm-benign"},
             },
@@ -753,7 +765,9 @@ async def test_vm_clone_synchronous_deploy_sub_op_sequence(
     recorder.responses.update(
         {
             "/vcenter/vm/vm-1": {"value": {"name": "src"}},
-            "/vcenter/vm-template/library-items/lib-1?action=deploy": {"value": "vm-cloned-9"},
+            f"/vcenter/vm-template/library-items/{_TEMPLATE_ITEM}?action=deploy": {
+                "value": "vm-cloned-9"
+            },
         }
     )
     await _bootstrap(recorder, stub_embedding_service)
@@ -767,7 +781,7 @@ async def test_vm_clone_synchronous_deploy_sub_op_sequence(
         params={
             "source_vm": "vm-1",
             "target_name": "vm-clone",
-            "library_item": "lib-1",
+            "library_item": _TEMPLATE_ITEM,
         },
     )
 
@@ -777,7 +791,7 @@ async def test_vm_clone_synchronous_deploy_sub_op_sequence(
     assert result.result["vm_id"] == "vm-cloned-9"
     assert recorder.calls == [
         ("GET", "/vcenter/vm/vm-1"),
-        ("POST", "/vcenter/vm-template/library-items/lib-1?action=deploy"),
+        ("POST", f"/vcenter/vm-template/library-items/{_TEMPLATE_ITEM}?action=deploy"),
     ]
 
 
@@ -1195,6 +1209,190 @@ async def test_vm_create_full_queue_approve_resume_execute(
 
 
 # ===========================================================================
+# One approval is enough: the raised generic exit does not park again (#4967)
+# ===========================================================================
+
+
+def _host_runtime_in_maintenance(host_moid: str, in_maintenance: bool) -> dict[str, Any]:
+    """A ``HostSystem`` runtime read: connected, in maintenance mode or not."""
+    return {
+        "objects": [
+            {
+                "obj": {"type": "HostSystem", "value": host_moid},
+                "propSet": [
+                    {"name": "name", "val": "esx-01"},
+                    {"name": "runtime.connectionState", "val": "connected"},
+                    {"name": "runtime.inMaintenanceMode", "val": in_maintenance},
+                ],
+            }
+        ]
+    }
+
+
+async def _insert_generic_exit_descriptor() -> None:
+    """Seed the generic exit the way the VMware floor stores it: dangerous, with approval."""
+    op_id = "POST:/HostSystem/{moId}/ExitMaintenanceMode_Task"
+    async with get_sessionmaker()() as s:
+        s.add(
+            EndpointDescriptor(
+                id=uuid.uuid4(),
+                tenant_id=None,
+                product="vmware",
+                version="9.0",
+                impl_id="vmware-rest",
+                op_id=op_id,
+                source_kind="ingested",
+                method="POST",
+                path=op_id.split(":", 1)[1],
+                handler_ref=None,
+                summary="Exit maintenance mode.",
+                description=None,
+                tags=[],
+                parameter_schema={"type": "object", "properties": {}},
+                response_schema=None,
+                llm_instructions=None,
+                safety_level="dangerous",
+                requires_approval=True,
+                is_enabled=True,
+                embedding=[0.1] * 384,
+                custom_description=None,
+                custom_notes=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await s.commit()
+
+
+def _maintenance_exit_recorder() -> _RecordingVmwareConnector:
+    recorder = _RecordingVmwareConnector()
+    # Three host reads: the park-time preview, the handler's read before the
+    # exit, and its read after the task ended.
+    recorder.vmomi_responses["HostSystem"] = iter(
+        [
+            _host_runtime_in_maintenance("host-1", True),
+            _host_runtime_in_maintenance("host-1", True),
+            _host_runtime_in_maintenance("host-1", False),
+        ]
+    )
+    recorder.vmomi_responses["/HostSystem/host-1/ExitMaintenanceMode_Task"] = _vmomi_task_moref(
+        "t-exit-1"
+    )
+    return recorder
+
+
+def _cluster_patch_recorder() -> _RecordingVmwareConnector:
+    recorder = _RecordingVmwareConnector()
+    recorder.responses.update(
+        {
+            "/vcenter/host": {"value": [{"host": "host-1"}]},
+            "/esx/settings/hosts/host-1/software?action=apply&vmw-task=true": {
+                "value": "task-apply-1"
+            },
+            "/cis/tasks/task-apply-1": {"value": {"status": "SUCCEEDED"}},
+        }
+    )
+    recorder.vmomi_responses.update(
+        {
+            "/HostSystem/host-1/EnterMaintenanceMode_Task": _vmomi_task_moref("t-enter-1"),
+            "/HostSystem/host-1/ExitMaintenanceMode_Task": _vmomi_task_moref("t-exit-1"),
+        }
+    )
+    return recorder
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("op_id", "params", "make_recorder", "expected_status"),
+    [
+        (
+            "vmware.composite.host.maintenance.exit",
+            {"host": "host-1"},
+            _maintenance_exit_recorder,
+            "exited",
+        ),
+        (
+            "vmware.composite.cluster.patch",
+            {"cluster": "domain-c1"},
+            _cluster_patch_recorder,
+            "completed",
+        ),
+    ],
+    ids=["host.maintenance.exit", "cluster.patch"],
+)
+async def test_exit_sub_step_does_not_wait_for_a_second_approval(
+    op_id: str,
+    params: dict[str, Any],
+    make_recorder: Callable[[], _RecordingVmwareConnector],
+    expected_status: str,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """One approval finishes the call, even though the generic exit row needs approval.
+
+    The VMware floor stores ``POST:/HostSystem/{moId}/ExitMaintenanceMode_Task``
+    as ``dangerous`` with ``requires_approval=True`` (#4967). The composites
+    send that vim call as a governed sub-step with the shared sub-op posture
+    (``requires_approval=False``), so the approved resume runs it at once:
+    the exit reaches the wire, and no second approval row is written.
+    """
+    recorder = make_recorder()
+    await _bootstrap(recorder, stub_embedding_service)
+    await _insert_generic_exit_descriptor()
+
+    target_id = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        s.add(
+            TargetORM(
+                id=target_id,
+                tenant_id=_TENANT_ID,
+                name="prod-vcenter",
+                product="vmware",
+                host="vcenter.prod.invalid",
+                aliases=[],
+            )
+        )
+        await s.commit()
+    requester = _make_operator(sub="ops-human", principal_kind=PrincipalKind.USER)
+    target = _FakeVmwareTarget(target_id=target_id)
+
+    # Step 1: a person's call waits for approval; nothing is sent.
+    result1 = await dispatch(
+        operator=requester, connector_id=_CONNECTOR_ID, op_id=op_id, target=target, params=params
+    )
+    assert result1.status == "awaiting_approval", result1.error
+    assert [p for p, _ in recorder.vmomi_calls if "MaintenanceMode_Task" in p] == []
+    approval_request_id = UUID(result1.extras["approval_request_id"])
+
+    # Step 2: a second person approves.
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        row = await approve_request(s, approval_request_id, operator=reviewer, params=params)
+        await s.commit()
+    assert row.status == ApprovalRequestStatus.APPROVED.value
+
+    # Step 3: the approved resume finishes the call; the exit is on the wire.
+    result2 = await dispatch(
+        operator=reviewer,
+        connector_id=_CONNECTOR_ID,
+        op_id=op_id,
+        target=target,
+        params=params,
+        _approved=True,
+    )
+    assert result2.status == "ok", result2.error
+    assert result2.result["status"] == expected_status
+    assert [p for p, _ in recorder.vmomi_calls if p.endswith("/ExitMaintenanceMode_Task")] == [
+        "/HostSystem/host-1/ExitMaintenanceMode_Task"
+    ]
+    async with get_sessionmaker()() as s:
+        approval_rows = (
+            await s.execute(select(func.count()).select_from(ApprovalRequest))
+        ).scalar()
+    assert approval_rows == 1, "the exit sub-step must not wait for a second approval"
+
+
+# ===========================================================================
 # vm.disk.grow — mutating VI-JSON: park → approve → resume, #2681 envelope
 # ===========================================================================
 
@@ -1214,6 +1412,9 @@ class _DiskGrowVmwareConnector:
     surfaces so the test can prove the mutating vmomi write fires only on
     the approved-resume path.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     _MOUNT = "/api"
 
@@ -1424,6 +1625,9 @@ class _CloneFromTemplateVmwareConnector:
     mutating vmomi write fires only on the approved-resume path.
     """
 
+    impl_id = "vmware-rest"
+    version = "9.0"
+
     _MOUNT = "/api"
 
     def __init__(self) -> None:
@@ -1627,7 +1831,7 @@ async def test_clone_from_template_fresh_boot_dispatchable_without_ingest(
 
 
 _DEPLOY_FROM_LIBRARY_PARAMS: dict[str, Any] = {
-    "library_item": "li-1",
+    "library_item": _ITEM_1,
     "resource_pool": "resgroup-8",
     "network_mappings": {"nat": "dvportgroup-9"},
 }
@@ -1652,8 +1856,10 @@ async def test_deploy_from_library_queue_approve_resume_with_2681_envelope(
        ``status='deployed'``.
     """
     recorder = _RecordingVmwareConnector()
-    recorder.responses["/vcenter/ovf/library-item/li-1?action=filter"] = {"name": "ovf-default"}
-    recorder.responses["/vcenter/ovf/library-item/li-1?action=deploy"] = {
+    recorder.responses[f"/vcenter/ovf/library-item/{_ITEM_1}?action=filter"] = {
+        "name": "ovf-default"
+    }
+    recorder.responses[f"/vcenter/ovf/library-item/{_ITEM_1}?action=deploy"] = {
         "succeeded": True,
         "resource_id": {"type": "VirtualMachine", "id": "vm-ovf-9"},
     }
@@ -1705,7 +1911,7 @@ async def test_deploy_from_library_queue_approve_resume_with_2681_envelope(
     assert effect["preview_populated"] is True
     # The param-echo blast-radius preview — what the approver decides on.
     assert effect["preview"] == {
-        "library_item": "li-1",
+        "library_item": _ITEM_1,
         "library_item_name": None,
         "library_name": None,
         "name": None,
@@ -1744,8 +1950,8 @@ async def test_deploy_from_library_queue_approve_resume_with_2681_envelope(
     # The synchronous OVF deploy fired exactly once, on the approved resume,
     # after the un-gated OVF summary read (#3697: no ``name`` in the params).
     assert recorder.calls == [
-        ("POST", "/vcenter/ovf/library-item/li-1?action=filter"),
-        ("POST", "/vcenter/ovf/library-item/li-1?action=deploy"),
+        ("POST", f"/vcenter/ovf/library-item/{_ITEM_1}?action=filter"),
+        ("POST", f"/vcenter/ovf/library-item/{_ITEM_1}?action=deploy"),
     ]
     assert recorder.vmomi_calls[0] == (
         "/VirtualMachine/vm-ovf-9/Rename_Task",
@@ -1767,7 +1973,7 @@ async def test_deploy_from_library_queue_approve_resume_with_2681_envelope(
 _DEPLOY_OP_ID = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy"
 _RENAME_VM_OP_ID = "POST:/VirtualMachine/{moId}/Rename_Task"
 _DEPLOY_NAMED_PARAMS: dict[str, Any] = {
-    "library_item": "li-1",
+    "library_item": _ITEM_1,
     "name": "web-01",
     "resource_pool": "resgroup-8",
 }
@@ -1802,7 +2008,7 @@ class _DeployRecordingVmwareConnector(_RecordingVmwareConnector):
 def _deploy_recorder(*, succeeded: bool) -> _DeployRecordingVmwareConnector:
     """A recorder serving one OVF deploy of ``vm-ovf-9``, its rename and its cleanup reads."""
     recorder = _DeployRecordingVmwareConnector()
-    recorder.responses["/vcenter/ovf/library-item/li-1?action=deploy"] = {
+    recorder.responses[f"/vcenter/ovf/library-item/{_ITEM_1}?action=deploy"] = {
         "succeeded": succeeded,
         "resource_id": {"type": "VirtualMachine", "id": "vm-ovf-9"},
     }
@@ -1889,7 +2095,7 @@ def _request_id_in(issue: dict[str, Any]) -> UUID:
     return UUID(issue["message"].split("waits for approval request ", 1)[1].split(";", 1)[0])
 
 
-_DEPLOY_CALL = ("POST", "/vcenter/ovf/library-item/li-1?action=deploy")
+_DEPLOY_CALL = ("POST", f"/vcenter/ovf/library-item/{_ITEM_1}?action=deploy")
 
 
 @pytest.mark.asyncio
@@ -1923,7 +2129,7 @@ async def test_deploy_rename_park_approve_resume_renames_and_deploys_nothing(
             "deployed": {
                 "vm_id": "vm-ovf-9",
                 "resource_type": "VirtualMachine",
-                "library_item_id": "li-1",
+                "library_item_id": _ITEM_1,
                 "name": "web-01",
                 "step": "rename",
                 "issues": [],
@@ -2047,7 +2253,7 @@ async def test_deploy_vapp_destroy_park_approve_resume_destroys_once_and_deploys
     there is no second OVF deploy.
     """
     recorder = _deploy_recorder(succeeded=False)
-    recorder.responses["/vcenter/ovf/library-item/li-1?action=deploy"] = {
+    recorder.responses[f"/vcenter/ovf/library-item/{_ITEM_1}?action=deploy"] = {
         "succeeded": False,
         "resource_id": {"type": "VirtualApp", "id": "vapp-7"},
     }
@@ -2108,7 +2314,7 @@ async def test_deploy_vapp_destroy_resume_destroys_the_saved_vapp_not_the_one_th
     touched.
     """
     recorder = _deploy_recorder(succeeded=False)
-    recorder.responses["/vcenter/ovf/library-item/li-1?action=deploy"] = {
+    recorder.responses[f"/vcenter/ovf/library-item/{_ITEM_1}?action=deploy"] = {
         "succeeded": False,
         "resource_id": {"type": "VirtualApp", "id": "vapp-7"},
     }
@@ -2275,7 +2481,7 @@ async def test_deploy_resume_deploys_the_saved_item_when_the_name_lookup_changed
         True,
     )
     recorder = _deploy_recorder(succeeded=True)
-    recorder.responses["/content/library/item?action=find"] = ["li-1"]
+    recorder.responses["/content/library/item?action=find"] = [_ITEM_1]
     await _bootstrap(recorder, stub_embedding_service)
     target_id = await _persist_vmware_target()
     await _seed_composite_service_grant(
@@ -2297,7 +2503,7 @@ async def test_deploy_resume_deploys_the_saved_item_when_the_name_lookup_changed
         pending = await s.get(ApprovalRequest, deploy_request)
     assert pending is not None
     assert pending.op_id == _DEPLOY_OP_ID
-    assert pending.params["ovfLibraryItemId"] == "li-1"
+    assert pending.params["ovfLibraryItemId"] == _ITEM_1
     deploy_name = pending.params["deployment_spec"]["name"]
     assert deploy_name.startswith("web-01-meho-")
     assert pending.resume_parent == {
@@ -2310,8 +2516,8 @@ async def test_deploy_resume_deploys_the_saved_item_when_the_name_lookup_changed
     }
 
     # Meanwhile: the same item name now finds another item.
-    recorder.responses["/content/library/item?action=find"] = ["li-2"]
-    recorder.responses["/vcenter/ovf/library-item/li-2?action=deploy"] = {
+    recorder.responses["/content/library/item?action=find"] = [_ITEM_2]
+    recorder.responses[f"/vcenter/ovf/library-item/{_ITEM_2}?action=deploy"] = {
         "succeeded": True,
         "resource_id": {"type": "VirtualMachine", "id": "vm-wrong"},
     }
@@ -2321,8 +2527,10 @@ async def test_deploy_resume_deploys_the_saved_item_when_the_name_lookup_changed
     assert resume.status == "ok", resume.error
     assert resume.result["status"] == "deployed"
     assert resume.result["vm_id"] == "vm-ovf-9"
-    assert resume.result["library_item_id"] == "li-1"
-    assert recorder.calls == [_FIND_ITEM_CALL, _DEPLOY_CALL], "no new lookup; li-2 never deploys"
+    assert resume.result["library_item_id"] == _ITEM_1
+    assert recorder.calls == [_FIND_ITEM_CALL, _DEPLOY_CALL], (
+        f"no new lookup; {_ITEM_2} never deploys"
+    )
     assert recorder.deploy_bodies == [
         {key: value for key, value in pending.params.items() if key != "ovfLibraryItemId"}
     ]
@@ -2505,7 +2713,7 @@ async def test_import_power_on_park_approve_resume_only_powers_on(
             return None
 
     async def _resolve(**_kw: Any) -> tuple[str, None]:
-        return "li-1", None
+        return _ITEM_1, None
 
     async def _import(**_kw: Any) -> LeaseImportResult:
         imports.append("import")
@@ -2528,7 +2736,7 @@ async def test_import_power_on_park_approve_resume_only_powers_on(
         op_id="vmware.composite.vm.import_from_library",
         target=_FakeVmwareTarget(target_id=target_id),
         params={
-            "library_item": "li-1",
+            "library_item": _ITEM_1,
             "resource_pool": "resgroup-8",
             "datastore": "datastore-1",
             "power_on": True,
@@ -2550,6 +2758,107 @@ async def test_import_power_on_park_approve_resume_only_powers_on(
     assert await _approval_row_count() == 1
 
 
+#: The params of a ``vm.create`` that touches every write step of the happy
+#: path: create, NIC attach, power-on (``test_vm_create_happy_path_sub_op_sequence``).
+_VM_CREATE_UNATTENDED_PARAMS: dict[str, Any] = {
+    "folder_name": "prod",
+    "name": "vm-new",
+    "guest_os": "UBUNTU_64",
+    "nics": [{"network": "net-1"}],
+    "power_on_after_create": True,
+}
+
+#: The write steps that run for ``_VM_CREATE_UNATTENDED_PARAMS``; each needs
+#: its own standing grant (``enforce_subop_policy`` reads no parent grant).
+_VM_CREATE_WRITE_STEPS = (
+    "POST:/vcenter/vm",
+    "POST:/vcenter/vm/{vm}/hardware/ethernet",
+    "POST:/vcenter/vm/{vm}/power?action=start",
+)
+
+
+async def _service_vm_create_unattended(
+    stub_embedding_service: AsyncMock, *, grant_composite: bool
+) -> tuple[_RecordingVmwareConnector, Any]:
+    """Run ``vm.create`` as a service principal with grants on every write step.
+
+    *grant_composite* adds the grant on the composite op id itself — the
+    grant the dispatcher's top-level gate reads before the handler runs.
+    """
+    recorder = _RecordingVmwareConnector()
+    recorder.responses.update(
+        {
+            "/vcenter/folder": {"value": [{"folder": "group-v1"}]},
+            "/vcenter/vm": {"value": "vm-123"},
+        }
+    )
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    op_ids = list(_VM_CREATE_WRITE_STEPS)
+    if grant_composite:
+        op_ids.append("vmware.composite.vm.create")
+    for op_id in op_ids:
+        await _seed_service_grant(op_id=op_id, target_id=target_id)
+    svc = _make_operator(sub="svc-blueprint", principal_kind=PrincipalKind.SERVICE)
+    result = await dispatch(
+        operator=svc,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.create",
+        target=_FakeVmwareTarget(target_id=target_id),
+        params=_VM_CREATE_UNATTENDED_PARAMS,
+    )
+    return recorder, result
+
+
+@pytest.mark.asyncio
+async def test_vm_create_service_with_composite_and_step_grants_runs_unattended(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """Grants on ``vm.create`` and on each write step: the call runs with no approval (#5063).
+
+    The composite's own gate clears on the composite grant; each write step
+    clears on its own grant. No approval request is created.
+    """
+    recorder, result = await _service_vm_create_unattended(
+        stub_embedding_service, grant_composite=True
+    )
+
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "created"
+    assert result.result["vm_id"] == "vm-123"
+    assert recorder.calls == [
+        ("GET", "/vcenter/folder"),
+        ("POST", "/vcenter/vm"),
+        ("POST", "/vcenter/vm/vm-123/hardware/ethernet"),
+        ("POST", "/vcenter/vm/vm-123/power?action=start"),
+    ]
+    assert await _approval_row_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_vm_create_service_with_step_grants_only_waits_for_approval(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """Step grants alone are not enough: without the composite grant the call waits (#5063).
+
+    The top-level gate checks the composite's own op id before the handler
+    runs and never reads the step grants, so the whole call parks and no
+    write reaches vCenter.
+    """
+    recorder, result = await _service_vm_create_unattended(
+        stub_embedding_service, grant_composite=False
+    )
+
+    assert result.status == "awaiting_approval", result.error
+    async with get_sessionmaker()() as s:
+        pending = (await s.scalars(select(ApprovalRequest))).one()
+    assert pending.op_id == "vmware.composite.vm.create"
+    assert pending.status == ApprovalRequestStatus.PENDING.value
+    assert all(verb == "GET" for verb, _ in recorder.calls), recorder.calls
+
+
 # ===========================================================================
 # cluster.drs_rule.create — park→approve→resume + fresh-boot (#2895)
 # ===========================================================================
@@ -2567,6 +2876,9 @@ class _DrsRuleVmwareConnector:
     The cluster read answers like vCenter 8.0.x: a path into
     ``configurationEx`` fails.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     _MOUNT = "/api"
 
@@ -2779,6 +3091,9 @@ class _FolderCreateVmwareConnector:
     poll ever fires. Records both surfaces so the test can prove the mutating
     CreateFolder fires only on the approved resume and is never polled.
     """
+
+    impl_id = "vmware-rest"
+    version = "9.0"
 
     _MOUNT = "/api"
 

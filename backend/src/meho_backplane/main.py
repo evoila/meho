@@ -43,7 +43,7 @@ v0.2 adds:
 
 import asyncio
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Final
@@ -86,6 +86,9 @@ from meho_backplane.api.v1.checks import router as api_v1_checks_router
 from meho_backplane.api.v1.checks_dashboards import (
     router as api_v1_checks_dashboards_router,
 )
+from meho_backplane.api.v1.connector_tenant_settings import (
+    router as api_v1_connector_tenant_settings_router,
+)
 from meho_backplane.api.v1.connectors_ingest import (
     router as api_v1_connectors_ingest_router,
 )
@@ -101,6 +104,9 @@ from meho_backplane.api.v1.gateway import router as api_v1_gateway_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.api.v1.kb import router as api_v1_kb_router
 from meho_backplane.api.v1.memory import router as api_v1_memory_router
+from meho_backplane.api.v1.operation_overrides import (
+    router as api_v1_operation_overrides_router,
+)
 from meho_backplane.api.v1.operation_runs import router as api_v1_operation_runs_router
 from meho_backplane.api.v1.operations import router as api_v1_operations_router
 from meho_backplane.api.v1.read_docs import router as api_v1_read_docs_router
@@ -117,6 +123,9 @@ from meho_backplane.api.v1.scheduler import router as api_v1_scheduler_router
 from meho_backplane.api.v1.search_docs import router as api_v1_search_docs_router
 from meho_backplane.api.v1.sensors import router as api_v1_sensors_router
 from meho_backplane.api.v1.service_grants import router as api_v1_service_grants_router
+from meho_backplane.api.v1.service_read_scopes import (
+    router as api_v1_service_read_scopes_router,
+)
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.v1.tenants import router as api_v1_tenants_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
@@ -178,14 +187,16 @@ from meho_backplane.memory import (
 from meho_backplane.metrics import render_metrics
 from meho_backplane.metrics_access import verify_metrics_access
 from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
-from meho_backplane.operations import run_typed_op_registrars, set_default_reducer
+from meho_backplane.operations import operation_catalog_write, set_default_reducer
 from meho_backplane.operations.approval_expiry import (
+    expire_approvals_from_older_release,
     start_approval_expiry_sweeper,
     stop_approval_expiry_sweeper,
 )
 from meho_backplane.operations.ingest import (
     build_anthropic_ingest_llm_client,
     load_catalog,
+    restore_ingested_profiled_connectors,
     stamp_catalog_profiled_connectors,
     validate_catalog_registry_coverage,
     validate_shipped_artifacts,
@@ -286,7 +297,7 @@ def _assert_mcp_resource_uri_configured() -> None:
     fail-fast-on-missing-security-config posture the
     :class:`~meho_backplane.settings.Settings` field validators already
     take for ``DATABASE_URL`` / ``BROADCAST_REDIS_URL``, and the same
-    crash-loud posture :func:`run_typed_op_registrars` takes for an
+    crash-loud posture :func:`operation_catalog_write` takes for an
     unpopulated dispatch table. The chart now derives a default from
     ``ingress.host`` for the common ingress-fronted deploy, so this
     guard only fires on a genuinely unresolvable config (no ingress,
@@ -335,6 +346,20 @@ def _advise_vault_tenant_scope_unenforced() -> None:
             enable_via="VAULT_KV_TENANT_SCOPE_PREFIX",
             doc="docs/codebase/connectors-vault-tenant-scope.md",
         )
+
+
+async def _expire_approvals_from_older_release() -> None:
+    """End waiting approvals from an older release at start-up (#5030).
+
+    Fail-open: a failure here is logged and the start goes on. An approved
+    request from an older release is still refused before it runs
+    (:func:`~meho_backplane.operations.approval_queue.refuse_resume_if_release_changed`),
+    so nothing from an older release can run either way.
+    """
+    try:
+        await expire_approvals_from_older_release()
+    except Exception:
+        structlog.get_logger().exception("approval_release_expiry_failed")
 
 
 async def _run_lifespan_shutdown() -> None:
@@ -389,11 +414,13 @@ async def _run_lifespan_startup() -> None:
        build failures surface at startup rather than first request.
     4. Connector + MCP module auto-discovery so import-time
        ``register_*`` calls run before the first request arrives.
-    5. Typed-op registrars run **after** connector discovery (the
-       registrars are appended during the import pass).
-    6. MCP audience guard after the eager-init steps, so a failure there
+    5. MCP audience guard after the eager-init steps, so a failure there
        carries the MCP-audience message, not a stale earlier one; the
        Vault tenant-scope advisory (operability-only) follows it.
+    6. Typed-op registrars run **last** (#5019). They write the shared
+       operation rows that pods of other releases may be serving, in one
+       transaction. Every step that can stop the start runs before them,
+       so a failed start leaves the rows as they were.
     """
     configure_logging()
     register_probe("keycloak", keycloak_readiness_probe)
@@ -452,17 +479,17 @@ async def _run_lifespan_startup() -> None:
     # (the #1971 review gate stays the interlock). Runs after the dry-run
     # validator above, so it only ever sees well-formed profiles.
     await stamp_catalog_profiled_connectors()
+    # Connectors an operator ingested with a login type (#5016): build their
+    # profiled classes again from the saved choice, so they still run calls
+    # after a restart. Runs after the catalog stamp so a shipped profile keeps
+    # its key; like the catalog stamp it never enables an op.
+    await restore_ingested_profiled_connectors()
     # Production spec-ingestion grouping LLM client (#1386). Installs the
     # Anthropic-backed factory so non-dry-run `--catalog` ingest grouping
     # works on deployed backplanes (reusing settings.anthropic_api_key)
     # instead of the build-time-only 503. Fail-closed when no key is set
     # — the factory raises LlmClientUnavailable only when invoked.
     _wire_ingest_llm_client()
-    # Typed-op registration (G0.6-T-Refactor-Vault #390). See the
-    # docstring for the contract; runs registrars connectors appended
-    # to during the import pass above so descriptor rows are populated
-    # before the first dispatch.
-    await run_typed_op_registrars()
     # Real JSONFlux reducer install (G0.6.1-T3 #753). Swaps the
     # dispatcher's module-level :class:`PassThroughReducer` default for
     # the production :class:`JsonFluxReducer`, so every connector's
@@ -493,6 +520,13 @@ async def _run_lifespan_startup() -> None:
     ensure_static_dist_dir()
     # Embedding model preload (G0.4-T2 #259); loud-but-non-fatal.
     await _preload_embedding_model()
+    # #5030: an approval covers one exact release. End every waiting
+    # approval made under another release before MEHO serves a request.
+    await _expire_approvals_from_older_release()
+    # The typed-op registration (G0.6-T-Refactor-Vault #390) does not run
+    # here. The lifespan runs it after this function, around the start of
+    # the background loops, so the operation rows commit only when the
+    # whole start succeeded (#5019). Add new start-up checks here.
 
 
 @dataclass
@@ -534,7 +568,7 @@ class _BackgroundTasks:
 # documentation and break the structural mirror; a holistic split of main.py
 # rides its own (pre-existing) file-size warning.
 # code-quality-allow: flat N-loop lifespan registry; length is per-task docs.
-def _start_background_tasks() -> _BackgroundTasks:
+def _start_background_tasks(started: list[asyncio.Task[None]]) -> _BackgroundTasks:
     """Start every lifespan-owned background loop, return their handles.
 
     Started after :func:`_run_lifespan_startup` returns -- they depend
@@ -543,41 +577,52 @@ def _start_background_tasks() -> _BackgroundTasks:
     returned dataclass so :func:`_stop_background_tasks` can cancel +
     await unwind before the DB/redis pools are disposed (an in-flight
     sweep must not race pool teardown).
+
+    Every task also goes into ``started`` the moment it exists. When a
+    later start raises, the caller (:func:`_start_background_tasks_or_none`)
+    cancels the tasks in that list, so a failed start leaves no loop
+    running.
     """
     settings = get_settings()
+
+    def start(start_loop: Callable[[], asyncio.Task[None]]) -> asyncio.Task[None]:
+        task = start_loop()
+        started.append(task)
+        return task
+
     # G9.1-T3 #450 — always on; the cadence + advisory-lock guard live
     # in the scheduler module itself.
-    topology_scheduler = start_topology_refresh_scheduler()
+    topology_scheduler = start(start_topology_refresh_scheduler)
     # G5.2-T1 #623 — gated on MEMORY_EXPIRY_ENABLED so operators using
     # an external cleanup mechanism don't double-sweep.
     memory_expiry: asyncio.Task[None] | None = None
     if settings.memory_expiry_enabled:
-        memory_expiry = start_memory_expiry_sweeper()
+        memory_expiry = start(start_memory_expiry_sweeper)
     # G9.3-T6 #858 — gated on TOPOLOGY_HISTORY_PRUNE_ENABLED.
     # ``RETENTION_DAYS=0`` keeps the loop running but every tick is a
     # no-op (heartbeat-only); ``PRUNE_ENABLED=false`` skips starting
     # the loop entirely.
     topology_history: asyncio.Task[None] | None = None
     if settings.topology_history_prune_enabled:
-        topology_history = start_topology_history_retention_sweeper()
+        topology_history = start(start_topology_history_retention_sweeper)
     # Broadcast v2 T2 #2547 — gated on BROADCAST_ANNOUNCEMENT_PRUNE_ENABLED.
     # ``RETENTION_DAYS=0`` keeps the loop running as a no-op heartbeat;
     # ``PRUNE_ENABLED=false`` skips starting the loop entirely.
     announcement_retention: asyncio.Task[None] | None = None
     if settings.broadcast_announcement_prune_enabled:
-        announcement_retention = start_announcement_retention_sweeper()
+        announcement_retention = start(start_announcement_retention_sweeper)
     # #2756 (Initiative #2780) — per-tick sensor-evidence retention prune.
     # Gated on CHECKS_EVIDENCE_PRUNE_ENABLED; ``RETENTION_DAYS=0`` disables the
     # feature (no rows written) — the divergent 0-semantics the setting docs.
     evidence_retention: asyncio.Task[None] | None = None
     if settings.checks_evidence_prune_enabled:
-        evidence_retention = start_evidence_retention_sweeper()
+        evidence_retention = start(start_evidence_retention_sweeper)
     # #3734 — request usage event prune. Runs only when
     # REQUEST_USAGE_RETENTION_DAYS is set; unset means collection is off,
     # so there is nothing to prune.
     request_usage_retention: asyncio.Task[None] | None = None
     if settings.request_usage_retention_days is not None:
-        request_usage_retention = start_request_usage_retention_sweeper()
+        request_usage_retention = start(start_request_usage_retention_sweeper)
     # Security review S19 #307 — audit_log.raw_payload age-off. Gated on
     # RAW_PAYLOAD_PRUNE_ENABLED so operators with an external age-off can skip
     # the loop. ``RETENTION_DAYS=0`` keeps the loop running as a no-op
@@ -585,31 +630,31 @@ def _start_background_tasks() -> _BackgroundTasks:
     # only ``raw_payload`` — the redacted record of account is never touched.
     audit_raw_payload_retention: asyncio.Task[None] | None = None
     if settings.raw_payload_prune_enabled:
-        audit_raw_payload_retention = start_audit_raw_payload_reaper()
+        audit_raw_payload_retention = start(start_audit_raw_payload_reaper)
     # G11.2-T6 #819 — gated on GRANT_EXPIRY_ENABLED so operators using
     # an external cleanup mechanism don't double-sweep.
     grant_expiry: asyncio.Task[None] | None = None
     if settings.grant_expiry_enabled:
-        grant_expiry = start_grant_expiry_sweeper()
+        grant_expiry = start(start_grant_expiry_sweeper)
     # #2322 (G0.31 #2364) — approval-TTL sweeper. Gated on
     # APPROVAL_EXPIRY_ENABLED so operators running an external sweep don't
     # double-expire. Drives ``expire_stale_requests`` per tenant so parked
     # approvals actually age out (the lifecycle was inert before #2322).
     approval_expiry: asyncio.Task[None] | None = None
     if settings.approval_expiry_enabled:
-        approval_expiry = start_approval_expiry_sweeper()
+        approval_expiry = start(start_approval_expiry_sweeper)
     # G11.3-T2 #823 — cron + one-off agent-trigger scheduler. Gated on
     # SCHEDULER_ENABLED so operators using an external orchestrator
     # (or running the test path without a scheduler) can opt out.
     scheduler: asyncio.Task[None] | None = None
     if settings.scheduler_enabled:
-        scheduler = start_scheduler()
+        scheduler = start(start_scheduler)
     # Initiative #2416 (#2505) — deterministic sensor check-runner. Gated on
     # SENSOR_RUNNER_ENABLED so operators running an external evaluator (or the
     # test path without a runner) can opt out.
     sensor_runner: asyncio.Task[None] | None = None
     if settings.sensor_runner_enabled:
-        sensor_runner = start_sensor_runner()
+        sensor_runner = start(start_sensor_runner)
     # #2763 — evaluation-loop watchdog. Same gate as the runner it
     # watches, never its own: a watchdog with an independent kill switch
     # is how the silent-stall class stays invisible. Started right after
@@ -617,14 +662,14 @@ def _start_background_tasks() -> _BackgroundTasks:
     # cadence sleep elapses.
     sensor_watchdog: asyncio.Task[None] | None = None
     if settings.sensor_runner_enabled:
-        sensor_watchdog = start_checks_watchdog()
+        sensor_watchdog = start(start_checks_watchdog)
     # G11.3-T4 #825 — gated on AGENT_RUN_REAPER_ENABLED so operators
     # running an external lease-reclaim mechanism (DBOS Transact, a
     # workflow engine) can disable the in-tree reaper without
     # patching code.
     agent_run_reaper: asyncio.Task[None] | None = None
     if settings.agent_run_reaper_enabled:
-        agent_run_reaper = start_agent_run_reaper()
+        agent_run_reaper = start(start_agent_run_reaper)
     # #3079 — async governed dispatch reaper. Gated on
     # OPERATION_RUN_REAPER_ENABLED so operators running an external
     # lease-reclaim mechanism can disable the in-tree reaper. Reclaims a
@@ -633,20 +678,20 @@ def _start_background_tasks() -> _BackgroundTasks:
     # non-idempotent vendor write).
     operation_run_reaper: asyncio.Task[None] | None = None
     if settings.operation_run_reaper_enabled:
-        operation_run_reaper = start_operation_run_reaper()
+        operation_run_reaper = start(start_operation_run_reaper)
     # #3212 — dispatch flight-recorder retention reaper. Gated on
     # FLIGHT_RECORDER_REAPER_ENABLED so operators with an external retention
     # mechanism can disable the in-tree sweep. Deletes expired trace headers +
     # spans (``expires_at < now()``); the ``audit_log`` row is never touched.
     flight_recorder_reaper: asyncio.Task[None] | None = None
     if settings.flight_recorder_reaper_enabled:
-        flight_recorder_reaper = start_flight_recorder_reaper()
+        flight_recorder_reaper = start(start_flight_recorder_reaper)
     # G11.3-T3 #824 — event-outbox drain loop. Gated on
     # EVENT_DRAIN_ENABLED so operators using an external orchestrator
     # (or running the test path without the drain) can opt out.
     event_drain: asyncio.Task[None] | None = None
     if settings.event_drain_enabled:
-        event_drain = start_event_drain()
+        event_drain = start(start_event_drain)
     # Initiative #2415 (#2501) — gateway runner dead-man switch. Gated on
     # GATEWAY_DEADMAN_ENABLED; default-on is what "mandatory" means (a
     # runner cannot opt out of heartbeating — the stamp is a request side
@@ -654,7 +699,7 @@ def _start_background_tasks() -> _BackgroundTasks:
     # an external liveness sweep can disable the in-tree one via the flag.
     gateway_deadman: asyncio.Task[None] | None = None
     if settings.gateway_deadman_enabled:
-        gateway_deadman = start_gateway_deadman_sweeper()
+        gateway_deadman = start(start_gateway_deadman_sweeper)
     # Initiative #2901 (#3193) — un-reported-mint security alarm. A separate
     # sweeper from the dead-man switch above: it flags a minted remote-write
     # capability whose effect went unreported past ``expires_at`` (threat T4), a
@@ -663,7 +708,7 @@ def _start_background_tasks() -> _BackgroundTasks:
     # disable the in-tree sweep.
     gateway_unreported_mint: asyncio.Task[None] | None = None
     if settings.gateway_unreported_mint_enabled:
-        gateway_unreported_mint = start_gateway_unreported_mint_sweeper()
+        gateway_unreported_mint = start(start_gateway_unreported_mint_sweeper)
     return _BackgroundTasks(
         topology_scheduler=topology_scheduler,
         memory_expiry=memory_expiry,
@@ -684,6 +729,24 @@ def _start_background_tasks() -> _BackgroundTasks:
         gateway_deadman=gateway_deadman,
         gateway_unreported_mint=gateway_unreported_mint,
     )
+
+
+async def _start_background_tasks_or_none() -> _BackgroundTasks:
+    """Start the background loops; when one start fails, stop the ones already started.
+
+    The lifespan calls this inside the operation catalog transaction
+    (#5019). A start that raises here rolls that transaction back, and
+    this function makes sure no loop from the failed start keeps running
+    against rows that were never committed.
+    """
+    started: list[asyncio.Task[None]] = []
+    try:
+        return _start_background_tasks(started)
+    except BaseException:
+        for task in started:
+            task.cancel()
+        await asyncio.gather(*started, return_exceptions=True)
+        raise
 
 
 async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
@@ -737,11 +800,23 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Application lifespan hook.
 
     Sequences three phases: :func:`_run_lifespan_startup` (probes,
-    eager pools, registrars, audience guard, embedding preload),
-    :func:`_start_background_tasks` (lifespan-owned ``asyncio`` loops),
+    eager pools, audience guard, embedding preload),
+    :func:`operation_catalog_write` around
+    :func:`_start_background_tasks_or_none` (the typed-op registrars'
+    rows in one transaction, then the lifespan-owned ``asyncio`` loops),
     yield (request-handling window), and :func:`_stop_background_tasks`
     (reverse-order shutdown so background tasks don't outlive the
     pools they borrow from).
+
+    The operation rows commit only when the ``with`` block below ends
+    without an error, that is after every background loop started
+    (#5019). A start that fails anywhere changes no operation row, and
+    the loops it already started are cancelled: a start that fails
+    inside the block is cleaned up by
+    :func:`_start_background_tasks_or_none`, and a commit that fails
+    when the block ends is cleaned up by the ``finally`` below, which
+    then stops every loop the block started. Nothing that can fail may
+    run after the block.
 
     Each phase helper carries the load-bearing detail in its own
     docstring; the lifespan body stays thin so the chassis function-
@@ -749,11 +824,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     refactor when adding a fourth background loop.
     """
     await _run_lifespan_startup()
-    tasks = _start_background_tasks()
+    tasks: _BackgroundTasks | None = None
     try:
+        async with operation_catalog_write():
+            tasks = await _start_background_tasks_or_none()
         yield
     finally:
-        await _stop_background_tasks(tasks)
+        if tasks is not None:
+            await _stop_background_tasks(tasks)
 
 
 app: FastAPI = FastAPI(
@@ -982,6 +1060,11 @@ app.include_router(api_v1_operations_router)
 # operator-gated. The same service layer (IngestionPipelineService +
 # ReviewService) backs T5 (CLI verbs) and T7 (admin MCP tools).
 app.include_router(api_v1_connectors_ingest_router)
+# #4711 -- the override report: operator overrides of risk levels and
+# approval flags, and the "operations running with reduced approval" list.
+app.include_router(api_v1_operation_overrides_router)
+# #5029 -- each tenant turns built-in operations on or off for itself.
+app.include_router(api_v1_connector_tenant_settings_router)
 # G4.1-T2 (#416) -- knowledge-base REST surface at /api/v1/kb*.
 # Five routes (GET / GET /{slug} / POST / DELETE /{slug} / POST /ingest)
 # that expose the T1 :class:`KbService` to operators + agents. Tenant-
@@ -1182,6 +1265,8 @@ app.include_router(api_v1_approvals_router)
 # #3151 -- operator-managed standing scoped auto-approval grants for
 # service principals (the persistent form of an approve decision).
 app.include_router(api_v1_service_grants_router)
+# #4992 -- the targets a service principal may read (set by a person).
+app.include_router(api_v1_service_read_scopes_router)
 # #3025 -- add-on pairing handshake (pair / unpair / list / heartbeat): a
 # sibling add-on product paired as a scoped Keycloak service principal over a
 # versioned integration contract (Initiative #2900 foundation).

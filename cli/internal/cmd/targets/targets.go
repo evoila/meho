@@ -18,6 +18,11 @@
 //     Sends only the flags the operator set; `--clear <field>` sends
 //     an explicit null (for example to drop a target's credential).
 //
+//   - `meho targets delete <name|alias> [--force] [--confirm]`
+//     (Task #3943) — DELETE /api/v1/targets/{name}. Soft-deletes one
+//     target after a y/N prompt; `--force` sends `force=true` so the
+//     delete goes ahead when topology nodes still point at the target.
+//
 //   - `meho targets list [--product P] [--json]` —
 //     GET /api/v1/targets, keyset-paginated, optionally narrowed by
 //     product slug.
@@ -68,9 +73,8 @@
 // Single-target create ships as `meho targets add <name>` (alias
 // `create`; Task #2862) — see add.go, which reuses import.go's
 // `doAuthedRequest` POST plumbing; `meho targets update <name>`
-// (Task #3854, update.go) reuses the same plumbing for PATCH. `delete`
-// stays out of scope; operators use `import --update` for bulk
-// reconciliation.
+// (Task #3854, update.go) reuses the same plumbing for PATCH, and
+// `meho targets delete <name>` (Task #3943, delete.go) for DELETE.
 package targets
 
 import (
@@ -97,12 +101,13 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "targets",
-		Short:        "Operate the MEHO targets registry (add / update / list / describe / probe / import / discover)",
-		Long:         "Add, update, list, describe, probe, bulk-import, and discover targets in the operator's tenant.",
+		Short:        "Operate the MEHO targets registry (add / update / delete / list / describe / probe / import / discover)",
+		Long:         "Add, update, delete, list, describe, probe, bulk-import, and discover targets in the operator's tenant.",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newAddCmd())
 	cmd.AddCommand(newUpdateCmd())
+	cmd.AddCommand(newDeleteCmd())
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newDescribeCmd())
 	cmd.AddCommand(newProbeCmd())

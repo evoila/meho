@@ -81,8 +81,7 @@ class ConnectorReviewOp(BaseModel):
     ``parameter_schema`` / ``response_schema`` / ``embedding`` —
     those are dispatch-time concerns, not review-time concerns, and
     sending 4 KB of schema per op would balloon the review payload
-    for connectors with thousands of operations (vCenter has 961
-    paths in v0.2).
+    for connectors with thousands of operations.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -101,6 +100,11 @@ class ConnectorReviewOp(BaseModel):
     # is re-ingested. Additive with a default so existing construction
     # call sites keep working; the service sets it from the row.
     needs_reingest: bool = False
+    # #5029: the reading tenant's own on/off setting for a built-in op.
+    # ``None`` means the tenant uses the install default (``is_enabled``),
+    # or the payload is not for a built-in connector. The effective value
+    # is this field when set, else ``is_enabled``.
+    tenant_enabled: bool | None = None
 
 
 class ConnectorReviewDeleteOp(BaseModel):

@@ -296,6 +296,17 @@ group writes classify as plain `write` on the broadcast feed (attributes
 are not secret material — see the flight-recorder classifier pin in
 `broadcast/events.py::_WRITE_OPS`).
 
+The group writes stay `dangerous` also for a brand-new tenant
+([decision of 2026-10-28](../decisions/2026-10-28-tenant-groups-stay-dangerous.md),
+#3872). The self-approval break-glass switch does not reach the
+`dangerous` tier, so one operator alone cannot add a tenant: a second
+person approves, or an agent requests and the operator approves. The
+operator walk-through is `docs-site/guides/tenant-bootstrap.md`. The
+agent-facing `when_to_use` of the group writes says this and links the
+guide, and the `user_write` blurb tells the agent not to put `tenant_*`
+on the user (Keycloak's default user profile drops unmanaged
+attributes) but to add the user to one role group.
+
 Three load-bearing properties (of the original nine; the group ops layer
 their own idempotency above):
 

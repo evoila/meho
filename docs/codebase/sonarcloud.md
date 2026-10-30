@@ -80,6 +80,51 @@ integration tests run in a separate job without coverage. The gate is
 `continue-on-error: true` — it is **advisory** and never blocks merges (see the
 new-code-period + scan-trigger section below for why it is kept advisory).
 
+## Measuring a test-to-code map (#5298)
+
+`scripts/ci/measure_test_map.py` counts how many tests a "run only the tests
+for the changed code" map would pick for recent merged pull requests. CI does
+not use it. It needs coverage data that records which test ran each line:
+`dynamic_context = test_function` in `.coveragerc.ci`. That setting is **not**
+on `main`. To get the data, open a pull request that adds it, give it the
+`ci-coverage-validate` label, and keep the combined `.coverage` file from the
+combine job (it is not uploaded today, only `coverage.xml`). How to run the
+script is in its docstring.
+
+The script also needs the list from `pytest --collect-only`. Make that list
+on the **exact commit the coverage run tested**. For a `pull_request` run this
+is the merge commit, not the pull request head. The log of the checkout step
+shows its SHA ("HEAD is now at ..."). If the list comes from another commit,
+the counts are wrong. The script prints how many test functions in the
+coverage data are not in the list, and warns when that number is not zero.
+A small number can also come from tests that a decorator wraps (for example
+`@respx.mock`): coverage then names them after the decorator's module, such
+as `functools.test_x`.
+
+The report splits the changed files the map cannot judge into four kinds:
+files the data does not have (for example files added after the coverage
+run), files in the data that no test function ran, files that a test ran
+whose name is not in the test list (the decorator case above), and other
+files (config, test helpers, files outside `backend/`). A pull request with
+a file of any kind counts as a full-suite run in the "safe" column.
+
+No GitHub API orders pull requests by merge date. So the script reads the
+closed pull requests page by page, most recently updated first. A merge
+updates a pull request, so its update time is never before its merge time.
+Reading stops at the first page whose oldest update time is not after the
+N-th newest merge time found so far: no later page can hold a pull request
+merged after it. This finds the N merged last, also when they were created
+long ago. Give `--merged-before` the time the coverage run started, so the
+sample stays the same when the script runs again later on the same data.
+
+Things to know about the data:
+
+- `test_function` records only lines that run inside the test function
+  itself. Lines that run in fixtures, at import time, or in background tasks
+  get the empty context, so the map does not see them.
+- Coverage cannot use the faster `sysmon` core with test contexts. It falls
+  back to the C tracer, so the shards run slower and need more time.
+
 ## When coverage collapses to ~24% — the invisible-import failure mode
 
 **Symptom.** The SonarCloud overall-coverage chip drops sharply (e.g. from ~66%

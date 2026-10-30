@@ -17,7 +17,7 @@ the render helpers stay unit-testable without a live FastAPI
 Big-payload guard
 -----------------
 
-The vmware-rest review payload is thousands of ops, so the drawer shell
+A big ingested connector's review payload is thousands of ops, so the drawer shell
 (:func:`render_review_drawer`) renders the groups as **collapsed**
 ``<details>`` carrying only ``name`` / ``review_status`` / ``op_count``
 -- it does NOT render the per-op rows. Each group's body lazy-loads via
@@ -44,7 +44,7 @@ same way.
 ``connector_id`` (``<impl_id>-<version>``) and ``group_key`` (snake_case,
 max 64) are slash-free, so the drawer + group-body routes use plain
 string path params. ``op_id`` is the natural key ``f"{method}:{path}"``
-(e.g. ``GET:/api/vcenter/cluster``) which CONTAINS slashes, so the per-op
+(e.g. ``GET:/repos/{owner}/{repo}/issues``) which CONTAINS slashes, so the per-op
 PATCH route uses the ``{op_id:path}`` converter -- the only param here
 that needs it -- and this module passes the captured ``op_id`` straight
 through to ``edit_op_endpoint`` intact.
@@ -172,6 +172,7 @@ def _op_context(op: ConnectorReviewOp) -> dict[str, Any]:
         "safety_level": op.safety_level,
         "requires_approval": op.requires_approval,
         "is_enabled": op.is_enabled,
+        "tenant_enabled": op.tenant_enabled,
         "tags": op.tags,
     }
 
@@ -443,7 +444,7 @@ async def submit_op_edit(
     Builds an :class:`EditOpBody` from the submitted controls and calls
     :func:`edit_op_endpoint` in-process (TENANT_ADMIN -- the route gates
     it). The ``op_id`` arrives intact from the ``{op_id:path}`` route (a
-    key like ``GET:/api/vcenter/cluster`` round-trips without URL-encoding
+    key like ``GET:/repos/{owner}/{repo}/issues`` round-trips without URL-encoding
     breakage) and is passed straight through.
 
     On success the response's ``warnings`` (the ``unreplaced_auto_shim``

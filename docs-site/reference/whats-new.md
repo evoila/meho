@@ -9,6 +9,31 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.39.0](https://github.com/evoila/meho/releases/tag/v0.39.0) — 2026-10-30
+
+- **Safer approvals.** The sender of a change that waits for approval
+  can withdraw it. An approval now covers one exact MEHO release, so an
+  upgrade ends the requests that still wait, and the requester asks
+  again.
+- **First steps for several tenants.** The login can list every tenant
+  of a person, the audit views and the approvals page show the tenant,
+  and a tenant admin can turn built-in operations on or off for their
+  own tenant only.
+- **Connector packages.** A MEHO image can carry connector packages from
+  other repositories. The status and version pages list them, and a
+  satellite runner gets only the work its packages can run.
+- **New connector and operations.** The phpIPAM connector reads subnets
+  and books addresses. New operations cover Azure VMware Solution and
+  Azure Arc, the steps that build a Windows domain controller,
+  Kubernetes access checks, vSphere datastore and vSAN folder lists,
+  Vault folder deletes with one approval, and Holodeck lab removal.
+- **Fewer secrets in errors and traces.** Error results, HTTP
+  diagnostics and traces hide secret fields before the audit row is
+  written.
+- **Before you upgrade.** There are eight database migrations, and a few
+  scripts and grants must change. Read "Breaking changes" and "Steps
+  after the upgrade" in the release notes.
+
 ## [v0.38.0](https://github.com/evoila/meho/releases/tag/v0.38.0) — 2026-10-28
 
 - **Azure, read end to end.** MEHO logs in to Azure with a service

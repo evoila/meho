@@ -403,6 +403,10 @@ async def test_only_tenant_admins_reach_the_privileged_path(env: _Env) -> None:
         assert _bao(env, "LIST", listing, tokens[user]) == 403, user
     assert _bao(env, "POST", f"{a}/target1", tokens["rita"], {"data": {"v": "y"}}) == 403
     assert _bao(env, "POST", f"{a}/rotation/t1", tokens["otto"], {"data": {"v": "y"}}) == 200
+    # The version soft-delete: tenant admins only.
+    soft_delete = f"secret/delete/tenants/{_TENANT_A}/rotation/t1"
+    assert _bao(env, "POST", soft_delete, tokens["otto"], {"versions": [1]}) == 403
+    assert _bao(env, "POST", soft_delete, tokens["anna"], {"versions": [1]}) == 204
 
 
 async def test_only_platform_admins_get_the_admin_login(env: _Env) -> None:

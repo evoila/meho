@@ -11,3 +11,8 @@ path "secret/metadata/tenants/{{identity.entity.aliases.JWT_ACCESSOR.metadata.te
 path "secret/data/tenants/{{identity.entity.aliases.JWT_ACCESSOR.metadata.tenant_id}}/privileged/*" {
   capabilities = ["create", "read", "update", "delete", "list"]
 }
+# The version soft-delete (vault.kv.delete) posts to secret/delete/<path>,
+# which OpenBao checks on that path, not on data/.
+path "secret/delete/tenants/{{identity.entity.aliases.JWT_ACCESSOR.metadata.tenant_id}}/*" {
+  capabilities = ["update"]
+}

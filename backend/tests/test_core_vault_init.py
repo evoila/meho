@@ -486,10 +486,11 @@ def test_policy_files_template_only_on_the_login_accessor() -> None:
         assert paths, name
         for path in paths:
             # A glob inside the templated part would let one tenant match another.
-            assert path.startswith(
-                f"secret/data/tenants/{{{{identity.entity.aliases.{ACCESSOR_MARK}.metadata.tenant_id}}}}/"
-            ) or path.startswith(
-                f"secret/metadata/tenants/{{{{identity.entity.aliases.{ACCESSOR_MARK}.metadata.tenant_id}}}}/"
+            assert any(
+                path.startswith(
+                    f"secret/{kind}/tenants/{{{{identity.entity.aliases.{ACCESSOR_MARK}.metadata.tenant_id}}}}/"
+                )
+                for kind in ("data", "metadata", "delete")
             ), path
 
 

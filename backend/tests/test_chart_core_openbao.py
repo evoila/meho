@@ -1,17 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Chart-render checks for the built-in OpenBao subchart (#4044).
+"""Chart-render checks for the built-in OpenBao subchart and its setup Job (#4044).
 
 Off by default: the chart then renders no OpenBao object at all, so a
 bring-your-own install renders what it rendered before. The parent's
 ``coreVault:`` block maps onto ``charts/openbao/`` through a dependency
 alias, and the subchart's own schema checks every value when it is on.
+The parent renders the ``vault-init`` Job with its own account; the Job's
+code is tested in ``test_core_vault_init.py``.
 Skips where ``helm`` is absent unless ``MEHO_REQUIRE_HELM=1``.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -50,7 +53,25 @@ _BASE_OVERRIDES = [
     "networkPolicy.keycloakCIDR=10.0.3.0/24",
 ]
 
-_ON = ["--set", "coreVault.enabled=true"]
+# The setup Job trusts the built-in Keycloak, so OpenBao needs it on (and
+# Keycloak needs the built-in PostgreSQL).
+_ON = [
+    "--set",
+    "coreVault.enabled=true",
+    "--set",
+    "corePostgres.enabled=true",
+    "--set",
+    "keycloak.issuer=",
+    "--set",
+    "config.keycloakIssuerUrl=",
+    "--set",
+    "coreKeycloak.enabled=true",
+    "--set",
+    "coreKeycloak.hostname=meho.test",
+    "--set",
+    "coreKeycloak.firstTenantId=3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c",
+]
+_POLICY_DIR = _CHART_DIR / "files" / "openbao" / "policies"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("helm") is None and os.environ.get("MEHO_REQUIRE_HELM") != "1",
@@ -78,9 +99,14 @@ def _is_openbao(doc: dict[str, Any]) -> bool:
     return bool(labels.get("app.kubernetes.io/name") == "openbao")
 
 
+def _is_vault_init(doc: dict[str, Any]) -> bool:
+    labels = doc.get("metadata", {}).get("labels", {})
+    return bool(labels.get("app.kubernetes.io/component") == "vault-init")
+
+
 def test_off_by_default_renders_nothing() -> None:
     docs = _render()
-    assert not [d for d in docs if _is_openbao(d)]
+    assert not [d for d in docs if _is_openbao(d) or _is_vault_init(d)]
     # Saying "off" out loud renders the same objects as leaving it out.
     explicit = _render("--set", "coreVault.enabled=false")
     assert [(d["kind"], d["metadata"]["name"]) for d in explicit] == [
@@ -243,13 +269,18 @@ def test_networkpolicy_off_by_default_and_admits_backplane_when_on() -> None:
     }
     (rule,) = policy["spec"]["ingress"]
     backplane = {"app.kubernetes.io/name": "meho", "app.kubernetes.io/instance": "test"}
-    assert rule["from"] == [{"podSelector": {"matchLabels": backplane}}]
+    setup_job = {"app.kubernetes.io/instance": "test", "app.kubernetes.io/component": "vault-init"}
+    assert rule["from"] == [
+        {"podSelector": {"matchLabels": backplane}},
+        {"podSelector": {"matchLabels": setup_job}},
+    ]
     assert rule["ports"] == [{"port": "http", "protocol": "TCP"}]
 
 
 def test_nothing_cluster_wide_by_default() -> None:
+    assert not [d for d in _render(*_ON) if d["kind"].startswith("Cluster")]
     docs = _openbao_docs()
-    assert not [d for d in docs if d["kind"].startswith("Cluster") or d["kind"] == "ServiceAccount"]
+    assert not [d for d in docs if d["kind"] == "ServiceAccount"]
     pod = _one(docs, "StatefulSet")["spec"]["template"]["spec"]
     assert "serviceAccountName" not in pod
 
@@ -393,3 +424,133 @@ def test_notes_show_the_command_never_the_key(tmp_path: Path) -> None:
     # Helm stores the NOTES text in the release; a `lookup` there would print
     # the key on every upgrade.
     assert "lookup" not in (_CHART_DIR / "templates" / "NOTES.txt").read_text(encoding="utf-8")
+
+
+def _setup_docs(*extra: str, release: str = "test") -> dict[str, dict[str, Any]]:
+    result = subprocess.run(
+        [
+            "helm",
+            "template",
+            release,
+            str(_CHART_DIR),
+            *_BASE_OVERRIDES,
+            *_ON,
+            "--namespace",
+            "meho",
+            *extra,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    docs = [d for d in yaml.safe_load_all(result.stdout) if d and _is_vault_init(d)]
+    by_kind = {d["kind"]: d for d in docs}
+    assert len(by_kind) == len(docs)
+    return by_kind
+
+
+def _job_name(*extra: str) -> str:
+    name: str = _setup_docs(*extra)["Job"]["metadata"]["name"]
+    return name
+
+
+def test_setup_job_is_a_release_object_with_its_own_account() -> None:
+    docs = _setup_docs()
+    assert sorted(docs) == ["ConfigMap", "Job", "Role", "RoleBinding", "ServiceAccount"]
+    for doc in docs.values():
+        # Not a hook: Helm --wait-for-jobs, klipper-helm and Argo CD wait for it.
+        assert not any(k.startswith("helm.sh/hook") for k in doc["metadata"].get("annotations", {}))
+    assert docs["ServiceAccount"]["metadata"]["name"] == "test-vault-init"
+    assert docs["ServiceAccount"]["automountServiceAccountToken"] is False
+    assert docs["RoleBinding"]["subjects"] == [
+        {"kind": "ServiceAccount", "name": "test-vault-init", "namespace": "meho"}
+    ]
+    names = [
+        "test-core-vault-unseal",
+        "test-core-vault-init",
+        "test-core-vault-scheduler",
+        "test-core-vault-snapshot",
+    ]
+    assert docs["Role"]["rules"] == [
+        {"apiGroups": [""], "resources": ["secrets"], "verbs": ["create"]},
+        {
+            "apiGroups": [""],
+            "resources": ["secrets"],
+            "verbs": ["get", "patch"],
+            "resourceNames": names,
+        },
+        {
+            "apiGroups": [""],
+            "resources": ["secrets"],
+            "verbs": ["delete"],
+            "resourceNames": ["test-core-vault-init"],
+        },
+    ]
+
+    job = docs["Job"]
+    assert job["metadata"]["name"].startswith("test-vault-init-")
+    assert "ttlSecondsAfterFinished" not in job["spec"]
+    pod = job["spec"]["template"]["spec"]
+    assert pod["serviceAccountName"] == "test-vault-init"
+    assert pod["restartPolicy"] == "Never"
+    assert job["spec"]["template"]["metadata"]["labels"] == {
+        "app.kubernetes.io/instance": "test",
+        "app.kubernetes.io/component": "vault-init",
+    }
+    volumes = {v["name"]: v for v in pod["volumes"]}
+    assert volumes["openbao-token"]["projected"]["sources"] == [
+        {"serviceAccountToken": {"audience": "openbao", "expirationSeconds": 600, "path": "token"}}
+    ]
+    assert volumes["policies"]["configMap"]["name"] == "test-vault-init-policies"
+    (container,) = pod["containers"]
+    assert container["command"] == ["python", "-m", "meho_backplane.core.vault_init"]
+    env = {e["name"]: e for e in container["env"]}
+    plan = json.loads(env["MEHO_CORE_VAULT_PLAN"]["value"])
+    assert plan == {
+        "openbao_url": "http://test-vault:8200",
+        "keycloak_url": "http://test-keycloak:8080/auth",
+        "jwks_url": "http://test-keycloak:8080/auth/realms/meho/protocol/openid-connect/certs",
+        "bound_issuer": "https://meho.test/auth/realms/meho",
+        "audience": "meho-backplane",
+        "policy_dir": "/opt/meho/openbao-policies",
+        "service_account": "test-vault-init",
+        "sa_token_file": "/var/run/secrets/openbao/token",
+        "unseal_secret": "test-core-vault-unseal",
+        "init_secret": "test-core-vault-init",
+        "scheduler_secret": "test-core-vault-scheduler",
+        "snapshot_secret": "test-core-vault-snapshot",
+    }
+
+
+def test_setup_job_carries_the_policy_files() -> None:
+    data = _setup_docs()["ConfigMap"]["data"]
+    assert data == {
+        p.name: p.read_text(encoding="utf-8") for p in sorted(_POLICY_DIR.glob("*.hcl"))
+    }
+    assert len(data) == 8
+
+
+def test_setup_job_name_changes_with_its_setup_only() -> None:
+    name = _job_name()
+    assert _job_name() == name
+    # The plan, the image and the pod spec are part of the name ...
+    assert (
+        _job_name("--set", "coreKeycloak.hostname=other.test", "--set", "ingress.host=other.test")
+        != name
+    )
+    assert _job_name("--set", "image.tag=other") != name
+    assert _job_name("--set", "migrationJob.resources.limits.memory=1Gi") != name
+    # ... OpenBao's own settings are not: they do not change the setup.
+    assert _job_name("--set", "coreVault.persistence.size=20Gi") == name
+
+
+def test_setup_job_needs_the_built_in_keycloak() -> None:
+    result = _run("--set", "coreVault.enabled=true")
+    assert result.returncode != 0
+    assert "coreVault.enabled needs coreKeycloak.enabled" in result.stderr
+
+
+def test_setup_job_names_stay_valid_for_a_long_release_name() -> None:
+    docs = _setup_docs(release="r" * 53)
+    assert all(len(d["metadata"]["name"]) <= 63 for d in docs.values())

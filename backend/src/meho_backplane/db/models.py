@@ -323,7 +323,6 @@ __all__ = [
     "Tenant",
     "TenantConvention",
     "TenantConventionHistory",
-    "TenantOperationSetting",
     "WebSession",
     "is_valid_kind_slug",
 ]
@@ -1935,6 +1934,80 @@ class EndpointDescriptor(Base):
         sa.CheckConstraint(
             "safety_level IN ('safe', 'caution', 'dangerous', 'destructive')",
             name="ck_endpoint_descriptor_safety_level",
+        ),
+    )
+
+
+class OperationPolicyOverride(Base):
+    """An operator's stricter risk level or approval flag for one operation (#4711).
+
+    The value in code (typed operations) or in the API description
+    (ingested operations) stays on :class:`EndpointDescriptor`. The
+    operator's choice lives here, in its own row, so a start (typed
+    registration) or a new ingest never overwrites it. Calls, previews,
+    search and the approval check use the stricter of the two; see
+    :mod:`meho_backplane.operations.op_policy`.
+
+    ``tenant_id`` is the scope: a tenant UUID for a tenant admin's change
+    (it applies to that tenant only), ``NULL`` for a platform admin's
+    change (it applies to the whole install). The row is keyed on the
+    operation's name ``(product, version, impl_id, op_id)``, not on a
+    descriptor id, so it survives a re-ingest that deletes and re-creates
+    descriptor rows.
+
+    ``safety_level`` ``NULL`` means "no risk level change in this scope".
+    ``requires_approval`` ``True`` means "require approval", ``False``
+    means "a platform admin turned approval off" (only allowed with a
+    ``reason``, never for a destructive operation), ``NULL`` means "no
+    change". A row with both fields ``NULL`` is deleted.
+    """
+
+    __tablename__ = "operation_policy_override"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
+    product: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    impl_id: Mapped[str] = mapped_column(Text, nullable=False)
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    safety_level: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    requires_approval: Mapped[bool | None] = mapped_column(
+        sa.Boolean(), nullable=True, default=None
+    )
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    set_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    set_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "operation_policy_override_install_idx",
+            "product",
+            "version",
+            "impl_id",
+            "op_id",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NULL"),
+            sqlite_where=sa.text("tenant_id IS NULL"),
+        ),
+        Index(
+            "operation_policy_override_tenant_idx",
+            "tenant_id",
+            "product",
+            "version",
+            "impl_id",
+            "op_id",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NOT NULL"),
+            sqlite_where=sa.text("tenant_id IS NOT NULL"),
+        ),
+        sa.CheckConstraint(
+            "safety_level IS NULL OR safety_level IN "
+            "('safe', 'caution', 'dangerous', 'destructive')",
+            name="ck_operation_policy_override_safety_level",
         ),
     )
 

@@ -114,7 +114,7 @@ func TestAddHelpListsFlags(t *testing.T) {
 	for _, want := range []string{
 		"--product", "--host", "--alias", "--version", "--port", "--fqdn",
 		"--secret-ref", "--auth-model", "--verify-tls", "--tls-ca-pin",
-		"--tls-server-name", "--preferred-impl", "--note",
+		"--tls-server-name", "--vpn-required", "--preferred-impl", "--note",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("`add --help` missing flag %q; got:\n%s", want, help)
@@ -196,7 +196,7 @@ func TestAddSuccessRendersTargetAndOmitsTenantID(t *testing.T) {
 	// omit-vs-null distinction is load-bearing for secret_ref (an
 	// omitted ref derives the per-tenant default; a null persists "no
 	// credential").
-	for _, k := range []string{"secret_ref", "aliases", "version", "port", "verify_tls", "notes"} {
+	for _, k := range []string{"secret_ref", "aliases", "version", "port", "verify_tls", "vpn_required", "notes"} {
 		if _, present := gotBody[k]; present {
 			t.Errorf("unset optional %q should be omitted from the body: %v", k, gotBody)
 		}
@@ -389,5 +389,22 @@ func TestAddExtraWithoutEqualsFails(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "expected key=value") {
 		t.Errorf("stderr should explain the expected shape; got:\n%s", stderr.String())
+	}
+}
+
+// TestAddVPNRequiredSendsTrue pins that --vpn-required sends
+// "vpn_required": true. Without the flag the key is left out, so the
+// server default (false) applies; TestAddSuccessRendersTargetAndOmitsTenantID
+// covers that case.
+func TestAddVPNRequiredSendsTrue(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
+	gotBody, stderr, err := captureAddBody(t,
+		"vault-vpn", "--product", "vault", "--host", "vault.example.com",
+		"--vpn-required")
+	if err != nil {
+		t.Fatalf("add --vpn-required: %v\nstderr=%s", err, stderr.String())
+	}
+	if v, ok := gotBody["vpn_required"].(bool); !ok || !v {
+		t.Errorf("vpn_required should be true; got %#v", gotBody["vpn_required"])
 	}
 }

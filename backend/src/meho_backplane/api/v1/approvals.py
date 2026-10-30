@@ -14,7 +14,8 @@ Route inventory
 ---------------
 
 * ``GET /api/v1/approvals`` — list pending requests for the operator's
-  tenant. Optional ``?status=`` filter (default ``pending``). Access:
+  tenant. Optional ``?status=`` filter (default ``pending``) and
+  ``?order=oldest|newest`` sort (default ``newest``). Access:
   approvals-plane (see below).
 * ``POST /api/v1/approvals/{request_id}/approve`` — approve a pending
   request and re-dispatch the original call with the original params.
@@ -99,6 +100,7 @@ from meho_backplane.operations.approval_queue import (
     EXPIRED_REASON_MESSAGES,
     MAX_REASON_LENGTH,
     ApprovalExpiredReason,
+    ApprovalListOrder,
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ApprovalRequestExpiredError,
@@ -654,7 +656,15 @@ async def list_approvals(
     offset: int = Query(
         default=0,
         ge=0,
-        description="Skip this many requests first (newest first). Defaults to 0.",
+        description="Skip this many requests first, in the chosen order. Defaults to 0.",
+    ),
+    order: ApprovalListOrder = Query(
+        default="newest",
+        description=(
+            "Sort by creation time. 'newest' (default) lists the newest request "
+            "first; 'oldest' lists the oldest first, which is the order a chain "
+            "of requests under one change ticket was sent in."
+        ),
     ),
     operator: Operator = _require_approvals_access,
 ) -> list[ApprovalRequestView]:
@@ -666,8 +676,11 @@ async def list_approvals(
     state (the same sentinel ``meho_approvals_list`` accepts), and by
     change ticket via
     ``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first
-    (``created_at DESC``). ``limit`` / ``offset`` page through the
-    result; no ``limit`` returns every match.
+    (``created_at DESC``) by default; ``?order=oldest`` returns
+    oldest-first (``created_at ASC``, ties broken on ``id``) so a chain of
+    requests under one change ticket reads in the order it was sent
+    (#3596). ``limit`` / ``offset`` page through the result; no ``limit``
+    returns every match.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id="approval.list",
@@ -694,7 +707,11 @@ async def list_approvals(
             stmt = stmt.where(ApprovalRequest.status == status_filter.value)
         if work_ref is not None:
             stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
-        stmt = stmt.order_by(ApprovalRequest.created_at.desc()).offset(offset)
+        if order == "oldest":
+            stmt = stmt.order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
+        else:
+            stmt = stmt.order_by(ApprovalRequest.created_at.desc())
+        stmt = stmt.offset(offset)
         if limit is not None:
             stmt = stmt.limit(limit)
         result = await session.execute(stmt)

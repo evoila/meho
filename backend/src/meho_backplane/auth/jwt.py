@@ -1558,6 +1558,12 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     scopes = _extract_scopes(claims, settings)
     platform_admin = _extract_platform_admin(claims, settings)
     runner_id = _extract_runner_id(claims, settings)
+    raw_auth_time = claims.get("auth_time")
+    auth_time = (
+        raw_auth_time
+        if isinstance(raw_auth_time, int) and not isinstance(raw_auth_time, bool)
+        else None
+    )
     if principal_kind is PrincipalKind.RUNNER and runner_id is None:
         # Fail-closed pairing (Initiative #2415, #2502): a runner-kind
         # token with no ``runner_id`` cannot be scoped by the gateway
@@ -1583,6 +1589,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             platform_admin=platform_admin,
             approver=approver,
             runner_id=runner_id,
+            auth_time=auth_time,
             tenants=tenants,
         )
     except pydantic.ValidationError as exc:

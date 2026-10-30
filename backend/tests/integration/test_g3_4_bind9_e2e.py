@@ -998,9 +998,8 @@ async def test_dispatch_config_show_against_bind9(
 ) -> None:
     """``bind9.config.show named.conf.local`` returns the live file content.
 
-    The read waits for approval since #4617 (a config file can hold TSIG /
-    rndc key secrets), so the call runs on the post-approval resume path
-    with ``_approved=True``, like the apply test below.
+    Since #5132 the read runs at once, without approval: it reads only
+    config files and hides key secrets. So there is no ``_approved=True``.
     """
     operator = _make_operator(sub="op-config-show", tenant_id=_OPERATOR_TENANT_ID)
     result = await dispatch(
@@ -1009,7 +1008,6 @@ async def test_dispatch_config_show_against_bind9(
         op_id="bind9.config.show",
         target=bind9_e2e,
         params={"path": "named.conf.local"},
-        _approved=True,
     )
     assert result.status == "ok", result.error
     assert "evba.lab" in result.result["content"]

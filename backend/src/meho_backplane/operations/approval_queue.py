@@ -73,6 +73,7 @@ where a malicious approver swaps the params between the "request" and the
 
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
 from collections.abc import Iterator
@@ -85,12 +86,13 @@ from enum import StrEnum
 from typing import Any, Final, Literal, NamedTuple, cast
 
 import structlog
-from sqlalchemy import CursorResult, and_, or_, select, update
+from sqlalchemy import CursorResult, and_, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.approval_sign_in import ApprovalAuth
 from meho_backplane.auth.delegation import resolve_actor_sub
+from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors.schemas import OperationResult
@@ -1419,9 +1421,18 @@ async def create_pending_request(
     return request
 
 
-# code-quality-allow: 101 lines but ~70 are the Args/Raises docstring documenting
-# the four preconditions + the params/reason contract; the executable body is ~15
-# lines. Splitting it would scatter one linear approve flow for a line-count win.
+def _sign_in_lock_key(sign_in_key: str) -> int:
+    """Map a sign-in key to a stable, non-negative 63-bit advisory-lock key.
+
+    A blake2b digest under its own prefix, masked to 63 bits so it fits the
+    ``bigint`` that ``pg_advisory_xact_lock`` takes. The same shape as the
+    other advisory-lock keys in the code base.
+    """
+    label = f"meho:approval-sign-in\0{sign_in_key}"
+    digest = hashlib.blake2b(label.encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
+
+
 async def _refuse_reused_sign_in(
     session: AsyncSession,
     request_id: uuid.UUID,
@@ -1433,11 +1444,29 @@ async def _refuse_reused_sign_in(
     Looks at the person's ``approval.decision`` audit rows written since
     the sign-in. The sign-in is at most a few minutes old, so the scan is
     short. A web click is not single-use and is never checked.
+
+    Two approves with the same sign-in can run at the same moment, for two
+    different requests and on two replicas. So the check first takes a
+    transaction-level PostgreSQL advisory lock on the sign-in key. The
+    second approve waits until the first commits or rolls back, and then
+    its scan sees the first audit row. PostgreSQL releases the lock with
+    the transaction. On other databases (the single-writer SQLite test
+    path) there is no lock.
+
+    The scan starts :data:`~meho_backplane.auth.fresh_sign_in.CLOCK_SKEW_SECONDS`
+    before ``auth_time``: the fresh sign-in check accepts an ``auth_time``
+    that far in the future, so an earlier approve of the same sign-in can
+    have an audit time before ``auth_time``.
     """
     key = approval_auth.sign_in_key(operator.sub)
     if key is None or approval_auth.auth_time is None:
         return
-    since = datetime.fromtimestamp(approval_auth.auth_time - 1, UTC)
+    conn = await session.connection()
+    if conn.dialect.name == "postgresql":
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:k)"), {"k": _sign_in_lock_key(key)}
+        )
+    since = datetime.fromtimestamp(approval_auth.auth_time - CLOCK_SKEW_SECONDS - 1, UTC)
     rows = await session.execute(
         select(AuditLog.payload).where(
             AuditLog.operator_sub == operator.sub,
@@ -1456,6 +1485,9 @@ async def _refuse_reused_sign_in(
             raise ApprovalSignInReusedError(request_id)
 
 
+# code-quality-allow: 101 lines but ~70 are the Args/Raises docstring documenting
+# the four preconditions + the params/reason contract; the executable body is ~15
+# lines. Splitting it would scatter one linear approve flow for a line-count win.
 async def approve_request(
     session: AsyncSession,
     request_id: uuid.UUID,

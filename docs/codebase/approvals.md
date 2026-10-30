@@ -2046,7 +2046,12 @@ CLI) the token must prove it:
   `fresh_sign_in_already_used:`) when an earlier `approval.decision` row of
   the same person, written since that sign-in, carries the same
   `sign_in_key`: a hash of `sub`, `sid` and `auth_time`. The audit row
-  keeps the hash, not the session id.
+  keeps the hash, not the session id. The scan starts 60 seconds
+  (`CLOCK_SKEW_SECONDS`, the allowed clock drift of the fresh sign-in
+  check) before `auth_time`. On PostgreSQL the check first takes a
+  transaction-level advisory lock on the sign-in key, so two approves
+  with one sign-in at the same moment run one after the other and only
+  one passes (`tests/integration/test_approval_sign_in_once_pg.py`).
 - Every approve writes `payload["approval_auth"]` on its
   `approval.decision` row: `{"channel": "rest" | "web", "method":
   "fresh_sign_in" | "one_time_code" | "web_click", "auth_time": <int|null>}`
@@ -2111,7 +2116,8 @@ stored login, with a loopback redirect on `127.0.0.1` and a random port
 credentials again. It retries `/decide` once with the new token, set by a
 per-request editor. The token stays in memory and is never written to the
 token store. When no browser can be opened (no `DISPLAY` /
-`WAYLAND_DISPLAY` on Linux, or the opener fails) it prints the sign-in link
+`WAYLAND_DISPLAY` on Linux, or the opener fails to start or ends with an
+error within 3 seconds) it prints the sign-in link
 and says to approve in the web interface, and exits non-zero (auth_expired).
 The Keycloak side — standard flow, PKCE and `http://127.0.0.1:*` on
 `meho-cli` — is set by `meho admin keycloak bootstrap-clients`, the bundled

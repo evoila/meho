@@ -303,6 +303,32 @@ async def test_one_sign_in_allows_one_approval(
 
 
 @pytest.mark.asyncio
+async def test_one_sign_in_allows_one_approval_when_the_sign_in_clock_is_ahead(
+    _client: tuple[httpx.AsyncClient, Any],
+    _fake_resume: list[uuid.UUID],
+) -> None:
+    """The reuse check also finds an approve written before ``auth_time``.
+
+    The sign-in server's clock is 20 seconds ahead. The fresh sign-in check
+    accepts that, so the first approve is written about 20 seconds before
+    the token's ``auth_time``. The second approve with the same sign-in
+    must still be refused.
+    """
+    ac, key = _client
+    first, second = await _park(), await _park()
+    auth_time = int(time.time()) + 20
+    token_a = _token(key, auth_time=auth_time, sid="s-ahead")
+    token_b = _token(key, auth_time=auth_time, sid="s-ahead", jti="second-token")
+
+    assert (await _approve(ac, "approve", first, token_a)).status_code == 200
+    response = await _approve(ac, "approve", second, token_b)
+
+    _assert_challenge(response)
+    assert response.json()["detail"].startswith("fresh_sign_in_already_used:")
+    assert await _status(second) == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("route", ["reject", "decide"])
 async def test_reject_needs_no_fresh_sign_in(
     route: str, _client: tuple[httpx.AsyncClient, Any]

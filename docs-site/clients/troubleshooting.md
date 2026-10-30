@@ -220,6 +220,7 @@ first, then match the row:
 | `missing_sub` | The token has no `sub` claim. Keycloak 25+ moved `sub` into a mapper inside the `basic` client scope, and clients created via the admin REST API do not auto-inherit realm default scopes. RFC 9068 makes `sub` required, so rejection is correct — the opacity is the problem. | Assign `basic` (and `roles`, `web-origins`, `acr`) as **default** client scopes, then log out and back in (**W3** — the deepest wall). |
 | `missing_tenant_claim` / `missing_tenant_role_claim` | The person is in none of the five MEHO groups, or the `tenant-id` / `tenant-role` mapper is absent, so the backplane cannot place the caller in a tenant. | Put the person in one group ([Keycloak realm setup § groups](../install/keycloak-realm.md#step-5-create-the-five-groups), or [Add a tenant](../guides/tenant-bootstrap.md) for a new tenant), or add the tenant mappers (**W2**, [§ mappers](../install/keycloak-realm.md#step-3-add-the-protocol-mappers)). |
 | `multiple_role_groups: …` | The person is in two or more of the five MEHO groups. Keycloak then copies the role from whichever group it finds first, so the role would be unpredictable. The message names the groups it found. | Keep the person in exactly one group ([Keycloak realm setup § groups](../install/keycloak-realm.md#step-5-create-the-five-groups)), then log out and back in. A site that renamed the groups sets `JWT_ROLE_GROUPS` on the backplane to the new names (comma-separated). |
+| `multiple_role_groups: … of the same tenant …` | The login lists tenants, and the person is in two role groups of one tenant. The role in that tenant would not be clear. Groups of two different tenants are fine. | Keep the person in one role group of that tenant, then log out and back in. |
 | `invalid_issuer` | The token's `iss` does not match the configured realm. | Point the client at the same realm `KEYCLOAK_ISSUER_URL` names; a stale OAuth state from a previous realm can survive across config changes. |
 | `token_expired` / `token_not_yet_valid` | `exp` is in the past, or `nbf` in the future beyond leeway (clock skew). | Refresh the token; for `nbf`, sync the clock on the issuing or calling host. |
 | `signature_verification_failed` | The JWS does not verify against the issuer's published keys. | Confirm the token comes from the realm the backplane validates against. |
@@ -229,6 +230,18 @@ The diagnostic detail (expected audience, claim name, exception class)
 is in the backplane's **server log**, not the 401 body — that
 body-vs-log split is the deliberate info-leak boundary an
 unauthenticated 401 honours.
+
+## Calls answer `tenant_not_chosen` or `tenant_not_member`
+
+One login can be in several tenants. MEHO then works in one tenant at a
+time: the request names it in the `Meho-Tenant` header (a tenant name or
+ID). These answers come after a valid login:
+
+| `detail` code | What it means | Fix |
+|---|---|---|
+| `tenant_not_chosen: …` (HTTP 400) | The login is in several tenants and the request named none. The message lists your tenants. `meho status` and the MCP tool `meho_status` still answer and list your tenants with the role in each. | Choose a tenant with `meho tenants use <name>`, or send the `Meho-Tenant` header. For MCP, set the tenant in the connection settings and start a new session. |
+| `tenant_not_member: …` (HTTP 403) | The `Meho-Tenant` header names a tenant you are not in. Agent, service and runner logins always stay in their own tenant. | Pick one of the tenants the message lists. If you need another tenant, ask your admin to put you in one role group of that tenant, then log in again. |
+| `tenant_not_found: …` (HTTP 403) | You are a platform admin and the header names a tenant that does not exist. MEHO never creates a tenant from this header. | Check the tenant name or ID. |
 
 ## `meho login` times out before you can approve (W4)
 

@@ -88,6 +88,11 @@ from authlib.jose.errors import (
 )
 from fastapi import Header, HTTPException, status
 
+from meho_backplane.auth.current_tenant import (
+    TENANT_HEADER,
+    reject_duplicate_tenants,
+    select_current_tenant,
+)
 from meho_backplane.auth.operator import (
     MACHINE_PRINCIPAL_KINDS,
     Operator,
@@ -95,6 +100,7 @@ from meho_backplane.auth.operator import (
     RoleGroup,
     TenantMembership,
     TenantRole,
+    group_grant,
 )
 from meho_backplane.health import ProbeResult
 from meho_backplane.settings import Settings, get_settings
@@ -877,8 +883,9 @@ def _extract_tenants(
     when its token carries the claim: a machine stays in its one tenant.
 
     The entries come from the trusted issuer's signed token, so they are
-    safe to log. The result is not used yet; the current tenant still
-    comes from :func:`_extract_tenant_id` and :func:`_extract_tenant_role`.
+    safe to log. When the result is not empty, :func:`_operator_from_claims`
+    takes the tenant, role and ``approver`` from it instead of the flat
+    claims (#5239).
     """
     if principal_kind in MACHINE_PRINCIPAL_KINDS:
         return ()
@@ -1464,6 +1471,29 @@ def _extract_runner_id(claims: Any, settings: Settings) -> UUID | None:
         raise _http_401("malformed_runner_id_claim") from exc
 
 
+def _start_tenant(
+    claims: Any, settings: Settings, tenants: tuple[TenantMembership, ...]
+) -> tuple[UUID, TenantRole, bool]:
+    """Return the tenant, role and ``approver`` flag the Operator starts with.
+
+    A token with a tenant list (#5239): one role group per tenant, and the
+    first entry is the start value; the flat claims are not used.
+    :func:`~meho_backplane.auth.current_tenant.select_current_tenant` then
+    picks the tenant the request names. A token without a list: today's
+    one-group check and the flat claims.
+    """
+    if tenants:
+        reject_duplicate_tenants(tenants)
+        grant = group_grant(tenants[0].group)
+        return tenants[0].tenant_id, grant.role, grant.approver
+    _reject_multiple_role_groups(claims, settings)
+    return (
+        _extract_tenant_id(claims, settings),
+        _extract_tenant_role(claims, settings),
+        _extract_approver(claims, settings),
+    )
+
+
 def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Operator:
     """Project the validated claims into the public :class:`Operator` shape.
 
@@ -1483,9 +1513,16 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     / ``missing_tenant_role_claim`` / ``unknown_tenant_role``) so the
     bare ``invalid_token`` fallback is reserved for unexpected
     pydantic validation failures (the malformed-email regression case).
-    The one-group check (``multiple_role_groups``, #4594) runs first:
-    a person in two login groups carries a ``tenant_role`` Keycloak
+    The one-group check (``multiple_role_groups``, #4594) runs before
+    them: a person in two login groups carries a ``tenant_role`` Keycloak
     picked at random, so the tenant extractors would accept it.
+
+    A token with a ``meho_tenants`` list (#5239) skips the flat
+    ``tenant_id`` / ``tenant_role`` / ``approver`` claims and the
+    ``groups`` check. The rule becomes one role group per tenant
+    (:func:`~meho_backplane.auth.current_tenant.reject_duplicate_tenants`),
+    and the Operator starts in the first entry's tenant. The caller
+    (:func:`verify_jwt_for_audience`) then picks the current tenant.
 
     ``principal_kind`` extraction is graceful only for the **absent**
     claim (→ ``user`` default, the pre-G11.2 legacy contract); a
@@ -1513,17 +1550,14 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
         raise _http_401("missing_sub")
     name = claims.get("name")
     email = claims.get("email")
-    _reject_multiple_role_groups(claims, settings)
-    tenant_id = _extract_tenant_id(claims, settings)
-    tenant_role = _extract_tenant_role(claims, settings)
     principal_kind = _extract_principal_kind(claims, settings)
+    tenants = _extract_tenants(claims, settings, principal_kind)
+    tenant_id, tenant_role, approver = _start_tenant(claims, settings, tenants)
     client_id = _extract_client_id(claims, settings, principal_kind)
     capabilities = _extract_capabilities(claims, settings)
     scopes = _extract_scopes(claims, settings)
     platform_admin = _extract_platform_admin(claims, settings)
-    approver = _extract_approver(claims, settings)
     runner_id = _extract_runner_id(claims, settings)
-    tenants = _extract_tenants(claims, settings, principal_kind)
     if principal_kind is PrincipalKind.RUNNER and runner_id is None:
         # Fail-closed pairing (Initiative #2415, #2502): a runner-kind
         # token with no ``runner_id`` cannot be scoped by the gateway
@@ -1559,6 +1593,8 @@ async def verify_jwt_for_audience(
     authorization: str | None,
     *,
     expected_audience: str,
+    requested_tenant: str | None = None,
+    allow_unchosen: bool = False,
 ) -> Operator:
     """Validate a Bearer token against an explicit ``aud`` claim value.
 
@@ -1603,6 +1639,13 @@ async def verify_jwt_for_audience(
     assumption against any real Keycloak deployment but one external
     invariant away from a bypass. Failing the check locally to the
     verifier makes the property auditable in one place.
+
+    Current tenant (#5239): *requested_tenant* is the value of the
+    ``Meho-Tenant`` header (or the web session's tenant). The last step,
+    :func:`~meho_backplane.auth.current_tenant.select_current_tenant`,
+    picks the tenant the request works in and may raise 400
+    ``tenant_not_chosen`` or 403 ``tenant_not_member`` /
+    ``tenant_not_found``. *allow_unchosen* is for the status answers only.
     """
     if not expected_audience or not expected_audience.strip():
         raise _http_401(AUDIENCE_NOT_CONFIGURED_REMEDIATION)
@@ -1613,10 +1656,42 @@ async def verify_jwt_for_audience(
         settings,
         expected_audience=expected_audience,
     )
-    return _operator_from_claims(claims, token, settings)
+    operator = _operator_from_claims(claims, token, settings)
+    return await select_current_tenant(operator, requested_tenant, allow_unchosen=allow_unchosen)
 
 
-async def verify_jwt(authorization: str | None = Header(default=None)) -> Operator:
+def header_value(value: object) -> str | None:
+    """Return *value* when it is a header string, else ``None``.
+
+    A dependency called as a plain function (not through FastAPI) gets
+    the ``Header(...)`` default object instead of a string.
+    """
+    return value if isinstance(value, str) else None
+
+
+async def verify_jwt_allow_unchosen(
+    authorization: str | None = Header(default=None),
+    meho_tenant: str | None = Header(default=None, alias=TENANT_HEADER, include_in_schema=False),
+) -> Operator:
+    """Like :func:`verify_jwt`, but a login with several tenants needs no header.
+
+    Only for the status answer behind ``meho status`` (#5239). The
+    result may have ``tenant_chosen=False``; the caller must then answer
+    with the person's tenants and do no tenant work.
+    """
+    settings = get_settings()
+    return await verify_jwt_for_audience(
+        authorization,
+        expected_audience=settings.keycloak_audience,
+        requested_tenant=header_value(meho_tenant),
+        allow_unchosen=True,
+    )
+
+
+async def verify_jwt(
+    authorization: str | None = Header(default=None),
+    meho_tenant: str | None = Header(default=None, alias=TENANT_HEADER, include_in_schema=False),
+) -> Operator:
     """FastAPI dependency: validate the Bearer token and return an Operator.
 
     Raises 401 on every failure mode — missing header, malformed
@@ -1637,11 +1712,15 @@ async def verify_jwt(authorization: str | None = Header(default=None)) -> Operat
     on the canonical "Key not found" ValueError from authlib, the JWKS
     cache is refreshed exactly once and the verify is retried. A
     second miss is a hard 401 ``invalid_token``.
+
+    The ``Meho-Tenant`` header names the current tenant (#5239); see
+    :mod:`meho_backplane.auth.current_tenant` for the rules.
     """
     settings = get_settings()
     return await verify_jwt_for_audience(
         authorization,
         expected_audience=settings.keycloak_audience,
+        requested_tenant=header_value(meho_tenant),
     )
 
 

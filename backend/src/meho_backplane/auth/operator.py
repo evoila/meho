@@ -115,10 +115,22 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
   :func:`~meho_backplane.auth.jwt._extract_tenants`. One login can list
   several tenants (``docs/decisions/2026-10-28-several-tenants-per-person.md``).
   Empty for a token without the claim and always empty for a machine
-  login (agent, service, runner). **Nothing reads it yet:** the current
-  tenant still comes from ``tenant_id`` / ``tenant_role``. The role and
-  flags of an entry come from :func:`group_grant`, the one table in code
-  that matches ``docs/decisions/login-role-groups.md``.
+  login (agent, service, runner). The role and flags of an entry come
+  from :func:`group_grant`, the one table in code that matches
+  ``docs/decisions/login-role-groups.md``. When the list is not empty,
+  ``tenant_id`` / ``tenant_role`` / ``approver`` hold the values of the
+  **current** tenant's entry, picked per request by
+  :func:`~meho_backplane.auth.current_tenant.select_current_tenant`
+  (#5239); the flat ``tenant_id`` / ``tenant_role`` / ``approver`` claims
+  are not used.
+* ``tenant_chosen`` — ``False`` only for a status answer (``meho status``,
+  ``meho_status``) of a login with several tenants that named no tenant.
+  The tenant fields then hold the first entry and must not be used for
+  any tenant work. ``True`` everywhere else.
+* ``role_from_platform_admin`` — ``True`` when a platform admin works in a
+  tenant where they have no role group, so the role (``tenant_admin``)
+  comes from the platform admin group (#5239). The audit rows of the
+  request record it as ``tenant_role_source: platform_admin``.
 
 Email validation uses pydantic's ``EmailStr`` (powered by
 ``email-validator``); a malformed ``email`` claim from Keycloak is a
@@ -321,9 +333,14 @@ class Operator(BaseModel):
     check_runner_dispatch: bool = False
     #: Every tenant the person is in, with the login group in each, in
     #: token order (#5236). Empty when the token has no ``meho_tenants``
-    #: claim, and always empty for a machine login. Not used yet: the
-    #: current tenant still comes from ``tenant_id`` / ``tenant_role``.
+    #: claim, and always empty for a machine login. The current tenant is
+    #: picked from it per request (#5239).
     tenants: tuple[TenantMembership, ...] = ()
+    #: ``False`` only for a status answer of a login with several tenants
+    #: and no chosen tenant (#5239). Never use the tenant fields then.
+    tenant_chosen: bool = True
+    #: The role comes from the platform admin group, not a role group (#5239).
+    role_from_platform_admin: bool = False
 
 
 #: Machine (non-human) principal kinds. A human operator authenticates as

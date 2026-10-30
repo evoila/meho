@@ -119,6 +119,7 @@ from meho_backplane.mcp.server import (
     McpPermissionDeniedError,
     register_method,
 )
+from meho_backplane.mcp.tenant_gate import STATUS_TOOL
 from meho_backplane.operations._validate import compute_audit_params_hash
 from meho_backplane.operations.delivery_budget import tool_result_text
 from meho_backplane.request_usage.collector import (
@@ -287,7 +288,12 @@ async def handle_tools_list(
     registry actually carries an add-on-gated tool (Task #3029), so the
     common listing stays a pure in-memory registry filter and never pays for
     a DB round-trip it can't use.
+
+    A session with no current tenant (#5239) sees only ``meho_status``.
     """
+    if not operator.tenant_chosen:
+        status_tool = get_tool(STATUS_TOOL)
+        return {"tools": [status_tool[0].to_wire()] if status_tool is not None else []}
     active_families = (
         await _active_addon_families(operator) if has_addon_gated_tools() else frozenset()
     )

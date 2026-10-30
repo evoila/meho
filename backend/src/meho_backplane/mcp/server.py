@@ -85,6 +85,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ValidationError
 
+from meho_backplane.auth.current_tenant import tenant_not_chosen_detail
 from meho_backplane.auth.operator import Operator
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.maturity import FEATURE_MATURITY_BAND
@@ -109,6 +110,7 @@ from meho_backplane.mcp.session_limit import (
     check_mcp_session_cap,
     resolve_mcp_session_cap,
 )
+from meho_backplane.mcp.tenant_gate import allowed_without_tenant
 from meho_backplane.operations.caller_gone import watch_caller
 from meho_backplane.request_usage.collector import (
     note_request_fallback_status,
@@ -1343,6 +1345,12 @@ async def _dispatch_mcp_request(request: Request, operator: Operator) -> Respons
     # are spec-defined as notification-only, so the server treats it
     # as such regardless of the envelope's id field.
     is_notification = "id" not in payload or jrpc.method.startswith("notifications/")
+    # #5239: a session with no current tenant may only start the
+    # connection and call meho_status.
+    if not allowed_without_tenant(operator, jrpc.method, jrpc.params):
+        if is_notification:
+            return Response(status_code=202)
+        return _error_response(jrpc.id, INVALID_REQUEST, tenant_not_chosen_detail(operator))
     # Request usage (#3734): label this request with its JSON-RPC method.
     # ``tools/call`` / ``resources/read`` narrow it to the tool or the
     # resource template once the handler has matched one. An unregistered

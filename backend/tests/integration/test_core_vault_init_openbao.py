@@ -224,6 +224,21 @@ def env(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Env]:
         _make_users(kc_url)
         yield env
     finally:
+        if os.environ.get("MEHO_TEST_DIAG_5425"):  # TEMPORARY (#5425), removed before merge
+            certs = "http://keycloak:8080/auth/realms/meho/protocol/openid-connect/certs"
+            probe = openbao.exec(
+                [
+                    "sh",
+                    "-c",
+                    "getent hosts keycloak; cat /etc/resolv.conf; "
+                    f"curl -sS -m 10 -o /dev/null -w 'curl http=%{{http_code}}\\n' {certs} 2>&1"
+                    f" || wget -q -T 10 -O /dev/null {certs} 2>&1; echo probe-exit=$?",
+                ]
+            )
+            print("DIAG probe:", probe.exit_code, probe.output.decode(errors="replace"))
+            out, err = openbao.get_logs()
+            lines = (out + err).decode(errors="replace").splitlines()
+            print("DIAG openbao log:\n" + "\n".join(lines[-40:]))
         openbao.stop()
         keycloak.stop()
         network.remove()

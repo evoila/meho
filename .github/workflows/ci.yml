@@ -2255,24 +2255,27 @@ jobs:
           uv run pytest -x -rs -o junit_family=xunit1 \
             --junitxml=pytest-integration-shard.xml "${SHARD_FILES[@]}"
 
-      - name: "TEMPORARY (#5425): run the OpenBao vault-init test 10 times"
+      - name: "TEMPORARY (#5425): run the OpenBao vault-init test again, with diagnostics"
         # Proof for #5425 only; removed again before merge. Each run is a new
         # pytest process, so each run starts new OpenBao and Keycloak
         # containers and does a real first setup.
-        if: matrix.shard == 1
+        if: matrix.shard == 1 || matrix.shard == 2
+        env:
+          MEHO_TEST_DIAG_5425: "1"
         run: |
+          docker version --format 'docker server {{.Server.Version}}' || true
           passed=0
-          for i in $(seq 1 10); do
-            if uv run pytest -q -rs -o tmp_path_retention_policy=failed \
+          for i in $(seq 1 3); do
+            if uv run pytest -q -rs -s -o tmp_path_retention_policy=failed \
                 tests/integration/test_core_vault_init_openbao.py; then
               passed=$((passed + 1))
-              echo "repeat ${i}/10: passed"
+              echo "repeat ${i}/3: passed"
             else
-              echo "::error::repeat ${i}/10: failed"
+              echo "::error::repeat ${i}/3: failed"
             fi
           done
-          echo "vault-init repeat: ${passed} of 10 runs passed"
-          test "${passed}" -eq 10
+          echo "vault-init repeat: ${passed} of 3 runs passed"
+          test "${passed}" -eq 3
 
       - name: Upload per-test times (input for the shard split)
         # Refresh tests/_integration_shard_durations.json from these

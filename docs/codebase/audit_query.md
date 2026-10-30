@@ -399,7 +399,7 @@ how an operator replays it.
 
 How an operator replays a client-credential run:
 
-1. `meho audit query --work-ref <ref> --json` (or
+1. `meho audit query --filter-work-ref <ref> --json` (or
    `GET /api/v1/audit/by-work-ref/{ref}`) — the rows show the shared
    `agent_session_id`. Use `--json`: the default table does not print
    that column.

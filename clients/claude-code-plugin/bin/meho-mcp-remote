@@ -84,6 +84,21 @@ if [ -z "${scopes//[[:space:]]/}" ]; then
   scopes="$default_scopes"
 fi
 
+# The current tenant (#5242). A login can list several tenants, and MEHO
+# works in one of them per request: the one the Meho-Tenant header names (a
+# tenant name or ID). MEHO_TENANT sets it for every request of this session.
+# To work in another tenant, change MEHO_TENANT and start a new session.
+# Unset, empty or whitespace-only sends no header: a person with one tenant
+# needs no setting. mcp-remote keeps a separate saved login per header
+# value, so the first session in a new tenant asks for a browser login.
+tenant="${MEHO_TENANT:-}"
+tenant="${tenant#"${tenant%%[![:space:]]*}"}"
+tenant="${tenant%"${tenant##*[![:space:]]}"}"
+tenant_args=()
+if [ -n "$tenant" ]; then
+  tenant_args=(--header "Meho-Tenant: $tenant")
+fi
+
 # Vendor mcp-remote from the committed lockfile instead of resolving it fresh
 # from npm semver ranges at each launch. This shim performs the OAuth 2.1 +
 # PKCE handshake and holds the operator's live backplane session, so its
@@ -162,11 +177,13 @@ fi
 # Run mcp-remote through the login guard (lib/login-guard.mjs, #3961). The
 # guard loads the vendored entry in the same process and hands it the same
 # argv as before: the URL plus the static-OAuth client id and scope
-# metadata. On top, it stops a connect that does not finish within
-# MEHO_MCP_LOGIN_TIMEOUT seconds (default 300), so an unfinished browser
-# login never holds the callback port forever. And when the login expires
+# metadata, and the Meho-Tenant header when MEHO_TENANT is set. On top, it
+# stops a connect that does not finish within MEHO_MCP_LOGIN_TIMEOUT seconds
+# (default 300), so an unfinished browser login never holds the callback
+# port forever. And when the login expires
 # during a session, the failed call gets a clear message that says what to
 # do. mcp-remote owns this process's stdio from here.
 exec node "$plugin_root/lib/login-guard.mjs" "$entry" "$url" \
   --static-oauth-client-info "{\"client_id\": \"$client_id\"}" \
-  --static-oauth-client-metadata "{\"scope\": \"$scopes\"}"
+  --static-oauth-client-metadata "{\"scope\": \"$scopes\"}" \
+  ${tenant_args[@]+"${tenant_args[@]}"}

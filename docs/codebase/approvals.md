@@ -2278,9 +2278,14 @@ Do not treat the `approval.approved` step event as proof that the step
 worked. It only says that a person approved. Use it to know when to read
 `/result`, then check the result.
 
-An agent run already works this way: it waits at each approval before it
-takes its next step. The automation add-on does the same for multi-step
-work.
+An agent run does **not** give this guarantee by itself. It waits at each
+approval for the decision, not for the run. Only one caller may run an
+approved request (`claim_resume`, #2293). When the waiting agent wins, it
+runs the step itself and gets the result. When an operator surface such as
+`/decide` wins, the agent gets `already_resumed` at once
+(`agent/approval_wait.py`), while the operator's run may still be going.
+So an agent that sees `already_resumed` must still poll `/result` and
+check `result.status` is `ok` before it sends the next step.
 
 ### Pattern 2: one change ticket, sent in order, approved with the ordered group action
 

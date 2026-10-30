@@ -2224,6 +2224,13 @@ async def test_vmware_8_0_pin_falls_back_to_9_0_sibling_for_9_x_target(
     assert [a.payload["connector_version"] for a in audits] == ["9.0"]
 
 
+_NOT_ON_8_0_REASON = (
+    "this operation is not available for vmware 8.0.3: connector vmware-rest-8.0 "
+    "serves this target and does not have this operation; use search_operations "
+    "on connector vmware-rest-8.0 to find a typed operation for this target"
+)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sibling_state", ["absent", "disabled"])
 async def test_vmware_sibling_fallback_keeps_rejection_when_op_not_enabled_there(
@@ -2248,10 +2255,10 @@ async def test_vmware_sibling_fallback_keeps_rejection_when_op_not_enabled_there
 
     assert result.status == "error"
     assert result.extras["error_code"] == "unqualified_target_version"
-    assert result.extras["reason"] == (
-        "target version is outside the supported 9.x catalog boundary"
-        "; use connector vmware-rest-8.0 for this target"
-    )
+    # #5069: the reason does not send the caller to vmware-rest-8.0, which
+    # would answer unknown_op. It says the op is not offered for the target.
+    assert result.extras["reason"] == _NOT_ON_8_0_REASON
+    assert "use connector" not in result.error
     assert result.extras["target_product"] == "vmware"
     assert result.extras["target_version"] == "8.0.3"
     assert _RecordingVmwareTransport.sent == []
@@ -2304,7 +2311,126 @@ async def test_vmware_sibling_fallback_skips_typed_descriptors(
     )
 
     assert result.extras["error_code"] == "unqualified_target_version"
+    # The typed op on vmware-rest-8.0 can run, so the hint to use it stays.
+    assert result.extras["reason"].endswith("; use connector vmware-rest-8.0 for this target")
     assert _RecordingVmwareTransport.sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_state_on_9_0", ["enabled", "disabled"])
+async def test_vmware_8_0_unknown_op_does_not_name_a_catalog_that_refuses_the_target(
+    op_state_on_9_0: str,
+    session: AsyncSession,
+) -> None:
+    """On an 8.0.x target, ``unknown_op`` on vmware-rest-8.0 does not name vmware-rest-9.0.
+
+    vmware-rest-9.0 refuses the 8.0.x target for its ingested ops, so naming
+    it would send the caller in a circle (#5069). The error points at
+    ``search_operations`` instead, for both the call and the preview.
+    """
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(
+        session,
+        requires_approval=False,
+        version="9.0",
+        is_enabled=op_state_on_9_0 == "enabled",
+    )
+    target = _FakeTarget(product="vmware", version="8.0.3")
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-8.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=target,
+        params={},
+    )
+    preview = await preview_dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-8.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=target,
+        params={},
+    )
+
+    assert result.extras["error_code"] == "unknown_op"
+    assert result.extras["connectors_with_op"] == []
+    assert result.error is not None
+    assert "vmware-rest-9.0" not in result.error
+    assert "Use search_operations on connector 'vmware-rest-8.0'" in result.error
+    assert preview["status"] == "error"
+    assert preview["error"] == result.error
+    assert preview["extras"] == result.extras
+    assert _RecordingVmwareTransport.sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_version", [None, "9.0.1"])
+async def test_vmware_8_0_unknown_op_names_9_0_when_it_accepts_the_target_or_no_target(
+    target_version: str | None,
+    session: AsyncSession,
+) -> None:
+    """With no target, or a target vmware-rest-9.0 serves, the #4031 hint stays."""
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+    target = None if target_version is None else _FakeTarget(product="vmware", version="9.0.1")
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-8.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=target,
+        params={},
+    )
+    preview = await preview_dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-8.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=target,
+        params={},
+    )
+
+    assert result.extras["error_code"] == "unknown_op"
+    assert result.extras["connectors_with_op"] == ["vmware-rest-9.0"]
+    assert result.error is not None
+    assert "This operation exists on connector(s) vmware-rest-9.0." in result.error
+    assert preview["error"] == result.error
+    assert preview["extras"] == result.extras
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sibling_state", ["absent", "disabled"])
+async def test_vmware_preview_gives_the_not_available_reason_like_the_call(
+    sibling_state: str,
+    session: AsyncSession,
+) -> None:
+    """The preview refuses with the same #5069 reason as the call."""
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="9.0")
+    if sibling_state == "disabled":
+        await _add_vmware_guard_descriptor(
+            session, requires_approval=False, version="8.0", is_enabled=False
+        )
+    target = _FakeTarget(product="vmware", version="8.0.3")
+
+    preview = await preview_dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=target,
+        params={},
+    )
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=target,
+        params={},
+    )
+
+    assert preview["extras"]["error_code"] == "unqualified_target_version"
+    assert preview["extras"]["reason"] == _NOT_ON_8_0_REASON
+    assert preview["error"] == result.error
+    assert preview["extras"] == result.extras
 
 
 @pytest.mark.asyncio

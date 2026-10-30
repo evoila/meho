@@ -416,6 +416,7 @@ async def rerun_failed_request(
                 error=f"rerun_failed: the run stopped with {type(exc).__name__}",
                 duration_ms=0.0,
             ),
+            parked_op_id=request.op_id,
         )
         raise
     return RerunOutcome(attempt=attempt, result=cast(OperationResult, result))

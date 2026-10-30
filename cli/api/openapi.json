@@ -146,7 +146,7 @@
           "health"
         ],
         "summary": "Authenticated Health",
-        "description": "Federation-proof authenticated health check (OPERATOR-gated).\n\nSee module docstring for the four-step chain this exercises. The\n``Depends(require_role(TenantRole.OPERATOR))`` dependency wraps\n``verify_jwt_and_bind`` \u2014 the JWT is validated *and*\n``operator_sub`` is bound into structlog contextvars before the\nrole check runs \u2014 and then enforces least privilege: every call\nhere federates a live per-operator Vault credential and reads a\nKV secret, which is not a ``read_only``-rank capability. Callers\nbelow OPERATOR receive 403 ``insufficient_role`` before any Vault\ninteraction; monitoring principals poll ``/health/live`` instead.",
+        "description": "Federation-proof authenticated health check (OPERATOR-gated).\n\nSee module docstring for the four-step chain this exercises. The\n:func:`_status_operator` dependency runs ``verify_jwt_and_bind`` and\nthe ``require_role(TenantRole.OPERATOR)`` check \u2014 the JWT is validated *and*\n``operator_sub`` is bound into structlog contextvars before the\nrole check runs \u2014 and then enforces least privilege: every call\nhere federates a live per-operator Vault credential and reads a\nKV secret, which is not a ``read_only``-rank capability. Callers\nbelow OPERATOR receive 403 ``insufficient_role`` before any Vault\ninteraction; monitoring principals poll ``/health/live`` instead.\n\nA login with several tenants and no chosen tenant (#5239) skips the\nrole check and gets only its tenants and roles (no Vault call).",
         "operationId": "authenticated_health_api_v1_health_get",
         "parameters": [
           {
@@ -24143,6 +24143,11 @@
             "format": "uuid",
             "nullable": true,
             "title": "Audit Id"
+          },
+          "guidance": {
+            "type": "string",
+            "nullable": true,
+            "title": "Guidance"
           }
         },
         "type": "object",
@@ -24150,7 +24155,8 @@
           "resumed_at",
           "result_status",
           "error_code",
-          "audit_id"
+          "audit_id",
+          "guidance"
         ],
         "title": "ApprovalResumeOutcomeView",
         "description": "What happened when an approved request ran (#3543).\n\nA summary read off the stored result envelope. The result body and the\nfree-text error stay on the owner-only ``/result`` read."
@@ -32704,10 +32710,20 @@
           "tenant_id": {
             "type": "string",
             "format": "uuid",
+            "nullable": true,
             "title": "Tenant Id"
           },
           "tenant_role": {
-            "$ref": "#/components/schemas/TenantRole"
+            "$ref": "#/components/schemas/TenantRole",
+            "nullable": true
+          },
+          "tenants": {
+            "items": {
+              "$ref": "#/components/schemas/TenantEntry"
+            },
+            "type": "array",
+            "title": "Tenants",
+            "default": []
           }
         },
         "type": "object",
@@ -32719,7 +32735,7 @@
           "tenant_role"
         ],
         "title": "OperatorIdentity",
-        "description": "Operator identity surface exposed to the CLI and MCP ``meho_status``.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only.\n\n``tenant_id`` + ``tenant_role`` (#2746) let a connected MCP session\nconfirm *which tenant and role it runs as* from inside the session \u2014\nthe check the clean-room program's \"logged in as operator, not\ntenant_admin\" discipline needs, and the identity the ``meho_status``\ntool's own doc (``docs/cross-repo/mcp-client-setup.md`` Step 4)\nalready promises. Both are always present on the validated\n:class:`Operator` (JWT claims), so the surface can never omit them;\nthey serialise as a UUID string / role value under\n``model_dump(mode=\"json\")`` \u2014 the same wire shape the\n``meho://tenant/<id>/info`` resource returns."
+        "description": "Operator identity surface exposed to the CLI and MCP ``meho_status``.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only.\n\n``tenant_id`` + ``tenant_role`` (#2746) let a connected MCP session\nconfirm *which tenant and role it runs as* from inside the session \u2014\nthe check the clean-room program's \"logged in as operator, not\ntenant_admin\" discipline needs, and the identity the ``meho_status``\ntool's own doc (``docs/cross-repo/mcp-client-setup.md`` Step 4)\nalready promises. Both are always present on the validated\n:class:`Operator` (JWT claims), so the surface can never omit them;\nthey serialise as a UUID string / role value under\n``model_dump(mode=\"json\")`` \u2014 the same wire shape the\n``meho://tenant/<id>/info`` resource returns.\n\n``tenants`` (#5239) lists every tenant of the person, with the role\nin each, when the token carries a tenant list (empty otherwise). A\nlogin with several tenants that chose none gets ``tenant_id`` and\n``tenant_role`` as ``None``: the status answer then only lists the\ntenants."
       },
       "OrderBy": {
         "properties": {
@@ -34004,6 +34020,12 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Extras"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Updated At"
           }
         },
         "type": "object",
@@ -37397,6 +37419,35 @@
         ],
         "title": "TemplateSummary",
         "description": "Operator-readable summary row surfaced by ``meho_runbook_list_templates``.\n\nThe list-view projection -- enough to identify a template and its\nlifecycle state without loading the full step list (which\n:class:`ShowTemplateResponse` carries)."
+      },
+      "TenantEntry": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "tenant_role": {
+            "$ref": "#/components/schemas/TenantRole"
+          },
+          "current": {
+            "type": "boolean",
+            "title": "Current"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "name",
+          "tenant_role",
+          "current"
+        ],
+        "title": "TenantEntry",
+        "description": "One tenant of the person, with the role there (#5239).\n\n``current`` is ``True`` for the tenant this request works in."
       },
       "TenantFlightRecorderPolicy": {
         "properties": {

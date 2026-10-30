@@ -389,7 +389,7 @@ meho agent-principal revoke <name> [flags]
 
 ## `meho approvals`
 
-Manage approval requests (list / show / approve / reject / withdraw)
+Manage approval requests (list / show / result / approve / reject / withdraw)
 
 ```
 meho approvals
@@ -434,6 +434,17 @@ meho approvals reject <id> [flags]
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--json` — emit raw JSON response instead of summary
 - `--reason` — optional rationale for the rejection; the command help explains the Instructed-by: layout
+
+### `meho approvals result`
+
+Show the output of an approved operation
+
+```
+meho approvals result <id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit the raw JSON answer instead of the human-readable view
 
 ### `meho approvals show`
 

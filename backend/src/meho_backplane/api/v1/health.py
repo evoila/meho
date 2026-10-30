@@ -83,10 +83,11 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.jwt import verify_jwt_allow_unchosen
+from meho_backplane.auth.operator import Operator, TenantRole, group_grant
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.checks.watchdog import sensor_runner_liveness
 from meho_backplane.connector_packages import ConnectorPackage, installed_connector_packages
@@ -149,6 +150,20 @@ _FEDERATION_PROOF_GSM_SECRET: str = "meho-test-federation"
 _FEDERATION_PROOF_TARGET_NAME: str = "health-federation-proof"
 
 
+class TenantEntry(BaseModel):
+    """One tenant of the person, with the role there (#5239).
+
+    ``current`` is ``True`` for the tenant this request works in.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    tenant_id: UUID
+    name: str
+    tenant_role: TenantRole
+    current: bool
+
+
 class OperatorIdentity(BaseModel):
     """Operator identity surface exposed to the CLI and MCP ``meho_status``.
 
@@ -166,6 +181,12 @@ class OperatorIdentity(BaseModel):
     they serialise as a UUID string / role value under
     ``model_dump(mode="json")`` — the same wire shape the
     ``meho://tenant/<id>/info`` resource returns.
+
+    ``tenants`` (#5239) lists every tenant of the person, with the role
+    in each, when the token carries a tenant list (empty otherwise). A
+    login with several tenants that chose none gets ``tenant_id`` and
+    ``tenant_role`` as ``None``: the status answer then only lists the
+    tenants.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -173,8 +194,30 @@ class OperatorIdentity(BaseModel):
     sub: str
     name: str | None
     email: str | None
-    tenant_id: UUID
-    tenant_role: TenantRole
+    tenant_id: UUID | None
+    tenant_role: TenantRole | None
+    tenants: list[TenantEntry] = []
+
+
+def _operator_identity(operator: Operator) -> OperatorIdentity:
+    """Build the identity block, with the person's tenants (#5239)."""
+    chosen = operator.tenant_chosen
+    return OperatorIdentity(
+        sub=operator.sub,
+        name=operator.name,
+        email=operator.email,
+        tenant_id=operator.tenant_id if chosen else None,
+        tenant_role=operator.tenant_role if chosen else None,
+        tenants=[
+            TenantEntry(
+                tenant_id=entry.tenant_id,
+                name=entry.name,
+                tenant_role=group_grant(entry.group).role,
+                current=chosen and entry.tenant_id == operator.tenant_id,
+            )
+            for entry in operator.tenants
+        ],
+    )
 
 
 class VaultStatus(BaseModel):
@@ -544,7 +587,7 @@ router = APIRouter(prefix="/api/v1", tags=["health"])
 #: Module-level dependency singleton (sibling-router convention, and
 #: what keeps ruff B008 happy): resolves the OPERATOR rank once at
 #: import time so a typo'd role fails at boot, not per-request.
-_require_operator = Depends(require_role(TenantRole.OPERATOR))
+_operator_role_check = require_role(TenantRole.OPERATOR)
 
 
 #: Vault exception class names that indicate a login-phase failure (the
@@ -884,18 +927,14 @@ async def build_health_response(operator: Operator) -> HealthResponse:
     this directly with the :class:`Operator` the MCP dispatcher already
     resolved.
     """
+    if not operator.tenant_chosen:
+        return await _tenant_not_chosen_response(operator)
     log = structlog.get_logger()
     vault_status = await _probe_federation(operator, log)
     db_state = await db_migration_status()
     approvals, features = _approvals_and_features()
     return HealthResponse(
-        operator=OperatorIdentity(
-            sub=operator.sub,
-            name=operator.name,
-            email=operator.email,
-            tenant_id=operator.tenant_id,
-            tenant_role=operator.tenant_role,
-        ),
+        operator=_operator_identity(operator),
         vault=vault_status,
         db=_db_status(db_state),
         mcp_session_id_capture=mcp_session_id_capture_mode(),
@@ -910,6 +949,23 @@ async def build_health_response(operator: Operator) -> HealthResponse:
         features=features,
         connector_packages=list(installed_connector_packages()),
         operation_catalog=await _operation_catalog_status(),
+    )
+
+
+async def _tenant_not_chosen_response(operator: Operator) -> HealthResponse:
+    """The status answer for a login with several tenants that chose none (#5239).
+
+    It lists the person's tenants with the role in each, plus the database
+    state. It runs no tenant work: no credential check, no add-on
+    pairings, no tool list. The ``vault`` detail says why the check was
+    skipped.
+    """
+    db_state = await db_migration_status()
+    return HealthResponse(
+        operator=_operator_identity(operator),
+        vault=VaultStatus(reachable=False, read_ok=False, detail="tenant_not_chosen"),
+        db=_db_status(db_state),
+        mcp_session_id_capture=mcp_session_id_capture_mode(),
     )
 
 
@@ -952,32 +1008,46 @@ async def liveness(
     """
     db_state = await db_migration_status()
     return LivenessResponse(
-        operator=OperatorIdentity(
-            sub=operator.sub,
-            name=operator.name,
-            email=operator.email,
-            tenant_id=operator.tenant_id,
-            tenant_role=operator.tenant_role,
-        ),
+        operator=_operator_identity(operator),
         db=_db_status(db_state),
         sensor_runner=_sensor_runner_status(),
     )
 
 
+async def _status_operator(
+    request: Request,
+    operator: Operator = Depends(verify_jwt_allow_unchosen),
+) -> Operator:
+    """The caller of ``GET /api/v1/health``, which may have no current tenant (#5239).
+
+    With a current tenant: the usual bind step and the OPERATOR role
+    check. A login with several tenants and no ``Meho-Tenant`` header is
+    passed on with ``tenant_chosen=False`` and nothing bound: the answer
+    only lists the person's tenants, so there is no tenant to record.
+    """
+    if not operator.tenant_chosen:
+        return operator
+    bound = await verify_jwt_and_bind(request, operator)
+    return _operator_role_check(bound)
+
+
 @router.get("/health", response_model=HealthResponse)
 async def authenticated_health(
-    operator: Operator = _require_operator,
+    operator: Operator = Depends(_status_operator),
 ) -> HealthResponse:
     """Federation-proof authenticated health check (OPERATOR-gated).
 
     See module docstring for the four-step chain this exercises. The
-    ``Depends(require_role(TenantRole.OPERATOR))`` dependency wraps
-    ``verify_jwt_and_bind`` — the JWT is validated *and*
+    :func:`_status_operator` dependency runs ``verify_jwt_and_bind`` and
+    the ``require_role(TenantRole.OPERATOR)`` check — the JWT is validated *and*
     ``operator_sub`` is bound into structlog contextvars before the
     role check runs — and then enforces least privilege: every call
     here federates a live per-operator Vault credential and reads a
     KV secret, which is not a ``read_only``-rank capability. Callers
     below OPERATOR receive 403 ``insufficient_role`` before any Vault
     interaction; monitoring principals poll ``/health/live`` instead.
+
+    A login with several tenants and no chosen tenant (#5239) skips the
+    role check and gets only its tenants and roles (no Vault call).
     """
     return await build_health_response(operator)

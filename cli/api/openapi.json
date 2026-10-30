@@ -1228,7 +1228,7 @@
           "targets"
         ],
         "summary": "Describe Target",
-        "description": "Describe a target by name or alias.\n\nUses :func:`~meho_backplane.targets.resolver.resolve_target` so\ncallers can pass any alias instead of the canonical name. Returns\n404 with near-misses when nothing matches.",
+        "description": "Describe a target by name, alias or id.\n\nUses :func:`_resolve_route_target`: exact name, then alias, then\nid (only when the value is a UUID). Returns 404 with near-misses\nwhen nothing matches.",
         "operationId": "describe_target_api_v1_targets__name__get",
         "parameters": [
           {
@@ -1279,7 +1279,7 @@
           "targets"
         ],
         "summary": "Update Target",
-        "description": "Partially update a target.\n\nOnly fields present in the request body are modified (Pydantic\n``exclude_unset``). ``name`` is not patchable \u2014 rename a target by\ndeleting and re-creating it (v0.2 decision). ``product`` is patchable\nas of G0.14-T4 (#1145); the new value is validated against the\nregistered connector products and an unknown product yields a\nstructured 422 listing the ``valid_products`` so an operator\ntypo-correcting a misregistered target sees the same actionable\ndiagnostic at PATCH time that they would see at probe time.\n``updated_at`` is always refreshed on a successful write.\n\n#2091. An explicit non-null ``secret_ref`` outside the operator's\ntenant subtree is rejected with a structured 422\n(``kind=\"secret_ref_outside_tenant_scope\"``) \u2014 the same write-time\ngate as POST. An explicit ``{\"secret_ref\": null}`` (clear) and a\nPATCH not sending the field are untouched; no-op when the guard is\ndisabled. See :func:`_enforce_secret_ref_tenant_scope`.",
+        "description": "Partially update a target.\n\nOnly fields present in the request body are modified (Pydantic\n``exclude_unset``). ``name`` is not patchable \u2014 rename a target by\ndeleting and re-creating it (v0.2 decision). ``product`` is patchable\nas of G0.14-T4 (#1145); the new value is validated against the\nregistered connector products and an unknown product yields a\nstructured 422 listing the ``valid_products`` so an operator\ntypo-correcting a misregistered target sees the same actionable\ndiagnostic at PATCH time that they would see at probe time.\n``updated_at`` is always refreshed on a successful write.\n\n#2091. An explicit non-null ``secret_ref`` outside the operator's\ntenant subtree is rejected with a structured 422\n(``kind=\"secret_ref_outside_tenant_scope\"``) \u2014 the same write-time\ngate as POST. An explicit ``{\"secret_ref\": null}`` (clear) and a\nPATCH not sending the field are untouched; no-op when the guard is\ndisabled. See :func:`_enforce_secret_ref_tenant_scope`. The path\nvalue is a name, an alias or an id (:func:`_resolve_route_target`).",
         "operationId": "update_target_api_v1_targets__name__patch",
         "parameters": [
           {
@@ -1340,7 +1340,7 @@
           "targets"
         ],
         "summary": "Delete Target",
-        "description": "Soft-delete a target.\n\nG0.14-T4 (#1145) \u2014 recovery path for misregistered targets\n(signal 6 in ``claude-rdc-hetzner-dc#697``). Stamps\n``deleted_at`` on the row instead of removing it so the\nappend-only :attr:`AuditLog.target_id` soft-FK keeps pointing\nat *something* (audit is append-only per v0.1-spec \u00a76); every\nread path filters ``deleted_at IS NULL`` so the row is\ninvisible to dispatch / probe / list / discover after the\nDELETE returns.\n\nCascade-check: counts ``graph_node.target_id`` references\n(G9.1-T1 #448 substrate) and defaults to **409 with the\ncount + a ``?force=true`` hint** when the target is wired\ninto the topology graph. ``?force=true`` proceeds with the\nsoft-delete anyway \u2014 the FK is\n``ON DELETE SET NULL`` so the graph rows survive the delete\nsafely; the operator confirms by passing ``force=true``.\nAudit references are not counted because the audit table\naccumulates a row per authenticated request against the\ntarget and would always block the delete.\n\nReturns 204 on success. The audit row is written by the\n:class:`~meho_backplane.audit.AuditMiddleware` with\n``audit_op_id='targets.delete'`` (mirrors the\n``meho_connector_edit_*`` precedent so cross-tenant audit\nqueries can filter by op id prefix).\n\nRe-deletes collapse to 404 \u2014 the second DELETE goes through\n:func:`~meho_backplane.targets.resolver.resolve_target`\nwhich filters ``deleted_at IS NULL``, so the row no longer\nresolves once the first DELETE flushes.\n\n``tenant_admin`` role required (cross-tenant DELETE returns\nthe standard 404 conflation that :func:`resolve_target`\nenforces).",
+        "description": "Soft-delete a target.\n\nG0.14-T4 (#1145) \u2014 recovery path for misregistered targets\n(signal 6 in ``claude-rdc-hetzner-dc#697``). Stamps\n``deleted_at`` on the row instead of removing it so the\nappend-only :attr:`AuditLog.target_id` soft-FK keeps pointing\nat *something* (audit is append-only per v0.1-spec \u00a76); every\nread path filters ``deleted_at IS NULL`` so the row is\ninvisible to dispatch / probe / list / discover after the\nDELETE returns.\n\nCascade-check: counts ``graph_node.target_id`` references\n(G9.1-T1 #448 substrate) and defaults to **409 with the\ncount + a ``?force=true`` hint** when the target is wired\ninto the topology graph. ``?force=true`` proceeds with the\nsoft-delete anyway \u2014 the FK is\n``ON DELETE SET NULL`` so the graph rows survive the delete\nsafely; the operator confirms by passing ``force=true``.\nAudit references are not counted because the audit table\naccumulates a row per authenticated request against the\ntarget and would always block the delete.\n\nReturns 204 on success. The audit row is written by the\n:class:`~meho_backplane.audit.AuditMiddleware` with\n``audit_op_id='targets.delete'`` (mirrors the\n``meho_connector_edit_*`` precedent so cross-tenant audit\nqueries can filter by op id prefix).\n\nThe path value is a name, an alias or an id (see\n:func:`_resolve_route_target`). Re-deletes collapse to 404 \u2014\nevery lookup step filters ``deleted_at IS NULL``, so the row no\nlonger resolves once the first DELETE flushes.\n\n``tenant_admin`` role required (cross-tenant DELETE, by name or\nby id, returns the standard 404).",
         "operationId": "delete_target_api_v1_targets__name__delete",
         "parameters": [
           {
@@ -1434,7 +1434,7 @@
           "targets"
         ],
         "summary": "Probe Target",
-        "description": "Invoke the registered connector's ``fingerprint`` method for a target.\n\nThe probe verb returns the connector's\n:class:`~meho_backplane.connectors.schemas.FingerprintResult` and\npersists it to ``targets.fingerprint`` so the G0.6 resolver (#388)\ncan pick an implementation without re-probing the live target.\nConnector selection uses\n:func:`~meho_backplane.connectors.resolver.resolve_connector_or_label`\nso this route and the dispatcher consult the same v2 registry\nthrough the same tie-break ladder (G0.14-T1 #1142). Returns:\n\n* **501** when the resolver reports ``no_connector``. ``detail``\n  carries the resolver's exception message naming the target's\n  product slug + the absence of a matching candidate.\n* **409** when the resolver reports ``ambiguous_connector``.\n  ``detail`` carries the resolver's exception message naming the\n  candidate set and the remediation step (set\n  ``target.preferred_impl_id`` to one of them).\n* **500** with the structured ``fingerprint_failed`` envelope from\n  :func:`_build_fingerprint_failed_detail` when the resolved\n  connector's :meth:`fingerprint` raises (G0.15-T1 #1210; mirrors\n  the dispatcher's ``connector_error`` envelope at the route\n  boundary so probe + dispatch agree on the shape of a connector\n  failure \u2014 sub-signal A of ``claude-rdc-hetzner-dc#753``).\n\nNo error branch writes to the DB row; the previously-cached\nfingerprint survives. The outer ``async with session.begin()``\nrolls back on every structured raise (nothing has been flushed by\nthat point), so the column always reflects the *last successful*\nprobe. The target must exist for the probe to fire \u2014 a\nnon-existent target returns 404 via ``resolve_target``.",
+        "description": "Invoke the registered connector's ``fingerprint`` method for a target.\n\nThe probe verb returns the connector's\n:class:`~meho_backplane.connectors.schemas.FingerprintResult` and\npersists it to ``targets.fingerprint`` so the G0.6 resolver (#388)\ncan pick an implementation without re-probing the live target.\nConnector selection uses\n:func:`~meho_backplane.connectors.resolver.resolve_connector_or_label`\nso this route and the dispatcher consult the same v2 registry\nthrough the same tie-break ladder (G0.14-T1 #1142). Returns:\n\n* **501** when the resolver reports ``no_connector``. ``detail``\n  carries the resolver's exception message naming the target's\n  product slug + the absence of a matching candidate.\n* **409** when the resolver reports ``ambiguous_connector``.\n  ``detail`` carries the resolver's exception message naming the\n  candidate set and the remediation step (set\n  ``target.preferred_impl_id`` to one of them).\n* **500** with the structured ``fingerprint_failed`` envelope from\n  :func:`_build_fingerprint_failed_detail` when the resolved\n  connector's :meth:`fingerprint` raises (G0.15-T1 #1210; mirrors\n  the dispatcher's ``connector_error`` envelope at the route\n  boundary so probe + dispatch agree on the shape of a connector\n  failure \u2014 sub-signal A of ``claude-rdc-hetzner-dc#753``).\n\nNo error branch writes to the DB row, so the column always\nreflects the *last successful* probe. The path value is a name,\nan alias or an id (:func:`_resolve_route_target`); no match is 404.",
         "operationId": "probe_target_api_v1_targets__name__probe_post",
         "parameters": [
           {
@@ -33993,6 +33993,13 @@
             "nullable": true,
             "title": "Tls Server Name"
           },
+          "secret_field_map": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Secret Field Map"
+          },
           "extras": {
             "additionalProperties": true,
             "type": "object",
@@ -36809,6 +36816,13 @@
             "nullable": true,
             "title": "Tls Server Name"
           },
+          "secret_field_map": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Secret Field Map"
+          },
           "extras": {
             "additionalProperties": true,
             "type": "object",
@@ -36996,6 +37010,20 @@
             "nullable": true,
             "title": "Tls Server Name"
           },
+          "secret_field_map": {
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "propertyNames": {
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "type": "object",
+            "maxProperties": 50,
+            "title": "Secret Field Map"
+          },
           "extras": {
             "additionalProperties": true,
             "type": "object",
@@ -37123,6 +37151,13 @@
             "nullable": true,
             "title": "Tls Server Name"
           },
+          "secret_field_map": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Secret Field Map"
+          },
           "fingerprint": {
             "additionalProperties": true,
             "type": "object",
@@ -37247,6 +37282,22 @@
             "maxLength": 512,
             "nullable": true,
             "title": "Tls Server Name"
+          },
+          "secret_field_map": {
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1,
+              "nullable": true
+            },
+            "propertyNames": {
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "type": "object",
+            "maxProperties": 50,
+            "nullable": true,
+            "title": "Secret Field Map"
           },
           "extras": {
             "additionalProperties": true,

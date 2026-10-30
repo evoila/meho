@@ -70,7 +70,8 @@ Mapping rules the importer applies:
 - **Recognised top-level keys** map 1:1 to real columns: `name`,
   `aliases`, `product`, `host`, `port`, `fqdn`, `secret_ref`,
   `auth_model`, `vpn_required`, `notes`, `preferred_impl_id`,
-  `verify_tls`, `tls_ca_pin`, `tls_server_name`, `extras`.
+  `verify_tls`, `tls_ca_pin`, `tls_server_name`, `secret_field_map`,
+  `extras`.
 - **`name`, `product`, and `host` are required** and validated
   locally before any HTTP request.
 - **Unknown keys are not errors** — they spill into the target's
@@ -86,6 +87,29 @@ Mapping rules the importer applies:
   `extras.exception_message`.
 
 You can leave `secret_ref` out entirely — see the next section.
+
+### Use a secret with different field names
+
+A connector reads fixed field names from the secret. For example, SSH
+reads `ssh_private_key` and `username`. If your secret already holds the
+right values under other names, you do not need a copy. Tell MEHO which
+field to read instead with `secret_field_map`:
+
+```yaml
+targets:
+  - name: web-01
+    product: linux
+    host: web-01.example.com
+    secret_field_map:
+      ssh_private_key: private_key   # the connector field: the field in your secret
+      username: login
+```
+
+On the CLI, use `--secret-field ssh_private_key=private_key` with
+`meho targets add`, `meho targets update` or `meho targets import`.
+`meho targets probe` then checks that every field the map points to
+exists in the secret. It names any missing field, never a value. For SSH,
+a field named `private_key` also works with no map at all.
 
 ## Stage the secret
 
@@ -263,5 +287,11 @@ Real failure modes, with the errors they actually produce:
     credential's path instead of a read: it proves the path resolves
     and the policy allows access while returning version numbers,
     never values.
+
+    To check that copies of one secret still match (for example after
+    a password change), use `vault.kv.compare` for two or more Vault
+    paths, or `k8s.secret.compare_to_ref` for a Kubernetes Secret key
+    and its Vault copy. They answer only "same" or "different" per
+    copy, never a value or a hash.
 
 **Next:** [Run your first operations](first-operations.md).

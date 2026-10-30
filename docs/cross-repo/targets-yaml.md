@@ -397,6 +397,7 @@ of this section for the bug history (PR #362's review on issue
 | `flight_recorder_capture` | top-level column | per-target flight-recorder capture setting: leave it out to inherit, `true` for on, `false` for off (#3272) |
 | `preferred_impl_id` | top-level column | G0.3-T1.5 (#477) amendment — G0.6 resolver tie-break override |
 | `verify_tls`, `tls_ca_pin`, `tls_server_name` | top-level column | per-target TLS trust (#1780 / #1784) and SNI / cert-verification hostname (#2002, mapped by #2643) — set `tls_server_name` to the cert's FQDN when the appliance is reached by IP |
+| `secret_field_map` | top-level column | `{connector_field: source_field}` (#3711) — read the secret's `source_field` when the connector asks for `connector_field`; field names only |
 | `extras` (explicit block) | `extras` JSONB | merges with the spilled-extras map from unknown keys; no warning |
 | `fingerprint` | dropped with warning | server-managed; only the probe verb writes it |
 | any other key | spilled into `extras` JSONB, with a warning | the consumer's `sso_realm`, `kubeconfig_field`, `account`, `project_id` land here. The import prints one warning per key (#3649), so a typo or a missing column is visible. Move the key under `extras:` to silence it |

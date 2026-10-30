@@ -1572,6 +1572,7 @@ got one in #4850; `k8s.secret.update` came later with its own builder
 | `sddc.host.validate` | an agent's call | host count; per host: `fqdn`, `username`, `storageType`, `networkPoolId` | the ESXi password and any other spec field |
 | `sddc.host.commission` | every call | the same as `sddc.host.validate` | the same |
 | `holodeck.router.patch` | every call | HoloRouter version, whether the call only checks (`verify_only`, a 9.1 router), the patch ids and the module file each one edits | nothing secret exists; the op takes no params |
+| `secret.handoff.import` | every call | the store target name (the other instance's Vault), the sink `{kind, ref}`, `expect_sha256`, the reason | the one-time handoff token (`connectors/secret/handoff_preview.py`) |
 | `vmware.composite.vm.guest.file.read` | an agent's call | VM, guest path, whether MEHO downloads the bytes (`fetch_content`, `max_inline_bytes`), the guest login's store path (`guest_secret_ref`) | the guest login |
 
 `k8s.secret.delete` is not a credential write (its params are only the
@@ -2139,10 +2140,10 @@ shows every state. An empty list names the state it filtered on and points
 to `--status all` (#5129). `--limit` / `--offset` go to the server as
 `limit` / `offset`. When `--offset` skips every match, the empty message
 says the page is empty and points to a smaller `--offset`, so it does not
-claim the tenant has no requests. When `--work-ref` matches nothing, the
+claim the tenant has no requests. When `--filter-work-ref` matches nothing, the
 empty message names the change ticket and points to removing the filter,
 for the same reason. `--order oldest|newest` picks the sort (#3596). It
-defaults to newest first, but to **oldest first when `--work-ref` is
+defaults to newest first, but to **oldest first when `--filter-work-ref` is
 set**, so the steps of one change ticket read in the order they were sent.
 
 ### Operator console (`backend/src/meho_backplane/ui/routes/approvals/`)
@@ -2268,7 +2269,7 @@ shows that order on the surfaces an approver uses. Nothing here changes what
   pending requests under its `work_ref`. A read error only drops the two
   fields (fail-open, like the event itself).
 - **CLI.** `meho approvals list --order oldest|newest`; oldest is the
-  default when `--work-ref` is set (see the CLI section above).
+  default when `--filter-work-ref` is set (see the CLI section above).
 
 ### Structured `proposed_effect` render in the modal (#2447)
 
@@ -2564,6 +2565,34 @@ each write runs once).
 
 A direct (non-composite) park is unchanged — `resume_parent` is NULL, so
 the resume keeps the generic re-dispatch of the stored `op_id`.
+
+#### The approved run acts on what the approver saw (#5202)
+
+A park stores the request's parameters (hash-pinned) and the preview its
+builder computed (`proposed_effect.preview`). The re-run gets only the
+parameters. When a parameter is a *name* that the preview resolved to an
+id, a re-run that looks the name up again may act on another object than
+the one the approver saw (a rename, or a deleted and re-created item).
+
+So `composite_resume_binding` also binds, for every park (direct or
+sub-op) and for the whole re-run, `approved_preview_var`
+(`operations/_preview.py`) with the parked op id and the stored computed
+preview (`{}` when the park stored none). A handler reads it with
+`approved_preview(op_id)`:
+
+- `None`: an ordinary dispatch, or the re-run of a different op (a sub-op
+  park re-runs its parent composite, which must not read the sub-op's
+  preview as its own). The handler resolves live.
+- a dict: the approved run of this op. The handler must act on what the
+  preview shows, and refuse (send nothing) when the preview shows no id,
+  because the approver then saw no object at all.
+
+First user: `vmware.composite.vm.cdrom.mount_library_iso`, whose mount by
+item name reads the pinned `library_item` from its preview and answers
+`item_not_pinned` without it. Tests:
+`test_resume_binding_hands_the_approved_preview_to_the_parked_op` in
+`test_operations_subop_policy_gate.py` and the `after_approval` tests in
+`test_connectors_vmware_rest_composites_cdrom_library_iso.py`.
 
 #### Both resume surfaces read `resume_parent` (#3421)
 

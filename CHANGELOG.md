@@ -294,7 +294,10 @@ before you upgrade.
   more Keycloak roles once; the bootstrap Job names them (#5322).
 - Install form 2: a run of `install.sh` on an installed machine now
   updates it, and `--os-packages <file>` installs signed OS updates with
-  no network (#5287).
+  no network (#5287). `meho-host uninstall` removes the kernel settings
+  file and the `etcd` user and group that the install made. On a machine
+  installed before this release, the `etcd` user and group stay, and a
+  note names the commands that remove them (#5414).
 - phpIPAM connector (`phpipam-rest-1.x`, hand-written operations):
   `phpipam.subnet.list`, `phpipam.subnet.free_addresses`,
   `phpipam.address.reserve` (waits for approval) and
@@ -330,7 +333,8 @@ before you upgrade.
   `vmware.content_library.find` and `vmware.content_library.item.find`
   (#5196); `vmware.host.datastores` (#5191);
   `vmware.composite.datastore.vsan.folder.list` lists vSAN folders and
-  their files (#5320).
+  their files (#5320); `vmware.datacenter.list` lists the datacenters of
+  a vCenter with their cluster, host and datastore counts (#5345).
 - SDDC Manager: `sddc.domain.validation.get` and
   `sddc.host.validation.get` read a check's result by id (#5194).
 - VCF Automation: `vcfa.provider.role.create` refuses a VM Apps org

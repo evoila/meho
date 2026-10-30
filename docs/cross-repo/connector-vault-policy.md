@@ -315,6 +315,8 @@ replace), `vault.kv.patch` (merge fields onto the current version), and
 ([`connectors/vault/ops.py`](../../backend/src/meho_backplane/connectors/vault/ops.py)).
 `vault.kv.metadata.delete` (evoila/meho#3424) adds the permanent removal of
 a whole secret: every version and its metadata.
+`vault.kv.folder.delete` (evoila/meho#3939) soft-deletes many secrets under
+one folder with one approval.
 These ops register `requires_approval=True`, so a human/operator write
 parks for a four-eyes review before it executes. **The review is wasted
 if the write then hits Vault `permission denied`** — the templated §2
@@ -377,6 +379,17 @@ path "secret/delete/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
 path "secret/metadata/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
   capabilities = ["read", "delete"]
 }
+
+# Only if this identity may soft-delete a whole folder at once
+# (`vault.kv.folder.delete`, evoila/meho#3939). The op lists the folder
+# again when it runs (`list`) and reads each secret's versions (`read`)
+# on the /metadata/ path. It also needs `update` on the /delete/ path,
+# which the second stanza above already grants. If you also use the
+# permanent-removal stanza above, put all three rights in one block:
+# ["list", "read", "delete"].
+path "secret/metadata/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
+  capabilities = ["list", "read"]
+}
 ```
 
 Notes:
@@ -415,6 +428,16 @@ Notes:
   dedicated teardown role ([vault-provisioning.md](vault-provisioning.md)
   §8). Destroying single versions (`PUT <mount>/destroy/<path>`) is still
   **not** a wired op and needs no grant.
+- **`vault.kv.folder.delete` needs `list` and `read` on the
+  `/metadata/` path and `update` on the `/delete/` path** (the fourth
+  and the second stanza above). `list` lets the op walk the folder.
+  `read` lets it see which versions are still live. `update` on
+  `/delete/` is the same soft delete as `vault.kv.delete`. Before the
+  call waits for approval, MEHO checks these rights for every listed
+  key and every sub-folder the walk visits, and refuses with
+  `write_capability_denied` when one is missing on any of them. When
+  you grant this and permanent removal, use one block with all three
+  rights.
 - The **same per-operator templating constraints** from §2 apply: no
   glob inside the rendered `{{identity...}}` segment; the trailing `/*`
   is a literal glob in the static path portion.
@@ -525,11 +548,14 @@ caveat). The contract a deploy must satisfy is therefore:
 | Write (`vault.kv.patch`) | same | `read` + `update` on `secret/data/…/{{identity…}}/*` (§6.1); it reads before it writes and never needs `create` |
 | Write (`vault.kv.delete` version soft-delete) | same | `update` on the data path (§6.1) |
 | Write (`vault.kv.metadata.delete` permanent removal) | same | `read` + `delete` on `secret/metadata/…/{{identity…}}/*` (§6.1) |
+| Write (`vault.kv.folder.delete` soft-delete a folder) | same | `list` + `read` on `secret/metadata/…/{{identity…}}/*` and `update` on `secret/delete/…/{{identity…}}/*` (§6.1) |
 | Write (`vault.token.role.write` create or change a token role) | same | `create` + `update` on `auth/token/roles/<role>` (§6.4) |
 | Read (`vault.token.role.read` / `vault.token.role.list`) | same | `read` on `auth/token/roles/<role>`; `list` on `auth/token/roles` (§6.4) |
 | Write (`vault.auth.jwt.role.write` create or change a JWT/OIDC login role) | same | `create` + `read` + `update` on `auth/<mount>/role/<role>` (§6.5) |
 | Read (`vault.auth.jwt.role.read` / `.role.list` / `.config.read`) | same | `read` on `auth/<mount>/role/<role>` and `auth/<mount>/config`; `list` on `auth/<mount>/role` (§6.5) |
 | Write (`vault.sys.policy.delete` delete one Vault policy) | same; use a target whose `vault_role` has this rule, not `meho-mcp` | `delete` on `sys/policy/<name>` ([vault-remove-tenant.md](vault-remove-tenant.md) step 4) |
+| Delete (`vault.identity.oidc.role.delete` / `vault.identity.oidc.key.delete`) | same | `delete` on `identity/oidc/role/<name>` or `identity/oidc/key/<name>` (§6.7) |
+| Read (`vault.identity.oidc.role.*` / `vault.identity.oidc.key.*` list and read) | same | `read` on the role or key path; `list` on `identity/oidc/role` or `identity/oidc/key` (§6.7) |
 
 A deploy that follows only the §2 read grant provisions **read-only** and
 discovers the missing write grant *after* an operator approves a parked
@@ -606,7 +632,7 @@ Notes:
 - **Nothing here lets the identity make tokens.** Making a token from a
   role is a separate operation with its own grant on `auth/token/create`
   (and `auth/token/create/<role>`); this section only covers the role
-  settings. §6.7 covers making a token from a role.
+  settings. §6.8 covers making a token from a role.
 
 ### 6.5 JWT/OIDC login roles (`vault.auth.jwt.*`)
 
@@ -726,7 +752,52 @@ vault token capabilities "secret/data/tenants/<tenant-uuid>/<register_as>"
 # Expect: create read update
 ```
 
-### 6.7 Make a token from a role and store it (`vault.token.create_and_store`)
+### 6.7 Identity token roles and keys (`vault.identity.oidc.*`)
+
+Vault signs identity tokens (JWTs) that another system, such as a cloud
+provider, trusts. A **role** under `identity/oidc/role/<name>` says which
+**key** under `identity/oidc/key/<name>` signs its tokens and who the
+token audience is. MEHO lists, reads and deletes both. The deletes are
+dangerous and wait until a person approves. Like §6.4, the rules go into
+the policy of the role that will manage them (the target's `vault_role`),
+not into the shared read policy of every operator:
+
+```hcl
+# List the names (`vault.identity.oidc.role.list` / `.key.list`).
+path "identity/oidc/role" {
+  capabilities = ["list"]
+}
+path "identity/oidc/key" {
+  capabilities = ["list"]
+}
+
+# Read and delete one role (`vault.identity.oidc.role.read` / `.delete`).
+# Replace <name> with the role this identity may remove.
+path "identity/oidc/role/<name>" {
+  capabilities = ["read", "delete"]
+}
+
+# Read and delete one key (`vault.identity.oidc.key.read` / `.delete`).
+path "identity/oidc/key/<name>" {
+  capabilities = ["read", "delete"]
+}
+```
+
+Notes:
+
+- **Check before approval.** Before MEHO asks for approval of a delete, it
+  runs the §6.2 `sys/capabilities-self` probe on the role or key path under
+  the target's role. When `delete` is missing, the call is refused with
+  `error_code: "write_capability_denied"` and no approval request is
+  written.
+- **Delete the role before its key.** Vault refuses to delete a key while
+  a role still uses it. MEHO then returns `connector_error` with
+  `exception_class: "VaultOidcKeyInUseError"`, and the `remediation` names
+  the roles. Vault never deletes the key named `default`.
+- **The trust on the other side stays.** Deleting the role stops new
+  tokens. The system that trusted those tokens keeps its own trust
+  setting until someone removes it there.
+### 6.8 Make a token from a role and store it (`vault.token.create_and_store`)
 
 `vault.token.create_and_store` makes a Vault token from a token role and
 writes it straight to a Vault KV path or to one key of an existing

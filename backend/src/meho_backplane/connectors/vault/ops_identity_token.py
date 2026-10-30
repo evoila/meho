@@ -6,7 +6,10 @@
 The identity surface (entity / entity-alias / group lifecycle) lives in
 :mod:`meho_backplane.connectors.vault.ops_identity`; the token surface
 (create / revoke_accessor / list_accessors / lookup_accessor) lives in
-:mod:`meho_backplane.connectors.vault.ops_token`; the token-role surface
+:mod:`meho_backplane.connectors.vault.ops_token`; the identity token role
+and key surface (``identity/oidc/role`` and ``identity/oidc/key`` list /
+read / delete, also in the ``identity`` group) lives in
+:mod:`meho_backplane.connectors.vault.ops_identity_oidc`; the token-role surface
 (role.write / role.read / role.list, also in the ``token`` group) lives
 in :mod:`meho_backplane.connectors.vault.ops_token_role`; the
 make-and-store op (``vault.token.create_and_store``, also in the ``token``
@@ -40,6 +43,7 @@ from meho_backplane.connectors.vault.ops_identity import (
     vault_identity_group_write,
     vault_identity_list,
 )
+from meho_backplane.connectors.vault.ops_identity_oidc import IDENTITY_OIDC_OP_SPECS
 from meho_backplane.connectors.vault.ops_token import (
     TOKEN_OP_SPECS,
     TOKEN_WHEN_TO_USE,
@@ -88,6 +92,7 @@ async def register_vault_identity_token_operations(
     """Upsert the Vault identity + token ops into ``endpoint_descriptor``.
 
     Walks :data:`~meho_backplane.connectors.vault.ops_identity.IDENTITY_OP_SPECS`,
+    :data:`~meho_backplane.connectors.vault.ops_identity_oidc.IDENTITY_OIDC_OP_SPECS`,
     :data:`~meho_backplane.connectors.vault.ops_token.TOKEN_OP_SPECS` and
     :data:`~meho_backplane.connectors.vault.ops_token_role.TOKEN_ROLE_OP_SPECS`,
     selecting the group's ``when_to_use`` blurb per spec. Idempotent: a
@@ -100,6 +105,7 @@ async def register_vault_identity_token_operations(
     """
     specs: tuple[dict[str, Any], ...] = (
         *IDENTITY_OP_SPECS,
+        *IDENTITY_OIDC_OP_SPECS,
         *TOKEN_OP_SPECS,
         *TOKEN_ROLE_OP_SPECS,
         *TOKEN_STORE_OP_SPECS,

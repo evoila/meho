@@ -1419,7 +1419,9 @@ narrow-waist contract.
   MCP-only. Whenever the op resolved, the human output also prints one
   plain line with the risk level and what MEHO would do with this call
   for this caller and target (#3973 / #4923) — for example "Risk level:
-  dangerous. This call waits for approval." — and `--json` carries
+  dangerous. This call waits for approval. A second person must approve
+  it." The line says a second person must approve only for `dangerous`
+  and `destructive`, where that is always true (#4963). `--json` carries
   `safety_level`, `requires_approval`, `policy_verdict` and
   `policy_reason`. The verb exits 1 on a non-ok
   envelope (`status="error"` for input faults, `status="unavailable"` for
@@ -1603,9 +1605,8 @@ add` (Task #2862) for a single target without authoring a YAML file —
 the earlier blanket deferral of a standalone `create` verb (#1574 /
 #1559) is lifted for the single-target create case only. `meho targets
 update` (Task #3854) changes one target through `PATCH
-/api/v1/targets/{name}`. No standalone `delete` verb is surfaced yet,
-though the API supports `DELETE /api/v1/targets/{name}`
-(`tenant_admin`).
+/api/v1/targets/{name}`, and `meho targets delete` (Task #3943)
+removes one through `DELETE /api/v1/targets/{name}`.
 
 ### Subcommands
 
@@ -1651,6 +1652,25 @@ though the API supports `DELETE /api/v1/targets/{name}`
   cannot be both set and cleared (all exit 4). Server errors use the shared
   `renderHTTPStatus` ladder (404 near-misses, 409 ambiguous alias, 422
   body verbatim). Same `doAuthedRequest` plumbing as `add`.
+- `meho targets delete <name-or-alias> [--force] [--confirm]`
+  (Task #3943) — calls `DELETE /api/v1/targets/{name}` (`tenant_admin`).
+  The server soft-deletes: it sets `deleted_at`, so the row stays and
+  audit rows still point at it, but no read path or call finds it any
+  more. The system itself and its Vault secret are not touched. Without
+  `--confirm` the verb asks y/N on stdin first; closed stdin counts as
+  no, and a decline exits 0 without a request (`--json` prints
+  `{"name", "status": "declined", "force"}`). With `--json` the question
+  goes to the terminal, not to stdout or stderr, so both streams hold
+  only JSON; when a program pipes the answer in, no question is printed.
+  When topology nodes
+  (`graph_node` rows) still point at the target, the server answers 409
+  `target_has_references` with the count; the CLI turns it into a plain
+  message ("This target is linked from 3 topology nodes. The nodes
+  stay, but they will point at a deleted target. Run again with --force
+  to delete it anyway.", exit 4). `--force` sends `?force=true`; the
+  nodes stay and keep the deleted target's id. Any other 409
+  (ambiguous alias) and 404 near-misses go through the shared
+  `renderHTTPStatus` ladder. Same `doAuthedRequest` plumbing as `add`.
 - `meho targets list [--product P] [--limit N] [--cursor C]` — calls
   `GET /api/v1/targets`. Renders the operator's tenant-scoped targets
   as a `NAME / ALIASES / PRODUCT / HOST` table. Results are keyset-
@@ -1744,12 +1764,9 @@ verbatim.
 
 ### Out of scope (v0.2)
 
-- A standalone `delete` verb. The API supports
-  `DELETE /api/v1/targets/{name}` (`tenant_admin`); the CLI surfaces it
-  in a follow-up task when operators ask. Single-target **create** ships
-  as `meho targets add` (Task #2862) and single-target **update** as
-  `meho targets update` (Task #3854); bulk reconciliation of updates
-  stays with `meho targets import --update`.
+- Bulk delete. `meho targets delete` (Task #3943) removes one target
+  per call; bulk reconciliation of updates stays with
+  `meho targets import --update`.
 - Auto-completion of target names. Operators type names; tab-completion
   would need a separate `cobra-complete`-style design pass.
 - Client-side caching. Every CLI invocation hits the API fresh — the

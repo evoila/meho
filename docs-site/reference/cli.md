@@ -4685,7 +4685,7 @@ meho status [flags]
 
 ## `meho targets`
 
-Operate the MEHO targets registry (add / update / list / describe / probe / import / discover)
+Operate the MEHO targets registry (add / update / delete / list / describe / probe / import / discover)
 
 ```
 meho targets
@@ -4716,6 +4716,19 @@ meho targets add <name> [flags]
 - `--tls-server-name` — TLS SNI / certificate-verification hostname, decoupled from --host
 - `--verify-tls` — verify the target's TLS certificate; pass --verify-tls=false to opt out
 - `--version` — operator-asserted product version (e.g. 9.0) the resolver consults before the first probe
+
+### `meho targets delete`
+
+Delete one target (the row is kept for the audit log)
+
+```
+meho targets delete <name|alias> [flags]
+```
+
+- `--backplane` — backplane URL the target lives in (defaults to the URL recorded by `meho login`)
+- `--confirm` — skip the stdin confirmation prompt
+- `--force` — delete even when topology nodes point at the target (the nodes stay)
+- `--json` — emit a machine-readable envelope instead of the human line
 
 ### `meho targets describe`
 

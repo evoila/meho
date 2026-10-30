@@ -20,8 +20,12 @@
 # SCOPE. The handful of ops the local wrapper covers, per the #2079
 # acceptance criteria: list/get servers, vSwitch get + membership,
 # per-server firewall get/set, reverse DNS, and the server_addon order.
-# The read GETs (server list/get, vswitch list/get, firewall get, rdns)
-# and the two vSwitch membership writes (POST/DELETE
+# Plus the four list reads the curated core also needs (#4963): IPs,
+# subnets, failover IPs and SSH keys. Without them the curation stops
+# before it writes the agent guidance for every curated op.
+# The read GETs (server list/get, ip, subnet, vswitch list/get,
+# failover, firewall get, rdns, key) and the two vSwitch membership
+# writes (POST/DELETE
 # /vswitch/{vswitch-id}/server, #3973) are the ops the curated core
 # enables (connectors/hetzner_robot/core_ops.py, ROBOT_CORE_OPS). The
 # other writes stay switched off: the vSwitch rename / VLAN change (POST
@@ -40,9 +44,9 @@
 # WIRE PATHS. Robot's REST paths are flat (one resource per root segment)
 # and MUST be reproduced verbatim -- the dispatcher addresses the real
 # Webservice with the persisted `path` / `op_id` (op_id = `METHOD:path`).
-# The GET op_ids here (GET:/server, GET:/server/{server-ip},
-# GET:/vswitch, GET:/vswitch/{vswitch-id}, GET:/firewall/{server-ip},
-# GET:/rdns) match the paths in ROBOT_CORE_OPS so the ingested rows and
+# The GET op_ids here (GET:/server, GET:/server/{server-ip}, GET:/ip,
+# GET:/subnet, GET:/vswitch, GET:/vswitch/{vswitch-id}, GET:/failover,
+# GET:/firewall/{server-ip}, GET:/rdns, GET:/key) match the paths in ROBOT_CORE_OPS so the ingested rows and
 # the curated core agree on the same op_id strings. Every path (template
 # segments included) is reconciled against the pinned vendor reference by
 # tests/test_connectors_hetzner_robot_spec_reconcile.py; the {server-ip}
@@ -66,8 +70,9 @@ info:
   version: "2026.04"
   description: >-
     MEHO-authored minimal subset of the Hetzner Robot Webservice REST API.
-    Covers the dedicated-server inventory, vSwitch, per-server firewall,
-    reverse-DNS, and server_addon-order operations MEHO ingests; not a full
+    Covers the dedicated-server inventory, IP, subnet, failover IP, SSH key,
+    vSwitch, per-server firewall, reverse-DNS, and server_addon-order
+    operations MEHO ingests; not a full
     vendor spec (the vendor publishes no OpenAPI document). Authenticates
     with HTTP Basic against the dedicated Webservice user, distinct from the
     Robot portal login user. SPDX-License-Identifier: Apache-2.0.
@@ -113,6 +118,54 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ServerEnvelope"
+  /ip:
+    get:
+      operationId: listIps
+      summary: List single IP addresses
+      description: >-
+        List the single IP addresses of the account. Each entry carries the
+        IP, the main IP and number of the server it belongs to, the lock
+        status, and the traffic warning limits.
+      parameters:
+        - name: server_ip
+          in: query
+          required: false
+          description: Show only the IP addresses of the server with this main IP.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: A list of IP addresses.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/IpEnvelope"
+  /subnet:
+    get:
+      operationId: listSubnets
+      summary: List subnets
+      description: >-
+        List the subnets of the account. Each entry carries the network
+        address, the mask, the gateway, the server it is routed to, the
+        failover flag, the lock status, and the traffic warning limits.
+      parameters:
+        - name: server_ip
+          in: query
+          required: false
+          description: Show only the subnets of the server with this main IP.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: A list of subnets.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SubnetEnvelope"
   /vswitch:
     get:
       operationId: listVswitches
@@ -246,6 +299,24 @@ paths:
       responses:
         "200":
           description: Change accepted. Robot sends no response body.
+  /failover:
+    get:
+      operationId: listFailovers
+      summary: List failover IPs
+      description: >-
+        List the failover IPs of the account. Each entry carries the failover
+        address and netmask, the server it belongs to, and the server it
+        routes to now (active_server_ip). Robot allows 100 calls per hour
+        for this read.
+      responses:
+        "200":
+          description: A list of failover IPs.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FailoverEnvelope"
   /firewall/{server-ip}:
     get:
       operationId: getFirewall
@@ -329,6 +400,23 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RdnsEnvelope"
+  /key:
+    get:
+      operationId: listKeys
+      summary: List SSH keys
+      description: >-
+        List the SSH public keys stored in Robot. Each entry carries the key
+        name, fingerprint, algorithm type, size, the key data in OpenSSH
+        format, and the creation date.
+      responses:
+        "200":
+          description: A list of SSH keys.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/KeyEnvelope"
   /order/server_addon/transaction:
     post:
       operationId: orderServerAddon
@@ -380,6 +468,131 @@ components:
         cancelled:
           type: boolean
         paid_until:
+          type: string
+    IpEnvelope:
+      type: object
+      description: The Robot Webservice wraps each IP under an ``ip`` key.
+      properties:
+        ip:
+          $ref: "#/components/schemas/Ip"
+    Ip:
+      type: object
+      description: A single IP address of the account.
+      properties:
+        ip:
+          type: string
+        server_ip:
+          type: string
+          description: Main IP of the server the address belongs to.
+        server_number:
+          type: integer
+        locked:
+          type: boolean
+        separate_mac:
+          type: string
+          nullable: true
+          description: Separate MAC address, or null when none is set.
+        traffic_warnings:
+          type: boolean
+        traffic_hourly:
+          type: integer
+          description: Hourly traffic limit in MB.
+        traffic_daily:
+          type: integer
+          description: Daily traffic limit in MB.
+        traffic_monthly:
+          type: integer
+          description: Monthly traffic limit in GB.
+    SubnetEnvelope:
+      type: object
+      description: The Robot Webservice wraps each subnet under a ``subnet`` key.
+      properties:
+        subnet:
+          $ref: "#/components/schemas/Subnet"
+    Subnet:
+      type: object
+      description: A subnet of the account.
+      properties:
+        ip:
+          type: string
+          description: Network address of the subnet.
+        mask:
+          type: integer
+          description: Subnet mask in CIDR notation (prefix length).
+        gateway:
+          type: string
+        server_ip:
+          type: string
+          nullable: true
+          description: Main IP of the server the subnet is routed to.
+        server_number:
+          type: integer
+        failover:
+          type: boolean
+          description: True when the subnet is a failover subnet.
+        locked:
+          type: boolean
+        traffic_warnings:
+          type: boolean
+        traffic_hourly:
+          type: integer
+          description: Hourly traffic limit in MB.
+        traffic_daily:
+          type: integer
+          description: Daily traffic limit in MB.
+        traffic_monthly:
+          type: integer
+          description: Monthly traffic limit in GB.
+    FailoverEnvelope:
+      type: object
+      description: The Robot Webservice wraps each failover IP under a ``failover`` key.
+      properties:
+        failover:
+          $ref: "#/components/schemas/Failover"
+    Failover:
+      type: object
+      description: A failover IP and where it routes to.
+      properties:
+        ip:
+          type: string
+          description: Failover net address.
+        netmask:
+          type: string
+        server_ip:
+          type: string
+          description: Main IP of the server the failover IP belongs to.
+        server_ipv6_net:
+          type: string
+          description: Main IPv6 net of the server the failover IP belongs to.
+        server_number:
+          type: integer
+        active_server_ip:
+          type: string
+          description: Main IP of the server the failover IP routes to now.
+    KeyEnvelope:
+      type: object
+      description: The Robot Webservice wraps each SSH key under a ``key`` key.
+      properties:
+        key:
+          $ref: "#/components/schemas/Key"
+    Key:
+      type: object
+      description: An SSH public key stored in Robot.
+      properties:
+        name:
+          type: string
+        fingerprint:
+          type: string
+        type:
+          type: string
+          description: Key algorithm type, for example ED25519 or RSA.
+        size:
+          type: integer
+          description: Key size in bits.
+        data:
+          type: string
+          description: The public key in OpenSSH format.
+        created_at:
           type: string
     VswitchEnvelope:
       type: object

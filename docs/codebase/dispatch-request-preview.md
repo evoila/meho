@@ -173,7 +173,11 @@ carries, unhashed: `safety_level` (`safe` / `caution` / `dangerous` /
 policy gate for this caller and target, and `policy_reason` (the gate's
 reason, or `null` when it gives none — a person's call that runs at once).
 The CLI prints them as one plain line, for example
-"Risk level: dangerous. This call waits for approval." Why: before #4923 a
+"Risk level: dangerous. This call waits for approval. A second person must
+approve it." The CLI adds the last sentence only for `dangerous` and
+`destructive` (#4963): the requester can never approve those. At a lower
+level the requester may approve their own call when self-approval is
+turned on (`APPROVAL_ALLOW_SELF_APPROVAL=true`). Why: before #4923 a
 preview looked the same whether the call would run at once or wait for
 approval, and an operator in a lab only found out with a second command
 (`meho operation search --op-id`).

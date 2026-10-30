@@ -70,6 +70,8 @@ _EXPECTED_OP_IDS: tuple[str, ...] = (
     "vmware.composite.datastore.refresh",
     # Datastore file list read (#3432).
     "vmware.composite.datastore.file.list",
+    # vSAN folder list read (#4022).
+    "vmware.composite.datastore.vsan.folder.list",
     "vmware.composite.network.portgroup.audit",
     # VM CPU / memory limit + reservation read (#3880).
     "vmware.composite.vm.resource_allocation.show",
@@ -108,6 +110,10 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     "vmware.composite.datastore.file.list": (
         "meho_backplane.connectors.vmware_rest.composites._datastore_list."
         "datastore_file_list_composite"
+    ),
+    "vmware.composite.datastore.vsan.folder.list": (
+        "meho_backplane.connectors.vmware_rest.composites._datastore_vsan."
+        "datastore_vsan_folder_list_composite"
     ),
     "vmware.composite.network.portgroup.audit": (
         "meho_backplane.connectors.vmware_rest.composites._read.network_portgroup_audit_composite"
@@ -153,6 +159,7 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.datastore.usage": "storage",
     "vmware.composite.datastore.refresh": "storage",
     "vmware.composite.datastore.file.list": "storage",
+    "vmware.composite.datastore.vsan.folder.list": "storage",
     "vmware.composite.network.portgroup.audit": "networking",
     "vmware.composite.vm.resource_allocation.show": "vm",
     "vmware.composite.vm.guest.process.list": "guest_ops",
@@ -563,7 +570,7 @@ async def test_register_vmware_composite_operations_is_idempotent(
             .scalars()
             .all()
         )
-    assert len(rows) == 16
+    assert len(rows) == 17
 
 
 # ---------------------------------------------------------------------------

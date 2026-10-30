@@ -63,15 +63,19 @@ global):
      persisted ``summary`` / ``description`` / ``custom_description``
      / ``tags`` matches the incoming hash) -- **skip the embedding
      compute**, UPDATE non-embedding fields (parameter_schema,
-     response_schema, safety_level, requires_approval,
-     llm_instructions, handler_ref, group_id, tags-when-unchanged)
-     when changed, advance ``updated_at``. The "skip re-embed"
+     response_schema, llm_instructions, handler_ref, group_id,
+     tags-when-unchanged) when changed, advance ``updated_at``.
+     ``safety_level`` and ``requires_approval`` only move up: a
+     stricter value saved on the row (for example by an operator,
+     #5037) stays. The "skip re-embed"
      branch is the operationally critical path for connector init
      speed on restart -- a connector with 50 typed ops avoids 50
      ONNX inferences (~500-2500 ms total CPU) every pod restart
      when descriptions are unchanged.
    * **Existing row, body changed** -- compute the embedding,
-     UPDATE every body-derived field plus ``embedding``.
+     UPDATE every body-derived field plus ``embedding``. The same
+     only-move-up rule applies to ``safety_level`` and
+     ``requires_approval``.
 
 6. Commit (helper-owned session) or flush (caller-owned session).
 
@@ -126,6 +130,7 @@ fail-fast deployment shape the chassis tasks already established.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -135,9 +140,11 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
+from meho_backplane.connector_packages import connector_package_of
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations._handler_resolve import import_handler
@@ -270,18 +277,38 @@ def clear_typed_op_snapshot() -> None:
     _TYPED_OP_SNAPSHOT = None
 
 
+#: The group keys ``(product, version, impl_id, group_key)`` already handled
+#: in the running registrar pass. Some connectors hand a different
+#: ``when_to_use`` to the same group from different ops. Only the first
+#: text of a pass is the group's code text, the same text a fresh install
+#: writes, so later calls in the pass leave the row alone. ``None`` outside
+#: a pass: then every call counts as the first.
+_GROUPS_SEEN_IN_PASS: ContextVar[set[tuple[str, str, str, str]] | None] = ContextVar(
+    "_GROUPS_SEEN_IN_PASS", default=None
+)
+
+
+def code_text_hash(text: str) -> str:
+    """Return the SHA-256 hex digest of a group text, as stored in ``code_text_hash``."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 async def _run_registrars(
     *,
     embedding_service: EmbeddingService | None,
 ) -> None:
     """Invoke every registered registrar in order (the real, un-amortized pass)."""
     log = structlog.get_logger(__name__)
-    for registrar in _TYPED_OP_REGISTRARS:
-        log.info(
-            "typed_op_registrar_running",
-            registrar=f"{registrar.__module__}.{registrar.__qualname__}",
-        )
-        await registrar(embedding_service=embedding_service)
+    token = _GROUPS_SEEN_IN_PASS.set(set())
+    try:
+        for registrar in _TYPED_OP_REGISTRARS:
+            log.info(
+                "typed_op_registrar_running",
+                registrar=f"{registrar.__module__}.{registrar.__qualname__}",
+            )
+            await registrar(embedding_service=embedding_service)
+    finally:
+        _GROUPS_SEEN_IN_PASS.reset(token)
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:
@@ -598,8 +625,10 @@ type CompositeOpHandler = Callable[..., Awaitable[dict[str, Any] | OperationResu
 # on :attr:`EndpointDescriptor.safety_level` so the helper rejects
 # invalid values at the Python boundary rather than at commit time
 # (where the IntegrityError message names the constraint, not the
-# field that produced it).
-_VALID_SAFETY_LEVELS: frozenset[str] = frozenset({"safe", "caution", "dangerous", "destructive"})
+# field that produced it). The rank orders the levels from least to
+# most strict.
+_SAFETY_RANK: dict[str, int] = {"safe": 0, "caution": 1, "dangerous": 2, "destructive": 3}
+_VALID_SAFETY_LEVELS: frozenset[str] = frozenset(_SAFETY_RANK)
 
 
 class HandlerRefError(ValueError):
@@ -861,6 +890,21 @@ def _validate_op_id(op_id: str) -> str:
     return op_id
 
 
+def _raise_saved_settings(
+    existing: EndpointDescriptor, *, safety_level: str, requires_approval: bool
+) -> None:
+    """Move the row's risk level and approval flag up, never down (#5037).
+
+    A saved row may carry a stricter value than the registrar's default,
+    for example one an operator set. Registration keeps it. A registrar
+    that wants a lower value cannot lower it here; the operator edits the
+    op instead.
+    """
+    if _SAFETY_RANK[safety_level] > _SAFETY_RANK[existing.safety_level]:
+        existing.safety_level = safety_level
+    existing.requires_approval = existing.requires_approval or requires_approval
+
+
 def _validate_safety_level(safety_level: str) -> str:
     """Validate ``safety_level`` is one of the bounded enum values.
 
@@ -968,15 +1012,16 @@ async def _resolve_or_create_group(
     default at this boundary makes the structural gap impossible to
     silently re-introduce.
 
-    First-write-wins on the existing-row branch: a caller-supplied
-    ``when_to_use`` is **not** written back to a row that already
-    exists. Curation iteration in normal flow happens during code
-    review (the string lives in source; the row is recreated on a
-    fresh database, which #731's required-kwarg gate ensures every
-    new deployment hits). The earlier UPDATE-on-different-string
-    branch this helper carried was dropped in T4b iter-2 to match
-    sibling PR #757 (T4a)'s explicitly-documented first-write-wins
-    contract -- the two designs cannot both ship.
+    Text refresh on the existing-row branch (#4332): the row keeps the
+    SHA-256 of the code text MEHO last wrote (``code_text_hash``). When
+    the row's text still matches that hash, no operator changed it, so a
+    new code text replaces it. When an operator edited the text
+    (``meho connector edit-group``), the hash no longer matches and the
+    row stays as the operator wrote it, also when a later code text
+    happens to equal the operator's text. The write is a conditional
+    ``UPDATE``: it only lands when the row still holds the text and hash
+    read above, so an operator edit saved through another instance in
+    between is kept. See :func:`_refresh_code_text`.
 
     Concurrency note: two concurrent connectors registering against
     the same ``group_key`` race here. The partial unique index
@@ -998,11 +1043,14 @@ async def _resolve_or_create_group(
         )
     )
     existing = result.scalar_one_or_none()
+    seen = _GROUPS_SEEN_IN_PASS.get()
+    key = (product, version, impl_id, group_key)
+    first_in_pass = seen is None or key not in seen
+    if seen is not None:
+        seen.add(key)
     if existing is not None:
-        # First-write-wins: a caller-supplied ``when_to_use`` is not
-        # written back to an existing row (see docstring). Curation
-        # iteration happens through code review + redeploy on a fresh
-        # database, not by re-running registrations on a live DB.
+        if first_in_pass:
+            await _refresh_code_text(session, existing, when_to_use, now)
         return existing.id
 
     # Title-case the dotted key for the default name -- ``"vm-lifecycle"``
@@ -1019,6 +1067,7 @@ async def _resolve_or_create_group(
         group_key=group_key,
         name=name,
         when_to_use=when_to_use,
+        code_text_hash=code_text_hash(when_to_use),
         review_status="enabled",
         created_at=now,
         updated_at=now,
@@ -1027,6 +1076,74 @@ async def _resolve_or_create_group(
     # Flush so ``group.id`` is populated for the descriptor's FK.
     await session.flush()
     return group.id
+
+
+async def _refresh_code_text(
+    session: AsyncSession, group: OperationGroup, code_text: str, now: datetime
+) -> None:
+    """Bring an existing group row up to the current code text, unless an operator edited it.
+
+    * The row's hash is set and does not match its text: an operator
+      edited the text. Leave the row alone, also when ``code_text`` now
+      equals the operator's text. Storing that hash would make the row
+      look like MEHO wrote it, and the next code text would overwrite
+      the operator's choice.
+    * The row already holds ``code_text``: only store its hash, so a later
+      code change can refresh the row.
+    * The row's text matches its stored hash: MEHO wrote it and no
+      operator changed it. Write ``code_text`` and its hash.
+    * Otherwise (no hash and a text MEHO cannot prove it shipped): leave
+      the row alone.
+
+    The write is a conditional ``UPDATE`` on the text and hash the row
+    held when it was read. During a rolling update an operator can save
+    an edit through another instance between that read and this write.
+    The ``UPDATE`` then matches no row, and the edit is kept.
+    """
+    old_text = group.when_to_use
+    old_hash = group.code_text_hash
+    new_hash = code_text_hash(code_text)
+    if old_hash is not None and old_hash != code_text_hash(old_text):
+        return
+    if old_text == code_text:
+        if old_hash == new_hash:
+            return
+        values: dict[str, Any] = {"code_text_hash": new_hash}
+    elif old_hash is None:
+        return
+    else:
+        values = {"when_to_use": code_text, "code_text_hash": new_hash, "updated_at": now}
+    unchanged_hash = (
+        OperationGroup.code_text_hash.is_(None)
+        if old_hash is None
+        else OperationGroup.code_text_hash == old_hash
+    )
+    result = await session.execute(
+        update(OperationGroup)
+        .where(
+            OperationGroup.id == group.id,
+            OperationGroup.when_to_use == old_text,
+            unchanged_hash,
+        )
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
+    log = structlog.get_logger(__name__).bind(
+        product=group.product,
+        version=group.version,
+        impl_id=group.impl_id,
+        group_key=group.group_key,
+    )
+    # ``rowcount`` is typed only on the concrete ``CursorResult`` the
+    # runtime returns, as in ``checks/repository.py``.
+    rowcount: int = result.rowcount  # type: ignore[attr-defined]
+    if rowcount != 1:
+        log.info("operation_group_text_refresh_skipped", reason="row changed since read")
+        return
+    for column, value in values.items():
+        set_committed_value(group, column, value)
+    if "when_to_use" in values:
+        log.info("operation_group_text_refreshed")
 
 
 # Pre-existing G0.6-T4 #395 public-API helper; G0.9-T4a #731 adds only the
@@ -1314,7 +1431,7 @@ async def register_composite_operation(
         :func:`register_typed_operation`. ``op_id`` is the dotted
         identifier composites are surfaced under -- by convention
         ``"<product>.composite.<verb>.<noun>"`` (e.g.
-        ``"vmware.composite.vm.create"``); the dispatcher treats it
+        ``"gh.composite.repo_create"``); the dispatcher treats it
         as opaque.
     handler
         The async callable the dispatcher routes the composite to.
@@ -1343,8 +1460,8 @@ async def register_composite_operation(
         cluster patching, host evacuation -- and the safe-by-default
         for the operator is the assume-dangerous posture. Per-op
         overrides at the call site for read-only composites
-        (``vmware.composite.vm.info``,
-        ``vmware.composite.performance.summary``).
+        (``gh.composite.repo_view``,
+        ``gh.composite.pr_status_summary``).
     requires_approval
         Defaults to ``True`` (vs. typed's ``False`` default). Same
         rationale: composites' blast radius is larger by construction
@@ -1530,6 +1647,10 @@ async def _register_in_session(
 
     log = structlog.get_logger()
     now = datetime.now(UTC)
+    # #5037: the connector package whose folder holds the handler, or None
+    # for a built-in op. Written on every path, so the row always names
+    # the code that wrote it last.
+    owner_package = connector_package_of(handler_ref)
 
     # Compose the embedding text + hash from the incoming args; the
     # same composer applies to the persisted row's text below for
@@ -1621,11 +1742,13 @@ async def _register_in_session(
             # the same values back would needlessly invalidate any
             # ORM identity-map sharing.
             existing.handler_ref = handler_ref
+            existing.owner_package = owner_package
             existing.parameter_schema = parameter_schema
             existing.response_schema = response_schema
             existing.llm_instructions = llm_instructions
-            existing.safety_level = safety_level
-            existing.requires_approval = requires_approval
+            _raise_saved_settings(
+                existing, safety_level=safety_level, requires_approval=requires_approval
+            )
             existing.group_id = group_id
             existing.updated_at = now
             await session.flush()
@@ -1648,6 +1771,7 @@ async def _register_in_session(
             service=embedding_service,
         )
         existing.handler_ref = handler_ref
+        existing.owner_package = owner_package
         existing.summary = summary
         existing.description = description
         existing.custom_description = custom_description
@@ -1655,8 +1779,9 @@ async def _register_in_session(
         existing.parameter_schema = parameter_schema
         existing.response_schema = response_schema
         existing.llm_instructions = llm_instructions
-        existing.safety_level = safety_level
-        existing.requires_approval = requires_approval
+        _raise_saved_settings(
+            existing, safety_level=safety_level, requires_approval=requires_approval
+        )
         existing.group_id = group_id
         existing.embedding = embedding
         existing.updated_at = now
@@ -1703,6 +1828,7 @@ async def _register_in_session(
         embedding=embedding,
         custom_description=custom_description,
         custom_notes=None,
+        owner_package=owner_package,
         created_at=now,
         updated_at=now,
     )

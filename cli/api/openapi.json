@@ -33890,6 +33890,12 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Extras"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Updated At"
           }
         },
         "type": "object",

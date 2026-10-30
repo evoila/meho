@@ -21,18 +21,32 @@ Two related concerns the dispatcher needs but that don't belong in
   :class:`asyncssh.SSHClientConnection` pool on :class:`SshConnector`)
   persists across dispatches. The cache is module-local; reset via
   :func:`reset_connector_instance_cache`.
+* :func:`forget_target_in_connectors` -- drop the logins and credentials
+  that every cached connector instance keeps for one target, so a changed
+  target is used fresh on the next dispatch (#3879).
+* :func:`forget_target_if_changed` -- the same drop, run by every process
+  that executes an operation (a backplane server, a satellite runner) when
+  the target row it reads was changed since this process last saw it. The
+  process that served the change drops at once; every other process drops
+  on its next call (#3879).
 """
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import structlog
+
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.base import Connector
 
 __all__ = [
+    "forget_target_if_changed",
+    "forget_target_in_connectors",
     "get_or_create_connector_instance",
     "import_handler",
     "is_unbound_method",
@@ -40,11 +54,28 @@ __all__ = [
     "reset_handler_cache",
 ]
 
+_log = structlog.get_logger(__name__)
+
+#: The duck-typed connector hooks that drop what a connector keeps for one
+#: target: ``invalidate_session`` drops the login token, and
+#: ``invalidate_credentials`` drops the secret read from Vault (and, for some
+#: connectors, the client built from it).
+_TARGET_FORGET_HOOKS = ("invalidate_session", "invalidate_credentials")
+
 # ``handler_ref`` -> resolved callable cache.
 _HANDLER_CACHE: dict[str, Callable[..., Awaitable[Any]]] = {}
 
 # ``type[Connector]`` -> singleton instance cache.
 _CONNECTOR_INSTANCE_CACHE: dict[type[Connector], Connector] = {}
+
+# ``target_cache_key`` -> the ``updated_at`` this process last saw for the
+# target. Per process, like the connector caches it guards (#3879).
+_SEEN_TARGET_VERSIONS: dict[tuple[str, str], Any] = {}
+
+# ``target_cache_key`` -> the lock a drop for the target runs under. A call
+# that arrives while a drop runs waits for it, instead of reading the new
+# version as already handled and reusing an old login (#3879).
+_TARGET_FORGET_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
 
 
 def reset_handler_cache() -> None:
@@ -53,8 +84,10 @@ def reset_handler_cache() -> None:
 
 
 def reset_connector_instance_cache() -> None:
-    """Empty the connector-instance cache. Test-only."""
+    """Empty the connector-instance cache and the seen target versions. Test-only."""
     _CONNECTOR_INSTANCE_CACHE.clear()
+    _SEEN_TARGET_VERSIONS.clear()
+    _TARGET_FORGET_LOCKS.clear()
 
 
 def import_handler(handler_ref: str) -> Callable[..., Awaitable[Any]]:
@@ -136,6 +169,107 @@ def get_or_create_connector_instance(cls: type[Connector]) -> Connector:
     instance = cls()
     _CONNECTOR_INSTANCE_CACHE[cls] = instance
     return instance
+
+
+async def forget_target_in_connectors(target: Any) -> None:
+    """Drop what every cached connector instance keeps for *target*.
+
+    Connectors keep logins and credentials per target, keyed on the
+    ``(tenant_id, id)`` pair, which a target change does not alter. Without
+    this, a changed ``secret_ref`` (or host, TLS setting, ...) is used only
+    after the kept login expires (#3879). The target update route calls this
+    after it changes the row.
+
+    Each instance in the cache gets every hook in :data:`_TARGET_FORGET_HOOKS`
+    that it has. The hooks only remove this target's own entries, so calling
+    them on a connector that never saw the target is a no-op. All instances
+    are asked, not only the one the target resolves to now, because the
+    change may have moved the target to another connector. A failing hook is
+    logged and skipped: the target change must still go through, and one
+    connector must not stop the others from forgetting the target.
+
+    The drop runs under the target's lock, and the target's ``updated_at``
+    is recorded as seen only when every hook is done. So a dispatch that
+    arrives while a hook still runs waits for the drop, and does not reuse a
+    login that is about to be dropped. After that, the next dispatch in this
+    process does not drop the same change a second time.
+    """
+    async with _forget_lock(target):
+        await _run_forget_hooks(target)
+        _record_seen_version(target)
+
+
+def _forget_lock(target: Any) -> asyncio.Lock:
+    key = target_cache_key(target)
+    lock = _TARGET_FORGET_LOCKS.get(key)
+    if lock is None:
+        lock = _TARGET_FORGET_LOCKS[key] = asyncio.Lock()
+    return lock
+
+
+async def _run_forget_hooks(target: Any) -> None:
+    for instance in list(_CONNECTOR_INSTANCE_CACHE.values()):
+        for hook_name in _TARGET_FORGET_HOOKS:
+            hook = getattr(instance, hook_name, None)
+            if not callable(hook):
+                continue
+            try:
+                await hook(target)
+            except Exception as exc:
+                _log.warning(
+                    "target_forget_hook_failed",
+                    connector=type(instance).__name__,
+                    hook=hook_name,
+                    target_id=str(getattr(target, "id", "?")),
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+
+
+def _record_seen_version(target: Any) -> None:
+    """Store *target*'s ``updated_at`` as the version this process saw last."""
+    _SEEN_TARGET_VERSIONS[target_cache_key(target)] = getattr(target, "updated_at", None)
+
+
+async def forget_target_if_changed(target: Any) -> bool:
+    """Drop the kept logins for *target* when its row changed since this process last saw it.
+
+    #3879. The target update route drops kept logins only in the process
+    that serves the PATCH. Every other backplane server, and every satellite
+    runner, keeps its own connector caches. So every execution path calls
+    this with the target it just read, before a connector reuses a login:
+    the dispatcher does, and so does the runner executor. A change shows as
+    a new ``updated_at`` on the row (the update route always refreshes it,
+    also when the same ``secret_ref`` is sent again). When the value differs
+    from the one this process saw last, the kept logins are dropped and the
+    next login uses the new values.
+
+    The check and the drop run under the target's lock. A second call with
+    the same new version waits until the first call's drop is done, then
+    sees the version as handled. Without the lock, it would see the version
+    as handled while a hook still runs, and reuse the old login.
+
+    The first sighting only records the value: nothing was kept for the
+    target by a dispatch yet. A target object with no ``updated_at`` (a test
+    double) is never treated as changed. Returns ``True`` when a drop ran.
+    """
+    updated_at = getattr(target, "updated_at", None)
+    if updated_at is None:
+        return False
+    key = target_cache_key(target)
+    async with _forget_lock(target):
+        if key not in _SEEN_TARGET_VERSIONS:
+            _record_seen_version(target)
+            return False
+        if _SEEN_TARGET_VERSIONS[key] == updated_at:
+            return False
+        _log.info(
+            "target_changed_since_last_seen",
+            target_id=str(getattr(target, "id", "?")),
+            target=getattr(target, "name", None),
+        )
+        await _run_forget_hooks(target)
+        _record_seen_version(target)
+        return True
 
 
 def is_unbound_method(handler: Any, connector_cls: type[Connector]) -> bool:

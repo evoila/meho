@@ -2279,7 +2279,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        leg: [full-1, full-2, startstop-1, startstop-2]
+        leg: [1, 2, 3, 4, 5, 6]
     timeout-minutes: 45
     env:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -2306,9 +2306,7 @@ jobs:
       - name: Sync Python environment (locked)
         run: uv sync --locked --all-groups
       - name: Diagnose
-        run: ./_diag_5427.sh "${MATRIX_LEG%-*}"
-        env:
-          MATRIX_LEG: ${{ matrix.leg }}
+        run: ./_diag_5427.sh
 
   python-integration:
     name: Python (integration testcontainers)

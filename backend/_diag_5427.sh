@@ -1,104 +1,55 @@
 #!/usr/bin/env bash
-# TEMPORARY (issue 5427): look at what the k3s tests leave behind on a
-# runner. Removed again before the pull request is ready.
+# TEMPORARY (issue 5427): check how a container finds another one by its
+# network alias on a runner. Removed again before the pull request is ready.
 set -uo pipefail
-MODE="${1:?full or startstop}"
 TOOL="${MEHO_TEST_VAULT_IMAGE}"
-K3S="${MEHO_TEST_K3S_IMAGE}"
+BAO=$(uv run python -c 'import yaml; i = yaml.safe_load(open("../deploy/charts/meho/charts/openbao/values.yaml"))["image"]; print(f"{i[\"repository\"]}@{i[\"digest\"]}")')
+docker pull -q "$BAO" >/dev/null
+docker pull -q "$TOOL" >/dev/null
 
-mask() { sed -E 's/([0-9]{1,3}\.[0-9]{1,3})\.[0-9]{1,3}\.[0-9]{1,3}/\1.x.x/g; s/([0-9a-f]{2}:){5}[0-9a-f]{2}/xx:xx/g'; }
-
-snap() {
-  echo "::group::snapshot $1"
-  echo "boot_id: $(cat /proc/sys/kernel/random/boot_id)"
-  echo "kernel: $(uname -r)"
-  docker version --format 'docker server {{.Server.Version}}'
-  docker info --format 'cgroup={{.CgroupDriver}} v{{.CgroupVersion}} fw={{.FirewallBackend}} sec={{.SecurityOptions}}' 2>&1
-  docker ps -a --format '{{.ID}} {{.Image}} {{.Status}} {{.Names}}'
-  docker network ls
-  for n in $(docker network ls -q); do docker network inspect "$n" --format '{{.Name}} {{.Driver}} ipv6={{.EnableIPv6}} {{range .IPAM.Config}}{{.Subnet}} {{end}}' | mask; done
-  docker run --rm --privileged --net=host --pid=host --cgroupns=host --entrypoint sh "$K3S" -c '
-    export PATH=$PATH:/bin/aux
-    echo "-- links"; ip -o link 2>&1 | cut -d" " -f2,3 | head -60
-    echo "-- addrs"; ip -o -4 addr 2>&1 | awk "{print \$2, \$4}" | head -60
-    echo "-- routes"; ip route 2>&1 | head -40
-    echo "-- sysctl"; for f in /proc/sys/net/ipv4/ip_forward /proc/sys/net/bridge/bridge-nf-call-iptables /proc/sys/net/bridge/bridge-nf-call-ip6tables /proc/sys/net/netfilter/nf_conntrack_count /proc/sys/net/netfilter/nf_conntrack_max /proc/sys/net/ipv4/conf/all/rp_filter /proc/sys/net/ipv4/conf/all/route_localnet /proc/sys/fs/inotify/max_user_instances /proc/sys/fs/inotify/max_user_watches; do echo "$f=$(cat $f 2>&1)"; done
-    echo "-- modules"; cut -d" " -f1 /proc/modules 2>&1 | sort | tr "\n" " "; echo
-    echo "-- iptables (filter, nat) legacy"; iptables-legacy-save 2>&1 | grep -v "^#" | head -150
-    echo "-- iptables nft"; iptables-nft-save 2>&1 | grep -v "^#" | head -150
-    echo "-- ip6tables nft"; ip6tables-nft-save 2>&1 | grep -v "^#" | head -60
-    echo "-- nft"; nft list ruleset 2>&1 | head -200
-    echo "-- cgroup root"; ls /sys/fs/cgroup 2>&1 | tr "\n" " "; echo; cat /sys/fs/cgroup/cgroup.subtree_control 2>&1
-    echo "-- processes"; ps -o pid,comm 2>/dev/null | awk "{print \$2}" | sort | uniq -c | sort -rn | head -40
-  ' 2>&1 | mask
-  echo "::endgroup::"
-}
-
-alias_check() {
+check() {
   local tag="$1"
-  echo "::group::alias check $tag"
+  shift
   docker network create "diag-$tag" >/dev/null
-  docker run -d --name "srv-$tag" --network "diag-$tag" --network-alias srv \
+  docker run -d --name "kc-$tag" --network "diag-$tag" --network-alias keycloak \
     -e SKIP_SETCAP=1 -e VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200 -e VAULT_DEV_ROOT_TOKEN_ID=diag \
     "$TOOL" server -dev >/dev/null
-  sleep 8
-  docker run --rm --network "diag-$tag" --entrypoint sh "$TOOL" -c '
-    echo "-- resolv.conf"; cat /etc/resolv.conf
-    for i in 1 2 3; do
-      if nslookup srv >/tmp/ns 2>&1; then echo "dns srv: ok"; else echo "dns srv: FAIL"; cat /tmp/ns; fi
-      if wget -T 5 -qO- http://srv:8200/v1/sys/health >/dev/null 2>/tmp/w; then echo "http by name: ok"; else echo "http by name: FAIL $(cat /tmp/w)"; fi
-    done
-    ip=$(getent hosts srv | cut -d" " -f1)
-    echo "getent srv: ${ip:-none}"
-    if [ -n "$ip" ]; then
-      if wget -T 5 -qO- "http://$ip:8200/v1/sys/health" >/dev/null 2>/tmp/w; then echo "http by ip: ok"; else echo "http by ip: FAIL $(cat /tmp/w)"; fi
-    fi
-  ' 2>&1 | mask
-  docker rm -f "srv-$tag" >/dev/null
+  sleep 5
+  local want
+  want=$(docker inspect -f "{{(index .NetworkSettings.Networks \"diag-$tag\").IPAddress}}" "kc-$tag")
+  for image in "$TOOL" "$BAO"; do
+    docker run --rm --network "diag-$tag" "$@" -e WANT="$want" --entrypoint sh "$image" -c '
+      if grep -q "^search" /etc/resolv.conf; then echo "  search line: present, $(grep -c . /etc/resolv.conf) lines"; else echo "  search line: none"; fi
+      i=0
+      for d in $(sed -n "s/^search //p" /etc/resolv.conf); do
+        i=$((i + 1))
+        if nslookup "keycloak.$d." >/dev/null 2>&1; then echo "  keycloak + search domain $i: has an answer"; else echo "  keycloak + search domain $i: no answer"; fi
+      done
+      for n in 1 2 3; do
+        got=$(getent hosts keycloak | cut -d" " -f1)
+        if [ -z "$got" ]; then echo "  keycloak -> nothing"; elif [ "$got" = "$WANT" ]; then echo "  keycloak -> the container"; else echo "  keycloak -> ANOTHER address"; fi
+      done
+      if wget -T 5 -qO- http://keycloak:8200/v1/sys/health >/dev/null 2>&1; then echo "  http://keycloak:8200 -> ok"; else echo "  http://keycloak:8200 -> FAIL"; fi
+    ' 2>&1 | sed "s|^|$tag $(basename "${image%%@*}") |"
+  done
+  docker rm -f "kc-$tag" >/dev/null
   docker network rm "diag-$tag" >/dev/null
-  echo "::endgroup::"
 }
 
-openbao_once() {
-  echo "::group::openbao test $1"
-  if uv run pytest -q -rs -o tmp_path_retention_policy=failed \
+echo "boot_id: $(cat /proc/sys/kernel/random/boot_id)"
+check plain
+check no-search --dns-search=.
+
+passed=0
+for i in $(seq 1 10); do
+  if uv run pytest -q -o tmp_path_retention_policy=failed \
       tests/integration/test_core_vault_init_openbao.py >/tmp/ob.log 2>&1; then
-    echo "openbao $1: passed"
+    passed=$((passed + 1))
+    echo "openbao run $i: passed"
   else
-    echo "openbao $1: FAILED"
-    grep -E "VaultInitError|passed|failed" /tmp/ob.log | head -10
+    echo "openbao run $i: FAILED"
+    grep -E "VaultInitError: " /tmp/ob.log | head -2
   fi
-  echo "::endgroup::"
-}
-
-snap before
-alias_check before
-openbao_once before
-
-if [ "$MODE" = full ]; then
-  echo "::group::k3s test file"
-  uv run pytest -q -o tmp_path_retention_policy=failed tests/integration/test_connectors_k8s_k3d.py 2>&1 | tail -3
-  echo "::endgroup::"
-else
-  echo "::group::k3s start and stop"
-  uv run python - <<'PY'
-import os
-import time
-
-from testcontainers.k3s import K3SContainer
-
-c = K3SContainer(image=os.environ["MEHO_TEST_K3S_IMAGE"])
-c.start()
-print("k3s started", flush=True)
-time.sleep(30)
-c.stop()
-print("k3s stopped", flush=True)
-PY
-  echo "::endgroup::"
-fi
-
-sleep 15
-snap after
-alias_check after
-openbao_once after
-alias_check after-openbao
+done
+echo "openbao with the fix: $passed of 10 runs passed"
+check plain-again

@@ -33,7 +33,7 @@ SQLite DB per test isolates the migration replay.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -192,15 +192,18 @@ def _trigger_count(sync_url: str, definition_id: uuid.UUID) -> int:
     return int(row)
 
 
-def test_upgrade_sets_on_delete_cascade(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_sets_on_delete_cascade(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0035`` reflects ``CASCADE`` on the agent_definition FK."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0035")
+    copy_migrated_db(cfg, "0035")
     assert _fk_on_delete(sync_url) == "CASCADE"
 
 
 def test_upgrade_cascade_deletes_dependent_triggers(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """At 0035, a bulk parent delete cascade-deletes its triggers (no error).
 
@@ -209,7 +212,7 @@ def test_upgrade_cascade_deletes_dependent_triggers(
     DB-level cascade. Pre-fix the same delete raised ``IntegrityError``.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0035")
+    copy_migrated_db(cfg, "0035")
 
     _tenant_id, definition_id, _trigger_id = _seed_definition_with_trigger(sync_url)
     assert _trigger_count(sync_url, definition_id) == 1
@@ -219,7 +222,9 @@ def test_upgrade_cascade_deletes_dependent_triggers(
     assert _trigger_count(sync_url, definition_id) == 0
 
 
-def test_downgrade_restores_blocking_fk(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_restores_blocking_fk(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0034"`` removes the cascade; a parent delete blocks again.
 
     Round-trips the migration: after the downgrade the FK is back to the
@@ -228,7 +233,7 @@ def test_downgrade_restores_blocking_fk(alembic_cfg: tuple[Config, str]) -> None
     exact regression #1480 fixed.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0035")
+    copy_migrated_db(cfg, "0035")
     command.downgrade(cfg, "0034")
 
     assert _fk_on_delete(sync_url) in (None, "NO ACTION")

@@ -31,8 +31,13 @@ resources that make up a running backplane:
 - ServiceAccount — Pod identity, `automountServiceAccountToken: false`.
 - NetworkPolicy — default-deny ingress + explicit egress allow-list to
   Postgres, Vault, Keycloak, the broadcast subchart, and CoreDNS only.
-- Migration Job — `pre-install,pre-upgrade` Helm hook running
-  `python -m meho_backplane.db.migrate` before the Deployment rolls forward.
+- Database migration — `python -m meho_backplane.db.migrate`. With a
+  bring-your-own PostgreSQL it is a `pre-install,pre-upgrade` Helm hook Job
+  that runs before the Deployment rolls forward. With the built-in
+  PostgreSQL (`corePostgres.enabled: true`) it is the `migrate` init
+  container of the backplane Deployment instead, and the Job is not
+  rendered (#5233; see
+  [Migration Job](#migration-job-templatesmigration-jobyaml)).
 - Broadcast subchart — in-tree Valkey 9.x Deployment + Service + ConfigMap
   per ADR 0005, plus its **own** ingress NetworkPolicy and a chart-managed
   `requirepass` Secret (#276) so the store is ingress-isolated and
@@ -203,6 +208,13 @@ and every pod uses `meho.core.imagePullSecrets` (both in
 `backend/tests/test_chart_image_registry.py` fails. The recipe is in
 [`../deploying.md`](../deploying.md#install-with-no-internet).
 
+`deploy/charts/meho/images.txt` is the list the customer copies: every
+image of the chart except MEHO's own, one per line, as `<image@digest>
+<path in your registry>:<tag>`. Every image must be pinned by digest. The
+same test fails when the list and a render with every part on differ, and
+prints the lines the chart now wants. A new image, or a new digest, means
+a new line in `images.txt`.
+
 ### Probes
 
 The Deployment renders `startupProbe`, `livenessProbe`, and
@@ -347,6 +359,42 @@ the chart's least-privilege egress story — only do it when an
 equivalent control is enforced upstream.
 
 ### Migration Job (`templates/migration-job.yaml`)
+
+**Where the migration runs.** The Job below renders only when the install
+brings its own PostgreSQL (`corePostgres.enabled: false`). With the
+built-in PostgreSQL on, Helm would run this pre-install hook before it
+creates the database, so the Job would wait for a database that does not
+exist yet and a fresh `helm install` could never finish (#5233). In that
+mode the chart renders no Job; the backplane Deployment
+(`templates/deployment.yaml`) gets the init container `migrate` instead:
+
+- Same container as the Job: image (with the digest pin), command,
+  `envFrom` the backplane ConfigMap, `DATABASE_URL` from
+  `postgres.credentialsSecret`, `extraEnv`, the `tmp` emptyDir,
+  `extraVolumeMounts`, the container `securityContext` and
+  `migrationJob.resources`. It runs in the backplane pod, so it has the
+  pod's security context (`runAsNonRoot`, `seccompProfile: RuntimeDefault`;
+  with the container's `drop: [ALL]` and no privilege escalation it meets
+  the `restricted` Pod Security Standard) and the pod's NetworkPolicy,
+  which already lets the backplane reach the database.
+  `backend/tests/test_chart_migrate_init_container.py` compares the two
+  container specs and checks both modes.
+- Every replica runs it before the backplane container starts. The runner
+  waits for the database (`MIGRATION_DB_WAIT_SECONDS`, default 300 s) and
+  holds a PostgreSQL advisory lock while it migrates, so a second replica
+  waits and then changes nothing. An older image (after `helm rollback`)
+  leaves a newer schema alone. Details:
+  [migrations.md](migrations.md) § "Where the migration runs".
+- `migrationJob.backoffLimit` and `ttlSecondsAfterFinished` do not apply;
+  the kubelet restarts a failed init container with back-off.
+- **Failure semantics.** A failed migration keeps the pod out of Ready.
+  `helm install --wait` / `helm upgrade --wait` fail at their timeout, and
+  on an upgrade the old pods keep serving. Without `--wait`, Helm reports
+  success and only the pod status shows the failure, so install the
+  built-in core with `--wait` (the form-2 installer does). Logs:
+  `kubectl logs <pod> -c migrate`.
+
+The rest of this section describes the bring-your-own Job.
 
 A Kubernetes `Job` runs as a Helm hook before the Deployment is created
 (install) or rolled forward (upgrade). The container executes
@@ -634,8 +682,9 @@ Design: the internal core design note, §2 (one database server) and §1
 - **Probes.** `pg_isready` on `127.0.0.1:5432` for startup (up to 5 min
   for a first setup), readiness and liveness.
 - **NetworkPolicy.** Its own ingress-only policy admits tcp/5432 from the
-  backplane pods (`networkPolicy.backplanePodLabels`; the migration Job and
-  the helm test pod carry the same labels) and the Keycloak pods
+  backplane pods (`networkPolicy.backplanePodLabels`; the `migrate` init
+  container runs in the backplane pod, and the helm test pod carries the
+  same labels) and the Keycloak pods
   (`networkPolicy.keycloakPodLabels`) of the release. The parent policy's
   egress rule to the built-in database (by pod, not CIDR) comes with #4050.
 - **Disk lifetime.** The PVC outlives `helm uninstall` (StatefulSet default).
@@ -644,9 +693,10 @@ Design: the internal core design note, §2 (one database server) and §1
   dump. Restart the pod after a restore: the sidecar then sets the
   passwords from the Secrets again (it also does so on the next Secret
   change, but not on its own clock).
-- **What wires it to the backplane.** Not this subchart: the
-  `DATABASE_URL` default, the schema conditionals and the migration as an
-  init container come with #4041 and #4047.
+- **What wires it to the backplane.** Not this subchart. The migration
+  runs as the backplane's `migrate` init container in this mode (#5233,
+  see [Migration Job](#migration-job-templatesmigration-jobyaml)). The
+  `DATABASE_URL` default and the schema conditionals come with #4047.
 
 **Helm test.** `templates/tests/test-pgvector.yaml` runs on the same
 image (`corePostgres.image`), in both modes, as user 999. It needs no
@@ -667,12 +717,19 @@ testcontainers database tests the chart's image (`repository@digest` from
 through the registry mirror, and a test keeps the two equal.
 
 **CI.** `chart.yml` validates a `corePostgres.enabled=true` render (also
-with `global.openshift=true`) with kubeconform. The kind job starts the
-subchart (`--show-only` its templates, with the three Secrets made the way
-the secrets Job makes them), installs the release in bring-your-own mode
-against it so the migration Job runs every migration as `meho`, runs
-`helm test`, and then checks the roles, the fencing, `vector` and a
-reconcile after a changed Secret plus a pod restart.
+with `global.openshift=true`) with kubeconform. The kind job installs the
+release with `corePostgres.enabled=true` in one `helm install --wait
+--wait-for-jobs` (#5233): the secrets Job makes the Secrets, and the
+backplane's `migrate` init container waits for the new database and runs
+every migration as `meho`. No step starts the database by hand. The job
+points the readiness probe at `/healthz`, because the kind cluster has no
+Keycloak and no Vault and `/ready` stays 503 there; it then checks that
+the init container exited 0 and that the `db` check of `/ready` is ok,
+runs `helm test`, and checks the roles, the fencing, `vector` and a
+reconcile after a changed Secret plus a pod restart. The bring-your-own
+hook Job is covered by the render tests (the golden render,
+`test_chart_migrate_job_no_sa.py`) and its runner by
+`backend/tests/migrations/test_migrate_runner.py`.
 
 ### Built-in Keycloak subchart (`charts/keycloak/`)
 
@@ -762,6 +819,7 @@ The file holds **no secret and no host name**. Keycloak fills every
 | --- | --- |
 | `MEHO_REALM_PUBLIC_URL` | `https://<coreKeycloak.hostname>` |
 | `MEHO_REALM_TENANT_ID` | `coreKeycloak.firstTenantId` (a UUID; pick one per install and keep it for a move) |
+| `MEHO_REALM_TENANT_NAME` | `coreKeycloak.tenantName` (the first tenant's short name, default `main`; goes into `meho_tenant`) |
 | `MEHO_REALM_ADMIN_CLIENT_SECRET`, `MEHO_REALM_WEB_CLIENT_SECRET`, `MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET` | the three client Secrets above |
 
 **Groups.** Each group carries the first tenant id and a role:
@@ -793,12 +851,14 @@ on a person directly: the claim always comes from the group.
 
 The three clients people log in with (`meho-cli`, `meho-mcp`, `meho-web`)
 have the default scopes `basic`, `roles`, `web-origins`, `acr`,
-`profile`, `email` and the six mappers `meho admin keycloak
-bootstrap-clients` sets: `tenant_id`, `tenant_role` and `approver` with the
-stock User Attribute mapper (`aggregate.attrs` and `multivalued` false; into
-the access token and userinfo; `approver` as a boolean), the audience
-mappers for `meho-backplane` and `https://<host>/mcp`, and the `groups`
-claim. No client has a fixed-value tenant or role mapper. The group model is
+`profile`, `email` and the eight mappers `meho admin keycloak
+bootstrap-clients` sets: `tenant_id`, `tenant_role`, `approver` and
+`platform_admin` with the stock User Attribute mapper (`aggregate.attrs`
+and `multivalued` false; into the access token and userinfo; `approver`
+and `platform_admin` as booleans), `meho-tenants` (the `meho_tenant`
+values of all the person's groups as the list `meho_tenants`;
+`aggregate.attrs` and `multivalued` true), the audience mappers for
+`meho-backplane` and `https://<host>/mcp`, and the `groups` claim. No client has a fixed-value tenant or role mapper. The group model is
 the decision in `docs/decisions/login-role-groups.md`.
 
 **Realm settings.** Offline sessions end after 7 days at most
@@ -1539,7 +1599,7 @@ hangs the queue forever:
 | `Python License Check` | `dependency-license-check.yml` | yes — `changes` + job-level `if:` |
 | `NPM License Check` | `dependency-license-check.yml` | yes — same shape |
 | `helm install + helm test (pgvector preflight)` | `chart.yml` | **yes (#3253)** — the `helm-test-gate` aggregator (`if: always()`) is the required context and fails closed |
-| `Migration chain (single head)` | `migration-heads.yml` | yes (#4204) — no path filter; when a migration lands on `main`, the push run also posts a fresh check run under this name on every open PR that adds a migration (`scripts/ci/recheck_migration_prs.py`). **Operator registers the context after #4204 lands.** |
+| `Migration chain (single head)` | `migration-heads.yml` | yes (#4204) — no path filter; when a migration lands on `main`, the push run also posts a fresh check run under this name on every open PR that adds a migration (`scripts/ci/recheck_migration_prs.py`). The operator registered the context after #4204 landed. |
 | `DCO` | **external GitHub App** (`app_id 1861`), not a workflow | **operator must verify** — see caveat below |
 
 Two shapes are load-bearing for queue compatibility and appear across

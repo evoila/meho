@@ -22,7 +22,7 @@ driver and the migration uses only generic DDL, so PG parity holds.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -127,10 +127,12 @@ def _table_names(sync_url: str) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
-def test_upgrade_creates_agent_announcement_table(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_creates_agent_announcement_table(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``upgrade 0067`` creates ``agent_announcement`` with the full column set."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
 
     assert _columns(sync_url, _TABLE) == _EXPECTED_COLUMNS
     # The always-populated columns are NOT NULL; optional claim fields nullable.
@@ -148,14 +150,18 @@ def test_upgrade_creates_agent_announcement_table(alembic_cfg: tuple[Config, str
         assert not _not_null(sync_url, _TABLE, column), f"{column} must be nullable"
 
 
-def test_upgrade_creates_indexes(alembic_cfg: tuple[Config, str]) -> None:
+def test_upgrade_creates_indexes(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """The (tenant, created_at DESC) + (tenant, work_ref) indexes are created."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _index_names(sync_url, _TABLE) >= _EXPECTED_INDEXES
 
 
-def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
+def test_downgrade_then_upgrade_round_trips(
+    alembic_cfg: tuple[Config, str], copy_migrated_db: Callable[[Config, str], None]
+) -> None:
     """``downgrade "0066"`` drops the table; ``upgrade "0067"`` recreates it.
 
     Pinned to this migration's own revision on both legs (never ``head``)
@@ -163,7 +169,7 @@ def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> 
     idempotency contract every migration test in this suite enforces.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, _REVISION)
+    copy_migrated_db(cfg, _REVISION)
     assert _TABLE in _table_names(sync_url)
 
     command.downgrade(cfg, _DOWN_REVISION)

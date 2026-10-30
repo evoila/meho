@@ -529,7 +529,7 @@ Rules for the key:
   nothing to compare, so the token stays per target.
 
 Connectors that key their tokens this way: the ingested (profiled)
-connectors, SRM and vSphere Replication (`_shared/dr_rest.py`), HCX, Salt,
+connectors, SRM and vSphere Replication (`vmware_shared/dr_rest.py`), HCX, Salt,
 vRO, vra8, VCF Automation, VCF Operations, VCF Operations for Logs, VCF
 Fleet, VCF Installer, SDDC Manager (VCF 5 and 9), Cloud Director and the
 Proxmox ticket.

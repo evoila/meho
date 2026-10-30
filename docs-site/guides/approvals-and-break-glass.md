@@ -268,8 +268,11 @@ What stays the same on a sandbox:
 
 How delete grants work:
 
-- Only a tenant admin creates one, and only in the web console. The REST
-  API and the CLI refuse it, also with a person's token.
+- Only a tenant admin creates one, in the web console. The REST API and
+  the CLI refuse it, also with a person's token, unless the instance has
+  the chart value `sandboxMode.deleteGrantsFromApi: true`. Then a tenant
+  admin who signed in with `meho login` may create one through REST or
+  `meho service-principals grants create`, with the same checks.
 - Every delete grant expires within 30 days. MEHO never renews one by
   itself; the banner on every console page counts the delete grants that
   expire within 7 days. A tenant admin renews the delete grants of one

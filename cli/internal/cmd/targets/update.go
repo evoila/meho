@@ -69,7 +69,7 @@ type updateFlags struct {
 //
 // CLI shape:
 //
-//	meho targets update <name|alias> [--product p] [--host h] \
+//	meho targets update <name, alias or id> [--product p] [--host h] \
 //	  [--alias a ...] [--version v] [--port n] [--fqdn f] \
 //	  [--secret-ref <ref>] [--auth-model <m>] [--verify-tls=false] \
 //	  [--tls-ca-pin <pin>] [--tls-server-name <sni>] [--vpn-required=bool] \
@@ -92,7 +92,7 @@ func newUpdateCmd() *cobra.Command {
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
-		Use:   "update <name|alias>",
+		Use:   "update <name, alias or id>",
 		Short: "Change fields on an existing target",
 		Long: "update changes one target via PATCH /api/v1/targets/{name}. " +
 			"Only the flags you pass are sent; every other field keeps its " +

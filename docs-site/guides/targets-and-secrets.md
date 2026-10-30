@@ -285,4 +285,10 @@ Real failure modes, with the errors they actually produce:
     and the policy allows access while returning version numbers,
     never values.
 
+    To check that copies of one secret still match (for example after
+    a password change), use `vault.kv.compare` for two or more Vault
+    paths, or `k8s.secret.compare_to_ref` for a Kubernetes Secret key
+    and its Vault copy. They answer only "same" or "different" per
+    copy, never a value or a hash.
+
 **Next:** [Run your first operations](first-operations.md).

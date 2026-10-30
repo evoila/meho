@@ -3496,6 +3496,42 @@ class VmwareRestConnector(HttpConnector):
 
         return await license_assigned_list_impl(self, operator, target, params)
 
+    async def resource_pool_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.resource_pool.list`` -- the resource pools, with parent and settings.
+
+        A ``source_kind="typed"`` read on the REST API. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_resource_pool_list.resource_pool_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_resource_pool_list import (
+            resource_pool_list_impl,
+        )
+
+        return await resource_pool_list_impl(self, operator, target, params)
+
+    async def datacenter_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.datacenter.list`` -- the datacenters, with cluster, host and datastore counts.
+
+        A ``source_kind="typed"`` read on the REST API. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_datacenter_list.datacenter_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_datacenter_list import (
+            datacenter_list_impl,
+        )
+
+        return await datacenter_list_impl(self, operator, target, params)
+
     async def content_library_find(
         self,
         operator: Operator,

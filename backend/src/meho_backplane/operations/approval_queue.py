@@ -82,7 +82,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Final, NamedTuple, cast
+from typing import Any, Final, Literal, NamedTuple, cast
 
 import structlog
 from sqlalchemy import CursorResult, and_, or_, select, update
@@ -136,10 +136,12 @@ __all__ = [
     "MAX_REASON_LENGTH",
     "ApprovalError",
     "ApprovalExpiredReason",
+    "ApprovalListOrder",
     "ApprovalNotFoundError",
     "ApprovalRequestAlreadyDecidedError",
     "ApprovalRequestExpiredError",
     "ApprovalResultState",
+    "ChainPosition",
     "DelegatedDecisionForbiddenError",
     "DelegatedReasonInvalidError",
     "Delegation",
@@ -167,6 +169,7 @@ __all__ = [
     "get_request",
     "list_pending",
     "parse_delegation",
+    "pending_chain_positions",
     "read_approval_result",
     "record_approval_step_event",
     "refuse_resume_if_release_changed",
@@ -2866,6 +2869,11 @@ async def _load_for_tenant(
 # ---------------------------------------------------------------------------
 
 
+#: Sort order of an approval list (#3596): ``"newest"`` is ``created_at``
+#: descending (the long-standing default), ``"oldest"`` is ascending.
+ApprovalListOrder = Literal["oldest", "newest"]
+
+
 async def list_pending(
     session: AsyncSession,
     *,
@@ -2874,6 +2882,7 @@ async def list_pending(
     work_ref: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    order: ApprovalListOrder = "newest",
 ) -> list[ApprovalRequest]:
     """Page through approval requests in *tenant_id*.
 
@@ -2884,17 +2893,78 @@ async def list_pending(
     change ticket (``"gh:evoila/meho#1"``); ``None`` applies no work_ref
     filter. Tenant-isolated by the WHERE clause — cross-tenant ids are
     invisible.
-    """
-    from sqlalchemy import select
 
+    ``order`` (#3596) picks the sort: ``"newest"`` (default) lists the
+    newest request first; ``"oldest"`` lists the oldest first, which is the
+    order a chain of requests under one change ticket was sent in. The
+    oldest-first order breaks ties on ``id`` so it matches the step numbers
+    :func:`pending_chain_positions` gives.
+    """
     stmt = select(ApprovalRequest).where(ApprovalRequest.tenant_id == tenant_id)
     if status is not None:
         stmt = stmt.where(ApprovalRequest.status == status)
     if work_ref is not None:
         stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
-    stmt = stmt.order_by(ApprovalRequest.created_at.desc()).limit(limit).offset(offset)
+    if order == "oldest":
+        stmt = stmt.order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
+    else:
+        stmt = stmt.order_by(ApprovalRequest.created_at.desc())
+    stmt = stmt.limit(limit).offset(offset)
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+@dataclass(frozen=True)
+class ChainPosition:
+    """Where one pending request sits in its change-ticket group (#3596).
+
+    ``step`` is 1 for the oldest pending request of the group; ``total`` is
+    how many requests of the group still wait for a decision.
+    """
+
+    work_ref: str
+    step: int
+    total: int
+
+
+async def pending_chain_positions(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    work_ref: str | None = None,
+) -> dict[uuid.UUID, ChainPosition]:
+    """Number the pending requests of each multi-request change ticket (#3596).
+
+    Requests sent under one ``work_ref`` are often steps of one chain: a
+    later step needs an earlier one to have run. This reads every pending
+    request of *tenant_id* that has a ``work_ref`` (only that ``work_ref``
+    when one is given), groups them by ``work_ref``, and numbers each group
+    oldest first. Only groups with two or more pending requests are
+    returned; a lone request has no order to show. The numbers count
+    pending requests only, so step 1 is always the oldest request that
+    still waits. Tenant-isolated by the WHERE clause.
+    """
+    stmt = (
+        select(ApprovalRequest.id, ApprovalRequest.work_ref)
+        .where(
+            ApprovalRequest.tenant_id == tenant_id,
+            ApprovalRequest.status == ApprovalRequestStatus.PENDING.value,
+            ApprovalRequest.work_ref.is_not(None),
+        )
+        .order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
+    )
+    if work_ref is not None:
+        stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
+    groups: dict[str, list[uuid.UUID]] = {}
+    for request_id, ref in (await session.execute(stmt)).all():
+        groups.setdefault(ref, []).append(request_id)
+    positions: dict[uuid.UUID, ChainPosition] = {}
+    for ref, ids in groups.items():
+        if len(ids) < 2:
+            continue
+        for step, request_id in enumerate(ids, start=1):
+            positions[request_id] = ChainPosition(work_ref=ref, step=step, total=len(ids))
+    return positions
 
 
 async def get_request(
@@ -3028,20 +3098,51 @@ async def record_approval_step_event(
 
     No Broadcast event is published (#3758). The stored approval row is
     what waiters, the approvals bell and the console read.
+
+    A ``pending`` event of a request that shares its ``work_ref`` with
+    other pending requests also carries ``chain_step`` / ``chain_total``
+    (#3596): "this is step k of N waiting under this change ticket".
     """
     from meho_backplane.operations.addon_step_events import AddonStepEventService
 
+    payload: dict[str, object] = {
+        "approval_request_id": str(request.id),
+        "decision": decision,
+        "connector_id": request.connector_id,
+        "approval_op_id": request.op_id,
+        "work_ref": request.work_ref,
+    }
+    if decision == "pending" and request.work_ref is not None:
+        position = await _chain_position_fail_open(tenant_id, request)
+        if position is not None:
+            payload["chain_step"] = position.step
+            payload["chain_total"] = position.total
     await AddonStepEventService().record_if_owned_committed(
         tenant_id=tenant_id,
         owner_principal_sub=request.principal_sub,
         event_kind=f"approval.{decision}",
         work_ref=request.work_ref,
         audit_id=audit_id,
-        payload={
-            "approval_request_id": str(request.id),
-            "decision": decision,
-            "connector_id": request.connector_id,
-            "approval_op_id": request.op_id,
-            "work_ref": request.work_ref,
-        },
+        payload=payload,
     )
+
+
+async def _chain_position_fail_open(
+    tenant_id: uuid.UUID, request: ApprovalRequest
+) -> ChainPosition | None:
+    """Return *request*'s step in its change-ticket group, or ``None`` (#3596).
+
+    Fail-open like the step event itself: a read error only drops the
+    step number from the event.
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+
+    try:
+        async with get_sessionmaker()() as session:
+            positions = await pending_chain_positions(
+                session, tenant_id=tenant_id, work_ref=request.work_ref
+            )
+    except Exception:
+        _log().exception("approval_chain_position_failed", approval_request_id=str(request.id))
+        return None
+    return positions.get(request.id)

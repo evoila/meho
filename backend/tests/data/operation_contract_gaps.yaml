@@ -112,7 +112,6 @@ bind9-ssh:
     - examples
     - requires_approval
   bind9.config.show:
-    - summary
     - llm_instructions
     - examples
   # A caution change that a person runs at once today; the approval flag is a decision for the connector, not for this check.

@@ -711,13 +711,10 @@ func WriteNotFoundIDs(w io.Writer, extras json.RawMessage) {
 
 // WriteAuditReceipt writes the `audit receipt: <id>` line, or nothing
 // when auditID is nil. Shared by WriteErrorTrailer and the parallel
-// operation/call.go render path so the line stays byte-identical
-// everywhere.
+// operation/call.go render path; it calls output.WriteAuditReceipt so
+// the line stays byte-identical with the other CLI writes.
 func WriteAuditReceipt(w io.Writer, auditID *string) {
-	if auditID == nil || *auditID == "" {
-		return
-	}
-	fmt.Fprintf(w, "audit receipt: %s\n", *auditID)
+	output.WriteAuditReceipt(w, auditID)
 }
 
 // PrettyJSON pretty-prints a json.RawMessage with 2-space indent.

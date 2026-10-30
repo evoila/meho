@@ -62,6 +62,7 @@ from meho_backplane.connectors.base import shim_kind
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup, TenantOperationSetting
+from meho_backplane.operations.op_policy import apply_effective_policy
 
 __all__ = [
     "close_connector_ids",
@@ -358,6 +359,12 @@ async def lookup_descriptor(
     built-in row (#3870). Otherwise the built-in row is used. Because
     only one bucket is ever visible, one SELECT finds at most one row.
 
+    The returned row carries the *effective* ``safety_level`` and
+    ``requires_approval`` for *tenant_id*: the operator overrides are
+    applied (#4711, :func:`~meho_backplane.operations.op_policy.apply_effective_policy`).
+    The row is detached from its session, so those values are never
+    written back.
+
     A row of a connector package that is not installed is not found
     (:func:`installed_owner_clause`).
     "Enabled" is :func:`enabled_for_tenant_clause`: for a built-in row the
@@ -382,7 +389,10 @@ async def lookup_descriptor(
                 installed_owner_clause(),
             )
         )
-        return result.scalar_one_or_none()
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        return await apply_effective_policy(session, tenant_id=tenant_id, row=row)
 
 
 async def descriptor_exists_any_state(

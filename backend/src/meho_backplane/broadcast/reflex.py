@@ -18,8 +18,9 @@ Heuristics (v1):
 * **read-before-act** -- the calling MCP session has no prior
   ``meho_broadcast_recent`` call recorded in ``audit_log`` (correlated by
   ``agent_session_id``). A one-liner recommends reading the feed first.
-* **announce-before-mutate** -- the op is write-class
-  (:func:`~meho_backplane.broadcast.events.classify_op` in
+* **announce-before-mutate** -- the op is write-class (the class the
+  dispatcher stores on its audit row,
+  :func:`~meho_backplane.operations._audit.descriptor_op_class`, is in
   :data:`~meho_backplane.broadcast.history.WRITE_OP_CLASSES`) and the
   caller holds no active announce claim covering it
   (:func:`~meho_backplane.broadcast.history.announce_claim_gap`). A
@@ -69,7 +70,6 @@ from sqlalchemy import exists, select
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.client import get_broadcast_client
-from meho_backplane.broadcast.events import classify_op
 from meho_backplane.broadcast.history import (
     WRITE_OP_CLASSES,
     ClaimGap,
@@ -119,7 +119,7 @@ _READ_NUDGE: Final[str] = (
 )
 
 #: One announce nudge per reason (#4091), so the agent knows what to fix.
-#: ``{op_class}`` is the server's :func:`classify_op` class of the op.
+#: ``{op_class}`` is the class the dispatcher stores on the op's audit row.
 _ANNOUNCE_NUDGES: Final[dict[ClaimGap, str]] = {
     "no_claim": (
         "You are running a write-class operation without an active announce "
@@ -201,7 +201,7 @@ async def _claim(session_id: uuid.UUID, heuristic: str, window_minutes: int) -> 
 async def build_reflex_advisory(
     operator: Operator,
     *,
-    op_id: str,
+    op_class: str,
     target_name: str | None,
 ) -> dict[str, Any]:
     """Build the ``extras`` fragment nudging toward coordination discipline.
@@ -249,10 +249,9 @@ async def build_reflex_advisory(
 
         # announce-before-mutate -- only for write-class ops; the claim is
         # issued only when the op qualifies and holds no covering claim.
-        op_class = classify_op(op_id)
         if op_class not in WRITE_OP_CLASSES:
             return {}
-        gap = await announce_claim_gap(operator, op_id=op_id, target_name=target_name)
+        gap = await announce_claim_gap(operator, op_class=op_class, target_name=target_name)
         if gap is not None and await _claim(session_id, _HEURISTIC_ANNOUNCE, window_minutes):
             return {REFLEX_ADVISORY_EXTRAS_KEY: _ANNOUNCE_NUDGES[gap].format(op_class=op_class)}
     except Exception:

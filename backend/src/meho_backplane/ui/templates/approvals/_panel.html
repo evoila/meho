@@ -6,7 +6,10 @@
 
   The modal body the app-shell bell opens (``hx-get /ui/approvals`` swapped
   into ``#meho-approvals-modal``). Lists this tenant's pending requests
-  newest-first; each row's "Review" button swaps the same modal container
+  newest-first -- or oldest-first when a change ticket (``work_ref``) has two
+  or more pending requests, so a chain reads in the order it was sent; each
+  such row shows "Step k of N" for its change ticket (#3596). Each row's
+  "Review" button swaps the same modal container
   with the request-detail + approve/deny fragment (``hx-get
   /ui/approvals/{id}``). A GET-only surface -- no CSRF token here (the
   decision POSTs carry it on the detail modal's own form).
@@ -14,7 +17,8 @@
   Context:
     requests -- list[dict]: projected pending requests
                 (id / op_id / connector_id / principal_sub /
-                 proposed_effect / created_at)
+                 proposed_effect / created_at / chain)
+                chain is {work_ref, step, total} or None (#3596)
 -#}
 {% from "_icons.html" import icon %}
 {% from "_references.html" import subject %}
@@ -44,6 +48,13 @@
           <li class="flex items-center justify-between gap-3 py-3">
             <div class="min-w-0">
               <p class="truncate font-mono text-sm">{{ req.op_id }}</p>
+              {% if req.chain %}
+                <p class="truncate text-xs" data-approval-chain-step="{{ req.chain.step }}">
+                  <span class="badge badge-sm badge-info">Step {{ req.chain.step }} of {{ req.chain.total }}</span>
+                  <span class="text-base-content/55">in change ticket</span>
+                  <span class="font-mono">{{ req.chain.work_ref }}</span>
+                </p>
+              {% endif %}
               <p class="truncate text-xs text-base-content/55">
                 <span>{{ req.connector_id }}</span>
                 <span aria-hidden="true">&middot;</span>

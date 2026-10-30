@@ -29,6 +29,15 @@ meho doctor
 - The **authenticated layer** checks DNS, TLS, and your token, then runs
   the MCP handshake. It shows your scopes and any working-surface tool
   your session should see but does not.
+- The **server layer** appears only on a Linux server where MEHO was
+  installed with its own install script (the file
+  `/usr/local/sbin/meho-host` exists). Run `sudo meho doctor` there. As
+  root, the doctor runs `meho-host check` and shows its lines last: the
+  node, the pods, the disk and the certificates of the built-in
+  Kubernetes. Without `sudo` it shows one warning and runs nothing. A
+  red server line gives exit code 1. With `sudo`, the offline and
+  authenticated lines check root's settings and login, not yours: run
+  `meho doctor` without `sudo` to check your own login.
 
 Use the failure class it prints (`dns`, `tls`, `refresh_rejected`,
 `surface_gap`, ...) to pick the section below. See also the

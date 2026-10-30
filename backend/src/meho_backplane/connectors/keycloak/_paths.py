@@ -18,7 +18,7 @@ drift). Before #2988 the paths lived as inline f-strings across four
 modules; hoisting them here is what makes the lane's enumeration
 introspectable.
 
-Two constants are dispatched but deliberately **outside** the pinned
+Three constants are dispatched but deliberately **outside** the pinned
 Admin REST spec's scope (the spec's only top-level path family is
 ``/admin/realms``); the lane pins them as evidenced exclusions rather
 than reconciling them:
@@ -26,7 +26,10 @@ than reconciling them:
 * :data:`_TOKEN_PATH` — the OIDC token endpoint the admin-token mint
   POSTs. Specified by OAuth 2.0 (RFC 6749 §3.2) / OIDC discovery
   (``/realms/{realm}/.well-known/openid-configuration``), not by the
-  Admin REST OpenAPI document.
+  Admin REST OpenAPI document. ``keycloak.user.check_login`` POSTs it too.
+* :data:`_LOGOUT_PATH` — the OIDC logout endpoint ``keycloak.user.check_login``
+  POSTs with the refresh token to end the session its login test opened.
+  Specified by OIDC, not by the Admin REST OpenAPI document.
 * :data:`_SERVERINFO_PATH` — the admin console's server-info endpoint
   (best-effort version read in
   :meth:`~meho_backplane.connectors.keycloak.connector.KeycloakConnector._server_version`).
@@ -81,6 +84,7 @@ _GROUPS_COUNT_PATH = "/admin/realms/{realm}/groups/count"
 # -- dispatched, but outside the Admin REST spec's scope (see docstring) ----
 
 _TOKEN_PATH = "/realms/{realm}/protocol/openid-connect/token"
+_LOGOUT_PATH = "/realms/{realm}/protocol/openid-connect/logout"
 _SERVERINFO_PATH = "/admin/serverinfo"
 
 

@@ -726,10 +726,26 @@ points the readiness probe at `/healthz`, because the kind cluster has no
 Keycloak and no Vault and `/ready` stays 503 there; it then checks that
 the init container exited 0 and that the `db` check of `/ready` is ok,
 runs `helm test`, and checks the roles, the fencing, `vector` and a
-reconcile after a changed Secret plus a pod restart. The bring-your-own
-hook Job is covered by the render tests (the golden render,
-`test_chart_migrate_job_no_sa.py`) and its runner by
-`backend/tests/migrations/test_migrate_runner.py`.
+reconcile after a changed Secret plus a pod restart.
+
+A second kind job, `helm-test-byo` (#5412), installs the bring-your-own
+way at the same time, so the hook Job runs in CI too. It applies the
+chart's PostgreSQL objects outside the release (`helm template
+--show-only`, plus the three Secrets made with `kubectl`), checks that
+`meho` is not a superuser, and installs with `corePostgres` off, as the
+namespace admin, with `--wait --wait-for-jobs`. The other flags are the
+same as in `helm-test`. One more flag, `broadcast.image.digest=`, lets
+kind use the Valkey image the job loaded. The `pre-install` hook Job
+runs every migration as `meho`. Helm deletes the Job once it succeeds, so
+the job reads Helm's record of the hook run (`helm status -o json`,
+`last_run.phase` is `Succeeded`). It also checks that the Deployment has
+no init container and that the `db` check of `/ready` reports
+`revision=<head>`, then runs `helm test`. The required `helm-test-gate`
+needs this job as well as `helm-test`, so a broken bring-your-own install
+stops a chart PR. The render tests (the golden render,
+`test_chart_migrate_job_no_sa.py`) and
+`backend/tests/migrations/test_migrate_runner.py` still cover the Job's
+render and its runner.
 
 ### Built-in Keycloak subchart (`charts/keycloak/`)
 
@@ -772,7 +788,7 @@ until all five exist.
 | ConfigMap `<release>-keycloak-realm` | `meho-realm.json`, mounted at `/opt/keycloak/data/import` |
 | Service `<release>-keycloak` | port 8080, plain HTTP inside the namespace |
 | two more paths on the backplane's Ingress (parent chart, `templates/_core-keycloak.tpl`) | on `ingress.host`: `/auth/realms/meho` and `/auth/resources` only (`Prefix`), to the Keycloak Service; `coreKeycloak.ingress.exposeAdmin: true` adds `/auth/admin` and `/auth/realms/master`. One Ingress keeps one set of annotations and one TLS certificate for the host |
-| NetworkPolicy `<release>-keycloak` | off by default; admits port 8080 from the backplane pods and `networkPolicy.extraFrom` |
+| NetworkPolicy `<release>-keycloak` | off by default; admits port 8080 from the backplane pods, the core hook Jobs, the built-in OpenBao and its `vault-init` Job, and `networkPolicy.extraFrom` |
 
 **Addresses.** Browsers, the CLI and the `iss` claim use the public URL
 `https://<coreKeycloak.hostname>/auth` (`KC_HOSTNAME`,
@@ -846,7 +862,7 @@ on a person directly: the claim always comes from the group.
 | `meho-cli` | public, device flow | `meho login`; no `offline_access` (as `bootstrap-clients` without `--cli-offline-access`) |
 | `meho-mcp` | public, authorization code + PKCE (S256) | redirect URIs `http://localhost:*`, `http://127.0.0.1:*`; optional scopes `offline_access`, `mcp:read`, `mcp:execute`, `mcp:admin`; offline login idle limit 48 hours |
 | `meho-web` | confidential, authorization code + PKCE (S256) | redirect `https://<host>/ui/auth/callback`, after logout `https://<host>/ui/auth/login` |
-| `meho-admin` | confidential, service account | realm-management roles `manage-clients` and `manage-users` |
+| `meho-admin` | confidential, service account | realm-management roles `manage-clients` and `manage-users`; with the company login on, the chart adds `manage-identity-providers` and `manage-realm` (#4592) |
 | `meho-check-runner` | confidential, service account | its tokens carry the audience `meho-check-runner`, not `meho-backplane` |
 
 The three clients people log in with (`meho-cli`, `meho-mcp`, `meho-web`)
@@ -1000,9 +1016,11 @@ The `vault:` block stays for a Vault you bring yourself. MEHO's names stay
 `vault` (`coreVault`, `<release>-vault`, `VAULT_ADDR`): they name the job,
 not the product.
 
-**Not yet:** the setup Job `vault-init-<hash>` (the first start, the key
-and login setup, the policies). Until it lands, the server runs empty and
-locked, and nothing makes the Secret `<release>-core-vault-unseal`.
+**Setup.** The Job `<release>-vault-init-<hash>` starts OpenBao the first
+time, stores the unseal key in `<release>-core-vault-unseal`, sets up the
+logins, the policies and the tenant separation, and revokes the root token.
+The chart refuses `coreVault` without `coreKeycloak`. Details:
+docs/codebase/core-vault-init.md.
 
 **What it renders.**
 
@@ -1012,7 +1030,7 @@ locked, and nothing makes the Secret `<release>-core-vault-unseal`.
 | ConfigMap `<release>-vault-config` | `server.hcl` at `/openbao/config`: raft storage, a plain-HTTP listener on 8200 (`tls_disable`), `ui = false`, the `file` audit device with `file_path = "stdout"`. A changed config restarts the pod (checksum annotation) |
 | Service `<release>-vault` | port 8200; `publishNotReadyAddresses: true` |
 | Service `<release>-vault-internal` | headless, ports 8200 and 8201; `publishNotReadyAddresses: true`. It gives the pod its DNS name, which sets `BAO_API_ADDR` and `BAO_CLUSTER_ADDR` |
-| NetworkPolicy `<release>-vault` | off by default; admits port 8200 from the backplane pods and `networkPolicy.extraFrom` |
+| NetworkPolicy `<release>-vault` | off by default; admits port 8200 from the backplane pods, the `vault-init` Job and `networkPolicy.extraFrom` |
 | ServiceAccount `<release>-vault` and ClusterRoleBinding `<namespace>-<release>-vault-auth-delegator` | only with `coreVault.authDelegator: true` (default false); the chart's only cluster-wide object |
 
 **A locked pod is not ready.** The readiness check is `bao status`, which
@@ -1033,7 +1051,7 @@ every 5 seconds. When the server is sealed and `/unseal/key` exists, it runs
 `127.0.0.1:8200`. The key file is the Secret `<release>-core-vault-unseal`,
 mounted only in this container, `optional: true` and without `subPath`.
 The Secret's `key` value is the key alone. White space around it (such as
-the line break `echo` adds) is dropped, so the setup Job (#4044 part 2),
+the line break `echo` adds) is dropped, so the setup Job (`vault-init`),
 the installers and an operator restoring by hand can write it either way;
 without the `tr`, a key with a line break never unseals.
 
@@ -1063,7 +1081,7 @@ kubelet rotates; they count against the container's `ephemeral-storage`.
 **A Vault image (tests only).** `coreVault.binary: vault` with a matching
 `image` switches the program name, the variables (`VAULT_*`), the paths
 (`/vault/...`) and the config: `disable_mlock = true` is written, and the
-audit device is left out (the setup Job turns it on through the API).
+audit device is left out; the setup Job does not turn one on either.
 
 **`authDelegator`.** A Kubernetes login method checks tokens through the
 cluster's TokenReview API, which needs the cluster-wide binding to
@@ -1469,9 +1487,9 @@ form 3). Two checks keep it that way:
   `scripts/ci/check_chart_namespace_scope.py`. It fails on any object whose
   kind is not in the script's `NAMESPACED_KINDS` allow-list, and on any
   object in another namespace. A new namespaced kind is added to that list.
-- `helm-test` binds the user `meho-installer` to the built-in `admin` role
-  in `meho-test` only, then runs `helm install` and `helm test` with
-  `--kube-as-user meho-installer`.
+- `helm-test` and `helm-test-byo` bind the user `meho-installer` to the
+  built-in `admin` role in `meho-test` only, then run `helm install` and
+  `helm test` with `--kube-as-user meho-installer`.
 
 ### Version stamping
 
@@ -1724,9 +1742,10 @@ workflow files, this doc, and the changelog.
 | --- | --- | --- |
 | `python-lint` (`Python lint + typecheck (ruff + mypy)`) | `backend/src/` + `backend/tests/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict`. Non-required; whole-tree, unshardable-by-file, runs once on a GitHub-hosted runner (#3251, #4626). |
 | `python-unit-shard` (`Python unit shard N/4`) | `backend/` unit + acceptance subtree, split 4 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). |
-| `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252). |
+| `python-outside-backend` (`Python tests that read files outside backend`) | the backend tests that read files outside `backend/` | Runs only on a PR with no `backend/` change (`backend_python=false`) that is not docs-only. `pytest -n 3` over the fixed list in `backend/tests/_outside_backend_tests.py`, on a GitHub-hosted runner. Non-required; the fan-in requires it on that path (#5296). See [No-backend path (#5296)](#no-backend-path-5296). |
+| `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252); on a no-backend diff it requires `python-outside-backend` to pass (#5296). |
 | `python-integration-shard` (`Python integration shard N/4`) | `backend/tests/integration/` + the G0.7 vSphere canary module, split 4 ways | `uv sync --locked --all-groups` -> `pytest -x -rs` over a file set split by measured time, against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. No xdist inside a shard. Non-required matrix (#5384). |
-| `python-integration` (`Python (integration testcontainers)`) | fan-in | `needs: [changes, python-integration-shard]`; **required check (#698)** so the lane that exercises real connector dispatch can no longer ship red. Fails when any shard failed or was cancelled, or the detector is not green; reports success-by-skip on a docs-only diff. Same rules as `python-unit-lane` (#5384). |
+| `python-integration` (`Python (integration testcontainers)`) | fan-in | `needs: [changes, python-integration-shard]`; **required check (#698)** so the lane that exercises real connector dispatch can no longer ship red. Fails when any shard failed or was cancelled, or the detector is not green; reports success-by-skip on a docs-only diff and on a no-backend diff (#5296). Same rules as `python-unit-lane` (#5384). |
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
 
@@ -1853,7 +1872,8 @@ shape (deterministic file-level matrix + fan-in):
   render tests really run there and fail, not skip, if helm is missing.
 - **`python-unit-lane`** — the **fan-in** carrying the exact
   branch-protection required context `Python (ruff + mypy + pytest)`. It
-  `needs: [changes, python-lint, python-unit-shard]` and, via `if: always()
+  `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`
+  and, via `if: always()
   && <fork guard>`, runs regardless of upstream results, then inspects
   `needs.*.result`. `always()` is load-bearing: a plain `needs:` gate would
   be *skipped* when a shard fails, and a skipped required check counts as
@@ -1863,10 +1883,15 @@ shape (deterministic file-level matrix + fan-in):
   guard skips this job (and the shards), reporting the required context as
   Success exactly as the old single job did. Since #3252 the step first
   fails CLOSED if the `changes` detector did not itself succeed, then
-  branches on `needs.changes.outputs.docs_only`: on the **docs-only fast
-  path** it accepts the detect-driven `skipped` lint/shards as pass; on a
-  **full run** it requires strict `success` (a `skipped` lint/shard there is
-  anomalous and fails the gate). See [Docs-only fast path
+  branches on `needs.changes.outputs.docs_only` (and, since #5296,
+  `backend_python`): on the **docs-only fast
+  path** it accepts the detect-driven `skipped` lint/shards as pass. Since
+  #5296, when no `backend/` file changed (`backend_python=false`), it accepts
+  the skipped lint/shards and passes only if `python-outside-backend` passes
+  (see [No-backend path (#5296)](#no-backend-path-5296)). On a **full run**
+  it requires strict `success` from lint and shards (a `skipped` lint/shard
+  there is anomalous and fails the gate), and `python-outside-backend` must
+  be skipped or passed. See [Docs-only fast path
   (#3252)](#docs-only-fast-path-3252).
 
 Because the required context string is unchanged and stays on a job, the
@@ -1908,8 +1933,9 @@ split it the same way as the unit lane:
   name `Python (integration testcontainers)`, so branch protection and
   the rulesets need no change. Same rules as `python-unit-lane`:
   `if: always() && <fork guard>`, fails closed when `changes` did not
-  succeed, accepts `skipped` shards only on a docs-only diff, and needs
-  strict `success` on every other run. It runs on `ubuntu-latest`.
+  succeed, accepts `skipped` shards only on a docs-only diff or a
+  no-backend diff (#5296), and needs strict `success` on every other run.
+  It runs on `ubuntu-latest`.
 
 The first measurements (`tests/_integration_shard_durations.json`) are
 the median of four green merge-queue runs of the serial job (29 October
@@ -1966,6 +1992,53 @@ completes CI in minutes.
   same guard. The integration shards stay on the plain `needs:`+`if:`
   shape (no `always()`) to keep cancel-in-progress on the heavy legs; if
   the detector crashes they skip-cascade, and the fan-in fails closed.
+
+### No-backend path (#5296)
+
+A PR that changes no file under `backend/` (for example a Go CLI change, a
+chart change, or a workflow other than `ci.yml`) cannot change the Python code.
+It used to pay the four unit shards and the integration job anyway. Now it
+runs one short job instead.
+
+- **Classification (fail-closed).** The `changes` job has a third output,
+  `backend_python`. It starts `true` and is `false` only when the event is
+  `pull_request`, the diff could be computed, no changed path apart from
+  `.md` files is under `backend/`, and `.github/workflows/ci.yml` did not
+  change. `push` and `merge_group` always keep it `true`. It uses the same
+  `HEAD^1..HEAD` diff as `docs_only`. The diff runs with
+  `core.quotePath=false`, so a path with non-ASCII characters (for example
+  `café.json`) is printed as is and the `backend/` check sees it. Git still
+  quotes a path that holds a double quote, a backslash or a control
+  character; such a line keeps every fail-safe default (full run and
+  migration gate on).
+- **What skips.** `python-lint`, the four `python-unit-shard` legs and
+  the four `python-integration-shard` legs skip by their own `if:` when
+  `backend_python` is `false`, the same way as on a docs-only PR. The
+  `python-integration` fan-in accepts the skipped legs on this path.
+- **What runs instead.** Some backend tests read files outside `backend/`:
+  the Helm chart, the Go CLI, the workflows, the docs and the examples. A PR
+  that changes no backend file can still break them. The job
+  `python-outside-backend` runs exactly these test files. The list lives in
+  `backend/tests/_outside_backend_tests.py`; the job reads it with
+  `uv run python tests/_outside_backend_tests.py`. It runs on a GitHub-hosted
+  runner with Helm installed and `MEHO_REQUIRE_HELM=1`.
+- **The list stays complete.** `backend/tests/test_outside_backend_tests.py`
+  scans the unit test files (everything under `backend/tests/` except
+  `integration/` and `migrations/`). A file reads outside `backend/` when it
+  climbs from `Path(__file__)` to the repository root with `.parents[N]` or a
+  `.parent` chain, calls a local `_repo_root` helper, or imports a helper
+  module in `tests/` that does. The test fails when the scan and the list
+  differ. Add a new file to the list in the same PR that adds it.
+- **The fan-in.** On this path `python-unit-lane` accepts the skipped lint and
+  shards and requires `python-outside-backend` to pass. On a full run that job
+  is skipped and lint and shards must pass, as before. The required check name
+  does not change.
+- **What is not covered.** The migration tests have their own detector
+  (`migrations`). A few integration tests read files outside `backend/` (the
+  Keycloak sub-chart, `examples/`, the CLI). They need containers, so on a
+  no-backend PR only the merge queue runs them.
+- **Tests.** `backend/tests/test_ci_backend_python_skip.py` runs the real
+  detect script and the real fan-in script from `ci.yml` for each case.
 
 ### Runner-CPU rule
 

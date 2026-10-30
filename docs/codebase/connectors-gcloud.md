@@ -28,8 +28,10 @@ refused before any token is built. This is not a soft warning — it raises
 
 Nine read-only ops registered via `register_gcloud_typed_operations()`
 at lifespan startup (eight from G3.7-T5 #848; the ninth,
-`gcloud.iam.service_account_keys.list`, added by #2846). All ops have
-`safety_level="safe"` and `requires_approval=False`. They land in the
+`gcloud.iam.service_account_keys.list`, added by #2846). These nine have
+`safety_level="safe"` and `requires_approval=False`. Five more ops for
+workload identity pools and service-account policies are described in
+the next section. They land in the
 `endpoint_descriptor` table under `connector_id="gcloud-rest-1.0"`.
 
 | Op ID | API surface | HTTP verb | Notes |
@@ -45,7 +47,86 @@ at lifespan startup (eight from G3.7-T5 #848; the ninth,
 | `gcloud.iam.service_account_keys.list` | IAM v1 `serviceAccounts.keys.list` | GET | Per-SA key inventory; required `service_account_email`, optional `key_types` → `keyTypes[]` filter; row carries `key_type` (USER_MANAGED/SYSTEM_MANAGED) + `valid_before_time` expiry; never returns key material; single GET (no pagination) |
 
 Groups and `when_to_use` blurbs are defined in `_WHEN_TO_USE_BY_GROUP`
-in `connector.py`: `identity`, `project`, `services`, `iam`, `compute`.
+in `connector.py`: `identity`, `project`, `services`, `iam`, `compute`,
+`workload_identity`.
+
+## Workload identity and service-account policy ops
+
+Five more ops let an operator see and remove an old outside access path
+through MEHO, with an approval and an audit row. A **workload identity pool**
+lets an outside system (for example Vault) get Google access without a key
+file. The pool trusts an outside issuer through a provider; a binding on a
+service account (usually `roles/iam.workloadIdentityUser`) lets the pool's
+identities act as that account.
+
+| Op ID | Google call | Risk level |
+|---|---|---|
+| `gcloud.iam.workload_identity_pools.list` | `GET iam/v1/projects/<p>/locations/global/workloadIdentityPools` | safe |
+| `gcloud.iam.workload_identity_pools.providers.list` | `GET .../workloadIdentityPools/<pool>/providers` | safe |
+| `gcloud.iam.workload_identity_pools.delete` | `GET` then `DELETE .../workloadIdentityPools/<pool>` | dangerous (a person must approve) |
+| `gcloud.iam.service_accounts.policy.read` | `POST iam/v1/projects/<p>/serviceAccounts/<sa>:getIamPolicy` (version 3) | safe |
+| `gcloud.iam.service_accounts.binding.remove` | `getIamPolicy`, drop one member, `setIamPolicy` with the read `etag` | dangerous (a person must approve) |
+
+Source: metadata in `ops_workload_identity.py` (`WORKLOAD_IDENTITY_OPS`,
+appended to `GCLOUD_OPS`); handlers in `workload_identity.py`, as the
+`WorkloadIdentityOps` mixin that `GcloudConnector` inherits; the checks
+before approval in `workload_identity_preflight.py`.
+
+How they behave:
+
+- **Lists** follow `nextPageToken`; `show_deleted=true` also shows items
+  that are marked deleted. Provider rows show `kind`, `issuer_uri`
+  (`issuerUri`), `allowed_audiences`, `attribute_mapping` and
+  `attribute_condition` (`attributeCondition`). Key material (`jwksJson`,
+  SAML metadata, trust stores) is never returned.
+- **Pool delete** reads the pool first. A missing pool gives `not_found`. A
+  pool that is already marked deleted is not sent again (safe to run twice).
+  The `DELETE` answers with a Google operation. MEHO polls it (up to 15
+  times, one second apart) until it is done. A finished operation gives
+  `state: DELETED`; an operation with an `error` fails the call
+  (`ConnectorUpstreamError`, status 502); an operation still running after
+  the wait gives `state: DELETE_PENDING`, `operation_done: false` and a
+  `note` that says how to check (`gcloud.iam.workload_identity_pools.list`
+  with `show_deleted=true`). MEHO never says `DELETED` before Google does.
+  Google only marks a pool deleted: it stops working at once, Google keeps
+  it for 30 days and it can be restored in that time, and its ID cannot be
+  used again in those days. The result says so (`restorable_for_days: 30`,
+  `note`).
+- **Binding removal** reads the policy (version 3, asked for with the
+  query parameter `options.requestedPolicyVersion=3`; the body is empty),
+  drops only the named
+  member from the named role, only in bindings without a condition, drops a
+  binding left with no member, and writes the policy back with the `etag` it
+  read. If the member holds the role only through a binding with a
+  condition, MEHO refuses. If Google still answers in an older format (a
+  role name contains `_withcond_`, which hides a condition), MEHO refuses
+  too. If the member is not there, nothing is sent
+  (`removed: false`). If someone changed the policy in between, Google
+  answers `409`; MEHO raises `GcloudPolicyChangedError` (a
+  `ConnectorUpstreamError`), changes nothing and does **not** retry.
+- **Strict values.** `pool_id`, `service_account_email`, `role` and `member`
+  must fully match a pattern (in the parameter schema and again in the
+  handler with `re.fullmatch`). A value with `/`, `..`, spaces or an unknown
+  member prefix is refused before any call, so it cannot change the URL
+  path.
+- **Check before approval.** Both writes register a
+  `register_permission_preflight` check. The binding removal calls Google's
+  `testIamPermissions` on the service account. The pool delete reads the
+  pool (`GET`) and then calls `testIamPermissions` on the **project**
+  (`cloudresourcemanager.googleapis.com/v1/projects/<p>:testIamPermissions`)
+  for `iam.workloadIdentityPools.delete`, because the IAM API does not
+  answer `testIamPermissions` on every pool. A missing permission or a
+  missing pool / service account (404) sets `will_be_denied`, so the
+  dispatcher refuses at once (`write_capability_denied`) instead of asking a
+  person to approve a call that cannot work. Any other failure skips the
+  check; the call still waits for approval.
+- The delete stays `dangerous`, not `destructive`: Google keeps the pool
+  for 30 days and it can be restored. Both writes still match the
+  delete-shaped op-id patterns (`*.delete`, `*.remove`), so a standing
+  grant can never run them without a person's approval.
+
+Tests: `backend/tests/test_connectors_gcloud_workload_identity.py` (respx
+answers, no Google project needed).
 
 ### JSONFlux handle note
 
@@ -67,7 +148,8 @@ and return a `ResultHandle` without any connector-side changes.
   `op_id`, `handler_attr`, `summary`, `description`, `parameter_schema`,
   `response_schema`, `group_key`, `tags`, `safety_level`,
   `requires_approval`, `llm_instructions`.
-- **`GCLOUD_OPS`** (`ops.py`) — tuple of all 9 `GcloudOp` entries.
+- **`GCLOUD_OPS`** (`ops.py`) — tuple of all 14 `GcloudOp` entries (the
+  nine in `ops.py` plus `WORKLOAD_IDENTITY_OPS`).
   `register_gcloud_typed_operations()` walks this tuple.
 - **`GcloudTargetLike`** (`session.py`) — runtime-checkable Protocol
   capturing the minimum target shape the connector reads: `name`,

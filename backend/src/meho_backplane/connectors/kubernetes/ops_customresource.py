@@ -206,9 +206,8 @@ def custom_resource_row(obj: dict[str, Any]) -> dict[str, Any]:
     ``managedFields`` metadata block is dropped to keep result sizes
     sane. ``namespace`` is ``None`` for a cluster-scoped CR.
 
-    Read-side Secret redaction (#3501): a dynamic CR read can be pointed
-    at core ``Secret`` objects (``group=""`` / ``version="v1"`` /
-    ``plural="secrets"``). The raw object is first passed through
+    Read-side Secret redaction (#3501): any object whose ``kind`` is
+    ``Secret`` is first passed through
     :func:`~meho_backplane.connectors.kubernetes.redaction.redact_kubernetes_payload`,
     which structurally scrubs every ``data`` / ``stringData`` value of a
     ``kind: Secret`` object (regardless of whether it matches a named
@@ -218,6 +217,8 @@ def custom_resource_row(obj: dict[str, Any]) -> dict[str, Any]:
     digest, never the bytes. The same walk replaces every annotation
     value of a Secret with the placeholder (keys kept). A non-Secret CR
     gets neither field and is otherwise untouched by the walk.
+    ``k8s.secret.list`` / ``k8s.secret.info`` are the dedicated way to
+    look at a core Secret's key names.
     """
     is_secret = obj.get("kind") == SECRET_KIND
     if is_secret:

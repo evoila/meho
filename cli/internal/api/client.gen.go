@@ -1684,6 +1684,7 @@ type ApprovalResultView struct {
 type ApprovalResumeOutcomeView struct {
 	AuditId      *openapi_types.UUID `json:"audit_id"`
 	ErrorCode    *string             `json:"error_code"`
+	Guidance     *string             `json:"guidance"`
 	ResultStatus *string             `json:"result_status"`
 	ResumedAt    *string             `json:"resumed_at"`
 }

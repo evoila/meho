@@ -1249,11 +1249,36 @@ example a Vault write that Vault refused). `result_state` already tells
 | `result_status` | `status` of the stored result: `ok`, `error`, `denied`, ... `null` while no result is stored. |
 | `error_code` | `extras.error_code` of a failed run, for example `connector_error`. |
 | `audit_id` | The audit row the dispatcher wrote for the run. |
+| `guidance` | The next step a failed multi-step operation names (#5377), for example "The VM waits on question _vmx1: show it to the user and answer it with vmware.vm.question.answer." `null` for any other run. |
 
 `resume_outcome` is `null` for a request that is not approved, and before
 the run starts. The result body and the free-text `error` stay on the
 owner-only `/result` read: an odd or missing field reads as `null`, never
 raises.
+
+**Where `guidance` comes from (#5377).** A multi-step operation can end with
+its own error answer (#3809): a `result` body with an `error` issue, whose
+`status` word (for example `result_unknown`) the dispatcher copies into
+`extras.error_code`. So `error_code` already carries that word, and
+`guidance` is the body's `guidance` text. The summary takes `guidance` only
+when all of these hold:
+
+- the run did not end `ok`;
+- the body's `status` equals `error_code`, so the body is MEHO's own error
+  answer, not a vendor answer;
+- neither the run's op nor the parked op is in a secret class
+  (`credential_read`, `credential_mint`, `credential_write`).
+
+So no param and no vendor text of an operation that sends or reads a secret
+reaches the summary (the rule of #4854). For other operations the text is
+MEHO's own words: a multi-step operation keeps a vendor error in its
+`issues`, never in its `guidance`, because every approver reads the
+guidance. Like every error result, the body has already passed the
+dispatcher's secret cleanup (`redact_error_result`). The text is cut at 500
+characters. For
+`vmware.composite.vm.device.cdrom`, the text names the running task ids and
+the question id; the question text and any read error stay in the body
+(`vm_question`, `tasks_error`).
 
 Where it shows:
 
@@ -1263,14 +1288,17 @@ Where it shows:
   `resume_outcome`, same shape.
 - **CLI** `meho approvals list`: a `RUN` column (`not-run`, `started`,
   `ok`, `FAILED`, or `-` when the request is not approved). `meho approvals
-  show` and `approve`: `Run:`, `Run started:`, `Run result:`, `Error code:`
-  and `Run audit:` lines, with the `meho audit show <id>` command for the
-  audit row.
+  show` and `approve`: `Run:`, `Run started:`, `Run result:`, `Error code:`,
+  `Next step:` (the `guidance`, when set) and `Run audit:` lines, with the
+  `meho audit show <id>` command for the audit row. `approve` reads the
+  request again after the decision, so it prints the same summary as
+  `show`.
 - **Console** `/ui/approvals`: a run badge next to the `approved` pill in
   the history list (`ran OK`, `run failed`, ...). The detail modal of a
   failed run shows a red banner with the error code and a link to the audit
   row (`/ui/audit?audit_id=<id>`). The card after an approve says "Approved,
-  but the run failed" when the run returned an error. When another resumer
+  but the run failed" when the run returned an error. Both show a "Next
+  step" line with the `guidance`, when set. When another resumer
   (usually the waiting requester) already ran the operation
   (`already_resumed`), it shows the normal "Request approved" card.
 
@@ -1286,8 +1314,12 @@ poll `/result` to learn whether the run ended.
 
 **Pinned by tests:** `tests/test_approval_resume_outcome.py` (summary
 shape, odd envelopes, a resume that errors shows on REST show, list and
-MCP), `tests/test_ui_approvals.py` (run badge, failed-run modal, failed
-approve card) and `cli/internal/cmd/approvals/approvals_test.go`.
+MCP, the `guidance` rules and a credential operation with no vendor text),
+`tests/test_ui_approvals.py` (run badge, failed-run modal, failed approve
+card, the "Next step" line),
+`tests/test_connectors_vmware_rest_typed_vm_question.py` (a CD-ROM change
+that times out on a VM question names the question id in the summary) and
+`cli/internal/cmd/approvals/approvals_test.go`.
 
 ### The add-on governed-destroy round trip (#3478)
 

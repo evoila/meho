@@ -226,6 +226,10 @@ class ApprovalResumeOutcomeView(BaseModel):
     error_code: str | None
     #: Id of the audit row the run wrote. Open it with ``meho audit show``.
     audit_id: uuid.UUID | None
+    #: The next step a failed multi-step operation names, written by MEHO
+    #: (#5377), for example "The VM waits on question _vmx1: ...". ``None``
+    #: for any other run, and always for an operation in a secret class.
+    guidance: str | None
 
 
 class ApprovalRequestView(BaseModel):
@@ -448,6 +452,7 @@ def _resume_outcome_view(row: ApprovalRequest) -> ApprovalResumeOutcomeView | No
         result_status=outcome.result_status,
         error_code=outcome.error_code,
         audit_id=outcome.audit_id,
+        guidance=outcome.guidance,
     )
 
 

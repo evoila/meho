@@ -23844,6 +23844,11 @@
             "format": "uuid",
             "nullable": true,
             "title": "Audit Id"
+          },
+          "guidance": {
+            "type": "string",
+            "nullable": true,
+            "title": "Guidance"
           }
         },
         "type": "object",
@@ -23851,7 +23856,8 @@
           "resumed_at",
           "result_status",
           "error_code",
-          "audit_id"
+          "audit_id",
+          "guidance"
         ],
         "title": "ApprovalResumeOutcomeView",
         "description": "What happened when an approved request ran (#3543).\n\nA summary read off the stored result envelope. The result body and the\nfree-text error stay on the owner-only ``/result`` read."

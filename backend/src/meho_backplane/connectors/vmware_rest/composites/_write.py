@@ -9422,7 +9422,9 @@ async def vm_resize_composite(
                     **base,
                     "status": "partial",
                     "applied": {"cpu": True, "memory": False},
-                    "guidance": f"CPU applied; memory update failed: {exc}",
+                    # MEHO's words only: an approval shows guidance to every
+                    # approver (#5377). The error text stays in the issue.
+                    "guidance": "CPU applied; memory update failed. See the error issue.",
                     "issues": [
                         issue("connector", "error", f"CPU applied; memory update failed: {exc}")
                     ],

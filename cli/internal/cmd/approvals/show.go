@@ -233,6 +233,11 @@ func printRunOutcome(w io.Writer, d *api.ApprovalRequestView) {
 	if o.ErrorCode != nil {
 		fmt.Fprintf(w, "Error code:   %s\n", *o.ErrorCode)
 	}
+	// The next step a failed multi-step operation names (#5377), for
+	// example the VM question that holds the change.
+	if o.Guidance != nil && *o.Guidance != "" {
+		fmt.Fprintf(w, "Next step:    %s\n", *o.Guidance)
+	}
 	if o.AuditId != nil {
 		fmt.Fprintf(w, "Run audit:    %s (meho audit show %s)\n", o.AuditId.String(), o.AuditId.String())
 	}

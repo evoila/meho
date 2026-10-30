@@ -743,7 +743,7 @@ async def _decide(
             dispatch_status=dispatch_result.status,
             operator_sub=operator.sub,
         )
-        run = project_run_result(dispatch_result)
+        run = project_run_result(dispatch_result, parked_op_id=approval.op_id)
 
     context: dict[str, object] = {
         # The reason already passed validation in the service, so this

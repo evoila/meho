@@ -1240,3 +1240,61 @@ func TestPrintListTableRendersRunState(t *testing.T) {
 		}
 	}
 }
+
+// guidanceRunView is an approved request whose run ended result_unknown
+// while the VM waits on a question (#5377): the run summary carries the
+// next step MEHO names.
+func guidanceRunView(t *testing.T) api.ApprovalRequestView {
+	t.Helper()
+	d := failedRunView(t)
+	errorCode := "result_unknown"
+	guidance := "The change did not answer in time and may still run (vCenter tasks: task-7). " +
+		"Do not start it again yet. The VM waits on question _vmx1: show it to the user " +
+		"and answer it with vmware.vm.question.answer."
+	d.ResumeOutcome.ErrorCode = &errorCode
+	d.ResumeOutcome.Guidance = &guidance
+	return d
+}
+
+// TestPrintDetailAndDecisionRenderGuidance: show and approve print the
+// next step of a run that waits on a VM question (#5377).
+func TestPrintDetailAndDecisionRenderGuidance(t *testing.T) {
+	d := guidanceRunView(t)
+	want := []string{
+		"Run:          FAILED",
+		"Error code:   result_unknown",
+		"Next step:    The change did not answer in time",
+		"The VM waits on question _vmx1",
+	}
+
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	var buf bytes.Buffer
+	printDecision(&buf, stubID, &d)
+	for name, out := range map[string]string{"show": stdout.String(), "approve": buf.String()} {
+		for _, w := range want {
+			if !strings.Contains(out, w) {
+				t.Errorf("%s render missing %q in:\n%s", name, w, out)
+			}
+		}
+	}
+}
+
+// TestPrintDecisionOkRunHasNoGuidance: a run that ended ok prints as
+// before, with no "Next step:" line (#5377).
+func TestPrintDecisionOkRunHasNoGuidance(t *testing.T) {
+	d := newApprovalView(t, "approved", "T-test")
+	executed := api.ApprovalResultStateExecuted
+	resultStatus := "ok"
+	d.ResultState = &executed
+	d.ResumeOutcome = &api.ApprovalResumeOutcomeView{ResultStatus: &resultStatus}
+	var buf bytes.Buffer
+	printDecision(&buf, stubID, &d)
+	out := buf.String()
+	if !strings.Contains(out, "Run:          ok") || !strings.Contains(out, "Run result:   ok") {
+		t.Errorf("ok run render changed:\n%s", out)
+	}
+	if strings.Contains(out, "Next step:") {
+		t.Errorf("ok run printed a Next step line:\n%s", out)
+	}
+}

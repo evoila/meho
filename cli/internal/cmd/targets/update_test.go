@@ -230,3 +230,37 @@ func TestUpdateNotFoundRendersNearMisses(t *testing.T) {
 		t.Errorf("stderr should list near-misses; got:\n%s", stderr.String())
 	}
 }
+
+// TestUpdateVPNRequiredSendsOnlyWhenGiven pins that --vpn-required=false
+// sends an explicit false (to clear the flag), --vpn-required sends
+// true, and an update without the flag leaves vpn_required out of the
+// body so the stored value stays as it is.
+func TestUpdateVPNRequiredSendsOnlyWhenGiven(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
+	cases := []struct {
+		name    string
+		args    []string
+		want    any
+		present bool
+	}{
+		{"set", []string{"--vpn-required"}, true, true},
+		{"clear", []string{"--vpn-required=false"}, false, true},
+		{"omitted", []string{"--note", "moved"}, nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var f fakePatchServer
+			url := f.start(t, http.StatusOK, updatedTargetJSON)
+			args := append([]string{"demo-vault"}, tc.args...)
+			_, stderr, err := runUpdateCmd(t, url, args...)
+			if err != nil {
+				t.Fatalf("update: %v\nstderr=%s", err, stderr.String())
+			}
+			v, present := f.body["vpn_required"]
+			if present != tc.present || (present && v != tc.want) {
+				t.Errorf("vpn_required: got %#v (present=%t); want %#v (present=%t); raw body %s",
+					v, present, tc.want, tc.present, f.raw)
+			}
+		})
+	}
+}

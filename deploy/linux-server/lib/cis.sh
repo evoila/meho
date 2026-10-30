@@ -9,7 +9,9 @@
 # - the host steps that RKE2 checks when it starts with the profile: the
 #   etcd user and group, and RKE2's own kernel settings file, copied to
 #   /etc/sysctl.d and loaded. They run after RKE2's installer, which brings
-#   the file, and before RKE2 starts. Each step is safe to run again.
+#   the file, and before RKE2 starts. Each step is safe to run again. The
+#   install records which part of the etcd account it created, so
+#   meho-host uninstall removes only that part (#5133).
 # - the pod security file that RKE2's settings name: RKE2's own file for
 #   the profile, with one more exempt namespace, local-path-storage.
 # - cis_state, which changes nothing, for meho-host check (#4638).
@@ -30,6 +32,10 @@ readonly RKE2_CIS_SYSCTL_SOURCES=(
 readonly CIS_SYSCTL_FILE=/etc/sysctl.d/60-rke2-cis.conf
 readonly SYSCTL_UNIT=systemd-sysctl.service
 readonly ETCD_ACCOUNT=etcd
+# The parts of the etcd account that the install created: "user", "group"
+# or both, one per line. meho-host uninstall reads it before it removes
+# /etc/meho and removes only these parts.
+readonly ETCD_ACCOUNT_RECORD=/etc/meho/etcd-account
 
 # render_pod_security_config: RKE2's own pod security file for the CIS
 # profile (restrictedPSAConfig in pkg/rke2/psa.go of RKE2), with
@@ -78,10 +84,37 @@ etcd_user_exists() { grep -q "^${ETCD_ACCOUNT}:" "${HOST_ROOT}/etc/passwd" 2>/de
 
 etcd_group_exists() { grep -q "^${ETCD_ACCOUNT}:" "${HOST_ROOT}/etc/group" 2>/dev/null; }
 
+# etcd_account_recorded <part>: true when the record names the part, user
+# or group, as created by the install.
+etcd_account_recorded() {
+    grep -qx -- "$1" "${HOST_ROOT}${ETCD_ACCOUNT_RECORD}" 2>/dev/null
+}
+
+# record_etcd_account <part>...: add the parts that this run created to the
+# record. A part that the record names already stays in it, so a later run
+# keeps the answer of the run that created the part.
+record_etcd_account() {
+    local created=" $* " part parts=()
+    for part in user group; do
+        if etcd_account_recorded "$part" || [[ $created == *" $part "* ]]; then
+            parts+=("$part")
+        fi
+    done
+    {
+        cat <<EOF
+# Written by MEHO install.sh: the parts of the $ETCD_ACCOUNT account for RKE2's
+# etcd that the install created. meho-host uninstall removes only these.
+EOF
+        printf '%s\n' "${parts[@]}"
+    } | write_root_file "$ETCD_ACCOUNT_RECORD" 0600
+}
+
 # create_etcd_account: RKE2 runs etcd as this user with the CIS profile and
 # stops at its start when the user or the group is missing. The command is
 # the one of the hardening guide. A user or group that exists already stays
-# as it is.
+# as it is. The record is written right after the part is created, so a
+# run that stops later still leaves the answer for the next run and for
+# meho-host uninstall.
 create_etcd_account() {
     if etcd_user_exists && etcd_group_exists; then
         ok "the $ETCD_ACCOUNT user and group for RKE2's etcd exist"
@@ -91,16 +124,21 @@ create_etcd_account() {
         groupadd -r "$ETCD_ACCOUNT" ||
             fail "groupadd could not create the $ETCD_ACCOUNT group." \
                 "read its message above, correct the cause and run install.sh again."
+        record_etcd_account group
+        ok "created the $ETCD_ACCOUNT group for RKE2's etcd. The $ETCD_ACCOUNT user existed before."
     elif etcd_group_exists; then
         useradd -r -c "etcd user" -s /sbin/nologin -M -g "$ETCD_ACCOUNT" "$ETCD_ACCOUNT" ||
             fail "useradd could not create the $ETCD_ACCOUNT user." \
                 "read its message above, correct the cause and run install.sh again."
+        record_etcd_account user
+        ok "created the $ETCD_ACCOUNT user for RKE2's etcd. The $ETCD_ACCOUNT group existed before."
     else
         useradd -r -c "etcd user" -s /sbin/nologin -M -U "$ETCD_ACCOUNT" ||
             fail "useradd could not create the $ETCD_ACCOUNT user and group." \
                 "read its message above, correct the cause and run install.sh again."
+        record_etcd_account user group
+        ok "created the $ETCD_ACCOUNT user and group for RKE2's etcd"
     fi
-    ok "created the $ETCD_ACCOUNT user and group for RKE2's etcd"
 }
 
 # cis_sysctl_source: print the path of RKE2's kernel settings file on this

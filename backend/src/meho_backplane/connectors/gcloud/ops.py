@@ -747,6 +747,9 @@ _GCLOUD_IAM_SERVICE_ACCOUNT_KEYS_LIST_OP = GcloudOp(
 
 def _gcloud_ops() -> tuple[GcloudOp, ...]:
     """Return the full registration tuple for all gcloud typed ops."""
+    # Imported here: ops_workload_identity imports GcloudOp from this module.
+    from meho_backplane.connectors.gcloud.ops_workload_identity import WORKLOAD_IDENTITY_OPS
+
     return (
         _GCLOUD_ABOUT_OP,
         _GCLOUD_PROJECT_DESCRIBE_OP,
@@ -757,6 +760,7 @@ def _gcloud_ops() -> tuple[GcloudOp, ...]:
         _GCLOUD_COMPUTE_SUBNETWORKS_LIST_OP,
         _GCLOUD_IAM_POLICY_READ_OP,
         _GCLOUD_IAM_SERVICE_ACCOUNT_KEYS_LIST_OP,
+        *WORKLOAD_IDENTITY_OPS,
     )
 
 
@@ -768,4 +772,7 @@ def _gcloud_ops() -> tuple[GcloudOp, ...]:
 #: ``gcloud.iam.service_accounts.list``, ``gcloud.compute.instances.list``,
 #: ``gcloud.compute.networks.list``, ``gcloud.compute.subnetworks.list``,
 #: ``gcloud.iam.policy.read``, ``gcloud.iam.service_account_keys.list``.
+#: Five more come from :mod:`.ops_workload_identity`: workload identity pools
+#: and providers (list, delete) and the service-account policy (read, remove
+#: one binding). The delete and the binding removal wait for approval.
 GCLOUD_OPS: tuple[GcloudOp, ...] = _gcloud_ops()

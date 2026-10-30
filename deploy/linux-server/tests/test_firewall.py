@@ -221,6 +221,7 @@ class RulesFileTests(FirewallTestCase):
                 self.machine.ssh_connection = session
 
                 self.assert_succeeds(self.machine.run(*args))
+                self.machine.remove_install_record()
 
                 rules = self.host_text(RULES)
                 self.assertIn(f"    # {note}", rules)
@@ -333,6 +334,7 @@ class FirewallStartTests(FirewallTestCase):
                 (self.machine.fake / "calls.log").write_text("")
 
                 result = self.machine.run(*ADMIN_NETWORK)
+                self.machine.remove_install_record()
 
                 self.assert_succeeds(result)
                 self.assertLess(self.index_of(FIREWALL_VERIFY), self.index_of(FIREWALLD_OFF))
@@ -427,6 +429,7 @@ class AdminNetworkCheckTests(FirewallTestCase):
         for value, line in cases.items():
             with self.subTest(admin_network=value):
                 result = self.machine.run("--admin-network", value)
+                self.machine.remove_install_record()
 
                 self.assert_succeeds(result)
                 self.assertIn(line, result.stdout)
@@ -482,6 +485,7 @@ class AdminNetworkCheckTests(FirewallTestCase):
         joined = self.machine.run(
             *ADMIN_NETWORK, "--join-address", "10.0.0.20", "--join-token-file", str(token_file)
         )
+        self.machine.remove_install_record()
         alone = self.machine.run(*ADMIN_NETWORK)
 
         self.assert_succeeds(joined)

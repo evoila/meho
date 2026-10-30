@@ -19,6 +19,7 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
+from meho_backplane.connectors.vcf_automation.feature_flag_ops import VCFA_FEATURE_FLAG_OPS
 from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
 from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
 from meho_backplane.connectors.vcf_automation.provisioning_ops import VCFA_PROVISIONING_OPS
@@ -31,6 +32,7 @@ _OPS: list[Any] = [
     *VCFA_IMAGE_OPS,
     *VCFA_NETWORK_OPS,
     *VCFA_DEPLOY_OPS,
+    *VCFA_FEATURE_FLAG_OPS,
     *VRA8_TYPED_OPS,
 ]
 
@@ -38,8 +40,8 @@ _OPS: list[Any] = [
 _REAL_LOOKING = re.compile(r"\b\d{1,3}(\.\d{1,3}){3}\b|\b[a-z0-9-]+\.(com|net|org|local|lan)\b")
 
 
-def test_all_36_operations_are_covered() -> None:
-    assert len({op.op_id for op in _OPS}) == 36
+def test_all_39_operations_are_covered() -> None:
+    assert len({op.op_id for op in _OPS}) == 39
 
 
 @pytest.mark.parametrize("op", _OPS, ids=lambda op: op.op_id)

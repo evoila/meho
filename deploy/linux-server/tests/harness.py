@@ -19,18 +19,25 @@ network, and they change nothing on the machine that runs them:
   arguments to calls.log, so a test changes one answer and reads the calls.
 - SSH_CONNECTION says that an admin at 10.0.0.9 runs the script over SSH.
   A test sets ssh_connection to None for a run on the machine's console.
+- Standard input is empty and not a terminal. A test gives terminal_input
+  to run the script on a pseudo-terminal that the input is typed into.
 
 The default answers describe a healthy Ubuntu 24.04 machine on which RKE2
 gets ready at once, Helm installs the core at once, and both Secrets of the
-core exist. RKE2's installer puts RKE2's kernel settings file for the CIS
-profile (fixtures/rke2-cis-sysctl.conf) under /usr/local/share/rke2, as
-the real one does. "systemctl restart systemd-sysctl.service" loads every
-file of /etc/sysctl.d into /proc/sys, and useradd and groupadd add their
-lines to /etc/passwd and /etc/group.
+core exist. The fake RKE2 does not run after the install and the fake Helm
+lists no release, so a second run finds no install; mark_installed() makes
+the machine look installed, for the tests of the update. RKE2's installer
+puts RKE2's kernel settings file for the CIS profile
+(fixtures/rke2-cis-sysctl.conf) under /usr/local/share/rke2, as the real
+one does. "systemctl restart systemd-sysctl.service" loads every file of
+/etc/sysctl.d into /proc/sys, and useradd and groupadd add their lines to
+/etc/passwd and /etc/group. A restart of rke2-server starts a new run of
+it, with a new invocation id.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -82,6 +89,7 @@ REAL_TOOLS = (
     "sed",
     "grep",
     "sort",
+    "tar",
 )
 
 # What "nft list chain inet meho prerouting" prints for the file install.sh
@@ -113,6 +121,7 @@ STUBS = {
         case "$1" in
           is-active) grep -qxF -- "$3" "$MEHO_FAKE/active_units" ;;
           is-enabled) grep -qxF -- "$3" "$MEHO_FAKE/enabled_units" ;;
+          show) cat "$MEHO_FAKE/rke2_invocation_id" ;;
           enable)
             case "$*" in
               *rke2-server*) exit "$(cat "$MEHO_FAKE/systemctl_enable_rc")" ;;
@@ -130,7 +139,16 @@ STUBS = {
               done
               exit 0
             fi
-            exit "$(cat "$MEHO_FAKE/systemctl_restart_rc")" ;;
+            rc=$(cat "$MEHO_FAKE/systemctl_restart_rc")
+            case "$*" in
+              *rke2-server*)
+                new_run=$(cat "$MEHO_FAKE/rke2_restart_starts_a_new_run")
+                if [ "$rc" = 0 ] && [ "$new_run" = yes ]; then
+                  run=$(cat "$MEHO_FAKE/rke2_invocation_id")
+                  printf '%s+\n' "$run" > "$MEHO_FAKE/rke2_invocation_id"
+                fi ;;
+            esac
+            exit "$rc" ;;
           disable) exit "$(cat "$MEHO_FAKE/systemctl_disable_rc")" ;;
         esac
         """).lstrip("\n"),
@@ -207,7 +225,12 @@ RKE2_INSTALLER_STUB = textwrap.dedent("""\
     exit "$rc"
     """)
 
+# "helm list" answers with the releases the fake cluster has.
 HELM_STUB = textwrap.dedent("""\
+    if [ "$1" = list ]; then
+        cat "$MEHO_FAKE/helm_releases"
+        exit "$(cat "$MEHO_FAKE/helm_list_rc")"
+    fi
     cat "$MEHO_FAKE/helm_stdout"
     cat "$MEHO_FAKE/helm_stderr" >&2
     exit "$(cat "$MEHO_FAKE/helm_rc")"
@@ -272,6 +295,10 @@ DEFAULT_ANSWERS = {
     ),
     "helm_stderr": "",
     "helm_rc": "0",
+    "helm_releases": "",
+    "helm_list_rc": "0",
+    "rke2_invocation_id": "rke2-run-1\n",
+    "rke2_restart_starts_a_new_run": "yes",
     "systemctl_restart_rc": "0",
     "systemctl_disable_rc": "0",
     "nft_table_rc": "0",
@@ -300,6 +327,16 @@ DOWNLOAD_PAYLOAD = {
         "BUILD_DATE=2026-10-23T00:00:00Z\n"
     ),
 }
+
+
+VERSION_FILE = textwrap.dedent("""\
+    MEHO_VERSION={meho}
+    MEHO_IMAGE_TAG=v{meho}
+    CHART_VERSION={meho}
+    RKE2_VERSION={rke2}
+    HELM_VERSION=v3.16.4
+    BUILD_DATE=2026-10-23T00:00:00Z
+    """)
 
 
 def kernel_path(key: str) -> str:
@@ -391,6 +428,30 @@ class FakeMachine:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
 
+    def mark_installed(self) -> None:
+        """What a machine shows after the install: rke2-server runs, and Helm
+        has the release meho. The fake RKE2 and Helm do not do this alone."""
+        active = (self.fake / "active_units").read_text()
+        self.answer("active_units", active + "rke2-server.service\n")
+        self.answer("helm_releases", "meho\n")
+
+    def remove_install_record(self) -> None:
+        """Make the machine look new again for one more first install: with
+        the fake RKE2 not running, the install record was the only sign of
+        the install before."""
+        self.host_path("/etc/meho/install.json").unlink()
+
+    def set_download_version(self, meho: str, rke2: str = "v1.37.1+rke2r1") -> None:
+        """Turn the fake download into the download of another version. The
+        chart, the image archive and the meho CLI then name that version."""
+        for chart in (self.download / "chart").glob("meho-*.tgz"):
+            chart.unlink()
+        (self.download / "chart" / f"meho-{meho}.tgz").write_text(f"fake chart {meho}\n")
+        (self.download / "VERSION").write_text(VERSION_FILE.format(meho=meho, rke2=rke2))
+        archive = self.download / "images" / "meho-images.linux-amd64.tar.zst"
+        archive.write_text(f"fake MEHO images {meho}\n")
+        (self.download / "bin" / "meho").write_text(f"fake meho CLI {meho}\n")
+
     def install_rke2_files(self) -> None:
         """What RKE2's installer leaves on the disk that install.sh reads:
         RKE2's kernel settings file for the CIS profile."""
@@ -400,8 +461,12 @@ class FakeMachine:
         """Every stub call so far, one line each: the command and its arguments."""
         return (self.fake / "calls.log").read_text()
 
-    def run(self, *args: str, shell: str | None = None) -> subprocess.CompletedProcess[str]:
-        """Run install.sh with the arguments, directly or with the given shell."""
+    def run(
+        self, *args: str, shell: str | None = None, terminal_input: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        """Run install.sh with the arguments, directly or with the given shell.
+        With terminal_input, standard input is a pseudo-terminal on which
+        that text was typed."""
         command = [str(self.download / "install.sh"), *args]
         if shell is not None:
             command.insert(0, str(self.tools / shell))
@@ -414,14 +479,31 @@ class FakeMachine:
         }
         if self.ssh_connection is not None:
             env["SSH_CONNECTION"] = self.ssh_connection
-        return subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            env=env,
-            check=False,
-            timeout=60,
-        )
+        if terminal_input is None:
+            return subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+                timeout=60,
+            )
+        leader, follower = os.openpty()
+        try:
+            os.write(leader, terminal_input.encode())
+            return subprocess.run(
+                command,
+                stdin=follower,
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+                timeout=60,
+            )
+        finally:
+            os.close(leader)
+            os.close(follower)
 
 
 class InstallTestCase(unittest.TestCase):
@@ -433,7 +515,9 @@ class InstallTestCase(unittest.TestCase):
 
     @staticmethod
     def output(result: subprocess.CompletedProcess[str]) -> str:
-        return result.stdout + result.stderr
+        """Standard output, then standard error, each from a new line. A
+        question on the terminal ends without a line break."""
+        return result.stdout + "\n" + result.stderr
 
     def assert_succeeds(self, result: subprocess.CompletedProcess[str]) -> None:
         self.assertEqual(0, result.returncode, self.output(result))

@@ -29,6 +29,13 @@ meho doctor
 - The **authenticated layer** checks DNS, TLS, and your token, then runs
   the MCP handshake. It shows your scopes and any working-surface tool
   your session should see but does not.
+- The **server layer** appears only on a Linux server where MEHO was
+  installed with its own install script (the file
+  `/usr/local/sbin/meho-host` exists). Run `sudo meho doctor` there. As
+  root, the doctor runs `meho-host check` and shows its lines last: the
+  node, the pods, the disk and the certificates of the built-in
+  Kubernetes. Without `sudo` it shows one warning and runs nothing. A
+  red server line gives exit code 1.
 
 Use the failure class it prints (`dns`, `tls`, `refresh_rejected`,
 `surface_gap`, ...) to pick the section below. See also the
@@ -218,7 +225,7 @@ first, then match the row:
 |---|---|---|
 | `invalid_audience` | The token's `aud` does not include the MCP resource URI (`MCP_RESOURCE_URI`, i.e. `https://<host>/mcp`). | Confirm the `meho-mcp-audience` mapper is on the client that issues the operator's token (**W2**). A reverse proxy that rewrites the request path can also leave the audience pointing at the wrong URI — capture the issued token via the realm's introspection endpoint and read `aud`. |
 | `missing_sub` | The token has no `sub` claim. Keycloak 25+ moved `sub` into a mapper inside the `basic` client scope, and clients created via the admin REST API do not auto-inherit realm default scopes. RFC 9068 makes `sub` required, so rejection is correct — the opacity is the problem. | Assign `basic` (and `roles`, `web-origins`, `acr`) as **default** client scopes, then log out and back in (**W3** — the deepest wall). |
-| `missing_tenant_claim` / `missing_tenant_role_claim` | The person is in none of the five MEHO groups, or the `tenant-id` / `tenant-role` mapper is absent, so the backplane cannot place the caller in a tenant. | Put the person in one group ([Keycloak realm setup § groups](../install/keycloak-realm.md#step-5-create-the-five-groups)), or add the tenant mappers (**W2**, [§ mappers](../install/keycloak-realm.md#step-3-add-the-protocol-mappers)). |
+| `missing_tenant_claim` / `missing_tenant_role_claim` | The person is in none of the five MEHO groups, or the `tenant-id` / `tenant-role` mapper is absent, so the backplane cannot place the caller in a tenant. | Put the person in one group ([Keycloak realm setup § groups](../install/keycloak-realm.md#step-5-create-the-five-groups), or [Add a tenant](../guides/tenant-bootstrap.md) for a new tenant), or add the tenant mappers (**W2**, [§ mappers](../install/keycloak-realm.md#step-3-add-the-protocol-mappers)). |
 | `multiple_role_groups: …` | The person is in two or more of the five MEHO groups. Keycloak then copies the role from whichever group it finds first, so the role would be unpredictable. The message names the groups it found. | Keep the person in exactly one group ([Keycloak realm setup § groups](../install/keycloak-realm.md#step-5-create-the-five-groups)), then log out and back in. A site that renamed the groups sets `JWT_ROLE_GROUPS` on the backplane to the new names (comma-separated). |
 | `invalid_issuer` | The token's `iss` does not match the configured realm. | Point the client at the same realm `KEYCLOAK_ISSUER_URL` names; a stale OAuth state from a previous realm can survive across config changes. |
 | `token_expired` / `token_not_yet_valid` | `exp` is in the past, or `nbf` in the future beyond leeway (clock skew). | Refresh the token; for `nbf`, sync the clock on the issuing or calling host. |

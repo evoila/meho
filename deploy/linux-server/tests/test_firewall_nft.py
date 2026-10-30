@@ -128,6 +128,8 @@ class NftCheckTests(InstallTestCase):
         self.machine.ssh_connection = session
         result = self.machine.run(*args)
         self.assert_succeeds(result)
+        # The next call is a first install again, not an update.
+        self.machine.remove_install_record()
         return self.machine.host_path(RULES)
 
     def test_nft_accepts_the_file_for_each_admin_network(self) -> None:

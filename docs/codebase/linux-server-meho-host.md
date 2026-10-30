@@ -29,8 +29,13 @@ This version has four commands:
   works. Only the SSH rule changes. Over SSH, the command asks first when
   the new range does not hold the admin's own address.
 - **`meho-host uninstall`** (#4739) removes MEHO and the built-in Kubernetes
-  from the machine, with all their data. It asks twice. The MEHO firewall
-  stays on, and the last line names the command that removes it.
+  from the machine, with all their data. It asks twice. It also removes the
+  host changes of RKE2's CIS profile (#5133): the kernel settings file, and
+  the `etcd` user and group when the install created them. An `etcd` user
+  or group that existed before the install stays. The MEHO firewall stays
+  on, and a line names the command that removes it. The last line says
+  that a restart of the machine brings back the operating system's own
+  kernel values.
 
 All need root. Exit codes: `check` exits 0 when every line is ok or a
 warning, and 1 when a line is red; the other commands exit 0 when they are
@@ -39,10 +44,10 @@ or with `Stopped. Nothing was changed.` when the admin answers a question
 with anything but `yes`, and 2 for wrong usage.
 
 A later Task adds the commands `certificate`, `keyholder` and `unseal`
-(#4738). `meho doctor` runs `check --json` when it runs on the server
-(#4740). The fourth hardening line of #4638, a scan of the operating
-system against the CIS Linux benchmark, is not built yet (see Known
-issues).
+(#4738). `meho doctor` runs `check --json` as root on the server and shows
+its lines (#4740, see below). The fourth hardening line of #4638, a scan of
+the operating system against the CIS Linux benchmark, is not built yet
+(see Known issues).
 
 ## Key files
 
@@ -50,12 +55,12 @@ issues).
 | --- | --- |
 | `meho-host` | One bash script: the output helpers, the seven checks with the rule for the console certificate (`certificate_state`), the bundle and its scrub, the SSH rule rewrite and the uninstall. It sources `lib/firewall.sh` and `lib/cis.sh` (see [How meho-host finds its lib files](#how-meho-host-finds-its-lib-files)). It carries its own copies of the IPv4 helpers of `lib/net.sh` and of the paths of `lib/common.sh` that it needs. |
 | `lib/firewall.sh` | `firewall_state` (the firewall line) and the firewall paths `MEHO_FIREWALL_FILE`, `MEHO_FIREWALL_UNIT` and the others. |
-| `lib/cis.sh` | `cis_state` (the CIS profile line). It reads `RKE2_CONFIG_FILE`, which `meho-host` defines as `lib/common.sh` does. |
+| `lib/cis.sh` | `cis_state` (the CIS profile line), and for the uninstall the paths of the CIS host changes and the `etcd` look-ups (`etcd_user_exists`, `etcd_group_exists`, `etcd_account_recorded`). It reads `RKE2_CONFIG_FILE`, which `meho-host` defines as `lib/common.sh` does. |
 | `lib/prepare.sh` | `install_meho_host`: the copy to `/usr/local/sbin`, mode 0755, and of the two lib files to `/usr/local/lib/meho-host`, mode 0644. |
 | `lib/common.sh` | `MEHO_HOST_FILE`, `MEHO_HOST_PATH`, `MEHO_HOST_LIB_DIR`, `MEHO_HOST_LIB_FILES`, and `meho-host` in `DOWNLOAD_FILES`. |
 | `packaging/parts.sh`, `packaging/common.sh` | The download ships `meho-host` next to `install.sh`, executable. |
-| `tests/host_harness.py` | A fake installed machine: stub `kubectl`, `rke2`, `journalctl`, `df`, `free`, `ip`, `date`, `nft`, `systemctl` and friends, the files of RKE2's CIS profile, and the real `openssl`. `console_certificate()` makes test certificates with fixed dates. `run()` takes the answers to the questions (`stdin`) and an SSH session (`ssh_client`). |
-| `tests/test_meho_host.py` | The tests of the four commands and of each hardening line, and of the install by `install.sh`. |
+| `tests/host_harness.py` | A fake installed machine: stub `kubectl`, `rke2`, `journalctl`, `df`, `free`, `ip`, `date`, `nft`, `systemctl`, `userdel`, `groupdel` and friends, the files of RKE2's CIS profile, and the real `openssl`. `console_certificate()` makes test certificates with fixed dates. `run()` takes the answers to the questions (`stdin`) and an SSH session (`ssh_client`). |
+| `tests/test_meho_host.py` | The tests of the four commands and of each hardening line, of the install by `install.sh`, and of the `etcd` record from the install through an update to `uninstall`. |
 | `tests/fixtures/firewall-admin-network.nft` | The firewall file `install.sh` writes with `--admin-network 10.0.50.0/24`; the `admin-network` and `uninstall` tests start from it. |
 
 The script has the same shape as `install.sh`: `set -Eeuo pipefail`, an ERR
@@ -157,6 +162,15 @@ form is
 ```
 
 with `status` one of `ok`, `warn` and `fail`. `hint` is empty on an ok line.
+
+`meho doctor` reads this form (#4740). When `/usr/local/sbin/meho-host`
+exists and the doctor runs as root, it runs `meho-host check --json` with
+a 60-second limit and shows each line in its server layer, after its own
+lines. It maps `ok`, `warn` and `fail` (and `skip`) to its own statuses.
+A line with another status word becomes a red line in the doctor, so a
+new status word needs a change in `cli/internal/cmd/doctor_server.go`
+too. Output that is not this JSON gives one red doctor line. See
+[cli.md](cli.md), section "Server layer".
 
 ### `support-bundle`
 
@@ -263,26 +277,53 @@ with `status` one of `ok`, `warn` and `fail`. `hint` is empty on an ok line.
    command stops before the MEHO files, and a second run goes on. When the
    script is not there, RKE2 is already gone, and the command says so and
    goes on.
-3. Remove `/var/lib/meho` (the volumes and the one-time files) and every
+3. Remove the host changes of RKE2's CIS profile (#4636, #5133). RKE2's
+   script does not remove them. They go before `/etc/meho`, because the
+   record of the `etcd` account is in that folder.
+   - The kernel settings file `/etc/sysctl.d/60-rke2-cis.conf`. Removing
+     the file does not change the running kernel: `systemd-sysctl` sets
+     only the values that a file names, and it does not set others back.
+     So the kernel keeps RKE2's values until the machine restarts, and the
+     last line of the command says that a restart brings back the
+     operating system's own kernel values. The file must not stay after
+     MEHO is gone: with two of its values, `kernel.panic_on_oops=1` and
+     `kernel.panic=10`, the machine restarts by itself 10 seconds after a
+     kernel error.
+   - The parts of the `etcd` account that the install created. The install
+     writes them to `/etc/meho/etcd-account`, one per line: `user`,
+     `group` or both ([linux-server-install.md](linux-server-install.md),
+     "The host steps"). Only a part that the record names is removed:
+     `userdel etcd` for the user, `groupdel etcd` for the group when it is
+     still there. `userdel` also removes the user's group of the same name
+     when `USERGROUPS_ENAB` is `yes` in `/etc/login.defs`, the default of
+     Ubuntu and RHEL. So when the install created only the user, and the
+     group existed before, both stay, and a `[note]` line says how to
+     remove them.
+   - A part that the record does not name stays: it existed before the
+     install, or an install.sh from before #5133 created it and wrote no
+     record. A `[note]` line names it and the command that removes it, for
+     when nothing else uses it.
+   - A failed `userdel` or `groupdel` is a `[WARN]` line with the command,
+     and the uninstall goes on.
+4. Remove `/var/lib/meho` (the volumes and the one-time files) and every
    entry of `/etc/meho` except `firewall.nft`, and the drop-in
    `/etc/systemd/system/rke2-server.service.d/meho-firewall.conf`, which
    would stop a later RKE2 install once the firewall is gone, with its
    folder when that is empty (RKE2's script removes only the
    `rke2-*.service` files). Then `systemctl daemon-reload`.
-4. Remove the two commands `install.sh` put on the machine,
+5. Remove the two commands `install.sh` put on the machine,
    `/usr/local/bin/meho` and `/usr/local/sbin/meho-host`, and the folder
    `/usr/local/lib/meho-host`. bash keeps the running script open and has
    read the two lib files at its start, so `meho-host` can remove itself
    and them and still print its last lines.
-5. The firewall file, its boot unit and the loaded table stay, so the
-   machine is never without a firewall (ADR 0009). The last line names the
+6. The firewall file, its boot unit and the loaded table stay, so the
+   machine is never without a firewall (ADR 0009). A line names the
    command that removes them, for when the customer's own firewall is
-   ready.
-6. The host steps of RKE2's CIS profile stay too (#4636): the kernel
-   settings file `/etc/sysctl.d/60-rke2-cis.conf` and the `etcd` user and
-   group. RKE2's script removes `/etc/rancher/rke2`, so the pod security
-   file `meho-pss.yaml` goes with it. A later install uses the two that
-   stay as they are.
+   ready. The line about the kernel values comes after it, as the last
+   line.
+
+RKE2's script removes `/etc/rancher/rke2`, so the pod security file of the
+CIS profile, `meho-pss.yaml`, goes with it.
 
 ### How meho-host finds its lib files
 
@@ -327,7 +368,18 @@ real one; a stubbed `nft` that refuses the file proves the old file stays.
 too, in a user and network namespace, on the file `install.sh` wrote, for
 a range and for `none`. CI requires it (`MEHO_REQUIRE_NFT_CHECK=1`).
 The `uninstall` tests put a fake `rke2-uninstall.sh` on the fake machine,
-which removes RKE2's unit and data the way the real one does.
+which removes RKE2's unit and data the way the real one does. The `userdel`
+and `groupdel` stubs remove their lines from the fake `/etc/passwd` and
+`/etc/group`; like the real `userdel` with `USERGROUPS_ENAB yes`, the
+`userdel` stub also removes the group of the same name, and the answer
+`usergroups_enab` turns that off. The tests cover each content of the
+record (both parts, only the group, only the user, no record), a failed
+`userdel` and `groupdel`, and the last line. `InstallUpdateUninstallTests`
+runs `install.sh`, then the update, then the `meho-host` that the install
+put on the machine, so it proves that the update keeps the record of the
+first install and that `uninstall` then removes the account. It also
+proves that an `etcd` user and group from before the install stay through
+all three.
 
 For the hardening lines, the fake machine has the files of RKE2's CIS
 profile as `install.sh` writes them, the kernel values in `/proc/sys`, an
@@ -369,6 +421,7 @@ in the folder.
 
 On the machine: bash, coreutils (`date`, `df`, `find`, `mktemp`), `sed`,
 `awk`, `grep`, `tar`, `gzip`, `hostname`, `free` (procps), `ip` (iproute2),
+`userdel` and `groupdel` (shadow-utils, the `passwd` package on Ubuntu),
 `journalctl`, `systemctl` and `timedatectl` (systemd), `nft` (nftables,
 which `install.sh` step 1 requires), `openssl` (Ubuntu's `ca-certificates`
 package depends on it), RKE2's own `kubectl` at
@@ -416,6 +469,18 @@ package depends on it), RKE2's own `kubectl` at
   wrote it.
 - **`uninstall` leaves the OS packages that RKE2's installer added** (out
   of scope in #4739).
+- **`uninstall` does not set the kernel values back.** It removes RKE2's
+  kernel settings file, but the running kernel keeps RKE2's values until
+  the machine restarts (#5133 decision). The last line says so.
+- **An `etcd` account without a record stays.** An install.sh from before
+  #5133 wrote no `/etc/meho/etcd-account`, and an update does not write
+  one later, because it cannot know who created the account. On such a
+  machine `uninstall` keeps the `etcd` user and group and prints the
+  commands that remove them.
+- **A user that the install created can stay.** When the `etcd` group
+  existed before the install and the install created only the user,
+  `userdel` would remove the group too, so `uninstall` keeps both and says
+  so.
 
 ## References
 
@@ -448,7 +513,18 @@ package depends on it), RKE2's own `kubectl` at
 - The MEHO firewall file and its unit: `docs/codebase/linux-server-install.md`, "The host firewall"
   (#4635), `lib/firewall.sh`.
 - RKE2 uninstall (`/usr/local/bin/rke2-uninstall.sh` for a tarball install):
-  https://docs.rke2.io/install/uninstall
+  https://docs.rke2.io/install/uninstall. The script of v1.37.1 removes
+  `/etc/rancher/rke2` and RKE2's `share/rke2` folder, not `/etc/sysctl.d`
+  and not the `etcd` user and group.
+- `userdel(8)`: with `USERGROUPS_ENAB yes` it removes the group with the
+  same name as the user, unless it is the primary group of another user;
+  exit code 8 when a process of the user runs.
+  https://man7.org/linux/man-pages/man8/userdel.8.html
+- `groupdel(8)`: refuses the primary group of an existing user (exit code
+  8). https://man7.org/linux/man-pages/man8/groupdel.8.html
+- `systemd-sysctl.service(8)`: applies the settings of the `sysctl.d`
+  files; it does not set unnamed values back.
+  https://www.freedesktop.org/software/systemd/man/latest/systemd-sysctl.service.html
 - `nft(8)`: `-c`, `--check` checks a rule file without applying it; `-f`
   reads the rules from a file; `list table` and `list chain` print a base
   chain with its `type`, `hook`, `priority` and `policy` on one line.

@@ -4,8 +4,9 @@
 """Tests of meho-host: the check list, its JSON form and exit codes, the
 hardening lines of the check (the firewall, RKE2's CIS profile and the
 console certificate), the support bundle and what is removed from it, the
-SSH rule of the firewall (admin-network), uninstall, and the install of
-meho-host and the files of lib/ it sources by install.sh."""
+SSH rule of the firewall (admin-network), uninstall with the host changes
+of RKE2's CIS profile (#5133), and the install of meho-host and the files
+of lib/ it sources by install.sh."""
 
 from __future__ import annotations
 
@@ -19,13 +20,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness import LINUX_SERVER, InstallTestCase
+from harness import LINUX_SERVER, RKE2_CIS_SYSCTL, FakeMachine, InstallTestCase
 from host_harness import (
+    ACCOUNT_ANSWERS,
+    GROUPDEL_STUB,
     HEALTHY_PODS,
     INSTALL_RECORD,
     MEHO_PODS,
     PREROUTING_CHAIN,
     TRAEFIK_POD,
+    USERDEL_STUB,
     HostTestCase,
     certificate_table,
     console_certificate,
@@ -55,6 +59,20 @@ REMOVE_FIREWALL = (
     "systemctl disable meho-firewall.service && rm -r "
     "/etc/systemd/system/meho-firewall.service /etc/meho && systemctl daemon-reload && "
     "nft delete table inet meho"
+)
+# The host changes of RKE2's CIS profile (lib/cis.sh) and the record of the
+# parts of the etcd account that the install created.
+SYSCTL_FILE = "/etc/sysctl.d/60-rke2-cis.conf"
+ETCD_RECORD = "/etc/meho/etcd-account"
+# The lines of /etc/passwd and /etc/group without the etcd account. The
+# names avoid "passwd", which CodeQL reads as a password.
+BASE_USERS = "root:x:0:0:root:/root:/bin/bash\n"
+BASE_GROUPS = "root:x:0:\n"
+ETCD_USER = "etcd:x:998:998:etcd user:/nonexistent:/sbin/nologin\n"
+ETCD_GROUP = "etcd:x:998:\n"
+KERNEL_LINE = (
+    f"Removing {SYSCTL_FILE} does not change the running kernel. A restart of this "
+    "machine brings back the operating system's own kernel values."
 )
 OK_LINES = [
     "[ok]   node: Ready",
@@ -1023,7 +1041,19 @@ class AdminNetworkTests(HostTestCase):
         self.assertIn("        elements = { 0.0.0.0/0 }\n", self.admin_set())
 
 
+def etcd_record(*parts: str) -> str:
+    """The record of the etcd account, as install.sh writes it."""
+    return (
+        "# Written by MEHO install.sh: the parts of the etcd account for RKE2's\n"
+        "# etcd that the install created. meho-host uninstall removes only these.\n"
+        + "".join(f"{part}\n" for part in parts)
+    )
+
+
 class UninstallTests(HostTestCase):
+    """A machine after a fresh install: the install created the etcd user and
+    group, and its record says so."""
+
     def setUp(self) -> None:
         super().setUp()
         self.host.host_file("/var/lib/meho/volumes/postgres/data", "rows\n")
@@ -1042,17 +1072,35 @@ class UninstallTests(HostTestCase):
         uninstall = self.host.host_path(RKE2_UNINSTALL)
         uninstall.write_text(RKE2_UNINSTALL_STUB)
         uninstall.chmod(0o755)
+        self.host.host_file(SYSCTL_FILE, RKE2_CIS_SYSCTL)
+        self.host.host_file("/etc/passwd", BASE_USERS + ETCD_USER)
+        self.host.host_file("/etc/group", BASE_GROUPS + ETCD_GROUP)
+        self.host.host_file(ETCD_RECORD, etcd_record("user", "group"))
+
+    def uninstall(self) -> subprocess.CompletedProcess[str]:
+        result = self.host.run("uninstall", stdin="yes\nyes\n")
+        self.assertEqual(0, result.returncode, self.output(result))
+        return result
+
+    def host_text(self, path: str) -> str:
+        return self.host.host_path(path).read_text()
 
     def assert_nothing_removed(self) -> None:
         for path in (
             "/var/lib/meho/volumes/postgres/data",
             "/etc/meho/install.json",
+            ETCD_RECORD,
+            SYSCTL_FILE,
             RKE2_UNIT,
             *MEHO_COMMANDS,
             MEHO_HOST_LIB,
         ):
             self.assertTrue(self.host.host_path(path).exists(), path)
-        self.assertNotIn("rke2-uninstall.sh", self.host.calls())
+        self.assertEqual(BASE_USERS + ETCD_USER, self.host_text("/etc/passwd"))
+        self.assertEqual(BASE_GROUPS + ETCD_GROUP, self.host_text("/etc/group"))
+        calls = self.host.calls()
+        for command in ("rke2-uninstall.sh", "userdel", "groupdel"):
+            self.assertNotIn(command, calls)
 
     def test_it_asks_twice_and_stops_without_two_yes(self) -> None:
         for answers in ("", "no\n", "yes\n", "yes\nno\n"):
@@ -1063,10 +1111,18 @@ class UninstallTests(HostTestCase):
                 self.assertIn("Stopped. Nothing was changed.", result.stdout)
                 self.assert_nothing_removed()
 
-    def test_after_two_yes_meho_and_rke2_are_gone_and_the_firewall_stays(self) -> None:
-        result = self.host.run("uninstall", stdin="yes\nyes\n")
+    def test_the_question_names_the_host_changes_of_the_cis_profile(self) -> None:
+        result = self.host.run("uninstall", stdin="")
 
-        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertIn(
+            f"It also removes RKE2's kernel settings file {SYSCTL_FILE} and the etcd user"
+            " and group that the install created.",
+            result.stdout,
+        )
+
+    def test_after_two_yes_meho_and_rke2_are_gone_and_the_firewall_stays(self) -> None:
+        result = self.uninstall()
+
         self.assertEqual(2, result.stdout.count("Type yes to go on: "))
         self.assertIn("rke2-uninstall.sh\n", self.host.calls())
         for path in (
@@ -1087,15 +1143,155 @@ class UninstallTests(HostTestCase):
         self.assertEqual(
             "The MEHO firewall stays on, so this machine is never without one. When your own "
             f"firewall is ready, remove it with: {REMOVE_FIREWALL}",
-            result.stdout.splitlines()[-1],
+            result.stdout.splitlines()[-2],
         )
 
-    def test_without_the_rke2_script_the_meho_files_still_go(self) -> None:
-        self.host.host_path(RKE2_UNINSTALL).unlink()
+    def test_the_kernel_settings_file_goes_and_the_last_line_names_a_restart(self) -> None:
+        result = self.uninstall()
+
+        self.assertFalse(self.host.host_path(SYSCTL_FILE).exists())
+        self.assertTrue(self.host.host_path("/etc/sysctl.d").is_dir())
+        self.assertIn(f"[ok]   removed RKE2's kernel settings file {SYSCTL_FILE}\n", result.stdout)
+        self.assertEqual(KERNEL_LINE, result.stdout.splitlines()[-1])
+
+    def test_without_the_kernel_settings_file_the_last_line_stays(self) -> None:
+        self.host.host_path(SYSCTL_FILE).unlink()
+
+        result = self.uninstall()
+
+        self.assertNotIn("removed RKE2's kernel settings file", result.stdout)
+        self.assertEqual(KERNEL_LINE, result.stdout.splitlines()[-1])
+
+    def test_the_etcd_user_and_group_that_the_install_created_go(self) -> None:
+        result = self.uninstall()
+
+        self.assertEqual(BASE_USERS, self.host_text("/etc/passwd"))
+        self.assertEqual(BASE_GROUPS, self.host_text("/etc/group"))
+        calls = self.host.calls().splitlines()
+        self.assertIn("userdel etcd", calls)
+        # userdel removed the group with the user (USERGROUPS_ENAB yes).
+        self.assertNotIn("groupdel", self.host.calls())
+        self.assertIn(
+            "[ok]   removed the etcd user and group that the install created for RKE2's etcd\n",
+            result.stdout,
+        )
+        self.assertNotIn("[note]", result.stdout)
+        self.assertFalse(self.host.host_path(ETCD_RECORD).exists())
+
+    def test_the_account_goes_after_rke2_and_before_the_record(self) -> None:
+        self.uninstall()
+
+        calls = self.host.calls().splitlines()
+        self.assertLess(calls.index("rke2-uninstall.sh"), calls.index("userdel etcd"))
+        self.assertLess(calls.index("userdel etcd"), calls.index("systemctl daemon-reload"))
+
+    def test_groupdel_removes_the_group_when_userdel_leaves_it(self) -> None:
+        self.host.answer("usergroups_enab", "no")
+
+        result = self.uninstall()
+
+        calls = self.host.calls().splitlines()
+        self.assertLess(calls.index("userdel etcd"), calls.index("groupdel etcd"))
+        self.assertEqual(BASE_USERS, self.host_text("/etc/passwd"))
+        self.assertEqual(BASE_GROUPS, self.host_text("/etc/group"))
+        self.assertIn("[ok]   removed the etcd user and group that the install", result.stdout)
+
+    def test_an_etcd_user_from_before_the_install_stays(self) -> None:
+        self.host.host_file(ETCD_RECORD, etcd_record("group"))
+
+        result = self.uninstall()
+
+        self.assertEqual(BASE_USERS + ETCD_USER, self.host_text("/etc/passwd"))
+        self.assertEqual(BASE_GROUPS, self.host_text("/etc/group"))
+        self.assertNotIn("userdel", self.host.calls())
+        self.assertIn("groupdel etcd\n", self.host.calls())
+        self.assertIn(
+            "[ok]   removed the etcd group that the install created for RKE2's etcd\n",
+            result.stdout,
+        )
+        self.assertIn(
+            "[note] kept the etcd user: the install did not record that it created it, so "
+            "another program may use it. If nothing else uses it, remove it with: userdel etcd\n",
+            result.stdout,
+        )
+
+    def test_an_etcd_group_from_before_the_install_stays_and_so_does_the_user(self) -> None:
+        self.host.host_file(ETCD_RECORD, etcd_record("user"))
+
+        result = self.uninstall()
+
+        self.assertEqual(BASE_USERS + ETCD_USER, self.host_text("/etc/passwd"))
+        self.assertEqual(BASE_GROUPS + ETCD_GROUP, self.host_text("/etc/group"))
+        for command in ("userdel", "groupdel"):
+            self.assertNotIn(command, self.host.calls())
+        self.assertIn(
+            "[note] kept the etcd user and group. The install created the user, but the group"
+            " existed before the install, and userdel would remove the group together with the"
+            " user. If nothing else uses the group, remove both with: userdel etcd, then"
+            " groupdel etcd if the group is still there.\n",
+            result.stdout,
+        )
+
+    def test_without_a_record_the_etcd_account_stays_and_the_note_says_how_to_remove_it(
+        self,
+    ) -> None:
+        # An install before #5133 wrote no record, and an install that found
+        # the user and group writes none either.
+        self.host.host_path(ETCD_RECORD).unlink()
+
+        result = self.uninstall()
+
+        self.assertEqual(BASE_USERS + ETCD_USER, self.host_text("/etc/passwd"))
+        self.assertEqual(BASE_GROUPS + ETCD_GROUP, self.host_text("/etc/group"))
+        for command in ("userdel", "groupdel"):
+            self.assertNotIn(command, self.host.calls())
+        self.assertIn(
+            "[note] kept the etcd user and group: the install did not record that it created"
+            " them, so another program may use them. If nothing else uses them, remove them"
+            " with: userdel etcd, then groupdel etcd if the group is still there.\n",
+            result.stdout,
+        )
+        self.assertEqual(KERNEL_LINE, result.stdout.splitlines()[-1])
+
+    def test_without_an_etcd_account_nothing_is_said_about_it(self) -> None:
+        self.host.host_file("/etc/passwd", BASE_USERS)
+        self.host.host_file("/etc/group", BASE_GROUPS)
+
+        result = self.uninstall()
+
+        for text in ("removed the etcd", "kept the etcd"):
+            self.assertNotIn(text, result.stdout)
+        for command in ("userdel", "groupdel"):
+            self.assertNotIn(command, self.host.calls())
+
+    def test_a_failed_userdel_is_a_warning_with_the_command_and_uninstall_goes_on(self) -> None:
+        self.host.answer("userdel_rc", "8")
+        self.host.answer("groupdel_rc", "8")
 
         result = self.host.run("uninstall", stdin="yes\nyes\n")
 
         self.assertEqual(0, result.returncode, self.output(result))
+        self.assertIn("userdel: user etcd is currently used by process 4242", result.stderr)
+        self.assertIn(
+            "[WARN] userdel could not remove the etcd user, which the install created. Read its"
+            " message above, then run: userdel etcd\n",
+            result.stderr,
+        )
+        self.assertIn(
+            "[WARN] groupdel could not remove the etcd group, which the install created. Read"
+            " its message above, then run: groupdel etcd\n",
+            result.stderr,
+        )
+        self.assertNotIn("removed the etcd", result.stdout)
+        self.assertNotIn("[note] kept the etcd", result.stdout)
+        self.assertFalse(self.host.host_path("/var/lib/meho").exists())
+        self.assertEqual(KERNEL_LINE, result.stdout.splitlines()[-1])
+
+    def test_without_the_rke2_script_the_meho_files_still_go(self) -> None:
+        self.host.host_path(RKE2_UNINSTALL).unlink()
+
+        result = self.uninstall()
+
         self.assertIn(f"[note] {RKE2_UNINSTALL} is not on this machine", result.stdout)
         self.assertFalse(self.host.host_path("/var/lib/meho").exists())
         self.assertEqual(["firewall.nft"], os.listdir(self.host.host_path("/etc/meho")))
@@ -1109,9 +1305,92 @@ class UninstallTests(HostTestCase):
         self.assertIn("rke2: no", result.stderr)
         self.assertIn("[FAIL] RKE2's uninstall script", result.stderr)
         self.assertTrue(self.host.host_path("/var/lib/meho/volumes/postgres/data").exists())
+        self.assertTrue(self.host.host_path(SYSCTL_FILE).exists())
+        self.assertTrue(self.host.host_path(ETCD_RECORD).exists())
+        self.assertNotIn("userdel", self.host.calls())
 
     def test_uninstall_takes_no_option(self) -> None:
         self.assert_usage_error(self.host.run("uninstall", "--yes"), "uninstall takes no option")
+
+
+def run_installed_meho_host(machine: FakeMachine, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run the meho-host that install.sh put on the fake machine, with two
+    yes answers. The install's stubs answer id and systemctl, the stubs of
+    host_harness.py answer userdel and groupdel, and find and rmdir are the
+    real tools."""
+    for tool in ("find", "rmdir"):
+        link = machine.tools / tool
+        if not link.exists():
+            found = shutil.which(tool)
+            if found is None:
+                raise RuntimeError(f"the tests need '{tool}' on PATH")
+            link.symlink_to(found)
+    machine.add_stub("userdel", USERDEL_STUB)
+    machine.add_stub("groupdel", GROUPDEL_STUB)
+    for name, content in ACCOUNT_ANSWERS.items():
+        machine.answer(name, content)
+    return subprocess.run(
+        [str(machine.host_path("/usr/local/sbin/meho-host")), *args],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": f"{machine.stubs}:{machine.tools}",
+            "MEHO_TEST_ROOT": str(machine.root),
+            "MEHO_FAKE": str(machine.fake),
+            "LC_ALL": "C",
+        },
+        input="yes\nyes\n",
+        check=False,
+        timeout=60,
+    )
+
+
+class InstallUpdateUninstallTests(InstallTestCase):
+    """The record goes from the first install through an update to
+    uninstall. The update finds the user and group that the first install
+    created, so it must keep the first install's record (#5133)."""
+
+    def update(self) -> None:
+        self.machine.mark_installed()
+        self.machine.set_download_version("0.37.0")
+        self.assert_succeeds(self.machine.run("--confirm-backup"))
+
+    def etc_text(self, name: str) -> str:
+        return self.machine.host_path(f"/etc/{name}").read_text()
+
+    def test_the_update_keeps_the_record_and_uninstall_removes_the_account(self) -> None:
+        self.assert_succeeds(self.machine.run())
+        record = self.machine.host_path(ETCD_RECORD).read_text()
+        self.assertEqual(etcd_record("user", "group"), record)
+        self.update()
+        self.assertEqual(record, self.machine.host_path(ETCD_RECORD).read_text())
+
+        result = run_installed_meho_host(self.machine, "uninstall")
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertNotRegex(self.etc_text("passwd"), r"(?m)^etcd:")
+        self.assertNotRegex(self.etc_text("group"), r"(?m)^etcd:")
+        self.assertFalse(self.machine.host_path(SYSCTL_FILE).exists())
+        self.assertEqual(KERNEL_LINE, result.stdout.splitlines()[-1])
+
+    def test_an_account_from_before_the_install_stays_through_update_and_uninstall(
+        self,
+    ) -> None:
+        users = BASE_USERS + "etcd:x:991:991::/nonexistent:/sbin/nologin\n"
+        groups = BASE_GROUPS + "etcd:x:991:\n"
+        self.machine.host_file("/etc/passwd", users)
+        self.machine.host_file("/etc/group", groups)
+        self.assert_succeeds(self.machine.run())
+        self.update()
+        self.assertFalse(self.machine.host_path(ETCD_RECORD).exists())
+
+        result = run_installed_meho_host(self.machine, "uninstall")
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual(users, self.etc_text("passwd"))
+        self.assertEqual(groups, self.etc_text("group"))
+        self.assertIn("[note] kept the etcd user and group:", result.stdout)
+        self.assertNotIn("userdel", self.machine.calls())
 
 
 class InstallTests(InstallTestCase):

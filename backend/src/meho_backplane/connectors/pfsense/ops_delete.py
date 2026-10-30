@@ -111,7 +111,7 @@ References
 ----------
 
 * Task: #3232. Parent decision: ``docs/decisions/governed-delete-operations.md``.
-* Precedent (first governed delete): #3198 / ``vmware.composite.vm.destroy``.
+* Precedent (first governed delete): #3198.
 * Additive-write precedent: :mod:`meho_backplane.connectors.pfsense.ops_write`.
 * pfSense config.xml tracker semantics:
   https://forum.netgate.com/topic/82877/purpose-of-tracker-on-pfsense-config-rules

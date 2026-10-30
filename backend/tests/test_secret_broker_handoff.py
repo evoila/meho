@@ -12,8 +12,10 @@ Each test uses in-process fake stores (:class:`_FakeStore`), no real Vault.
 A fake store keeps KV-v2 fields and handoffs; a handoff works once. Two
 separate fake stores stand for the two instances' stores. "This instance's
 store" is whichever fake the ``auth.vault._build_client`` seam returns at
-the moment; the other instance's store is reached through the
-``handoff._build_store_client`` seam, keyed by URL.
+the moment; the other instance's store is reached over HTTP through the
+``handoff._build_store_client`` seam: a mock transport routes each request
+to a fake store by URL, so the real request, header and status handling
+runs.
 """
 
 from __future__ import annotations
@@ -26,9 +28,9 @@ from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import httpx
 import hvac.exceptions
 import pytest
-import requests.exceptions
 import structlog
 from cryptography.fernet import Fernet
 from sqlalchemy import select
@@ -36,9 +38,11 @@ from sqlalchemy import select
 from meho_backplane.auth import vault as vault_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op
+from meho_backplane.connectors._shared.pinned_transport import _PinnedAsyncBackend
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.connectors.secret import handoff as handoff_module
 from meho_backplane.connectors.secret.handoff import (
+    SecretHandoffDestinationBlockedError,
     SecretHandoffDigestMismatchError,
     SecretHandoffInvalidError,
     SecretHandoffRefusedError,
@@ -59,7 +63,9 @@ from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._preview import PreviewContext
+from meho_backplane.operations._vendor_text import VENDOR_TEXT_WITHHELD
 from meho_backplane.settings import get_settings
+from meho_backplane.targets.ssrf_guard import TARGET_SSRF_ALLOWLIST_ENV
 
 #: The moved value. Generated so no literal secret sits in the source.
 _VALUE = f"handoff-value-{secrets.token_hex(6)}"
@@ -92,11 +98,28 @@ class _FakeStore:
         self.handoffs: dict[str, dict[str, Any]] = {}
         self.login_exc: Exception | None = None
         self.wrap_exc: Exception | None = None
+        #: When set, every unwrap answers this HTTP status instead of working.
+        self.unwrap_status: int | None = None
         self.unwrap_calls = 0
         self.writes: list[tuple[str, dict[str, str]]] = []
 
     def client(self, token: str | None = None) -> _FakeStoreClient:
         return _FakeStoreClient(self, token)
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        """Answer one HTTP request the way Vault's unwrap endpoint does."""
+        if request.method != "POST" or request.url.path != "/v1/sys/wrapping/unwrap":
+            return httpx.Response(404, json={"errors": []})
+        self.unwrap_calls += 1
+        if self.unwrap_status is not None:
+            headers = {"location": "https://elsewhere.test.invalid/v1/sys/wrapping/unwrap"}
+            return httpx.Response(self.unwrap_status, headers=headers, json={"errors": []})
+        payload = self.handoffs.pop(request.headers.get("X-Vault-Token", ""), None)
+        if payload is None:
+            return httpx.Response(
+                400, json={"errors": ["wrapping token is not valid or does not exist"]}
+            )
+        return httpx.Response(200, json={"data": payload})
 
 
 class _NS:
@@ -121,7 +144,6 @@ class _FakeStoreClient:
         self.secrets.kv.v2.create_or_update_secret = self._write
         self.sys = _NS()
         self.sys.wrap = self._wrap
-        self.sys.unwrap = self._unwrap
 
     def _jwt_login(self, role: str, jwt: str, path: str | None = None) -> dict[str, Any]:
         del role, jwt, path
@@ -146,13 +168,6 @@ class _FakeStoreClient:
         self.store.handoffs[token] = dict(payload)
         return {"wrap_info": {"token": token, "ttl": ttl, "creation_path": "sys/wrapping/wrap"}}
 
-    def _unwrap(self) -> dict[str, Any]:
-        self.store.unwrap_calls += 1
-        payload = self.store.handoffs.pop(self.token or "", None)
-        if payload is None:
-            raise hvac.exceptions.InvalidRequest("wrapping token is not valid or does not exist")
-        return {"data": payload}
-
 
 class _Instances:
     """Two instances' stores, and a switch for which one is 'this instance'."""
@@ -163,16 +178,23 @@ class _Instances:
         self.local = self.store_a
         self.remote_by_url: dict[str, _FakeStore] = {_STORE_A_URL: self.store_a}
         self.remote_calls: list[dict[str, Any]] = []
+        self.remote_requests: list[httpx.Request] = []
 
         def _build_local(_settings: Any, *, token: str | None = None) -> _FakeStoreClient:
             return self.local.client(token)
 
-        def _build_remote(url: str, *, token: str, verify: bool) -> Any:
-            self.remote_calls.append({"url": url, "verify": verify})
-            store = self.remote_by_url.get(url)
+        def _handle(request: httpx.Request) -> httpx.Response:
+            self.remote_requests.append(request)
+            store = self.remote_by_url.get(f"{request.url.scheme}://{request.url.netloc.decode()}")
             if store is None:
-                return _UnreachableClient()
-            return store.client(token)
+                raise httpx.ConnectError("name or service not known", request=request)
+            return store.handle(request)
+
+        def _build_remote(store: handoff_module._RemoteStore) -> httpx.AsyncClient:
+            self.remote_calls.append({"url": store.url, "verify": store.verify})
+            return httpx.AsyncClient(
+                base_url=store.url, transport=httpx.MockTransport(_handle), follow_redirects=False
+            )
 
         monkeypatch.setattr(vault_module, "_build_client", _build_local)
         monkeypatch.setattr(handoff_module, "_build_store_client", _build_remote)
@@ -182,16 +204,6 @@ class _Instances:
 
     def on_b(self) -> None:
         self.local = self.store_b
-
-
-class _UnreachableClient:
-    def __init__(self) -> None:
-        self.sys = _NS()
-
-        def _fail() -> None:
-            raise requests.exceptions.ConnectionError("name or service not known")
-
-        self.sys.unwrap = _fail
 
 
 # ---------------------------------------------------------------------------
@@ -467,17 +479,8 @@ async def test_import_refused_by_the_other_store_fails_plainly(
 ) -> None:
     """A store that answers 403 (token unknown there) gives the same plain error."""
     instances.on_b()
+    instances.store_a.unwrap_status = 403
 
-    def _forbidden() -> None:
-        raise hvac.exceptions.Forbidden("permission denied")
-
-    class _RefusingStore(_FakeStore):
-        def client(self, token: str | None = None) -> _FakeStoreClient:
-            client = super().client(token)
-            client.sys.unwrap = _forbidden
-            return client
-
-    instances.remote_by_url[_STORE_A_URL] = _RefusingStore("refusing")
     with pytest.raises(SecretHandoffInvalidError) as excinfo:
         await secret_handoff_import(_operator(_TENANT_B), None, _import_params("not-a-handoff"))
     assert "sys/wrapping/unwrap" in str(excinfo.value)
@@ -499,6 +502,7 @@ async def test_import_refused_sink_login_says_handoff_is_used(
     message = str(excinfo.value)
     assert f"vault:{_SINK_PATH}#password" in message
     assert "make a new handoff" in message
+    assert "role denied" not in message
     assert _VALUE not in message
 
 
@@ -552,6 +556,112 @@ async def test_import_refuses_a_store_target_that_is_not_vault(instances: _Insta
             _operator(_TENANT_B), None, _import_params(exported["handoff_token"])
         )
     assert instances.remote_calls == []
+
+
+# ---------------------------------------------------------------------------
+# The other store's address: screened, pinned, no redirects
+# ---------------------------------------------------------------------------
+
+
+def _resolve_to(monkeypatch: pytest.MonkeyPatch, *ips: str) -> None:
+    """Point the destination guard's DNS seam at a fixed answer (no real DNS)."""
+    import ipaddress
+
+    addrs = [ipaddress.ip_address(ip) for ip in ips]
+    monkeypatch.setattr("meho_backplane.targets.ssrf_guard._resolve_addrs", lambda host: addrs)
+
+
+async def test_store_client_pins_the_screened_address_and_follows_no_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real client dials only an address the guard passed, and never follows a redirect."""
+    monkeypatch.delenv(TARGET_SSRF_ALLOWLIST_ENV, raising=False)
+    store = handoff_module._RemoteStore(
+        label=f"store target {_STORE_TARGET!r}", host=_STORE_A_HOST, url=_STORE_A_URL, verify=True
+    )
+    client = handoff_module._build_store_client(store)
+    try:
+        assert client.follow_redirects is False
+        backend = client._transport._pool._network_backend  # type: ignore[attr-defined]
+        assert isinstance(backend, _PinnedAsyncBackend)
+
+        _resolve_to(monkeypatch, "93.184.216.34")
+        assert backend._resolver(_STORE_A_HOST) == ["93.184.216.34"]
+
+        # The resolver flips to a private address when the socket opens.
+        _resolve_to(monkeypatch, "10.0.0.5")
+        with pytest.raises(SecretHandoffDestinationBlockedError) as excinfo:
+            backend._resolver(_STORE_A_HOST)
+        assert "10.0.0.5" not in str(excinfo.value)
+    finally:
+        await client.aclose()
+
+
+async def test_import_refuses_a_store_whose_address_is_now_blocked(
+    instances: _Instances,
+    store_target: None,
+    _registered_ops: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After registration the store's name resolves to a private address: nothing is sent."""
+    exported = await _export_on_a(instances)
+    instances.on_b()
+    monkeypatch.delenv(TARGET_SSRF_ALLOWLIST_ENV, raising=False)
+    _resolve_to(monkeypatch, "10.0.0.5")
+
+    result = await _dispatch(
+        _TENANT_B, "secret.handoff.import", _import_params(exported["handoff_token"])
+    )
+
+    assert result.status == "error"
+    assert result.error == "connector_error: SecretHandoffDestinationBlockedError"
+    remediation = result.extras["remediation"]
+    assert _STORE_TARGET in remediation
+    assert TARGET_SSRF_ALLOWLIST_ENV in remediation
+    assert "still usable" in remediation
+    assert "10.0.0.5" not in remediation
+    assert instances.remote_requests == []
+    assert exported["handoff_token"] in instances.store_a.handoffs
+    assert instances.store_b.writes == []
+    assert exported["handoff_token"] not in result.model_dump_json()
+
+
+async def test_import_does_not_follow_a_redirect(instances: _Instances, store_target: None) -> None:
+    exported = await _export_on_a(instances)
+    instances.on_b()
+    instances.store_a.unwrap_status = 302
+
+    with pytest.raises(SecretHandoffStoreError) as excinfo:
+        await secret_handoff_import(
+            _operator(_TENANT_B), None, _import_params(exported["handoff_token"])
+        )
+
+    message = str(excinfo.value)
+    assert "redirect" in message
+    assert "HTTP 302" in message
+    assert _STORE_TARGET in message
+    assert "elsewhere.test.invalid" not in message
+    # One request to the store, none to the address it pointed at.
+    assert [str(req.url) for req in instances.remote_requests] == [
+        f"{_STORE_A_URL}/v1/sys/wrapping/unwrap"
+    ]
+    assert instances.store_b.writes == []
+
+
+async def test_import_sends_the_handoff_as_the_vault_token(
+    instances: _Instances, store_target: None
+) -> None:
+    exported = await _export_on_a(instances)
+    instances.on_b()
+    await secret_handoff_import(
+        _operator(_TENANT_B), None, _import_params(exported["handoff_token"])
+    )
+
+    (request,) = instances.remote_requests
+    assert request.method == "POST"
+    assert str(request.url) == f"{_STORE_A_URL}/v1/sys/wrapping/unwrap"
+    assert request.headers["X-Vault-Token"] == exported["handoff_token"]
+    assert json.loads(request.content) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +737,97 @@ async def test_both_steps_wait_for_approval(
     assert imported.status == "awaiting_approval", imported.error
     assert instances.store_a.unwrap_calls == 0
     assert instances.store_b.writes == []
+
+
+# ---------------------------------------------------------------------------
+# Failures through the dispatcher: the message is withheld, the remediation stays
+# ---------------------------------------------------------------------------
+
+
+def _assert_message_withheld(result: OperationResult, exception_class: str) -> str:
+    """Both ops send a secret, so the raised message is withheld. Return the remediation."""
+    assert result.status == "error"
+    assert result.error == f"connector_error: {exception_class}"
+    assert result.extras["exception_class"] == exception_class
+    assert result.extras["exception_message"] == VENDOR_TEXT_WITHHELD
+    remediation = result.extras["remediation"]
+    assert isinstance(remediation, str) and remediation
+    assert _VALUE not in result.model_dump_json()
+    return remediation
+
+
+async def test_dispatch_import_wrong_address_names_store_path_and_next_step(
+    instances: _Instances, _registered_ops: None
+) -> None:
+    exported = await _export_on_a(instances)
+    await _seed_target(_STORE_TARGET, product="vault", host="wrong-host.test.invalid")
+    instances.on_b()
+
+    result = await _dispatch(
+        _TENANT_B, "secret.handoff.import", _import_params(exported["handoff_token"])
+    )
+
+    remediation = _assert_message_withheld(result, "SecretHandoffUnreachableError")
+    assert _STORE_TARGET in remediation
+    assert "wrong-host.test.invalid" in remediation
+    assert "sys/wrapping/unwrap" in remediation
+    assert "check the address" in remediation
+    assert "same handoff" in remediation
+    assert exported["handoff_token"] not in result.model_dump_json()
+    assert instances.store_b.writes == []
+
+
+async def test_dispatch_export_refused_by_the_store_names_store_and_path(
+    instances: _Instances, _registered_ops: None
+) -> None:
+    instances.on_a()
+    instances.store_a.wrap_exc = hvac.exceptions.Forbidden("permission denied")
+
+    result = await _dispatch(_TENANT_A, "secret.handoff.export", {"from": _FROM})
+
+    remediation = _assert_message_withheld(result, "SecretHandoffRefusedError")
+    assert "this instance's secret store" in remediation
+    assert "sys/wrapping/wrap" in remediation
+    assert "secret.handoff.export again" in remediation
+    assert "permission denied" not in remediation
+
+
+async def test_dispatch_import_used_handoff_says_make_a_new_one(
+    instances: _Instances, store_target: None, _registered_ops: None
+) -> None:
+    exported = await _export_on_a(instances)
+    instances.on_b()
+    params = _import_params(exported["handoff_token"])
+    first = await _dispatch(_TENANT_B, "secret.handoff.import", params)
+    assert first.status == "ok", first.error
+
+    second = await _dispatch(_TENANT_B, "secret.handoff.import", params)
+
+    remediation = _assert_message_withheld(second, "SecretHandoffInvalidError")
+    assert _STORE_TARGET in remediation
+    assert "sys/wrapping/unwrap" in remediation
+    assert "already used" in remediation
+    assert "secret.handoff.export" in remediation
+    assert exported["handoff_token"] not in second.model_dump_json()
+    assert len(instances.store_b.writes) == 1
+
+
+async def test_dispatch_import_refused_sink_login_keeps_no_sink_text(
+    instances: _Instances, store_target: None, _registered_ops: None
+) -> None:
+    exported = await _export_on_a(instances)
+    instances.on_b()
+    instances.store_b.login_exc = hvac.exceptions.Forbidden("role denied")
+
+    result = await _dispatch(
+        _TENANT_B, "secret.handoff.import", _import_params(exported["handoff_token"])
+    )
+
+    remediation = _assert_message_withheld(result, "SecretHandoffSinkWriteError")
+    assert f"vault:{_SINK_PATH}#password" in remediation
+    assert "handoff was used" in remediation
+    assert "new handoff" in remediation
+    assert "role denied" not in remediation
 
 
 # ---------------------------------------------------------------------------

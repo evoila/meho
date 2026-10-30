@@ -150,7 +150,16 @@ do that, and nobody sees the value:
      (`https` unless `extras.scheme` says `http`; `verify_tls` is kept;
      a `tls_ca_pin` is refused for now);
    - calls `sys/wrapping/unwrap` at that URL with the handoff as the
-     only credential (seam: `handoff._build_store_client`);
+     only credential. The call is one HTTP `POST` over an `httpx` client
+     on the shared address-pinning transport
+     (`connectors/_shared/pinned_transport.py`) with the target
+     destination guard (`targets/ssrf_guard.py`) as its resolver, the
+     same screen every other target dial gets. The host is screened
+     before the request and again when the socket opens, and the socket
+     dials only an address that passed. A store whose DNS answer changed
+     after registration is refused, and nothing is sent. The client
+     follows no redirect: a `3xx` answer is reported as an error. Seam:
+     `handoff._build_store_client`;
    - checks `expect_sha256` when it is set, and writes nothing on a
      mismatch;
    - writes the value through the sink (for `vault:`, B's own Vault,
@@ -189,17 +198,23 @@ the value once, so it is handled as a credential:
   keeps the result like any other result.
 
 **Errors** (`handoff.py`, all subclasses of `SecretHandoffError`). Each
-message names the store and the Vault path, never the value or the
-token:
+message names the store, the Vault path and the next step, never the
+value, the token, or text from the store, the sink or a client library.
+Both ops send a secret, so the dispatcher withholds the raised message
+(`extras.exception_message`) from the error result
+(`operations/_vendor_text.py`). Every error therefore sets `remediation`
+to the same MEHO-written text, and that is what the caller reads in
+`extras.remediation`.
 
 | Error | When |
 |---|---|
 | `SecretHandoffUnreachableError` | the store cannot be reached (wrong address, network, TLS) |
+| `SecretHandoffDestinationBlockedError` | the store target is, or now resolves to, an address this MEHO does not dial; nothing was sent, the handoff is still usable |
 | `SecretHandoffRefusedError` | the store refused the login or the call |
 | `SecretHandoffInvalidError` | the handoff was already used, expired, or was made by another store |
 | `SecretHandoffDigestMismatchError` | the value's SHA-256 is not `expect_sha256`; nothing was written |
 | `SecretHandoffSinkWriteError` | the handoff was used but the sink write failed; make a new handoff |
-| `SecretHandoffStoreError` | a bad store target (not product `vault`, a pinned CA) or a malformed reply |
+| `SecretHandoffStoreError` | a bad store target (not product `vault`, a pinned CA), a redirect, another HTTP status, or a malformed reply |
 
 ## Ops example — move a Keycloak client secret into Vault
 

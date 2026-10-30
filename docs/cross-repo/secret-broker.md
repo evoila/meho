@@ -445,13 +445,16 @@ In this section, **A** is the instance that has the login now, and
 
 ### 5.4 When it fails
 
-Every error names the store and the Vault path
-(`sys/wrapping/wrap` on A, `sys/wrapping/unwrap` on B), never the
-value:
+Every error names the store, the Vault path
+(`sys/wrapping/wrap` on A, `sys/wrapping/unwrap` on B) and the next
+step, never the value. Both steps send a secret, so the error result
+hides the raised message; read the details in `extras.remediation`.
 
 | What you see | What it means | What to do |
 |---|---|---|
-| could not reach the store | wrong address, network or TLS problem | fix the store target on B |
+| could not reach the store | wrong address, network or TLS problem | fix the store target on B, then import again with the same handoff |
+| the store's address is not dialed | the store target points at, or now resolves to, an address MEHO does not dial (not a public address); nothing was sent | fix the store target's host, or add the address to the allowlist if it is trusted |
+| the store answered with a redirect | B does not follow redirects | register the store target with the address the store itself listens on |
 | the store refused the login or the call | the operator's Vault login or policy does not allow the call | fix the Vault role or policy |
 | the store did not accept the handoff | the handoff was already used, expired, or was made by another store | run the export on A again |
 | SHA-256 does not match | the value is not the one the export reported | nothing was written; find out why, then export again |

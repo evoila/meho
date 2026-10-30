@@ -3379,6 +3379,7 @@ async def dispatch(
             op_id=op_id,
             triple=(product, version, impl_id),
             started=started,
+            target=target,
         )
     # #4139: an op that needs a target (every ingested op, or a typed op
     # bound to a connector) and got none fails here with one clear line,

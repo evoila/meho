@@ -1405,9 +1405,20 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    - VI-JSON needs vCenter 8.0 U1 or later, so the VI-JSON composites do
      not work on an 8.0 GA target.
    - When the 9.0 catalog refuses an ingested op for an 8.0.x target
-     (`unqualified_target_version`), the reason now names the catalog to
+     (`unqualified_target_version`), the reason names the catalog to
      use: `...; use connector vmware-rest-8.0 for this target`. The 8.0
      catalog does the same for a 9.x target.
+   - That hint is left out when the other catalog serves the target but
+     does not have the op turned on (#5069). This is true for all the
+     generic VIM calls (paths like `/PerformanceManager/{moId}/perfCounter`):
+     only the 9.0 catalog has them. On an 8.0.3 target the reason is then:
+     `this operation is not available for vmware 8.0.3: connector
+     vmware-rest-8.0 serves this target and does not have this operation;
+     use search_operations on connector vmware-rest-8.0 to find a typed
+     operation for this target`. The same call on `vmware-rest-8.0`
+     answers `unknown_op` and does not name `vmware-rest-9.0`, because the
+     9.0 catalog refuses the 8.0.x target. So the two connectors no longer
+     send the caller to each other. The preview gives the same answers.
 4. The registry's v2 table now resolves `(vmware, 9.0, vmware-rest)`
    to `VmwareRestConnector`. The G0.7 auto-shim's idempotency check
    (in `ensure_connector_class_registered`, once #408's pipeline lands

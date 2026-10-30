@@ -231,7 +231,15 @@ the ingested-catalog boundary.
   audit row and any approval request name the catalog that really ran
   (`vmware-rest-8.0`), not the one the caller named. If no sibling qualifies,
   or the op is missing or disabled there, the result is still
-  `unqualified_target_version` with the same fields. Typed and composite
+  `unqualified_target_version` with the same fields. When the sibling
+  serves the target but does not have the op turned on, the reason does
+  not say "use connector ..." (#5069). It says the op is not available
+  for the target's version and points at `search_operations` on the
+  sibling, where a typed operation may do the same work. The same call on
+  the sibling answers `unknown_op`, and its `extras.connectors_with_op`
+  leaves out every connector whose catalog check refuses the target, so
+  neither error sends the caller to a connector that refuses the call.
+  Typed and composite
   descriptors are not affected. The params are checked once, after this
   choice, against the schema of the catalog that runs. So for a guarded
   op, `unqualified_target_version` is reported before `invalid_params`.

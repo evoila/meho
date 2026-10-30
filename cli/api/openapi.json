@@ -12397,6 +12397,81 @@
         }
       }
     },
+    "/ui/tenant": {
+      "get": {
+        "tags": [
+          "ui-tenant"
+        ],
+        "summary": "Ui Tenant Picker",
+        "description": "``GET /ui/tenant``: choose the tenant to work in.",
+        "operationId": "ui_tenant_picker_ui_tenant_get",
+        "parameters": [
+          {
+            "name": "notice",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Notice"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/tenant/switch": {
+      "post": {
+        "tags": [
+          "ui-tenant"
+        ],
+        "summary": "Ui Tenant Switch",
+        "description": "``POST /ui/tenant/switch``: work in another tenant.",
+        "operationId": "ui_tenant_switch_ui_tenant_switch_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "303": {
+            "description": "Switched. Opens the dashboard."
+          },
+          "403": {
+            "description": "The token does not allow this tenant. Nothing changed.",
+            "content": {
+              "text/html": {}
+            }
+          }
+        }
+      }
+    },
     "/ui/broadcast": {
       "get": {
         "tags": [
@@ -38195,6 +38270,16 @@
             "type": "string",
             "nullable": true,
             "title": "Tenant Name"
+          },
+          "tenant_chosen": {
+            "type": "boolean",
+            "title": "Tenant Chosen",
+            "default": true
+          },
+          "can_switch_tenant": {
+            "type": "boolean",
+            "title": "Can Switch Tenant",
+            "default": false
           }
         },
         "type": "object",
@@ -38204,7 +38289,7 @@
           "tenant_id"
         ],
         "title": "UISessionContext",
-        "description": "Per-request session identity exposed on ``request.state``.\n\nFrozen so a route handler that stashes the context on a logger\nor forwards it to a service layer cannot accidentally mutate\nfields downstream. The shape mirrors :class:`Operator` for the\nfields T5 (#866) needs to render an authenticated page header;\n``raw_jwt`` / ``tenant_role`` are intentionally absent because\nthe session-cookie path does not load them today (the encrypted\nrow carries only the access token, not the decoded claims).\n\n``tenant_slug`` / ``tenant_name`` are populated by the middleware\nfrom a same-request lookup against the ``tenant`` table (keyed on\n:attr:`tenant_id`). The fields are surfaced into every UI template\nby the chassis context processor so the page header's tenant chip\nrenders the operator-readable name without each route having to\nre-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the\ntenant row was deleted between session-creation and the request\n(an ops anomaly; the operator still authenticates fine, the chip\njust falls back to the tenant UUID)."
+        "description": "Per-request session identity exposed on ``request.state``.\n\nFrozen so a route handler that stashes the context on a logger\nor forwards it to a service layer cannot accidentally mutate\nfields downstream. The shape mirrors :class:`Operator` for the\nfields T5 (#866) needs to render an authenticated page header;\n``raw_jwt`` / ``tenant_role`` are intentionally absent because\nthe session-cookie path does not load them today (the encrypted\nrow carries only the access token, not the decoded claims).\n\n``tenant_slug`` / ``tenant_name`` are populated by the middleware\nfrom a same-request lookup against the ``tenant`` table (keyed on\n:attr:`tenant_id`). The fields are surfaced into every UI template\nby the chassis context processor so the page header's tenant chip\nrenders the operator-readable name without each route having to\nre-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the\ntenant row was deleted between session-creation and the request\n(an ops anomaly; the operator still authenticates fine, the chip\njust falls back to the tenant UUID).\n\n``tenant_id`` is the session's current tenant (#5240).\n``tenant_chosen`` is ``False`` while a person with several tenants\nhas not picked one; the middleware then lets the request reach only\nthe tenant picker. ``can_switch_tenant`` makes the sidebar tenant box\na switch."
       },
       "UsageReport": {
         "properties": {

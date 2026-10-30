@@ -120,6 +120,7 @@ from meho_backplane.ui.auth.session_store import (
     create_session,
     revoke_session,
 )
+from meho_backplane.ui.auth.tenant import TENANT_PICKER_PATH, can_switch_tenant
 
 __all__ = [
     "AUTHORIZATION_STATE_EXPIRED_DETAIL",
@@ -506,12 +507,16 @@ async def _exchange_or_translate(
 
 async def _persist_session_from_tokens(
     tokens: TokenExchangeResult,
-) -> tuple[uuid.UUID, str, uuid.UUID]:
+) -> tuple[uuid.UUID, str, uuid.UUID, bool]:
     """Validate the access token + write the encrypted session row.
 
-    Returns ``(session_id, operator_sub, tenant_id)`` -- the values
-    the calling handler needs to log + redirect, without holding the
-    plaintext tokens any longer than necessary.
+    Returns ``(session_id, operator_sub, tenant_id, tenant_chosen)`` --
+    the values the calling handler needs to log + redirect, without
+    holding the plaintext tokens any longer than necessary.
+
+    A person with several tenants (#5240) gets a session with
+    ``tenant_chosen=False``: the web interface shows the tenant picker
+    first. Until then the row holds the token's first tenant.
     """
     settings = get_settings()
     # Validate the access token through the chassis JWT chain so the
@@ -520,6 +525,7 @@ async def _persist_session_from_tokens(
     operator = await verify_jwt_for_audience(
         f"Bearer {tokens.access_token}",
         expected_audience=settings.keycloak_audience,
+        allow_unchosen=True,
     )
     lifetime = timedelta(seconds=max(tokens.expires_in - SESSION_TTL_MARGIN_SECONDS, 60))
     sessionmaker = get_sessionmaker()
@@ -531,8 +537,10 @@ async def _persist_session_from_tokens(
             access_token=tokens.access_token,
             refresh_token=tokens.refresh_token,
             lifetime=lifetime,
+            tenant_chosen=operator.tenant_chosen,
+            can_switch_tenant=can_switch_tenant(operator),
         )
-    return decrypted.id, operator.sub, operator.tenant_id
+    return decrypted.id, operator.sub, operator.tenant_id, operator.tenant_chosen
 
 
 async def _handle_callback(
@@ -577,18 +585,18 @@ async def _handle_callback(
         authorization_response=str(request.url),
         browser_binding=browser_binding,
     )
-    session_id, operator_sub, tenant_id = await _persist_session_from_tokens(tokens)
+    session_id, operator_sub, tenant_id, tenant_chosen = await _persist_session_from_tokens(tokens)
     log.info(
         "ui_auth_session_created",
         operator_sub=operator_sub,
         tenant_id=str(tenant_id),
+        tenant_chosen=tenant_chosen,
         return_to=tokens.return_to,
         session_id=str(session_id),
     )
-    response = RedirectResponse(
-        url=tokens.return_to or _DEFAULT_RETURN_TO,
-        status_code=status.HTTP_302_FOUND,
-    )
+    # A person with several tenants picks one first (#5240).
+    location = (tokens.return_to or _DEFAULT_RETURN_TO) if tenant_chosen else TENANT_PICKER_PATH
+    response = RedirectResponse(url=location, status_code=status.HTTP_302_FOUND)
     set_session_cookie(response, session_id)
     # Single-use: the binding is consumed, so clear its cookie now that
     # the flow has completed (F10, #272). ``state`` is non-None on any

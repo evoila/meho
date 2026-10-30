@@ -55,5 +55,12 @@
    document is parsed so ``document.body`` exists. Acts ONLY on 401 -- non-auth
    responses (incl. 422 form-validation swaps) flow through untouched. #}
 <script src="/ui/static/src/app/session-expiry.js" defer></script>
+{# Page tenant marker (#5240). Sends the tenant the page was made for
+   (``<body data-meho-tenant>``) in the ``Meho-Tenant`` header of every htmx
+   request and as a hidden ``meho_tenant`` field in every plain form, and
+   shows a reload banner when MEHO refuses a request because the tenant
+   changed in another tab. ``defer`` after ``session-expiry.js``, whose
+   banner helper it reuses. #}
+<script src="/ui/static/src/app/page-tenant.js" defer></script>
 <script src="/ui/static/src/vendor/sse.min.js" defer></script>
 <script src="/ui/static/src/vendor/alpine.min.js" defer></script>

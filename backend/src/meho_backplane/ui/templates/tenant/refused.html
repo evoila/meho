@@ -1,0 +1,25 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Refused tenant switch (#5240). Nothing changed; the link goes back to
+  the tenant picker.
+-#}
+<!doctype html>
+<html lang="en" data-theme="meho-dark" class="h-full">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tenant not changed &middot; MEHO Operator Console</title>
+    {% include "_head_assets.html" %}
+  </head>
+  <body class="min-h-full bg-base-200 text-base-content antialiased">
+    <main class="mx-auto max-w-xl space-y-4 px-4 py-12">
+      <h1 class="text-xl font-semibold">Tenant not changed</h1>
+      <div role="alert" class="alert alert-error" data-field="tenant-refused">
+        <span>{{ message }}</span>
+      </div>
+      <p><a class="link text-sm" href="{{ picker_path }}">Back to the tenant list</a></p>
+    </main>
+  </body>
+</html>

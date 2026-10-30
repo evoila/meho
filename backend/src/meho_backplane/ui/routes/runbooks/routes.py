@@ -117,6 +117,7 @@ from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
 )
+from meho_backplane.ui.auth.tenant import TenantRemovedError
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.query_filters import EMPTY_STR_TO_NONE
 from meho_backplane.ui.routes.kb.render import pygments_css, render_markdown
@@ -208,6 +209,8 @@ async def _resolve_role(session_ctx: UISessionContext) -> Operator | None:
             decrypted,
             expected_audience=settings.keycloak_audience,
         )
+    except TenantRemovedError:
+        raise
     except Exception as exc:
         if (
             isinstance(exc, HTTPException)

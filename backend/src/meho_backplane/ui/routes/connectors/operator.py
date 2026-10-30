@@ -56,6 +56,7 @@ from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
 )
+from meho_backplane.ui.auth.tenant import TenantRemovedError
 
 __all__ = [
     "OperatorRoleProbe",
@@ -98,6 +99,11 @@ def _assert_identity_matches(operator: Operator, session_ctx: UISessionContext) 
     A mismatch is a security anomaly (token swapped under the same
     session row); it must surface as 401, not a silently-honoured
     cross-identity read.
+
+    The token check already ran in the session's current tenant (#5240):
+    the shared tenant choice compared the session tenant with the token's
+    tenant list, so ``operator.tenant_id`` is the session tenant unless
+    the row changed in between.
     """
     if operator.sub != session_ctx.operator_sub or operator.tenant_id != session_ctx.tenant_id:
         _log.warning(
@@ -190,6 +196,8 @@ async def resolve_role_probe(
         session_ctx = await require_ui_session(request)
     try:
         operator = await _lift_operator(session_ctx)
+    except TenantRemovedError:
+        raise
     except Exception as exc:
         if (
             isinstance(exc, HTTPException)

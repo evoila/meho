@@ -2367,6 +2367,12 @@ type BodyKeycloakClientScopeCreateUiKeycloakClientScopesCreatePost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	Target     *string           `json:"target,omitempty"`
 }
@@ -2397,6 +2403,12 @@ type BodyKeycloakProtocolMapperCreateUiKeycloakClientsClientUuidProtocolMappersC
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	Target     *string           `json:"target,omitempty"`
 }
@@ -2548,6 +2560,12 @@ type BodyUiAgentGrantsCreateSubmitUiAgentsGrantsCreatePost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx  *UISessionContext `json:"session_ctx,omitempty"`
 	TargetScope *string           `json:"target_scope"`
 	Verdict     *string           `json:"verdict,omitempty"`
@@ -2578,6 +2596,12 @@ type BodyUiAgentGrantsElevateSubmitUiAgentsGrantsElevatePost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx  *UISessionContext `json:"session_ctx,omitempty"`
 	TargetScope *string           `json:"target_scope"`
 	Verdict     *string           `json:"verdict,omitempty"`
@@ -2607,6 +2631,12 @@ type BodyUiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 }
 
@@ -2633,6 +2663,12 @@ type BodyUiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 }
 
@@ -2662,6 +2698,12 @@ type BodyUiAgentsCreateSubmitUiAgentsCreatePost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx   *UISessionContext `json:"session_ctx,omitempty"`
 	SystemPrompt *string           `json:"system_prompt,omitempty"`
 	TurnBudget   *string           `json:"turn_budget"`
@@ -2692,6 +2734,12 @@ type BodyUiAgentsEditSubmitUiAgentsNamePatch struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx   *UISessionContext `json:"session_ctx,omitempty"`
 	SystemPrompt *string           `json:"system_prompt,omitempty"`
 	TurnBudget   *string           `json:"turn_budget"`
@@ -2720,6 +2768,12 @@ type BodyUiAgentsRunSubmitUiAgentsNameRunPost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	WorkRef    *string           `json:"work_ref"`
 }
@@ -2747,6 +2801,12 @@ type BodyUiAgentsToggleUiAgentsNameTogglePost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 }
 
@@ -2788,6 +2848,12 @@ type BodyUiConnectorsCreateSubmitUiConnectorsCreatePost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx  *UISessionContext `json:"session_ctx,omitempty"`
 	VpnRequired *bool             `json:"vpn_required,omitempty"`
 }
@@ -2821,6 +2887,12 @@ type BodyUiConnectorsEditSubmitUiConnectorsNamePatch struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx  *UISessionContext `json:"session_ctx,omitempty"`
 	VpnRequired *bool             `json:"vpn_required,omitempty"`
 }
@@ -2848,6 +2920,12 @@ type BodyUiConnectorsImportConfirmUiConnectorsImportConfirmPost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	Upload     *string           `json:"upload"`
 }
@@ -2875,6 +2953,12 @@ type BodyUiConnectorsImportPreviewUiConnectorsImportPost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	Upload     *string           `json:"upload"`
 }
@@ -2907,6 +2991,12 @@ type BodyUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	SpecUri    *[]string         `json:"spec_uri,omitempty"`
 	Version    *string           `json:"version,omitempty"`
@@ -2939,6 +3029,12 @@ type BodyUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpId
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 }
 
@@ -2967,6 +3063,12 @@ type BodyUiConventionsCreateSubmitUiConventionsCreatePost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	Slug       string            `json:"slug"`
 	Title      string            `json:"title"`
@@ -2996,6 +3098,12 @@ type BodyUiConventionsPatchUiConventionsSlugPatch struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	Title      string            `json:"title"`
 }
@@ -3024,6 +3132,12 @@ type BodyUiConventionsPreviewUiConventionsPreviewPost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	Title      *string           `json:"title,omitempty"`
 }
@@ -3061,6 +3175,12 @@ type BodyUiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPost struct
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	Vendor     *string           `json:"vendor,omitempty"`
 	WhenToUse  *string           `json:"when_to_use"`
@@ -3092,6 +3212,12 @@ type BodyUiMemoryBulkUiMemoryBulkPost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	Tag        *string           `json:"tag"`
 }
@@ -3135,6 +3261,12 @@ type BodyUiMemoryCreateSubmitUiMemoryCreatePost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	Slug       *string           `json:"slug"`
 	Tags       *string           `json:"tags"`
@@ -3164,6 +3296,12 @@ type BodyUiMemoryPatchUiMemoryScopeSlugPatch struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 }
 
@@ -3193,6 +3331,12 @@ type BodyUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	TargetName *string           `json:"target_name"`
 
@@ -3241,6 +3385,12 @@ type BodyUiSchedulerCreateSubmitUiSchedulerCreatePost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	Timezone   *string           `json:"timezone,omitempty"`
 	WorkRef    *string           `json:"work_ref"`
@@ -3269,6 +3419,12 @@ type BodyUiSchedulerValidateCronUiSchedulerValidateCronPost struct {
 	// tenant row was deleted between session-creation and the request
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
+	//
+	// ``tenant_id`` is the session's current tenant (#5240).
+	// ``tenant_chosen`` is ``False`` while a person with several tenants
+	// has not picked one; the middleware then lets the request reach only
+	// the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+	// a switch.
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	Timezone   *string           `json:"timezone,omitempty"`
 }
@@ -10527,12 +10683,20 @@ type TraceView struct {
 // tenant row was deleted between session-creation and the request
 // (an ops anomaly; the operator still authenticates fine, the chip
 // just falls back to the tenant UUID).
+//
+// “tenant_id“ is the session's current tenant (#5240).
+// “tenant_chosen“ is “False“ while a person with several tenants
+// has not picked one; the middleware then lets the request reach only
+// the tenant picker. “can_switch_tenant“ makes the sidebar tenant box
+// a switch.
 type UISessionContext struct {
-	OperatorSub string             `json:"operator_sub"`
-	SessionId   openapi_types.UUID `json:"session_id"`
-	TenantId    openapi_types.UUID `json:"tenant_id"`
-	TenantName  *string            `json:"tenant_name"`
-	TenantSlug  *string            `json:"tenant_slug"`
+	CanSwitchTenant *bool              `json:"can_switch_tenant,omitempty"`
+	OperatorSub     string             `json:"operator_sub"`
+	SessionId       openapi_types.UUID `json:"session_id"`
+	TenantChosen    *bool              `json:"tenant_chosen,omitempty"`
+	TenantId        openapi_types.UUID `json:"tenant_id"`
+	TenantName      *string            `json:"tenant_name"`
+	TenantSlug      *string            `json:"tenant_slug"`
 }
 
 // UsageReport Top-level shape returned by :func:`compute_usage` + the API route.
@@ -12311,6 +12475,11 @@ type UiSchedulerListUiSchedulerGetParams struct {
 type UiSensorsListUiSensorsGetParams struct {
 	Status      *string `form:"status,omitempty" json:"status,omitempty"`
 	CadenceKind *string `form:"cadence_kind,omitempty" json:"cadence_kind,omitempty"`
+}
+
+// UiTenantPickerUiTenantGetParams defines parameters for UiTenantPickerUiTenantGet.
+type UiTenantPickerUiTenantGetParams struct {
+	Notice *string `form:"notice,omitempty" json:"notice,omitempty"`
 }
 
 // UiTopologyTableUiTopologyGetParams defines parameters for UiTopologyTableUiTopologyGet.
@@ -16057,6 +16226,12 @@ type ClientInterface interface {
 
 	// UiSensorsListUiSensorsGet request
 	UiSensorsListUiSensorsGet(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiTenantPickerUiTenantGet request
+	UiTenantPickerUiTenantGet(ctx context.Context, params *UiTenantPickerUiTenantGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiTenantSwitchUiTenantSwitchPost request
+	UiTenantSwitchUiTenantSwitchPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiTopologyTableUiTopologyGet request
 	UiTopologyTableUiTopologyGet(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -22947,6 +23122,30 @@ func (c *Client) UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPost(ctx conte
 
 func (c *Client) UiSensorsListUiSensorsGet(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiSensorsListUiSensorsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiTenantPickerUiTenantGet(ctx context.Context, params *UiTenantPickerUiTenantGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiTenantPickerUiTenantGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiTenantSwitchUiTenantSwitchPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiTenantSwitchUiTenantSwitchPostRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -45329,6 +45528,82 @@ func NewUiSensorsListUiSensorsGetRequest(server string, params *UiSensorsListUiS
 	return req, nil
 }
 
+// NewUiTenantPickerUiTenantGetRequest generates requests for UiTenantPickerUiTenantGet
+func NewUiTenantPickerUiTenantGetRequest(server string, params *UiTenantPickerUiTenantGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/tenant")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Notice != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "notice", runtime.ParamLocationQuery, *params.Notice); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiTenantSwitchUiTenantSwitchPostRequest generates requests for UiTenantSwitchUiTenantSwitchPost
+func NewUiTenantSwitchUiTenantSwitchPostRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/tenant/switch")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiTopologyTableUiTopologyGetRequest generates requests for UiTopologyTableUiTopologyGet
 func NewUiTopologyTableUiTopologyGetRequest(server string, params *UiTopologyTableUiTopologyGetParams) (*http.Request, error) {
 	var err error
@@ -48250,6 +48525,12 @@ type ClientWithResponsesInterface interface {
 
 	// UiSensorsListUiSensorsGetWithResponse request
 	UiSensorsListUiSensorsGetWithResponse(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*UiSensorsListUiSensorsGetResponse, error)
+
+	// UiTenantPickerUiTenantGetWithResponse request
+	UiTenantPickerUiTenantGetWithResponse(ctx context.Context, params *UiTenantPickerUiTenantGetParams, reqEditors ...RequestEditorFn) (*UiTenantPickerUiTenantGetResponse, error)
+
+	// UiTenantSwitchUiTenantSwitchPostWithResponse request
+	UiTenantSwitchUiTenantSwitchPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiTenantSwitchUiTenantSwitchPostResponse, error)
 
 	// UiTopologyTableUiTopologyGetWithResponse request
 	UiTopologyTableUiTopologyGetWithResponse(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*UiTopologyTableUiTopologyGetResponse, error)
@@ -56897,6 +57178,49 @@ func (r UiSensorsListUiSensorsGetResponse) StatusCode() int {
 	return 0
 }
 
+type UiTenantPickerUiTenantGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiTenantPickerUiTenantGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiTenantPickerUiTenantGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiTenantSwitchUiTenantSwitchPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiTenantSwitchUiTenantSwitchPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiTenantSwitchUiTenantSwitchPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiTopologyTableUiTopologyGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -62339,6 +62663,24 @@ func (c *ClientWithResponses) UiSensorsListUiSensorsGetWithResponse(ctx context.
 		return nil, err
 	}
 	return ParseUiSensorsListUiSensorsGetResponse(rsp)
+}
+
+// UiTenantPickerUiTenantGetWithResponse request returning *UiTenantPickerUiTenantGetResponse
+func (c *ClientWithResponses) UiTenantPickerUiTenantGetWithResponse(ctx context.Context, params *UiTenantPickerUiTenantGetParams, reqEditors ...RequestEditorFn) (*UiTenantPickerUiTenantGetResponse, error) {
+	rsp, err := c.UiTenantPickerUiTenantGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiTenantPickerUiTenantGetResponse(rsp)
+}
+
+// UiTenantSwitchUiTenantSwitchPostWithResponse request returning *UiTenantSwitchUiTenantSwitchPostResponse
+func (c *ClientWithResponses) UiTenantSwitchUiTenantSwitchPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiTenantSwitchUiTenantSwitchPostResponse, error) {
+	rsp, err := c.UiTenantSwitchUiTenantSwitchPost(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiTenantSwitchUiTenantSwitchPostResponse(rsp)
 }
 
 // UiTopologyTableUiTopologyGetWithResponse request returning *UiTopologyTableUiTopologyGetResponse
@@ -73474,6 +73816,48 @@ func ParseUiSensorsListUiSensorsGetResponse(rsp *http.Response) (*UiSensorsListU
 		}
 		response.JSON422 = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseUiTenantPickerUiTenantGetResponse parses an HTTP response from a UiTenantPickerUiTenantGetWithResponse call
+func ParseUiTenantPickerUiTenantGetResponse(rsp *http.Response) (*UiTenantPickerUiTenantGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiTenantPickerUiTenantGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiTenantSwitchUiTenantSwitchPostResponse parses an HTTP response from a UiTenantSwitchUiTenantSwitchPostWithResponse call
+func ParseUiTenantSwitchUiTenantSwitchPostResponse(rsp *http.Response) (*UiTenantSwitchUiTenantSwitchPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiTenantSwitchUiTenantSwitchPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
 
 	return response, nil

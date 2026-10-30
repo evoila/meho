@@ -120,6 +120,11 @@ from meho_backplane.ui.auth.session_store import (
     load_session_for_update,
     rotate_refresh,
 )
+from meho_backplane.ui.auth.tenant import (
+    fall_back_after_removal,
+    lost_tenant,
+    session_tenant_request,
+)
 
 __all__ = [
     "REFRESH_EXPIRY_MARGIN_SECONDS",
@@ -437,6 +442,37 @@ async def load_fresh_session(session_id: uuid.UUID) -> DecryptedSession | None:
     return decrypted
 
 
+async def _verify_session_token(
+    decrypted: DecryptedSession,
+    *,
+    access_token: str,
+    expected_audience: str,
+) -> Operator:
+    """Check *access_token* for the session's current tenant (#5240).
+
+    The session's tenant goes to the shared tenant choice like a
+    ``Meho-Tenant`` header. When the token no longer allows it, the
+    session is reset and :class:`~meho_backplane.ui.auth.tenant.TenantRemovedError`
+    is raised (:func:`~meho_backplane.ui.auth.tenant.fall_back_after_removal`).
+    """
+    requested, allow_unchosen = session_tenant_request(decrypted)
+    try:
+        return await verify_jwt_for_audience(
+            f"Bearer {access_token}",
+            expected_audience=expected_audience,
+            requested_tenant=requested,
+            allow_unchosen=allow_unchosen,
+        )
+    except HTTPException as exc:
+        if requested is not None and lost_tenant(exc):
+            await fall_back_after_removal(
+                decrypted,
+                access_token=access_token,
+                expected_audience=expected_audience,
+            )
+        raise
+
+
 async def verify_access_token_with_refresh(
     decrypted: DecryptedSession,
     *,
@@ -452,6 +488,15 @@ async def verify_access_token_with_refresh(
     :class:`~meho_backplane.auth.operator.Operator` so the caller's
     role gate runs against claims that match the stored token.
 
+    The check runs in the session's current tenant (#5240): the
+    returned Operator carries that tenant's role. A session whose
+    person has several tenants and has not picked one yet gets an
+    Operator with ``tenant_chosen=False``; the session middleware lets
+    such a session reach only the tenant picker. When the token no
+    longer allows the session's tenant, the session is reset and
+    :class:`~meho_backplane.ui.auth.tenant.TenantRemovedError` (409)
+    is raised.
+
     Every other verification failure (bad signature, wrong audience,
     structural break) propagates untouched: those are not expiry
     conditions, a refresh would not repair them, and masking them
@@ -463,10 +508,10 @@ async def verify_access_token_with_refresh(
     rather than leaking raw JSON at an HTML browser; the JWT chain
     has already logged the precise classifier event by then.
     """
-    bearer = f"Bearer {decrypted.access_token}"
     try:
-        operator = await verify_jwt_for_audience(
-            bearer,
+        operator = await _verify_session_token(
+            decrypted,
+            access_token=decrypted.access_token,
             expected_audience=expected_audience,
         )
         return decrypted, operator
@@ -479,8 +524,9 @@ async def verify_access_token_with_refresh(
     )
     log = structlog.get_logger(__name__)
     try:
-        operator = await verify_jwt_for_audience(
-            f"Bearer {refreshed.access_token}",
+        operator = await _verify_session_token(
+            refreshed,
+            access_token=refreshed.access_token,
             expected_audience=expected_audience,
         )
     except HTTPException as exc:

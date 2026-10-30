@@ -13,6 +13,12 @@ changes the setting and starts a new session.
 
 The check is an allow list, so a new method or tool is refused until it
 is added here on purpose.
+
+The allowed requests do no tenant work either. The bind step binds
+nothing, so no audit row or usage event names the placeholder tenant;
+``initialize`` skips the per-tenant session cap and the tenant preamble;
+``tools/call`` of ``meho_status`` writes no wrapper row and reads no
+broadcast setting.
 """
 
 from __future__ import annotations

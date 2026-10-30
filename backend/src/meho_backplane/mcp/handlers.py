@@ -589,10 +589,17 @@ async def handle_tools_call(
         try:
             # #3757: after the cutover, routine and dispatcher-owned calls
             # get no wrapper row; the request usage event records them.
-            row_class = wrapper_row_class(
-                status_code=_decision_status(status_code, handler_rejected=handler_rejected),
-                routine=mcp_tool_is_routine(audit_payload["op_class"]),
-                operator_sub=operator.sub,
+            # #5239: a session with no current tenant (only ``meho_status``
+            # reaches here) gets no row either: the row and its broadcast
+            # detail are per tenant, and the operator holds a placeholder.
+            row_class = (
+                wrapper_row_class(
+                    status_code=_decision_status(status_code, handler_rejected=handler_rejected),
+                    routine=mcp_tool_is_routine(audit_payload["op_class"]),
+                    operator_sub=operator.sub,
+                )
+                if operator.tenant_chosen
+                else None
             )
             if row_class is None:
                 note_request_status(status_code)

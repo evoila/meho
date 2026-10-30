@@ -490,6 +490,19 @@ async def _session_instructions(operator: Operator) -> str | None:
     return joined or None
 
 
+def _no_tenant_instructions(operator: Operator) -> str:
+    """The ``initialize.instructions`` for a session with no current tenant (#5239).
+
+    No tenant preamble is loaded: there is no tenant to load it for. The
+    text names the person's tenants and how to pick one.
+    """
+    return (
+        f"{tenant_not_chosen_detail(operator)} Call meho_status to see your role "
+        "in each tenant. Then set the Meho-Tenant header and start a new session; "
+        "every other tool is refused until then."
+    )
+
+
 async def _enforce_mcp_session_cap(operator: Operator) -> None:
     """Refuse ``initialize`` when the tenant is over its session cap (#3500).
 
@@ -545,8 +558,13 @@ async def _initialize(
     #3500: a per-tenant session cap is enforced first, so a tenant over its
     new-sessions-per-minute limit is refused with a ``-32000`` rate-limited
     error before a new session is negotiated.
+
+    #5239: a session with no current tenant skips the cap and the tenant
+    preamble. Both are per tenant, and the operator's tenant fields hold
+    only a placeholder; see :func:`_no_tenant_instructions`.
     """
-    await _enforce_mcp_session_cap(operator)
+    if operator.tenant_chosen:
+        await _enforce_mcp_session_cap(operator)
 
     # ``params or {}`` deliberately collapses ``None`` and ``{}``. Spec-
     # aligned: a missing ``params`` field on the JSON-RPC request and an
@@ -585,7 +603,11 @@ async def _initialize(
         # tracks a release, so the Step-4 upgrade-verify guidance in
         # docs/cross-repo/mcp-client-setup.md could not work off it (#2746).
         serverInfo={"name": _SERVER_NAME, "version": deployed_version_label()},
-        instructions=await _session_instructions(operator),
+        instructions=(
+            await _session_instructions(operator)
+            if operator.tenant_chosen
+            else _no_tenant_instructions(operator)
+        ),
     )
 
 

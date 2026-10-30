@@ -6,6 +6,8 @@
 A login with several tenants that sends no ``Meho-Tenant`` header may only
 start the connection and call ``meho_status``, which lists the person's
 tenants and roles. Everything else is refused with ``tenant_not_chosen``.
+The allowed requests do no tenant work: no session cap, no tenant
+preamble, no audit row, no broadcast setting, nothing bound.
 The ``Meho-Tenant`` header on the MCP transport is tested end to end.
 """
 
@@ -18,13 +20,22 @@ from typing import Any
 
 import pytest
 import respx
+import structlog
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, RoleGroup, TenantMembership, TenantRole
+from meho_backplane.conventions import preamble as preamble_module
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
 from meho_backplane.main import app
+from meho_backplane.mcp import handlers as mcp_handlers
+from meho_backplane.mcp import server as mcp_server
 from meho_backplane.mcp.auth import mcp_resource_uri, verify_mcp_jwt, verify_mcp_jwt_and_bind
-from meho_backplane.mcp.schemas import INVALID_REQUEST
+from meho_backplane.mcp.schemas import INVALID_REQUEST, PROTOCOL_VERSION
+from meho_backplane.operations.ingest.boot_stamp import BOOT_STAMP_OPERATOR_SUB
+from meho_backplane.settings import get_settings
 from tests.conftest import make_rsa_keypair, mint_token, mock_discovery_and_jwks, public_jwks
 from tests.mcp_test_fixtures import (
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
@@ -127,6 +138,73 @@ def test_connection_start_is_allowed(unchosen_client: TestClient) -> None:
     assert "error" not in ping.json()
     note = post_mcp(unchosen_client, {"jsonrpc": "2.0", "method": "notifications/initialized"})
     assert note.status_code == 202
+
+
+@pytest.fixture
+def no_tenant_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail the test when a request without a tenant does tenant work."""
+
+    def _fail(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("tenant work without a current tenant")
+
+    monkeypatch.setattr(mcp_server, "resolve_mcp_session_cap", _fail)
+    monkeypatch.setattr(mcp_server, "check_mcp_session_cap", _fail)
+    monkeypatch.setattr(preamble_module, "assemble_preamble_detailed", _fail)
+    monkeypatch.setattr(mcp_handlers, "compute_effective_broadcast_detail", _fail)
+    monkeypatch.setattr(mcp_handlers, "write_mcp_audit_row", _fail)
+
+
+async def _audit_rows_without_boot_stamp() -> list[AuditLog]:
+    async with get_sessionmaker()() as session:
+        rows = await session.execute(
+            select(AuditLog).where(AuditLog.operator_sub != BOOT_STAMP_OPERATOR_SUB)
+        )
+        return list(rows.scalars().all())
+
+
+@pytest.mark.usefixtures("no_tenant_work")
+def test_initialize_without_a_tenant_skips_the_cap_and_the_preamble(
+    unchosen_client: TestClient,
+) -> None:
+    response = post_mcp(
+        unchosen_client,
+        {
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "tenant-gate-test", "version": "1"},
+            },
+        },
+    )
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["serverInfo"]["name"]
+    assert result["instructions"].startswith("tenant_not_chosen:")
+    assert "lab-a, lab-b" in result["instructions"]
+    assert "meho_status" in result["instructions"]
+    assert "Meho-Tenant" in result["instructions"]
+
+
+@pytest.mark.usefixtures("no_tenant_work")
+async def test_meho_status_without_a_tenant_writes_no_audit_row(
+    unchosen_client: TestClient,
+) -> None:
+    """With the default audit settings the wrapper row would name the placeholder tenant."""
+    assert get_settings().audit_wrapper_rows_retired is False
+    response = _call(unchosen_client, "meho_status")
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
+    assert await _audit_rows_without_boot_stamp() == []
+
+
+async def test_bind_step_binds_nothing_without_a_tenant() -> None:
+    structlog.contextvars.clear_contextvars()
+    operator = await verify_mcp_jwt_and_bind(_unchosen_operator())
+    assert operator.tenant_chosen is False
+    assert structlog.contextvars.get_contextvars() == {}
 
 
 # ---------------------------------------------------------------------------

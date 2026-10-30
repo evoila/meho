@@ -816,6 +816,15 @@ the working surface stays at its size.
   `-32600` error whose message starts with `tenant_not_chosen:` and names
   the person's tenants. The check is an allow list: a new method or tool
   is refused until it is added there.
+- The allowed requests do no tenant work. The bind step
+  (`verify_mcp_jwt_and_bind`) binds nothing for such a session, so the
+  chassis audit middleware writes no row and the usage collector no
+  event. `initialize` skips the per-tenant session cap and the tenant
+  preamble; its `instructions` text is the `tenant_not_chosen` message
+  plus how to pick a tenant. `tools/call` of `meho_status` writes no
+  wrapper row and reads no broadcast setting. The operator's tenant
+  fields hold only a placeholder (the first entry) and are never
+  recorded.
 - `tools/list` for such a session lists only `meho_status`.
 - `meho_status` (and `GET /api/v1/health`) then answers with
   `operator.tenant_id` and `operator.tenant_role` set to `null`,

@@ -204,6 +204,11 @@ async def verify_mcp_jwt_and_bind(
     JSON-renderer reason the chassis wrapper documents — see
     :func:`~meho_backplane.middleware.verify_jwt_and_bind`.
 
+    A login with several tenants and no ``Meho-Tenant`` header (#5239)
+    arrives with ``tenant_chosen=False``. Nothing is bound for it: the
+    chassis audit middleware then writes no row and the usage collector
+    no event, so the placeholder tenant in its fields is never recorded.
+
     Runner cage (Initiative #2415, #2502)
     -------------------------------------
     A ``principal_kind=runner`` token is fail-closed 403'd here. The REST
@@ -221,6 +226,11 @@ async def verify_mcp_jwt_and_bind(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="runner_scope_violation",
         )
+    if not operator.tenant_chosen:
+        # #5239: a session with no current tenant binds nothing, as the
+        # REST status route does. The tenant fields hold a placeholder,
+        # so no audit row, usage event or log line may name it.
+        return operator
     structlog.contextvars.bind_contextvars(
         operator_sub=operator.sub,
         tenant_id=str(operator.tenant_id),

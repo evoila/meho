@@ -40,6 +40,7 @@ image. Skips when Docker is missing or the container cannot start.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import html
 import json
@@ -122,11 +123,9 @@ def _subchart_image() -> str:
 def _wait_for_realm(base_url: str, logs: Callable[[], str], timeout: float = 120.0) -> None:
     deadline = time.monotonic() + timeout
     while True:
-        try:
+        with contextlib.suppress(httpx.TransportError):
             if httpx.get(f"{base_url}/realms/meho/.well-known/openid-configuration").is_success:
                 return
-        except httpx.TransportError:
-            pass
         if time.monotonic() > deadline:
             pytest.fail(f"Keycloak did not serve realm meho in time. Keycloak log:\n{logs()}")
         time.sleep(2)

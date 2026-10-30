@@ -407,6 +407,36 @@ target registration) is documented in
   `list` classifies `read` via the `.list` suffix and normalises an
   empty-store 404 to `{"keys": []}`. None of the identity objects carry
   secret material.
+
+  **Identity token roles and keys** (`ops_identity_oidc.py` /
+  `ops_identity_oidc_schemas.py`) are in the same `identity` group. Vault
+  signs identity tokens (JWTs) that another system trusts: a role under
+  `identity/oidc/role/<name>` names the key under
+  `identity/oidc/key/<name>` that signs its tokens, the audience
+  (`client_id`), `ttl` and `template`. These are not the login roles of
+  the JWT/OIDC auth method (`auth/<mount>/role`).
+
+  | op_id | hvac call | safety_level | approval | op_class |
+  |---|---|---|---|---|
+  | `vault.identity.oidc.role.list` | `secrets.identity.list_roles` | safe | False | `read` |
+  | `vault.identity.oidc.role.read` | `secrets.identity.read_role` | safe | False | `other` |
+  | `vault.identity.oidc.role.delete` | `secrets.identity.delete_role` | dangerous | True | `write` |
+  | `vault.identity.oidc.key.list` | `secrets.identity.list_named_keys` | safe | False | `read` |
+  | `vault.identity.oidc.key.read` | `secrets.identity.read_named_key` | safe | False | `other` |
+  | `vault.identity.oidc.key.delete` | `secrets.identity.delete_named_key` | dangerous | True | `write` |
+
+  Lists turn the empty-store 404 into `{"keys": []}`; a read of an
+  unknown name surfaces `InvalidPath`. Nothing is a secret (a key read
+  never returns the private key). Vault refuses to delete a key that a
+  role (or an OIDC provider client or a mount) still uses; the key delete
+  turns that 400 into `VaultOidcKeyInUseError` (a `ConnectorUpstreamError`)
+  whose `remediation` names the roles. Unlike the older identity ops, all
+  six log in through `vault_client_for_target`, so the target's
+  `extras["vault_role"]` decides which Vault role runs the call. Both
+  deletes register a park-time permission preflight for `delete` on their
+  path (see the preflight section below). The policy rules are in
+  [`connector-vault-policy.md`](../cross-repo/connector-vault-policy.md)
+  §6.7.
 - **`token` op group** (`ops_token.py` / `ops_token_schemas.py`,
   G3.15-T4 #1412) — token lifecycle on the core `token` backend, group
   key `token`:
@@ -475,7 +505,7 @@ target registration) is documented in
   target's `extras["vault_role"]` decides which Vault role makes the
   change.
 
-  Both groups register from `ops_identity.py` / `ops_token.py` /
+  Both groups register from `ops_identity.py` / `ops_identity_oidc.py` / `ops_token.py` /
   `ops_token_role.py` spec tables, composed by the thin
   `register_vault_identity_token_operations()` registrar
   (`ops_identity_token.py`), which is queued from the package `__init__`
@@ -744,15 +774,18 @@ exercised by calling it directly in the unit suite. The policy reads
 (`policy.read` / `policy.list`) stay `requires_approval=False`.
 
 The identity write ops (`identity.entity.write` / `entity_alias.write` /
-`group.write` / `group.delete`) and the token write ops
+`group.write` / `group.delete`, and `oidc.role.delete` /
+`oidc.key.delete`) and the token write ops
 (`token.create` / `token.revoke_accessor`, and `token.role.write`, whose
 `allowed_policies` decide what a token made from the role can do)
 (G3.15-T4 #1412) likewise
 register `requires_approval=True` — each is a privilege assignment,
 privilege-plumbing membership change, irreversible removal, or a secret
 mint. `requires_approval` / `safety_level` are carried per-op in the
-`IDENTITY_OP_SPECS` / `TOKEN_OP_SPECS` / `TOKEN_ROLE_OP_SPECS` rows. The
-identity reads (`entity.read` / `group.read` / `list`),
+`IDENTITY_OP_SPECS` / `IDENTITY_OIDC_OP_SPECS` / `TOKEN_OP_SPECS` /
+`TOKEN_ROLE_OP_SPECS` rows. The
+identity reads (`entity.read` / `group.read` / `list`, and the
+`oidc.role` / `oidc.key` list and read),
 `token.list_accessors` and the token-role reads (`token.role.read` /
 `token.role.list`) stay `requires_approval=False`, registered `safe` so
 create-if-absent flows do not stall. The integration tests drive the gated writes via the
@@ -857,7 +890,10 @@ deployment adds are in
 **`vault.auth.jwt.role.write`** registers a third preflight
 (`ops_auth_jwt.py`) on `auth/<mount>/role/<name>`. It needs `create`,
 `read` and `update`, because the write reads the current role first. Coverage in
-`test_connectors_vault_auth_jwt.py`.
+`test_connectors_vault_auth_jwt.py`. `vault.identity.oidc.role.delete` and `vault.identity.oidc.key.delete`
+register the same kind of preflight (`ops_identity_oidc.py`): `delete` on
+`identity/oidc/role/<name>` or `identity/oidc/key/<name>` (policy doc
+§6.7, coverage in `test_connectors_vault_identity_oidc.py`).
 
 ## JSONFlux result-handle path (`vault.kv.list`)
 
@@ -901,7 +937,7 @@ raw >50-key list once a handle is produced.
    read) + `register_vault_auth_write_operations` (auth write).
    `register_vault_identity_token_operations` composes the `identity` +
    `token` groups from their per-module spec tables (`ops_identity.py`,
-   `ops_token.py`, `ops_token_role.py`).
+   `ops_identity_oidc.py`, `ops_token.py`, `ops_token_role.py`).
 2. At FastAPI lifespan startup, `run_typed_op_registrars()` invokes
    all registrars, which upsert the `endpoint_descriptor` rows. Upsert
    is idempotent: a restart against unchanged descriptions is a no-op

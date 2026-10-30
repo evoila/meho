@@ -69,7 +69,7 @@ _OP_CLASS_WRITE: Final[str] = "write"
 # one string instead of six.
 _CONNECTOR_ID_DESCRIPTION: Final[str] = (
     "Operator-facing connector identifier — '<impl_id>-<version>' "
-    "(e.g. 'vmware-rest-9.0', 'vault-1.x'). Split into the parsed "
+    "(e.g. 'k8s-1.x', 'vault-1.x'). Split into the parsed "
     "(product, version, impl_id) triple by the same rule the CLI "
     "uses."
 )

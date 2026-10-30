@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""msad group ops — ``list`` / ``get`` / ``members`` (safe) + membership writes.
+"""msad group ops — ``list`` / ``get`` / ``members`` (safe) + create and membership writes.
 
-``add-member`` / ``remove-member`` are ``caution`` (recoverable); ``delete`` is
+``add-member`` / ``remove-member`` are ``caution`` (recoverable); ``create`` is
+``caution`` + ``requires_approval`` and safe to run twice (an existing group
+with the same sAMAccountName is returned, not created again); ``delete`` is
 ``dangerous`` + ``requires_approval``. Groups are driven by the
 ``ActiveDirectory`` module cmdlets (``Get-ADGroup`` / ``Get-ADGroupMember`` /
 ``Add-ADGroupMember`` / ``Remove-ADGroupMember`` / ``Remove-ADGroup``) over the
@@ -25,7 +27,7 @@ References
 ----------
 
 * ``Get-ADGroup`` / ``Get-ADGroupMember`` / ``Add-ADGroupMember`` /
-  ``Remove-ADGroupMember`` / ``Remove-ADGroup``:
+  ``Remove-ADGroupMember`` / ``Remove-ADGroup`` / ``New-ADGroup``:
   https://learn.microsoft.com/en-us/powershell/module/activedirectory/
 """
 
@@ -48,6 +50,7 @@ if TYPE_CHECKING:
 __all__ = [
     "GROUP_OPS",
     "msad_group_add_member",
+    "msad_group_create",
     "msad_group_delete",
     "msad_group_get",
     "msad_group_list",
@@ -146,6 +149,58 @@ async def msad_group_remove_member(
     return await _member_write(
         connector, target, params, "Remove-ADGroupMember", "remove-member", operator
     )
+
+
+_GROUP_SCOPES: tuple[str, ...] = ("DomainLocal", "Global", "Universal")
+_GROUP_CATEGORIES: tuple[str, ...] = ("Security", "Distribution")
+
+
+async def msad_group_create(
+    connector: MsadConnector,
+    target: Any,
+    params: dict[str, Any],
+    operator: Operator | None = None,
+) -> dict[str, Any]:
+    """Handler for ``msad.group.create`` (caution, approval) — ``New-ADGroup``.
+
+    Looks the sAMAccountName up first with a script-block filter (the value is
+    bound as a variable, not parsed). When the group exists it is returned with
+    ``created: false``; otherwise ``New-ADGroup`` makes it.
+    """
+    name: str = params["name"]
+    sam: str = params.get("sam_account_name") or name
+    scope = params.get("scope", "Global")
+    category = params.get("category", "Security")
+    if scope not in _GROUP_SCOPES:
+        raise ValueError(f"scope must be one of {list(_GROUP_SCOPES)}; got {scope!r}")
+    if category not in _GROUP_CATEGORIES:
+        raise ValueError(f"category must be one of {list(_GROUP_CATEGORIES)}; got {category!r}")
+    extra = ""
+    if params.get("path"):
+        extra += f" -Path {ps_single_quote(params['path'])}"
+    if params.get("description"):
+        extra += f" -Description {ps_single_quote(params['description'])}"
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        f"$n = {ps_single_quote(sam)}; "
+        "$g = Get-ADGroup -Filter { SamAccountName -eq $n }; "
+        "$created = $false; "
+        "if (-not $g) { "
+        f"New-ADGroup -Name {ps_single_quote(name)} -SamAccountName $n "
+        f"-GroupScope {scope} -GroupCategory {category}{extra}; "
+        "$created = $true; $g = Get-ADGroup -Identity $n }; "
+        "ConvertTo-Json -Compress -InputObject @{ "
+        "created = $created; "
+        "sam_account_name = [string]$g.SamAccountName; "
+        "name = [string]$g.Name; "
+        "distinguished_name = [string]$g.DistinguishedName; "
+        "scope = [string]$g.GroupScope; "
+        "category = [string]$g.GroupCategory }"
+    )
+    payload = await pwsh_run(connector, target, script, operator=operator)
+    if not isinstance(payload, dict):
+        raise ValueError("the group create script did not return a JSON object")
+    return {**payload, "action": "create", "op_class": "write"}
 
 
 async def msad_group_delete(
@@ -374,6 +429,116 @@ GROUP_OPS: tuple[MsadOp, ...] = (
             "output_shape": (
                 "{'identity', 'rows': [{SamAccountName, objectClass, ...}], 'total': <int>}."
             ),
+        },
+    ),
+    MsadOp(
+        op_id="msad.group.create",
+        handler_attr="msad_group_create",
+        summary="Create an AD group via New-ADGroup; returns the existing group if it is there.",
+        description=(
+            "Runs New-ADGroup with a name, scope and category, optionally in an OU and "
+            "with a description. When a group with the same sAMAccountName exists, it is "
+            "returned with created false. A person must approve it."
+        ),
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "\\S",
+                    "description": "The group name, for example Server-Joiners.",
+                },
+                "sam_account_name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "\\S",
+                    "description": "Optional sAMAccountName. Leave it out to use the name.",
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": list(_GROUP_SCOPES),
+                    "description": "Group scope: DomainLocal, Global (the default) or Universal.",
+                },
+                "category": {
+                    "type": "string",
+                    "enum": list(_GROUP_CATEGORIES),
+                    "description": "Security (the default) or Distribution.",
+                },
+                "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S",
+                    "description": (
+                        "Optional DN of the OU or container for the group, for example "
+                        "OU=Groups,DC=example,DC=test. Leave it out for the default "
+                        "container."
+                    ),
+                },
+                "description": {
+                    "type": "string",
+                    "maxLength": 1024,
+                    "description": "Optional description of the group.",
+                },
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+            "examples": [
+                {
+                    "name": "Server-Joiners",
+                    "scope": "Global",
+                    "category": "Security",
+                    "path": "OU=Groups,DC=example,DC=test",
+                }
+            ],
+        },
+        response_schema={
+            "type": "object",
+            "properties": {
+                "created": {
+                    "type": "boolean",
+                    "description": "false when the group was already there.",
+                },
+                "sam_account_name": {"type": "string", "description": "The sAMAccountName."},
+                "name": {"type": "string", "description": "The group name."},
+                "distinguished_name": {"type": "string", "description": "The DN of the group."},
+                "scope": {"type": "string", "description": "The group scope."},
+                "category": {"type": "string", "description": "The group category."},
+                "action": {"type": "string", "description": "Always 'create'."},
+                "op_class": {"type": "string", "enum": ["write"], "description": "Always 'write'."},
+            },
+            "required": ["created", "sam_account_name", "distinguished_name", "op_class"],
+            "additionalProperties": True,
+        },
+        group_key="groups",
+        tags=("write", "group", "create"),
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions={
+            "when_to_call": (
+                "Call to make a new AD group, for example a group that may join "
+                "computers or a role group for a service. " + SSH_TRANSPORT_NOTE
+            ),
+            "preconditions": (
+                "A person must approve the call. The OU in path must exist "
+                "(msad.ou.list). When created is false, check scope and category: the "
+                "existing group is not changed."
+            ),
+            "parameter_hints": {
+                "name": "Required. The group name.",
+                "sam_account_name": "Optional. Defaults to the name.",
+                "scope": "Optional. Global by default.",
+                "category": "Optional. Security by default.",
+                "path": "Optional. DN of the OU.",
+                "description": "Optional.",
+            },
+            "output_shape": (
+                "{created, sam_account_name, name, distinguished_name, scope, category, "
+                "action: 'create', op_class: 'write'}."
+            ),
+            "next_step": "Add members with msad.group.add-member. msad.group.delete is the undo.",
         },
     ),
     _member_write_op(

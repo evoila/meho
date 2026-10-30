@@ -201,7 +201,7 @@ register_mcp_tool(
             "operation to invoke -- it narrows the search space from "
             "hundreds of operations to a handful of relevant ones. "
             "Argument: `connector_id` in `<impl_id>-<version>` form "
-            '(e.g. "vmware-rest-9.0", "vault-1.x") -- NOT the bare '
+            '(e.g. "k8s-1.x", "vault-1.x") -- NOT the bare '
             "product name. Returns groups in `group_key` order. An "
             "UNKNOWN connector_id is an error (no such connector, "
             "`-32602` with `data.reason=unknown_connector`); a "
@@ -227,7 +227,7 @@ register_mcp_tool(
                     "type": "string",
                     "description": (
                         "Connector identifier in the form "
-                        '`<impl_id>-<version>` (e.g. "vmware-rest-9.0", '
+                        '`<impl_id>-<version>` (e.g. "k8s-1.x", '
                         '"vault-1.x") -- NOT the bare product name. A '
                         "value naming no registered connector is an error."
                     ),
@@ -581,7 +581,7 @@ register_mcp_tool(
                     "minLength": 1,
                     "description": (
                         "Operation id from `search_operations`, e.g. "
-                        '"vault.kv.read" or "GET:/api/vcenter/cluster".'
+                        '"vault.kv.read" or "GET:/repos/{owner}/{repo}/issues".'
                     ),
                 },
                 "target": {
@@ -806,7 +806,7 @@ register_mcp_tool(
                     "description": (
                         "Operation id as returned by `search_operations`. "
                         'Examples: "POST:/repos/{owner}/{repo}/issues", '
-                        '"GET:/api/vcenter/cluster".'
+                        '"GET:/repos/{owner}/{repo}/pulls".'
                     ),
                 },
                 "target": {

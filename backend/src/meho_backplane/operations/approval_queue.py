@@ -2251,7 +2251,9 @@ def composite_resume_binding(
         composite_resume_var.reset(resume_token)
 
 
-def _run_audit_context(request: ApprovalRequest) -> dict[str, Any]:
+def _run_audit_context(
+    request: ApprovalRequest, rerun_attempt: int | None = None
+) -> dict[str, Any]:
     """The ``audit_*`` log context to bind while an approved op runs (#3864).
 
     The REST approve routes bind ``audit_op_id="approval.decide"`` (and its
@@ -2262,11 +2264,16 @@ def _run_audit_context(request: ApprovalRequest) -> dict[str, Any]:
     ``None``), and only ``approval_request_id`` is kept, so the run row names
     its own op and the request it ran for. ``bound_contextvars`` puts the
     route keys back when the run ends.
+
+    A re-run of a failed request (#5417) passes *rerun_attempt*, so the
+    run row also says which attempt it is.
     """
     context: dict[str, Any] = {
         key: None for key in structlog.contextvars.get_contextvars() if key.startswith("audit_")
     }
     context["audit_approval_request_id"] = str(request.id)
+    if rerun_attempt is not None:
+        context["audit_approval_rerun_attempt"] = rerun_attempt
     return context
 
 
@@ -2277,6 +2284,7 @@ async def _dispatch_resume_with_bound_context(
     resolved_target: Any,
     effective_params: dict[str, Any],
     resume_parent_override: dict[str, Any] | None = None,
+    rerun_attempt: int | None = None,
 ) -> Any:
     """Re-bind the parked row's stored context, then dispatch ``_approved=True``.
 
@@ -2334,7 +2342,7 @@ async def _dispatch_resume_with_bound_context(
     owner_token = handle_owner_sub_var.set(request.principal_sub)
     try:
         with (
-            structlog.contextvars.bound_contextvars(**_run_audit_context(request)),
+            structlog.contextvars.bound_contextvars(**_run_audit_context(request, rerun_attempt)),
             bind_approved_requester(request),
             composite_resume_binding(
                 subop_op_id=request.op_id,

@@ -105,13 +105,21 @@ def stub_embedding_service() -> AsyncMock:
 
 
 class _NoCallConnector:
-    """A connector double that fails the test on any call to vCenter."""
+    """A connector double that fails the test on any call to vCenter.
+
+    Attribute reads succeed (``__getattr__`` stays well-behaved); the
+    returned callable is what fails, so the test trips the moment a
+    handler actually calls the connector.
+    """
 
     impl_id = "vmware-rest"
     version = "9.0"
 
     def __getattr__(self, name: str) -> Any:
-        raise AssertionError(f"vCenter was contacted: {name}")
+        def _fail(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError(f"vCenter was contacted: {name}")
+
+        return _fail
 
 
 def _operator() -> Operator:

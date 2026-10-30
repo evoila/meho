@@ -327,7 +327,9 @@ async def test_cronjob_run_preview_shows_job_template_and_active_jobs_not_values
     pod_spec.node_name = "node-01"
     pod_spec.host_pid = True
     pod_spec.containers[0].security_context = V1SecurityContext(privileged=True)
+    pod_spec.containers[0].command = ["run-backup", "--password"]
     pod_spec.containers[0].args = [
+        f"{_SHORT} phrase",
         f"--token={_SECRET}",
         f"PGPASSWORD={_SHORT} pg_dump -h db app",
         "--password",
@@ -366,7 +368,8 @@ async def test_cronjob_run_preview_shows_job_template_and_active_jobs_not_values
     assert pod["hostPID"] is True
     (container,) = pod["containers"]
     assert container["image"] == "registry.example/backup:1.2"
-    assert container["command"] == ["sh", "-c", "run-backup"]
+    assert container["command"] == ["run-backup", "--password"]
+    assert container["args"][0] == "***REDACTED***"
     assert container["securityContext"] == {"privileged": True}
     assert container["env"] == [{"name": "DB_PASSWORD", "value": "***REDACTED***"}]
     assert container["envFrom"] == [{"secretRef": {"name": "db-creds"}}]

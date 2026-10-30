@@ -487,12 +487,15 @@ do and with which rights: `command`, `args`, image, pod and container
 (`nodeName`, `nodeSelector`, `tolerations`, `affinity`), service account,
 `volumes` and `volumeMounts`. `ops_write_preview.py` hides every inline
 `env` value and every probe `httpHeaders` value; the name stays, and
-`valueFrom` / `envFrom` references stay. On `command` and `args` the
+`valueFrom` / `envFrom` references stay. A container's `command` and
+`args` are read as one command line, the way Kubernetes runs them. The
 words stay, but these values are hidden: the value of a `NAME=VALUE` or
 `--name=value` whose name holds a secret word (`PGPASSWORD=...`,
-`AWS_SECRET_ACCESS_KEY=...`, `--password=...`, any length), the word after
-a secret flag (`--password x`, `--token x`, `-p x`), the password in
-`user:password` after `-u` or `--user`, the password in a URL that
+`AWS_SECRET_ACCESS_KEY=...`, `--password=...`, any length), the argument
+after a secret flag (`--password x`, `--token x`, `-p x`; the whole list
+item or the whole quoted value, also when the flag ends `command` and the
+value starts `args`), the password in `user:password` after `-u` or
+`--user`, the password in a URL that
 carries a user and password, and tokens with a known vendor prefix
 (`ghp_...`). Then the same two-step redaction as the generic params echo
 runs over the spec: it hides secret-shaped text anywhere (JWTs, bearer

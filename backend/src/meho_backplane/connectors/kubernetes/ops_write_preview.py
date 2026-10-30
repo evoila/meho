@@ -45,14 +45,17 @@ What is never shown
   pods run and with which rights: ``command``, ``args``, ``image``,
   ``securityContext``, ``hostPID`` / ``hostNetwork`` / ``hostIPC``,
   ``nodeName``, ``nodeSelector``, ``tolerations``, ``affinity``,
-  ``volumes`` and ``volumeMounts``. On each ``command`` and ``args`` list
-  the words stay, but these values are hidden: the value of a
-  ``NAME=VALUE`` or ``--name=value`` whose name holds a secret word
-  (``PGPASSWORD=...``, ``AWS_SECRET_ACCESS_KEY=...``, ``--password=...``,
-  any length), the word after a secret flag (``--password x``,
-  ``--token x``, ``-p x``), the password in ``user:password`` after ``-u``
-  or ``--user``, the password in a URL that carries a user and password
-  and tokens with a known vendor prefix (``ghp_...``). Then the shared
+  ``volumes`` and ``volumeMounts``. A container's ``command`` and ``args``
+  are read as one command line, the way Kubernetes runs them. The words
+  stay, but these values are hidden: the value of a ``NAME=VALUE`` or
+  ``--name=value`` whose name holds a secret word (``PGPASSWORD=...``,
+  ``AWS_SECRET_ACCESS_KEY=...``, ``--password=...``, any length), the
+  argument after a secret flag (``--password x``, ``--token x``, ``-p x``;
+  the whole list item, or the whole quoted value in a shell string, also
+  when the flag ends ``command`` and the value starts ``args``), the
+  password in ``user:password`` after ``-u`` or ``--user``, the password
+  in a URL that carries a user and password and tokens with a known
+  vendor prefix (``ghp_...``). Then the shared
   params redaction of the generic echo runs over the spec: it hides
   secret-shaped text anywhere (JWTs, bearer tokens) and the value of a
   field with a secret-shaped name (a ``secret`` volume, for example). A
@@ -196,6 +199,11 @@ _KNOWN_TOKEN = re.compile(
 #: A command-line flag: ``-u``, ``--password``.
 _FLAG = re.compile(r"^--?(?P<name>[A-Za-z][A-Za-z0-9_-]*)$")
 
+#: One token of a shell string: whitespace, or a word in which a quoted part
+#: may hold spaces (``--password 'my phrase'``). An unclosed quote is a word
+#: on its own. Joined back, the tokens give the string as it was.
+_TOKEN = re.compile(r"""\s+|(?:[^\s'"]+|'[^']*'|"[^"]*")+|\S+""")
+
 
 def _secret_shaped_name(name: str) -> bool:
     """True when a variable or flag name on a command line can name a secret."""
@@ -226,16 +234,23 @@ def _hide_in_text(text: str) -> str:
     return _KNOWN_TOKEN.sub(_HIDDEN, text)
 
 
+def _hide_flag_value(pending: str, value: str) -> str:
+    """The value that follows a secret flag, hidden the way the flag asks."""
+    return _HIDDEN if pending == "secret" else _hide_user_password(value)
+
+
 def _hide_command_secrets(parts: list[Any]) -> list[Any]:
-    """Copy a ``command`` / ``args`` list with the secret values on it hidden.
+    """Copy one command line (``command`` + ``args``) with its secret values hidden.
 
     The words stay, so the approver still reads what runs. Hidden are: the
     value of a ``NAME=VALUE`` (or ``--name=value``) with a secret-shaped
     name, the password in a URL, tokens with a known vendor prefix, the
-    word after a secret-shaped flag (``--password x``, ``-p x``) and the
-    password in ``user:password`` after ``-u`` or ``--user``. A flag and
-    its value may be two list items or two words of one string
-    (``sh -c "..."``).
+    argument after a secret-shaped flag (``--password x``, ``-p x``) and
+    the password in ``user:password`` after ``-u`` or ``--user``. A flag
+    and its value may be two list items or two words of one string
+    (``sh -c "..."``). The argument after a flag is hidden whole: the
+    whole list item, or the whole quoted value in a string, so a password
+    with a space in it does not leak in part.
     """
     hidden: list[Any] = []
     pending: str | None = None
@@ -243,12 +258,16 @@ def _hide_command_secrets(parts: list[Any]) -> list[Any]:
         if not isinstance(part, str):
             hidden.append(part)
             continue
-        words = re.split(r"(\s+)", _hide_in_text(part))
+        if pending is not None and not part.startswith("-"):
+            hidden.append(_hide_flag_value(pending, part))
+            pending = None
+            continue
+        words = _TOKEN.findall(_hide_in_text(part))
         for index, word in enumerate(words):
-            if not word or word.isspace():
+            if word.isspace():
                 continue
             if pending is not None and not word.startswith("-"):
-                words[index] = _HIDDEN if pending == "secret" else _hide_user_password(word)
+                words[index] = _hide_flag_value(pending, word)
                 pending = None
                 continue
             pending = None
@@ -327,9 +346,27 @@ async def _cronjob_run_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 #: ``env`` and the ``httpHeaders`` of a probe or lifecycle ``httpGet``.
 _NAME_VALUE_LISTS = ("env", "httpHeaders")
 
-#: Command-line lists shown only by their size: a container's ``command`` and
-#: ``args``, and the ``exec.command`` of a probe or lifecycle hook.
+#: Command-line lists: a container's ``command`` and ``args``, and the
+#: ``exec.command`` of a probe or lifecycle hook. In this order they make one
+#: command line, the way Kubernetes runs them.
 _COMMAND_LISTS = ("command", "args")
+
+
+def _hide_command_line(node: dict[str, Any]) -> dict[str, list[Any]]:
+    """The ``command`` and ``args`` lists of *node* with their secret values hidden.
+
+    Both lists are read as one command line, so a secret flag that ends
+    ``command`` hides the first argument of ``args``. Keys whose value is
+    not a list are left out.
+    """
+    lists = {key: node[key] for key in _COMMAND_LISTS if isinstance(node.get(key), list)}
+    hidden = _hide_command_secrets([part for parts in lists.values() for part in parts])
+    out: dict[str, list[Any]] = {}
+    start = 0
+    for key, parts in lists.items():
+        out[key] = hidden[start : start + len(parts)]
+        start += len(parts)
+    return out
 
 
 #: Fields of a Secret whose values are hidden; the key names stay.
@@ -357,7 +394,8 @@ def _hide_values(node: Any, *, hide_commands: bool = True) -> Any:
     * Every ``command`` or ``args`` list becomes ``{"hidden": true, "bytes":
       <size>}``. With ``hide_commands=False`` (the Job previews) the
       command lines stay, so the approver reads what will run; only the
-      secret values on them are hidden (:func:`_hide_command_secrets`).
+      secret values on them are hidden, with ``command`` and ``args`` read
+      as one command line (:func:`_hide_command_line`).
     * Every dict with ``kind: Secret`` keeps only the key names of its
       ``data`` and ``stringData``. This catches a Secret nested in another
       object, not only a top-level Secret document.
@@ -366,8 +404,11 @@ def _hide_values(node: Any, *, hide_commands: bool = True) -> Any:
     """
     if isinstance(node, dict):
         out: dict[str, Any] = {}
+        command_line = {} if hide_commands else _hide_command_line(node)
         for key, item in node.items():
-            if key in _NAME_VALUE_LISTS and isinstance(item, list):
+            if key in command_line:
+                out[key] = command_line[key]
+            elif key in _NAME_VALUE_LISTS and isinstance(item, list):
                 out[key] = [
                     _hide_values({**entry, "value": _HIDDEN}, hide_commands=hide_commands)
                     if isinstance(entry, dict) and "value" in entry
@@ -375,11 +416,7 @@ def _hide_values(node: Any, *, hide_commands: bool = True) -> Any:
                     for entry in item
                 ]
             elif key in _COMMAND_LISTS and isinstance(item, list):
-                out[key] = (
-                    {"hidden": True, "bytes": _parts_bytes(item)}
-                    if hide_commands
-                    else _hide_command_secrets(item)
-                )
+                out[key] = {"hidden": True, "bytes": _parts_bytes(item)}
             elif key == "annotations" and isinstance(item, dict) and _LAST_APPLIED in item:
                 out[key] = _hide_values(
                     {**item, _LAST_APPLIED: _HIDDEN}, hide_commands=hide_commands

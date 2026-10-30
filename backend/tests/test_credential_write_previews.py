@@ -312,6 +312,9 @@ _URL_WITH_PASSWORD = f"https://bob:{_SHORT}@example.invalid"  # trufflehog:ignor
         ([f"AWS_SECRET_ACCESS_KEY={_SECRET}", f"API_KEY={_SHORT}"], "AWS_SECRET_ACCESS_KEY"),
         ([f"--password={_SHORT}", f"--token={_SHORT}", "--dry-run"], "--dry-run"),
         (["--password", _SHORT, "--verbose"], "--verbose"),
+        (["--password", f"{_SHORT} phrase", "--verbose"], "--verbose"),
+        (["-c", f"mytool --password '{_SHORT} phrase' run"], "run"),
+        (["-c", f'mytool --password "{_SHORT} phrase" run'], "run"),
         (["-c", f"mysql -u root -p {_SHORT} app"], "mysql"),
         (["-c", f"curl -u admin:{_SHORT} https://example.invalid"], "admin:"),  # gitleaks:allow
         (["curl", "--user", f"admin:{_SHORT}", _URL_WITH_PASSWORD], "curl"),
@@ -333,6 +336,43 @@ async def test_k8s_job_create_hides_secret_values_on_the_command_line(
     assert kept in text
     (container,) = preview["spec"]["template"]["spec"]["containers"]
     assert len(container["args"]) == len(args)
+
+
+@pytest.mark.asyncio
+async def test_k8s_job_create_hides_the_whole_argument_after_a_secret_flag() -> None:
+    """A password with a space in it is hidden whole, as a list item or quoted."""
+    _, preview = await _preview(
+        "k8s.job.create",
+        _job_params(
+            {
+                "name": "run",
+                "image": "busybox:1.36",
+                "command": ["sh"],
+                "args": ["--password", f"{_SHORT} phrase", "-c", f"tool -p '{_SHORT} phrase' x"],
+            }
+        ),
+    )
+    (container,) = preview["spec"]["template"]["spec"]["containers"]
+    assert container["args"] == ["--password", "***REDACTED***", "-c", "tool -p ***REDACTED*** x"]
+
+
+@pytest.mark.asyncio
+async def test_k8s_job_create_reads_command_and_args_as_one_command_line() -> None:
+    """A secret flag that ends ``command`` hides the first item of ``args``."""
+    _, preview = await _preview(
+        "k8s.job.create",
+        _job_params(
+            {
+                "name": "run",
+                "image": "busybox:1.36",
+                "command": ["tool", "--password"],
+                "args": [_SHORT, "--user", f"admin:{_SHORT}", "--verbose"],  # gitleaks:allow
+            }
+        ),
+    )
+    (container,) = preview["spec"]["template"]["spec"]["containers"]
+    assert container["command"] == ["tool", "--password"]
+    assert container["args"] == ["***REDACTED***", "--user", "admin:***REDACTED***", "--verbose"]
 
 
 @pytest.mark.asyncio

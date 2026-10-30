@@ -34,7 +34,11 @@ A platform admin (a person, never a machine) may also name any tenant that
 exists in the ``tenant`` table. There they act as ``tenant_admin``, never
 with ``approver``, and :attr:`Operator.role_from_platform_admin` is set so
 the audit row can say so. A tenant that does not exist gives
-``403 tenant_not_found``; the lookup never creates a tenant row.
+``403 tenant_not_found``; the lookup never creates a tenant row. The
+lookup never raises the role of a tenant the person is already in: when
+the header names one of their own tenants by a name the token does not
+carry (a token without a list holds only the UUID), they keep the role
+of their group there.
 """
 
 from __future__ import annotations
@@ -61,6 +65,7 @@ __all__ = [
     "reject_duplicate_tenants",
     "select_current_tenant",
     "tenant_not_chosen_detail",
+    "tenant_role_source_payload",
     "with_membership",
 ]
 
@@ -103,6 +108,21 @@ def bind_tenant_role_source(operator: Operator) -> None:
     """
     if operator.role_from_platform_admin:
         structlog.contextvars.bind_contextvars(audit_tenant_role_source="platform_admin")
+
+
+def tenant_role_source_payload(operator: Operator) -> dict[str, str]:
+    """The payload keys an audit writer adds for the role source.
+
+    ``{"tenant_role_source": "platform_admin"}`` when the role came from
+    the platform admin group, else empty. For the audit writers that build
+    their own payload (approval decisions, grants, topology edits, agent
+    tool calls) and so do not see the ``audit_*`` contextvars of
+    :func:`bind_tenant_role_source`. With the wrapper rows retired, their
+    row is the only record of the request.
+    """
+    if operator.role_from_platform_admin:
+        return {"tenant_role_source": "platform_admin"}
+    return {}
 
 
 def reject_duplicate_tenants(tenants: tuple[TenantMembership, ...]) -> None:
@@ -194,6 +214,23 @@ async def _find_existing_tenant(wanted: str) -> UUID | None:
         return (await session.execute(select(Tenant.id).where(condition))).scalar_one_or_none()
 
 
+def _own_tenant(operator: Operator, tenant_id: UUID) -> Operator | None:
+    """Return *operator* in *tenant_id* when it is one of their own tenants, else ``None``.
+
+    The header may name a tenant by a name the token does not carry: a
+    token without a list holds only the UUID, and a listed entry may use
+    another name than the tenant row. The role of the person's own group
+    there wins over the platform admin role, so a platform admin cannot
+    raise their own role in a tenant by naming it differently.
+    """
+    own = _match_entry(operator.tenants, str(tenant_id))
+    if own is not None:
+        return with_membership(operator, own)
+    if not operator.tenants and tenant_id == operator.tenant_id:
+        return operator
+    return None
+
+
 async def _as_platform_admin(operator: Operator, wanted: str) -> Operator:
     """Let a platform admin work in an existing tenant that is not in their list."""
     tenant_id = await _find_existing_tenant(wanted)
@@ -210,6 +247,9 @@ async def _as_platform_admin(operator: Operator, wanted: str) -> Operator:
                 "Check the tenant name or ID. MEHO never creates a tenant from this header."
             ),
         )
+    own = _own_tenant(operator, tenant_id)
+    if own is not None:
+        return own
     structlog.get_logger(__name__).info(
         "platform_admin_tenant_selected",
         operator_sub=operator.sub,

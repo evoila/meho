@@ -93,12 +93,22 @@ this stage it exposes:
     that exists in the `tenant` table (by UUID or slug). There they act as
     `tenant_admin`, with `approver=False`, and
     `Operator.role_from_platform_admin=True`. A role group in that tenant
-    wins over this. An unknown tenant gives `403 tenant_not_found: …`; the
+    wins over this, also when the header names one of the person's own
+    tenants by a name the token does not carry (a token without a list
+    holds only the UUID): the resolved id is checked against their own
+    tenants first, so naming a tenant differently never raises the role
+    there. An unknown tenant gives `403 tenant_not_found: …`; the
     lookup is read only, and the refusal happens before
     `verify_jwt_and_bind`, so `ensure_tenant` never sees the value and no
     tenant row is made. `bind_tenant_role_source` (called by the REST and
     MCP bind steps) puts `tenant_role_source: platform_admin` into the
-    payload of every audit row of such a request.
+    payload of every audit row of such a request that the middleware or
+    the MCP dispatcher writes. The audit writers that build their own
+    payload (approval decisions, standing grants, add-on runs, topology
+    edits and refresh, gateway commands, agent tool calls) add the same
+    key with `tenant_role_source_payload(operator)`, so the marker is on
+    the record also when the wrapper rows are retired
+    (`AUDIT_WRAPPER_ROWS_RETIRED=true`).
   - Status without a tenant: `GET /api/v1/health` uses
     `verify_jwt_allow_unchosen`. A login with several tenants and no
     header gets `Operator.tenant_chosen=False`; the route then skips the

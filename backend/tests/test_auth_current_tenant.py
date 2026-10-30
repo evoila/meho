@@ -26,7 +26,11 @@ from sqlalchemy import func, select
 
 from meho_backplane.api.v1 import health as health_module
 from meho_backplane.auth import current_tenant
-from meho_backplane.auth.current_tenant import bind_tenant_role_source, select_current_tenant
+from meho_backplane.auth.current_tenant import (
+    bind_tenant_role_source,
+    select_current_tenant,
+    tenant_role_source_payload,
+)
 from meho_backplane.auth.jwt import _operator_from_claims, verify_jwt
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.rbac import require_role
@@ -350,6 +354,26 @@ async def test_platform_admin_without_list_can_name_another_tenant() -> None:
     assert picked.tenant_role is TenantRole.TENANT_ADMIN
 
 
+async def test_platform_admin_without_list_keeps_own_role_when_naming_own_tenant() -> None:
+    """Naming the own tenant by name must not raise the role to tenant_admin."""
+    await _seed_tenant(_TENANT_A, "lab-a")
+    operator = _operator(platform_admin=True, tenant_role="read_only")
+    picked = await select_current_tenant(operator, "lab-a")
+    assert picked == operator
+    assert picked.tenant_role is TenantRole.READ_ONLY
+    assert picked.role_from_platform_admin is False
+
+
+async def test_platform_admin_keeps_group_role_when_tenant_row_has_another_name() -> None:
+    """The token names the tenant "lab-a"; the tenant row is "team-a"."""
+    await _seed_tenant(_TENANT_A, "team-a")
+    operator = _operator(platform_admin=True, meho_tenants=[_ENTRY_A_READERS])
+    picked = await select_current_tenant(operator, "team-a")
+    assert picked.tenant_id == _TENANT_A
+    assert picked.tenant_role is TenantRole.READ_ONLY
+    assert picked.role_from_platform_admin is False
+
+
 async def test_platform_admin_with_a_role_group_there_gets_that_role() -> None:
     await _seed_tenant(_TENANT_A, "lab-a")
     operator = _operator(platform_admin=True, meho_tenants=[_ENTRY_A_READERS, _ENTRY_B_OPERATORS])
@@ -392,6 +416,17 @@ async def test_platform_admin_role_is_noted_on_audit_rows() -> None:
     bind_tenant_role_source(_operator())
     assert "audit_tenant_role_source" not in structlog.contextvars.get_contextvars()
     structlog.contextvars.clear_contextvars()
+
+
+async def test_platform_admin_role_payload_for_writers_with_their_own_payload() -> None:
+    """Audit writers that do not read the contextvars get the same marker."""
+    await _seed_tenant(_TENANT_C, "team3")
+    picked = await select_current_tenant(
+        _operator(platform_admin=True, meho_tenants=[_ENTRY_A_READERS]), "team3"
+    )
+    assert tenant_role_source_payload(picked) == {"tenant_role_source": "platform_admin"}
+    assert tenant_role_source_payload(await select_current_tenant(picked, "lab-a")) == {}
+    assert tenant_role_source_payload(_operator()) == {}
 
 
 # ---------------------------------------------------------------------------

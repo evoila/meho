@@ -580,6 +580,19 @@ class InventoryEnvelope(_Shape):
 class Figure(_Shape):
     """One number of a calculation result, with everything needed to check it."""
 
+    # The same rule as ``_unknown_has_a_reason``, for a tool that reads only the
+    # schema file.
+    model_config = ConfigDict(
+        json_schema_extra={
+            "if": {"properties": {"value": {"type": "null"}}},
+            "then": {
+                "required": ["unknown_reason"],
+                "properties": {"unknown_reason": {"type": "string", "minLength": 1}},
+            },
+            "else": {"properties": {"unknown_reason": {"type": "null"}}},
+        }
+    )
+
     value: float | None = Field(description="The number; null when it is unknown.")
     unit: str = Field(min_length=1, description="For example 'EUR/month' or 'cores'.")
     basis: Literal["measured", "allocated"] | None = Field(
@@ -602,7 +615,7 @@ class Figure(_Shape):
     def _unknown_has_a_reason(self) -> Figure:
         if self.value is None and not self.unknown_reason:
             raise ValueError("an unknown value needs an unknown_reason; it is never zero")
-        if self.value is not None and self.unknown_reason:
+        if self.value is not None and self.unknown_reason is not None:
             raise ValueError("a known value has no unknown_reason")
         return self
 
@@ -620,6 +633,15 @@ class Assumption(_Shape):
 
 class Finding(_Shape):
     """One checked statement about one record, and the source the check follows."""
+
+    # The same rule as ``_missing_data_is_unknown``, for a tool that reads only
+    # the schema file: when any input is null, the state is 'unknown'.
+    model_config = ConfigDict(
+        json_schema_extra={
+            "if": {"properties": {"inputs": {"additionalProperties": {"not": {"type": "null"}}}}},
+            "else": {"properties": {"state": {"const": "unknown"}}},
+        }
+    )
 
     check: str = Field(min_length=1, description="What was checked, in plain words.")
     state: Literal["pass", "fail", "unknown"] = Field(

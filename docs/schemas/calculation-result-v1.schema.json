@@ -97,6 +97,20 @@
     "Figure": {
       "additionalProperties": false,
       "description": "One number of a calculation result, with everything needed to check it.",
+      "else": {
+        "properties": {
+          "unknown_reason": {
+            "type": "null"
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "value": {
+            "type": "null"
+          }
+        }
+      },
       "properties": {
         "assumptions": {
           "description": "Names of the assumptions it used.",
@@ -189,12 +203,41 @@
         "unit",
         "calculation_version"
       ],
+      "then": {
+        "properties": {
+          "unknown_reason": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "unknown_reason"
+        ]
+      },
       "title": "Figure",
       "type": "object"
     },
     "Finding": {
       "additionalProperties": false,
       "description": "One checked statement about one record, and the source the check follows.",
+      "else": {
+        "properties": {
+          "state": {
+            "const": "unknown"
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "inputs": {
+            "additionalProperties": {
+              "not": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      },
       "properties": {
         "check": {
           "description": "What was checked, in plain words.",

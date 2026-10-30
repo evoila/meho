@@ -137,7 +137,12 @@ the two shapes as JSON Schema. The same schemas are checked in as
 `docs/schemas/inventory-v1.schema.json` and
 `docs/schemas/calculation-result-v1.schema.json`, so a tool outside the
 backplane can check an inventory or a result without importing backplane
-code. The number in the file name is the `schema_version`.
+code. The number in the file name is the `schema_version`. The result
+file also carries the two missing-data rules as `if`/`then`/`else`: a
+figure with a `null` value needs an `unknown_reason`, a figure with a
+known value has none, and a finding with a `null` input has the state
+`unknown`. A tool that reads only the file rejects the same results as
+the models.
 
 - Make the files again after a model change:
   `cd backend && uv run python scripts/generate_inventory_schemas.py`.
@@ -544,7 +549,7 @@ header, column for column.
 finding with and without data), the sample interval (set, missing in an
 older inventory, missing from a producer), and the JSON Schema files
 (they match the models, they are valid schemas, and the result file checks
-a result with no backplane code).
+a result with no backplane code, including the two missing-data rules).
 
 ## Known issues
 

@@ -114,6 +114,9 @@ def test_unknown_figure_needs_a_reason() -> None:
         CalculationResult.model_validate(_result(unknown))
     unknown["unknown_reason"] = "no price for this size"
     CalculationResult.model_validate(_result(unknown))
+    for reason in ("no price for this size", ""):
+        with pytest.raises(ValidationError, match="a known value has no unknown_reason"):
+            CalculationResult.model_validate(_result({**_FIGURE, "unknown_reason": reason}))
 
 
 def _finding(**change: Any) -> dict[str, Any]:
@@ -275,10 +278,40 @@ def test_schema_file_is_a_valid_schema_with_its_version(relpath: str) -> None:
     assert relpath.endswith(f"-v{schema['properties']['schema_version']['const']}.schema.json")
 
 
-def test_result_schema_file_checks_a_result_without_backplane_code() -> None:
+def _result_schema_file() -> Draft202012Validator:
+    """The committed result schema, read as a tool outside the backplane would."""
     relpath = next(path for path in SCHEMA_FILES if "calculation-result" in path)
     schema = json.loads((_REPO_ROOT / relpath).read_text(encoding="utf-8"))
-    validator = Draft202012Validator(schema)
+    return Draft202012Validator(schema)
+
+
+def test_result_schema_file_checks_a_result_without_backplane_code() -> None:
+    validator = _result_schema_file()
     assert not list(validator.iter_errors(_result(_FIGURE, findings=[_finding()])))
     wrong = _result(_FIGURE, findings=[_finding(state="maybe")])
     assert list(validator.iter_errors(wrong))
+
+
+def test_result_schema_file_rejects_a_finding_with_missing_data_that_is_not_unknown() -> None:
+    validator = _result_schema_file()
+    missing = {"boot_type": None, "secure_boot": True}
+    for state in ("pass", "fail"):
+        wrong = _result(_FIGURE, findings=[_finding(state=state, inputs=missing)])
+        assert list(validator.iter_errors(wrong)), state
+    unknown = _result(_FIGURE, findings=[_finding(state="unknown", inputs=missing)])
+    assert not list(validator.iter_errors(unknown))
+    no_inputs = _result(_FIGURE, findings=[_finding(inputs={})])
+    assert not list(validator.iter_errors(no_inputs))
+
+
+def test_result_schema_file_rejects_an_unknown_figure_without_a_reason() -> None:
+    validator = _result_schema_file()
+    unknown: dict[str, Any] = {"value": None, "unit": "EUR/month", "calculation_version": "1"}
+    assert list(validator.iter_errors(_result(unknown)))
+    for reason in (None, ""):
+        assert list(validator.iter_errors(_result({**unknown, "unknown_reason": reason}))), reason
+    with_reason = {**unknown, "unknown_reason": "no price for this size"}
+    assert not list(validator.iter_errors(_result(with_reason)))
+    known_with_reason = {**_FIGURE, "unknown_reason": "no price for this size"}
+    assert list(validator.iter_errors(_result(known_with_reason)))
+    assert not list(validator.iter_errors(_result({**_FIGURE, "unknown_reason": None})))

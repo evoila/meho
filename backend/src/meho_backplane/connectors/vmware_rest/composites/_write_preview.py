@@ -198,6 +198,9 @@ from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
 from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
     cluster_drs_rule_delete_preview,
 )
+from meho_backplane.connectors.vmware_rest.composites._folder_teardown_plan import (
+    folder_teardown_preview,
+)
 from meho_backplane.connectors.vmware_rest.composites._library_delete import (
     content_library_delete_preview,
     content_library_item_delete_preview,
@@ -1868,6 +1871,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.network.portgroup.delete": network_portgroup_delete_preview,
     "vmware.composite.host.standard_portgroup.delete": host_standard_portgroup_delete_preview,
     "vmware.composite.folder.delete": folder_delete_preview,
+    "vmware.composite.folder.teardown": folder_teardown_preview,
     "vmware.composite.datastore.file.delete": datastore_file_delete_preview,
     "vmware.composite.datastore.dir.create": datastore_dir_create_preview,
     "vmware.composite.content_library.delete": content_library_delete_preview,

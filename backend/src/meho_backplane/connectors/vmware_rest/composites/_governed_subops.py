@@ -34,6 +34,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _alarm,
     _datastore_files,
     _drs_rule_delete,
+    _folder_teardown,
     _host,
     _library,
     _library_delete,
@@ -153,6 +154,9 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
         _teardown_network._VIM_SUB_OPS_HOST_STANDARD_PORTGROUP_DELETE
     ),
     "vmware.composite.folder.delete": _teardown._VIM_SUB_OPS_FOLDER_DELETE,
+    "vmware.composite.folder.teardown": (
+        _folder_teardown._SUB_OPS_FOLDER_TEARDOWN + _folder_teardown._VIM_SUB_OPS_FOLDER_TEARDOWN
+    ),
     "vmware.composite.datastore.file.delete": (_datastore_files._VIM_SUB_OPS_DATASTORE_FILE_DELETE),
     "vmware.composite.datastore.dir.create": _datastore_files._VIM_SUB_OPS_DATASTORE_DIR_CREATE,
     "vmware.composite.content_library.delete": (

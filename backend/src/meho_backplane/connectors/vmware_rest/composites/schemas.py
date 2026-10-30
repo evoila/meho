@@ -106,6 +106,8 @@ __all__ = [
     "FOLDER_DELETE_PARAMETER_SCHEMA",
     "FOLDER_DELETE_RESPONSE_SCHEMA",
     "FOLDER_MOID_PATTERN",
+    "FOLDER_TEARDOWN_PARAMETER_SCHEMA",
+    "FOLDER_TEARDOWN_RESPONSE_SCHEMA",
     "GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA",
     "GUEST_CUSTOMIZATION_SPEC_CREATE_RESPONSE_SCHEMA",
     "GUEST_ENV_READ_PARAMETER_SCHEMA",
@@ -8448,6 +8450,150 @@ FOLDER_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
         "name": {"type": ["string", "null"], "description": "Child name."},
     },
 )
+
+#: ``vmware.composite.folder.teardown`` parameter schema (#4624).
+FOLDER_TEARDOWN_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "folder": {
+            "type": "string",
+            "pattern": VM_FOLDER_MOID_PATTERN,
+            "description": (
+                "VM folder moid, e.g. 'group-v1234'. Names are not accepted. Root and "
+                "datacenter top folders are refused."
+            ),
+        },
+        "expected_vms": {
+            "type": "array",
+            "items": {"type": "string", "pattern": VM_MOID_PATTERN},
+            "uniqueItems": True,
+            "description": (
+                "Ids of every VM and VM template under the folder, at every depth, e.g. "
+                "['vm-101', 'vm-102']. The call is refused when the folder holds a VM that "
+                "is not on this list, so it never deletes a VM that was added later. Use [] "
+                "for a folder without VMs."
+            ),
+        },
+        "power_off": {
+            "type": "string",
+            "enum": ["hard", "guest"],
+            "default": "hard",
+            "description": (
+                "How running VMs are powered off: 'hard' (default) powers them off at once; "
+                "'guest' asks the guest OS to shut down first (needs VMware Tools) and "
+                "powers off hard after guest_timeout_s."
+            ),
+        },
+        "guest_timeout_s": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1800,
+            "default": 120,
+            "description": (
+                "Seconds to wait for a guest shutdown before a hard power off. Only used "
+                "with power_off='guest'."
+            ),
+        },
+        "delete_folder": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "Delete the folder itself at the end (default true). With false the folder "
+                "stays; its VMs and sub-folders are still deleted."
+            ),
+        },
+    },
+    "required": ["folder", "expected_vms"],
+    "additionalProperties": False,
+    "examples": [{"folder": "group-v1234", "expected_vms": ["vm-101", "vm-102"]}],
+}
+
+_FOLDER_TEARDOWN_ROW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "kind": {"type": "string", "description": "``vm``, ``template`` or ``folder``."},
+        "moid": {"type": "string", "description": "Object moid."},
+        "name": {"type": ["string", "null"], "description": "Object name."},
+        "status": {
+            "type": "string",
+            "enum": ["deleted", "unchanged", "failed"],
+            "description": (
+                "``deleted`` -- gone after the delete; ``unchanged`` -- nothing done (already "
+                "gone, not under the folder, or the kept folder); ``failed`` -- still reads "
+                "back after the delete."
+            ),
+        },
+        "powered_off": {"type": "boolean", "description": "This call powered the VM off."},
+        "detail": {"type": ["string", "null"], "description": "Why, for unchanged / failed."},
+    },
+}
+
+#: ``vmware.composite.folder.teardown`` response schema (#4624).
+FOLDER_TEARDOWN_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "deleted",
+                "unchanged",
+                "precondition_failed",
+                "invalid_request",
+                "still_present",
+            ],
+            "description": (
+                "``'deleted'`` -- every object of the plan is gone; ``'unchanged'`` -- "
+                "nothing was there to delete; ``'precondition_failed'`` / "
+                "``'invalid_request'`` -- refused before any change (see ``blockers`` / "
+                "``guidance``); ``'still_present'`` -- an object still reads back after its "
+                "delete (see ``rows``). A vSphere fault is not a status: it raises "
+                "(``connector_error``) and names what was already deleted."
+            ),
+        },
+        "object": {
+            "type": "object",
+            "description": "The folder, as read before any change.",
+            "properties": {
+                "kind": {"type": "string", "description": "Always ``folder``."},
+                "moid": {"type": ["string", "null"], "description": "Folder moid."},
+                "name": {"type": ["string", "null"], "description": "Folder name."},
+                "parent": {"type": ["string", "null"], "description": "Parent moid."},
+            },
+        },
+        "rows": {
+            "type": "array",
+            "items": _FOLDER_TEARDOWN_ROW_SCHEMA,
+            "description": "One row per object: VMs, templates, sub-folders, the folder.",
+        },
+        "counts": {
+            "type": "object",
+            "description": "Totals over the plan and the rows.",
+            "properties": {
+                "vms": {"type": "integer", "description": "VMs and templates in the plan."},
+                "folders": {"type": "integer", "description": "Sub-folders in the plan."},
+                "powered_off": {"type": "integer", "description": "VMs this call powered off."},
+                "deleted": {"type": "integer", "description": "Rows with status deleted."},
+                "unchanged": {"type": "integer", "description": "Rows with status unchanged."},
+                "failed": {"type": "integer", "description": "Rows with status failed."},
+            },
+        },
+        "blockers": {
+            "type": "array",
+            "description": "What stops the teardown (capped at 50). Empty when nothing blocks.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "description": "``vm``, ``template`` or vim type."},
+                    "moid": {"type": "string", "description": "Object moid."},
+                    "name": {"type": ["string", "null"], "description": "Object name."},
+                    "reason": {"type": "string", "description": "Why it blocks."},
+                },
+            },
+        },
+        "guidance": {"type": ["string", "null"], "description": "What to do next."},
+    },
+    "required": ["status", "object", "rows", "counts", "blockers"],
+}
 
 #: ``vmware.composite.cluster.drs_rule.delete`` parameter schema.
 CLUSTER_DRS_RULE_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {

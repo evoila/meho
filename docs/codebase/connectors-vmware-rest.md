@@ -62,6 +62,8 @@ SUBSCRIBED composites** subsection), and the seven teardown composites /
 `host.standard_portgroup.delete`, `folder.delete`, `datastore.file.delete`,
 `content_library.delete`, `content_library.item.delete`, plus the caution
 `datastore.dir.create` (see **Governed teardown deletes**), the destructive
+whole-folder teardown `folder.teardown` / `#4624` (see **Delete a whole
+disposable system**), the destructive
 DRS rule delete `cluster.drs_rule.delete` (see **Governed DRS rule delete**), the
 CD drive add `vm.cdrom.add` (`dangerous`) and the VMware Tools installer unmount
 `vm.tools.installer.unmount` (`caution`) (see **VM hardware read, CD drive add and
@@ -1918,6 +1920,7 @@ enum) are:
 | `vm.resource_allocation.set` | `set`, `unchanged`, `invalid_request`, `vm_not_found`, `partial`, `timeout` (vim `ReconfigVM_Task` polled, #3880; `invalid_request` refuses an empty request, an out-of-range value (a limit of `0` included — `-1` clears) or a resulting limit below its reservation before any write; `unchanged` when the request already matches (no task); `partial` when the task succeeded but the re-read `after` does not match every requested field; `vm_not_found` on a promoted `ManagedObjectNotFound`; a task *fault* raises `connector_error` like `vm.disk.grow`. Carries `before` / `after` allocation views) |
 | `network.portgroup.delete` / `folder.delete` | `deleted`, `unchanged`, `precondition_failed`, `still_present`, `timeout` (#3339; vim `Destroy_Task` polled; `precondition_failed` before any write when something still uses the object -- listed in `blockers`; a task *fault* raises `connector_error`) |
 | `host.standard_portgroup.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present` (#3339; synchronous `RemovePortGroup` -- a vim fault raises) |
+| `folder.teardown` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present` (#4624; one row per object with `deleted` / `unchanged` / `failed`; a vendor fault raises `connector_error` and names what was already deleted) |
 | `datastore.file.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present`, `timeout` (#3339; `DeleteDatastoreFile_Task` polled; a task fault raises) |
 | `datastore.dir.create` | `created`, `unchanged`, `invalid_request`, `precondition_failed`, `not_verified` (#3339; synchronous `MakeDirectory` -- a vim fault raises) |
 | `content_library.delete` / `content_library.item.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present` (#3339 / #3331; REST `DELETE` -- a REST fault raises) |
@@ -2534,6 +2537,64 @@ backing `fileName` contains `/<item id>/`; the VMs are read through the
 library's datastores (`Datastore.vm`). A library not stored only on datastores
 (with items) is refused, because the check cannot run. The item delete refuses
 unless the item's `library_id` is a UUID that reads back as a LOCAL library.
+
+### Delete a whole disposable system (`folder.teardown`, #4624)
+
+`vmware.composite.folder.teardown` removes a disposable system that lives in
+one VM folder, in one call with one approval. It powers off every VM under
+the folder (also in sub-folders), deletes every VM and VM template with its
+disks, deletes the sub-folders bottom up and then the folder. It is
+`destructive` with `requires_approval=True`.
+
+Parameters: `folder` (a VM folder moid, `group-v...`; never a name),
+`expected_vms` (required: the id of every VM and template under the folder),
+`power_off` (`hard`, the default, or `guest`: a guest shutdown first, then a
+hard power off after `guest_timeout_s`, default 120 s; a VM without VMware
+Tools is powered off hard at once) and `delete_folder` (default `true`; with
+`false` the folder stays and its content is still deleted).
+
+**One plan, used twice.** `_folder_teardown_plan.plan_folder_teardown` reads
+the folder, walks every sub-folder level by level and reads every VM (power
+state, template flag, `config.managedBy`, disks, NICs, snapshots). The
+park-time preview and the handler both call it; the handler plans again on
+the live state after approval. Refused before any change
+(`precondition_failed`, with `blockers`, or `invalid_request`):
+
+- a root or datacenter top folder, or a folder that cannot hold VMs;
+- a vApp, or any other object type, under the folder (delete vApps first);
+- a VM another product manages (`config.managedBy` is set, for example
+  vSphere Cluster Services);
+- a VM under the folder that is not in `expected_vms`;
+- an answer vCenter did not fully give (a paged answer, a left-out object, a
+  property it could not read).
+
+**Why `expected_vms`.** The preview hash covers only the request (connector,
+operation, parameters), and the handler cannot see the plan the approver
+read. `expected_vms` is a parameter, so the approval binds it. The handler
+refuses when the live folder holds a VM that is not on the list, so a VM
+moved into the folder after the approval request is never deleted. An
+expected VM that is no longer under the folder is reported `unchanged` and
+not touched, so a second run is safe.
+
+**The steps.** The same vendor calls as the single-object ops, each through
+the same step check (`_write._write_sub_op` / `_write_vmomi_sub_op`):
+
+| Step | vendor call |
+| --- | --- |
+| power off (like `vm.power`) | REST `POST /vcenter/vm/{vm}/power?action=stop`; with `power_off=guest` first `POST /vcenter/vm/{vm}/guest/power?action=shutdown`, then a power-state read until off or `guest_timeout_s` |
+| delete a VM (like `vm.destroy`) | vim `VirtualMachine.Destroy_Task` before vCenter 9.0, REST `DELETE /vcenter/vm/{vm}` from 9.0; a template always uses vim `Destroy_Task` |
+| delete a folder (like `folder.delete`) | vim `Folder.Destroy_Task`, after a read that finds the folder empty |
+
+Then it reads every object again and returns one row per object (`deleted`,
+`unchanged`, or `failed` when it still reads back). A vendor fault, a task
+that does not finish in time, or a folder that is not empty after its VMs
+were deleted stops the call: it raises (`connector_error`) and names what
+was already deleted. A parked or refused step answer is returned as it is.
+
+Code: `composites/_folder_teardown_plan.py` (plan + preview),
+`composites/_folder_teardown.py` (handler). Tests:
+`tests/test_connectors_vmware_rest_composites_folder_teardown.py` with the
+`FolderTeardownFake` of `tests/_vmware_teardown_fake.py`.
 
 Code: `composites/_teardown.py` (shared plan helpers + `folder.delete`),
 `_teardown_reads.py` (strict reads), `_teardown_network.py`,
@@ -3926,6 +3987,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.device.cdrom` | `{vm, name, cdrom, action, current_backing, state}` (the host-local ISO path) | live read (`cdrom/{cdrom}`) |
 | `vm.resource_allocation.set` | `{vm, name, current: {cpu_allocation, memory_allocation}, requested}` limit / reservation from->to | live read (vim `RetrievePropertiesEx`) |
 | `network.portgroup.delete` / `host.standard_portgroup.delete` / `folder.delete` / `datastore.file.delete` / `content_library.delete` / `content_library.item.delete` | mandatory `blast_radius`: `{object: {..., present}, children, irreversibility, blockers?, refusal?}` -- the handler's own plan (#3339) | live read (vim `RetrievePropertiesEx` / browse, or REST GET) |
+| `folder.teardown` | mandatory `blast_radius`: the shared block above plus `summary` (plain words: how many VMs it powers off and deletes), `power_off_count`, `vm_count`, `folder_count`, `delete_folder`, `missing_expected_vms`; `children` are the VM rows (disks, NICs, snapshot count) and the sub-folders (#4624) | live read (vim `RetrievePropertiesEx`) |
 | `datastore.dir.create` | `{action, datastore, path, create_parents}` | param echo, no I/O |
 | `vm.create` | creation-spec echo (name, guest_os, placement pins — folder_name, folder (#3115), resource_pool, datastore, host (#3096) — sizing, networks, disks_gb (#3117), nested_hv, power-on) | param echo, no I/O |
 | `vm.clone` | clone-coordinates echo | param echo, no I/O |

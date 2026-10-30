@@ -49,6 +49,8 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.vm.import_from_library",
         "vmware.composite.vm.snapshot.revert",
         "vmware.composite.vm.destroy",
+        # ``.teardown`` is not a classifier suffix -> ``other``, like vm.destroy.
+        "vmware.composite.folder.teardown",
         "vmware.composite.vm.migrate",
         "vmware.composite.vm.power.bulk",
         "vmware.composite.vm.power",

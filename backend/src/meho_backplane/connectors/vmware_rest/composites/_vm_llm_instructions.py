@@ -495,4 +495,35 @@ VM_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
             "On precondition_failed, move or delete each object in blockers, then call again."
         ),
     },
+    _P + "folder.teardown": {
+        "when_to_call": (
+            "Call to delete a whole disposable system that lives in one VM folder: all its "
+            "VMs (running ones are powered off), templates and sub-folders, then the folder, "
+            "with one approval."
+        ),
+        "preconditions": (
+            "Pass the folder moid and, in expected_vms, the id of every VM and template under "
+            "it at every depth (list them first, e.g. with GET:/api/vcenter/vm filtered by "
+            "folder). A VM not on the list, a vApp, a VM managed by another product, or a "
+            "root or datacenter folder is refused before any change. A second person must "
+            "always approve it."
+        ),
+        "parameter_hints": {
+            "folder": "VM folder moid, e.g. 'group-v1234'.",
+            "expected_vms": "Every VM id under the folder, e.g. ['vm-101', 'vm-102'].",
+            "power_off": "'hard' (default) or 'guest' (guest shutdown first).",
+        },
+        "output_shape": (
+            "{status: deleted|unchanged|precondition_failed|invalid_request|still_present, "
+            "object: {kind, moid, name, parent}, rows: [{kind, moid, name, status: "
+            "deleted|unchanged|failed, powered_off, detail}], counts: {vms, folders, "
+            "powered_off, deleted, unchanged, failed}, blockers: [{kind, moid, name, "
+            "reason}], guidance}."
+        ),
+        "next_step": (
+            "On precondition_failed, fix each blocker (or correct expected_vms) and call "
+            "again. After a failed call, call again: objects already gone are reported "
+            "unchanged."
+        ),
+    },
 }

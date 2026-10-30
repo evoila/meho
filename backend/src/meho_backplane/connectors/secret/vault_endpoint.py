@@ -160,6 +160,17 @@ class VaultKvSecretEndpoint:
             )
         return SecretMaterial(strip_credential_value(secret_data[self._field]))
 
+    def check_write_allowed(self, operator: Operator) -> None:
+        """Deny a write outside the operator's tenant path, before any Vault call.
+
+        Defense-in-depth tenant-scope check (#1643 / S08 #296), run before
+        the Vault login. ``read_only=False`` — a write to the shared platform
+        path under a non-owning operator stays tenant-scoped (#1725 M1).
+        Public so ``secret.handoff.import`` can run it *before* it uses the
+        one-time handoff, so a wrong sink path does not burn the handoff.
+        """
+        enforce_tenant_scope(operator, mount=self._mount, path=self._path, read_only=False)
+
     async def write_secret(self, operator: Operator, material: SecretMaterial) -> None:
         """Write *material* into the addressed field as a new KV-v2 version.
 
@@ -173,11 +184,7 @@ class VaultKvSecretEndpoint:
         guard is a policy-task concern (#1579), not the mechanism.
         """
         _log.debug("secret_broker.vault.write", path=self._path, field=self._field)
-        # Defense-in-depth tenant-scope check (#1643 / S08 #296): deny a write
-        # outside the operator's tenant namespace BEFORE the Vault login.
-        # ``read_only=False`` — a write to the shared platform path under a
-        # non-owning operator stays tenant-scoped (#1725 M1).
-        enforce_tenant_scope(operator, mount=self._mount, path=self._path, read_only=False)
+        self.check_write_allowed(operator)
         body: dict[str, str] = {self._field: material.value.decode("utf-8")}
         async with _auth_vault.vault_client_for_operator(operator) as client:
             await asyncio.to_thread(

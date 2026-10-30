@@ -117,11 +117,16 @@ write_traefik_config() {
 }
 
 # install_meho_host <download dir>: the host command, for the customer's work
-# on the machine after the install (form-2 design, section 5). Every run of
-# install.sh installs the version of its download.
+# on the machine after the install (form-2 design, section 5), and the files
+# of lib/ that it sources: the read-only state functions of the firewall and
+# of RKE2's CIS profile. Every run of install.sh installs the version of its
+# download.
 install_meho_host() {
-    local download_dir=$1 target="${HOST_ROOT}${MEHO_HOST_PATH}"
-    mkdir -p "${target%/*}"
+    local download_dir=$1 target="${HOST_ROOT}${MEHO_HOST_PATH}" lib_dir="${HOST_ROOT}${MEHO_HOST_LIB_DIR}" file
+    mkdir -p "${target%/*}" "$lib_dir"
+    for file in "${MEHO_HOST_LIB_FILES[@]}"; do
+        install -m 0644 "$download_dir/$file" "$lib_dir/"
+    done
     install -m 0755 "$download_dir/$MEHO_HOST_FILE" "$target"
-    ok "installed meho-host to $MEHO_HOST_PATH"
+    ok "installed meho-host to $MEHO_HOST_PATH, and the files it sources to $MEHO_HOST_LIB_DIR"
 }

@@ -1499,6 +1499,7 @@ got one in #4850; `k8s.secret.update` came later with its own builder
 | `sddc.host.validate` | an agent's call | host count; per host: `fqdn`, `username`, `storageType`, `networkPoolId` | the ESXi password and any other spec field |
 | `sddc.host.commission` | every call | the same as `sddc.host.validate` | the same |
 | `holodeck.router.patch` | every call | HoloRouter version, whether the call only checks (`verify_only`, a 9.1 router), the patch ids and the module file each one edits | nothing secret exists; the op takes no params |
+| `secret.handoff.import` | every call | the store target name (the other instance's Vault), the sink `{kind, ref}`, `expect_sha256`, the reason | the one-time handoff token (`connectors/secret/handoff_preview.py`) |
 | `vmware.composite.vm.guest.file.read` | an agent's call | VM, guest path, whether MEHO downloads the bytes (`fetch_content`, `max_inline_bytes`), the guest login's store path (`guest_secret_ref`) | the guest login |
 
 `k8s.secret.delete` is not a credential write (its params are only the
@@ -2066,10 +2067,10 @@ shows every state. An empty list names the state it filtered on and points
 to `--status all` (#5129). `--limit` / `--offset` go to the server as
 `limit` / `offset`. When `--offset` skips every match, the empty message
 says the page is empty and points to a smaller `--offset`, so it does not
-claim the tenant has no requests. When `--work-ref` matches nothing, the
+claim the tenant has no requests. When `--filter-work-ref` matches nothing, the
 empty message names the change ticket and points to removing the filter,
 for the same reason. `--order oldest|newest` picks the sort (#3596). It
-defaults to newest first, but to **oldest first when `--work-ref` is
+defaults to newest first, but to **oldest first when `--filter-work-ref` is
 set**, so the steps of one change ticket read in the order they were sent.
 
 ### Operator console (`backend/src/meho_backplane/ui/routes/approvals/`)
@@ -2195,7 +2196,7 @@ shows that order on the surfaces an approver uses. Nothing here changes what
   pending requests under its `work_ref`. A read error only drops the two
   fields (fail-open, like the event itself).
 - **CLI.** `meho approvals list --order oldest|newest`; oldest is the
-  default when `--work-ref` is set (see the CLI section above).
+  default when `--filter-work-ref` is set (see the CLI section above).
 
 ### Structured `proposed_effect` render in the modal (#2447)
 

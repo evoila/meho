@@ -458,7 +458,9 @@ var cliRedirectURIs = []string{"http://127.0.0.1:*"}
 // desiredCLIClient builds the ClientRepresentation for the public
 // device-code client. Mirrors the reference shell script verbatim
 // (including the "Description" string pattern so re-runs against a
-// shell-script-created client don't churn the field).
+// shell-script-created client don't churn the field). Keycloak stores
+// the description in a 255-character column; a longer one fails the
+// create with HTTP 500.
 //
 // The standard (browser) flow is on with PKCE S256 and loopback
 // redirect URIs only: `meho approvals approve` uses it for the fresh
@@ -468,7 +470,7 @@ func (o BootstrapOptions) desiredCLIClient() *clientRep {
 	c := &clientRep{
 		ClientID:                  o.CLIClientID,
 		Name:                      "MEHO CLI + MCP-OAuth-2.1 device-code public client",
-		Description:               "Public OAuth client for RFC 8628 device-code flow used by `meho login` and any MCP-OAuth-2.1 client targeting <backplane-url>/mcp, and for the loopback browser sign-in of `meho approvals approve`. Audience-mapped to " + o.BackplaneAudience + ". Provisioned by `meho admin keycloak bootstrap-clients` (#791).",
+		Description:               "Public OAuth client for RFC 8628 device-code flow used by `meho login` and any MCP-OAuth-2.1 client targeting <backplane-url>/mcp. Audience-mapped to " + o.BackplaneAudience + ". Provisioned by `meho admin keycloak bootstrap-clients` (#791).",
 		Enabled:                   boolPtr(true),
 		PublicClient:              boolPtr(true),
 		StandardFlowEnabled:       boolPtr(true),

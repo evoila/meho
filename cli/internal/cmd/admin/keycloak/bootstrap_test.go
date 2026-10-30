@@ -1567,3 +1567,15 @@ func TestBootstrapClientsCmd_RemovedFlagsStop(t *testing.T) {
 		})
 	}
 }
+
+// TestBootstrap_ClientDescriptionsFitKeycloak pins the 255-character
+// limit of Keycloak's client description column: a longer description
+// makes the client create fail with HTTP 500.
+func TestBootstrap_ClientDescriptionsFitKeycloak(t *testing.T) {
+	opts := fullOpts().withDefaults()
+	for _, c := range []*clientRep{opts.desiredCLIClient(), opts.desiredMCPClient()} {
+		if n := len(c.Description); n > 255 {
+			t.Errorf("%s description is %d characters, want at most 255", c.ClientID, n)
+		}
+	}
+}

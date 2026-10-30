@@ -138,7 +138,7 @@ a new raw-secret surface, so it is surfaced verbatim (with a clear
 connector_id shape (load-bearing)
 ---------------------------------
 
-The picker emits the ``<impl_id>-<version>`` id (e.g. ``vmware-rest-9.0``,
+The picker emits the ``<impl_id>-<version>`` id (e.g. ``k8s-1.x``,
 ``vault-1.x``) the meta-tools expect, NOT the bare product slug
 (``vault``), which names no connector and raises
 :class:`~meho_backplane.operations.meta_tools.UnknownConnectorError`. The
@@ -249,7 +249,7 @@ _GROUPS_LIMIT: Final[int] = 100
 _MAX_OP_ID_LENGTH: Final[int] = 512
 
 #: Maximum target-name length accepted on the preview form. A target name
-#: is a short slug (``rdc-vcenter``); the bound protects the form parse
+#: is a short slug (``prod-k8s``); the bound protects the form parse
 #: against a paste-from-clipboard accident.
 _MAX_TARGET_LENGTH: Final[int] = 256
 

@@ -23,7 +23,7 @@ only holds op-id → child-op-id tuples a connector declared. Two parts:
   It single-sources the delete-shaped classification through
   :mod:`meho_backplane.operations.service_grants` (the same rule
   ``ServicePrincipalGrantService.create`` refuses on), so a rollback / delete
-  leg (e.g. ``vm.create``'s ``DELETE:/vcenter/vm/{vm}``) is flagged
+  leg (e.g. a ``DELETE:/repos/{owner}/{repo}`` clean-up step) is flagged
   **un-grantable** on the discovery surface exactly as it would be refused at
   grant-create time — telling the operator up front that a partial failure of
   that composite will still require a human.
@@ -59,7 +59,7 @@ class GovernedSubopSurface(NamedTuple):
     Attributes
     ----------
     connector_id:
-        The connector the composite dispatches against (``"vmware-rest-9.0"``)
+        The connector the composite dispatches against (``"gh-rest-3"``)
         — used to resolve each child's descriptor for a best-effort
         ``safety_level`` on the discovery surface.
     sub_op_ids:

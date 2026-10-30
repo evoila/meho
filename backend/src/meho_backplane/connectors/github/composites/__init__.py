@@ -16,7 +16,7 @@ has walked every ``connectors/<product>/`` subpackage, so the
 ``endpoint_descriptor`` upsert for the T4 composite lands before any
 dispatch can fire.
 
-Layout mirrors the vmware-rest composites package: ``__init__`` wires
+Layout: ``__init__`` wires
 the registrar; ``_register.py`` carries per-composite registration
 metadata; ``_read.py`` / ``_board.py`` / ``_sub_issues.py`` carry handler
 implementations; ``_repos.py`` carries the repository write;

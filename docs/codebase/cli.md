@@ -804,6 +804,7 @@ field, so a response from an older backplane prints as it always did.
 | `Approvals: …` | `approvals` | `Approvals: a second person must approve; decisions on someone else's instruction are refused; approval key configured` |
 | `Features: …` | `features` | `Features: all configured` or `Features: not configured: agent_runtime (needs KEYCLOAK_ADMIN_CLIENT_ID)` |
 | `Sandbox mode: on …` | `sandbox_mode` | printed only when the mode is on (#4622) |
+| `Operation settings: written by release …` | `operation_catalog` | printed only when another release wrote the shared operation rows (#5019) |
 
 The DB line (`formatDB` in `internal/output/format.go`) uses the
 database revision and the revision this version expects, which the
@@ -1602,9 +1603,8 @@ add` (Task #2862) for a single target without authoring a YAML file —
 the earlier blanket deferral of a standalone `create` verb (#1574 /
 #1559) is lifted for the single-target create case only. `meho targets
 update` (Task #3854) changes one target through `PATCH
-/api/v1/targets/{name}`. No standalone `delete` verb is surfaced yet,
-though the API supports `DELETE /api/v1/targets/{name}`
-(`tenant_admin`).
+/api/v1/targets/{name}`, and `meho targets delete` (Task #3943)
+removes one through `DELETE /api/v1/targets/{name}`.
 
 ### Subcommands
 
@@ -1650,6 +1650,25 @@ though the API supports `DELETE /api/v1/targets/{name}`
   cannot be both set and cleared (all exit 4). Server errors use the shared
   `renderHTTPStatus` ladder (404 near-misses, 409 ambiguous alias, 422
   body verbatim). Same `doAuthedRequest` plumbing as `add`.
+- `meho targets delete <name-or-alias> [--force] [--confirm]`
+  (Task #3943) — calls `DELETE /api/v1/targets/{name}` (`tenant_admin`).
+  The server soft-deletes: it sets `deleted_at`, so the row stays and
+  audit rows still point at it, but no read path or call finds it any
+  more. The system itself and its Vault secret are not touched. Without
+  `--confirm` the verb asks y/N on stdin first; closed stdin counts as
+  no, and a decline exits 0 without a request (`--json` prints
+  `{"name", "status": "declined", "force"}`). With `--json` the question
+  goes to the terminal, not to stdout or stderr, so both streams hold
+  only JSON; when a program pipes the answer in, no question is printed.
+  When topology nodes
+  (`graph_node` rows) still point at the target, the server answers 409
+  `target_has_references` with the count; the CLI turns it into a plain
+  message ("This target is linked from 3 topology nodes. The nodes
+  stay, but they will point at a deleted target. Run again with --force
+  to delete it anyway.", exit 4). `--force` sends `?force=true`; the
+  nodes stay and keep the deleted target's id. Any other 409
+  (ambiguous alias) and 404 near-misses go through the shared
+  `renderHTTPStatus` ladder. Same `doAuthedRequest` plumbing as `add`.
 - `meho targets list [--product P] [--limit N] [--cursor C]` — calls
   `GET /api/v1/targets`. Renders the operator's tenant-scoped targets
   as a `NAME / ALIASES / PRODUCT / HOST` table. Results are keyset-
@@ -1743,12 +1762,9 @@ verbatim.
 
 ### Out of scope (v0.2)
 
-- A standalone `delete` verb. The API supports
-  `DELETE /api/v1/targets/{name}` (`tenant_admin`); the CLI surfaces it
-  in a follow-up task when operators ask. Single-target **create** ships
-  as `meho targets add` (Task #2862) and single-target **update** as
-  `meho targets update` (Task #3854); bulk reconciliation of updates
-  stays with `meho targets import --update`.
+- Bulk delete. `meho targets delete` (Task #3943) removes one target
+  per call; bulk reconciliation of updates stays with
+  `meho targets import --update`.
 - Auto-completion of target names. Operators type names; tab-completion
   would need a separate `cobra-complete`-style design pass.
 - Client-side caching. Every CLI invocation hits the API fresh — the

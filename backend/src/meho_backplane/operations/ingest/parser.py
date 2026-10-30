@@ -4,7 +4,7 @@
 """Operator-facing connector_id parser.
 
 The CLI / REST / MCP surfaces accept a single-string connector
-identifier (``"vmware-rest-9.0"``) so operators don't have to type
+identifier (``"harbor-rest-2.x"``) so operators don't have to type
 the three underlying fields separately. This module is the single
 source of truth for how that string maps onto the
 ``(product, version, impl_id)`` triple the
@@ -36,8 +36,8 @@ def parse_connector_id(connector_id: str) -> tuple[str, str, str]:
 
     Worked examples (from the architecture doc's connector inventory):
 
-    * ``"vmware-rest-9.0"`` → ``("vmware", "9.0", "vmware-rest")``
-    * ``"nsx-4.2"``         → ``("nsx", "4.2", "nsx")``
+    * ``"gh-rest-3"``       → ``("gh", "3", "gh-rest")``
+    * ``"k8s-1.x"``         → ``("k8s", "1.x", "k8s")``
     * ``"harbor-2.x"``      → ``("harbor", "2.x", "harbor")``
     * ``"hetzner-robot-2026-04"`` → ``("hetzner", "2026-04", "hetzner-robot")``
     * ``"vault-1.x"``       → ``("vault", "1.x", "vault")``

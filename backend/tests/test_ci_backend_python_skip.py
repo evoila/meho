@@ -29,7 +29,7 @@ import yaml
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
-_SKIPPED_ON_NO_BACKEND = ("python-lint", "python-unit-shard", "python-integration")
+_SKIPPED_ON_NO_BACKEND = ("python-lint", "python-unit-shard", "python-integration-shard")
 
 
 def _jobs() -> dict[str, Any]:
@@ -280,3 +280,46 @@ def test_fan_in_fails_when_the_detector_did_not_pass(tmp_path: Path) -> None:
         outside="skipped",
     )
     assert result.returncode != 0
+
+
+# --- The `python-integration` fan-in -----------------------------------------
+
+
+def _integration_fan_in(
+    tmp_path: Path, *, docs_only: str, backend_python: str, shards: str
+) -> subprocess.CompletedProcess[str]:
+    script = _step_script("python-integration", name="Assert every integration shard passed")
+    for expression, value in {
+        "${{ needs.changes.result }}": "success",
+        "${{ needs.changes.outputs.docs_only }}": docs_only,
+        "${{ needs.changes.outputs.backend_python }}": backend_python,
+        "${{ needs.python-integration-shard.result }}": shards,
+    }.items():
+        assert expression in script, expression
+        script = script.replace(expression, value)
+    assert "${{" not in script
+    return _bash(script, tmp_path, {"PATH": "/usr/bin:/bin"})
+
+
+@pytest.mark.parametrize(
+    ("docs_only", "backend_python", "shards", "passes"),
+    [
+        # No-backend path: the shards skip; the merge queue runs them.
+        ("false", "false", "skipped", True),
+        ("false", "false", "failure", False),
+        ("false", "false", "cancelled", False),
+        # Full run: the shards must pass.
+        ("false", "true", "success", True),
+        ("false", "true", "skipped", False),
+        ("false", "", "skipped", False),
+        # Docs-only: the shards skip.
+        ("true", "false", "skipped", True),
+    ],
+)
+def test_integration_fan_in_result(
+    tmp_path: Path, docs_only: str, backend_python: str, shards: str, passes: bool
+) -> None:
+    result = _integration_fan_in(
+        tmp_path, docs_only=docs_only, backend_python=backend_python, shards=shards
+    )
+    assert (result.returncode == 0) is passes, result.stdout + result.stderr

@@ -155,6 +155,11 @@ path "secret/delete/tenants/{{identity.entity.metadata.tenant_id}}/*" {
 }
 ```
 
+A test reads this block and checks that `vault.kv.delete` and
+`vault.kv.metadata.delete` pass MEHO's permission check under it
+(`backend/tests/test_vault_tenant_admin_policy_doc.py`). If you change the
+block, run that test.
+
 Write each via the approval-gated op
 ([`ops_sys_policy.py`](../../backend/src/meho_backplane/connectors/vault/ops_sys_policy.py),
 `vault.sys.policy.write`) or `vault policy write` at provisioning time:
@@ -300,6 +305,12 @@ missing/mismatched (§3) or the group binding is absent (§4) — fix the
 identity wiring, not the connector. A **success** on step 3 means a glob
 leaked into the templated segment (§1) — every tenant could read every
 secret; fix the policy body immediately.
+
+## Removing a tenant
+
+To remove a finished tenant from Vault (its secrets, its login role, its
+policy and its groups), follow
+[`vault-remove-tenant.md`](./vault-remove-tenant.md).
 
 ## References
 

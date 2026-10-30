@@ -32,7 +32,7 @@
 # detect job at the start plus the fan-in at the end put that wait on the
 # critical path of every run twice. The jobs that pull test images from the
 # internal mirror or read the private spec shelf stay on the internal pools:
-# `python-unit-shard` (heavy pool), `python-integration`,
+# `python-unit-shard` (heavy pool), `python-integration-shard`,
 # `python-migration-tests` and the nightly coverage jobs. Every moved job
 # keeps its name, `if:` guard and triggers, so the required checks are
 # unchanged.
@@ -40,12 +40,13 @@
 # Docs-only fast path (#3252): the `changes` detector also classifies a PR
 # whose diff is PURELY documentation (every path under `docs/` or ending in
 # `.md`). On such a PR the heavy Python lanes — `python-lint`, the four
-# `python-unit-shard` legs, and `python-integration` — skip via their own
-# job-level `if:` (skipped-by-`if:` == Success per #2140), so a changelog
-# roll / guide edit / README fix finishes CI in minutes instead of paying the
-# ~17-19-min Python tax for zero signal. The required `Python (ruff + mypy +
-# pytest)` fan-in still RUNS and reports (its inspection step treats the
-# detect-driven skips as pass ONLY when `docs_only=true`). The cheap lanes
+# `python-unit-shard` legs, and the four `python-integration-shard` legs —
+# skip via their own job-level `if:` (skipped-by-`if:` == Success per
+# #2140), so a changelog roll / guide edit / README fix finishes CI in
+# minutes instead of paying the ~17-19-min Python tax for zero signal. The
+# required `Python (ruff + mypy + pytest)` and `Python (integration
+# testcontainers)` fan-ins still RUN and report (their inspection steps
+# treat the detect-driven skips as pass ONLY when `docs_only=true`). The cheap lanes
 # (Go, Helm) and the security/secret/license scans keep running unchanged —
 # docs can still leak secrets, and those lanes are already fast. The skip is
 # an ALLOW-LIST that fails CLOSED: anything the detector cannot prove is
@@ -194,8 +195,8 @@ jobs:
     #   docs_only  — `true` when a PR's diff is PURELY documentation (every
     #                changed path is under `docs/` or ends in `.md`), so the
     #                heavy Python lanes (`python-lint`, the `python-unit-shard`
-    #                matrix, and `python-integration`) skip via their own `if:`
-    #                and report success-by-skip (#3252).
+    #                matrix, and the `python-integration-shard` matrix) skip
+    #                via their own `if:` and report success-by-skip (#3252).
     #   backend_python — `false` when a PR changes no file under `backend/`
     #                (except `.md`) and does not change this file (#5296). The
     #                same heavy Python lanes skip. The job
@@ -531,7 +532,7 @@ jobs:
       # pytest.skip exactly as they did before #2949. When the checkout
       # ran, the seconds-cheap reconcile lanes run for real in this job;
       # the G0.7 canary's full-ingest tests are opted out here and run
-      # armed in python-integration instead (#2980 — see this job's
+      # armed in python-integration-shard instead (#2980 — see this job's
       # MEHO_SKIP_SPEC_INGEST_TESTS env row). The docs-root form (not
       # MEHO_VCENTER_OPENAPI_VCENTER / _VI_JSON) is deliberate: it is
       # the only single setting that lights every spec lane, because
@@ -940,7 +941,7 @@ jobs:
           # still erroring fast) past this job's cap. Per this
           # workflow's perf-budget discipline (#898/#793/#827): the slow
           # path is relocated, not the cap raised. The canary's
-          # full-ingest tests run armed in the python-integration job
+          # full-ingest tests run armed in the python-integration-shard job
           # (which selects the file explicitly, see its Pytest step);
           # its fixture-less self-checks and every seconds-cheap
           # reconcile lane stay in this sweep. Honored by a
@@ -999,7 +1000,7 @@ jobs:
           # conftest / loadscope semantics identical to a full run, and the
           # four shards partition the full set exactly (every file lands in
           # one shard; tests/test_unit_shard_split.py pins that).
-          # tests/integration stays out (→ python-integration) and
+          # tests/integration stays out (→ python-integration-shard) and
           # tests/migrations stays out (→ python-migration-tests), matching
           # the pre-shard lane's `--ignore` of both. The splitter prints
           # the file count and the predicted seconds per shard on stderr.
@@ -1965,52 +1966,65 @@ jobs:
           if-no-files-found: warn
 
 
-  python-integration:
-    name: Python (integration testcontainers)
-    # Sibling of the sharded unit lane (python-unit-shard). Holds the
-    # container-heavy tests/integration/ subtree (pgvector/valkey/k3d/vcsim
-    # testcontainers) that made the combined serial sweep blow every
-    # timeout cap (see the python-unit-shard comment). Separated so the
-    # required lint+mypy+unit gate stays fast and deterministic while
-    # integration runs on every PR.
-    # **Required merge gate as of 2026-05-20 (#698).** This job's
-    # context ("Python (integration testcontainers)") is in
-    # ``branches/main/protection.required_status_checks.contexts``;
-    # promoting it was the structural corrective to the v0.2 / G3.4
+  python-integration-shard:
+    name: Python integration shard ${{ matrix.shard }}/4
+    # Non-required checks (one per matrix leg: `Python integration shard
+    # 1/4` ... `4/4`). The required context `Python (integration
+    # testcontainers)` is carried by the python-integration fan-in below,
+    # the same shape as python-unit-shard + python-unit-lane (#5384).
+    # Holds the container-heavy tests/integration/ subtree
+    # (pgvector/valkey/k3d/vcsim testcontainers) plus the G0.7 vSphere
+    # canary module. Kept apart from the unit shards so the required
+    # lint+mypy+unit gate stays fast while integration runs on every PR.
+    # The fan-in has been a required merge gate since 2026-05-20 (#698):
+    # it was the structural corrective to the v0.2 / G3.4
     # green-but-hollow incidents (#634 / #697) — the lane that
     # exercises real connector dispatch, k3d / bind9-container /
     # vcsim / federated-write acceptance, must be merge-blocking so
     # red integration cannot ship to ``main`` again.
-    # 60-min cap: container pulls + DinD spin-up + the serial
-    # integration sweep. pytest-xdist loadgroup parallelization to
-    # bring this well under cap is tracked in #564.
+    #
+    # Why shards (#5384): the serial job grew to ~28 min of pytest and
+    # finished last in every merge-queue run. Each leg now runs one part of
+    # the test files, split by measured time (see the pytest step), so the
+    # wall is about the slowest shard instead of the sum.
     #
     # #3252 docs-only skip — SAME shape as the python-migration-tests gate
     # below (plain `needs: changes` + an `if:` that ANDs in the detect
-    # output), deliberately NOT `always()`: this is a HEAVY 60-min lane, so
-    # keeping cancel-in-progress (a force-push must cancel it) matters more
-    # than the marginal robustness `always()` would add. The residual — if the
-    # detect job hard-CRASHES, `needs: changes` skip-cascades this job to
-    # `skipped`/Success — is identical to (and no worse than) the pre-existing
-    # migration gate's exposure, and is mitigated by the detect step being
-    # written to never exit non-zero on the classification path (it defaults
-    # `docs_only=false` on any diff error). The CLASSIFIER itself is fail-safe:
-    # only a proven-docs-only diff sets `docs_only=true`, so a code PR is never
-    # skipped here.
+    # output), deliberately NOT `always()`: these are HEAVY legs, so keeping
+    # cancel-in-progress (a force-push must cancel them) matters. If the
+    # detect job hard-CRASHES, `needs: changes` skip-cascades these legs to
+    # `skipped`, and the fan-in fails the required context CLOSED (it
+    # checks that `changes` succeeded). The CLASSIFIER itself is fail-safe:
+    # only a proven-docs-only diff sets `docs_only=true`, so a code PR is
+    # never skipped here.
     #
-    # #5296: this job also skips when `backend_python` is `false` (a PR that
-    # changes no file under backend/ and not this file). A few integration
-    # tests read files outside backend/ (the Keycloak sub-chart, examples/,
-    # the CLI); they need containers, so on such a PR only the merge queue
-    # runs them.
+    # #5296: the legs also skip when `backend_python` is `false` (a PR that
+    # changes no file under backend/ and not this file), and the fan-in
+    # accepts the skipped legs on that path. A few integration tests read
+    # files outside backend/ (the Keycloak sub-chart, examples/, the CLI);
+    # they need containers, so on such a PR only the merge queue runs them.
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.docs_only != 'true' &&
        needs.changes.outputs.backend_python != 'false')
     needs: changes
+    # The normal internal pool, not the heavy one: the tests run serially
+    # (no xdist) and mostly wait on containers.
     runs-on: meho-runners-ci
-    timeout-minutes: 60
+    strategy:
+      # fail-fast: false — one shard's red test must NOT cancel the others,
+      # so a broad breakage shows every failing shard in one run (the fan-in
+      # still fails if ANY leg fails). To change the shard count, edit BOTH
+      # the matrix and the `TOTAL` in the pytest step, in lockstep
+      # (tests/test_unit_shard_split.py checks that they match).
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    # 30-min cap: hang backstop only. The slowest shard is one file
+    # (test_connectors_k8s_k3d.py, ~9-10 min) plus ~2 min of setup; the
+    # serial job had a 60-min cap for ~30 min of work.
+    timeout-minutes: 30
     env:
       # Surfaced as a job-level env var purely so the Docker Hub login
       # step can test it in an `if:`. The `secrets` context is NOT
@@ -2193,24 +2207,22 @@ jobs:
       - name: Sync Python environment (locked)
         run: uv sync --locked --all-groups
 
-      - name: Pytest (integration testcontainers)
+      - name: Pytest (integration testcontainers, one shard)
         # The tests/integration/ subtree plus the G0.7 vSphere canary
-        # module. No --cov here: coverage is emitted by the unit job
-        # (see its NOTE); combined coverage is a #564 follow-up. -x for
-        # fast-fail on the first broken integration case. Deliberately
-        # NOT parallelized: the unit job is the ~49min bottleneck (now
-        # split-parallelized); this job is ~6min and its
-        # container-heavy fixtures under xdist are unverified — out of
-        # scope for the perf change.
+        # module, split over the shards. No --cov here: coverage is emitted
+        # by the python-coverage jobs. -x for fast-fail on the first broken
+        # integration case in this shard. No xdist inside a shard: the
+        # container-heavy fixtures were never checked under xdist; the
+        # speed comes from the parallel shards instead (#5384).
         #
         # The canary module is selected here (#2980) because its
         # armed-shelf full-ingest tests need the container-heavy
         # budget: the ~164 s two-spec ingest runs ONCE per module
         # (module-scoped _canary_corpus fixture, amortised in PR #2995
-        # after per-test ingests — 25 x ~164 s — timeout-killed this
-        # job's 60-min cap on the first armed run; per-test ingests
+        # after per-test ingests — 25 x ~164 s — timeout-killed the
+        # serial job's 60-min cap on the first armed run; per-test ingests
         # had already blown the unit lane's 25-min cap the day the
-        # shelf was armed). This job is the canary's single armed
+        # shelf was armed). These shards are the canary's single armed
         # lane; the unit sweep opts out via
         # MEHO_SKIP_SPEC_INGEST_TESTS (see its Pytest step's env
         # comment). Shelf absent (fork/Dependabot/unprovisioned) → the
@@ -2221,7 +2233,109 @@ jobs:
         # -rs prints the reason of every skipped test. The k3s tests skip
         # when the cluster cannot pull an image; without the reason a green
         # lane hides that nothing ran on the cluster.
-        run: uv run pytest -x -rs tests/integration/ tests/acceptance/test_g07_vsphere_canary.py
+        run: |
+          # Split by measured file time, the same tool as the unit shards
+          # (tests/_unit_shard_split.py) with the integration measurements
+          # in tests/_integration_shard_durations.json. Every file lands in
+          # exactly one shard; tests/test_unit_shard_split.py pins that and
+          # checks this file list. The splitter prints the file count and
+          # the predicted seconds per shard on stderr.
+          TOTAL=4
+          SHARD="${{ matrix.shard }}"
+          mapfile -t SHARD_FILES < <({ find tests/integration -name 'test_*.py'; echo tests/acceptance/test_g07_vsphere_canary.py; } | sort | uv run python tests/_unit_shard_split.py --durations tests/_integration_shard_durations.json --shard "${SHARD}" --total "${TOTAL}")
+          echo "shard ${SHARD}/${TOTAL}: ${#SHARD_FILES[@]} test files"
+          if [ "${#SHARD_FILES[@]}" -eq 0 ]; then
+            echo "::error::shard ${SHARD} selected 0 test files — shard split broken"
+            exit 1
+          fi
+          # --junitxml: the per-test times of this shard, uploaded by the
+          # step below, to refresh tests/_integration_shard_durations.json.
+          # xunit1 because only xunit1 writes the test file name on every
+          # test case.
+          uv run pytest -x -rs -o junit_family=xunit1 \
+            --junitxml=pytest-integration-shard.xml "${SHARD_FILES[@]}"
+
+      - name: Upload per-test times (input for the shard split)
+        # Refresh tests/_integration_shard_durations.json from these
+        # artifacts (one per shard) of a green run; the docstring of
+        # tests/_unit_shard_split.py has the commands. continue-on-error +
+        # timeout-minutes: a failed or hung upload must never fail or hold
+        # the shard.
+        if: always() && hashFiles('backend/pytest-integration-shard.xml') != ''
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: python-integration-shard-junit-${{ matrix.shard }}
+          path: backend/pytest-integration-shard.xml
+          retention-days: 14
+          if-no-files-found: warn
+
+  python-integration:
+    name: Python (integration testcontainers)
+    # FAN-IN carrying the branch-protection required context (#5384). This
+    # job name is the EXACT string pinned in the `main` required checks, so
+    # branch protection and the rulesets need no change: the name moved off
+    # the old serial job onto this fan-in, the same way python-unit-lane
+    # took over `Python (ruff + mypy + pytest)` (#3251).
+    #
+    # Same rules as python-unit-lane (read its comment for the full why):
+    #  1. NOT fail-open. `always()` makes this job run even when a shard
+    #     failed (a skipped required check counts as Success, #2140), and
+    #     the step FAILS on any shard result that is not allowed. A hung
+    #     shard hits its own timeout → `cancelled` → this gate fails.
+    #  2. Fork PRs: this job skips by its own `if:`, which reports the
+    #     required context as Success, exactly as the old serial job did.
+    #  3. Docs-only PRs: every shard skips by its detect-gated `if:` and
+    #     this step accepts `skipped` ONLY when `changes` succeeded and
+    #     said docs_only=true. On every other run it needs strict success.
+    #  4. No-backend PRs (#5296): the shards skip the same way when
+    #     `backend_python` is `false`, and this step accepts `skipped` then
+    #     too. The merge queue runs the shards on the merged result.
+    # GitHub-hosted runner (#4626): one bash step, no setup; it must never
+    # wait for a slot on the internal pool.
+    needs: [changes, python-integration-shard]
+    if: >-
+      always() &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Assert every integration shard passed
+        # needs.python-integration-shard.result is the AGGREGATE of the
+        # matrix: success only if every leg succeeded.
+        run: |
+          detect='${{ needs.changes.result }}'
+          docs_only='${{ needs.changes.outputs.docs_only }}'
+          backend_python='${{ needs.changes.outputs.backend_python }}'
+          shards='${{ needs.python-integration-shard.result }}'
+          echo "changes (detect): result=${detect}, docs_only=${docs_only}, backend_python=${backend_python}"
+          echo "python-integration-shard (aggregate of all 4 shard legs): ${shards}"
+
+          if [ "${detect}" != "success" ]; then
+            echo "::error title=Integration lane — detector not green::the change-detector ('changes') result is '${detect}', so the docs-only classification cannot be trusted. Failing the required integration lane closed."
+            exit 1
+          fi
+
+          if [ "${docs_only}" = "true" ]; then
+            case "${shards}" in
+              success|skipped) echo "Integration lane GREEN (docs-only fast path #3252) — all 4 shards skipped-by-detect." ;;
+              *) echo "::error title=Integration lane red::an integration shard did not pass (${shards}). Open the 'Python integration shard N/4' jobs above for the detail."; exit 1 ;;
+            esac
+          elif [ "${backend_python}" = "false" ]; then
+            # NO-BACKEND PATH (#5296) — the shards were skipped by their
+            # `if:`; the merge queue runs them on the merged result.
+            case "${shards}" in
+              success|skipped) echo "Integration lane GREEN (no backend change, #5296) — all 4 shards skipped-by-detect." ;;
+              *) echo "::error title=Integration lane red::an integration shard did not pass (${shards}). Open the 'Python integration shard N/4' jobs above for the detail."; exit 1 ;;
+            esac
+          elif [ "${shards}" = "success" ]; then
+            echo "Integration lane GREEN — all 4 integration shards passed."
+          else
+            echo "::error title=Integration lane red::one or more integration shards did not pass (${shards}). This fan-in carries the required context 'Python (integration testcontainers)'; open the 'Python integration shard N/4' jobs above for the failing detail."
+            exit 1
+          fi
 
   python-migration-tests:
     name: Python (database migrations)

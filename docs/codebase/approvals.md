@@ -94,6 +94,96 @@ terminal, so it cannot be approved (the pending guard raises
 `ApprovalRequestAlreadyDecidedError`) — an expired run-bound request can
 never be claimed or re-dispatched (#2293).
 
+## An approval covers one exact release (#5030)
+
+A person approves one exact release of MEHO. When MEHO is updated, every
+request that still waits from an older release ends, and the requester
+asks again under the new release. MEHO is updated about every week, and a
+request can wait up to 14 days, so an update often ends waiting requests.
+This costs one more approval for a request that waits across an update.
+It is the simple and strict choice.
+
+**What MEHO records.** `create_pending_request` stores the running
+release on the new column `approval_request.release_id` (migration
+`0126`). The value comes from `version.running_release_id()`: the full
+commit hash (`GIT_SHA`), plus the chart version (`CHART_VERSION`) when it
+is set. These are the same values `GET /version` shows.
+
+**At start-up.** `main._run_lifespan_startup` calls
+`approval_expiry.expire_approvals_from_older_release()`. For each tenant
+it calls `approval_queue.expire_older_release_requests()`, which moves
+every `pending` request whose `release_id` is not the running release to
+`expired`. A request with no `release_id` (saved before this change)
+counts as an older release, so the first start with this change ends it
+too. The expiry reuses the TTL path (`_expire_request`): one
+`approval.decision` audit row each, under `system:approval-expiry`, with
+`reason: "release_changed"`, `request_release` and `running_release` in
+the payload. A request already past its deadline expires as the TTL sweep
+would expire it, with no extra reason. This runs whether or not
+`APPROVAL_EXPIRY_ENABLED` is set: it is part of the approval rule, not the
+TTL clean-up. A failure is logged and the start goes on; the check below
+still stops any old approval from running.
+
+**Before an approved run.** Both resume paths call
+`approval_queue.refuse_resume_if_release_changed()` before they run
+anything: the operator surfaces (`resume_dispatch_after_approval`) and the
+in-process agent waiter (`agent/approval_wait.py`). When the request's
+`release_id` is not the running release, the operation does not run and
+the vendor gets no call:
+
+1. The one-resumer claim (`claim_resume`) is taken, so the request can
+   never run later. If another resumer took it first, the usual
+   `already_resumed` result comes back. The claim winner then deletes the
+   request's stored run input (`approval_handoff.discard`), the same as
+   every other way a request ends.
+2. One audit row records the refusal: `path = "approval.resume"`,
+   `status_code = 409`, `result_status = "release_changed_while_waiting"`,
+   both releases in the payload.
+3. The caller gets a `denied` result with
+   `error_code = "release_changed_while_waiting"`, and the refusal is
+   stored as the request's run result. So every read surface shows
+   `result_state = "failed"` with that error code.
+
+This covers a request that was approved just before an update and had
+not run yet. A remote-write mint for a satellite runner checks the same
+rule: an approval from an older release mints nothing
+(`REMOTE_WRITE_GATE_UNSATISFIED`, logged like the other mint refusals,
+and the approval stays unused).
+
+**No release identity.** A build with no `GIT_SHA` (or `GIT_SHA=unknown`)
+has no release identity. Only local development runs like this; every
+published image sets `GIT_SHA`. Then MEHO stores no `release_id`, ends no
+request at start-up, and refuses no run. The start-up check logs one
+`approval_release_binding_off` warning so this is visible. A request made in such a run has
+no `release_id`, so the first start of a real release ends it.
+
+**What the requester sees.** The read views (REST
+`ApprovalRequestView`, the MCP approvals tools, the console) carry three
+added fields: `release_id`, `expired_reason` (`deadline_passed` or
+`release_changed`, only for an `expired` request) and `expired_message`,
+a plain sentence with the advice to ask again. `meho approvals show`
+prints `Release:` and `Expired:` lines. The reason is read off the row and
+not stored: only the start-up expiry ends a request before its deadline,
+so an `expired` row with `decided_at < expires_at` expired because the
+release changed. The console modal shows such a request with the time
+the update ended it (`decided_at`), not the deadline it never reached.
+For a run MEHO refused (error code `release_changed_while_waiting`), the
+console says MEHO was updated, the operation did not run, and the
+requester must ask again; it does not say the operation ran and failed.
+
+**During a rolling update.** For a short time old and new pods run side
+by side. A new pod ends the waiting requests it finds when it starts. A
+request that an old pod saves after that point still waits; if it is
+approved, a new pod refuses to run it. Once both releases have this
+check, an old pod also refuses to run a request made by a new pod. In both cases nothing from the wrong release
+runs; the requester asks again.
+
+**Later, not built yet: a finer binding.** Each operation could get an
+execution version: a checksum of its handler code, the shared code it
+uses, its schemas, its risk level, its approval flag and its steps. Then
+an update would end only the requests whose operation changed. That needs
+its own design.
+
 ## The params hash on requests and audit rows
 
 Two kinds of rows carry a keyed hash of a call's params:

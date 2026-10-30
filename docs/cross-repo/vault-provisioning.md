@@ -642,6 +642,13 @@ policy `meho-teardown` + role `auth/jwt-meho/role/meho-teardown` soft-deleted a
 scratch KV version through the connector, was denied outside its two subtrees,
 and left `meho-mcp` byte-identical.
 
+**Tenant secrets.** The example policy above has no rule for
+`secret/tenants/`. To let a teardown role remove a finished tenant's
+secrets, add the tenant-folder rules from
+[`vault-remove-tenant.md`](./vault-remove-tenant.md) step 2. That page
+also says which role deletes the tenant's login role, policy and groups,
+and in which order.
+
 ## Verification
 
 Run from any host with the operator's Vault token (`vault login`

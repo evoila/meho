@@ -1404,7 +1404,7 @@ class OperationGroup(Base):
     ``list_operation_groups`` meta-tool (T8 #399) returns verbatim so
     the agent can pick the right group before calling
     ``search_operations`` against it. Examples per connector:
-    ``vmware-rest/9.0`` → ``vm-lifecycle`` / ``cluster`` / ``network``;
+    ``k8s/1.x`` → ``workload`` / ``inventory`` / ``network``;
     ``vault/1.x`` → ``kv`` / ``sys`` / ``auth``.
 
     ``tenant_id`` is NULL for built-in / global groups (shipped by spec
@@ -1451,6 +1451,11 @@ class OperationGroup(Base):
     group_key: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     when_to_use: Mapped[str] = mapped_column(Text, nullable=False)
+    # SHA-256 hex of the ``when_to_use`` MEHO's code last wrote (#4332).
+    # NULL for texts from spec ingestion and for rows MEHO cannot prove it
+    # wrote. A row whose text still matches this hash gets the new code
+    # text at start-up; an operator edit breaks the match and is kept.
+    code_text_hash: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     review_status: Mapped[str] = mapped_column(
         Text,
         nullable=False,
@@ -1679,9 +1684,9 @@ class EndpointDescriptor(Base):
 
     ``op_id`` is the connector-side natural key. Examples:
 
-    * Ingested HTTP — ``"GET:/api/vcenter/cluster"`` (method + path).
+    * Ingested HTTP — ``"GET:/repos/{owner}/{repo}/issues"`` (method + path).
     * Typed — ``"vault.kv.read"`` / ``"k8s.pod.list"`` (dotted handle).
-    * Composite — ``"vmware.composite.vm.create"`` (dotted handle).
+    * Composite — ``"gh.composite.repo_create"`` (dotted handle).
 
     The ``method`` / ``path`` columns are populated for ingested rows
     and NULL for typed/composite; ``handler_ref`` (a Python dotted
@@ -1873,6 +1878,13 @@ class EndpointDescriptor(Base):
     )
     custom_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     custom_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # #5037: the connector package that wrote this row at start. NULL means
+    # the op is built into MEHO (or ingested). When the package is not
+    # installed, discovery hides the row and dispatch refuses it with
+    # ``connector_package_not_installed``. The row and the operator's
+    # settings on it stay, so they come back with the package. See
+    # ``docs/codebase/connector-packages.md``.
+    owner_package: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -4777,6 +4789,10 @@ class RunnerPrincipal(Base):
     # the version does not match, so an operator can see which runner is on
     # another version. ``NULL`` until the runner calls after migration 0118.
     wire_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # #5038: the digest of the runner's connector packages, sent with each
+    # call (the runner list shows it). ``NULL`` until the runner calls after
+    # migration 0124.
+    package_set_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         Index(
@@ -4853,8 +4869,8 @@ class RunnerWriteAllowlistEntry(Base):
         nullable=False,
     )
     # A glob over ``op_id`` (``fnmatch`` semantics): an exact op-class for a
-    # minimal Stage-1 allowlist (``vmware.vm.tag_set``) or a prefix
-    # (``vmware.vm.*``). Matched by the shared, DB-free gate
+    # minimal Stage-1 allowlist (``k8s.label``) or a prefix
+    # (``k8s.secret.*``). Matched by the shared, DB-free gate
     # (:func:`~meho_backplane.runner.satellite_tier.evaluate_remote_write_gate`).
     op_pattern: Mapped[str] = mapped_column(Text, nullable=False)
     # A target-scope cap: ``*`` (any target in the tenant), or a concrete
@@ -5560,7 +5576,7 @@ class AgentPermission(Base):
     ``principal_kind=agent`` (see :mod:`meho_backplane.auth.permissions`).
 
     **op_pattern is an fnmatch glob string.** Examples: ``"*"`` (every
-    op), ``"GET:/api/vcenter/*"`` (all vCenter GET ops), ``"vault.kv.*"``
+    op), ``"GET:/repos/*"`` (all GitHub repo GET ops), ``"vault.kv.*"``
     (all vault kv ops). The resolver scores patterns by the literal
     prefix before the first glob metacharacter and prefers the most
     specific match; ties fold to the most-restrictive verdict
@@ -5718,7 +5734,7 @@ class _StandingGrantColumns:
     # reference (no FK) -- same discipline as AgentPermission.principal_sub.
     principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
     # Exactly one operation id (no glob). Raw HTTP ops are ``"POST:/path"``;
-    # typed / composite ops are dotted (``"vmware.composite.vm.create"``).
+    # typed / composite ops are dotted (``"gh.composite.repo_create"``).
     op_id: Mapped[str] = mapped_column(Text, nullable=False)
     # The ``"<impl_id>-<version>"`` connector string the dispatcher resolves
     # (same shape as ApprovalRequest.connector_id).
@@ -5975,6 +5991,26 @@ class SandboxModeState(Base):
     stored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (sa.CheckConstraint("id = 1", name="ck_sandbox_mode_state_single_row"),)
+
+
+class OperationCatalogState(Base):
+    """Which release last wrote the built-in operation rows: one row (#5019).
+
+    Written by :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
+    in the same transaction as the typed and composite
+    :class:`EndpointDescriptor` rows, so it changes only when those rows
+    change. ``written_by_release`` is the commit hash of the build
+    (``GIT_SHA``, as ``GET /version`` reports it). A pod compares it with
+    its own release to notice rows written by another release.
+    """
+
+    __tablename__ = "operation_catalog_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    written_by_release: Mapped[str] = mapped_column(Text, nullable=False)
+    written_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (sa.CheckConstraint("id = 1", name="ck_operation_catalog_state_single_row"),)
 
 
 class ScheduledTriggerKind(StrEnum):
@@ -6692,6 +6728,16 @@ class ApprovalRequest(Base):
       Internal resume input only; like ``params`` it is never projected onto a
       read view or a broadcast frame. Added by migration ``0099``.
 
+    * ``release_id`` -- Text nullable. The MEHO release the request was
+      made under (#5030): the full ``GIT_SHA`` plus the ``CHART_VERSION``
+      when set (:func:`~meho_backplane.version.running_release_id`). A
+      person approves one exact release. At start-up a ``pending`` request
+      from another release expires, and an approved request from another
+      release is refused before it runs. NULL on rows saved before this
+      column (they count as an older release) and on rows made by a build
+      with no release identity (local development). Added by migration
+      ``0120``.
+
     Indexes
     -------
 
@@ -6891,6 +6937,9 @@ class ApprovalRequest(Base):
         nullable=True,
         default=None,
     )
+    # The MEHO release the request was made under (#5030). See the class
+    # docstring. Added by migration ``0120``.
+    release_id: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     __table_args__ = (
         Index(
@@ -9092,7 +9141,7 @@ class DispatchTraceSpan(Base):
       ``composite_step`` / ``jsonflux_reduction`` / ``typed`` / ``opaque``
       (the decision's enumerated span kinds). Text (no DB ``CHECK``) so a
       new kind lands without a migration; the seam validates.
-    * ``name`` -- Text NOT NULL. Human label (``"GET /rest/vm"``,
+    * ``name`` -- Text NOT NULL. Human label (``"GET /repos/{owner}/{repo}"``,
       ``"jsonflux.reduce"``, a composite sub-step name).
     * ``started_at`` -- ``timestamptz`` NOT NULL. Span start time.
     * ``duration_ms`` -- ``numeric(10,2)`` nullable. Same shape as

@@ -244,6 +244,11 @@ data:
   {{- end }}
   MEHO_SANDBOX_MODE: "true"
   MEHO_SANDBOX_MODE_CONFIRM: {{ .Values.sandboxMode.confirmHost | quote }}
+  {{- /* #5251 -- REST and the CLI may create delete grants too. Only with
+       sandbox mode on; outside it the setting is never rendered. */}}
+  {{- if .Values.sandboxMode.deleteGrantsFromApi }}
+  MEHO_SANDBOX_DELETE_GRANTS_FROM_API: "true"
+  {{- end }}
   {{- end }}
   # #3997 — most output tokens the agent asks the model for in one answer.
   # Rendered always; it only matters when the agent runtime is in use.

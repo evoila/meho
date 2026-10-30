@@ -10,9 +10,7 @@ after the registrar list is populated by the
 ``__init__`` (which appends this function via
 :func:`register_typed_op_registrar`).
 
-Mirrors the vmware-rest precedent
-(:mod:`meho_backplane.connectors.vmware_rest.composites._register`):
-per-composite arguments (summary / description / group_key / tags /
+Per-composite arguments (summary / description / group_key / tags /
 ``parameter_schema`` / ``safety_level`` / ``requires_approval``) live
 in this module so a future shape change touches one file. The helper
 :func:`~meho_backplane.operations.typed_register.register_composite_operation`

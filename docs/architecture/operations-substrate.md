@@ -163,7 +163,7 @@ register_typed_op_registrar(register_vault_typed_operations)
 Two phases:
 
 - **Synchronous (import time)** — `register_connector_v2(...)` lands the registry entry; `register_typed_op_registrar(...)` appends an `async def register_xxx_typed_operations` callable to a module-level list on `meho_backplane.operations.typed_register`.
-- **Asynchronous (lifespan startup)** — the FastAPI `lifespan` hook calls [`_eager_import_connectors()`](../../backend/src/meho_backplane/connectors/registry.py) (so every subpackage self-registers) and then [`run_typed_op_registrars()`](../../backend/src/meho_backplane/operations/typed_register.py) (which iterates the registrar list sequentially). Each registrar invokes [`register_typed_operation(...)`](../../backend/src/meho_backplane/operations/typed_register.py) for every op it ships — once per `(product, version, impl_id, op_id)` natural key.
+- **Asynchronous (lifespan startup)** — the FastAPI `lifespan` hook calls [`_eager_import_connectors()`](../../backend/src/meho_backplane/connectors/registry.py) (so every subpackage self-registers) and then [`run_typed_op_registrars()`](../../backend/src/meho_backplane/operations/typed_register.py) (which iterates the registrar list sequentially, inside one database transaction; the lifespan holds that transaction open through `operation_catalog_write()` while it starts the background loops, and commits only when every registrar, the sweeps after them and every loop start passed — a failed start changes no row, #5019). Each registrar invokes [`register_typed_operation(...)`](../../backend/src/meho_backplane/operations/typed_register.py) for every op it ships — once per `(product, version, impl_id, op_id)` natural key.
 
 The two-phase shape lets every `__init__.py` stay sync while the typed-op upserts await on the DB and the embedding pipeline.
 
@@ -229,6 +229,7 @@ The dispatcher never raises; it always returns an `OperationResult`. Every error
 | Code                    | When                                                                                  |
 |-------------------------|---------------------------------------------------------------------------------------|
 | `unknown_op`            | Natural key didn't resolve a descriptor.                                              |
+| `connector_package_not_installed` | The op's row was written by a connector package that is not installed in this MEHO. The row is hidden, not deleted. `extras.package` names the package. See [connector packages](../codebase/connector-packages.md). |
 | `invalid_params`        | `params` failed JSON Schema validation.                                               |
 | `no_connector`          | Resolver couldn't pick a connector for the target. `extras.exception_message` carries the resolver's diagnostic text (G0.14-T1 #1142). |
 | `ambiguous_connector`   | Resolver matched two or more connectors and the tie-break ladder couldn't pick. `extras.exception_message` carries the candidate list + remediation step ("set `target.preferred_impl_id` to one of them"). G0.14-T1 (#1142). |

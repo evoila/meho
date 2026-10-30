@@ -10,7 +10,7 @@
   Each control PATCHes
   ``/ui/connectors/registry/{connector_id}/operations/{op_id}`` and swaps
   THIS row's outerHTML with the re-rendered row. The ``op_id`` is the
-  natural key ``f"{method}:{path}"`` (e.g. ``GET:/api/vcenter/cluster``)
+  natural key ``f"{method}:{path}"`` (e.g. ``GET:/repos/{owner}/{repo}/issues``)
   which CONTAINS slashes; it is emitted RAW into the ``hx-patch`` URL
   (Jinja HTML-escapes the attribute but does NOT URL-encode the path) so
   the ``{op_id:path}`` converter on the route captures the slash-bearing
@@ -51,7 +51,8 @@
     * ``connector_id``   -- str: the ``<impl_id>-<version>`` key.
     * ``op``             -- dict: {op_id, summary, description,
                             custom_description, safety_level,
-                            requires_approval, is_enabled, tags}.
+                            requires_approval, is_enabled,
+                            tenant_enabled, tags}.
     * ``is_tenant_admin``-- bool: edit controls vs read-only badges.
     * ``csrf_token``     -- str: minted double-submit token.
     * ``warnings``       -- list[dict]: {code, connector_class, message}
@@ -196,6 +197,16 @@
       <span class="badge badge-xs {{ 'badge-success' if op.is_enabled else 'badge-ghost' }}">
         {{ "enabled" if op.is_enabled else "disabled" }}
       </span>
+    </div>
+  {% endif %}
+
+  {#- ---- This tenant's own on/off setting (#5029) ----
+      Shown only when the tenant set one for this built-in op; without it
+      the tenant uses the install default the controls above show. -#}
+  {% if op.tenant_enabled is not none %}
+    <div class="text-xs opacity-80" data-op-tenant-setting="{{ 'on' if op.tenant_enabled else 'off' }}">
+      Install default: {{ "on" if op.is_enabled else "off" }}.
+      This tenant: {{ "on" if op.tenant_enabled else "off" }}.
     </div>
   {% endif %}
 

@@ -54,7 +54,10 @@ resolved VM + host group sets).
                           handler's plan -- the snapshot, the snapshots below
                           it when ``remove_children`` is set
 ``vm.migrate``            echo: vm, cluster, target_host + resolution source
-``vm.power``              echo: vm, verb, power_kind (hard vs Tools-soft)
+``vm.power``              live-read: vm, name, power_state, verb,
+                          power_kind (hard vs Tools-soft); a failed read
+                          is listed under ``unavailable``, never blocks
+                          the park (#3942)
 ``vm.disk.grow``          live-read: vm, name, disk, disk_label,
                           current_capacity_bytes, requested_capacity_bytes,
                           delta_bytes
@@ -122,14 +125,17 @@ Two preview depths, chosen per composite
   requested change. Declines (``None`` -> identifier-only default) when no
   connector resolved or the VM read returns no dict, and fails-soft on a
   resolution fault exactly like the fan-out builders.
+* **Best-effort name read** for ``vm.power`` (#3942): the params name the
+  VM only by moid, so the builder reads the VM's display name and current
+  power state and echoes the verb plus ``power_kind`` (hard vs
+  Tools-soft). A failed read does not block the park: the moid stays and
+  the gap is listed under ``unavailable``.
 * **Param echo** (no I/O — the ``secret.move`` precedent, #1580) for the
-  six single-entity composites whose params fully name the blast
+  single-entity composites whose params fully name the blast
   radius. ``vm.clone_from_template`` echoes only the customization spec
   *name*, never its secret-bearing contents (#1503), so the GOSC keystone
   composes without leaking sysprep/password material onto the reviewer
-  surface. ``vm.power`` additionally echoes ``power_kind`` so the approver
-  sees the soft-vs-hard distinction (a Tools-mediated ``guest_shutdown``
-  is a very different blast radius from a hard ``off``).
+  surface.
   ``vm.migrate`` deliberately does **not** pre-resolve a DRS
   recommendation: DRS output is point-in-time and the approved dispatch
   re-consults it, so echoing a predicted host could mislead the reviewer
@@ -660,24 +666,56 @@ async def _vm_migrate_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 
 
 async def _vm_power_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Preview ``vm.power`` — echo the VM + verb + hard-vs-soft power kind (no I/O).
+    """Preview ``vm.power`` — the VM's name + power state, the verb, hard vs soft (#3942).
 
-    The params fully name the blast radius (one VM, one verb), so no
-    resolution read is needed. ``power_kind`` makes the soft-vs-hard
-    distinction explicit for the approver: a Tools-mediated
-    ``guest_shutdown`` cleanly quiesces the guest, while a hard ``off`` /
-    ``reset`` yanks power and may lose in-flight state — the reviewer should
-    see which one they are approving.
+    A moid such as ``vm-42`` means nothing to a person, so the builder reads
+    the VM's display ``name`` and current ``power_state`` (one read-only
+    ``GET:/vcenter/vm/{vm}`` via :func:`._write._read_vm_info`) and echoes
+    the verb. ``power_kind`` makes the soft-vs-hard distinction explicit: a
+    Tools-mediated ``guest_shutdown`` cleanly quiesces the guest, while a
+    hard ``off`` / ``reset`` yanks power and may lose in-flight state.
+
+    The read is best-effort. When it fails (or no connector resolved) the
+    preview keeps the moid, leaves ``name`` / ``power_state`` as ``None``
+    and names the gap under ``unavailable`` (the fault class only, never the
+    fault text), so the approval request is still created. The power verb
+    never fires here. Declines (``None``) only on malformed params.
     """
     vm = ctx.params.get("vm")
     verb = ctx.params.get("verb")
     if not isinstance(vm, str) or not isinstance(verb, str):
         return None
-    return {
+    preview: dict[str, Any] = {
         "vm": vm,
+        "name": None,
+        "power_state": None,
         "verb": verb,
         "power_kind": "guest" if verb in _GUEST_POWER_VERBS else "hard",
     }
+    reason: str | None = None
+    if ctx.connector_instance is None:
+        reason = "no connector session to read the VM"
+    else:
+        try:
+            info = await _read_vm_info(
+                connector=ctx.connector_instance,  # type: ignore[arg-type]
+                target=ctx.target,
+                operator=ctx.operator,
+                vm_moid=vm,
+            )
+        except Exception as exc:
+            reason = f"the VM read failed ({type(exc).__name__})"
+        else:
+            if info is None:
+                reason = "the VM read returned no data"
+            else:
+                name = info.get("name")
+                power_state = info.get("power_state")
+                preview["name"] = name if isinstance(name, str) else None
+                preview["power_state"] = power_state if isinstance(power_state, str) else None
+    if reason is not None:
+        preview["unavailable"] = [f"the VM name and power state: {reason}"]
+    return preview
 
 
 async def _vm_disk_grow_preview(ctx: PreviewContext) -> dict[str, Any] | None:

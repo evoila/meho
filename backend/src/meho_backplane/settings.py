@@ -322,6 +322,16 @@ class Settings(BaseModel):
         (``tid``, ``org_id``, etc.) override via env var. Read once
         per request by ``verify_jwt`` — the string itself never leaves
         :class:`Settings`.
+    jwt_tenants_claim_name:
+        Name of the JWT claim that lists every tenant the person is in
+        (#5236). Default ``meho_tenants``. Each entry is
+        ``<tenant-uuid>:<tenant>:<RoleGroup>``, for example
+        ``3f0c...:lab-a:Operators``; ``verify_jwt`` reads the list into
+        :attr:`~meho_backplane.auth.operator.Operator.tenants`. The claim
+        is optional: no claim means an empty list. Bad entries are left
+        out and logged. Nothing uses the list yet; the current tenant
+        still comes from ``jwt_tenant_claim_name``. See
+        ``docs/decisions/2026-10-28-several-tenants-per-person.md``.
     jwt_tenant_role_claim_name:
         Name of the JWT claim that carries the operator's
         :class:`~meho_backplane.auth.operator.TenantRole`. Default
@@ -1175,6 +1185,13 @@ class Settings(BaseModel):
         and one dot-separated part of that host must be exactly
         ``sandbox``. Otherwise MEHO refuses to start. Ignored when the
         mode is off.
+    sandbox_delete_grants_from_api:
+        With sandbox mode on, lets a tenant admin who is a person create a
+        delete grant through REST and the CLI too, not only in the web
+        console (#5251). From ``MEHO_SANDBOX_DELETE_GRANTS_FROM_API``.
+        Default ``False``: a delete grant is made only in the console.
+        Outside sandbox mode it changes nothing. Read at boot only; no
+        request field can change it.
     openai_api_key:
         Bearer token the OpenAI-compatible backend builder
         (G11.5-T3 #1077) authenticates with. Empty (the default) is
@@ -1314,6 +1331,7 @@ class Settings(BaseModel):
     keycloak_jwks_cache_ttl_seconds: int = Field(default=300, gt=0)
     keycloak_jwt_leeway_seconds: int = Field(default=30, ge=0)
     jwt_tenant_claim_name: str = Field(default="tenant_id", min_length=1)
+    jwt_tenants_claim_name: str = Field(default="meho_tenants", min_length=1)
     jwt_tenant_role_claim_name: str = Field(default="tenant_role", min_length=1)
     jwt_role_groups: tuple[str, ...] = _DEFAULT_JWT_ROLE_GROUPS
     jwt_principal_kind_claim_name: str = Field(default="principal_kind", min_length=1)
@@ -1644,6 +1662,9 @@ class Settings(BaseModel):
     # on an instance for disposable test systems. Both read at boot only.
     sandbox_mode: bool = False
     sandbox_mode_confirm: str = ""
+    # #5251 -- with sandbox mode on, REST and the CLI may create delete
+    # grants too. Read at boot only.
+    sandbox_delete_grants_from_api: bool = False
     # #2322 (G0.31 #2364) -- approval-TTL lifecycle. Every parked approval
     # is stamped ``expires_at = created_at + APPROVAL_DEFAULT_TTL_SECONDS``
     # (default 14 days); an explicit caller override is honoured but capped
@@ -1771,7 +1792,7 @@ class Settings(BaseModel):
     # the mint is still refused if this config disagrees). Format: a
     # comma-separated list of ``op_pattern`` or ``op_pattern@target_scope``
     # tokens (``@`` omitted => ``target_scope='*'``), e.g.
-    # ``"vmware.vm.tag_set@*,vmware.vm.annotation_set"``; default ``""`` is
+    # ``"k8s.label@*,k8s.annotate"``; default ``""`` is
     # fail-closed (no remote-write executes at the edge until provisioned).
     # Central-only deployments (no runner role) leave this unset.
     satellite_write_allowlist: str = ""
@@ -2172,6 +2193,13 @@ class Settings(BaseModel):
     #: Set via ``VAULT_KV_TENANT_SCOPE_PREFIX``.
     vault_kv_tenant_scope_prefix: str = "secret/tenants/{tenant_id}/"
 
+    #: The most secrets one folder call may walk or delete: ``vault.kv.list``
+    #: with ``recursive=true`` and ``vault.kv.folder.delete``. A bigger folder
+    #: is refused, and the caller picks smaller folders. The delete also
+    #: refuses a ``keys`` list longer than this before it asks for approval.
+    #: Set via ``VAULT_KV_FOLDER_MAX_KEYS``.
+    vault_kv_folder_max_keys: int = Field(default=500, ge=1, le=10000)
+
     @property
     def keycloak_discovery_base(self) -> str:
         """Realm base URL for discovery and token calls, without a trailing slash.
@@ -2524,6 +2552,7 @@ def get_settings() -> Settings:
             os.environ.get("KEYCLOAK_JWT_LEEWAY_SECONDS", "30"),
         ),
         jwt_tenant_claim_name=os.environ.get("JWT_TENANT_CLAIM_NAME", "tenant_id"),
+        jwt_tenants_claim_name=os.environ.get("JWT_TENANTS_CLAIM_NAME", "meho_tenants"),
         jwt_tenant_role_claim_name=os.environ.get(
             "JWT_TENANT_ROLE_CLAIM_NAME",
             "tenant_role",
@@ -2799,6 +2828,9 @@ def get_settings() -> Settings:
             os.environ.get("MEHO_SANDBOX_MODE", "false"),
         ),
         sandbox_mode_confirm=os.environ.get("MEHO_SANDBOX_MODE_CONFIRM", "").strip(),
+        sandbox_delete_grants_from_api=parse_bool_env(
+            os.environ.get("MEHO_SANDBOX_DELETE_GRANTS_FROM_API", "false"),
+        ),
         # #2322 — approval-TTL default + sweeper knobs.
         approval_default_ttl_seconds=int(
             os.environ.get("APPROVAL_DEFAULT_TTL_SECONDS", str(14 * 24 * 3600)),
@@ -3024,4 +3056,5 @@ def get_settings() -> Settings:
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"
         ).strip(),
+        vault_kv_folder_max_keys=int(os.environ.get("VAULT_KV_FOLDER_MAX_KEYS", "500")),
     )

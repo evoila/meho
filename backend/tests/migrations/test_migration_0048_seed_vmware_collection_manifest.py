@@ -41,7 +41,7 @@ stay sync (the ``0046`` harness).
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Final
 from uuid import UUID, uuid4
@@ -206,10 +206,11 @@ def _count_collections(sync_url: str) -> int:
 
 def test_empty_global_vmware_row_is_filled(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A global ``vmware`` row with empty prose gains the hand-authored manifest."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0047")
+    copy_migrated_db(cfg, "0047")
 
     row_id = _insert_collection(sync_url)  # global, bare vendor, [] products, no prose
 
@@ -227,6 +228,7 @@ def test_empty_global_vmware_row_is_filled(
 
 def test_operator_authored_prose_not_clobbered(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A row that already carries a manifest keeps its operator content.
 
@@ -235,7 +237,7 @@ def test_operator_authored_prose_not_clobbered(
     nothing (``updated_at`` stays at the seed value).
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0047")
+    copy_migrated_db(cfg, "0047")
 
     row_id = _insert_collection(
         sync_url,
@@ -257,10 +259,11 @@ def test_operator_authored_prose_not_clobbered(
 
 def test_tenant_curated_vmware_row_untouched(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A tenant-scoped ``vmware`` row is left alone -- the seed is global-only."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0047")
+    copy_migrated_db(cfg, "0047")
 
     tenant_id = UUID("22222222-2222-2222-2222-222222222222")
     row_id = _insert_collection(sync_url, tenant_id=tenant_id)  # empty prose, but tenant-scoped
@@ -276,6 +279,7 @@ def test_tenant_curated_vmware_row_untouched(
 
 def test_no_vmware_row_is_a_noop_no_insert(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """A deploy without the global ``vmware`` seed gains no row.
 
@@ -284,7 +288,7 @@ def test_no_vmware_row_is_a_noop_no_insert(
     the row count is unchanged.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0047")
+    copy_migrated_db(cfg, "0047")
 
     other_id = _insert_collection(sync_url, collection_key="other-corpus")
 
@@ -298,6 +302,7 @@ def test_no_vmware_row_is_a_noop_no_insert(
 
 def test_upgrade_is_idempotent(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """Re-running the upgrade against an already-seeded DB changes nothing.
 
@@ -315,7 +320,7 @@ def test_upgrade_is_idempotent(
     ``add_column("targets", "tls_server_name")`` → "duplicate column").
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0047")
+    copy_migrated_db(cfg, "0047")
 
     row_id = _insert_collection(sync_url)
 
@@ -334,6 +339,7 @@ def test_upgrade_is_idempotent(
 
 def test_downgrade_clears_seeded_prose_but_keeps_operator_edit(
     alembic_cfg: tuple[Config, str],
+    copy_migrated_db: Callable[[Config, str], None],
 ) -> None:
     """``downgrade`` rewinds only the prose this migration authored.
 
@@ -347,7 +353,7 @@ def test_downgrade_clears_seeded_prose_but_keeps_operator_edit(
     against a column that already exists and fail with "duplicate column".
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0048")
+    copy_migrated_db(cfg, "0048")
 
     row_id = _insert_collection(sync_url)
     # Run the seed by stamping back + re-upgrading (the row was inserted at

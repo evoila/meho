@@ -97,7 +97,9 @@ from meho_backplane.operations.approval_context import (
 )
 from meho_backplane.operations.approval_outcome import resume_outcome
 from meho_backplane.operations.approval_queue import (
+    EXPIRED_REASON_MESSAGES,
     MAX_REASON_LENGTH,
+    ApprovalExpiredReason,
     ApprovalListOrder,
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
@@ -112,6 +114,7 @@ from meho_backplane.operations.approval_queue import (
     SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
     WithdrawForbiddenError,
+    approval_expired_reason,
     approval_result_state,
     approve_request,
     get_decision_delegation,
@@ -261,6 +264,17 @@ class ApprovalRequestView(BaseModel):
     #: status, error code and the run's audit id. ``None`` until the run
     #: starts, and for a request that is not ``approved``. Additive.
     resume_outcome: ApprovalResumeOutcomeView | None = None
+    #: Why an ``expired`` request expired (#5030): ``deadline_passed`` or
+    #: ``release_changed`` (MEHO was updated while it waited). ``None``
+    #: unless ``status`` is ``expired``. Read off the row. Additive.
+    expired_reason: ApprovalExpiredReason | None = None
+    #: What the requester reads for ``expired_reason``, with the advice to
+    #: ask again (#5030). ``None`` unless ``status`` is ``expired``.
+    expired_message: str | None = None
+    #: The MEHO release the request was made under (#5030): the commit
+    #: hash, plus the chart version when set. ``None`` for a request saved
+    #: before MEHO recorded it, or made by a build with no release identity.
+    release_id: str | None = None
     reviewed_by: str | None
     #: Reviewer display name, resolved alongside ``reviewed_by`` (#3300).
     #: ``None`` before a decision or when the deciding token carried no
@@ -452,6 +466,7 @@ def _view(
     simply absent there. *delegation* (#3692) is likewise single-request
     only -- it is read off the decision audit row.
     """
+    expired_reason = approval_expired_reason(row)
     return ApprovalRequestView(
         id=row.id,
         tenant_id=row.tenant_id,
@@ -468,6 +483,9 @@ def _view(
         status=ApprovalRequestStatus(row.status),
         result_state=approval_result_state(row),
         resume_outcome=_resume_outcome_view(row),
+        expired_reason=expired_reason,
+        expired_message=EXPIRED_REASON_MESSAGES[expired_reason] if expired_reason else None,
+        release_id=row.release_id,
         reviewed_by=row.reviewed_by,
         reviewed_by_name=row.reviewed_by_name,
         decided_at=row.decided_at.isoformat() if row.decided_at else None,
@@ -746,7 +764,7 @@ async def get_approval_result(
 
     Surfaces the reduced / handle-shaped ``OperationResult`` envelope the
     backplane produced when it re-dispatched the approved op, so the consumer
-    that parked a **non-idempotent** op (VCF ``installer.sddc.bringup.start``)
+    that parked a **non-idempotent** op (one that starts a long task)
     can resume in place by poll — read back the resulting task id and continue
     polling it — instead of a second submit that would start a second
     bring-up.

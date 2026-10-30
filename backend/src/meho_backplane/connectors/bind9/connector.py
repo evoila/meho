@@ -214,9 +214,9 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "journal swap / rndc thaw) so a failed apply leaves the zone "
         "untouched. ``add`` is a ``caution`` write; ``remove`` clears "
         "every A + AAAA at the name and is a governed ``destructive`` "
-        "write (#3247 — human approval + preview-hash binding + a "
+        "write (human approval + preview-hash binding + a "
         "whole-name blast-radius), as is the single-record "
-        "``bind9.record.delete`` (#3231; prefer it to retire ONE "
+        "``bind9.record.delete`` (prefer it to retire ONE "
         "record rather than the whole name). "
         "Typically reached after the 'zone' group identifies the "
         "target zone. Pair with the 'config' group when the change "
@@ -257,8 +257,8 @@ class Bind9Connector(SshConnector):
     # makes room for a future ``("bind9", "9.x", "bind9-rndc")`` or
     # ``("bind9", "9.x", "bind9-rest")`` sibling once a non-SSH
     # control surface lands; the multi-impl shape is already in the
-    # registry-v2 substrate (vmware-rest vs the future
-    # vmware-pyvmomi). The ``9.x`` version range covers ISC's 9.18
+    # registry-v2 substrate (several impl_ids can serve one
+    # product). The ``9.x`` version range covers ISC's 9.18
     # (current Extended Support Version) and 9.20 (current Stable
     # Release) -- both expose ``named -v`` / ``named-checkconf -p``
     # with the same flags and the same banner format.

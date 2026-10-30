@@ -26,9 +26,11 @@ from meho_backplane.operations.approval_outcome import (
     resume_outcome_from_envelope,
 )
 from meho_backplane.operations.approval_queue import (
+    EXPIRED_REASON_MESSAGES,
     ApprovalNotFoundError,
     ChainPosition,
     Delegation,
+    approval_expired_reason,
     approval_result_state,
     get_request,
     pending_chain_positions,
@@ -161,8 +163,15 @@ def project_request_to_view(
     ``chain`` (#3596) is ``{"work_ref", "step", "total"}`` when the request
     is step ``step`` of ``total`` pending requests under one change ticket,
     else ``None``. Only the callers that computed it pass it.
+
+    ``expired_reason`` / ``expired_message`` (#5030) say why an ``expired``
+    request expired (its deadline passed, or MEHO was updated while it
+    waited) and tell the requester to ask again; ``release_id`` is the
+    release the request was made under. The reason keys are ``None`` for a
+    request that is not expired.
     """
     result_state = approval_result_state(row)
+    expired_reason = approval_expired_reason(row)
     return {
         "id": str(row.id),
         "op_id": row.op_id,
@@ -184,6 +193,9 @@ def project_request_to_view(
         "result_state": result_state.value if result_state is not None else None,
         "outcome": project_outcome(resume_outcome(row)),
         "chain": _project_chain(chain),
+        "expired_reason": expired_reason.value if expired_reason else None,
+        "expired_message": EXPIRED_REASON_MESSAGES[expired_reason] if expired_reason else None,
+        "release_id": row.release_id,
     }
 
 

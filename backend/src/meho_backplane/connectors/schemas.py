@@ -602,8 +602,8 @@ class CandidateHint(BaseModel):
     """One candidate target a connector's :meth:`Connector.list_candidates` returns.
 
     Candidates are potentially-reachable targets the connector inferred
-    from an existing seed (e.g. a vCenter exposing its managed ESXi
-    hosts; a kubeconfig listing peer cluster contexts). The
+    from an existing seed (e.g. a kubeconfig listing peer cluster
+    contexts). The
     G9.1-T6 ``meho targets discover`` CLI verb surfaces these to the
     operator; auto-registration is intentionally out of scope per
     Initiative #363 (operator runs ``meho targets import`` after review).

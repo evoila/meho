@@ -665,6 +665,46 @@ func TestPrintDetailRendersOptionalFields(t *testing.T) {
 	}
 }
 
+// TestPrintDetailRendersReleaseAndExpiredReason confirms show prints the
+// release a request was made under, and why an expired request expired
+// with the advice to ask again (#5030).
+func TestPrintDetailRendersReleaseAndExpiredReason(t *testing.T) {
+	d := newApprovalView(t, "expired", "")
+	release := "0123456789abcdef0123456789abcdef01234567 (chart 0.40.0)"
+	reason := api.ApprovalExpiredReasonReleaseChanged
+	message := "MEHO was updated while the request waited, and an approval covers one exact release. Ask again."
+	d.ReleaseId = &release
+	d.ExpiredReason = &reason
+	d.ExpiredMessage = &message
+
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	out := stdout.String()
+	for _, want := range []string{
+		"Release:      " + release,
+		"Expired:      " + message,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printDetail render missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintDetailOmitsReleaseWhenUnset confirms a request with no release
+// and no expiry reason prints neither line (#5030).
+func TestPrintDetailOmitsReleaseWhenUnset(t *testing.T) {
+	d := newApprovalView(t, "pending", "")
+
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	out := stdout.String()
+	for _, banned := range []string{"Release:", "Expired:"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("printDetail render included %q for nil field in:\n%s", banned, out)
+		}
+	}
+}
+
 // TestPrintListTableEmpty — an empty list names the state filter that
 // produced it and how to see more; only --status all with no --work-ref
 // and no offset says "none at all". With --work-ref, the message names

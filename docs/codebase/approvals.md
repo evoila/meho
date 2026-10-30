@@ -94,6 +94,96 @@ terminal, so it cannot be approved (the pending guard raises
 `ApprovalRequestAlreadyDecidedError`) — an expired run-bound request can
 never be claimed or re-dispatched (#2293).
 
+## An approval covers one exact release (#5030)
+
+A person approves one exact release of MEHO. When MEHO is updated, every
+request that still waits from an older release ends, and the requester
+asks again under the new release. MEHO is updated about every week, and a
+request can wait up to 14 days, so an update often ends waiting requests.
+This costs one more approval for a request that waits across an update.
+It is the simple and strict choice.
+
+**What MEHO records.** `create_pending_request` stores the running
+release on the new column `approval_request.release_id` (migration
+`0126`). The value comes from `version.running_release_id()`: the full
+commit hash (`GIT_SHA`), plus the chart version (`CHART_VERSION`) when it
+is set. These are the same values `GET /version` shows.
+
+**At start-up.** `main._run_lifespan_startup` calls
+`approval_expiry.expire_approvals_from_older_release()`. For each tenant
+it calls `approval_queue.expire_older_release_requests()`, which moves
+every `pending` request whose `release_id` is not the running release to
+`expired`. A request with no `release_id` (saved before this change)
+counts as an older release, so the first start with this change ends it
+too. The expiry reuses the TTL path (`_expire_request`): one
+`approval.decision` audit row each, under `system:approval-expiry`, with
+`reason: "release_changed"`, `request_release` and `running_release` in
+the payload. A request already past its deadline expires as the TTL sweep
+would expire it, with no extra reason. This runs whether or not
+`APPROVAL_EXPIRY_ENABLED` is set: it is part of the approval rule, not the
+TTL clean-up. A failure is logged and the start goes on; the check below
+still stops any old approval from running.
+
+**Before an approved run.** Both resume paths call
+`approval_queue.refuse_resume_if_release_changed()` before they run
+anything: the operator surfaces (`resume_dispatch_after_approval`) and the
+in-process agent waiter (`agent/approval_wait.py`). When the request's
+`release_id` is not the running release, the operation does not run and
+the vendor gets no call:
+
+1. The one-resumer claim (`claim_resume`) is taken, so the request can
+   never run later. If another resumer took it first, the usual
+   `already_resumed` result comes back. The claim winner then deletes the
+   request's stored run input (`approval_handoff.discard`), the same as
+   every other way a request ends.
+2. One audit row records the refusal: `path = "approval.resume"`,
+   `status_code = 409`, `result_status = "release_changed_while_waiting"`,
+   both releases in the payload.
+3. The caller gets a `denied` result with
+   `error_code = "release_changed_while_waiting"`, and the refusal is
+   stored as the request's run result. So every read surface shows
+   `result_state = "failed"` with that error code.
+
+This covers a request that was approved just before an update and had
+not run yet. A remote-write mint for a satellite runner checks the same
+rule: an approval from an older release mints nothing
+(`REMOTE_WRITE_GATE_UNSATISFIED`, logged like the other mint refusals,
+and the approval stays unused).
+
+**No release identity.** A build with no `GIT_SHA` (or `GIT_SHA=unknown`)
+has no release identity. Only local development runs like this; every
+published image sets `GIT_SHA`. Then MEHO stores no `release_id`, ends no
+request at start-up, and refuses no run. The start-up check logs one
+`approval_release_binding_off` warning so this is visible. A request made in such a run has
+no `release_id`, so the first start of a real release ends it.
+
+**What the requester sees.** The read views (REST
+`ApprovalRequestView`, the MCP approvals tools, the console) carry three
+added fields: `release_id`, `expired_reason` (`deadline_passed` or
+`release_changed`, only for an `expired` request) and `expired_message`,
+a plain sentence with the advice to ask again. `meho approvals show`
+prints `Release:` and `Expired:` lines. The reason is read off the row and
+not stored: only the start-up expiry ends a request before its deadline,
+so an `expired` row with `decided_at < expires_at` expired because the
+release changed. The console modal shows such a request with the time
+the update ended it (`decided_at`), not the deadline it never reached.
+For a run MEHO refused (error code `release_changed_while_waiting`), the
+console says MEHO was updated, the operation did not run, and the
+requester must ask again; it does not say the operation ran and failed.
+
+**During a rolling update.** For a short time old and new pods run side
+by side. A new pod ends the waiting requests it finds when it starts. A
+request that an old pod saves after that point still waits; if it is
+approved, a new pod refuses to run it. Once both releases have this
+check, an old pod also refuses to run a request made by a new pod. In both cases nothing from the wrong release
+runs; the requester asks again.
+
+**Later, not built yet: a finer binding.** Each operation could get an
+execution version: a checksum of its handler code, the shared code it
+uses, its schemas, its risk level, its approval flag and its steps. Then
+an update would end only the requests whose operation changed. That needs
+its own design.
+
 ## The params hash on requests and audit rows
 
 Two kinds of rows carry a keyed hash of a call's params:
@@ -394,7 +484,11 @@ What it resolves, all fail-open to `None`:
   so the reviewer reads `web-01 (vm-1042)` instead of an unresolved
   `{vm}`. The gate params already carry the sub-op's full logical params
   (`connectors/vmware_rest/composites/_write.py`), so no live read is
-  needed at render time.
+  needed at render time. When the params name no subject, the resolver
+  uses a `subject` string the preview builder stored under
+  `proposed_effect.preview`, with the same credential-class and redaction
+  rules. `k8s.apply` names its objects there, for example
+  `Deployment/prod/web, Service/prod/web` (#3877).
 - **parent composite** — for a composite *child* park, the op id of the
   composite that fanned it out, walked off the `request_audit_id` →
   `parent_audit_id` lineage the #3348 direct-seam fix records (see
@@ -1330,7 +1424,19 @@ The only builder wired in #1437 is **`k8s.apply`**: it re-invokes the
 `k8s_apply` handler with `dry_run="server"` forced on (the API's
 `?dryRun=All`), so nothing persists and the per-document summary
 (resource identity + `resourceVersion` + `uid`) is the diff-preview the
-reviewer reads. When the API server rejects the dry-run (for example an
+reviewer reads. The builder also adds `manifest` (the applied manifest,
+one dict per document) and `subject` (the objects it touches), so the
+approver sees what the apply sets, not only which objects it touches
+(#3877). Secret `data` / `stringData` values, every `env` value, every
+`httpHeaders` value of a probe or lifecycle hook, every `command` / `args`
+list (only its size in bytes stays) and the
+`kubectl.kubernetes.io/last-applied-configuration` annotation are hidden
+first, at any depth (`connectors/kubernetes/ops_write_preview.py`), then
+the echo goes through the same two-pass redaction as the generic params
+echo. The echo keeps at most 16 KB in total, counting every entry: a
+document that does not fit in full keeps only its identity, and when not
+even that fits, one closing entry counts the documents left out. When the
+API server rejects the dry-run (for example an
 admission webhook denial), the handler raises `ApplyRejectedError` and the
 row gets the `preview_unavailable` marker with the server's message in
 `preview_error`, so the reviewer sees that the apply will be rejected
@@ -1387,7 +1493,7 @@ got one in #4850; `k8s.secret.update` came later with its own builder
 | `keycloak.user.reset_password` | every call | user (`username` / `id`), realm, Vault path of the new password (`password_secret_ref`, mount, field), `temporary` | the password |
 | `vault.auth.userpass.update_password` | every call | mount, username, `sets_password` | the password |
 | `vault.auth.userpass.write` | every call | mount, username, `sets_password`, `token_policies` and whether they are replaced or kept | the password |
-| `k8s.secret.create` | every call | name, namespace, type, all key names, inline key names, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts | any value |
+| `k8s.secret.create` | every call | name, namespace, type, all key names, inline key names, the `labels` and `annotations` maps, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts | any value |
 | `k8s.secret.update` | every call | name, namespace, `mode`, the key names that are set, inline key names, the `*_secret_ref` store paths per key, the `*_secret_mount` store mounts, the key names the Secret has now, in `replace` mode the key names that are removed | any value |
 | `k8s.job.create` | every call | name, namespace, service account, per container: name, image, env var names, `envFrom` Secret / ConfigMap names, command size in bytes | env values, the command and args text |
 | `sddc.host.validate` | an agent's call | host count; per host: `fqdn`, `username`, `storageType`, `networkPoolId` | the ESXi password and any other spec field |
@@ -1765,6 +1871,60 @@ preview stays hidden (it is a credential op), but the check still runs,
 so a write Vault would refuse is refused at park time instead of after
 approval. See
 [`docs/codebase/connectors-kubernetes.md`](connectors-kubernetes.md).
+
+### The requester's policy on a second target (#3898)
+
+Some ops write to a second target that the caller names in the params.
+`vcfa.provider.api_token.create` is the first: it writes the minted token
+through `vault.kv.patch` on the caller-named `vault_target`. The handler
+calls the Vault handler directly, so the dispatcher's policy gate never
+sees that write. One shared module checks it:
+`operations/secondary_target_policy.py`.
+
+**Execution runs as the reviewer. The requester's policy on the second
+target is still enforced.** The operator approval surfaces (REST
+`/approve` and `/decide`, the MCP by-id approve) run the approved call as
+the reviewer. Without this module, only the reviewer's policy would be
+checked, and an agent's `deny` on the Vault target would be skipped.
+
+How it works:
+
+1. **At park time** the op's permission preflight calls
+   `requester_policy_preflight`. It runs the policy gate for the requester
+   on the second target and adds three keys to
+   `proposed_effect["permission_preflight"]`:
+   - `requester_denied` — `true` when the requester's policy says `deny`.
+   - `requester_reason` — the `policy_denied: …` reason, or `null`.
+   - `requester` — who asked: `sub`, `principal_kind`, `client_id`,
+     `tenant_role`, `act`. The resume uses this to check them again.
+
+   `needs-approval` counts as allowed: the approval being asked for
+   satisfies it. A `requester_denied: true` does **not** refuse the park.
+   The reviewer sees it on the card and should reject.
+2. **On a reviewer's resume** `_dispatch_resume_with_bound_context` binds
+   the requester for the run (`bind_approved_requester`). Who asked comes
+   from the approval row (`principal_sub` / `principal_act`). The card's
+   `requester` record supplies the rest (kind, role, client id), and only
+   when its `sub` matches the row.
+3. **In the handler** `secondary_target_refusal` checks the caller (the
+   reviewer) as before, then the bound requester, **live**, with
+   `decide_only=True` (no standing grant is marked used). A requester
+   `deny` refuses before any appliance call:
+   `policy_denied: requester '<sub>': <op> on <target label> '<name>': …`.
+   A deny added while the request waited still stops it.
+
+The agent's own resume (`call_operation_with_approval`) runs as the agent,
+so the agent is the caller and the requester check adds nothing. When a
+reviewer runs an opted-in op and the card has no `requester` record, or
+its `sub` does not match the row, the run is refused before any appliance
+call: `policy_denied: the requester's policy … cannot be checked … -- ask
+again`. This covers a park whose preflight failed and a request parked
+before #3898. Ops that do not opt in never read the binding.
+
+**To opt an op in:** describe its second-target write as a
+`SecondaryTargetWrite(connector_id, op_ids, target_label)`. Call
+`requester_policy_preflight` from its registered permission preflight and
+`secondary_target_refusal` from its handler, with the same value.
 
 ## Transports
 

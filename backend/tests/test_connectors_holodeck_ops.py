@@ -1638,10 +1638,10 @@ _READ_OP_IDS: frozenset[str] = frozenset(
 _APPROVAL_GATED_READ_OP_IDS: frozenset[str] = frozenset({"holodeck.k8s.exec"})
 
 
-def test_holodeck_ops_has_seventeen_entries() -> None:
+def test_holodeck_ops_has_eighteen_entries() -> None:
     """about + 7 T2 reads + disk.usage + #2847 backups.list + 3 write ops +
-    #2908 4 deploy-lifecycle ops = 17 total."""
-    assert len(HOLODECK_OPS) == 17
+    #2908 4 deploy-lifecycle ops + instance.remove = 18 total."""
+    assert len(HOLODECK_OPS) == 18
 
 
 def test_holodeck_ops_about_remains_at_index_zero() -> None:
@@ -1659,6 +1659,7 @@ def test_holodeck_ops_covers_expected_op_ids() -> None:
         "holodeck.instance.start",
         "holodeck.instance.status",
         "holodeck.router.patch",
+        "holodeck.instance.remove",
     }
     assert op_ids == expected
 
@@ -1801,6 +1802,8 @@ def test_holodeck_ops_group_keys_include_new_groups() -> None:
         "deploy-lifecycle",
         "deploy-status",
         "deploy-patch",
+        # The delete of an instance (holodeck.instance.remove).
+        "deploy-remove",
     } == group_keys
 
 

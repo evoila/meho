@@ -102,7 +102,12 @@ from typing import Any, Final
 import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.tools._connector_shared import (
     _CONNECTOR_ID_DESCRIPTION,
     _OP_CLASS_READ,
@@ -579,6 +584,7 @@ async def _delete_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         name=CONNECTOR_LIST_NAME,
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         feature="typed_connector_reads",
         description=(
@@ -763,7 +769,9 @@ register_mcp_tool(
                 "op_id": {
                     "type": "string",
                     "minLength": 1,
-                    "description": ("Connector-side op_id (e.g. 'GET:/api/vcenter/cluster')."),
+                    "description": (
+                        "Connector-side op_id (e.g. 'GET:/repos/{owner}/{repo}/issues')."
+                    ),
                 },
                 "custom_description": {"type": ["string", "null"]},
                 "safety_level": {

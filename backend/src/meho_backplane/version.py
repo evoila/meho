@@ -37,7 +37,13 @@ from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.connector_packages import ConnectorPackage, installed_connector_packages
 
-__all__ = ["VersionResponse", "build_git_sha", "deployed_version_label", "router"]
+__all__ = [
+    "VersionResponse",
+    "build_git_sha",
+    "deployed_version_label",
+    "router",
+    "running_release_id",
+]
 
 _UNKNOWN: str = "unknown"
 
@@ -100,6 +106,25 @@ def deployed_version_label() -> str:
     if git_sha and git_sha != _UNKNOWN:
         return git_sha[:_SHA_LABEL_LEN]
     return _UNKNOWN
+
+
+def running_release_id() -> str | None:
+    """Return the identity of the running release, or ``None`` when unknown.
+
+    An approval request is bound to this value (#5030): a person approves
+    one exact release of MEHO. The value is the full ``GIT_SHA`` plus the
+    ``CHART_VERSION`` when it is set, the same values ``GET /version``
+    shows. ``None`` when ``GIT_SHA`` is unset or ``unknown``: only a local
+    development run has no release identity, and then MEHO does not bind
+    or check a release.
+    """
+    git_sha = os.environ.get("GIT_SHA")
+    if not git_sha or git_sha == _UNKNOWN:
+        return None
+    chart_version = os.environ.get("CHART_VERSION")
+    if chart_version:
+        return f"{git_sha} (chart {chart_version})"
+    return git_sha
 
 
 @router.get("/version", response_model=VersionResponse)

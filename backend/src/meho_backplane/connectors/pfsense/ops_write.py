@@ -123,6 +123,12 @@ _HEREDOC_DELIM = "MEHO_PFSENSE_PLAYBACK_EOF"
 _GATEWAY_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _INTERFACE_RE = re.compile(r"^[A-Za-z0-9_]{1,32}$")
 
+# Optional free-text description on a gateway or static route. One line of
+# printable text: control characters (newlines included) are refused.
+_DESCR_MAX_LEN = 200
+_DESCR_PATTERN = r"^[^\u0000-\u001f\u007f]{1,200}$"
+_DESCR_RE = re.compile(_DESCR_PATTERN)
+
 
 # ---------------------------------------------------------------------------
 # Input validation
@@ -155,6 +161,22 @@ def _validate_interface(value: Any) -> str:
             f"got {value!r}"
         )
     return value
+
+
+def _validate_descr(value: Any, default: str) -> str:
+    """Return the description to store: *value* when given, else *default*.
+
+    *value* must be one line of printable text, 1 to 200 characters, with
+    no control characters. Leading and trailing spaces are removed first.
+    """
+    if value is None:
+        return default
+    if not isinstance(value, str) or not _DESCR_RE.fullmatch(value.strip()):
+        raise ValueError(
+            f"descr must be one line of text, 1 to {_DESCR_MAX_LEN} characters, "
+            f"with no control characters; got {value!r}"
+        )
+    return value.strip()
 
 
 def _validate_gateway_ip(value: Any) -> tuple[str, str]:
@@ -295,6 +317,7 @@ def _build_gateway_playback(
     gateway: str,
     ipprotocol: str,
     monitor_disable: bool,
+    descr: str,
 ) -> str:
     """Return the raw-PHP playback fragment that appends one gateway_item."""
     lines = [
@@ -308,7 +331,7 @@ def _build_gateway_playback(
         f"$gw['name'] = {_php_squote(name)};",
         "$gw['weight'] = '1';",
         f"$gw['ipprotocol'] = {_php_squote(ipprotocol)};",
-        f"$gw['descr'] = {_php_squote('meho: gateway ' + name)};",
+        f"$gw['descr'] = {_php_squote(descr)};",
     ]
     if monitor_disable:
         lines.append("$gw['monitor_disable'] = '';")
@@ -317,7 +340,7 @@ def _build_gateway_playback(
     return "\n".join(lines) + "\n"
 
 
-def _build_route_playback(*, network: str, gateway: str) -> str:
+def _build_route_playback(*, network: str, gateway: str, descr: str) -> str:
     """Return the raw-PHP playback fragment that appends one static route."""
     lines = [
         "global $config;",
@@ -327,7 +350,7 @@ def _build_route_playback(*, network: str, gateway: str) -> str:
         "$route = array();",
         f"$route['network'] = {_php_squote(network)};",
         f"$route['gateway'] = {_php_squote(gateway)};",
-        f"$route['descr'] = {_php_squote('meho: static route ' + network)};",
+        f"$route['descr'] = {_php_squote(descr)};",
         "$config['staticroutes']['route'][] = $route;",
         f"write_config({_php_squote('meho: add static route ' + network)});",
         "system_routing_configure();",
@@ -549,7 +572,7 @@ async def pfsense_gateway_add(
     fragment, then read ``config.xml`` back and confirm the row landed.
 
     Returns ``{op_class, resource, name, interface, gateway, ipprotocol,
-    monitor_disable, existed_before, applied, existing}``. ``existing`` is
+    monitor_disable, descr, existed_before, applied, existing}``. ``existing`` is
     the pre-existing ``gateway_item`` row when ``existed_before`` is true
     (surfacing a name collision whose interface / IP may differ from the
     request), else ``None``.
@@ -558,6 +581,7 @@ async def pfsense_gateway_add(
     interface = _validate_interface(params.get("interface"))
     gateway, ipprotocol = _validate_gateway_ip(params.get("gateway"))
     monitor_disable = bool(params.get("monitor_disable", False))
+    descr = _validate_descr(params.get("descr"), default=f"meho: gateway {name}")
 
     before = await _read_config_xml(self, target, operator)
     existing = _find_gateway(before, name)
@@ -569,6 +593,7 @@ async def pfsense_gateway_add(
         "gateway": gateway,
         "ipprotocol": ipprotocol,
         "monitor_disable": monitor_disable,
+        "descr": descr,
     }
     if existing is not None:
         return {**result, "existed_before": True, "applied": False, "existing": existing}
@@ -579,6 +604,7 @@ async def pfsense_gateway_add(
         gateway=gateway,
         ipprotocol=ipprotocol,
         monitor_disable=monitor_disable,
+        descr=descr,
     )
     await _apply_playback(
         self,
@@ -624,11 +650,13 @@ async def pfsense_route_static_add(
     ``system_routing_configure()``), then read ``config.xml`` back and
     confirm the row landed.
 
-    Returns ``{op_class, resource, network, gateway, existed_before,
-    applied, existing}``.
+    Returns ``{op_class, resource, network, gateway, descr, existed_before,
+    applied, existing}``. ``descr`` is the description the route gets: the
+    caller's ``descr``, or ``meho: static route <network>`` when none is given.
     """
     network = _validate_network_cidr(params.get("network"))
     gateway = _validate_gateway_name(params.get("gateway"))
+    descr = _validate_descr(params.get("descr"), default=f"meho: static route {network}")
 
     before = await _read_config_xml(self, target, operator)
     if _find_gateway(before, gateway) is None:
@@ -642,11 +670,12 @@ async def pfsense_route_static_add(
         "resource": "static_route",
         "network": network,
         "gateway": gateway,
+        "descr": descr,
     }
     if existing is not None:
         return {**result, "existed_before": True, "applied": False, "existing": existing}
 
-    body = _build_route_playback(network=network, gateway=gateway)
+    body = _build_route_playback(network=network, gateway=gateway, descr=descr)
     await _apply_playback(
         self,
         target,
@@ -738,6 +767,17 @@ _GATEWAY_ADD_PARAMETER_SCHEMA: dict[str, Any] = {
                 "gateway whose upstream device is not up yet."
             ),
         },
+        "descr": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": _DESCR_PATTERN,
+            "description": (
+                "Optional description stored on the gateway, for example which lab "
+                "or ticket it is for. One line, at most 200 characters. When "
+                "left out, MEHO writes ``meho: gateway <name>``."
+            ),
+        },
     },
     "required": ["name", "interface", "gateway"],
     "additionalProperties": False,
@@ -753,6 +793,7 @@ _GATEWAY_ADD_RESPONSE_SCHEMA: dict[str, Any] = {
         "gateway": {"type": "string"},
         "ipprotocol": {"type": "string", "enum": ["inet", "inet6"]},
         "monitor_disable": {"type": "boolean"},
+        "descr": {"type": "string"},
         "existed_before": {"type": "boolean"},
         "applied": {"type": "boolean"},
         "existing": {"type": ["object", "null"]},
@@ -765,6 +806,7 @@ _GATEWAY_ADD_RESPONSE_SCHEMA: dict[str, Any] = {
         "gateway",
         "ipprotocol",
         "monitor_disable",
+        "descr",
         "existed_before",
         "applied",
         "existing",
@@ -792,10 +834,14 @@ _GATEWAY_ADD_LLM_INSTRUCTIONS: dict[str, Any] = {
             "Optional (default false). Disable dpinger monitoring for a "
             "pre-staged gateway whose upstream is not up yet."
         ),
+        "descr": (
+            "Optional. One-line description stored on the gateway (which lab, "
+            "which ticket). Default: ``meho: gateway <name>``."
+        ),
     },
     "output_shape": (
         "``{op_class: 'write', resource: 'gateway', name, interface, "
-        "gateway, ipprotocol, monitor_disable, existed_before, applied, "
+        "gateway, ipprotocol, monitor_disable, descr, existed_before, applied, "
         "existing}``. ``ipprotocol`` is ``inet`` / ``inet6`` from the IP "
         "family. When ``existed_before`` is true, ``applied`` is false and "
         "``existing`` carries the pre-existing gateway row (whose interface "
@@ -824,6 +870,17 @@ _ROUTE_ADD_PARAMETER_SCHEMA: dict[str, Any] = {
                 "rejected."
             ),
         },
+        "descr": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": _DESCR_PATTERN,
+            "description": (
+                "Optional description stored on the route, for example which lab "
+                "or ticket it is for. One line, at most 200 characters. When "
+                "left out, MEHO writes ``meho: static route <network>``."
+            ),
+        },
     },
     "required": ["network", "gateway"],
     "additionalProperties": False,
@@ -836,6 +893,7 @@ _ROUTE_ADD_RESPONSE_SCHEMA: dict[str, Any] = {
         "resource": {"type": "string", "enum": ["static_route"]},
         "network": {"type": "string"},
         "gateway": {"type": "string"},
+        "descr": {"type": "string"},
         "existed_before": {"type": "boolean"},
         "applied": {"type": "boolean"},
         "existing": {"type": ["object", "null"]},
@@ -845,6 +903,7 @@ _ROUTE_ADD_RESPONSE_SCHEMA: dict[str, Any] = {
         "resource",
         "network",
         "gateway",
+        "descr",
         "existed_before",
         "applied",
         "existing",
@@ -869,11 +928,17 @@ _ROUTE_ADD_LLM_INSTRUCTIONS: dict[str, Any] = {
         "gateway": (
             "Required. Name of an existing gateway (add it first with ``pfsense.gateway.add``)."
         ),
+        "descr": (
+            "Optional. One-line description stored on the route (which lab, "
+            "which ticket), so people who read the firewall later know what "
+            "it is for. Default: ``meho: static route <network>``."
+        ),
     },
     "output_shape": (
         "``{op_class: 'write', resource: 'static_route', network, gateway, "
-        "existed_before, applied, existing}``. ``network`` is the "
-        "canonical CIDR. When ``existed_before`` is true, ``applied`` is "
+        "descr, existed_before, applied, existing}``. ``network`` is the "
+        "canonical CIDR. A route that already exists keeps its own "
+        "description; ``existing.descr`` shows it. When ``existed_before`` is true, ``applied`` is "
         "false and ``existing`` carries the pre-existing route row; "
         "otherwise ``existing`` is null."
     ),

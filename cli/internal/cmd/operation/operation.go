@@ -16,6 +16,9 @@
 //     — page rows back from a JSONFlux result handle via
 //     POST /api/v1/operations/result-query (#3179), the REST twin of the
 //     MCP `result_query` tool.
+//   - `meho operation subops <op_id> [--connector C]` — the child steps
+//     of a multi-step operation and whether a grant may cover each, via
+//     GET /api/v1/operations/governed-subops (#4983).
 //
 // Each verb wraps one backplane route and renders the response in
 // either a human-readable table or `--json` mode. Authentication
@@ -52,7 +55,7 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "operation",
-		Short:        "G0.6 operation meta-tool surface (groups / search / call)",
+		Short:        "G0.6 operation meta-tool surface (groups / search / call / preview / result-query / subops)",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newGroupsCmd())
@@ -60,6 +63,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newCallCmd())
 	cmd.AddCommand(newPreviewCmd())
 	cmd.AddCommand(newResultQueryCmd())
+	cmd.AddCommand(newSubopsCmd())
 	return cmd
 }
 
@@ -93,6 +97,11 @@ type operationsAPI interface {
 		params *api.GetSearchApiV1OperationsSearchGetParams,
 		reqEditors ...api.RequestEditorFn,
 	) (*api.GetSearchApiV1OperationsSearchGetResponse, error)
+	GetGovernedSubopsApiV1OperationsGovernedSubopsGetWithResponse(
+		ctx context.Context,
+		params *api.GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams,
+		reqEditors ...api.RequestEditorFn,
+	) (*api.GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse, error)
 	// result-query binds to the raw method, not the *WithResponse one:
 	// the generated parser decodes every 422 as HTTPValidationError (a
 	// list `detail`) and fails on the backplane's object `detail`

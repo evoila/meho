@@ -1157,6 +1157,12 @@ class Settings(BaseModel):
         ``docs/codebase/approvals.md``. Reject is always allowed
         regardless of this flag — an operator withdrawing their own
         pending request is never a privilege escalation.
+    fresh_sign_in_max_age_seconds:
+        How old a person's sign-in may be for an action that needs a
+        fresh sign-in (#4711): turning approval off for an operation over
+        REST. The check reads the token's ``auth_time`` claim; see
+        :mod:`meho_backplane.auth.fresh_sign_in`. Default ``300`` (five
+        minutes). Set via ``FRESH_SIGN_IN_MAX_AGE_SECONDS``.
     approval_allow_delegated_decision:
         Lab-class switch for **delegated** approval decisions (#3693).
         A delegated decision is an approve or reject whose ``reason``
@@ -1658,6 +1664,9 @@ class Settings(BaseModel):
     # the reason, #3692) are allowed only on lab-class deployments. Default
     # False is fail-closed: production refuses them.
     approval_allow_delegated_decision: bool = False
+    # #4711 -- how old a sign-in may be for an action that needs a person
+    # with a fresh sign-in (turning approval off over REST).
+    fresh_sign_in_max_age_seconds: int = Field(default=300, ge=30, le=3600)
     # #4622 -- sandbox mode: a standing grant may also cover deletes, only
     # on an instance for disposable test systems. Both read at boot only.
     sandbox_mode: bool = False
@@ -1792,7 +1801,7 @@ class Settings(BaseModel):
     # the mint is still refused if this config disagrees). Format: a
     # comma-separated list of ``op_pattern`` or ``op_pattern@target_scope``
     # tokens (``@`` omitted => ``target_scope='*'``), e.g.
-    # ``"vmware.vm.tag_set@*,vmware.vm.annotation_set"``; default ``""`` is
+    # ``"k8s.label@*,k8s.annotate"``; default ``""`` is
     # fail-closed (no remote-write executes at the edge until provisioned).
     # Central-only deployments (no runner role) leave this unset.
     satellite_write_allowlist: str = ""
@@ -2821,6 +2830,10 @@ def get_settings() -> Settings:
         # this lab-class switch is explicitly enabled.
         approval_allow_delegated_decision=parse_bool_env(
             os.environ.get("APPROVAL_ALLOW_DELEGATED_DECISION", "false"),
+        ),
+        # #4711 -- how old a sign-in may be for an action that needs a person.
+        fresh_sign_in_max_age_seconds=int(
+            os.environ.get("FRESH_SIGN_IN_MAX_AGE_SECONDS", "300"),
         ),
         # #4622 -- sandbox mode is off unless both settings are set; the
         # boot guards in ``meho_backplane.sandbox_mode`` check them.

@@ -27,9 +27,9 @@ or vmware, only about the generic fact "``endpoint_descriptor`` row X is
   session has no descriptor-routed surface to declare and registers
   nothing -- that is the compliant shape the Goal migrated the shipped
   composites to. A composite that runs another connector's operations as
-  child calls declares them here (``vmware.migration.inventory`` declares
-  its two VCF Operations reads), so the sweep covers it without touching
-  this module.
+  child calls declares them here (for example, the reads it makes on a
+  second connector), so the sweep covers it without touching this
+  module.
 * :func:`assert_no_ingested_dispatch_dependency` -- the per-op primitive.
   Given a code-shipped op's declared ``sub_op_ids`` and its
   ``connector_id``, it resolves each raw sub-op against the descriptor
@@ -99,7 +99,7 @@ __all__ = [
 _log = structlog.get_logger(__name__)
 
 #: Infix marking a composite-to-composite recursion sub-op
-#: (``gh.composite.*`` / ``vmware.composite.*``). Skipped by the walk for
+#: (``gh.composite.*``). Skipped by the walk for
 #: the same reason the connector preflights and the backing-listing marker
 #: skipped it: such sub-ops resolve to registrar-guaranteed
 #: ``source_kind='composite'`` rows, never ingested primitives, so they can

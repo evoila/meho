@@ -599,6 +599,7 @@ func TestUnannotateIDFormHappyPath(t *testing.T) {
 			t.Errorf("expected DELETE; got %s", r.Method)
 		}
 		deleted = true
+		w.Header().Set("Meho-Audit-Id", "99999999-8888-7777-6666-555555555555")
 		w.WriteHeader(http.StatusNoContent)
 	})
 	// A GET handler exists so the test fails loud if the id-form
@@ -622,6 +623,9 @@ func TestUnannotateIDFormHappyPath(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "deleted edge "+edgeID) {
 		t.Errorf("output wrong; got %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "audit receipt: 99999999-8888-7777-6666-555555555555\n") {
+		t.Errorf("expected audit receipt line; got %q", stdout.String())
 	}
 }
 

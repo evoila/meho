@@ -291,6 +291,7 @@ from meho_backplane.operations._audit import (
     AuditCommitError,
     audit_rejection_safe,
     audit_safe,
+    descriptor_op_class,
     parent_audit_id_var,
     policy_decision_var,
     reveal_secret_var,
@@ -974,7 +975,7 @@ def _composite_terminal_error_code(descriptor: EndpointDescriptor, envelope: Any
     predicate detects the marker so :func:`_execute_and_audit_inner` can re-route
     the envelope through the error-audit path.
 
-    Rule (documented in ``docs/codebase/connectors-vmware-rest.md``): the signal
+    Rule: the signal
     is an ``error``-severity issue, NOT the ``status`` sentinel. The sentinel
     space is unbounded and mixes hard failures with legitimate soft refusals /
     idempotency guards (``rule_exists``, ``not_powered_off``,
@@ -1322,9 +1323,11 @@ async def _reduce_and_audit_success(
         # a successful return for every op, read or write (postulate 7 /
         # v0.1-spec §6). The outcome is uncertain and must not be retried.
         return result_audit_commit_failed(op_id, duration_ms)
+    # The two write checks below use the class the audit row above stores.
+    op_class = descriptor_op_class(descriptor)
     activity_advisory = await build_target_activity_advisory(
         operator,
-        op_id=descriptor.op_id,
+        op_class=op_class,
         target_name=getattr(target, "name", None),
     )
     # Second extras fragment beside #2550: the checks-alert advisory
@@ -1338,7 +1341,7 @@ async def _reduce_and_audit_success(
     # stays a clobber-free union of the three fragments.
     reflex_advisory = await build_reflex_advisory(
         operator,
-        op_id=descriptor.op_id,
+        op_class=op_class,
         target_name=getattr(target, "name", None),
     )
     return wrap_ok_result(
@@ -3592,7 +3595,7 @@ async def dispatch(
             # strand an approved op behind an announce it can no longer add.
             announce_block = await announce_gate_blocks(
                 operator,
-                op_id=op_id,
+                op_class=descriptor_op_class(descriptor),
                 safety_level=descriptor.safety_level,
                 target_name=getattr(target, "name", None),
             )

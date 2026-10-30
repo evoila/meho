@@ -4794,10 +4794,10 @@ meho targets delete <name|alias> [flags]
 
 ### `meho targets describe`
 
-Describe a single target (alias-aware)
+Describe a single target by name, alias or id
 
 ```
-meho targets describe <name-or-alias> [flags]
+meho targets describe <name, alias or id> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
@@ -4848,7 +4848,7 @@ meho targets list [flags]
 Probe a target's connector and refresh its fingerprint
 
 ```
-meho targets probe <name-or-alias> [flags]
+meho targets probe <name, alias or id> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
@@ -4859,7 +4859,7 @@ meho targets probe <name-or-alias> [flags]
 Change fields on an existing target
 
 ```
-meho targets update <name|alias> [flags]
+meho targets update <name, alias or id> [flags]
 ```
 
 - `--alias` — alias the target resolves by (repeatable; replaces the whole alias list)

@@ -29,7 +29,7 @@ Why the agent surface is meta-tools, not per-op tools
 =====================================================
 
 CLAUDE.md postulate 5 is load-bearing: the agent never sees vendor-specific
-tools (no ``vsphere.vm.list`` in the tool list). All execution flows through
+tools (no ``k8s.pod.list`` in the tool list). All execution flows through
 ``call_operation(connector_id, op_id, ...)``. So "connector-ops ∩ identity
 permissions" is **not** "register one Pydantic AI tool per connector op" —
 that would put vendor identifiers in tool names, which the architecture
@@ -52,7 +52,7 @@ can grow without a migration — the T2 design constraint):
 
     {
       "meta_tools": ["list_operation_groups", "search_operations", "call_operation"],
-      "connectors": ["vmware-rest-9.0", "vault-1.x"]
+      "connectors": ["k8s-1.x", "vault-1.x"]
     }
 
 * ``meta_tools`` — the allow-list of meta-tool names to register. Omitted /
@@ -197,7 +197,7 @@ _OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = (
             "which operation to invoke: it narrows hundreds of operations to "
             "a handful of relevant groups, each with a `when_to_use` blurb. "
             "Argument: `connector_id` in `<impl_id>-<version>` form (e.g. "
-            '"vmware-rest-9.0", "vault-1.x") — not the bare product name.'
+            '"k8s-1.x", "vault-1.x") — not the bare product name.'
         ),
         parameter_schema={
             "type": "object",
@@ -207,7 +207,7 @@ _OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = (
                     "minLength": 1,
                     "description": (
                         "Connector identifier in `<impl_id>-<version>` form "
-                        '(e.g. "vmware-rest-9.0", "vault-1.x").'
+                        '(e.g. "k8s-1.x", "vault-1.x").'
                     ),
                 },
             },

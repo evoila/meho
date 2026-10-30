@@ -419,6 +419,7 @@ meho approvals list [flags]
 - `--json` — emit raw JSON array instead of the human table
 - `--limit` — max requests to return (1..500; no limit when omitted)
 - `--offset` — skip this many requests first (default 0)
+- `--order` — sort order: oldest or newest (default: newest; oldest when --work-ref is set)
 - `--status` — filter by status: pending, approved, rejected, expired, withdrawn, all (default: pending)
 - `--work-ref` — filter by external change-ticket reference, exact match
 
@@ -676,11 +677,33 @@ meho argocd repo list [flags]
 
 ## `meho audit`
 
-Query the MEHO audit log (query / recent / show / who-touched / my-recent / replay / reflex / trace)
+Query the MEHO audit log (query / count / recent / show / who-touched / my-recent / replay / reflex / trace)
 
 ```
 meho audit
 ```
+
+### `meho audit count`
+
+Count the audit rows that match a filter, per event class
+
+```
+meho audit count [flags]
+```
+
+- `--audit-id` — count only this audit-id (UUID)
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--filter-work-ref` — count only the rows of one change-ticket reference
+- `--json` — print the backplane's answer as it came instead of the summary
+- `--op-class` — count only one op-class (read|write|credential_read|audit_query|other)
+- `--op-id` — count only one op-id (glob with * wildcards)
+- `--parent-audit-id` — count only the rows whose parent is this audit-id (UUID)
+- `--principal` — count only one operator (part of the user id or the name; case does not matter)
+- `--result-status` — count only one result-status (ok|error|denied|pending)
+- `--session-id` — count only one agent session (UUID)
+- `--since` — start of the window; 24h / 7d / 30m / 2w shorthand or ISO-8601 (default: the last 24 hours)
+- `--target` — count only one target (name or alias; server-side resolution)
+- `--until` — end of the window; accepts the same shorthand as --since (default: now)
 
 ### `meho audit my-recent`
 
@@ -1195,8 +1218,9 @@ meho connector edit-op <connector_id> <op_id> [flags]
 - `--enable` — set is_enabled=true on this op
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
 - `--no-requires-approval` — clear the requires_approval flag
+- `--reason` — why you make this change; written to the audit row and required to turn approval off
 - `--requires-approval` — mark the op as requiring an approval workflow
-- `--safety` — replacement safety_level: safe | caution | dangerous
+- `--safety` — replacement safety_level: safe | caution | dangerous | destructive (can only raise the level)
 
 ### `meho connector enable`
 
@@ -1269,6 +1293,31 @@ meho connector list [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 - `--status` — filter by review status: staged | enabled | disabled | all (default all)
+
+### `meho connector overrides`
+
+List operator changes to risk levels and approval, or the operations running with reduced approval
+
+```
+meho connector overrides [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit machine-readable JSON to stdout instead of the human table
+- `--reduced-approval` — list only the operations a platform admin turned approval off for
+
+### `meho connector remove-override`
+
+Remove one operator change to an operation's risk level or approval
+
+```
+meho connector remove-override <connector_id> <op_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit machine-readable JSON to stdout instead of the human summary
+- `--reason` — why you remove it; written to the audit row and required when the removal ends approval
+- `--tenant` — the tenant whose change to remove (a UUID); leave it out for the install-wide change
 
 ### `meho connector review`
 
@@ -3579,7 +3628,7 @@ meho nsx transport-zone list [flags]
 
 ## `meho operation`
 
-operation meta-tool surface (groups / search / call)
+operation meta-tool surface (groups / search / call / preview / result-query / subops)
 
 ```
 meho operation
@@ -3658,6 +3707,18 @@ meho operation search <connector_id> [query] [flags]
 - `--limit` — max hits to return (1..50, clamped by the API at 50)
 - `--op-id` — show this one operation's call contract instead of ranked hits
 - `--scores` — add ranking scores to each hit (honoured for tenant_admin only)
+
+### `meho operation subops`
+
+List the child steps of a multi-step operation and whether a grant may cover each
+
+```
+meho operation subops <op_id> [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--connector` — connector id to ask for (e.g. vmware-rest-8.0); default: the composite's own connector
+- `--json` — print the backplane's answer as it came instead of the table
 
 ## `meho pfsense`
 
@@ -4716,6 +4777,7 @@ meho targets add <name> [flags]
 - `--tls-server-name` — TLS SNI / certificate-verification hostname, decoupled from --host
 - `--verify-tls` — verify the target's TLS certificate; pass --verify-tls=false to opt out
 - `--version` — operator-asserted product version (e.g. 9.0) the resolver consults before the first probe
+- `--vpn-required` — mark that a VPN must be up to reach the target (default: false)
 
 ### `meho targets delete`
 
@@ -4817,6 +4879,7 @@ meho targets update <name|alias> [flags]
 - `--tls-server-name` — TLS SNI / certificate-verification hostname, decoupled from --host
 - `--verify-tls` — verify the target's TLS certificate; pass --verify-tls=false to opt out
 - `--version` — operator-asserted product version
+- `--vpn-required` — mark that a VPN must be up to reach the target; pass --vpn-required=false to clear it
 
 ## `meho tenants`
 

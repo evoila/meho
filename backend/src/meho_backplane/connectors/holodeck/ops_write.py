@@ -261,6 +261,7 @@ async def _run_text(
     target: Any,
     cmd: str,
     operator: Operator | None = None,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
     """Run *cmd* over plain SSH, return ``{stdout, stderr, exit_status}``.
 
@@ -268,8 +269,10 @@ async def _run_text(
     already-quoted) command via the base adapter's ``_run_command`` and shape
     the completed process into the connector's standard result envelope.
     Stderr is capped at 4096 chars (the ``PwshRunError`` convention).
+    *timeout* (seconds) overrides the SSH layer's default when set.
     """
-    proc = await self._run_command(target, cmd, operator=operator)
+    extra: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+    proc = await self._run_command(target, cmd, operator=operator, **extra)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     stderr = (proc.stderr or "") if hasattr(proc, "stderr") else ""
     if not isinstance(stdout, str):

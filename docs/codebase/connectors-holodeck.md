@@ -32,8 +32,10 @@ appends `holodeck.backups.list` — a safe per-file inventory of
 taking the read surface to **10 ops** (13 total, including the 3
 approval-gated write ops). #2908 (Initiative #2907) appends the 4
 deploy-lifecycle ops (`config.apply`, `instance.start`, `instance.status`,
-`router.patch`). `holodeck.instance.remove` deletes an instance again
-(see "Delete an instance" below) — **18 ops total**.
+`router.patch`). #4066 (Initiative #2907) appends the 3 DNS name ops
+(`dns.host.list`, `dns.host.add`, `dns.host.remove`), and
+`holodeck.instance.remove` deletes an instance again
+(see "Delete an instance" below) — **21 ops total**.
 
 Source: `backend/src/meho_backplane/connectors/holodeck/`.
 
@@ -106,13 +108,13 @@ Source: `backend/src/meho_backplane/connectors/holodeck/`.
   (#854) extends the tuple via `_holodeck_ops()` which splats `READ_OPS`
   (the 7 read ops defined in `ops_read.py`) onto the canary, and later tasks
   append `WRITE_OPS` (`ops_write.py`, #2154), `DEPLOY_OPS` (`ops_deploy.py`,
-  #2908) and `REMOVE_OPS` (`ops_remove.py`) — **18 ops total**. The pattern mirrors bind9's `_bind9_ops()` and
+  #2908), `DNS_OPS` (`ops_dns.py`, #4066) and `REMOVE_OPS` (`ops_remove.py`) — **21 ops total**. The pattern mirrors bind9's `_bind9_ops()` and
   pfSense's `_pfsense_ops()`.
 
 - **Response schemas** (`_response_schemas.py`) — `HOLODECK_RESPONSE_SCHEMAS`,
   one schema per op id, split out so the op tables stay readable.
 
-**Operation contracts.** The 18 ops meet the VMware operation-contract check
+**Operation contracts.** The 21 ops meet the VMware operation-contract check
 (`backend/tests/test_operation_contracts.py`); none is on its gap list.
 
 - Each `response_schema` names the fields the handler returns, with a
@@ -142,6 +144,13 @@ Source: `backend/src/meho_backplane/connectors/holodeck/`.
   mapper), `target_hr_version` (reads `Target.version` then `fingerprint.version`),
   and `ROUTER_PATCHES` (the three `RouterPatchSpec` records: applied/unpatched
   grep markers + the `sed` expression per patch).
+
+- **DNS name op handlers** (`ops_dns.py`, #4066) — `holodeck_dns_host_list`,
+  `holodeck_dns_host_add`, `holodeck_dns_host_remove`, and the small `_Router`
+  helper that runs one op call's commands. The pure helpers are in
+  `dns_hosts.py`: `bound_dns_entry` (input check), `parse_hosts`, `plan_add`,
+  `plan_remove`, `dnsmasq_pods`, `dig_status`, `dig_answers`, and
+  `HolodeckDnsError` (carries the failed `step`).
 
 - **`parse_photon_version`** (`connector.py`) — pure parser for
   `/etc/photon-release` output; recovers the `<major>.<minor>(.<patch>)?`
@@ -515,6 +524,85 @@ broadcast surfaces.
   pinned into `_CREDENTIAL_WRITE_OPS` (broadcast defence-in-depth) per the
   `rke2.node.config.update` precedent.
 
+### DNS name ops (#4066 surface, Initiative #2907)
+
+A Holodeck 9.0 router runs its DNS service as dnsmasq in its own
+Kubernetes. The lab's names live in ConfigMap `default/dnsmasq`, key
+`hosts`, one `<address> <name>` line per server. dnsmasq answers the
+reverse question from the same line. `ops_dns.py` (module `DNS_OPS`) adds
+three ops in two groups, `dns` (read) and `dns-write`:
+
+- **`holodeck.dns.host.list`** (`safe`, no approval). Runs
+  `kubectl get configmap dnsmasq -n default -o json` and returns
+  `{rows: [{address, names}], total}`.
+- **`holodeck.dns.host.add`** (`caution`, `requires_approval=True`). Adds one
+  `<address> <name>` line.
+- **`holodeck.dns.host.remove`** (`dangerous`, `requires_approval=True`).
+  Removes the line that is exactly `<address> <name>`.
+
+Each write runs these steps and stops at the first failure (the answer's
+`error` starts with the step name):
+
+1. `input` — `address` must be an IP address (`ipaddress`, not unspecified,
+   not multicast, no IPv6 zone id such as `%eth0`); `name` must be DNS labels joined by `.` (written in lower
+   case). Nothing runs on the router before this check passes.
+2. `read` — read the live ConfigMap and plan the change in Python.
+   `conflict` — the add refuses a name or address that is already used with
+   another partner; the remove refuses when the name or address is only in a
+   line that is not exactly `<address> <name>`. When the line is already there
+   (add) or not there (remove), nothing is written and nothing restarts:
+   `state` is `unchanged` or `absent`. This makes both writes safe to run twice.
+   Such a call still runs the `wait` step (6) and then the `check` step (7):
+   a retry during a rollout must not report `verified` while an old pod
+   still serves the old file.
+   Size limit: the patch (step 4) carries the whole `hosts` value twice, old
+   and new, inside one shell argument, and Linux allows at most 128 KiB per
+   argument. MEHO builds the patch command first and refuses with a `write`
+   error, before the save, when it is longer than 100,000 bytes
+   (`PATCH_CMD_MAX_BYTES`). That is a `hosts` value of about 50 KB.
+3. `save` — `kubectl get configmap dnsmasq -n default -o yaml >
+   /root/dnsmasq-cm-pre-<op>-<time>.yaml`, returned as `backup_path`.
+4. `write` — `kubectl patch configmap dnsmasq -n default --type json -p
+   <patch>`. The JSON Patch has two steps: `test` that `/data/hosts` still
+   holds the value MEHO read, then `replace` it. A change made by someone else
+   in between makes the patch fail; nothing is overwritten. The API server
+   answers a failed `test` step with a generic 422 text only, so on a failed
+   patch MEHO reads the ConfigMap again. When `hosts` already holds MEHO's
+   new value, the patch went through and only the answer was lost (for
+   example a timeout), so MEHO goes on with `verify`, `restart` and `wait`.
+   When `hosts` holds a third value, the error is
+   `conflict: the hosts list changed since MEHO read it; nothing was written;
+   run the op again`. Otherwise the router's text is kept. The patch is
+   built with `json.dumps` and passed as one `shlex.quote`-d argument (see
+   the size limit above).
+5. `verify` — read the ConfigMap again: `hosts` must be the new value and
+   every other key unchanged. `lines_before` / `lines_after` count the
+   `hosts` lines.
+6. `restart` / `wait` — `kubectl rollout restart` and `kubectl rollout status
+   --timeout=180s` on `deployment/dnsmasq-dns-deployment` (the pods read the
+   file only at start), then poll `kubectl get pods -n default -o json` until
+   all the deployment's pods share one `pod-template-hash` and none is
+   shutting down. `rollout status` alone returns while an old pod can still
+   answer with the old file. The SSH call for `rollout status` gets a 200 s
+   timeout, longer than its own 180 s wait (other steps keep the 30 s SSH
+   default). When the router does not answer in time, `error` says so.
+7. `check` — ask every running dnsmasq pod, by its pod IP, with
+   `dig +noall +answer +comments @<pod ip> <name> A|AAAA` and the same with
+   `-x <address>`. The `+comments` header carries the DNS status
+   (`forward_status` / `reverse_status` in each check). `dig` exits with 0
+   for every DNS status, so an empty `+short` answer would not tell a
+   missing record from a failed query: only `NOERROR` and `NXDOMAIN` count
+   as an answer, and `SERVFAIL`, `REFUSED` or a missing header make the
+   check fail. `verified` is true when every pod answers as expected (the
+   pair present after an add, absent after a remove). `dig` must be on the
+   router; when it is missing or fails, or the SSH call for it fails,
+   `verified` is false, the check's `error` says why, and the change stays.
+   The answer still carries `state` and `backup_path`.
+
+`holodeck.k8s.exec` stays read-only; these ops do not widen it.
+
+Out of scope: a Holodeck 9.1 router, whose DNS service is Technitium (#3964).
+
 ### Delete an instance
 
 `ops_remove.py` adds **`holodeck.instance.remove`** (group `deploy-remove`,
@@ -724,6 +812,8 @@ External (pinned in `backend/pyproject.toml`):
 
 - Initiative #371 (G3.8 typed-SSH connector).
 - Task #853 (T1 skeleton + the package-local `_pwsh.py`).
+- Task #4066 (Initiative #2907) — the DNS name ops.
+- JSON Patch `test` operation: https://www.rfc-editor.org/rfc/rfc6902#section-4.6
 - Task #3260 (Initiative #3259) — hoist of the pwsh transport to the shared
   `_shared/pwsh.py`.
 - Adapter: `SshConnector` (G0.2-T4 #243).

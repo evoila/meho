@@ -342,6 +342,12 @@ class Operator(BaseModel):
     #: claim, and always empty for a machine login. The current tenant is
     #: picked from it per request (#5239).
     tenants: tuple[TenantMembership, ...] = ()
+    #: How the person signed in, from the ``acr`` claim. ``None`` when absent.
+    acr: str | None = None
+    #: The Keycloak sign-in session id, from the ``sid`` claim. ``None`` when
+    #: absent. With ``auth_time`` it names one sign-in, so one sign-in allows
+    #: one approval (#3979).
+    sid: str | None = None
     #: ``False`` only for a status answer of a login with several tenants
     #: and no chosen tenant (#5239). Never use the tenant fields then.
     tenant_chosen: bool = True

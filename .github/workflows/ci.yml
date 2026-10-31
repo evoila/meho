@@ -9,7 +9,7 @@
 #
 #   Python (ruff + mypy + pytest) on backend/ — SHARDED (#3251) into:
 #     python-lint       : ruff check + ruff format --check + mypy (once)
-#     python-unit-shard : the pytest unit sweep as a 4-way matrix; test files
+#     python-unit-shard : the pytest unit sweep as a 5-way matrix; test files
 #                         are split by measured time (#4809)
 #     python-unit-lane  : fan-in carrying the branch-protection required
 #                         context `Python (ruff + mypy + pytest)`
@@ -39,7 +39,7 @@
 #
 # Docs-only fast path (#3252): the `changes` detector also classifies a PR
 # whose diff is PURELY documentation (every path under `docs/` or ending in
-# `.md`). On such a PR the heavy Python lanes — `python-lint`, the four
+# `.md`). On such a PR the heavy Python lanes — `python-lint`, the five
 # `python-unit-shard` legs, and the four `python-integration-shard` legs —
 # skip via their own job-level `if:` (skipped-by-`if:` == Success per
 # #2140), so a changelog roll / guide edit / README fix finishes CI in
@@ -232,7 +232,7 @@ jobs:
     #                connector folder (plus its tests and docs), else empty
     #                (#5297). The `python-unit-shard` matrix then runs ONE
     #                job with that connector's tests and a fixed contract
-    #                set instead of the four shards. Same fail-closed rule as
+    #                set instead of the five shards. Same fail-closed rule as
     #                docs_only: backend/tests/_unit_connector_select.py says
     #                which diffs qualify, and any doubt, any error, and every
     #                merge_group / push run give empty (the full run).
@@ -337,7 +337,7 @@ jobs:
             # An error in the tool leaves single_connector empty (full run).
             if [ "${docs_only}" = "false" ]; then
               single_connector="$(printf '%s\n' "${changed}" | python3 backend/tests/_unit_connector_select.py detect)" || single_connector=
-              echo "single_connector=${single_connector:-<empty>} (empty -> four unit shards)"
+              echo "single_connector=${single_connector:-<empty>} (empty -> five unit shards)"
             fi
           fi
           {
@@ -357,10 +357,10 @@ jobs:
   #   python-lint       — ruff check + ruff format --check + mypy. Whole-tree,
   #                       unshardable-by-file, ~1-2 min; runs ONCE on the light
   #                       pool. Non-required check.
-  #   python-unit-shard — the pytest unit sweep as a 4-way matrix; the test
+  #   python-unit-shard — the pytest unit sweep as a 5-way matrix; the test
   #                       files are split by measured time so every shard
   #                       takes about as long (heavy pool, in parallel).
-  #                       Non-required checks (`Python unit shard N/4`).
+  #                       Non-required checks (`Python unit shard N/5`).
   #   python-unit-lane  — FAN-IN carrying the EXACT branch-protection required
   #                       context `Python (ruff + mypy + pytest)`; fails iff
   #                       python-lint or ANY shard did not pass. Branch
@@ -449,27 +449,27 @@ jobs:
         run: uv run mypy src/
 
   python-unit-shard:
-    name: ${{ needs.changes.outputs.single_connector != '' && format('Python unit tests for connector {0}', needs.changes.outputs.single_connector) || format('Python unit shard {0}/4', matrix.shard) }}
+    name: ${{ needs.changes.outputs.single_connector != '' && format('Python unit tests for connector {0}', needs.changes.outputs.single_connector) || format('Python unit shard {0}/5', matrix.shard) }}
     # One-connector run (#5297): when `changes` sets single_connector, the
     # matrix below has ONE leg, and the pytest step runs that connector's
     # tests plus the contract set (tests/_unit_connector_select.py) instead
     # of a quarter of the suite. Only a pull request can get there; the
-    # merge queue and pushes to `main` always run the four shards.
+    # merge queue and pushes to `main` always run the five shards.
     #
-    # Non-required checks (one per matrix leg: `Python unit shard 1/4`,
-    # `.../2/4`, `.../3/4`, `.../4/4`) — the required context is carried by
+    # Non-required checks (one per matrix leg: `Python unit shard 1/5`
+    # to `.../5/5`) — the required context is carried by
     # the python-unit-lane fan-in below. This is the pytest half of the old
-    # required lane, split into a deterministic 4-way file-level matrix
+    # required lane, split into a deterministic 5-way file-level matrix
     # (#3251, 3 shards; #4655 raised it to 4 when the 3 shards reached the
     # 660 s budget; #4809 split by measured file time instead of every
-    # 4th file) so its serial wall runs as parallel shards.
+    # 4th file; #5433 raised it to 5) so its serial wall runs as parallel shards.
     #
     # Fork-PR guard: never execute project code from a fork on the self-hosted
     # runner pool. Same stance as the old lane — job-level so no step ever
-    # starts on a fork PR. On a fork PR all four legs skip (→ reported
+    # starts on a fork PR. On a fork PR all five legs skip (→ reported
     # Success), which the fan-in's own fork guard mirrors. Plus the #3252
     # docs-only skip (identical shape to python-lint): a proven docs-only PR
-    # skips all four legs → the fan-in reports success-by-skip. `needs:
+    # skips all five legs → the fan-in reports success-by-skip. `needs:
     # changes` makes `docs_only` readable; a detect-job failure skip-cascades
     # these legs and the fan-in fails the required context CLOSED. The legs
     # also skip when `backend_python` is `false` (#5296); the job
@@ -485,9 +485,11 @@ jobs:
     # ruff/mypy run once in python-lint on a GitHub-hosted runner.
     runs-on: meho-runners-ci-heavy
     strategy:
-      # 4 shards (#3251 started with 3; #4655 raised it to 4 after the
-      # slowest shard reached the 660 s budget — measure, then rebalance, do
-      # not raise the budget). fail-fast: false — one shard's red tests must NOT
+      # 5 shards (#3251 started with 3; #4655 raised it to 4 after the
+      # slowest shard reached the 660 s budget; #5433 raised it to 5 when all
+      # four shards took 780-930 s on busy runners, and fresh file times
+      # alone would still leave them near 850 s — measure, then rebalance,
+      # do not raise the budget). fail-fast: false — one shard's red tests must NOT
       # cancel the others, so a broad breakage surfaces every failing shard in
       # one run (the fan-in still fails if ANY leg fails). To change the shard
       # count, edit BOTH the matrix and the `TOTAL` in the pytest step, in
@@ -495,7 +497,7 @@ jobs:
       # (tests/_unit_shard_durations.json, see tests/_unit_shard_split.py).
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(needs.changes.outputs.single_connector != '' && '[1]' || '[1, 2, 3, 4]') }}
+        shard: ${{ fromJSON(needs.changes.outputs.single_connector != '' && '[1]' || '[1, 2, 3, 4, 5]') }}
     # 20-min cap: hang backstop only. Expected job wall is ~8 min (setup ~2 min
     # + pytest ~6 min); the perf-budget step below is the PR-level early-warning
     # gate that fires well before this cap. The pre-shard lane's 25-min cap
@@ -811,7 +813,7 @@ jobs:
         # locks a uv.lock, not a requirements.txt). enable-cache: true
         # opts into the action's built-in cache for the uv download
         # cache directory, keyed by uv.lock — repeat installs on the
-        # same lockfile are near-instant, so the four shards share one
+        # same lockfile are near-instant, so the five shards share one
         # warm uv cache. `version` pins uv; see the python-lint job for
         # why, and for where the Python version comes from.
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
@@ -835,7 +837,7 @@ jobs:
         # pinned there, so a fastembed bump (which can remap the HF
         # source/filename) misses the cache and the model re-downloads
         # exactly once, then re-saves. restore-keys lets an unrelated
-        # lock change still reuse the prior model blob. All four shards
+        # lock change still reuse the prior model blob. All five shards
         # share this one cache entry (same key), so steady-state only the
         # first cold run pays the download.
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -936,7 +938,7 @@ jobs:
           sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends php-cli
           php --version | head -1
 
-      - name: Pytest (unit shard ${{ matrix.shard }}/4)
+      - name: Pytest (unit shard ${{ matrix.shard }}/5)
         # `shell: bash` for `mapfile` + arrays (and the pipefail/-e the
         # default self-hosted shell does not enable — #2865). Under -e a
         # failing `uv run pytest` exits the step immediately, so the
@@ -1025,13 +1027,13 @@ jobs:
           # the seconds in tests/_unit_shard_durations.json; a file without
           # a measurement counts as the median. File-level split keeps
           # conftest / loadscope semantics identical to a full run, and the
-          # four shards partition the full set exactly (every file lands in
+          # five shards partition the full set exactly (every file lands in
           # one shard; tests/test_unit_shard_split.py pins that).
           # tests/integration stays out (→ python-integration-shard) and
           # tests/migrations stays out (→ python-migration-tests), matching
           # the pre-shard lane's `--ignore` of both. The splitter prints
           # the file count and the predicted seconds per shard on stderr.
-          TOTAL=4
+          TOTAL=5
           SHARD="${{ matrix.shard }}"
           if [ -n "${SINGLE_CONNECTOR}" ]; then
             # One-connector run (#5297): one job, no split. The tool exits
@@ -1063,6 +1065,9 @@ jobs:
           # measured file times are stale — refresh tests/_unit_shard_durations.json
           # (see tests/_unit_shard_split.py) rather than bumping only this budget.
           # Add a shard (matrix + TOTAL) only when all shards are near the budget.
+          # #5433 did both: on busy runners all four shards took 780-930 s, and
+          # fresh file times alone would still leave them near 850 s, so the
+          # matrix went from 4 to 5 shards.
           # 900 s (was 660 s): when every heavy runner is busy (2 jobs per
           # node), shards that pass every test can take 674-710 s, and 660 s
           # dropped good pull requests from the merge queue.
@@ -1165,14 +1170,14 @@ jobs:
           if [ -r "${cg}/cpu.max" ]; then
             echo "- CPU limit: $(awk '{ if ($1 == "max") print "none"; else printf "%.1f CPUs", $1 / $2 }' "${cg}/cpu.max")."
           fi
-          echo "::notice title=Peak memory (unit shard ${{ matrix.shard }}/4)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
+          echo "::notice title=Peak memory (unit shard ${{ matrix.shard }}/5)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
           exit 0
 
   python-outside-backend:
     name: Python tests that read files outside backend
     # #5296. Runs only on a pull request that changes no file under backend/
     # (`backend_python` is `false`) and is not docs-only. On such a pull
-    # request python-lint, the four unit shards and python-integration skip.
+    # request python-lint, the five unit shards and python-integration skip.
     # Some backend tests still read files outside backend/: the Helm chart,
     # the Go CLI, the workflows, the docs and the examples. This job runs
     # exactly those test files, from the list in
@@ -1312,8 +1317,8 @@ jobs:
           outside='${{ needs.python-outside-backend.result }}'
           echo "changes (detect): result=${detect}, docs_only=${docs_only}, backend_python=${backend_python}"
           echo "python-lint (ruff + ruff format + mypy): ${lint}"
-          echo "python-unit-shard (aggregate of all 4 shard legs, or the one connector leg): ${shards}"
-          echo "single_connector='${{ needs.changes.outputs.single_connector }}' (empty = four shards)"
+          echo "python-unit-shard (aggregate of all 5 shard legs, or the one connector leg): ${shards}"
+          echo "single_connector='${{ needs.changes.outputs.single_connector }}' (empty = five shards)"
           echo "python-outside-backend (tests that read outside backend/): ${outside}"
 
           # The detect job MUST have succeeded for its docs_only classification
@@ -1370,16 +1375,16 @@ jobs:
           fi
 
           if [ "${fail}" -ne 0 ]; then
-            echo "::error title=Python unit lane red::ruff / ruff format / mypy, one or more pytest shards, or the tests that read files outside backend did not pass. This fan-in carries the branch-protection required context 'Python (ruff + mypy + pytest)'; open the 'Python lint + typecheck (ruff + mypy)' / 'Python unit shard N/4' / 'Python tests that read files outside backend' jobs above for the failing detail."
+            echo "::error title=Python unit lane red::ruff / ruff format / mypy, one or more pytest shards, or the tests that read files outside backend did not pass. This fan-in carries the branch-protection required context 'Python (ruff + mypy + pytest)'; open the 'Python lint + typecheck (ruff + mypy)' / 'Python unit shard N/5' / 'Python tests that read files outside backend' jobs above for the failing detail."
             exit 1
           fi
 
           if [ "${docs_only}" = "true" ]; then
-            echo "Unit lane GREEN (docs-only fast path #3252) — lint + all 4 pytest shards skipped-by-detect; nothing to test for a pure docs/*.md diff."
+            echo "Unit lane GREEN (docs-only fast path #3252) — lint + all 5 pytest shards skipped-by-detect; nothing to test for a pure docs/*.md diff."
           elif [ "${backend_python}" = "false" ]; then
-            echo "Unit lane GREEN (no backend change, #5296) — lint + all 4 pytest shards skipped; the tests that read files outside backend/ passed."
+            echo "Unit lane GREEN (no backend change, #5296) — lint + all 5 pytest shards skipped; the tests that read files outside backend/ passed."
           else
-            echo "Unit lane GREEN — ruff + ruff format + mypy + all 4 pytest shards passed."
+            echo "Unit lane GREEN — ruff + ruff format + mypy + all 5 pytest shards passed."
           fi
 
   python-coverage:

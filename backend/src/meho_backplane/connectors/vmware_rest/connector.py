@@ -3287,6 +3287,26 @@ class VmwareRestConnector(HttpConnector):
 
         return await snapshot_list_impl(self, operator, target, params)
 
+    async def network_portgroup_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.network.portgroup.show`` -- all settings of one distributed port group.
+
+        A ``source_kind="typed"`` read: reads the port group's VIM ``config``
+        property through PropertyCollector on the connector session, so it works
+        with zero catalog ingest. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_portgroup_show.portgroup_show_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_portgroup_show import (
+            portgroup_show_impl,
+        )
+
+        return await portgroup_show_impl(self, operator, target, params)
+
     async def vm_question_get(
         self,
         operator: Operator,
@@ -3320,6 +3340,23 @@ class VmwareRestConnector(HttpConnector):
         )
 
         return await vm_question_answer_impl(self, operator, target, params)
+
+    async def vcenter_deployment_status(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vcenter.deployment.status`` -- the install state of a new appliance (#4394).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vcenter_deployment_status.deployment_status_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vcenter_deployment_status import (
+            deployment_status_impl,
+        )
+
+        return await deployment_status_impl(self, operator, target, params)
 
     async def object_collect(
         self,

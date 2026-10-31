@@ -417,6 +417,15 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # ``vmware.appliance.local_account.policy.set`` sends only expiry
         # numbers and flags, so it is NOT pinned.
         "vmware.appliance.local_account.password.set",
+        # The two steps of a new vCenter install that send a password (#4394):
+        # the appliance import (the root password, ``root_password_secret_ref``)
+        # and the setup start (the SSO password,
+        # ``sso_admin_password_secret_ref``). The params carry only Vault
+        # paths; the passwords go only into the vCenter request bodies. The
+        # pin keeps those bodies out of the flight recorder and the params out
+        # of the broadcast.
+        "vmware.composite.vcenter.appliance.deploy",
+        "vmware.composite.vcenter.install",
         # The Keycloak login test. Its params carry only a Vault *path*
         # (``password_secret_ref``); the password is read in-process and sent
         # only in the token request BODY, and the token answer carries an

@@ -86,8 +86,17 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
+from meho_backplane.auth.approval_sign_in import (
+    ApprovalAuth,
+    check_fresh_approval_sign_in,
+    fresh_sign_in_required,
+)
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.rbac import require_approvals_access, require_human_principal
+from meho_backplane.auth.rbac import (
+    require_approvals_access,
+    require_fresh_approval_sign_in,
+    require_human_principal,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.middleware import verify_jwt_and_bind
@@ -105,6 +114,7 @@ from meho_backplane.operations.approval_queue import (
     ApprovalRequestAlreadyDecidedError,
     ApprovalRequestExpiredError,
     ApprovalResultState,
+    ApprovalSignInReusedError,
     DelegatedDecisionForbiddenError,
     DelegatedReasonInvalidError,
     Delegation,
@@ -126,6 +136,7 @@ from meho_backplane.operations.approval_queue import (
     withdraw_request,
 )
 from meho_backplane.operations.operation_run_service import get_operation_run_service
+from meho_backplane.settings import get_settings
 
 __all__ = ["router"]
 
@@ -152,6 +163,11 @@ _require_approvals_access = Depends(require_approvals_access)
 #: (list / show / result) keep ``require_approvals_access`` alone so a
 #: service principal's approval bridge can still list the queue.
 _require_human = Depends(require_human_principal)
+
+#: Approve-only proof that a person is present (#3979): the token must show
+#: a fresh sign-in or a one-time code, else ``401`` with the RFC 9470
+#: challenge. Reject keeps the human gate alone.
+_require_fresh_sign_in = Depends(require_fresh_approval_sign_in)
 
 #: Decision ``reason`` length bound, the same value the console form uses.
 _MAX_REASON_LENGTH = MAX_REASON_LENGTH
@@ -555,6 +571,7 @@ async def _capture_operator_decision(
     decision: str,
     reason: str,
     operator: Operator,
+    approval_auth: ApprovalAuth | None,
 ) -> ApprovalRequest:
     """Commit a ``/decide`` operator decision + publish, mapping errors to HTTP.
 
@@ -571,7 +588,12 @@ async def _capture_operator_decision(
         async with sessionmaker() as session:
             if decision == "approved":
                 request = await approve_request(
-                    session, request_id, operator=operator, params=None, reason=reason
+                    session,
+                    request_id,
+                    operator=operator,
+                    params=None,
+                    reason=reason,
+                    approval_auth=approval_auth,
                 )
             else:
                 request = await reject_request(
@@ -622,6 +644,8 @@ async def _capture_operator_decision(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="preview_binding_missing",
         ) from exc
+    except ApprovalSignInReusedError as exc:
+        raise fresh_sign_in_required(reason="fresh_sign_in_already_used") from exc
     except DelegatedReasonInvalidError as exc:
         raise _delegated_reason_http_error(exc) from exc
     except DelegatedDecisionForbiddenError as exc:
@@ -826,6 +850,7 @@ async def _record_approval_decision(
     *,
     operator: Operator,
     body: ApproveRequestBody,
+    approval_auth: ApprovalAuth,
 ) -> ApprovalRequest:
     """Commit + audit the approval decision, publish the event, map errors.
 
@@ -845,6 +870,7 @@ async def _record_approval_decision(
                 operator=operator,
                 params=body.params,
                 reason=body.reason,
+                approval_auth=approval_auth,
             )
             await session.commit()
         # Publish AFTER commit (G11.2-T5): a phantom event cannot
@@ -898,6 +924,8 @@ async def _record_approval_decision(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="preview_binding_missing",
         ) from exc
+    except ApprovalSignInReusedError as exc:
+        raise fresh_sign_in_required(reason="fresh_sign_in_already_used") from exc
     except DelegatedReasonInvalidError as exc:
         raise _delegated_reason_http_error(exc) from exc
     except DelegatedDecisionForbiddenError as exc:
@@ -914,6 +942,7 @@ async def approve_approval_request(
     request_id: Annotated[uuid.UUID, Path()],
     body: ApproveRequestBody,
     operator: Operator = _require_approvals_access,
+    approval_auth: ApprovalAuth = _require_fresh_sign_in,
 ) -> ApproveResponseBody | JSONResponse:
     """Approve a pending request and re-dispatch the original operation.
 
@@ -934,6 +963,12 @@ async def approve_approval_request(
 
     * 200 — approved + re-dispatched successfully (sync).
     * 202 — approved; resume launched in the background (``async: true``).
+    * 401 — the token shows no fresh sign-in (#3979): its ``auth_time`` is
+      missing or older than ``FRESH_SIGN_IN_MAX_AGE_SECONDS``, or
+      this sign-in already gave an approval. The answer carries
+      ``WWW-Authenticate: Bearer error="insufficient_user_authentication"``
+      with ``max_age`` (RFC 9470). Approve in the web interface, or sign in
+      again. The request stays pending.
     * 403 — caller lacks approvals-plane access (neither ``operator`` role
       nor the ``approver`` capability, #3243), **or** the approver is the
       requester and self-approval break-glass is disabled (G11.7-T1 #1401).
@@ -948,7 +983,9 @@ async def approve_approval_request(
         audit_op_class="write",
         audit_approval_request_id=str(request_id),
     )
-    request = await _record_approval_decision(request_id, operator=operator, body=body)
+    request = await _record_approval_decision(
+        request_id, operator=operator, body=body, approval_auth=approval_auth
+    )
 
     # Async governed dispatch (#3079): hand the resume to the background
     # substrate and return the durable handle at 202 instead of blocking.
@@ -1222,6 +1259,11 @@ async def decide_approval_request(
     where the approval committed but nothing ran. Two independent guards
     coexist: the already-decided 409 prevents a second *decision*, and the
     claim prevents a second *dispatch* of one decision.
+
+    An approval needs a fresh sign-in or a one-time code (#3979): otherwise
+    the route answers 401 with ``WWW-Authenticate: Bearer
+    error="insufficient_user_authentication"`` and ``max_age`` (RFC 9470),
+    and the request stays pending. A rejection needs no fresh sign-in.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id="approval.decide",
@@ -1235,11 +1277,16 @@ async def decide_approval_request(
             detail=f"decision must be 'approved' or 'rejected', got {body.decision!r}",
         )
 
+    # Approve needs a fresh sign-in or a one-time code (#3979); reject does not.
+    approval_auth = (
+        check_fresh_approval_sign_in(operator, get_settings()) if decision == "approved" else None
+    )
     request = await _capture_operator_decision(
         request_id=request_id,
         decision=decision,
         reason=body.reason,
         operator=operator,
+        approval_auth=approval_auth,
     )
 
     # Every approval drives the execute (#1503, #2293): stored params

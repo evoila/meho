@@ -1,29 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The ``migration.inventory.csv`` operation and the package registrar.
+"""The ``inventory.export`` operation and the package registrar.
 
-Natural key ``(product="migration", version="1.x", impl_id="migration-assess")``,
-so the wire ``connector_id`` is ``migration-assess-1.x``. No connector class
+Natural key ``(product="inventory", version="1.x", impl_id="inventory")``,
+so the wire ``connector_id`` is ``inventory-1.x``. No connector class
 backs it (the ``audit-integrity-1.x`` mould): the handler is a module-level
 function the dispatcher calls with ``target=None``.
 
 The operation only reads stored results of the caller (or inventories given
 in the call) and builds text, so it is ``safe`` and sets
 ``requires_approval=False``. It is a typed operation, not a multi-step one:
-it runs no other operation.
+it runs no other operation. It holds no rule of one target: the file comes
+from the format named in the call (:mod:`.formats`).
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
-from meho_backplane.connectors.migration.azure_migrate_csv import (
-    MAX_SERVERS_PER_FILE,
-    CsvExport,
-    inventory_to_csv,
-)
-from meho_backplane.connectors.migration.inventory_load import (
+from meho_backplane.connectors.inventory.export import ExportResult
+from meho_backplane.connectors.inventory.formats import EXPORT_FORMATS, get_export_format
+from meho_backplane.connectors.inventory.inventory_load import (
     MAX_INVENTORY_HANDLES,
     load_inventories,
 )
@@ -34,22 +32,33 @@ if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
-    "MIGRATION_CONNECTOR_ID",
-    "MIGRATION_INVENTORY_CSV_OP_ID",
-    "MIGRATION_INVENTORY_CSV_PARAMETER_SCHEMA",
-    "MIGRATION_INVENTORY_CSV_RESPONSE_SCHEMA",
-    "migration_inventory_csv",
-    "register_migration_operations",
+    "INVENTORY_CONNECTOR_ID",
+    "INVENTORY_EXPORT_OP_ID",
+    "INVENTORY_EXPORT_PARAMETER_SCHEMA",
+    "INVENTORY_EXPORT_RESPONSE_SCHEMA",
+    "inventory_export",
+    "register_inventory_operations",
 ]
 
-MIGRATION_CONNECTOR_ID: Final[str] = "migration-assess-1.x"
-MIGRATION_INVENTORY_CSV_OP_ID: Final[str] = "migration.inventory.csv"
+INVENTORY_CONNECTOR_ID: Final[str] = "inventory-1.x"
+INVENTORY_EXPORT_OP_ID: Final[str] = "inventory.export"
 
 _EXAMPLE_HANDLE: Final[str] = "3f2b8c1e-6a4d-4e2f-9b7a-1c5d8e9f0a21"
 
-MIGRATION_INVENTORY_CSV_PARAMETER_SCHEMA: dict[str, Any] = {
+
+def _format_description() -> str:
+    known = "; ".join(f"'{name}': {fmt.description}" for name, fmt in EXPORT_FORMATS.items())
+    return f"The file format to build. Known formats: {known}"
+
+
+INVENTORY_EXPORT_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "format": {
+            "type": "string",
+            "enum": sorted(EXPORT_FORMATS),
+            "description": _format_description(),
+        },
         "inventory_handles": {
             "type": "array",
             "items": {"type": "string", "format": "uuid"},
@@ -72,14 +81,15 @@ MIGRATION_INVENTORY_CSV_PARAMETER_SCHEMA: dict[str, Any] = {
             ),
         },
     },
+    "required": ["format"],
     "anyOf": [{"required": ["inventory_handles"]}, {"required": ["inventories"]}],
     "additionalProperties": False,
-    "examples": [{"inventory_handles": [_EXAMPLE_HANDLE]}],
+    "examples": [{"inventory_handles": [_EXAMPLE_HANDLE], "format": next(iter(EXPORT_FORMATS))}],
 }
 
 
 def _response_schema() -> dict[str, Any]:
-    schema = CsvExport.model_json_schema()
+    schema = ExportResult.model_json_schema()
     properties = schema["properties"]
     properties["sources"] = {
         "type": "array",
@@ -102,7 +112,7 @@ def _response_schema() -> dict[str, Any]:
     return schema
 
 
-MIGRATION_INVENTORY_CSV_RESPONSE_SCHEMA: dict[str, Any] = _response_schema()
+INVENTORY_EXPORT_RESPONSE_SCHEMA: dict[str, Any] = _response_schema()
 
 _GROUP_KEY: Final[str] = "inventory"
 _GROUP_WHEN_TO_USE: Final[str] = (
@@ -111,21 +121,21 @@ _GROUP_WHEN_TO_USE: Final[str] = (
     "here calls a source system or changes anything."
 )
 
-_SUMMARY: Final[str] = "Turn inventories into an Azure Migrate CSV import file."
+_SUMMARY: Final[str] = "Turn inventories into a file another tool imports, in a named format."
 
 _DESCRIPTION: Final[str] = (
     "Reads one or more inventories, stored or given inline, merges them and returns "
-    "the CSV text in the column format of Azure Migrate's import template, the row "
-    "count, and the servers left out or renamed. Read-only."
+    "the file in the format named in the call: the file lines, the row count, the "
+    "records left out with the reason, the renamed records and notes. Read-only."
 )
 
 _LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_call": (
-        "You have inventory handles or inventories and need a file for Azure Migrate's CSV "
-        "import, or want to see which servers lack the values Azure Migrate "
-        "needs (name, cores, memory, OS name)."
+        "You have inventory handles or inventories and need a file that another tool "
+        "imports, or want to see which records lack the values that file needs."
     ),
     "parameter_hints": {
+        "format": "One of the format names in the parameter schema's enum.",
         "inventory_handles": (
             f"1 to {MAX_INVENTORY_HANDLES} handle ids. A stored result "
             "lasts one hour; an expired handle fails with a clear message."
@@ -137,59 +147,60 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
         ),
     },
     "output_shape": (
-        "{'csv_lines': [<header line>, <one line per server>, ...], 'row_count', "
-        "'columns', 'left_out': [{source_id, name, reason, missing, same_as}], "
-        "'renamed': [{source_id, original_name, csv_name, reasons}], "
-        "'skipped_records': {kind: count}, 'notes', 'sources'}. At most "
-        f"{MAX_SERVERS_PER_FILE} servers per file."
+        "{'format', 'lines': [<header line>, <one line per record>, ...], 'line_end', "
+        "'row_count', 'columns', 'left_out': [{source_id, name, reason, missing, same_as}], "
+        "'renamed': [{source_id, original_name, name_in_file, reasons}], "
+        "'skipped_records': {kind: count}, 'notes', 'sources'}."
     ),
     "next_step": (
-        "Show the left-out and renamed servers to the user before the file is "
-        "imported. Join csv_lines with CRLF to get the file. When the result came "
+        "Show the left-out and renamed records to the user before the file is "
+        "imported. Join lines with line_end to get the file. When the result came "
         "back as a handle, read the lines in pages with result_query, path "
-        "'/csv_lines' and offset/limit; each page returns rows of {'value': <line>}."
+        "'/lines' and offset/limit; each page returns rows of {'value': <line>}."
     ),
 }
 
 
-async def migration_inventory_csv(
+async def inventory_export(
     operator: Operator, target: Any, params: dict[str, Any]
 ) -> dict[str, Any]:
-    """Build the Azure Migrate CSV file from the caller's stored and inline inventories.
+    """Build the file in ``params["format"]`` from the caller's stored and inline inventories.
 
     Targetless; *target* is always ``None``. The tenant and the caller come
-    from *operator*, never from *params*.
+    from *operator*, never from *params*. An unknown format fails before any
+    inventory is read.
     """
     del target
+    export_format = get_export_format(str(params.get("format")))
     loaded = await load_inventories(
         operator,
         list(params.get("inventory_handles") or []),
         inventories=list(params.get("inventories") or []),
     )
-    export = inventory_to_csv(loaded.records, loaded.duplicates)
+    export = export_format.build(loaded.records, loaded.duplicates)
     result = export.model_dump(mode="json")
     result["sources"] = loaded.sources()
     return result
 
 
-async def register_migration_operations(
+async def register_inventory_operations(
     *,
     embedding_service: EmbeddingService | None = None,
 ) -> None:
-    """Upsert the migration operations into ``endpoint_descriptor``. Safe to run twice."""
+    """Upsert the inventory operations into ``endpoint_descriptor``. Safe to run twice."""
     await register_typed_operation(
-        product="migration",
+        product="inventory",
         version="1.x",
-        impl_id="migration-assess",
-        op_id=MIGRATION_INVENTORY_CSV_OP_ID,
-        handler=migration_inventory_csv,
+        impl_id="inventory",
+        op_id=INVENTORY_EXPORT_OP_ID,
+        handler=inventory_export,
         group_key=_GROUP_KEY,
         when_to_use=_GROUP_WHEN_TO_USE,
         summary=_SUMMARY,
         description=_DESCRIPTION,
-        parameter_schema=MIGRATION_INVENTORY_CSV_PARAMETER_SCHEMA,
-        response_schema=MIGRATION_INVENTORY_CSV_RESPONSE_SCHEMA,
-        tags=["migration", "inventory", "azure-migrate", "csv", "read"],
+        parameter_schema=INVENTORY_EXPORT_PARAMETER_SCHEMA,
+        response_schema=INVENTORY_EXPORT_RESPONSE_SCHEMA,
+        tags=["inventory", "export", "read"],
         safety_level="safe",
         requires_approval=False,
         llm_instructions=_LLM_INSTRUCTIONS,

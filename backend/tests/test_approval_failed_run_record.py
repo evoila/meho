@@ -151,6 +151,7 @@ def _approve(request_id: uuid.UUID, *, users_status: int) -> tuple[dict[str, Any
         )
         token = mint_token(
             key,
+            fresh_sign_in=True,
             sub="approver",
             tenant_role=TenantRole.OPERATOR.value,
             tenant_id=str(_TENANT_ID),

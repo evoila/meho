@@ -1471,6 +1471,26 @@ def _extract_runner_id(claims: Any, settings: Settings) -> UUID | None:
         raise _http_401("malformed_runner_id_claim") from exc
 
 
+def _extract_sign_in_claims(claims: Any) -> tuple[int | None, str | None, str | None]:
+    """Read ``auth_time``, ``acr`` and ``sid``: when and how the person signed in.
+
+    The fresh sign-in check (#4711) and the approve check (#3979) need
+    them. A value of the wrong type reads as missing, so the check refuses
+    (fail closed). ``auth_time`` must be a whole number (OIDC Core §2 says
+    NumericDate; Keycloak sends an integer). A bool is not a time, even
+    though Python counts it as an ``int``.
+    """
+    raw_time = claims.get("auth_time")
+    auth_time = raw_time if isinstance(raw_time, int) and not isinstance(raw_time, bool) else None
+    acr = claims.get("acr")
+    sid = claims.get("sid")
+    return (
+        auth_time,
+        acr if isinstance(acr, str) and acr else None,
+        sid if isinstance(sid, str) and sid else None,
+    )
+
+
 def _start_tenant(
     claims: Any, settings: Settings, tenants: tuple[TenantMembership, ...]
 ) -> tuple[UUID, TenantRole, bool]:
@@ -1558,12 +1578,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     scopes = _extract_scopes(claims, settings)
     platform_admin = _extract_platform_admin(claims, settings)
     runner_id = _extract_runner_id(claims, settings)
-    raw_auth_time = claims.get("auth_time")
-    auth_time = (
-        raw_auth_time
-        if isinstance(raw_auth_time, int) and not isinstance(raw_auth_time, bool)
-        else None
-    )
+    auth_time, acr, sid = _extract_sign_in_claims(claims)
     if principal_kind is PrincipalKind.RUNNER and runner_id is None:
         # Fail-closed pairing (Initiative #2415, #2502): a runner-kind
         # token with no ``runner_id`` cannot be scoped by the gateway
@@ -1589,8 +1604,10 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             platform_admin=platform_admin,
             approver=approver,
             runner_id=runner_id,
-            auth_time=auth_time,
             tenants=tenants,
+            auth_time=auth_time,
+            acr=acr,
+            sid=sid,
         )
     except pydantic.ValidationError as exc:
         raise _http_401("invalid_token") from exc

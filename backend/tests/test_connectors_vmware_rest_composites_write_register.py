@@ -165,6 +165,10 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.cluster.drs_rule.delete",
     # Licence assign: dangerous + approval (the default tier).
     "vmware.composite.license.assign",
+    # Install a new vCenter (#4394): dangerous + approval.
+    "vmware.composite.vcenter.appliance.deploy",
+    "vmware.composite.vcenter.install",
+    "vmware.composite.vcenter.deployment.answer",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -336,6 +340,18 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     "vmware.composite.license.assign": (
         "meho_backplane.connectors.vmware_rest.composites._license.license_assign_composite"
     ),
+    "vmware.composite.vcenter.appliance.deploy": (
+        "meho_backplane.connectors.vmware_rest.composites._vcenter_deploy."
+        "vcenter_appliance_deploy_composite"
+    ),
+    "vmware.composite.vcenter.install": (
+        "meho_backplane.connectors.vmware_rest.composites._vcenter_install."
+        "vcenter_install_composite"
+    ),
+    "vmware.composite.vcenter.deployment.answer": (
+        "meho_backplane.connectors.vmware_rest.composites._vcenter_answer."
+        "vcenter_deployment_answer_composite"
+    ),
     "vmware.composite.guest.customization_spec.create": (
         "meho_backplane.connectors.vmware_rest.composites._write."
         "guest_customization_spec_create_composite"
@@ -448,6 +464,9 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.cdrom.unmount_library_iso": "vm",
     "vmware.composite.vm.resource_allocation.set": "vm",
     "vmware.composite.license.assign": "vmware-licensing",
+    "vmware.composite.vcenter.appliance.deploy": "vcenter_install",
+    "vmware.composite.vcenter.install": "vcenter_install",
+    "vmware.composite.vcenter.deployment.answer": "vcenter_install",
     "vmware.composite.host.evacuate": "host",
     "vmware.composite.host.maintenance.exit": "host",
     "vmware.composite.host.detach_from_vds": "host",
@@ -1130,6 +1149,28 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "license_not_found",
             "license_ambiguous",
             "asset_not_found",
+        },
+        # Install a new vCenter (#4394): the start answers accepted at once.
+        "vmware.composite.vcenter.install": {
+            "accepted",
+            "already_running",
+            "waiting_for_answer",
+            "already_done",
+            "failed_before",
+            "not_ready",
+            "unknown_state",
+            "not_reachable",
+            "check_failed",
+            "start_failed",
+            "start_unknown",
+        },
+        "vmware.composite.vcenter.deployment.answer": {
+            "accepted",
+            "no_question",
+            "unknown_question",
+            "answer_not_allowed",
+            "answer_failed",
+            "answer_unknown",
         },
     }
     for op_id, expected_values in expected_status_values.items():

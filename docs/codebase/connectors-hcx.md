@@ -20,7 +20,11 @@ Today the connector ships:
   alerts and the inventory for a migration (resource containers, the
   compute tree, datastores and networks), and
 - **four service mesh changes** (create, change, resync, delete) with the
-  status read `hcx.task.get`. Each change waits for a person's approval.
+  status read `hcx.task.get`. Each change waits for a person's approval, and
+- **network extension**: one read of the extended networks and three
+  changes that each wait for a person's approval: extend a network,
+  unextend it, and set Mobility Optimized Networking (see "Network
+  extension" below).
 
 Why `hcx.api_file.get` came first: Broadcom publishes no file and no
 versioned reference of the main HCX API (`/hybridity/api/...`). Only a
@@ -58,6 +62,10 @@ Package: `backend/src/meho_backplane/connectors/hcx/`.
 | `hcx.service_mesh.resync` | Resync a service mesh with its compute profiles: HCX computes the difference and applies it, and can redeploy appliances. Returns `accepted` with the task id. | `POST /hybridity/api/interconnect/serviceMesh/{serviceMeshId}/resync` | change (`dangerous`) | 4.11, 9.x |
 | `hcx.service_mesh.delete` | Start the deletion of a service mesh; HCX removes its appliances. Needs a preview first. Returns `accepted` with the task id. | `DELETE /hybridity/api/interconnect/serviceMesh/{serviceMeshId}?force=` | change (`destructive`) | 4.11, 9.x |
 | `hcx.task.get` | One interconnect task: state (QUEUED, RUNNING, SUCCESS, FAILED), progress, message, the vendor error, the steps. `not_reachable` when the Manager does not answer. | `GET /hybridity/api/interconnect/tasks/{interconnectTaskId}` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.network_extension.list` | The extended networks: stretch id, state, job id, source network, router and site at the other side, appliance, and the MON and egress flags. | `GET /hybridity/api/l2Extensions` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.network_extension.extend` | Extend a network to the other site. Starts a vendor job; returns `accepted` and the job id. | `POST /hybridity/api/l2Extensions` | change (`dangerous`, approval) | 4.11, 9.x |
+| `hcx.network_extension.unextend` | Unextend a network, and if asked connect the cloud network to its local router. Starts a vendor job; returns `accepted` and the job id. | `DELETE /hybridity/api/l2Extensions/{extensionId}?connectToLocalRouter=` | change (`dangerous`, approval) | 4.11, 9.x |
+| `hcx.network_extension.mon.set` | Turn Mobility Optimized Networking on or off, and set the policy routes. Two steps; lists what ran, what failed and what did not run. | `PUT /hybridity/api/networkExtensions/{extensionId}`, `PUT /hybridity/api/l2Extensions/policyRoutes` | change (`dangerous`, approval) | 4.11, 9.x |
 
 Every operation in the table exists on every version the connector
 covers, so none stops early with a version message.
@@ -93,7 +101,12 @@ covers, so none stops early with a version message.
 - `typed_reads.py` -- the bodies of the thirteen reads, `VENDOR_CALLS`
   (every `(method, path)` they send; the reconcile lane checks them),
   `rows_of` (takes the rows out of `items` or `data.items`),
-  `flatten_inventory_tree` and `redact_secrets`.
+  `flatten_inventory_tree`, `redact_secrets` and `job_outcome` (the plain
+  state of a job, from its flags).
+- `HCX_NETWORK_EXTENSION_OPS`, `HCX_NETWORK_EXTENSION_WHEN_TO_USE_BY_GROUP`
+  (`network_extension_ops.py`) -- the metadata and group text of the four
+  network extension operations; their bodies, `VENDOR_CALLS` and the busy
+  check `is_busy` are in `network_extension.py`.
 
 ## Control flow
 
@@ -265,6 +278,7 @@ Groups (the text the agent reads in `list_operation_groups`):
 | `hcx-service-mesh` | `hcx.service_mesh.list`, `hcx.appliance.list`, `hcx.service_mesh.diagnose`, `hcx.service_mesh.diagnostics.list`, `hcx.service_mesh.diagnostics.get`, and the changes `hcx.service_mesh.create`, `hcx.service_mesh.update`, `hcx.service_mesh.resync`, `hcx.service_mesh.delete` |
 | `hcx-jobs-alerts` | `hcx.job.get`, `hcx.task.get`, `hcx.alert.list` |
 | `hcx-inventory` | `hcx.inventory.list`, `hcx.inventory.compute.list`, `hcx.inventory.datastore.list`, `hcx.inventory.network.list` |
+| `hcx-network-extension` | `hcx.network_extension.list`, `hcx.network_extension.extend`, `hcx.network_extension.unextend`, `hcx.network_extension.mon.set` |
 
 What each read sends and returns:
 
@@ -304,7 +318,17 @@ What each read sends and returns:
   Manager returns them), `warnings` and `errors`.
 - `hcx.job.get` takes `job_id` and returns the vendor job object
   (`jobId`, `isDone`, `didFail`, `isCancelled`, `isRolledBack`,
-  `percentComplete`, `startTime`, `endTime`, ...).
+  `percentComplete`, `startTime`, `endTime`, ...) plus three fields:
+  `outcome` (from the flags: `failed`, `cancelled`, `rolled_back`,
+  `succeeded`, `queued`, else `running`; a failure wins), `error` (the
+  job's `errorMessage`, `error` or `errors`, when it has one) and
+  `checked_at`. When the Manager does not answer (a connection or time-out
+  error after the retries, for example during its own upgrade), it
+  returns `{jobId, outcome: "not_reachable", error: null, checked_at}`:
+  not `failed`. A certificate MEHO does not trust, and an address MEHO
+  refuses, are raised as errors instead. A `401` makes a new login and
+  the read runs again, so a login that expired since the start does not
+  lose the job. MEHO keeps no job state between calls.
 - `hcx.alert.list` sends `?action=query`. Optional `severity` (a list),
   `state`, `module`, `category` and `entity_id` go into the body's
   `filter` (`entity_id` as `entityId`); with none set the body is `{}`.
@@ -434,6 +458,105 @@ removed, migrations and network extensions through the mesh stop, a new
 mesh needs a new create and a new deployment). When the mesh does not
 exist (`404`), the preview fails, so the delete is refused before it
 waits for approval.
+### Network extension
+
+The metadata is in `network_extension_ops.py` (group
+`hcx-network-extension`), the bodies in `network_extension.py`.
+`network_extension.VENDOR_CALLS` lists the five vendor calls for the
+reconcile lane.
+
+Risk: the list is `safe`. The three changes are `dangerous` with
+`requires_approval: true`. A person's call waits until a second person
+approves it. An agent needs a grant for `dangerous`, and its call then
+waits for approval too.
+
+- `hcx.network_extension.list` sends `GET /hybridity/api/l2Extensions`
+  and returns one row per extension. The vendor fields stay, and these
+  are added flat: `stretch_id`, `state` (`operationStatus.state`),
+  `job_id` (`operationStatus.jobId`, when the vendor gives it),
+  `source_network_id`, `source_network_name`, `source_network_type`,
+  `destination_network_name`, `destination_gateway_id`,
+  `destination_endpoint_id`, `source_appliance_id`,
+  `mobility_optimized_networking`, `egress_optimization`. A long list is
+  behind a result handle.
+- `hcx.network_extension.extend` takes the source network (`network_id`,
+  `network_type`, optional `network_name`), the other site (`endpoint_id`,
+  `resource_id`, optional names and types), `destination_gateway_id` (the
+  router at the other site), `source_appliance_id`, `gateway`, `netmask`,
+  and optional `dns`, `vc_guid`, `egress_optimization` and
+  `mobility_optimized_networking`. It sends the body VMware's own
+  Terraform provider sends (`sourceNetwork`, `destination`,
+  `destinationNetwork.gatewayId`, `sourceAppliance`, `features`, ...).
+- `hcx.network_extension.unextend` takes `stretch_id` and
+  `connect_to_local_router` (default false). The flag goes out as the
+  query parameter `connectToLocalRouter=true|false`: with true, the
+  network at the other site is connected to its local router, so it stays
+  routed there.
+- `hcx.network_extension.mon.set` takes `stretch_id` and at least one of
+  `mobility_optimized_networking` (true or false) and `policy_routes`
+  (`allow` and `deny` subnet lists, optional `endpoint_id`; default: the
+  other site of the extension). It reads the extension first; its row is
+  the body of the MON change, with `features.mobilityOptimizedNetworking`
+  set and `operationStatus` left out. Then step 1 sends
+  `PUT /hybridity/api/networkExtensions/{extensionId}` and step 2
+  `PUT /hybridity/api/l2Extensions/policyRoutes` with
+  `{endpointId, allow, deny}`. The policy routes replace the routes of the
+  site. A step fails on an HTTP error, on an answer whose `errors` list is
+  not empty (both `outcome: rejected`, the step did not apply), or on a
+  lost connection (`outcome: unknown`: the Manager may have taken the
+  step; the list read shows it). The run stops there. The answer is
+  `{status: accepted|partial|failed, stretch_id, steps_ran, step_failed:
+  {step, error, outcome}|null, steps_not_run, warnings}`. Nothing is
+  undone, and a step that ran is never lost from the answer. A `401` at a
+  step makes a new login and one more send of that step only; the steps
+  before it are not repeated. When the new login fails (the Manager
+  rejects it, answers it with a fault, or does not answer), or the step
+  gets a second `401`, the error is raised when no step ran yet, so the
+  dispatcher reports the login failure; after a step ran, it is the
+  failed step of the answer (`outcome: rejected`, the Manager did nothing
+  with the step), with the login error as its text. A
+  lost connection at the first step is raised when the request never
+  left MEHO (a blocked destination, an untrusted certificate). Every
+  vendor text in the answer (an error body, an `errors` or `warnings`
+  message) goes through the secret filter: a secret-named field of a JSON
+  error body is replaced before the body becomes text, and the text goes
+  through the default redaction policy.
+
+Vendor jobs (extend and unextend):
+
+1. The start returns as soon as HCX took the job. The answer is
+   `{status: "accepted", job_id, status_read: "hcx.job.get", ...}`. It
+   never says the work is done.
+2. Before the start, the operation reads the extension list. Extend
+   starts nothing when the source network already has an extension, in
+   any state (`already_extended`, with its `stretch_id`, `state` and
+   `job_id`). Unextend starts nothing when the extension is gone
+   (`not_found`) or when its state holds a word that says work still runs
+   (`PROGRESS`, `RUNNING`, `PENDING`, `QUEUED`, `EXTENDING`, `DELETING`,
+   `TEARING`, `UNEXTEND`, `UNSTRETCH`: `already_running`). The vendor
+   publishes no fixed list of states and no list of running jobs. This
+   check helps; it is not a lock. Two callers can both check before
+   either starts.
+3. After a lost reply, do not start again blindly. Read
+   `hcx.network_extension.list` first. For extend, a row with the same
+   source network means the job was started. For unextend, no row, or a
+   row in a running state, means it was started.
+4. Start the change in MEHO's async mode (`async: true`, see
+   `async-governed-dispatch.md`). MEHO then keeps the answer with the job
+   id under a run handle, so a lost reply does not lose the job id.
+5. Follow the job with `hcx.job.get` until `outcome` is `succeeded`,
+   `failed`, `cancelled` or `rolled_back`.
+
+Where the calls come from: Broadcom's "HCX Workload Migration APIs"
+reference, and VMware's Terraform provider and PowerCLI module for HCX,
+which use the same `l2Extensions` calls for list, create and delete. The
+reference marks the `l2Extensions` create and delete as deprecated. They
+are still served, and they return the job id (`{"id": ...}`); the newer
+`networkExtensions` delete answers with no job id. MON is set with
+`PUT /hybridity/api/networkExtensions/{extensionId}`, the call the
+reference names for "enable or disable MON". The Task first named
+`PUT /hybridity/api/l2Extensions/{stretchId}`; the reference has no such
+call.
 
 ### Shutdown
 
@@ -498,6 +621,16 @@ is sent.
 - The uplink fields (`networks`, `overriddenUplink` in a compute profile
   entry) come from the vendor schema, which does not describe them; the
   live proof will confirm them.
+- The network extension state names are not published. The busy check
+  of unextend matches words in the state (see "Network extension"); the
+  live proof confirms the real names. The job object's error field name
+  (`errorMessage`) is not in the reference either; the read also looks
+  at `error` and `errors`.
+- The `l2Extensions` create and delete are marked deprecated in the
+  vendor reference. If a later HCX version drops them, move to
+  `POST /hybridity/api/l2NetworkExtensions` and
+  `DELETE /hybridity/api/networkExtensions/{extensionId}` and read the job
+  id from their answer.
 - The vendor reference writes the job path as `/hybridity/api/jobs/{jobid}`
   (lower-case `id`); the reconcile lane uses that spelling.
 - `role` in `hcx.about` is derived from `systemType`. The vendor upgrade
@@ -514,7 +647,8 @@ is sent.
 ## References
 
 - Task #4608 (this connector, login, version helper and the read);
-  #4545 (the reads that build on it); #4548 (the service mesh changes); #4395 (the same read for NSX);
+  #4545 (the reads that build on it); #4548 (the service mesh changes);
+  #4547 (network extension); #4395 (the same read for NSX);
   #4505 (the same shape for Site Recovery Manager).
 - `docs/decisions/spec-reconcile-guards-standard.md` -- the waiting lane.
 - `docs/codebase/connectors-nsx.md` -- the sibling connector this one

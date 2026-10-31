@@ -184,9 +184,10 @@ A gcloud target row carries:
 | `product` | `gcloud` | Must be exactly `gcloud` |
 | `version` | `1.0` | Must be exactly `1.0` |
 | `impl_id` | `gcloud-rest` | Must be exactly `gcloud-rest` |
-| `gcp_project` | `rdc-dev-123456` | GCP project ID |
-| `gcp_impersonate_sa` | `meho-reader@rdc-dev-123456.iam.gserviceaccount.com` | SA the connector impersonates |
-| `secret_ref` | `{}` or Vault path dict | **No SA JSON key fields** (see auth section) |
+| `host` | `cloudresourcemanager.googleapis.com` | Required by the target registry; the connector does not use it |
+| `gcp_project` | `rdc-dev-123456` | GCP project ID. Saved in the target's `extras` |
+| `gcp_impersonate_sa` | `meho-reader@rdc-dev-123456.iam.gserviceaccount.com` | SA the connector impersonates. Saved in the target's `extras` |
+| `secret_ref` | leave out, or a Vault path | Leave it out: all auth is ADC + impersonation. If set, the secret must hold **no SA JSON key fields** (see auth section) |
 | `auth_model` | `impersonation` | The only supported auth model |
 
 ### targets.yaml entry
@@ -197,11 +198,14 @@ targets:
     product: gcloud
     version: "1.0"
     impl_id: gcloud-rest
+    host: cloudresourcemanager.googleapis.com
     gcp_project: rdc-dev-123456
     gcp_impersonate_sa: meho-reader@rdc-dev-123456.iam.gserviceaccount.com
-    secret_ref: {}
     auth_model: impersonation
 ```
+
+`meho targets import` saves `gcp_project` and `gcp_impersonate_sa` in the
+target's `extras`. The connector reads them from there on every call.
 
 Register with:
 
@@ -516,7 +520,7 @@ Broadcast events follow the standard envelope (CLAUDE.md §6 §7). All
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| `status=error connector_error: ValueError: target … secret_ref contains SA JSON key fields` | Vault secret has SA key material | Replace `secret_ref` with an empty dict `{}`; use ADC+impersonation instead |
+| `status=error connector_error: ValueError: target … secret_ref contains SA JSON key fields` | Vault secret has SA key material | Remove the SA key fields from the secret, or leave `secret_ref` out of the target; use ADC+impersonation instead |
 | `status=error connector_error: google.auth.exceptions.TransportError` | No ADC configured on backplane host | Run `gcloud auth application-default login` on the backplane; or set `GOOGLE_APPLICATION_CREDENTIALS` |
 | `status=error connector_error: google.auth.exceptions.RefreshError … 403 PERMISSION_DENIED` on impersonation | Backplane ADC principal lacks `roles/iam.serviceAccountTokenCreator` on the target SA | Grant the Token Creator binding (see Prerequisites) |
 | `status=error connector_error: google.auth.exceptions.RefreshError … 403 PERMISSION_DENIED` on the GCP API | Target SA lacks the required role | Grant the appropriate `roles/viewer` or narrower role on the project |

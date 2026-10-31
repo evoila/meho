@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 import httpx
 
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
-from meho_backplane.connectors.gcloud.session import GcloudTargetLike
+from meho_backplane.connectors.gcloud.session import GcloudTargetLike, gcp_project
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -142,11 +142,11 @@ def _service_account(params: dict[str, Any]) -> str:
 
 
 def _pools_name(target: GcloudTargetLike) -> str:
-    return f"projects/{target.gcp_project}/locations/global/workloadIdentityPools"
+    return f"projects/{gcp_project(target)}/locations/global/workloadIdentityPools"
 
 
 def _service_account_name(target: GcloudTargetLike, account: str) -> str:
-    return f"projects/{target.gcp_project}/serviceAccounts/{account}"
+    return f"projects/{gcp_project(target)}/serviceAccounts/{account}"
 
 
 def _connector(ops: WorkloadIdentityOps) -> GcloudConnector:

@@ -223,19 +223,31 @@ and return a `ResultHandle` without any connector-side changes.
   `register_gcloud_typed_operations()` walks this tuple.
 - **`GcloudTargetLike`** (`session.py`) — runtime-checkable Protocol
   capturing the minimum target shape the connector reads: `name`,
-  `gcp_project`, `gcp_impersonate_sa`, `secret_ref`, and `auth_model`.
-  `target.host` is intentionally unused — GCP REST is reached via
-  well-known public hostnames. Replaced by the concrete `Target` model
-  once G0.3 (#224) lands.
+  `host`, `secret_ref`, `auth_model`, `id` and `tenant_id`. The
+  registered `Target` row satisfies it unchanged. `target.host` is
+  intentionally unused — GCP REST is reached via well-known public
+  hostnames.
+- **`gcp_project(target)` / `gcp_impersonate_sa(target)`**
+  (`session.py`) — read the two Google settings a target needs. The
+  `Target` row has no column for them: a registered target keeps them
+  in `extras` (`meho targets import` puts the `gcp_project` and
+  `gcp_impersonate_sa` lines of `targets.yaml` there). A test stub may
+  carry them as attributes; the attribute wins when both exist. A
+  missing setting raises a `ValueError` that names the `extras` key to
+  set. Every handler, the probe and the fingerprint read the project
+  through these functions, never through `target.gcp_project`.
 - **`GcloudCredentialsLoader`** (`session.py`) — async callable type
   resolving a target to its Vault-stored credential record. Injectable
   on connector construction (`GcloudConnector(credentials_loader=...)`)
-  so unit tests, integration tests, and pre-G0.3 deployments override
-  the default Vault loader. The record is checked for SA-JSON-key fields
-  before use — the loader does NOT validate; the connector validates.
-- **`load_credentials_from_vault`** (`session.py`) — default loader,
-  stubbed `NotImplementedError` until G0.3 lands the operator-context
-  Vault read path (Goal #214).
+  so unit tests and integration tests override the default loader. The
+  record is checked for SA-JSON-key fields before use — the loader does
+  NOT validate; the connector validates.
+- **`load_credentials_from_vault`** (`session.py`) — default loader. A
+  target without a `secret_ref` has no record: the loader answers `{}`
+  and calls no Vault. A target with a `secret_ref` is read with the
+  shared operator-context reader
+  `meho_backplane.connectors._shared.vault_creds.load_vault_secret_data`,
+  like every other connector.
 - **`_SA_KEY_FIELDS`** (`session.py`) — `frozenset` of field names that
   identify a service-account JSON key file. The connector's
   `_gate_sa_key_refusal()` intersects the Vault record's keys against
@@ -414,27 +426,27 @@ Key tests:
 | `test_gcloud_live_integration_about` _(gated)_ | Live GCP probe; skips unless `CI_GCLOUD_CREDENTIALS_PRESENT=1` |
 | `test_gcloud_live_integration_all_9_ops_return_ok_status` _(gated)_ | Live 9-ops sweep |
 
-**Design note:** The always-on tests use handler method calls directly
-(not `call_operation`) because the `Target` ORM model does not yet have
-`gcp_project` / `gcp_impersonate_sa` as first-class columns (planned for
-a future `extras` migration). The live `@_SKIP_LIVE` tests use
-`CI_GCLOUD_PROJECT` + `CI_GCLOUD_IMPERSONATE_SA` env vars to construct a
-real `GcloudConnector` against a live project.
+**Design note:** The tests above call the handler methods directly.
+`test_connectors_gcloud_call_operation.py` covers the normal path: it
+seeds a registered `Target` row whose `extras` hold `gcp_project` and
+`gcp_impersonate_sa`, registers the operations, and runs pool create and
+binding add through `preview_operation` and `call_operation`. The call
+waits for approval, a second person approves, the operation runs against
+mocked Google for the project in `extras`, and the audit row names the
+approver. The live `@_SKIP_LIVE` tests use `CI_GCLOUD_PROJECT` +
+`CI_GCLOUD_IMPERSONATE_SA` env vars to construct a real `GcloudConnector`
+against a live project.
 
 ## Known issues
 
-- `load_credentials_from_vault` is a stub until Goal #214 (Connector
-  parity) wires the live Vault read. Inject `credentials_loader` on
-  construction to test or run pre-production.
 - `fingerprint()` and `probe()` run the SA-JSON-key gate under a synthesised
   system operator (empty `raw_jwt`), because their ABC signatures carry no
-  operator. Once the live `load_credentials_from_vault` lands (Goal #214),
-  the system operator's empty `raw_jwt` will fail closed on the Vault read —
-  which is the intended boundary for system-initiated credential reads, but
-  means probe/fingerprint on a target with a live Vault secret will need a
-  follow-up to thread a real operator (or an unauthenticated reachability
-  variant). Today, with the stub/injected loader, the gate runs and refuses
-  SA-key material correctly on these paths (#985).
+  operator. A target without a `secret_ref` (the normal shape: all auth is
+  ADC + impersonation) is not affected, because the loader reads nothing.
+  A target with a `secret_ref` fails closed on that Vault read — the
+  intended boundary for system-initiated credential reads — so its probe
+  and fingerprint need a follow-up to thread a real operator (or an
+  unauthenticated reachability variant).
 - `_fetch_token_sync` and `refresh_token` run synchronous
   `google.auth.transport.requests.Request()` calls in a thread pool
   executor. The executor is the event loop's default (unbounded); a

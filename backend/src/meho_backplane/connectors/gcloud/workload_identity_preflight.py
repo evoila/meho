@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
-from meho_backplane.connectors.gcloud.session import GcloudTargetLike
+from meho_backplane.connectors.gcloud.session import GcloudTargetLike, gcp_project
 from meho_backplane.connectors.gcloud.workload_identity import (
     _IAM_API,
     _pool_id,
@@ -141,7 +141,7 @@ async def _project_check(
                 "reason": f"{kind}_not_found",
             }
         extra = {kind: name}
-    project = f"projects/{ctx.target.gcp_project}"
+    project = f"projects/{gcp_project(ctx.target)}"
     check = await _permission_check(
         connector,
         ctx.target,

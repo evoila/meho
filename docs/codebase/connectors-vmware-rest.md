@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 87 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 90 hand-authored composites
 that orchestrate cross-spec workflows: 20 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -22,8 +22,10 @@ read `datastore.file.list` / `#3432` + the vSAN folder list
 read `datastore.vsan.folder.list` / `#4022` + the orphan folder check
 `datastore.orphan_dirs` / `#3814` + the VM limit and
 reservation read `vm.resource_allocation.show` / `#3880` + the migration
-inventory read `vmware.migration.inventory`) and 67 write
-composites (G3.1-T6 / `#509`, incl. the three vCenter install changes
+inventory read `vmware.migration.inventory`) and 70 write
+composites (G3.1-T6 / `#509`, incl. the three host certificate changes
+`host.certificate.renew` / `host.certificate.csr` / `host.certificate.install`
+(see **Host certificates and TPM attestation**), the three vCenter install changes
 `vcenter.appliance.deploy` / `vcenter.install` / `vcenter.deployment.answer`
 (`#4394`), the destructive-tier `vm.destroy` / `#3198`, the
 governed vSphere Namespace `namespace.create` (caution) +
@@ -565,10 +567,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 87
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 90
   `_CompositeSpec` rows (20 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 50 dangerous/destructive
-  writes + 17 caution writes); each row carries its
+  cache-refresh read `datastore.refresh` — + 52 dangerous/destructive
+  writes + 18 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
   (`llm_instructions`) of the VM and folder writes and the VM allocation
@@ -1438,13 +1440,13 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 87 `vmware.composite.*` rows with
+   queued registrar and upserts: the 90 `vmware.composite.*` rows with
    `source_kind="composite"` — 20 reads (19 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 67 writes, all `requires_approval=True`
-   (38 `safety_level="dangerous"`; 17 `safety_level="caution"` —
-   `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
+   service principals), and 70 writes, all `requires_approval=True`
+   (40 `safety_level="dangerous"`; 18 `safety_level="caution"` —
+   `host.certificate.csr`, `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
    `vm.resource_allocation.set` / `#3880`, `datastore.dir.create` / `#3339`,
@@ -1840,7 +1842,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 87 composites (20 reads + 67 writes) land as `source_kind="composite"`
+The 90 composites (20 reads + 70 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1937,7 +1939,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 87 composites are hand-authored aggregators the connector ships as
+The 90 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the

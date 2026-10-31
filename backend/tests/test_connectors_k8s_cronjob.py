@@ -337,6 +337,8 @@ async def test_cronjob_run_preview_shows_job_template_and_active_jobs_not_values
         f"curl -u admin:{_SHORT} {_URL_WITH_PASSWORD}",  # gitleaks:allow
         f'tool --password "{_SHORT}\\" phrase" run',
         f"tool --password {_SHORT}\\ phrase run",
+        f'env "PGPASSWORD={_SHORT}" pg_dump app',
+        f'sh -c "pg_dump --password={_SHORT} app" && echo done',
     ]
     ctx = PreviewContext(
         descriptor=_FakeDescriptor(op_id="k8s.cronjob.run"),  # type: ignore[arg-type]
@@ -373,10 +375,12 @@ async def test_cronjob_run_preview_shows_job_template_and_active_jobs_not_values
     assert container["image"] == "registry.example/backup:1.2"
     assert container["command"] == ["run-backup", "--password"]
     assert container["args"][0] == "***REDACTED***"
-    assert container["args"][-2:] == [
+    assert container["args"][-4:-1] == [
         "tool --password ***REDACTED*** run",
         "tool --password ***REDACTED*** run",
+        'env "PGPASSWORD=***REDACTED***" pg_dump app',
     ]
+    assert container["args"][-1].endswith(' app" && echo done')
     assert container["securityContext"] == {"privileged": True}
     assert container["env"] == [{"name": "DB_PASSWORD", "value": "***REDACTED***"}]
     assert container["envFrom"] == [{"secretRef": {"name": "db-creds"}}]

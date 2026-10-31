@@ -49,7 +49,9 @@ What is never shown
   are read as one command line, the way Kubernetes runs them. The words
   stay, but these values are hidden: the value of a ``NAME=VALUE`` or
   ``--name=value`` whose name holds a secret word (``PGPASSWORD=...``,
-  ``AWS_SECRET_ACCESS_KEY=...``, ``--password=...``, any length), the
+  ``AWS_SECRET_ACCESS_KEY=...``, ``--password=...``, any length; inside a
+  quoted part, ``"PGPASSWORD=..."``, the value ends at the closing quote,
+  so the commands after it stay visible), the
   argument after a secret flag (``--password x``, ``--token x``, ``-p x``;
   the whole list item, or the whole shell word in a shell string, quotes
   and backslash escapes included, also when the flag ends ``command`` and
@@ -198,12 +200,20 @@ def _shell_word(stop: str = "") -> str:
     )
 
 
-#: ``NAME=VALUE``, also as ``--name=value``; the value is one shell word, so
-#: a quoted or escaped value may hold spaces.
-_ASSIGNMENT = re.compile(
-    r"(?<![A-Za-z0-9_.-])(?P<name>-{0,2}[A-Za-z_][A-Za-z0-9_.-]*)="
-    rf"(?P<value>{_shell_word(';&|')})"
-)
+#: The ``NAME=`` of a ``NAME=VALUE``, also as ``--name=``, at the start of a
+#: word or of a quoted part.
+_ASSIGNMENT_NAME = re.compile(r"(?<![A-Za-z0-9_.-])(?P<name>-{0,2}[A-Za-z_][A-Za-z0-9_.-]*)=")
+
+#: The value of an assignment, by the quote that is open where it starts.
+#: Outside quotes it is one shell word, so a quoted or escaped value may hold
+#: spaces. Inside quotes it ends at the closing quote; a word of a quoted
+#: shell string (``sh -c "tool --password=x run"``) ends at a space too.
+_BARE_VALUE = re.compile(_shell_word(";&|"))
+_QUOTED_PART_VALUE = {"'": re.compile(r"[^']*"), '"': re.compile(r'(?:[^"\\]|\\[\s\S])*')}
+_QUOTED_WORD_VALUE = {
+    "'": re.compile(r"""(?:"[^"']*"|[^\s'])*"""),
+    '"': re.compile(r"""(?:'[^'"]*'|[^\s"\\]|\\[\s\S])*"""),
+}
 
 #: The password in a URL that carries a user and password before the ``@``.
 _URL_PASSWORD = re.compile(r"(?P<head>[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@]*:)[^\s/@]+@")
@@ -236,19 +246,66 @@ def _hide_user_password(value: str) -> str:
     return f"{user}:{_HIDDEN}" if sep else value
 
 
-def _hide_assignment(match: re.Match[str]) -> str:
-    """Hide the value of a ``NAME=VALUE`` whose name is secret-shaped."""
-    name, value = match["name"], match["value"]
-    if _secret_shaped_name(name):
-        return f"{name}={_HIDDEN}"
-    if name.lstrip("-") in _USER_FLAGS:
-        return f"{name}={_hide_user_password(value)}"
-    return match[0]
+def _assignment_value_end(text: str, start: int, quote: str, whole_part: bool) -> int:
+    """Index after the value of an assignment that starts at *start*.
+
+    *quote* is the quote open at *start* (``""`` outside quotes). The
+    value of a quoted part that is one assignment (``"PGPASSWORD=a b"``,
+    *whole_part*) runs to the closing quote, spaces included. A word of a
+    quoted shell string ends at a space or at the closing quote. Neither
+    runs past the closing quote.
+    """
+    if not quote:
+        pattern = _BARE_VALUE
+    elif whole_part:
+        pattern = _QUOTED_PART_VALUE[quote]
+    else:
+        pattern = _QUOTED_WORD_VALUE[quote]
+    match = pattern.match(text, start)
+    return start if match is None else match.end()
+
+
+def _hide_assignments(text: str) -> str:
+    """Hide the value of every ``NAME=VALUE`` with a secret-shaped name.
+
+    The scan tracks the quote that is open at each point, so a value that
+    starts inside a quoted part ends at the closing quote: the commands
+    after ``env "PGPASSWORD=x" pg_dump app`` stay visible. After ``-u`` or
+    ``--user`` as ``--user=name:password`` only the password is hidden.
+    """
+    out: list[str] = []
+    pos = 0
+    quote = ""
+    opened_at = -1
+    while pos < len(text):
+        char = text[pos]
+        if char == "\\" and quote != "'":
+            out.append(text[pos : pos + 2])
+            pos += 2
+            continue
+        if quote and char == quote:
+            quote = ""
+        elif not quote and char in "'\"":
+            quote, opened_at = char, pos
+        match = _ASSIGNMENT_NAME.match(text, pos)
+        if match is None:
+            out.append(char)
+            pos += 1
+            continue
+        name = match["name"]
+        out.append(match[0])
+        pos = match.end()
+        if _secret_shaped_name(name) or name.lstrip("-") in _USER_FLAGS:
+            end = _assignment_value_end(text, pos, quote, whole_part=opened_at == match.start() - 1)
+            value = text[pos:end]
+            out.append(_HIDDEN if _secret_shaped_name(name) else _hide_user_password(value))
+            pos = end
+    return "".join(out)
 
 
 def _hide_in_text(text: str) -> str:
     """Hide secret values inside one command-line string."""
-    text = _ASSIGNMENT.sub(_hide_assignment, text)
+    text = _hide_assignments(text)
     text = _URL_PASSWORD.sub(lambda match: f"{match['head']}{_HIDDEN}@", text)
     return _KNOWN_TOKEN.sub(_HIDDEN, text)
 

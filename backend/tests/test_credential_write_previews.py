@@ -319,6 +319,7 @@ _URL_WITH_PASSWORD = f"https://bob:{_SHORT}@example.invalid"  # trufflehog:ignor
         (["-c", f"mytool --password {_SHORT}\\ phrase run"], "run"),
         (["-c", f"mytool --password={_SHORT}\\ phrase run"], "run"),
         (["-c", f"PGPASSWORD='{_SHORT} phrase pg_dump"], "PGPASSWORD="),
+        (["-c", f'env "PGPASSWORD={_SHORT}" pg_dump app'], "pg_dump app"),
         (["-c", f"mysql -u root -p {_SHORT} app"], "mysql"),
         (["-c", f"curl -u admin:{_SHORT} https://example.invalid"], "admin:"),  # gitleaks:allow
         (["curl", "--user", f"admin:{_SHORT}", _URL_WITH_PASSWORD], "curl"),
@@ -384,6 +385,38 @@ async def test_k8s_job_create_hides_a_password_with_shell_escapes_whole() -> Non
         "tool --password ***REDACTED*** run",
         "tool -p ***REDACTED*** --user admin:***REDACTED*** run",
     ]
+
+
+@pytest.mark.asyncio
+async def test_k8s_job_create_keeps_the_commands_after_a_quoted_assignment() -> None:
+    """A value inside a quoted part ends at the closing quote, not at the string's end."""
+    _, preview = await _preview(
+        "k8s.job.create",
+        _job_params(
+            {
+                "name": "run",
+                "image": "busybox:1.36",
+                "command": ["sh", "-c"],
+                "args": [
+                    f'env "PGPASSWORD={_SHORT}" pg_dump app',
+                    f"env 'PGPASSWORD={_SHORT} phrase' pg_dump app",
+                    f'sh -c "pg_dump --password={_SHORT} app" && echo done',
+                    f"sh -c 'curl --user=admin:{_SHORT} x.invalid' && echo done",  # gitleaks:allow
+                ],
+            }
+        ),
+    )
+    (container,) = preview["spec"]["template"]["spec"]["containers"]
+    assert _SHORT not in json.dumps(container)
+    assert "phrase" not in json.dumps(container)
+    assert container["args"][:2] == [
+        'env "PGPASSWORD=***REDACTED***" pg_dump app',
+        "env 'PGPASSWORD=***REDACTED***' pg_dump app",
+    ]
+    assert container["args"][2].endswith(' app" && echo done')
+    assert container["args"][3] == (
+        "sh -c 'curl --user=admin:***REDACTED*** x.invalid' && echo done"  # gitleaks:allow
+    )
 
 
 @pytest.mark.asyncio

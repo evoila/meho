@@ -226,6 +226,9 @@ from meho_backplane.connectors.vmware_rest.composites._teardown_network import (
     host_standard_portgroup_delete_composite,
     network_portgroup_delete_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._vcenter_install_ops import (
+    VCENTER_INSTALL_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._vm_allocation import (
     vm_resource_allocation_set_composite,
     vm_resource_allocation_show_composite,
@@ -420,6 +423,10 @@ from meho_backplane.connectors.vmware_rest.license_common import (
     LICENSE_GROUP_KEY,
     LICENSE_KEY_TAG,
     LICENSE_WHEN_TO_USE,
+)
+from meho_backplane.connectors.vmware_rest.vcenter_deployment import (
+    INSTALL_GROUP_KEY,
+    INSTALL_WHEN_TO_USE,
 )
 from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
@@ -624,6 +631,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # registers under the same group key with the same text.
     ALARMS_GROUP_KEY: ALARMS_WHEN_TO_USE,
     "migration": MIGRATION_GROUP_WHEN_TO_USE,
+    # #4394: shared with the typed read vmware.vcenter.deployment.status.
+    INSTALL_GROUP_KEY: INSTALL_WHEN_TO_USE,
 }
 
 
@@ -2129,6 +2138,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         requires_approval=True,
         llm_instructions=ALARM_RESET_LLM_INSTRUCTIONS,
     ),
+    # Install a new vCenter (#4394), dangerous / approval; the rows live in
+    # their own module.
+    *(_CompositeSpec(**row) for row in VCENTER_INSTALL_COMPOSITES),
 )
 
 

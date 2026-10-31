@@ -3341,6 +3341,23 @@ class VmwareRestConnector(HttpConnector):
 
         return await vm_question_answer_impl(self, operator, target, params)
 
+    async def vcenter_deployment_status(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vcenter.deployment.status`` -- the install state of a new appliance (#4394).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vcenter_deployment_status.deployment_status_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vcenter_deployment_status import (
+            deployment_status_impl,
+        )
+
+        return await deployment_status_impl(self, operator, target, params)
+
     async def object_collect(
         self,
         operator: Operator,

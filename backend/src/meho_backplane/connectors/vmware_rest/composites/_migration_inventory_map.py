@@ -403,6 +403,18 @@ def _hardware(vm: VmProps, missing: dict[str, MissingReason]) -> dict[str, Any]:
     return {"disks": disks, "nics": nics, "macs": macs}
 
 
+def _utilization_missing(utilization: Utilization) -> dict[str, MissingReason]:
+    """The reason for each unknown part of a measured utilization block."""
+    missing: dict[str, MissingReason] = {
+        f"utilization.{name}": "not_measured"
+        for name in _UTILIZATION_STATS
+        if getattr(utilization, name) is None
+    }
+    if utilization.sample_interval_minutes is None:
+        missing["utilization.sample_interval_minutes"] = "not_reported_by_source"
+    return missing
+
+
 def server_record(
     vm: VmProps,
     *,
@@ -465,9 +477,7 @@ def server_record(
         if value is None:
             missing[name] = reason
     if utilization is not None:
-        for name in _UTILIZATION_STATS:
-            if getattr(utilization, name) is None:
-                missing[f"utilization.{name}"] = "not_measured"
+        missing.update(_utilization_missing(utilization))
     hints = IdentityHints(
         bios_uuid=guest_bios_uuid(vm.get("config.uuid"), hardware_version),
         mac_addresses=hardware["macs"],

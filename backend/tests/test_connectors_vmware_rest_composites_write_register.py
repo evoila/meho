@@ -167,6 +167,13 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.cluster.drs_group.delete",
     # Licence assign: dangerous + approval (the default tier).
     "vmware.composite.license.assign",
+    # The six host security changes: dangerous + approval.
+    "vmware.composite.host.advanced_settings.set",
+    "vmware.composite.host.firewall.ruleset.set",
+    "vmware.composite.host.lockdown.set",
+    "vmware.composite.host.lockdown.exceptions.set",
+    "vmware.composite.host.snmp.set",
+    "vmware.composite.host.coredump.set",
     # Install a new vCenter (#4394): dangerous + approval.
     "vmware.composite.vcenter.appliance.deploy",
     "vmware.composite.vcenter.install",
@@ -245,6 +252,24 @@ _ALL_OP_IDS: tuple[str, ...] = _READ_OP_IDS + _CAUTION_OP_IDS + _WRITE_OP_IDS
 
 
 _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
+    "vmware.composite.host.advanced_settings.set": (
+        "meho_backplane.connectors.vmware_rest.composites._host_security_writes.host_advanced_settings_set_composite"
+    ),
+    "vmware.composite.host.firewall.ruleset.set": (
+        "meho_backplane.connectors.vmware_rest.composites._host_security_writes.host_firewall_ruleset_set_composite"
+    ),
+    "vmware.composite.host.lockdown.set": (
+        "meho_backplane.connectors.vmware_rest.composites._host_access_writes.host_lockdown_set_composite"
+    ),
+    "vmware.composite.host.lockdown.exceptions.set": (
+        "meho_backplane.connectors.vmware_rest.composites._host_access_writes.host_lockdown_exceptions_set_composite"
+    ),
+    "vmware.composite.host.snmp.set": (
+        "meho_backplane.connectors.vmware_rest.composites._host_access_writes.host_snmp_set_composite"
+    ),
+    "vmware.composite.host.coredump.set": (
+        "meho_backplane.connectors.vmware_rest.composites._host_access_writes.host_coredump_set_composite"
+    ),
     "vmware.composite.vm.create": (
         "meho_backplane.connectors.vmware_rest.composites._write.vm_create_composite"
     ),
@@ -447,6 +472,12 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
 
 
 _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
+    "vmware.composite.host.advanced_settings.set": "vmware-host-security",
+    "vmware.composite.host.firewall.ruleset.set": "vmware-host-security",
+    "vmware.composite.host.lockdown.set": "vmware-host-security",
+    "vmware.composite.host.lockdown.exceptions.set": "vmware-host-security",
+    "vmware.composite.host.snmp.set": "vmware-host-security",
+    "vmware.composite.host.coredump.set": "vmware-host-security",
     "vmware.composite.vm.create": "vm",
     "vmware.composite.vm.clone": "vm",
     "vmware.composite.vm.deploy_from_library": "vm",

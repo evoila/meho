@@ -63,6 +63,10 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vmware_rest._typed_response_schemas import (
     HOST_USAGE_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vmware_rest.host_security import (
+    HOST_SECURITY_GROUP_KEY,
+    HOST_SECURITY_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.vim_body import (
     retrieve_properties_body,
@@ -428,6 +432,9 @@ from meho_backplane.connectors.vmware_rest.typed_ops_host_network_uplinks import
     HOST_NETWORK_UPLINKS_WHEN_TO_USE,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_host_security import (  # noqa: E402
+    HOST_SECURITY_TYPED_OPS,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_host_storage_devices import (  # noqa: E402
     HOST_STORAGE_DEVICES_GROUP_KEY,
     HOST_STORAGE_DEVICES_WHEN_TO_USE,
@@ -520,6 +527,8 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     HOST_VSAN_HEALTH_GROUP_KEY: HOST_VSAN_HEALTH_WHEN_TO_USE,
     HOST_STORAGE_DEVICES_GROUP_KEY: HOST_STORAGE_DEVICES_WHEN_TO_USE,
     HOST_DATASTORES_GROUP_KEY: HOST_DATASTORES_WHEN_TO_USE,
+    # Shared with the six host security changes: the same key and text.
+    HOST_SECURITY_GROUP_KEY: HOST_SECURITY_WHEN_TO_USE,
     VM_INFO_GROUP_KEY: VM_INFO_WHEN_TO_USE,
     VM_HARDWARE_GROUP_KEY: VM_HARDWARE_WHEN_TO_USE,
     OBJECT_COLLECT_GROUP_KEY: OBJECT_COLLECT_WHEN_TO_USE,
@@ -629,6 +638,8 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_VSAN_HEALTH_OP,
     VMWARE_HOST_STORAGE_DEVICES_OP,
     VMWARE_HOST_DATASTORES_OP,
+    # The advanced settings and firewall of one host.
+    *HOST_SECURITY_TYPED_OPS,
     VMWARE_VM_INFO_OP,
     VMWARE_VM_HARDWARE_SHOW_OP,
     VMWARE_OBJECT_COLLECT_OP,

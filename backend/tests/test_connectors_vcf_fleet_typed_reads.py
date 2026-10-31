@@ -291,7 +291,8 @@ async def test_typed_ops_registered_with_no_ingested_rows(
         .all()
     )
     op_ids = {r.op_id for r in rows}
-    assert op_ids == {"fleet.about", "fleet.environment.list", "fleet.api_file.get"}
+    assert op_ids == {op.op_id for op in FLEET_TYPED_OPS}
+    assert {"fleet.about", "fleet.environment.list", "fleet.api_file.get"} <= op_ids
     assert all(r.source_kind == "typed" for r in rows)
 
 
@@ -300,14 +301,14 @@ async def test_typed_ops_registered_with_no_ingested_rows(
 # ---------------------------------------------------------------------------
 
 
-def test_typed_ops_are_read_only_and_ungated() -> None:
-    """Every typed op is safe, read-only, and requires no approval."""
-    assert {op.op_id for op in FLEET_TYPED_OPS} == {
-        "fleet.about",
-        "fleet.environment.list",
-        "fleet.api_file.get",
-    }
+def test_typed_reads_are_read_only_and_ungated() -> None:
+    """Every read-only typed op is safe and requires no approval; every change waits."""
+    reads = {op.op_id for op in FLEET_TYPED_OPS if "read-only" in op.tags}
+    assert {"fleet.about", "fleet.environment.list", "fleet.api_file.get"} <= reads
     for op in FLEET_TYPED_OPS:
+        if "read-only" not in op.tags:
+            assert op.safety_level != "safe" and op.requires_approval is True, op.op_id
+            continue
         assert op.safety_level == "safe", op.op_id
         assert op.requires_approval is False, op.op_id
         assert "read-only" in op.tags, op.op_id

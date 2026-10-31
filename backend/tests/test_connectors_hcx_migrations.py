@@ -571,6 +571,112 @@ async def test_start_of_a_group_vendor_error_reaches_the_answer(registered: None
     assert "group is not valid" in json.dumps(result.extras, default=str)
 
 
+_ECHOED_SECRET = "echoed-secret-value-0001"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"password": _ECHOED_SECRET, "detail": "login failed"},
+        {"errors": [{"message": f'login failed with "password": "{_ECHOED_SECRET}"'}]},
+        {"errors": [{"message": f"token Bearer {_ECHOED_SECRET} was refused"}]},
+    ],
+    ids=["secret-field-in-body", "secret-field-in-message", "bearer-token-in-message"],
+)
+@pytest.mark.asyncio
+async def test_start_step_error_holds_no_secret_from_the_vendor_body(
+    registered: None, body: dict[str, Any]
+) -> None:
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        _query_route(mock, [])
+        mock.post(_GROUPS).respond(201, json=_group_answer())
+        mock.post(_GROUPS_START).respond(500, json=body)
+        result = await _call("hcx.migration.start", {"group": _GROUP_INPUT}, approved=True)
+
+    assert result.status == "ok", result.error
+    step = result.result["steps"][1]
+    assert step["state"] == "failed"
+    assert step["error"].startswith("HTTP 500: ")
+    rendered = json.dumps(result.result) + json.dumps(result.extras, default=str)
+    assert _ECHOED_SECRET not in rendered
+    assert _PASSWORD not in rendered
+    assert _TOKEN not in rendered
+
+
+@pytest.mark.asyncio
+async def test_start_of_a_group_rejected_with_http_200_says_failed(registered: None) -> None:
+    answer = _group_answer(errors=[{"code": "E1", "message": "group is not valid"}])
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        _query_route(mock, [])
+        mock.post(_GROUPS_START).respond(200, json=answer)
+        result = await _call("hcx.migration.start", {"mobility_group_id": _GROUP_ID}, approved=True)
+
+    assert result.status == "ok", result.error
+    answer = result.result
+    assert answer["status"] == "failed"
+    assert answer["errors"] == [{"code": "E1", "message": "group is not valid"}]
+    assert answer["steps"] == [
+        {"step": "start_group", "state": "failed", "error": "group is not valid"}
+    ]
+    assert answer["status_read_params"] == {"mobility_group_id": _GROUP_ID}
+
+
+@pytest.mark.asyncio
+async def test_start_vms_rejected_with_http_200_keeps_the_group(registered: None) -> None:
+    rejected = {
+        "migrationId": _MIGRATION_ID,
+        "entityId": _VM_ID,
+        "errors": [{"message": "no seed datastore"}],
+        "warnings": [],
+    }
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        _query_route(mock, [])
+        mock.post(_GROUPS).respond(201, json=_group_answer())
+        mock.post(_GROUPS_START).respond(200, json=_group_answer(migrations=[rejected]))
+        result = await _call("hcx.migration.start", {"group": _GROUP_INPUT}, approved=True)
+
+    assert result.status == "ok", result.error
+    answer = result.result
+    assert answer["status"] == "failed"
+    assert answer["mobility_group_id"] == _GROUP_ID
+    assert answer["migrations"][0]["errors"] == [{"message": "no seed datastore"}]
+    assert answer["steps"] == [
+        {"step": "create_group", "state": "done", "error": None},
+        {"step": "start_group", "state": "failed", "error": f"{_VM_ID}: no seed datastore"},
+    ]
+    assert answer["status_read_params"] == {"mobility_group_id": _GROUP_ID}
+
+
+@pytest.mark.asyncio
+async def test_start_with_some_migrations_rejected_says_partial(registered: None) -> None:
+    started = {"migrationId": _MIGRATION_ID, "entityId": _VM_ID, "errors": [], "warnings": []}
+    rejected = {
+        "migrationId": "migration-0002",
+        "entityId": "vm-0002",
+        "errors": [{"message": "VM is powered off"}],
+        "warnings": [],
+    }
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        _query_route(mock, [])
+        mock.post(_GROUPS_START).respond(200, json=_group_answer(migrations=[started, rejected]))
+        result = await _call("hcx.migration.start", {"mobility_group_id": _GROUP_ID}, approved=True)
+
+    assert result.status == "ok", result.error
+    answer = result.result
+    assert answer["status"] == "partial"
+    assert [m["migration_id"] for m in answer["migrations"]] == [_MIGRATION_ID, "migration-0002"]
+    assert answer["migrations"][0]["errors"] == []
+    assert answer["migrations"][1]["errors"] == [{"message": "VM is powered off"}]
+    assert answer["steps"] == [
+        {"step": "start_group", "state": "partial", "error": "vm-0002: VM is powered off"}
+    ]
+    assert answer["status_read_params"] == {"mobility_group_id": _GROUP_ID}
+
+
 # ---------------------------------------------------------------------------
 # hcx.migration.list -- the status read
 # ---------------------------------------------------------------------------

@@ -211,11 +211,14 @@ JOB_ANSWER_SCHEMA: Final[dict[str, Any]] = {
     "properties": {
         "status": {
             "type": "string",
-            "enum": ["accepted", "already_running", "failed", "no_answer"],
+            "enum": ["accepted", "already_running", "failed", "partial", "no_answer"],
             "description": (
                 "accepted: HCX took the start; it is not done. already_running: a migration "
-                "of the same group or VMs still runs; nothing was started. failed or "
-                "no_answer: a step failed or got no answer; see steps."
+                "of the same group or VMs still runs; nothing was started. failed: HCX "
+                "rejected the start (its errors are on the group or on every migration), or "
+                "a step failed; see steps. partial: HCX rejected some migrations and started "
+                "the others; the rejected ones have errors in migrations. no_answer: a step "
+                "got no answer; see steps."
             ),
         },
         "mobility_group_id": string_schema("Id of the mobility group that was started."),
@@ -243,10 +246,15 @@ JOB_ANSWER_SCHEMA: Final[dict[str, Any]] = {
                     "step": string_schema("Step name."),
                     "state": {
                         "type": "string",
-                        "enum": ["done", "failed", "not_run"],
-                        "description": "What happened to the step.",
+                        "enum": ["done", "failed", "partial", "not_run"],
+                        "description": (
+                            "What happened to the step. partial: HCX rejected some "
+                            "migrations of the start and started the others."
+                        ),
                     },
-                    "error": string_schema("HCX's error text when the step failed."),
+                    "error": string_schema(
+                        "HCX's error text when the step failed, with secrets removed."
+                    ),
                 },
             },
         },

@@ -70,7 +70,7 @@ Package: `backend/src/meho_backplane/connectors/hcx/`.
 | `hcx.network_extension.unextend` | Unextend a network, and if asked connect the cloud network to its local router. Starts a vendor job; returns `accepted` and the job id. | `DELETE /hybridity/api/l2Extensions/{extensionId}?connectToLocalRouter=` | change (`dangerous`, approval) | 4.11, 9.x |
 | `hcx.network_extension.mon.set` | Turn Mobility Optimized Networking on or off, and set the policy routes. Two steps; lists what ran, what failed and what did not run. | `PUT /hybridity/api/networkExtensions/{extensionId}`, `PUT /hybridity/api/l2Extensions/policyRoutes` | change (`dangerous`, approval) | 4.11, 9.x |
 | `hcx.migration.validate` | Check a planned migration or a mobility group before it starts. Returns `valid` and HCX's errors and warnings for the group and each VM. Changes nothing. | `POST /hybridity/api/mobility/groups/validate` | read (`safe`, no approval) | 4.11, 9.x |
-| `hcx.migration.start` | Start all migrations of a mobility group, or make a group for VMs (bulk, vMotion, replication-assisted vMotion, cold) and start it. Returns `accepted` with the ids and the status read. | `POST /hybridity/api/mobility/groups/start`, `POST /hybridity/api/mobility/groups`, `POST /hybridity/api/migrations?action=query` | change (`dangerous`, waits for approval) | 4.11, 9.x |
+| `hcx.migration.start` | Start all migrations of a mobility group, or make a group for VMs (bulk, vMotion, replication-assisted vMotion, cold) and start it. Returns `accepted` with the ids and the status read; `failed` or `partial` when HCX rejects the start, also with HTTP 200. | `POST /hybridity/api/mobility/groups/start`, `POST /hybridity/api/mobility/groups`, `POST /hybridity/api/migrations?action=query` | change (`dangerous`, waits for approval) | 4.11, 9.x |
 | `hcx.migration.list` | The migrations with vendor state, outcome, progress, messages and times; filter by state, ids, VMs or group. | `POST /hybridity/api/migrations?action=query` | read (`safe`, no approval) | 4.11, 9.x |
 | `hcx.migration.cancel` | Cancel migrations, or force-cancel a stuck one. Returns `accepted`; migrations that already ended are not sent. | `POST /hybridity/api/mobility/migrations/cancel`, `POST /hybridity/api/mobility/migrations/forceCancel`, `POST /hybridity/api/migrations?action=query` | change (`dangerous`, waits for approval) | 4.11, 9.x |
 | `hcx.mobility_group.list` | The mobility groups (migration waves) with state and configuration status, or the summary of one group. | `POST /hybridity/api/v2/mobility-groups/query`, `GET /hybridity/api/v2/mobility-groups/{mobilityGroupId}/summary` | read (`safe`, no approval) | 4.11, 9.x |
@@ -681,6 +681,19 @@ HCX does the migration after the start call returns. So:
   nothing is undone. Read `hcx.migration.list` with its
   `mobility_group_id`, then start it by id. When `create_group` fails, the
   vendor error comes back as the call's error and nothing ran.
+- HCX can answer a start with HTTP 200 and still reject it: the `errors`
+  of the group, or of each migration, are not empty. The operation reads
+  them before it sets the status. Errors on the group, or on every
+  migration, mean nothing started: `status: failed`, `start_group` failed
+  with the messages. Errors on some migrations mean HCX started the
+  others: `status: partial`, `start_group` partial, and the rejected
+  migrations are those with errors in `migrations`. A start of VMs keeps
+  its `create_group` done step in both cases; the group stays.
+- The error text of a step has its secrets removed before it leaves the
+  connector: the value of each secret-named field of the vendor body
+  (`"password": "..."`) is replaced, then the default redaction policy
+  runs. The vendor's messages are kept; a body without messages becomes
+  text only after that scrub.
 
 ### Shutdown
 

@@ -30,11 +30,21 @@ mobility group first, then starts it. When the second step fails, the
 answer lists the steps that ran, the step that failed with the vendor's
 error, and the steps that did not run. The group stays; nothing is undone.
 
+**A rejected start.** HCX can answer a start with HTTP 200 and still
+reject it: the ``errors`` of the group, or of each migration, are not
+empty. Such an answer is ``failed`` (nothing started) or ``partial`` (HCX
+rejected some migrations and started the others), never ``accepted``.
+
 Every answer runs through :func:`~meho_backplane.connectors.hcx.typed_reads.redact_secrets`.
+The error text of a step (the vendor's messages, else its body) goes
+through the secret-field scrub and the default redaction policy first
+(:func:`~meho_backplane.operations._vendor_text.redact_error_payload`), so
+a secret the Manager echoes in an error body never reaches the answer.
 """
 
 from __future__ import annotations
 
+import json
 import ssl
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
@@ -58,6 +68,8 @@ from meho_backplane.connectors.hcx.typed_reads import (
     redact_secrets,
     rows_of,
 )
+from meho_backplane.operations._vendor_text import ERROR_TEXT_WITHHELD, redact_error_payload
+from meho_backplane.redaction.secret_fields import scrub_secret_fields
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.hcx.connector import HcxConnector
@@ -135,10 +147,40 @@ def _notes(body: Any) -> dict[str, list[Any]]:
     return {"errors": body.get("errors") or [], "warnings": body.get("warnings") or []}
 
 
+def _texts(errors: list[Any]) -> list[str]:
+    """The ``message`` of each error object in *errors*."""
+    return [
+        str(error["message"])
+        for error in errors
+        if isinstance(error, dict) and error.get("message")
+    ]
+
+
+def _clean_text(text: str) -> str:
+    """*text* with every secret filtered out, cut to :data:`_VENDOR_TEXT_MAX`.
+
+    The value of each quoted secret-named pair is replaced first, then the
+    default redaction policy runs; the filter runs before the cut, so a
+    secret never leaves a fragment behind. When the filter itself fails,
+    the text is withheld.
+    """
+    try:
+        cleaned = redact_error_payload(text)
+    except Exception:  # fail-closed: a vendor text always goes through the filter
+        return ERROR_TEXT_WITHHELD
+    if not isinstance(cleaned, str):
+        return ERROR_TEXT_WITHHELD
+    return cleaned[:_VENDOR_TEXT_MAX]
+
+
 def _vendor_error(exc: httpx.HTTPError) -> str:
-    """The vendor's error text of a failed call: the ``errors[].message`` texts, or the body."""
+    """The vendor's error text of a failed call: the ``errors[].message`` texts, or the body.
+
+    A body with no error message has its secret-named fields replaced
+    before it becomes text; :func:`_step` cleans the text once more.
+    """
     if not isinstance(exc, httpx.HTTPStatusError):
-        return f"no answer from HCX: {type(exc).__name__}: {exc}"[:_VENDOR_TEXT_MAX]
+        return f"no answer from HCX: {type(exc).__name__}: {exc}"
     response = exc.response
     try:
         body = response.json()
@@ -146,11 +188,14 @@ def _vendor_error(exc: httpx.HTTPError) -> str:
         body = None
     messages: list[str] = []
     for holder in [body, *rows_of(body)]:
-        for error in _notes(holder)["errors"]:
-            if isinstance(error, dict) and error.get("message"):
-                messages.append(str(error["message"]))
-    text = "; ".join(messages) or response.text
-    return f"HTTP {response.status_code}: {text}"[:_VENDOR_TEXT_MAX]
+        messages.extend(_texts(_notes(holder)["errors"]))
+    if messages:
+        text = "; ".join(messages)
+    elif body is not None:
+        text = json.dumps(scrub_secret_fields(body), default=str)
+    else:
+        text = response.text
+    return f"HTTP {response.status_code}: {text}"
 
 
 async def _query_migrations(
@@ -284,7 +329,33 @@ def _job_answer(
 
 
 def _step(name: str, state: str, error: str | None = None) -> dict[str, Any]:
-    return {"step": name, "state": state, "error": error}
+    """One step of the answer; the error text is cleaned of secrets here, in one place."""
+    return {"step": name, "state": state, "error": None if error is None else _clean_text(error)}
+
+
+def _start_result(item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """The status and the ``start_group`` step of a start HCX answered with HTTP 2xx.
+
+    ``accepted`` when the group and its migrations have no errors. Errors
+    on the group, or on every migration, mean HCX started nothing:
+    ``failed``. Errors on some migrations mean HCX started the others:
+    ``partial``; the rejected ones are those with errors in ``migrations``.
+    """
+    group_errors = _texts(_notes(item)["errors"])
+    if group_errors:
+        return "failed", _step("start_group", "failed", "; ".join(group_errors))
+    migrations = _migration_results(item)
+    rejected = [migration for migration in migrations if migration["errors"]]
+    if not rejected:
+        return "accepted", _step("start_group", "done")
+    error = "; ".join(
+        f"{migration['vm_id'] or migration['migration_id']}: {text}"
+        for migration in rejected
+        for text in (_texts(migration["errors"]) or ["rejected"])
+    )
+    if len(rejected) == len(migrations):
+        return "failed", _step("start_group", "failed", error)
+    return "partial", _step("start_group", "partial", error)
 
 
 async def _running(
@@ -321,8 +392,11 @@ async def hcx_migration_start_impl(
 
     Returns ``status: already_running`` (and starts nothing) when a
     migration of the same group or VMs still runs; ``accepted`` when HCX
-    took the start; ``failed`` or ``no_answer`` when the start step of a
-    new group failed after the group was made.
+    took the start; ``failed`` when HCX rejected the start (also with HTTP
+    200: errors on the group or on every migration) or when the start step
+    of a new group failed after the group was made; ``partial`` when HCX
+    rejected some migrations and started the others; ``no_answer`` when
+    the start step of a new group got no answer.
     """
     group_id = params.get("mobility_group_id")
     if group_id:
@@ -330,7 +404,8 @@ async def hcx_migration_start_impl(
         if running:
             return _job_answer("already_running", group_id, running=running, steps=[])
         item = await _start_group(connector, operator, target, group_id)
-        return _job_answer("accepted", group_id, item=item, steps=[_step("start_group", "done")])
+        status, step = _start_result(item)
+        return _job_answer(status, group_id, item=item, steps=[step])
     group = params["group"]
     vm_ids = [vm["vm_id"] for vm in group["vms"]]
     running = await _running(connector, operator, target, {"entityId": vm_ids})
@@ -343,11 +418,7 @@ async def hcx_migration_start_impl(
     )
     new_id = created.get("migrationGroupId")
     if not new_id:
-        errors = "; ".join(
-            str(error.get("message"))
-            for error in _notes(created)["errors"]
-            if isinstance(error, dict)
-        )
+        errors = "; ".join(_texts(_notes(created)["errors"]))
         steps = [
             _step("create_group", "failed", errors or "HCX returned no mobility group id"),
             _step("start_group", "not_run"),
@@ -359,8 +430,8 @@ async def hcx_migration_start_impl(
         status = "no_answer" if isinstance(exc, httpx.TransportError) else "failed"
         steps = [_step("create_group", "done"), _step("start_group", "failed", _vendor_error(exc))]
         return _job_answer(status, new_id, item=created, steps=steps)
-    steps = [_step("create_group", "done"), _step("start_group", "done")]
-    return _job_answer("accepted", new_id, item=item, steps=steps)
+    status, step = _start_result(item)
+    return _job_answer(status, new_id, item=item, steps=[_step("create_group", "done"), step])
 
 
 async def hcx_migration_validate_impl(

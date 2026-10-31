@@ -262,6 +262,8 @@ function makeCertificate() {
 //     that expired during the session.
 async function startFakeMeho(mode, tls) {
   let base;
+  // The Meho-Tenant header of every /mcp request, in order (#5242).
+  const tenantHeaders = [];
   const server = createHttpsServer({ key: tls.key, cert: tls.cert }, (req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
@@ -294,6 +296,7 @@ async function startFakeMeho(mode, tls) {
         res.writeHead(404);
         return res.end();
       }
+      tenantHeaders.push(req.headers["meho-tenant"] ?? null);
       const challenge = {
         "www-authenticate": `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource"`,
       };
@@ -323,12 +326,16 @@ async function startFakeMeho(mode, tls) {
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   base = `https://127.0.0.1:${server.address().port}`;
-  return { url: `${base}/mcp`, close: () => server.close() };
+  return { url: `${base}/mcp`, tenantHeaders, close: () => server.close() };
 }
 
 // Save a login for `url`, the way mcp-remote stores it after a browser login.
-function saveLogin(authDir, url) {
-  const hash = createHash("md5").update(url).digest("hex");
+// mcp-remote keys a login on the URL plus the custom headers it sends, so a
+// session with a Meho-Tenant header has its own saved login.
+function saveLogin(authDir, url, headers = {}) {
+  const keys = Object.keys(headers).sort();
+  const parts = keys.length > 0 ? [url, JSON.stringify(headers, keys)] : [url];
+  const hash = createHash("md5").update(parts.join("|")).digest("hex");
   const dir = join(authDir, `mcp-remote-${mcpRemoteConfigVersion()}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(
@@ -449,6 +456,49 @@ e2e("e2e: two starts at once with a saved login both connect", { timeout: 30000 
       assert.doesNotMatch(run.stderr, /did not connect|Fatal error/);
     }
     assert.deepEqual(signInLocks(bundle.authDir), []);
+  } finally {
+    fake.close();
+  }
+});
+
+e2e("e2e: the tenant setting reaches MEHO as the Meho-Tenant header", { timeout: 30000 }, async () => {
+  // #5242: the session works in the tenant the header names.
+  const fake = await startFakeMeho("expire", TLS);
+  try {
+    const bundle = makeBundle({ realNodeModules: REAL_NODE_MODULES });
+    saveLogin(bundle.authDir, fake.url, { "Meho-Tenant": "tenant-b" });
+    const run = startLauncher(bundle, [fake.url, TLS.certPath], { MEHO_TENANT: "tenant-b" });
+    run.send(INITIALIZE);
+    await waitFor(
+      () => run.lines.some((l) => JSON.parse(l).id === 1 && JSON.parse(l).result),
+      `an initialize answer; stderr:\n${run.stderr}`,
+    );
+    run.child.stdin.end();
+    const { code } = await run.exited;
+    assert.equal(code, 0, run.stderr);
+    assert.ok(fake.tenantHeaders.length > 0, "MEHO got no /mcp request");
+    assert.deepEqual([...new Set(fake.tenantHeaders)], ["tenant-b"]);
+  } finally {
+    fake.close();
+  }
+});
+
+e2e("e2e: without a tenant setting MEHO gets no Meho-Tenant header", { timeout: 30000 }, async () => {
+  const fake = await startFakeMeho("expire", TLS);
+  try {
+    const bundle = makeBundle({ realNodeModules: REAL_NODE_MODULES });
+    saveLogin(bundle.authDir, fake.url);
+    const run = startLauncher(bundle, [fake.url, TLS.certPath], { MEHO_TENANT: "" });
+    run.send(INITIALIZE);
+    await waitFor(
+      () => run.lines.some((l) => JSON.parse(l).id === 1 && JSON.parse(l).result),
+      `an initialize answer; stderr:\n${run.stderr}`,
+    );
+    run.child.stdin.end();
+    const { code } = await run.exited;
+    assert.equal(code, 0, run.stderr);
+    assert.ok(fake.tenantHeaders.length > 0, "MEHO got no /mcp request");
+    assert.deepEqual([...new Set(fake.tenantHeaders)], [null]);
   } finally {
     fake.close();
   }

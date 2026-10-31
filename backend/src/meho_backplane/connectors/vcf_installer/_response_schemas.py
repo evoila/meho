@@ -10,7 +10,9 @@ they describe the answer, they do not check it.
 Vendor field names come from the pinned ``vcf-installer-9.1`` OpenAPI file
 (``components.schemas``: ``Validation``, ``SddcTask``, ``PageOfSddcTask``,
 ``DepotSettings``, ``DepotSyncInfo``, ``PageOfTrustedCertificate``,
-``PageOfBundle``, ``PageOfBundleDownloadStatusInfo``). The envelope fields of
+``PageOfBundle``, ``PageOfBundleDownloadStatusInfo``, ``VcenterDiscoveryResult``,
+``SddcManagerDiscoveryResult``, ``VcfOperationsDiscoveryResult``,
+``ApplianceInfo``, ``PageOfRelease``, ``SddcSpec``). The envelope fields of
 the writes and of the multi-step bring-up (``status``, ``settings``,
 ``results``, ``sddc_task`` and so on) are the keys MEHO's own handlers build.
 """
@@ -20,6 +22,7 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
+    "APPLIANCE_INFO_RESPONSE",
     "BRINGUP_COMPOSITE_RESPONSE",
     "BUNDLES_DOWNLOAD_RESPONSE",
     "BUNDLES_DOWNLOAD_STATUS_RESPONSE",
@@ -27,10 +30,16 @@ __all__ = [
     "DEPOT_GET_RESPONSE",
     "DEPOT_SET_RESPONSE",
     "DEPOT_SYNC_STATUS_RESPONSE",
+    "DISCOVERY_SDDC_MANAGER_RESPONSE",
+    "DISCOVERY_VCENTER_RESPONSE",
+    "DISCOVERY_VCF_OPERATIONS_RESPONSE",
     "PROXY_GET_RESPONSE",
     "PROXY_SET_RESPONSE",
+    "RELEASE_LIST_RESPONSE",
     "RESOURCES_CALCULATE_RESPONSE",
+    "SDDC_CANCEL_RESPONSE",
     "SDDC_LIST_RESPONSE",
+    "SDDC_SPEC_RESPONSE",
     "SDDC_TASK_RESPONSE",
     "SETTINGS_GET_RESPONSE",
     "SETTINGS_SET_RESPONSE",
@@ -379,6 +388,179 @@ BUNDLES_DOWNLOAD_RESPONSE: dict[str, Any] = _object(
                 "message": _field("string", "On failed: the vendor error message."),
             },
         ),
+    },
+)
+
+# --- Reuse checks, cancel, appliance info, releases, spec read ---------------
+
+_NODE_ADDRESSES = _list_of(
+    "The node addresses.",
+    {
+        "type": _field("string", "fqdn or ipv4."),
+        "value": _field("string", "The address."),
+    },
+)
+
+DISCOVERY_VCENTER_RESPONSE: dict[str, Any] = _object(
+    "What the Installer found on the vCenter (vendor VcenterDiscoveryResult).",
+    {
+        "vcenterVersion": _field("string", "The vCenter version."),
+        "vcenterBuildNumber": _field("string", "The vCenter build number."),
+        "nsxInfo": _object(
+            "The NSX instance tied to this vCenter, if any.",
+            {"address": _field("string", "The NSX address.")},
+        ),
+    },
+)
+
+_COMPONENT_STATE = {
+    "fqdn": _field("string", "The component FQDN."),
+    "deploymentStatus": _field(
+        "string", "NOT_FOUND, NOT_STARTED, IN_PROGRESS, FAILED or SUCCEEDED."
+    ),
+    "deploymentType": _field("string", "NEW or EXISTING."),
+}
+
+DISCOVERY_SDDC_MANAGER_RESPONSE: dict[str, Any] = _object(
+    "What the Installer found on the SDDC Manager (vendor SddcManagerDiscoveryResult).",
+    {
+        "sddcManager": _object(
+            "The SDDC Manager itself.",
+            {
+                "fqdn": _field("string", "The SDDC Manager FQDN."),
+                "version": _field("string", "The SDDC Manager version."),
+                "vcfInstanceName": _field("string", "The VCF instance name."),
+            },
+        ),
+        "managementVcenter": _object(
+            "The management vCenter of this SDDC Manager.",
+            {
+                "fqdn": _field("string", "The vCenter FQDN."),
+                "version": _field("string", "The vCenter version."),
+                "status": _field("string", "The vCenter status."),
+            },
+        ),
+        "vcfManagementComponents": _object(
+            "Each VCF management component (vcfOperations, vcfAutomation, fleetLcm, "
+            "vcfOperationsLogs and others), each with fqdn, deploymentStatus and "
+            "deploymentType.",
+            {
+                "vcfOperations": _object("VCF Operations.", _COMPONENT_STATE),
+                "vcfAutomation": _object("VCF Automation.", _COMPONENT_STATE),
+                "vcfOperationsFleetManagement": _object(
+                    "VCF Operations fleet management.", _COMPONENT_STATE
+                ),
+            },
+        ),
+    },
+)
+
+DISCOVERY_VCF_OPERATIONS_RESPONSE: dict[str, Any] = _object(
+    "What the Installer found on VCF Operations (vendor VcfOperationsDiscoveryResult).",
+    {
+        "vcfOperationsVersion": _field("string", "The VCF Operations version."),
+        "vcfOperationsBuildNumber": _field("string", "The VCF Operations build number."),
+        "vcfOperationsNodes": _list_of(
+            "The cluster nodes.",
+            {
+                "address": _field("string", "The node address."),
+                "name": _field("string", "The node name."),
+                "type": _field("string", "master, replica, data, witness or cloudproxy."),
+            },
+        ),
+        "vcfOperationsManagementNode": _object(
+            "The management node.",
+            {"name": _field("string", "The node name."), "addresses": _NODE_ADDRESSES},
+        ),
+        "vcfAutomationNodes": _list_of(
+            "The VCF Automation nodes.",
+            {"name": _field("string", "The node name."), "addresses": _NODE_ADDRESSES},
+        ),
+        "vcenterAdapters": _list_of(
+            "The vCenters VCF Operations watches.",
+            {
+                "id": _field("string", "The adapter id."),
+                "name": _field("string", "The adapter name."),
+                "address": _field("string", "The vCenter address."),
+            },
+        ),
+        "nsxAdapters": _list_of(
+            "The NSX instances VCF Operations watches.",
+            {
+                "id": _field("string", "The adapter id."),
+                "name": _field("string", "The adapter name."),
+                "address": _field("string", "The NSX address."),
+                "vcenterAddress": _field("string", "The vCenter address."),
+            },
+        ),
+    },
+)
+
+SDDC_CANCEL_RESPONSE: dict[str, Any] = _object(
+    "The Installer took the cancel.",
+    {
+        "id": _field("string", "The task id that was cancelled."),
+        "status": _field("string", "Always cancel_requested."),
+    },
+)
+
+APPLIANCE_INFO_RESPONSE: dict[str, Any] = _object(
+    "The Installer appliance (vendor ApplianceInfo).",
+    {
+        "version": _field("string", "The Installer version, for example 9.1.0.0."),
+        "role": _field("string", "The appliance role."),
+        "dnsDomain": _field("string", "The DNS domain (9.1 only)."),
+        "dnsServers": {"type": "array", "description": "The DNS servers (9.1 only)."},
+        "ntpServers": {"type": "array", "description": "The NTP servers (9.1 only)."},
+        "ipAddresses": _list_of(
+            "The appliance IP addresses (9.1 only).",
+            {
+                "ipAddress": _field("string", "The IP address."),
+                "ipAddressVersion": _field("string", "The IP version."),
+            },
+        ),
+    },
+)
+
+RELEASE_LIST_RESPONSE: dict[str, Any] = _object(
+    "The releases this Installer knows (vendor PageOfRelease), one flat row each.",
+    {
+        "elements": _list_of(
+            "One row per release.",
+            {
+                "product": _field("string", "The product, for example VCF."),
+                "version": _field("string", "The release version."),
+                "releaseDate": _field("string", "The release date (ISO 8601)."),
+                "minInstallerVersion": _field(
+                    "string", "The oldest Installer version that can deploy it."
+                ),
+                "minCompatibleVcfVersion": _field("string", "The oldest compatible VCF version."),
+                "eol": _field("string", "The end-of-life date (ISO 8601)."),
+                "bom": {
+                    "type": "object",
+                    "description": "Component name to version, for example ESX or VCENTER.",
+                    "additionalProperties": {"type": ["string", "null"]},
+                },
+            },
+        ),
+        "pageMetadata": _PAGE_METADATA,
+    },
+)
+
+SDDC_SPEC_RESPONSE: dict[str, Any] = _object(
+    "The SddcSpec a bring-up used. Every secret field holds [REDACTED:param_name].",
+    {
+        "sddcId": _field("string", "The SDDC id (the management domain name)."),
+        "vcfInstanceName": _field("string", "The VCF instance name."),
+        "workflowType": _field("string", "The workflow type."),
+        "version": _field("string", "The VCF version of the spec."),
+        "vcenterSpec": _object(
+            "The vCenter part (vcenterHostname, vmSize, useExistingDeployment, ...).", {}
+        ),
+        "hostSpecs": {"type": "array", "description": "The ESX hosts (hostname, ...)."},
+        "networkSpecs": {"type": "array", "description": "The networks (networkType, vlanId)."},
+        "dnsSpec": _object("The DNS part (subdomain, nameservers).", {}),
+        "nsxtSpec": _object("The NSX part (vipFqdn, nsxtManagers, ...).", {}),
     },
 )
 

@@ -21,12 +21,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from meho_backplane.connectors.vcf_installer._op_meta import (
+from meho_backplane.connectors.vcf_installer._op_model import (
     GROUP_BRINGUP,
     GROUP_DEPOT,
     GROUP_SYSTEM,
     InstallerTypedOp,
-    build_instructions,
+    instructions,
 )
 from meho_backplane.connectors.vcf_installer._response_schemas import (
     PROXY_GET_RESPONSE,
@@ -116,7 +116,7 @@ _PROXY_GET = InstallerTypedOp(
     tags=("read-only", "vcf", "installer", "system", "proxy"),
     safety_level="safe",
     requires_approval=False,
-    llm_instructions=build_instructions(
+    llm_instructions=instructions(
         when_to_call=(
             "Call to see which proxy the Installer uses to reach the online depot, or "
             "with task_id to follow a change made by installer.system.proxy.set."
@@ -210,7 +210,7 @@ _PROXY_SET = InstallerTypedOp(
     tags=("vcf", "installer", "system", "proxy", "write", "credential"),
     safety_level="dangerous",
     requires_approval=True,
-    llm_instructions=build_instructions(
+    llm_instructions=instructions(
         when_to_call=(
             "Call when the Installer must reach the online depot through a proxy, when "
             "the proxy changes, or to turn the proxy off. " + _JOB_ADVICE
@@ -254,7 +254,7 @@ _SETTINGS_GET = InstallerTypedOp(
     tags=("read-only", "vcf", "installer", "system", "ceip"),
     safety_level="safe",
     requires_approval=False,
-    llm_instructions=build_instructions(
+    llm_instructions=instructions(
         when_to_call=(
             "Call to see whether CEIP is on and how many domains subscription mode "
             "allows, or with task_id to follow a change made by "
@@ -308,7 +308,7 @@ _SETTINGS_SET = InstallerTypedOp(
     tags=("vcf", "installer", "system", "ceip", "write"),
     safety_level="caution",
     requires_approval=True,
-    llm_instructions=build_instructions(
+    llm_instructions=instructions(
         when_to_call=(
             "Call to turn CEIP on or off on the Installer, or to change the most "
             "domains allowed in subscription mode. " + _JOB_ADVICE
@@ -367,7 +367,7 @@ _TRUSTED_CERTIFICATE_REMOVE = InstallerTypedOp(
     tags=("vcf", "installer", "certificates", "system", "write", "delete"),
     safety_level="dangerous",
     requires_approval=True,
-    llm_instructions=build_instructions(
+    llm_instructions=instructions(
         when_to_call=(
             "Call to remove a certificate the Installer should no longer trust, for "
             "example an old or wrong depot certificate."
@@ -472,7 +472,7 @@ _RESOURCES_CALCULATE = InstallerTypedOp(
     tags=("read-only", "vcf", "installer", "bringup", "capacity", "credential"),
     safety_level="safe",
     requires_approval=False,
-    llm_instructions=build_instructions(
+    llm_instructions=instructions(
         when_to_call=(
             "Call before a bring-up to learn whether the hosts have enough CPU, memory "
             "and storage for the spec. Use async: true: MEHO answers at once with a run "

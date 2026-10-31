@@ -20,7 +20,7 @@ handles upsert, body-hash dedupe, embedding pipeline, and
 Scope
 -----
 
-Ten composites ship. ``gh.composite.pr_status_summary`` (T4 #1224) and
+Fourteen composites ship. ``gh.composite.pr_status_summary`` (T4 #1224) and
 ``gh.composite.repo_view`` (one repository, read) are read-only.
 ``gh.composite.repo_create`` (one repository in an organization) is a
 ``caution`` write that waits for approval (``requires_approval=True``). #2081
@@ -32,7 +32,10 @@ together the "file a board-complete ticket without a gh CLI fallback"
 surface. The ``git`` group adds ``gh.composite.git_ref_view`` and
 ``gh.composite.git_tree_view`` (reads) and
 ``gh.composite.branch_commit_files`` (a ``dangerous`` write that always
-waits for approval; see :mod:`._git`).
+waits for approval; see :mod:`._git`). The ``issues`` group also holds
+``gh.composite.issue_search`` and ``gh.composite.issue_view`` (reads) and
+``gh.composite.issue_create`` and ``gh.composite.issue_comment`` (``caution``
+writes that wait for approval; see :mod:`._issues`).
 
 The composite-helper's defaults are ``safety_level="dangerous"`` +
 ``requires_approval=True`` (suited to high-blast-radius write
@@ -72,6 +75,12 @@ from meho_backplane.connectors.github.composites._git import (
     git_ref_view_composite,
     git_tree_view_composite,
 )
+from meho_backplane.connectors.github.composites._issues import (
+    issue_comment_composite,
+    issue_create_composite,
+    issue_search_composite,
+    issue_view_composite,
+)
 from meho_backplane.connectors.github.composites._read import (
     pr_status_summary_composite,
     repo_view_composite,
@@ -108,6 +117,20 @@ from meho_backplane.connectors.github.composites.schemas_git import (
     GIT_TREE_VIEW_LLM_INSTRUCTIONS,
     GIT_TREE_VIEW_PARAMETER_SCHEMA,
     GIT_TREE_VIEW_RESPONSE_SCHEMA,
+)
+from meho_backplane.connectors.github.composites.schemas_issues import (
+    ISSUE_COMMENT_LLM_INSTRUCTIONS,
+    ISSUE_COMMENT_PARAMETER_SCHEMA,
+    ISSUE_COMMENT_RESPONSE_SCHEMA,
+    ISSUE_CREATE_LLM_INSTRUCTIONS,
+    ISSUE_CREATE_PARAMETER_SCHEMA,
+    ISSUE_CREATE_RESPONSE_SCHEMA,
+    ISSUE_SEARCH_LLM_INSTRUCTIONS,
+    ISSUE_SEARCH_PARAMETER_SCHEMA,
+    ISSUE_SEARCH_RESPONSE_SCHEMA,
+    ISSUE_VIEW_LLM_INSTRUCTIONS,
+    ISSUE_VIEW_PARAMETER_SCHEMA,
+    ISSUE_VIEW_RESPONSE_SCHEMA,
 )
 from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
@@ -154,11 +177,12 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "the 'file a board-complete ticket' path -- no gh CLI fallback."
     ),
     "issues": (
-        "Use to link a task to its parent as a GitHub sub-issue "
-        "(sub_issue_add). Complements the board group: after creating a "
-        "child issue you attach it under a parent by the child's "
-        "database id. The sub-issue must share the parent's repository "
-        "owner."
+        "Use to work with the issues of one repository: find issues "
+        "(issue_search, by filters or by free text), read one issue with "
+        "its parent, sub-issues and comments (issue_view), file an issue "
+        "(issue_create), add a comment (issue_comment), and link a task "
+        "under its parent as a sub-issue (sub_issue_add, by the child's "
+        "database id). Search before you file, so you do not file twice."
     ),
     "repos": (
         "Use for questions about one repository as a whole: does it "
@@ -310,6 +334,75 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "issues", "sub_issue"],
         safety_level="caution",
         requires_approval=False,
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.issue_search",
+        handler=issue_search_composite,
+        summary="Find issues in one repository by filters, an exact phrase, or free text.",
+        description=(
+            "Mode 'exact' (default) returns every issue that matches state, labels, "
+            "assignee, author and an optional exact phrase, newest first. Mode "
+            "'ranked' returns free-text hits in GitHub's order, as suggestions. The "
+            "search never leaves the named repository. Read-only."
+        ),
+        parameter_schema=ISSUE_SEARCH_PARAMETER_SCHEMA,
+        response_schema=ISSUE_SEARCH_RESPONSE_SCHEMA,
+        group_key="issues",
+        tags=["composite", "read-only", "issues", "search"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=ISSUE_SEARCH_LLM_INSTRUCTIONS,
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.issue_view",
+        handler=issue_view_composite,
+        summary="Read one issue with its parent, sub-issues and newest comments.",
+        description=(
+            "Reads GET /repos/{owner}/{repo}/issues/{issue_number} and its parent, "
+            "direct sub-issues and, on request, newest comments. Returns the title, "
+            "text, state, labels, assignees, number of comments, and the node id and "
+            "database id other issue and board operations need. Read-only."
+        ),
+        parameter_schema=ISSUE_VIEW_PARAMETER_SCHEMA,
+        response_schema=ISSUE_VIEW_RESPONSE_SCHEMA,
+        group_key="issues",
+        tags=["composite", "read-only", "issues"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=ISSUE_VIEW_LLM_INSTRUCTIONS,
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.issue_create",
+        handler=issue_create_composite,
+        summary="File one issue: title, text, labels, assignees (waits for approval).",
+        description=(
+            "Files one issue with POST /repos/{owner}/{repo}/issues. Returns its "
+            "number, its node id (for project_item_add) and its database id (for "
+            "sub_issue_add). A change that waits for approval."
+        ),
+        parameter_schema=ISSUE_CREATE_PARAMETER_SCHEMA,
+        response_schema=ISSUE_CREATE_RESPONSE_SCHEMA,
+        group_key="issues",
+        tags=["composite", "write", "issues"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=ISSUE_CREATE_LLM_INSTRUCTIONS,
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.issue_comment",
+        handler=issue_comment_composite,
+        summary="Add a comment to one issue (waits for approval).",
+        description=(
+            "Adds one comment with POST /repos/{owner}/{repo}/issues/{issue_number}/"
+            "comments and returns its id and link. A change that waits for approval."
+        ),
+        parameter_schema=ISSUE_COMMENT_PARAMETER_SCHEMA,
+        response_schema=ISSUE_COMMENT_RESPONSE_SCHEMA,
+        group_key="issues",
+        tags=["composite", "write", "issues", "comment"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=ISSUE_COMMENT_LLM_INSTRUCTIONS,
     ),
     _CompositeSpec(
         op_id="gh.composite.repo_view",

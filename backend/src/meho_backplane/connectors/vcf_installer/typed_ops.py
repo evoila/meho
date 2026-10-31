@@ -33,6 +33,12 @@ explicit GA pre-download), plus ``installer.bundles.download-status`` (the
 per-bundle failure message and progress, #3410). Reads are ``safe``; the
 three writes are ``caution`` + ``requires_approval``.
 
+Plus seven ops from :mod:`.typed_ops_lifecycle` (handlers in
+:mod:`.typed_lifecycle`): the three reuse checks ``installer.discovery.*``,
+``installer.sddc.cancel`` (``dangerous`` + ``requires_approval``),
+``installer.sddc.spec.get``, ``installer.appliance.info`` and
+``installer.release.list``.
+
 The Installer settings operations (proxy, CEIP and system settings, removing
 a trusted certificate) and the 9.1+ resource calculation are defined in
 :mod:`.typed_ops_system` and appended to :data:`INSTALLER_TYPED_OPS`.
@@ -58,13 +64,14 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from meho_backplane.connectors.vcf_installer._op_meta import (
+from meho_backplane.connectors.vcf_installer._op_model import EMPTY_PARAMS as _EMPTY_PARAMS
+from meho_backplane.connectors.vcf_installer._op_model import (
     GROUP_BRINGUP,
     GROUP_DEPOT,
     GROUP_SYSTEM,
     InstallerTypedOp,
 )
-from meho_backplane.connectors.vcf_installer._op_meta import build_instructions as _instructions
+from meho_backplane.connectors.vcf_installer._op_model import instructions as _instructions
 from meho_backplane.connectors.vcf_installer._response_schemas import (
     BUNDLES_DOWNLOAD_RESPONSE,
     BUNDLES_DOWNLOAD_STATUS_RESPONSE,
@@ -77,6 +84,10 @@ from meho_backplane.connectors.vcf_installer._response_schemas import (
     TRUSTED_CERTIFICATE_ADD_RESPONSE,
     TRUSTED_CERTIFICATES_LIST_RESPONSE,
     VALIDATION_RESPONSE,
+)
+from meho_backplane.connectors.vcf_installer.typed_ops_lifecycle import (
+    INSTALLER_LIFECYCLE_OPS,
+    LIFECYCLE_WHEN_TO_USE_BY_GROUP,
 )
 from meho_backplane.connectors.vcf_installer.typed_ops_system import (
     INSTALLER_SYSTEM_TYPED_OPS,
@@ -122,7 +133,10 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "lists every bring-up task with its id and status and needs no id, so "
         "use it to find a running bring-up whose id you do not have; on "
         "COMPLETED_WITH_FAILURE, installer.sddc.bringup.retry (dangerous, "
-        "approval-gated) resumes the task from its failed sub-task. The "
+        "approval-gated) resumes the task from its failed sub-task; "
+        "installer.sddc.cancel (dangerous, approval-gated) cancels a task that "
+        "is still IN_PROGRESS; installer.sddc.spec.get reads the spec a "
+        "bring-up used, with passwords removed. The "
         "one-shot governed validate-then-deploy unit is "
         "installer.composite.sddc.bringup. Before all that, "
         "installer.sddc.resources.calculate (a read, Installer 9.1 and newer) "
@@ -171,6 +185,7 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "answers accepted with a task_id, and the matching read with task_id "
         "gives the job state."
     ),
+    **LIFECYCLE_WHEN_TO_USE_BY_GROUP,
 }
 
 
@@ -557,13 +572,6 @@ _BRINGUP_STATUS = InstallerTypedOp(
     ),
 )
 
-
-_EMPTY_PARAMS: dict[str, Any] = {
-    "type": "object",
-    "properties": {},
-    "additionalProperties": False,
-    "examples": [{}],
-}
 
 _SDDC_LIST = InstallerTypedOp(
     op_id="installer.sddc.list",
@@ -1002,7 +1010,8 @@ _BUNDLES_DOWNLOAD = InstallerTypedOp(
 #: list after its poll; the depot family runs
 #: in its air-gapped lifecycle order: settings read/write → catalog sync
 #: read → trust store read/write → bundle inventory read / download-detail
-#: read / download).
+#: read / download), then the reuse checks, cancel and appliance reads of
+#: :mod:`.typed_ops_lifecycle`.
 INSTALLER_TYPED_OPS: tuple[InstallerTypedOp, ...] = (
     _SPEC_VALIDATE,
     _VALIDATION_STATUS,
@@ -1018,6 +1027,7 @@ INSTALLER_TYPED_OPS: tuple[InstallerTypedOp, ...] = (
     _BUNDLES_LIST,
     _BUNDLES_DOWNLOAD_STATUS,
     _BUNDLES_DOWNLOAD,
+    *INSTALLER_LIFECYCLE_OPS,
     *INSTALLER_SYSTEM_TYPED_OPS,
 )
 

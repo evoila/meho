@@ -47,6 +47,11 @@ Source: `backend/src/meho_backplane/connectors/vcf_installer/`.
   default `load_credentials_from_vault` delegates to the shared
   `_shared/vcf_auth.load_basic_credentials` live operator-context Vault read
   (rubric State 2, `shared_service_account`).
+- **`InstallerTypedOp`** (`_op_model.py`) — the metadata of one typed op.
+  `typed_ops.INSTALLER_TYPED_OPS` lists all 21: the bring-up and depot ops of
+  `typed_ops.py` and the seven of `typed_ops_lifecycle.py`.
+- **`require_installer_version`** (`typed_lifecycle.py`) — stops an op on an
+  Installer older than the first version that has its vendor call.
 
 ## Control flow
 
@@ -219,13 +224,78 @@ deploy POST — correct for a single governed "just bring it up" call, wrong
 for a workflow that wants short resumes. (Pattern precedent: vmware-rest
 ships composites alongside raw ops.)
 
+### Reuse checks, cancel, appliance info and releases (typed, [#4468](https://github.com/evoila/meho/issues/4468))
+
+Seven typed ops. The metadata is in `typed_ops_lifecycle.py`, the handlers in
+`typed_lifecycle.py`, and a short shim on the connector exposes each one. The
+**Versions** column says on which Installer versions the vendor call exists.
+
+| op_id | What it does | Vendor call | Safety | Versions |
+|---|---|---|---|---|
+| `installer.discovery.vcenter` | Checks a running vCenter for reuse in a bring-up. Returns its version, build and NSX. Changes nothing. | `POST /v1/sddcs/vcenter-discovery` | `safe` | 9.0, 9.1 |
+| `installer.discovery.sddc_manager` | Checks a running SDDC Manager for reuse. Returns it, its management vCenter and the state of each management component. | `POST /v1/sddcs/sddcm-discovery` | `safe` | 9.1 |
+| `installer.discovery.vcf_operations` | Checks a running VCF Operations for reuse. Returns its version, nodes and adapters. | `POST /v1/sddcs/vcfops-discovery` | `safe` | 9.0, 9.1 |
+| `installer.sddc.cancel` | Cancels a bring-up task that is still `IN_PROGRESS`. Returns `{id, status: cancel_requested}`. | `DELETE /v1/tasks/{id}` | `dangerous` + `requires_approval` | 9.0, 9.1 |
+| `installer.sddc.spec.get` | Reads the `SddcSpec` a bring-up used. Every secret field holds `[REDACTED:param_name]`. | `GET /v1/sddcs/{id}/spec` | `safe` | 9.0, 9.1 |
+| `installer.appliance.info` | Reads the Installer version and role (and on 9.1 the DNS, NTP and IP settings). | `GET /v1/system/appliance-info` | `safe` | 9.0, 9.1 |
+| `installer.release.list` | Lists the VCF releases the Installer knows, one flat row per release. | `GET /v1/releases` | `safe` | 9.0, 9.1 |
+
+Groups: the three discovery ops are in `installer-discovery`; cancel and the
+spec read are in `installer-bringup`; the appliance info and the release list
+are in `installer-appliance`.
+
+- **The login of the system to check comes from Vault.** A discovery call
+  takes `address`, `ssl_thumbprint` and `secret_ref`: the Vault path of a
+  secret with the keys `username` and `password` (optional `secret_mount`,
+  default `secret`). MEHO reads it under the caller's identity with
+  `_shared/vault_creds.load_param_secret_data`; a refused or missing path is a
+  `vault_credentials_read_error`. A secret without a password (or without a
+  username, for vCenter and SDDC Manager) stops the call before anything is
+  sent. The password is never an op parameter.
+- **No password in an error.** On a vendor error the handler raises a copy of
+  the `httpx.HTTPStatusError` without the request body. The answer keeps only
+  the vendor `errorCode`, `message` and `remediationMessage`, and none of them
+  when the raw answer holds the password. The copy keeps the request headers,
+  so a `401` still leads to one re-login and retry. The ops carry the
+  `credential` tag, so a trace keeps no request or answer body.
+- **Version check.** `installer.discovery.sddc_manager` calls
+  `require_installer_version` first. On an Installer older than 9.1 it raises
+  `NotImplementedError` before the Vault read and the vendor call, with a
+  message that names the op, the target's version and "9.1 or newer". The
+  dispatcher turns it into an audited `connector_unsupported` answer. A target
+  with no known version goes on, and the vendor answer decides.
+- **Cancel.** The vendor answers `200` with no body when it takes the cancel.
+  On a task that is not `IN_PROGRESS` it answers `409`; that message reaches
+  the caller in `extras.upstream_message`. Poll `installer.sddc.bringup.status`
+  afterwards.
+- **Path ids.** The `id` of the cancel and of the spec read goes into the
+  vendor path. It must be one plain path segment: letters, digits, `.`, `_`,
+  `~` and `-`, and not `.` or `..` (`typed_lifecycle.PATH_ID_PATTERN`). The
+  schema `pattern` makes the dispatcher refuse anything else as
+  `invalid_params` before an approval is asked for, and the handler
+  (`typed_lifecycle.path_id`) checks again before it builds the URL. So an id
+  can never point the call at another vendor endpoint.
+- **Release rows.** Each vendor `Release` keeps `product`, `version`,
+  `releaseDate`, `minInstallerVersion`, `minCompatibleVcfVersion`, `eol` and a
+  `bom` map (component name to version). The long `description`, `sku`,
+  `updates` and `patchBundles` are left out. A long list goes through the
+  normal JSONFlux reduction and returns a handle.
+- **Spec read.** The answer goes through the shared
+  `redaction.secret_fields.scrub_secret_fields` rule, the same name rule the
+  broadcast scrub uses. In the pinned 9.0 and 9.1 files it catches every
+  password field of the `SddcSpec` (for example `rootVcenterPassword`,
+  `nsxtAdminPassword`, `credentials`). To retry with a fixed spec, the caller
+  must put the real passwords back first.
+
+Tests: `backend/tests/test_connectors_vcf_installer_lifecycle.py`.
+
 ### Installer settings and the resource calculation (typed)
 
 Six more typed operations cover the setup work done once per site. Their
 metadata is in `typed_ops_system.py`; the bodies are in `system_settings.py`
 and `resources_calc.py`. `typed_ops.INSTALLER_TYPED_OPS` includes them, so the
 same registrar upserts them. The shared metadata type and the group keys live in
-`_op_meta.py`.
+`_op_model.py`.
 
 | op_id | What it does | Vendor call | Risk | Versions |
 |---|---|---|---|---|
@@ -375,7 +445,7 @@ Shipped as increment 2 of [#3065](https://github.com/evoila/meho/issues/3065).
 
 ### Operation contracts
 
-The 20 typed ops and the bring-up composite meet the VMware operation-contract
+The 27 typed ops and the bring-up composite meet the VMware operation-contract
 check (`backend/tests/test_operation_contracts.py`), with one gap left
 (see below):
 
@@ -408,13 +478,19 @@ A VCF 9.0.x bring-up uses Installer 9.0.2. Such a target resolves to
 
 - The pinned 9.0 and 9.1 installer API files were compared with
   `backend/scripts/diff_vcf_api_contract_catalogs.py`. 9.1 adds 5 operations
-  and removes none. MEHO calls one of the 5 new ones, the resources
-  calculation, and only on 9.1 targets (see the version check above). It
-  calls none of the others (SDDC Manager discovery, vCenter network discovery,
-  depot machine details).
+  and removes none. MEHO calls two of the 5 new ones, SDDC Manager discovery
+  and the resources calculation, and only on 9.1 targets: each op checks the
+  version first (see the version checks above). MEHO calls none of the other
+  three (vCenter network discovery, depot machine details).
 - The 9.0 case of the spec-reconcile lane (below) checks this in CI.
 
-**Every installer operation but one works on 9.0.** That is 19 typed operations
+**Every installer operation but two works on 9.0.**
+`installer.discovery.sddc_manager` answers "not available on this version" on
+a 9.0 Installer (`connector_unsupported`), because 9.0 has no SDDC Manager
+discovery. `installer.sddc.resources.calculate` stops the same way with
+"needs VCF Installer 9.1 or newer", because the 9.0 file has no resource
+calculation. The others are the six remaining ops of the reuse-checks section
+above, and the 19 typed operations
 (`installer.sddc.spec.validate`, `installer.sddc.validation.status`,
 `installer.sddc.bringup.start`, `installer.sddc.bringup.retry`,
 `installer.sddc.bringup.status`, `installer.sddc.list`,
@@ -426,10 +502,7 @@ A VCF 9.0.x bring-up uses Installer 9.0.2. Such a target resolves to
 `installer.system.proxy.set`, `installer.system.settings.get`,
 `installer.system.settings.set`,
 `installer.system.trusted-certificates.remove`) and the multi-step operation
-`installer.composite.sddc.bringup`. The one exception is
-`installer.sddc.resources.calculate`: the 9.0 file has no resource
-calculation, so on a 9.0 target it stops early with "needs VCF Installer 9.1
-or newer".
+`installer.composite.sddc.bringup`.
 
 What is different on 9.0 (from the two API files):
 
@@ -461,9 +534,11 @@ the depot-family reads such as `GET:/v1/system/settings/depot/depot-sync-info`
 `typed_writes.TYPED_WRITE_DECLARED_OP_IDS`), and the composite's
 `POST:/v1/sddcs/validations`, `POST:/v1/sddcs`,
 `GET:/v1/sddcs/validations/{id}` (introspected from
-`bringup.BRINGUP_DECLARED_OP_IDS`), and the settings calls of
-`system_settings.SYSTEM_DECLARED_OP_IDS` (proxy, CEIP, system, certificate
-remove, `GET:/v1/tasks` and `GET:/v1/tasks/{id}`) — is asserted against **both** pinned
+`bringup.BRINGUP_DECLARED_OP_IDS`), the reuse checks, cancel and
+appliance reads (`typed_lifecycle.LIFECYCLE_DECLARED_OP_IDS`), and the
+settings calls of `system_settings.SYSTEM_DECLARED_OP_IDS` (proxy, CEIP,
+system, certificate remove, `GET:/v1/tasks` and `GET:/v1/tasks/{id}`) — is
+asserted against **both** pinned
 shelf specs, `vcf-installer-9.0` and `vcf-installer-9.1` (vendored from
 `vmware/vcf-api-specs`; one test case per file), by
 [`backend/tests/test_connectors_vcf_installer_spec_reconcile.py`](../../backend/tests/test_connectors_vcf_installer_spec_reconcile.py)
@@ -471,10 +546,13 @@ shelf specs, `vcf-installer-9.0` and `vcf-installer-9.1` (vendored from
 shelf is unconfigured). CI checks out both files and fails when one is missing,
 so neither case skips there. A new operation that calls a 9.1-only path fails
 the 9.0 case; such an operation then needs a "not available on this version"
-answer for 9.0 targets before the range can stay at 9.0. The resource
-calculation is such an operation: `resources_calc.RESOURCES_DECLARED_OP_IDS`
-is checked against the 9.1 file only, and a guard checks that the 9.0 file
-still lacks it. Standard:
+answer for 9.0 targets before the range can stay at 9.0. Two operations are
+like that. `POST:/v1/sddcs/sddcm-discovery` is listed in
+`typed_lifecycle.LIFECYCLE_9_1_ONLY_OP_IDS`; the 9.0 case leaves it out, and a
+separate test checks that the 9.0 file really lacks it. The resource
+calculation's `resources_calc.RESOURCES_DECLARED_OP_IDS` is checked against
+the 9.1 file only, and a guard checks that the 9.0 file still lacks it.
+Standard:
 [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
 ## Dependencies

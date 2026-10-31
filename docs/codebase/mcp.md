@@ -574,7 +574,7 @@ The full rules, bounds, and errors are in
 ### Long calls: `call_operation` async mode (#3695)
 
 A long call (a deploy, a multi-step operation that runs for minutes) should
-not hold one MCP request open the whole time. `call_operation` takes two
+not hold one MCP request open the whole time. `call_operation` takes three
 optional arguments for this. They are MCP controls and never reach the
 dispatcher:
 
@@ -593,6 +593,18 @@ dispatcher:
   `status="ok"` and its `audit_id` and gets `delivery="partial"` or
   `"unavailable"`. A failed or cancelled run gives `status="error"` and `extras.error_code`
   `run_failed` / `run_cancelled`. Checking never runs the call again.
+- **`wait_seconds`** (only with `run_id`, #5264) makes the check wait up to
+  that many seconds for the run to end. The answer comes as soon as the run
+  ends, or after the wait with `pending` / `running` as before. `0` or no
+  value answers at once. An agent with only MCP tools has no shell, so it
+  cannot sleep between checks; with this it does not have to send check
+  after check. The limit is 50 seconds (`MAX_RUN_WAIT_SECONDS`), below the
+  usual 60-second read limit of HTTP proxies. The `inputSchema` holds the
+  range, so a larger value gets `-32602` with a message that names the
+  maximum. `wait_seconds` without `run_id` gives
+  `data.reason="wait_without_run_id"`. The wait holds no database
+  connection: see
+  [`async-governed-dispatch.md`](async-governed-dispatch.md#waiting-for-a-run-to-end-5264).
 
 An unknown run, a run of another tenant, or a run of a different
 `connector_id` / `op_id` gives the same `-32602` error with
@@ -854,6 +866,13 @@ session works in **one** tenant, fixed at the start by the `Meho-Tenant`
 request header (a tenant name or UUID). To switch, the client changes the
 setting and starts a new session. There is no tool to switch tenants, so
 the working surface stays at its size.
+
+The two connection helpers send the header (#5242): the Claude Code plugin
+shim from `MEHO_TENANT` (`clients/claude-code-plugin/bin/meho-mcp-remote`),
+and the Claude Desktop bundle from its optional `tenant` setting
+(`clients/claude-desktop-mcpb/`, see `claude-desktop-mcpb.md`). Both pass it
+to `mcp-remote` as `--header "Meho-Tenant: <value>"` and send nothing when it
+is not set.
 
 - `verify_mcp_jwt` (`mcp/auth.py`) reads the header and calls
   `verify_jwt_for_audience(..., requested_tenant=..., allow_unchosen=True)`.

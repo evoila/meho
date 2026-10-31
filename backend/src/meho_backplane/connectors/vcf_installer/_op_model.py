@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The metadata type of an Installer typed operation, and its guidance builder.
+"""The shape of one VCF Installer typed operation, shared by the op lists.
 
-Kept apart from :mod:`.typed_ops` so the operation modules (:mod:`.typed_ops`
-and :mod:`.typed_ops_system`) can share them without importing each other.
+:mod:`.typed_ops` (bring-up and depot), :mod:`.typed_ops_lifecycle`
+(discovery, cancel, appliance info, releases, spec read) and
+:mod:`.typed_ops_system` (proxy, CEIP and system settings, certificate remove,
+resource calculation) all build :class:`InstallerTypedOp` rows. The model lives
+here so no list file has to import another.
 """
 
 from __future__ import annotations
@@ -13,14 +16,15 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 __all__ = [
+    "EMPTY_PARAMS",
     "GROUP_BRINGUP",
     "GROUP_DEPOT",
     "GROUP_SYSTEM",
     "InstallerTypedOp",
-    "build_instructions",
+    "instructions",
 ]
 
-#: The operation groups of the Installer connector.
+#: The operation groups the typed-op lists share.
 GROUP_BRINGUP = "installer-bringup"
 GROUP_DEPOT = "installer-depot"
 GROUP_SYSTEM = "installer-system"
@@ -51,7 +55,16 @@ class InstallerTypedOp:
     llm_instructions: dict[str, Any] | None
 
 
-def build_instructions(
+#: The parameter schema of a read that takes no input.
+EMPTY_PARAMS: dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+    "examples": [{}],
+}
+
+
+def instructions(
     *,
     when_to_call: str,
     output_shape: str,
@@ -61,27 +74,27 @@ def build_instructions(
     result_scalars: tuple[str, ...] | None = None,
     result_digest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The ``llm_instructions`` blob of one operation."""
-    instructions: dict[str, Any] = {
+    """Build the ``llm_instructions`` blob of one op."""
+    built: dict[str, Any] = {
         "when_to_call": when_to_call,
         "output_shape": output_shape,
         "next_step": next_step,
         "parameter_hints": parameter_hints,
     }
     if preconditions is not None:
-        instructions["preconditions"] = preconditions
+        built["preconditions"] = preconditions
     if result_scalars is not None:
         # #3084: the JSONFlux reduction hint — when the vendor object's
         # set-shaped field (validationChecks[] / sddcSubTasks[]) rides the
         # reduction, the listed scalar siblings survive on the inline
         # summary so the submit → poll loop stays drivable through the
         # governed surface (the reducer's ``_preserved_scalars`` contract).
-        instructions["result_scalars"] = {"keys": list(result_scalars)}
+        built["result_scalars"] = {"keys": list(result_scalars)}
     if result_digest is not None:
         # #3122: the row-digest hint — names the collection to reduce (so a
         # two-list SddcTask reduces sddcSubTasks[] instead of passing through
         # the reducer's multi-list detail-object exemption) and drives the
         # inline per-state counts / IN_PROGRESS names / FAILED-rows-with-errors
         # digest (the reducer's ``_row_digest`` contract).
-        instructions["result_digest"] = dict(result_digest)
-    return instructions
+        built["result_digest"] = dict(result_digest)
+    return built

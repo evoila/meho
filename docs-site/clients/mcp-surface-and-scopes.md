@@ -97,6 +97,33 @@ the scope silently. Leave the scope off entirely and the session stays on
 the 26-tool working surface, which is the right default for almost every
 agent.
 
+## Which tenant a session works in
+
+One login can belong to several tenants. MEHO works in one tenant per
+request: the tenant that the `Meho-Tenant` header names (a tenant name or
+ID). A client sends the same header on every request of a session, so one
+MCP session works in one tenant from start to end. No tool switches the
+tenant inside a session. So an agent stays in the tenant the person chose.
+
+- **Your login has one tenant:** set nothing. Nothing changes for you.
+- **Your login has several tenants:** set the tenant before the session
+  starts:
+    - **Claude Code plugin** — `MEHO_TENANT="<tenant name or ID>"` in your
+      shell profile or in `~/.config/meho/plugin.env`.
+    - **Claude Desktop `.mcpb` bundle** — the **Tenant** field in the
+      extension settings.
+    - **Claude Code without the plugin** — a `Meho-Tenant` entry under
+      `headers` in `.mcp.json`; see
+      [Claude Code](claude-code.md#work-in-one-tenant).
+- **No tenant set, several tenants:** the session may only call
+  `meho_status`. It lists your tenants and your role in each. MEHO refuses
+  every other tool until you set a tenant and start a new session.
+- **To switch tenant:** change the setting, then start a new session. The
+  first session in a tenant opens a browser login once more, because the
+  shim keeps one saved login per tenant setting.
+- **A tenant you are not a member of:** MEHO refuses the session with
+  `tenant_not_member`.
+
 ## The human-only decision verbs (no MCP path)
 
 Three verbs have **no MCP registration under any scope**, elevated or

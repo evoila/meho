@@ -264,6 +264,12 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # aggregate-only rather than shipping it on the feed.
         "keycloak.user.create",
         "keycloak.user.reset_password",
+        # The AD password set. Same shape as the Keycloak pair: the password
+        # comes from Vault at run time, and params carry only the
+        # ``password_ref`` reference. The pin keeps even that off the feed and
+        # stores the approval input encrypted, and the flight recorder keeps
+        # no body for it.
+        "msad.user.set-password",
         # G-Node/RKE2-T3 #2430 — the RKE2 node-config write op. Its ``patch``
         # param carries key -> value edits, and an RKE2 ``config.yaml`` body
         # holds ``token:`` / ``agent-token:`` join credentials, so a plain

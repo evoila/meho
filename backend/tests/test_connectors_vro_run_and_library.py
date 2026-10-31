@@ -111,6 +111,9 @@ _CONTENT_PAYLOAD: dict[str, Any] = {
             {"name": "tags", "type": "Array/string"},
             {"name": "hostList", "type": "Array/SecureString"},
             {"name": "note", "type": "EncryptedString"},
+            {"name": "hostGrid", "type": "Array/Array/SecureString"},
+            {"name": "creds", "type": "CompositeType(user:string,pw:SecureString):Creds"},
+            {"name": "mixed", "type": "secureSTRING"},
         ]
     },
     "output": {"param": []},
@@ -493,9 +496,16 @@ async def test_preview_refuses_a_missing_workflow(session: AsyncSession) -> None
     ("inputs", "match"),
     [
         ([{"name": "adminPassword", "value": "x"}], "secret"),
-        ([{"name": "note", "value": "x"}], "is a secret"),
-        ([{"name": "hostList", "value": ["x", "y"]}], "a list of secrets"),
-        ([{"name": "hostList", "secret_ref": "<vault-path>#f"}], "a list of secrets"),
+        ([{"name": "note", "value": "x"}], "holds a secret"),
+        ([{"name": "note", "secret_ref": "<vault-path>#f"}], "holds a secret"),
+        ([{"name": "hostList", "value": ["x", "y"]}], "holds a secret"),
+        ([{"name": "hostList", "secret_ref": "<vault-path>#f"}], "holds a secret"),
+        ([{"name": "hostGrid", "value": [["x"]]}], "holds a secret"),
+        ([{"name": "hostGrid", "secret_ref": "<vault-path>#f"}], "holds a secret"),
+        ([{"name": "creds", "value": "x"}], "holds a secret"),
+        ([{"name": "creds", "secret_ref": "<vault-path>#f"}], "holds a secret"),
+        ([{"name": "mixed", "value": "x"}], "holds a secret"),
+        ([{"name": "mixed", "secret_ref": "<vault-path>#f"}], "holds a secret"),
         ([{"name": "unknown", "value": "x"}], "no input named"),
         ([{"name": "count", "secret_ref": "<vault-path>#f"}], "only a SecureString"),
         ([{"name": "vmName", "value": "a"}, {"name": "vmName", "value": "b"}], "twice"),
@@ -689,6 +699,28 @@ async def test_run_stops_without_an_approval_card(session: AsyncSession) -> None
 
 
 @pytest.mark.asyncio
+async def test_run_takes_the_run_id_from_location_when_the_answer_is_not_json(
+    session: AsyncSession,
+) -> None:
+    connector = await _register()
+    params = {"workflow_id": _WF}
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_workflow(mock)
+        card = await _card(connector, params)
+        _mock_runs(mock, "completed")
+        post = mock.post(_EXECUTIONS).respond(
+            202,
+            text="<accepted, not json>",
+            headers={"Location": f"https://<orchestrator>{_EXECUTIONS}/{_RUN}/"},
+        )
+        answer = await _approved_run(connector, params, card)
+    assert post.call_count == 1
+    assert answer["status"] == "accepted"
+    assert answer["execution_id"] == _RUN
+    assert answer["state"] is None
+
+
+@pytest.mark.asyncio
 async def test_run_returns_the_running_run_and_starts_nothing(session: AsyncSession) -> None:
     connector = await _register()
     params = {"workflow_id": _WF}
@@ -793,9 +825,9 @@ async def test_vendor_error_text_reaches_the_answer_through_the_whole_flow(
 
     async with get_sessionmaker()() as s:
         audits = (await s.execute(select(AuditLog))).scalars().all()
-    post_spans = [x for x in spans if x.name.startswith("POST ")]
-    assert post_spans
-    assert all(x.attributes["body_recorded"] is False for x in post_spans)
+    vendor_spans = [x for x in spans if "body_recorded" in x.attributes]
+    assert {x.name.split(" ", 1)[0] for x in vendor_spans} >= {"GET", "POST"}
+    assert all(x.attributes["body_recorded"] is False for x in vendor_spans)
     kept = [*stored, json.dumps(result.result, default=str), str(result.extras)]
     kept += [json.dumps(a.__dict__, default=str) for a in audits]
     kept += [json.dumps(dataclasses.asdict(x), default=str) for x in spans]

@@ -273,10 +273,15 @@ for approval like every change.
   flag is set, or whose name is a secret name, and marks the row
   `masked: true`.
 - `vro.workflow.run` takes a secret input only as `secret_ref`
-  (`<vault-path>#<field>`), never as a value: a `SecureString` or
-  `EncryptedString` input, or an input with a secret name, given as a
-  value is refused. A list of secrets (`Array/SecureString`,
-  `Array/EncryptedString`) is refused too. MEHO reads the value from Vault
+  (`<vault-path>#<field>`), never as a value. Every input type that holds
+  a secret is treated as secret: a type whose name contains
+  `SecureString` or `EncryptedString` in any letter case, also inside a
+  list (`Array/...`) or a composite type (`CompositeType(...)`). This is
+  the same rule the reads use. Only an input of exactly type
+  `SecureString` (or an input with a secret name) takes a `secret_ref`.
+  Every other type that holds a secret, for example `EncryptedString`,
+  `Array/SecureString` or a composite type with a `SecureString` field,
+  is refused: MEHO cannot send it. MEHO reads the value from Vault
   under the caller's identity (after an approval: the approver) when the
   approved run starts. So the params, the approval row and the broadcast
   hold Vault references only, never a secret value. The op is not pinned

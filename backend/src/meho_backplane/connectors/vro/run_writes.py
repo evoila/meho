@@ -55,10 +55,15 @@ the vendor expects: ``{"string": {"value": ...}}``, ``number``,
 ``sdk-object`` (a plug-in type such as ``VC:VirtualMachine``; the value is
 the object id). Other types are refused with a clear message.
 
-A secret input (type ``SecureString`` or ``EncryptedString``, or a secret
-name) takes only a ``secret_ref``, never a value. A list of secrets
-(``Array/SecureString``, ``Array/EncryptedString``) is refused: one
-``secret_ref`` cannot fill it, and a list of values would show on the card.
+Every input type that holds a secret is treated as secret: a type whose
+name contains ``SecureString`` or ``EncryptedString`` in any letter case,
+also inside a list (``Array/...``) or a composite type
+(``CompositeType(...)``). This is the same rule the reads use to hide
+values. Such an input never takes a value, because a value would show on
+the approval card. Only an input of exactly type ``SecureString`` takes a
+``secret_ref``; every other type that holds a secret is refused, because
+one ``secret_ref`` cannot fill it. An input with a secret name takes only a
+``secret_ref`` too.
 
 Cancel a run (``vro.execution.cancel``, ``dangerous``)
 ------------------------------------------------------
@@ -145,8 +150,10 @@ _SCALAR_KEYS: Final[dict[str, str]] = {
     "Date": "date",
     "SecureString": "secure-string",
 }
-#: Element types whose value is a secret, also inside ``Array/<type>``.
-_SECRET_TYPES: Final[frozenset[str]] = frozenset({"securestring", "encryptedstring"})
+#: Words that mark a type as holding a secret, anywhere in the type name, any case.
+_SECRET_TYPE_WORDS: Final[tuple[str, ...]] = ("securestring", "encryptedstring")
+#: The one secret type MEHO can send, always from a Vault reference.
+_SENDABLE_SECRET_TYPE: Final = "SecureString"
 #: Declared types an input may fill from a Vault reference.
 _SECRET_REF_TYPES: Final[frozenset[str]] = frozenset({"SecureString", "string"})
 _ARRAY_PREFIX: Final = "Array/"
@@ -159,8 +166,9 @@ class VroRunRefusedError(ValueError):
 
 
 def _is_secret_type(type_name: str) -> bool:
-    """True for a secret type, also as the element type of an ``Array/<type>``."""
-    return type_name.removeprefix(_ARRAY_PREFIX).lower() in _SECRET_TYPES
+    """True for a type that holds a secret anywhere in it (same rule as the reads)."""
+    lowered = type_name.lower()
+    return any(word in lowered for word in _SECRET_TYPE_WORDS)
 
 
 def wrap_value(type_name: str, value: Any, *, name: str) -> dict[str, Any]:
@@ -243,11 +251,11 @@ def _check_inputs(raw_inputs: Any, declared: list[dict[str, Any]]) -> list[_RunI
         seen.add(name)
         type_name = str(types[name])
         secret_type = _is_secret_type(type_name)
-        if secret_type and type_name.startswith(_ARRAY_PREFIX):
+        if secret_type and type_name != _SENDABLE_SECRET_TYPE:
             raise VroRunRefusedError(
-                f"input {name!r} has type {type_name}, a list of secrets. MEHO cannot send "
-                "it: a secret input takes one secret_ref, and a list of secret values "
-                "would show on the approval card."
+                f"input {name!r} has type {type_name}, which holds a secret. MEHO cannot "
+                "send it: a secret value would show on the approval card, and a "
+                "secret_ref fills only an input of type SecureString."
             )
         if "secret_ref" in raw:
             if type_name not in _SECRET_REF_TYPES:

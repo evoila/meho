@@ -39,6 +39,10 @@ Plus seven ops from :mod:`.typed_ops_lifecycle` (handlers in
 ``installer.sddc.spec.get``, ``installer.appliance.info`` and
 ``installer.release.list``.
 
+The Installer settings operations (proxy, CEIP and system settings, removing
+a trusted certificate) and the 9.1+ resource calculation are defined in
+:mod:`.typed_ops_system` and appended to :data:`INSTALLER_TYPED_OPS`.
+
 The vendor bring-up API is natively asynchronous — every submit returns its
 tracking object in seconds and progress rides the status polls — so each
 primitive is a short call and the standard park → approve → resume machinery
@@ -61,7 +65,12 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from meho_backplane.connectors.vcf_installer._op_model import EMPTY_PARAMS as _EMPTY_PARAMS
-from meho_backplane.connectors.vcf_installer._op_model import InstallerTypedOp
+from meho_backplane.connectors.vcf_installer._op_model import (
+    GROUP_BRINGUP,
+    GROUP_DEPOT,
+    GROUP_SYSTEM,
+    InstallerTypedOp,
+)
 from meho_backplane.connectors.vcf_installer._op_model import instructions as _instructions
 from meho_backplane.connectors.vcf_installer._response_schemas import (
     BUNDLES_DOWNLOAD_RESPONSE,
@@ -79,6 +88,9 @@ from meho_backplane.connectors.vcf_installer._response_schemas import (
 from meho_backplane.connectors.vcf_installer.typed_ops_lifecycle import (
     INSTALLER_LIFECYCLE_OPS,
     LIFECYCLE_WHEN_TO_USE_BY_GROUP,
+)
+from meho_backplane.connectors.vcf_installer.typed_ops_system import (
+    INSTALLER_SYSTEM_TYPED_OPS,
 )
 from meho_backplane.connectors.vcf_installer.typed_writes import (
     INSTALLER_BRINGUP_RETRY_OP_ID,
@@ -103,8 +115,8 @@ __all__ = [
 
 _log = structlog.get_logger(__name__)
 
-_GROUP_BRINGUP = "installer-bringup"
-_GROUP_DEPOT = "installer-depot"
+_GROUP_BRINGUP = GROUP_BRINGUP
+_GROUP_DEPOT = GROUP_DEPOT
 
 
 #: Curated ``when_to_use`` blurb per typed-op group.
@@ -126,7 +138,10 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "is still IN_PROGRESS; installer.sddc.spec.get reads the spec a "
         "bring-up used, with passwords removed. The "
         "one-shot governed validate-then-deploy unit is "
-        "installer.composite.sddc.bringup."
+        "installer.composite.sddc.bringup. Before all that, "
+        "installer.sddc.resources.calculate (a read, Installer 9.1 and newer) "
+        "calculates the CPU, memory and storage a spec needs and compares it "
+        "with what the hosts have."
     ),
     _GROUP_DEPOT: (
         "Use to make an air-gapped/offline Installer ready to deploy — the "
@@ -154,7 +169,21 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "the set is SUCCESSFUL; installer.bundles.download-status reads the "
         "per-bundle failure message, isDownloadable flag and downloaded bytes, "
         "so a FAILED bundle can be told apart as retry-worthy or not "
-        "downloadable from this depot."
+        "downloadable from this depot. "
+        "installer.system.trusted-certificates.remove (approval-gated) removes "
+        "a certificate from the trust store by its alias."
+    ),
+    GROUP_SYSTEM: (
+        "Use to read or change the Installer's own settings. Reads: "
+        "installer.system.proxy.get (the proxy the Installer uses to reach the "
+        "online depot; password never shown) and installer.system.settings.get "
+        "(CEIP, whether usage data goes to the vendor, and the most domains "
+        "allowed in subscription mode). Changes (each approval-gated): "
+        "installer.system.proxy.set sets or turns off the proxy, and "
+        "installer.system.settings.set turns CEIP on or off or changes the "
+        "domain limit. Proxy and CEIP changes run as vendor jobs: the change "
+        "answers accepted with a task_id, and the matching read with task_id "
+        "gives the job state."
     ),
     **LIFECYCLE_WHEN_TO_USE_BY_GROUP,
 }
@@ -999,6 +1028,7 @@ INSTALLER_TYPED_OPS: tuple[InstallerTypedOp, ...] = (
     _BUNDLES_DOWNLOAD_STATUS,
     _BUNDLES_DOWNLOAD,
     *INSTALLER_LIFECYCLE_OPS,
+    *INSTALLER_SYSTEM_TYPED_OPS,
 )
 
 

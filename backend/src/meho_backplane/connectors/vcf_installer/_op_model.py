@@ -3,10 +3,11 @@
 
 """The shape of one VCF Installer typed operation, shared by the op lists.
 
-:mod:`.typed_ops` (bring-up and depot) and :mod:`.typed_ops_lifecycle`
-(discovery, cancel, appliance info, releases, spec read) both build
-:class:`InstallerTypedOp` rows. The model lives here so neither list file has
-to import the other.
+:mod:`.typed_ops` (bring-up and depot), :mod:`.typed_ops_lifecycle`
+(discovery, cancel, appliance info, releases, spec read) and
+:mod:`.typed_ops_system` (proxy, CEIP and system settings, certificate remove,
+resource calculation) all build :class:`InstallerTypedOp` rows. The model lives
+here so no list file has to import another.
 """
 
 from __future__ import annotations
@@ -14,7 +15,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-__all__ = ["EMPTY_PARAMS", "InstallerTypedOp", "instructions"]
+__all__ = [
+    "EMPTY_PARAMS",
+    "GROUP_BRINGUP",
+    "GROUP_DEPOT",
+    "GROUP_SYSTEM",
+    "InstallerTypedOp",
+    "instructions",
+]
+
+#: The operation groups the typed-op lists share.
+GROUP_BRINGUP = "installer-bringup"
+GROUP_DEPOT = "installer-depot"
+GROUP_SYSTEM = "installer-system"
 
 
 @dataclass(frozen=True)

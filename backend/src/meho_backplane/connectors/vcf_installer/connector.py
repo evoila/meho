@@ -588,6 +588,62 @@ class InstallerConnector(HttpConnector):
         """``installer.release.list`` shim — release list read."""
         return await _lifecycle.installer_release_list_impl(self, operator, target, params)
 
+    async def system_proxy_get(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.proxy.get`` shim — proxy settings read (and job state)."""
+        from meho_backplane.connectors.vcf_installer.system_settings import installer_proxy_get_impl
+
+        return await installer_proxy_get_impl(self, operator, target, params)
+
+    async def system_proxy_set(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.proxy.set`` shim — proxy change."""
+        from meho_backplane.connectors.vcf_installer.system_settings import installer_proxy_set_impl
+
+        return await installer_proxy_set_impl(self, operator, target, params)
+
+    async def system_settings_get(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.settings.get`` shim — CEIP and system settings read."""
+        from meho_backplane.connectors.vcf_installer.system_settings import (
+            installer_settings_get_impl,
+        )
+
+        return await installer_settings_get_impl(self, operator, target, params)
+
+    async def system_settings_set(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.settings.set`` shim — CEIP and system settings change."""
+        from meho_backplane.connectors.vcf_installer.system_settings import (
+            installer_settings_set_impl,
+        )
+
+        return await installer_settings_set_impl(self, operator, target, params)
+
+    async def system_trusted_certificate_remove(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.trusted-certificates.remove`` shim — trust store remove."""
+        from meho_backplane.connectors.vcf_installer.system_settings import (
+            installer_trusted_certificate_remove_impl,
+        )
+
+        return await installer_trusted_certificate_remove_impl(self, operator, target, params)
+
+    async def sddc_resources_calculate(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.sddc.resources.calculate`` shim — resource calculation (9.1+)."""
+        from meho_backplane.connectors.vcf_installer.resources_calc import (
+            installer_resources_calculate_impl,
+        )
+
+        return await installer_resources_calculate_impl(self, operator, target, params)
+
     async def aclose(self) -> None:
         """Clear cached session tokens + credentials, then tear down the httpx pool."""
         async with self._session_lock:

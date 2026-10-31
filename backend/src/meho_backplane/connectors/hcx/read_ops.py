@@ -400,10 +400,9 @@ _JOB_GET = HcxTypedOp(
                     "HCX did not answer; it does not mean the job failed."
                 ),
             },
-            "error": {
-                "type": ["string", "array", "object", "null"],
-                "description": "The vendor's error of the job, when the job object has one.",
-            },
+            "error": string_schema(
+                "The vendor's error text of the job, when the job object has one."
+            ),
             "checked_at": {
                 "type": "string",
                 "description": "When MEHO read the job, ISO 8601 in UTC.",

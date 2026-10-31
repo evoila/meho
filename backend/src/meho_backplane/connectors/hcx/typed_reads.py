@@ -459,12 +459,22 @@ def job_outcome(job: dict[str, Any]) -> str:
     return "running"
 
 
-def _job_error(job: dict[str, Any]) -> Any:
-    """The vendor's error text of a job, when the job object has one."""
+def _job_error(job: dict[str, Any]) -> str | None:
+    """The vendor's error text of a job, when the job object has one.
+
+    A list of errors becomes one text: each item's ``message`` (or the
+    item itself), joined with ``"; "``.
+    """
     for key in ("errorMessage", "error", "errors"):
         value = job.get(key)
-        if value:
-            return value
+        if not value:
+            continue
+        if isinstance(value, list):
+            return "; ".join(
+                str(item.get("message", item)) if isinstance(item, dict) else str(item)
+                for item in value
+            )
+        return str(value)
     return None
 
 

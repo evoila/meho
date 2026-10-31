@@ -666,6 +666,24 @@ async def test_job_get_reports_a_failed_job_with_the_vendor_error() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_registered")
+async def test_job_get_joins_a_list_of_vendor_errors() -> None:
+    job = {
+        "jobId": _JOB_ID,
+        "isDone": True,
+        "didFail": True,
+        "errors": [{"message": "Tunnel is down"}, "Appliance is down"],
+    }
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        mock.get(f"/hybridity/api/jobs/{_JOB_ID}").respond(200, json=job)
+        result = await _dispatch("hcx.job.get", {"job_id": _JOB_ID})
+
+    assert result.status == "ok", result.error
+    assert result.result["error"] == "Tunnel is down; Appliance is down"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_registered")
 async def test_job_get_logs_in_again_when_the_login_expired_after_the_start() -> None:
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         login = mock.post(_SESSIONS)

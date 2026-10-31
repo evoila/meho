@@ -294,6 +294,16 @@ _CASES = (
 )
 
 
+#: The cases where the tag alone keeps the body out. The proxy change and the
+#: resource calculation are also pinned as credential writes in
+#: ``broadcast/events.py``, which keeps their bodies out without the tag too.
+_TAG_ONLY_CASES = tuple(
+    case
+    for case in _CASES
+    if case.op_id not in {INSTALLER_PROXY_SET_OP_ID, INSTALLER_RESOURCES_CALCULATE_OP_ID}
+)
+
+
 @pytest.fixture(autouse=True)
 def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Pin the env vars Settings reads (Vault client + dispatcher)."""
@@ -536,7 +546,7 @@ async def _drop_the_tag(op_id: str) -> None:
         await s.commit()
 
 
-@pytest.mark.parametrize("case", _CASES, ids=lambda case: case.op_id)
+@pytest.mark.parametrize("case", _TAG_ONLY_CASES, ids=lambda case: case.op_id)
 @pytest.mark.asyncio
 async def test_without_the_tag_the_trace_would_hold_the_body(
     case: _Case, session: AsyncSession, result_store: MemoryResultStore

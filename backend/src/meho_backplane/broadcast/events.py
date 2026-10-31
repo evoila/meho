@@ -417,6 +417,13 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # ``vmware.appliance.local_account.policy.set`` sends only expiry
         # numbers and flags, so it is NOT pinned.
         "vmware.appliance.local_account.password.set",
+        # The VCF Installer proxy change and resource calculation. Like
+        # ``vcfa.provider.user.create``, their params carry only Vault paths
+        # (``password_secret_ref`` / ``password_refs``); the passwords are read
+        # in-process and sent only in the request BODY. The pin keeps those
+        # bodies out of traces and collapses the broadcast to aggregate-only.
+        "installer.system.proxy.set",
+        "installer.sddc.resources.calculate",
         # The two steps of a new vCenter install that send a password (#4394):
         # the appliance import (the root password, ``root_password_secret_ref``)
         # and the setup start (the SSO password,

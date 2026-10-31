@@ -1162,10 +1162,19 @@ class Settings(BaseModel):
         pending request is never a privilege escalation.
     fresh_sign_in_max_age_seconds:
         How old a person's sign-in may be for an action that needs a
-        fresh sign-in (#4711): turning approval off for an operation over
-        REST. The check reads the token's ``auth_time`` claim; see
+        fresh sign-in: turning approval off for an operation over REST
+        (#4711), and approving a waiting change on the command line or
+        REST (#3979). The check reads the token's ``auth_time`` claim; see
         :mod:`meho_backplane.auth.fresh_sign_in`. Default ``300`` (five
         minutes). Set via ``FRESH_SIGN_IN_MAX_AGE_SECONDS``.
+    approval_one_time_code_acr_values:
+        The ``acr`` values that mean "the person entered a one-time code
+        from their authenticator app" (#3979). An approve whose token
+        carries one of them, with a recent ``auth_time``, is recorded as a
+        one-time code approval. Empty by default (off): then every approve
+        on the command line or REST counts as a fresh sign-in. An ``acr``
+        alone never replaces a recent ``auth_time``. Comma-separated, via
+        ``APPROVAL_ONE_TIME_CODE_ACR_VALUES``.
     approval_allow_delegated_decision:
         Lab-class switch for **delegated** approval decisions (#3693).
         A delegated decision is an approve or reject whose ``reason``
@@ -1668,8 +1677,11 @@ class Settings(BaseModel):
     # False is fail-closed: production refuses them.
     approval_allow_delegated_decision: bool = False
     # #4711 -- how old a sign-in may be for an action that needs a person
-    # with a fresh sign-in (turning approval off over REST).
+    # with a fresh sign-in (turning approval off over REST, and with #3979
+    # an approve on the command line or REST).
     fresh_sign_in_max_age_seconds: int = Field(default=300, ge=30, le=3600)
+    # #3979 -- the acr values that mean a one-time code step. Empty = off.
+    approval_one_time_code_acr_values: tuple[str, ...] = ()
     # #4622 -- sandbox mode: a standing grant may also cover deletes, only
     # on an instance for disposable test systems. Both read at boot only.
     sandbox_mode: bool = False
@@ -2837,6 +2849,12 @@ def get_settings() -> Settings:
         # #4711 -- how old a sign-in may be for an action that needs a person.
         fresh_sign_in_max_age_seconds=int(
             os.environ.get("FRESH_SIGN_IN_MAX_AGE_SECONDS", "300"),
+        ),
+        # #3979 -- which acr values mean a one-time code step.
+        approval_one_time_code_acr_values=tuple(
+            chunk.strip()
+            for chunk in os.environ.get("APPROVAL_ONE_TIME_CODE_ACR_VALUES", "").split(",")
+            if chunk.strip()
         ),
         # #4622 -- sandbox mode is off unless both settings are set; the
         # boot guards in ``meho_backplane.sandbox_mode`` check them.

@@ -1702,6 +1702,7 @@ type ApprovalResultView struct {
 type ApprovalResumeOutcomeView struct {
 	AuditId      *openapi_types.UUID `json:"audit_id"`
 	ErrorCode    *string             `json:"error_code"`
+	Guidance     *string             `json:"guidance"`
 	ResultStatus *string             `json:"result_status"`
 	ResumedAt    *string             `json:"resumed_at"`
 }
@@ -1896,6 +1897,7 @@ type AuditClassCountsRequest struct {
 //     “Operator.name“ since G0.15-T3 #1212; HTTP-chassis rows remain
 //     None pending a separate fix to bind “name“ to contextvars in
 //     “verify_jwt_and_bind“.
+//   - “sandbox_mode“ ← “audit_log.sandbox_mode“ (the sandbox mark; #4622)
 //   - “broadcast_event_id“ — v0.2 placeholder, always None (FK direction
 //     is reversed: “BroadcastEvent.audit_id“ points at the audit row).
 type AuditEntry struct {
@@ -1915,6 +1917,7 @@ type AuditEntry struct {
 	PrincipalSub     string                 `json:"principal_sub"`
 	RequestId        *openapi_types.UUID    `json:"request_id"`
 	ResultStatus     string                 `json:"result_status"`
+	SandboxMode      bool                   `json:"sandbox_mode"`
 	StatusCode       int                    `json:"status_code"`
 	TargetId         *openapi_types.UUID    `json:"target_id"`
 	TargetName       *string                `json:"target_name"`
@@ -7828,6 +7831,7 @@ type ReplayNode struct {
 	PrincipalSub     string                 `json:"principal_sub"`
 	RequestId        *openapi_types.UUID    `json:"request_id"`
 	ResultStatus     string                 `json:"result_status"`
+	SandboxMode      bool                   `json:"sandbox_mode"`
 	StatusCode       int                    `json:"status_code"`
 	TargetId         *openapi_types.UUID    `json:"target_id"`
 	TargetName       *string                `json:"target_name"`
@@ -7878,6 +7882,7 @@ type ResolvedTargetDescriptor struct {
 	TenantId        openapi_types.UUID      `json:"tenant_id"`
 	TlsCaPin        *string                 `json:"tls_ca_pin"`
 	TlsServerName   *string                 `json:"tls_server_name"`
+	UpdatedAt       *time.Time              `json:"updated_at"`
 	VerifyTls       *bool                   `json:"verify_tls,omitempty"`
 	Version         *string                 `json:"version"`
 }
@@ -11560,6 +11565,8 @@ type ListOperationRunsApiV1OperationsRunsGetParams struct {
 
 // GetOperationRunStatusApiV1OperationsRunsHandleGetParams defines parameters for GetOperationRunStatusApiV1OperationsRunsHandleGet.
 type GetOperationRunStatusApiV1OperationsRunsHandleGetParams struct {
+	// WaitSeconds Wait up to this many seconds for the run to end, then answer. 0 (the default) answers at once. At most 50.
+	WaitSeconds   *int    `form:"wait_seconds,omitempty" json:"wait_seconds,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -30925,6 +30932,28 @@ func NewGetOperationRunStatusApiV1OperationsRunsHandleGetRequest(server string, 
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.WaitSeconds != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "wait_seconds", runtime.ParamLocationQuery, *params.WaitSeconds); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)

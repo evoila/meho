@@ -26,7 +26,9 @@ SQLite DB to head so the descriptor / audit tables exist.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import hashlib
+import ipaddress
 import json
 import socket
 import ssl
@@ -38,9 +40,14 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import anyio
+import httpcore
 import httpx
 import pytest
 import respx
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -631,6 +638,95 @@ def test_untrusted_ca_classifies_tls_error(cert_error: ssl.SSLError) -> None:
     direct = httpx.ConnectError("verify failed")
     direct.__cause__ = cert_error
     assert _classify(direct, tls=True) == "tls_error"
+
+
+def _pool_reraised_cert_error() -> httpx.ConnectError:
+    """Rebuild the real httpx/httpcore 1.0.9 shape of an untrusted cert.
+
+    httpcore maps the ``ssl.SSLCertVerificationError`` to
+    ``httpcore.ConnectError``, then its connection pool re-raises it with
+    ``raise exc from None``. That sets ``__cause__`` to ``None``, so the
+    SSL error is reachable only as ``__context__``. httpx then wraps it
+    with ``raise httpx.ConnectError(...) from exc``.
+    """
+    message = "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate"
+    ssl_exc = ssl.SSLCertVerificationError(1, message)
+    core_exc = httpcore.ConnectError(message)
+    core_exc.__cause__ = None
+    core_exc.__context__ = ssl_exc
+    exc = httpx.ConnectError(message)
+    exc.__cause__ = core_exc
+    exc.__context__ = core_exc
+    return exc
+
+
+def test_cert_error_reachable_only_via_context_is_tls_error() -> None:
+    """The SSL error sits only on ``__context__`` (httpcore cleared
+    ``__cause__``); the probe must still read tls_error, and
+    error_detail must list the SSL error."""
+    exc = _pool_reraised_cert_error()
+    assert _classify(exc, tls=True) == "tls_error"
+    assert _detail(exc)[0]["type"] == "ssl.SSLCertVerificationError"
+
+
+def _self_signed_cert_files(tmp_path: Path) -> tuple[Path, Path]:
+    """Write a fresh self-signed certificate and key for 127.0.0.1."""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+    )
+    return cert_path, key_path
+
+
+async def test_self_signed_https_server_reads_tls_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A real local HTTPS server with a self-signed certificate reads
+    tls_error (not unreachable), so a change in the httpx/httpcore
+    exception chain shows up here."""
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "127.0.0.1")
+    cert_path, key_path = _self_signed_cert_files(tmp_path)
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ctx.load_cert_chain(cert_path, key_path)
+
+    async def _handle(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.close()
+
+    server = await asyncio.start_server(_handle, "127.0.0.1", 0, ssl=server_ctx)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        result = await net_http_probe(_make_operator(), None, {"url": f"https://127.0.0.1:{port}/"})
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert result["reachable"] is False
+    assert result["reason"] == "tls_error"
+    assert any(entry["type"].startswith("ssl.") for entry in result["error_detail"])
 
 
 @pytest.mark.parametrize("inner", [anyio.BrokenResourceError(), anyio.EndOfStream()])

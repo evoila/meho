@@ -16,13 +16,13 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
-from meho_backplane.connectors.migration.source_hosts import (
+from meho_backplane.connectors.inventory.source_hosts import (
     linux_migration_inventory,
     winsrv_migration_inventory,
 )
-from meho_backplane.connectors.migration.source_hyperv import hyperv_migration_inventory
-from meho_backplane.connectors.migration.source_k8s import k8s_migration_inventory
-from meho_backplane.connectors.migration.source_proxmox import proxmox_migration_inventory
+from meho_backplane.connectors.inventory.source_hyperv import hyperv_migration_inventory
+from meho_backplane.connectors.inventory.source_k8s import k8s_migration_inventory
+from meho_backplane.connectors.inventory.source_proxmox import proxmox_migration_inventory
 from meho_backplane.operations.typed_register import register_composite_operation
 
 if TYPE_CHECKING:
@@ -39,7 +39,7 @@ _GROUP_KEY: Final[str] = "migration"
 _GROUP_WHEN_TO_USE: Final[str] = (
     "Use to collect this source's machines or workloads for a migration "
     "assessment, in MEHO's common inventory shape. Read-only. The answer is "
-    "the handle of a stored inventory, which migration.inventory.csv and the "
+    "the handle of a stored inventory, which inventory.export and the "
     "assessment steps read."
 )
 
@@ -54,7 +54,7 @@ INVENTORY_ANSWER_SCHEMA: Final[dict[str, Any]] = {
     "properties": {
         "inventory_handle": {
             "type": "string",
-            "description": "Handle id of the stored inventory. Pass it to migration.inventory.csv.",
+            "description": "Handle id of the stored inventory. Pass it to inventory.export.",
         },
         "expires_at": {"type": "string", "description": "When the stored inventory expires."},
         "connector_id": {"type": "string", "description": "Connector that read the source."},
@@ -118,8 +118,9 @@ _RESULT_OBJECTS: Final[dict[str, Any]] = {
 }
 
 _NEXT_STEP: Final[str] = (
-    "Pass inventory_handle to migration.inventory.csv for an Azure Migrate "
-    "import file, or read the records with result_query (path '/records'). "
+    "Pass inventory_handle to inventory.export for a file another tool imports "
+    "(for example format 'azure-migrate-csv'), or read the records with "
+    "result_query (path '/records'). "
     "The handle lasts one hour. Show the omissions to the user."
 )
 

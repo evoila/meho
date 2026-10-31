@@ -230,7 +230,7 @@ the command + output to the fail-closed redaction engine.
 The multi-step read `linux.migration.inventory` (group `migration`,
 `safe`) returns the host as one server record in the common migration
 inventory shape. It only calls `linux.about` and `linux.file.read`. It lives
-in `connectors/migration/source_hosts.py`; see `connectors-migration.md`.
+in `connectors/inventory/source_hosts.py`; see `connectors-inventory.md`.
 
 ## The write surface (T2)
 

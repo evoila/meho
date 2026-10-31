@@ -109,6 +109,8 @@ func newUpdateCmd() *cobra.Command {
 			"`--clear secret-ref --extra scheme=http` turns a target into " +
 			"a plain-HTTP target with no credential, and `--clear alias` " +
 			"removes every alias.\n\n" +
+			"Re-sending `--secret-ref` with the same path makes MEHO read " +
+			"the secret again, for example after you changed it in Vault.\n\n" +
 			"`--secret-field <connector_field>=<source_field>` (repeatable) " +
 			"adds or replaces one entry of the target's secret field map and " +
 			"keeps the other entries. `--secret-field <connector_field>=` " +

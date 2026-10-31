@@ -574,7 +574,7 @@ The full rules, bounds, and errors are in
 ### Long calls: `call_operation` async mode (#3695)
 
 A long call (a deploy, a multi-step operation that runs for minutes) should
-not hold one MCP request open the whole time. `call_operation` takes two
+not hold one MCP request open the whole time. `call_operation` takes three
 optional arguments for this. They are MCP controls and never reach the
 dispatcher:
 
@@ -593,6 +593,18 @@ dispatcher:
   `status="ok"` and its `audit_id` and gets `delivery="partial"` or
   `"unavailable"`. A failed or cancelled run gives `status="error"` and `extras.error_code`
   `run_failed` / `run_cancelled`. Checking never runs the call again.
+- **`wait_seconds`** (only with `run_id`, #5264) makes the check wait up to
+  that many seconds for the run to end. The answer comes as soon as the run
+  ends, or after the wait with `pending` / `running` as before. `0` or no
+  value answers at once. An agent with only MCP tools has no shell, so it
+  cannot sleep between checks; with this it does not have to send check
+  after check. The limit is 50 seconds (`MAX_RUN_WAIT_SECONDS`), below the
+  usual 60-second read limit of HTTP proxies. The `inputSchema` holds the
+  range, so a larger value gets `-32602` with a message that names the
+  maximum. `wait_seconds` without `run_id` gives
+  `data.reason="wait_without_run_id"`. The wait holds no database
+  connection: see
+  [`async-governed-dispatch.md`](async-governed-dispatch.md#waiting-for-a-run-to-end-5264).
 
 An unknown run, a run of another tenant, or a run of a different
 `connector_id` / `op_id` gives the same `-32602` error with
@@ -1219,7 +1231,7 @@ Five synthetic connectors follow this mould (natural key
 | `targets-registry-1.x` | `targets.register` | `meho_targets_register` | #2861 |
 | `targets-registry-1.x` | `targets.remove` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves) | #4623 |
 | `audit-integrity-1.x` | `audit.loose_rows` | (dispatch-only; a `safe` read a Sensor pins) | #4670 |
-| `migration-assess-1.x` | `migration.inventory.csv` | (dispatch-only; a `safe` read of stored or inline inventories) | #5099 |
+| `inventory-1.x` | `inventory.export` | (dispatch-only; a `safe` read that turns stored or inline inventories into a file in a named format) | #5218 |
 
 `meho_targets_register` (#2861,
 `mcp/tools/targets_register.py` + `connectors/targets/`) closes the last

@@ -200,6 +200,12 @@ data:
   # unconditionally, like the self-approval switch above; the default
   # `"false"` refuses decisions made on someone else's instruction.
   APPROVAL_ALLOW_DELEGATED_DECISION: {{ .Values.config.approvalAllowDelegatedDecision | quote }}
+  # How old a sign-in may be for an action that needs a fresh sign-in:
+  # turning approval off for an operation (#4711), and approving on the
+  # command line or REST (#3979). Then which `acr` values count as a
+  # one-time code step for an approve. The web interface is not affected.
+  FRESH_SIGN_IN_MAX_AGE_SECONDS: {{ .Values.config.freshSignInMaxAgeSeconds | quote }}
+  APPROVAL_ONE_TIME_CODE_ACR_VALUES: {{ .Values.config.approvalOneTimeCodeAcrValues | quote }}
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
   # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that

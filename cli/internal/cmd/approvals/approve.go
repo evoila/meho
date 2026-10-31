@@ -5,14 +5,17 @@ package approvals
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
+	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -63,7 +66,14 @@ func newApproveCmd() *cobra.Command {
 			"paused agent run resumes off the broadcast (T9 #1117). " +
 			"Only pending requests can be approved; any other status " +
 			"returns 409. --reason attaches a human-readable " +
-			"rationale to the decision row.\n\n" + delegatedReasonHelp("approve"),
+			"rationale to the decision row.\n\n" +
+			"An approval needs proof that you are present: a sign-in " +
+			"from the last few minutes. Your `meho login` token is " +
+			"older, so approve opens your browser and asks you to sign " +
+			"in again. It uses the new token for this one approval and " +
+			"does not store it. Without a browser it prints the sign-in " +
+			"link and stops; approve in the web interface instead. " +
+			"Reject needs no new sign-in.\n\n" + delegatedReasonHelp("approve"),
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -143,6 +153,10 @@ func runDecision(
 		return cerr
 	}
 	detail, err := postDecision(cmd.Context(), client, requestID, verb, reason)
+	var noBrowser *auth.NoBrowserError
+	if errors.As(err, &noBrowser) {
+		return output.RenderError(cmd.ErrOrStderr(), noBrowserError(noBrowser.URL), jsonOut)
+	}
 	if err != nil {
 		return routeRequestError(cmd, backplaneURL, err, jsonOut)
 	}
@@ -208,11 +222,28 @@ func postDecision(
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode() == 401 {
+	if resp.StatusCode() == 401 && !needsFreshSignIn(resp.HTTPResponse) {
 		if rerr := client.Refresh(ctx); rerr != nil {
 			return nil, rerr
 		}
 		resp, err = client.DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostWithResponse(ctx, requestID, nil, body)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if decision == "approved" && resp.StatusCode() == 401 && needsFreshSignIn(resp.HTTPResponse) {
+		// The server wants a fresh sign-in (#3979). Sign in again in the
+		// browser and retry once with that token. The token stays in
+		// memory: it is never written to the token store.
+		token, serr := freshSignIn(ctx, client)
+		if serr != nil {
+			return nil, serr
+		}
+		withFresh := func(_ context.Context, req *http.Request) error {
+			req.Header.Set("Authorization", "Bearer "+token)
+			return nil
+		}
+		resp, err = client.DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostWithResponse(ctx, requestID, nil, body, withFresh)
 		if err != nil {
 			return nil, err
 		}
@@ -225,4 +256,58 @@ func postDecision(
 	// the decide call just succeeded, but defensive against a
 	// token-rotation window between the two calls).
 	return fetchDetail(ctx, client, requestID)
+}
+
+// needsFreshSignIn reports whether a 401 asks for a newer sign-in: the
+// RFC 9470 §3 challenge error="insufficient_user_authentication".
+func needsFreshSignIn(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	for _, v := range resp.Header.Values("WWW-Authenticate") {
+		if strings.Contains(v, `error="insufficient_user_authentication"`) ||
+			strings.Contains(v, "error=insufficient_user_authentication") {
+			return true
+		}
+	}
+	return false
+}
+
+// openSignInBrowser opens the fresh sign-in link. A package variable
+// so tests can play the browser against a fake identity provider.
+var openSignInBrowser = auth.OpenSystemBrowser
+
+// freshSignIn finds the identity provider of the stored login and runs
+// the browser sign-in against the same command-line client.
+func freshSignIn(ctx context.Context, client *api.AuthedClient) (string, error) {
+	issuer, clientID := client.SignInClient()
+	if issuer == "" || clientID == "" {
+		return "", errors.New("meho: the stored login names no identity provider; " +
+			"run `meho login` again, or approve in the web interface")
+	}
+	doc, err := auth.FetchDiscoveryFromRealm(ctx, client.HTTPClient(), issuer)
+	if err != nil {
+		return "", err
+	}
+	tok, err := auth.RunFreshSignIn(ctx, doc, clientID, auth.FreshSignInOptions{
+		HTTPClient:  client.HTTPClient(),
+		OpenBrowser: openSignInBrowser,
+	})
+	if err != nil {
+		return "", err
+	}
+	if tok.AccessToken == "" {
+		return "", errors.New("meho: the browser sign-in returned no access token")
+	}
+	return tok.AccessToken, nil
+}
+
+// noBrowserError is the message when no browser could be opened for
+// the fresh sign-in. It points to the web interface and gives the link.
+func noBrowserError(signInURL string) *output.StructuredError {
+	return output.AuthExpired(
+		"this approval needs a fresh sign-in, and no browser could be opened. " +
+			"Approve in the web interface: that is the normal place to approve. " +
+			"Or run this command on a computer where a browser can open. " +
+			"Sign-in link: " + signInURL)
 }

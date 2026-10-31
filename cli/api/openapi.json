@@ -3706,7 +3706,7 @@
           "operations"
         ],
         "summary": "Get Operation Run Status",
-        "description": "Poll an async operation run's durable state by handle (the run id).\n\nReads the durable ``operation_run`` row, so it works after the request\nthat submitted the run has returned \u2014 the dropped-response-class fix: the\nfull result envelope is retrievable here even if the submit response was\nlost in transit. An unknown / cross-tenant handle is 404.",
+        "description": "Poll an async operation run's durable state by handle (the run id).\n\nReads the durable ``operation_run`` row, so it works after the request\nthat submitted the run has returned \u2014 the dropped-response-class fix: the\nfull result envelope is retrievable here even if the submit response was\nlost in transit. An unknown / cross-tenant handle is 404.\n\nWith ``wait_seconds`` the answer comes as soon as the run ends, or when\nthe time is up with the run still ``pending`` or ``running``. The wait\nholds no database connection.",
         "operationId": "get_operation_run_status_api_v1_operations_runs__handle__get",
         "parameters": [
           {
@@ -3718,6 +3718,20 @@
               "format": "uuid",
               "title": "Handle"
             }
+          },
+          {
+            "name": "wait_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 50,
+              "minimum": 0,
+              "description": "Wait up to this many seconds for the run to end, then answer. 0 (the default) answers at once. At most 50.",
+              "default": 0,
+              "title": "Wait Seconds"
+            },
+            "description": "Wait up to this many seconds for the run to end, then answer. 0 (the default) answers at once. At most 50."
           },
           {
             "name": "authorization",
@@ -10679,7 +10693,7 @@
           "approvals"
         ],
         "summary": "Approve Approval Request",
-        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nAsync governed dispatch (#3079): with ``async: true`` the decision is\nstill recorded + audited synchronously, but the resumed op is dispatched\non a background task and the route returns HTTP 202 + a durable run\nhandle (``{\"run_id\", \"status\": \"pending\", \"async\": true}``) instead of\nblocking for the resumed op's full duration. The resume runs through the\nsame exactly-one-resumer claim + policy bypass + audit path the inline\nresume uses. Default (``async`` absent / false) is byte-identical to the\npre-#3079 inline resume below.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully (sync).\n* 202 \u2014 approved; resume launched in the background (``async: true``).\n* 403 \u2014 caller lacks approvals-plane access (neither ``operator`` role\n  nor the ``approver`` capability, #3243), **or** the approver is the\n  requester and self-approval break-glass is disabled (G11.7-T1 #1401).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch, a reason over 2000 characters, or a\n  delegated reason (``Instructed-by:``) missing ``Instruction:`` /\n  ``Refs:`` (#3692).",
+        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nAsync governed dispatch (#3079): with ``async: true`` the decision is\nstill recorded + audited synchronously, but the resumed op is dispatched\non a background task and the route returns HTTP 202 + a durable run\nhandle (``{\"run_id\", \"status\": \"pending\", \"async\": true}``) instead of\nblocking for the resumed op's full duration. The resume runs through the\nsame exactly-one-resumer claim + policy bypass + audit path the inline\nresume uses. Default (``async`` absent / false) is byte-identical to the\npre-#3079 inline resume below.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully (sync).\n* 202 \u2014 approved; resume launched in the background (``async: true``).\n* 401 \u2014 the token shows no fresh sign-in (#3979): its ``auth_time`` is\n  missing or older than ``FRESH_SIGN_IN_MAX_AGE_SECONDS``, or\n  this sign-in already gave an approval. The answer carries\n  ``WWW-Authenticate: Bearer error=\"insufficient_user_authentication\"``\n  with ``max_age`` (RFC 9470). Approve in the web interface, or sign in\n  again. The request stays pending.\n* 403 \u2014 caller lacks approvals-plane access (neither ``operator`` role\n  nor the ``approver`` capability, #3243), **or** the approver is the\n  requester and self-approval break-glass is disabled (G11.7-T1 #1401).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch, a reason over 2000 characters, or a\n  delegated reason (``Instructed-by:``) missing ``Instruction:`` /\n  ``Refs:`` (#3692).",
         "operationId": "approve_approval_request_api_v1_approvals__request_id__approve_post",
         "parameters": [
           {
@@ -10871,7 +10885,7 @@
           "approvals"
         ],
         "summary": "Decide Approval Request",
-        "description": "Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and records the ``approval.{approved,rejected}``\nadd-on step event. Backs the CLI/MCP operator-decision flow where the\noperator approves by id alone.\n\nOn **every approval** the decision then drives a re-dispatch using the\nparams stored on the row at park time (#1503) \u2014 the direct operator op\n(``run_id IS NULL``) and, since #2293, the **agent-run** request\n(``run_id`` set) alike. The exactly-one-resumer claim\n(:func:`~meho_backplane.operations.approval_queue.claim_resume`, won\ninside ``resume_dispatch_after_approval``) makes this safe for\nrun-bound requests: when the in-process agent waiter is alive it wins\nthe claim and ``/decide``'s re-dispatch no-ops with\n``dispatch_status=\"already_resumed\"``; when the waiter is gone\n(wait-timeout, pod restart, run cancelled) ``/decide`` wins the claim\nand executes the approved op, closing the silent-non-execution seam\nwhere the approval committed but nothing ran. Two independent guards\ncoexist: the already-decided 409 prevents a second *decision*, and the\nclaim prevents a second *dispatch* of one decision.",
+        "description": "Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and records the ``approval.{approved,rejected}``\nadd-on step event. Backs the CLI/MCP operator-decision flow where the\noperator approves by id alone.\n\nOn **every approval** the decision then drives a re-dispatch using the\nparams stored on the row at park time (#1503) \u2014 the direct operator op\n(``run_id IS NULL``) and, since #2293, the **agent-run** request\n(``run_id`` set) alike. The exactly-one-resumer claim\n(:func:`~meho_backplane.operations.approval_queue.claim_resume`, won\ninside ``resume_dispatch_after_approval``) makes this safe for\nrun-bound requests: when the in-process agent waiter is alive it wins\nthe claim and ``/decide``'s re-dispatch no-ops with\n``dispatch_status=\"already_resumed\"``; when the waiter is gone\n(wait-timeout, pod restart, run cancelled) ``/decide`` wins the claim\nand executes the approved op, closing the silent-non-execution seam\nwhere the approval committed but nothing ran. Two independent guards\ncoexist: the already-decided 409 prevents a second *decision*, and the\nclaim prevents a second *dispatch* of one decision.\n\nAn approval needs a fresh sign-in or a one-time code (#3979): otherwise\nthe route answers 401 with ``WWW-Authenticate: Bearer\nerror=\"insufficient_user_authentication\"`` and ``max_age`` (RFC 9470),\nand the request stays pending. A rejection needs no fresh sign-in.",
         "operationId": "decide_approval_request_api_v1_approvals__request_id__decide_post",
         "parameters": [
           {
@@ -24079,6 +24093,11 @@
             "format": "uuid",
             "nullable": true,
             "title": "Audit Id"
+          },
+          "guidance": {
+            "type": "string",
+            "nullable": true,
+            "title": "Guidance"
           }
         },
         "type": "object",
@@ -24086,7 +24105,8 @@
           "resumed_at",
           "result_status",
           "error_code",
-          "audit_id"
+          "audit_id",
+          "guidance"
         ],
         "title": "ApprovalResumeOutcomeView",
         "description": "What happened when an approved request ran (#3543).\n\nA summary read off the stored result envelope. The result body and the\nfree-text error stay on the owner-only ``/result`` read."
@@ -24557,6 +24577,10 @@
             "type": "string",
             "title": "Event Class"
           },
+          "sandbox_mode": {
+            "type": "boolean",
+            "title": "Sandbox Mode"
+          },
           "broadcast_event_id": {
             "type": "string",
             "format": "uuid",
@@ -24587,10 +24611,11 @@
           "work_ref",
           "policy_decision",
           "event_class",
+          "sandbox_mode",
           "broadcast_event_id"
         ],
         "title": "AuditEntry",
-        "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``tenant_name`` \u2190 LEFT JOIN ``tenant.name`` ON ``audit_log.tenant_id``\n  (#5238). ``None`` when the tenant row is gone; show ``tenant_id`` then.\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``work_ref`` \u2190 ``audit_log.work_ref`` (external change-ticket reference;\n  work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat\n  ``work_ref`` filter on :class:`AuditQueryFilters` is exact-match.\n* ``principal_name`` \u2190 ``payload['principal_name']`` when set. The MCP\n  audit-write helper (``write_mcp_audit_row``) populates it from\n  ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain\n  None pending a separate fix to bind ``name`` to contextvars in\n  ``verify_jwt_and_bind``.\n* ``broadcast_event_id`` \u2014 v0.2 placeholder, always None (FK direction\n  is reversed: ``BroadcastEvent.audit_id`` points at the audit row)."
+        "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``tenant_name`` \u2190 LEFT JOIN ``tenant.name`` ON ``audit_log.tenant_id``\n  (#5238). ``None`` when the tenant row is gone; show ``tenant_id`` then.\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``work_ref`` \u2190 ``audit_log.work_ref`` (external change-ticket reference;\n  work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat\n  ``work_ref`` filter on :class:`AuditQueryFilters` is exact-match.\n* ``principal_name`` \u2190 ``payload['principal_name']`` when set. The MCP\n  audit-write helper (``write_mcp_audit_row``) populates it from\n  ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain\n  None pending a separate fix to bind ``name`` to contextvars in\n  ``verify_jwt_and_bind``.\n* ``sandbox_mode`` \u2190 ``audit_log.sandbox_mode`` (the sandbox mark; #4622)\n* ``broadcast_event_id`` \u2014 v0.2 placeholder, always None (FK direction\n  is reversed: ``BroadcastEvent.audit_id`` points at the audit row)."
       },
       "AuditEventClass": {
         "type": "string",
@@ -33743,6 +33768,10 @@
             "type": "string",
             "title": "Event Class"
           },
+          "sandbox_mode": {
+            "type": "boolean",
+            "title": "Sandbox Mode"
+          },
           "broadcast_event_id": {
             "type": "string",
             "format": "uuid",
@@ -33784,6 +33813,7 @@
           "work_ref",
           "policy_decision",
           "event_class",
+          "sandbox_mode",
           "broadcast_event_id",
           "depth"
         ],
@@ -33884,6 +33914,12 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Extras"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Updated At"
           }
         },
         "type": "object",

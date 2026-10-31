@@ -178,6 +178,7 @@ async def read_many(
     mo_type: str,
     moids: list[str],
     props: list[str],
+    all_pages: bool = False,
 ) -> tuple[dict[str, dict[str, Any]], bool]:
     """Read *props* of many objects: ``({moid: props}, complete)``.
 
@@ -185,17 +186,24 @@ async def read_many(
     answer, left an object out, or could not read one of *props* on an
     object -- the caller then refuses instead of reading "nothing uses it".
     Faults propagate.
+
+    With ``all_pages=True`` every page of a chunk's answer is read
+    (:func:`~meho_backplane.connectors.vmware_rest.vim_retrieve.retrieve_all_pages`),
+    so a paged answer is whole, not incomplete. A failed page fails the read.
+    The deletes keep the default: they refuse a paged answer and never write
+    on a guess.
     """
     by_moid: dict[str, dict[str, Any]] = {}
     complete = True
     for start in range(0, len(moids), _CHUNK):
         chunk = moids[start : start + _CHUNK]
-        result = await connector._post_vmomi_json(
-            target,
-            _VMOMI_RETRIEVE_PROPERTIES_PATH,
-            operator=operator,
-            json=retrieve_properties_body(mo_type, chunk, props),
-        )
+        body = retrieve_properties_body(mo_type, chunk, props)
+        if all_pages:
+            result = await retrieve_all_pages(connector, target, operator, body)
+        else:
+            result = await connector._post_vmomi_json(
+                target, _VMOMI_RETRIEVE_PROPERTIES_PATH, operator=operator, json=body
+            )
         objects = _objects(result)
         if _paged(result) or set(chunk) - set(objects):
             complete = False

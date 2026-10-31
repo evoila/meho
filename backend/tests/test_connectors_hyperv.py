@@ -237,7 +237,7 @@ async def test_vswitch_list_empty_host(rows_json: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# vms group (the migration-assessment surface)
+# vms group (the migration assessment surface)
 # ---------------------------------------------------------------------------
 
 

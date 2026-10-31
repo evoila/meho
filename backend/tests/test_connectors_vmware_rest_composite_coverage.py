@@ -43,6 +43,8 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.datastore.usage",
         # ``datastore.refresh`` is pinned ``write`` in ``_WRITE_OPS``: it is
         # ``safe`` but makes the host rescan, so it is not a plain read.
+        # #3814: ``.orphan_dirs`` is not a classifier suffix -> ``other``; a read.
+        "vmware.composite.datastore.orphan_dirs",
         "vmware.composite.network.portgroup.audit",
         "vmware.composite.vm.clone",
         "vmware.composite.vm.deploy_from_library",
@@ -96,6 +98,9 @@ _CLASSIFIER_OTHER = frozenset(
         # ``other``, like ``host.service_control``.
         "vmware.composite.alarm.acknowledge",
         "vmware.composite.alarm.reset",
+        # #4394: ``.answer`` is not a classifier suffix -> ``other``. The
+        # deploy and the install send a password: they are credential_write.
+        "vmware.composite.vcenter.deployment.answer",
         # ``.inventory`` is not a classifier suffix -> ``other``; a read.
         "vmware.migration.inventory",
     }

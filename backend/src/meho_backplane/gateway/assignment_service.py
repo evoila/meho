@@ -114,6 +114,7 @@ def descriptor_from_target(target: TargetORM) -> wire.ResolvedTargetDescriptor:
         tls_server_name=target.tls_server_name,
         secret_field_map=dict(target.secret_field_map or {}),
         extras=dict(target.extras or {}),
+        updated_at=target.updated_at,
     )
 
 

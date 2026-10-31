@@ -46,7 +46,7 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
-from meho_backplane.connectors.migration.contracts import (
+from meho_backplane.connectors.inventory.contracts import (
     INVENTORY_SCHEMA_VERSION,
     IdentityIndex,
     IdentityMatch,

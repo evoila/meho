@@ -6774,7 +6774,8 @@ class ApprovalRequest(Base):
       ``GET /api/v1/approvals/{id}/result`` to resume by poll instead of a
       second submit. It is the same reduced envelope the approver already
       sees inline: a set-shaped response rides a JSONFlux ``handle``
-      (v0.1-spec §4), never a raw body. NULL until captured — a pending /
+      (v0.1-spec §4), never a raw body, plus the ``extras.approval_guidance``
+      stamp the store adds for the run summary (#5377). NULL until captured — a pending /
       rejected / expired row, an agent-run request resumed in-process (which
       does not route through the shared operator resume path), and every
       pre-0096 row keep NULL. Internal to the ``/result`` surface only; like

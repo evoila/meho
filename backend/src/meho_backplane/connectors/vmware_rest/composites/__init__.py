@@ -110,6 +110,9 @@ from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
 from meho_backplane.connectors.vmware_rest.composites._datastore_list import (
     datastore_file_list_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._datastore_orphans import (
+    datastore_orphan_dirs_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._datastore_vsan import (
     datastore_vsan_folder_list_composite,
 )
@@ -255,6 +258,7 @@ __all__ = [
     "datastore_file_delete_composite",
     "datastore_file_list_composite",
     "datastore_mount_nfs_composite",
+    "datastore_orphan_dirs_composite",
     "datastore_refresh_composite",
     "datastore_usage_composite",
     "datastore_vsan_folder_list_composite",

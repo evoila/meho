@@ -1,0 +1,1341 @@
+{
+  "$defs": {
+    "ApplicationRecord": {
+      "additionalProperties": false,
+      "description": "Software found on one or more servers (a database engine, a web server).",
+      "properties": {
+        "category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For example 'database'.",
+          "title": "Category"
+        },
+        "collected_at": {
+          "description": "When this record was read from the source.",
+          "format": "date-time",
+          "title": "Collected At",
+          "type": "string"
+        },
+        "kind": {
+          "const": "application",
+          "default": "application",
+          "title": "Kind",
+          "type": "string"
+        },
+        "missing": {
+          "additionalProperties": {
+            "enum": [
+              "not_reported_by_source",
+              "no_permission",
+              "powered_off",
+              "not_measured",
+              "collection_failed",
+              "not_supported"
+            ],
+            "type": "string"
+          },
+          "description": "Dotted field path to the reason it is unknown. Every field that is null must be covered, nested fields and list items too: 'cores', 'os.version', 'disks.0.used_gb', 'utilization.cpu_percent.average'. A parent path ('disks.0', 'disks') covers every unknown field below it.",
+          "title": "Missing",
+          "type": "object"
+        },
+        "name": {
+          "description": "Application name.",
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "runs_on": {
+          "description": "source_id of each server it runs on.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Runs On",
+          "type": "array"
+        },
+        "source_id": {
+          "description": "Stable id from the source, for example 'vmware:<vCenter instance uuid>:<VM instance uuid>'. The same thing read twice from the same source gets the same id.",
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "vendor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Vendor"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        }
+      },
+      "required": [
+        "source_id",
+        "collected_at",
+        "name"
+      ],
+      "title": "ApplicationRecord",
+      "type": "object"
+    },
+    "CountCheck": {
+      "additionalProperties": false,
+      "description": "Does the source's own total equal records plus omissions, for one kind?",
+      "properties": {
+        "difference": {
+          "description": "source_total minus records minus omitted.",
+          "title": "Difference",
+          "type": "integer"
+        },
+        "kind": {
+          "enum": [
+            "server",
+            "application",
+            "kubernetes_workload"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "matches": {
+          "description": "True when the difference is 0.",
+          "title": "Matches",
+          "type": "boolean"
+        },
+        "omitted": {
+          "description": "Omissions of this kind (each one item).",
+          "minimum": 0,
+          "title": "Omitted",
+          "type": "integer"
+        },
+        "records": {
+          "description": "Records of this kind in the inventory.",
+          "minimum": 0,
+          "title": "Records",
+          "type": "integer"
+        },
+        "source_total": {
+          "description": "The total the source itself reports.",
+          "minimum": 0,
+          "title": "Source Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "source_total",
+        "records",
+        "omitted",
+        "difference",
+        "matches"
+      ],
+      "title": "CountCheck",
+      "type": "object"
+    },
+    "Disk": {
+      "additionalProperties": false,
+      "description": "One virtual or physical disk. Speeds use the server's measurement window.",
+      "properties": {
+        "independent": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Left out of snapshots.",
+          "title": "Independent"
+        },
+        "label": {
+          "description": "Disk name as the source shows it.",
+          "title": "Label",
+          "type": "string"
+        },
+        "raw_mapping": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Raw device mapping (RDM).",
+          "title": "Raw Mapping"
+        },
+        "read_mb_per_s": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Stat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Read throughput in MB/s."
+        },
+        "read_ops_per_s": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Stat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Read operations per second."
+        },
+        "shared": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Shared with another machine.",
+          "title": "Shared"
+        },
+        "size_gb": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Size in GB.",
+          "title": "Size Gb"
+        },
+        "thin": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Thin provisioned.",
+          "title": "Thin"
+        },
+        "used_gb": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Space in use in GB.",
+          "title": "Used Gb"
+        },
+        "write_mb_per_s": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Stat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Write throughput in MB/s."
+        },
+        "write_ops_per_s": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Stat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Write operations per second."
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "title": "Disk",
+      "type": "object"
+    },
+    "IdentityDuplicate": {
+      "additionalProperties": false,
+      "description": "Two records that look like the same machine. Both stay in ``records``.",
+      "properties": {
+        "match": {
+          "description": "The kind of value this record shares with another record of the machine.",
+          "enum": [
+            "bios_uuid",
+            "instance_uuid"
+          ],
+          "title": "Match",
+          "type": "string"
+        },
+        "same_as": {
+          "description": "The first record of that machine. Never itself a duplicate.",
+          "minLength": 1,
+          "title": "Same As",
+          "type": "string"
+        },
+        "source_id": {
+          "description": "The later record.",
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "same_as",
+        "match"
+      ],
+      "title": "IdentityDuplicate",
+      "type": "object"
+    },
+    "IdentityHints": {
+      "additionalProperties": false,
+      "description": "Facts that find one machine seen through two sources (vCenter and its guest OS).",
+      "properties": {
+        "bios_uuid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "SMBIOS / BIOS UUID, lower case, in the form the guest OS reports it. A vCenter record is converted to that form (see the migration docs).",
+          "title": "Bios Uuid"
+        },
+        "host_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Host name, lower case.",
+          "title": "Host Name"
+        },
+        "mac_addresses": {
+          "description": "MAC addresses, lower case with ':'.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Mac Addresses",
+          "type": "array"
+        }
+      },
+      "title": "IdentityHints",
+      "type": "object"
+    },
+    "InventoryCounts": {
+      "additionalProperties": false,
+      "description": "Records per kind, plus the totals the source itself reports, for checking.",
+      "properties": {
+        "application": {
+          "minimum": 0,
+          "title": "Application",
+          "type": "integer"
+        },
+        "kubernetes_workload": {
+          "minimum": 0,
+          "title": "Kubernetes Workload",
+          "type": "integer"
+        },
+        "reconciliation": {
+          "description": "Per kind: source total against records plus omissions.",
+          "items": {
+            "$ref": "#/$defs/CountCheck"
+          },
+          "title": "Reconciliation",
+          "type": "array"
+        },
+        "server": {
+          "minimum": 0,
+          "title": "Server",
+          "type": "integer"
+        },
+        "source_totals": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "description": "The source's own total per kind, where it reports one.",
+          "propertyNames": {
+            "enum": [
+              "server",
+              "application",
+              "kubernetes_workload"
+            ]
+          },
+          "title": "Source Totals",
+          "type": "object"
+        }
+      },
+      "required": [
+        "server",
+        "application",
+        "kubernetes_workload"
+      ],
+      "title": "InventoryCounts",
+      "type": "object"
+    },
+    "InventorySource": {
+      "additionalProperties": false,
+      "description": "Where one inventory was read from.",
+      "properties": {
+        "collected_at": {
+          "description": "When the collection finished.",
+          "format": "date-time",
+          "title": "Collected At",
+          "type": "string"
+        },
+        "connector_id": {
+          "description": "Connector that read it.",
+          "minLength": 1,
+          "title": "Connector Id",
+          "type": "string"
+        },
+        "target": {
+          "description": "Target name.",
+          "minLength": 1,
+          "title": "Target",
+          "type": "string"
+        }
+      },
+      "required": [
+        "connector_id",
+        "target",
+        "collected_at"
+      ],
+      "title": "InventorySource",
+      "type": "object"
+    },
+    "KubernetesWorkloadRecord": {
+      "additionalProperties": false,
+      "description": "A Kubernetes workload. CPU and memory are the sums over its containers, per replica.",
+      "properties": {
+        "cluster": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Cluster name.",
+          "title": "Cluster"
+        },
+        "collected_at": {
+          "description": "When this record was read from the source.",
+          "format": "date-time",
+          "title": "Collected At",
+          "type": "string"
+        },
+        "cpu_limit_millicores": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cpu Limit Millicores"
+        },
+        "cpu_request_millicores": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cpu Request Millicores"
+        },
+        "images": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Images"
+        },
+        "kind": {
+          "const": "kubernetes_workload",
+          "default": "kubernetes_workload",
+          "title": "Kind",
+          "type": "string"
+        },
+        "memory_limit_mb": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Memory Limit Mb"
+        },
+        "memory_request_mb": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Memory Request Mb"
+        },
+        "missing": {
+          "additionalProperties": {
+            "enum": [
+              "not_reported_by_source",
+              "no_permission",
+              "powered_off",
+              "not_measured",
+              "collection_failed",
+              "not_supported"
+            ],
+            "type": "string"
+          },
+          "description": "Dotted field path to the reason it is unknown. Every field that is null must be covered, nested fields and list items too: 'cores', 'os.version', 'disks.0.used_gb', 'utilization.cpu_percent.average'. A parent path ('disks.0', 'disks') covers every unknown field below it.",
+          "title": "Missing",
+          "type": "object"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "namespace": {
+          "minLength": 1,
+          "title": "Namespace",
+          "type": "string"
+        },
+        "nodes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Nodes its pods run on.",
+          "title": "Nodes"
+        },
+        "replicas": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Replicas"
+        },
+        "source_id": {
+          "description": "Stable id from the source, for example 'vmware:<vCenter instance uuid>:<VM instance uuid>'. The same thing read twice from the same source gets the same id.",
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "volumes": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/WorkloadVolume"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Volumes"
+        },
+        "workload_kind": {
+          "description": "For example 'Deployment'.",
+          "minLength": 1,
+          "title": "Workload Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "collected_at",
+        "namespace",
+        "workload_kind",
+        "name"
+      ],
+      "title": "KubernetesWorkloadRecord",
+      "type": "object"
+    },
+    "Nic": {
+      "additionalProperties": false,
+      "description": "One network adapter.",
+      "properties": {
+        "ip_addresses": {
+          "description": "IPv4 and IPv6 addresses.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Ip Addresses",
+          "type": "array"
+        },
+        "mac_address": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "MAC address.",
+          "title": "Mac Address"
+        },
+        "network": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Network or port group name.",
+          "title": "Network"
+        }
+      },
+      "title": "Nic",
+      "type": "object"
+    },
+    "Omission": {
+      "additionalProperties": false,
+      "description": "A part of the estate that was not collected, and why.",
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "More detail, if any.",
+          "title": "Detail"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "server",
+                "application",
+                "kubernetes_workload"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Set when this omission stands for one item of the source that has no record (one VM left out). Such omissions count in the reconciliation.",
+          "title": "Kind"
+        },
+        "reason": {
+          "enum": [
+            "not_reported_by_source",
+            "no_permission",
+            "powered_off",
+            "not_measured",
+            "collection_failed",
+            "not_supported"
+          ],
+          "title": "Reason",
+          "type": "string"
+        },
+        "source_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Id of the left-out item.",
+          "title": "Source Id"
+        },
+        "what": {
+          "description": "What was not collected.",
+          "minLength": 1,
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "reason"
+      ],
+      "title": "Omission",
+      "type": "object"
+    },
+    "OperatingSystem": {
+      "additionalProperties": false,
+      "description": "The guest operating system as the source reports it.",
+      "properties": {
+        "architecture": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For example 'x64' or 'arm64'.",
+          "title": "Architecture"
+        },
+        "family": {
+          "anyOf": [
+            {
+              "enum": [
+                "windows",
+                "linux",
+                "other"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Family.",
+          "title": "Family"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Full name, for example 'Ubuntu Linux'.",
+          "title": "Name"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Version text.",
+          "title": "Version"
+        }
+      },
+      "title": "OperatingSystem",
+      "type": "object"
+    },
+    "ServerRecord": {
+      "additionalProperties": false,
+      "description": "A virtual or physical server.",
+      "properties": {
+        "boot_type": {
+          "anyOf": [
+            {
+              "enum": [
+                "bios",
+                "uefi"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Boot Type"
+        },
+        "collected_at": {
+          "description": "When this record was read from the source.",
+          "format": "date-time",
+          "title": "Collected At",
+          "type": "string"
+        },
+        "cores": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Processor cores allocated.",
+          "title": "Cores"
+        },
+        "disks": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Disk"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Disks"
+        },
+        "hypervisor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For example 'VMware' or 'Hyper-V'.",
+          "title": "Hypervisor"
+        },
+        "identity_hints": {
+          "$ref": "#/$defs/IdentityHints"
+        },
+        "kind": {
+          "const": "server",
+          "default": "server",
+          "title": "Kind",
+          "type": "string"
+        },
+        "memory_assigned_mb": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "RAM assigned now (differs with dynamic memory).",
+          "title": "Memory Assigned Mb"
+        },
+        "memory_configured_mb": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Configured RAM.",
+          "title": "Memory Configured Mb"
+        },
+        "missing": {
+          "additionalProperties": {
+            "enum": [
+              "not_reported_by_source",
+              "no_permission",
+              "powered_off",
+              "not_measured",
+              "collection_failed",
+              "not_supported"
+            ],
+            "type": "string"
+          },
+          "description": "Dotted field path to the reason it is unknown. Every field that is null must be covered, nested fields and list items too: 'cores', 'os.version', 'disks.0.used_gb', 'utilization.cpu_percent.average'. A parent path ('disks.0', 'disks') covers every unknown field below it.",
+          "title": "Missing",
+          "type": "object"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Server name as the source shows it.",
+          "title": "Name"
+        },
+        "nics": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Nic"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Nics"
+        },
+        "os": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperatingSystem"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "power_state": {
+          "anyOf": [
+            {
+              "enum": [
+                "on",
+                "off",
+                "suspended"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Power State"
+        },
+        "secure_boot": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Secure Boot"
+        },
+        "server_type": {
+          "anyOf": [
+            {
+              "enum": [
+                "virtual",
+                "physical"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Server Type"
+        },
+        "snapshot_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Snapshot Count"
+        },
+        "source_attributes": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "More facts the source reports, with fixed keys per source. VMware: 'vm_id', 'instance_uuid', 'hardware_version', 'esxi_host', 'cluster'.",
+          "title": "Source Attributes",
+          "type": "object"
+        },
+        "source_id": {
+          "description": "Stable id from the source, for example 'vmware:<vCenter instance uuid>:<VM instance uuid>'. The same thing read twice from the same source gets the same id.",
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "utilization": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Utilization"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "source_id",
+        "collected_at"
+      ],
+      "title": "ServerRecord",
+      "type": "object"
+    },
+    "Stat": {
+      "additionalProperties": false,
+      "description": "Average, 95th percentile and maximum over the measurement window.",
+      "properties": {
+        "average": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Average over the window.",
+          "title": "Average"
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Highest value in the window.",
+          "title": "Maximum"
+        },
+        "p95": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "95th percentile over the window.",
+          "title": "P95"
+        }
+      },
+      "title": "Stat",
+      "type": "object"
+    },
+    "Utilization": {
+      "additionalProperties": false,
+      "description": "Measured use over a window. Absent measurements make the whole block null.",
+      "properties": {
+        "cpu_percent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Stat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "CPU use in percent."
+        },
+        "memory_percent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Stat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Memory use in percent."
+        },
+        "network_in_mb_per_s": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Stat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Received MB/s."
+        },
+        "network_out_mb_per_s": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Stat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Sent MB/s."
+        },
+        "sample_interval_minutes": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Minutes between two samples, as the source keeps them. With 'samples' it tells how much of the window the samples cover. An inventory stored before this field loads with null and the reason 'not_reported_by_source'.",
+          "title": "Sample Interval Minutes"
+        },
+        "samples": {
+          "description": "Number of samples in the window.",
+          "minimum": 1,
+          "title": "Samples",
+          "type": "integer"
+        },
+        "source": {
+          "description": "Where the numbers come from, for example 'vcenter-perf'.",
+          "title": "Source",
+          "type": "string"
+        },
+        "window_end": {
+          "description": "End of the measurement window.",
+          "format": "date-time",
+          "title": "Window End",
+          "type": "string"
+        },
+        "window_start": {
+          "description": "Start of the measurement window.",
+          "format": "date-time",
+          "title": "Window Start",
+          "type": "string"
+        }
+      },
+      "required": [
+        "window_start",
+        "window_end",
+        "samples",
+        "source"
+      ],
+      "title": "Utilization",
+      "type": "object"
+    },
+    "WorkloadVolume": {
+      "additionalProperties": false,
+      "description": "A volume a Kubernetes workload mounts.",
+      "properties": {
+        "name": {
+          "description": "Volume name in the pod spec.",
+          "title": "Name",
+          "type": "string"
+        },
+        "size_gb": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Requested size in GB.",
+          "title": "Size Gb"
+        },
+        "storage_class": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Storage class name.",
+          "title": "Storage Class"
+        },
+        "type": {
+          "description": "For example 'persistentVolumeClaim' or 'emptyDir'.",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "title": "WorkloadVolume",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One inventory from one source.",
+  "properties": {
+    "counts": {
+      "$ref": "#/$defs/InventoryCounts"
+    },
+    "duplicates": {
+      "description": "Records that look like a machine already in the list. Not counted twice.",
+      "items": {
+        "$ref": "#/$defs/IdentityDuplicate"
+      },
+      "title": "Duplicates",
+      "type": "array"
+    },
+    "omissions": {
+      "items": {
+        "$ref": "#/$defs/Omission"
+      },
+      "title": "Omissions",
+      "type": "array"
+    },
+    "records": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "application": "#/$defs/ApplicationRecord",
+            "kubernetes_workload": "#/$defs/KubernetesWorkloadRecord",
+            "server": "#/$defs/ServerRecord"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/ServerRecord"
+          },
+          {
+            "$ref": "#/$defs/ApplicationRecord"
+          },
+          {
+            "$ref": "#/$defs/KubernetesWorkloadRecord"
+          }
+        ]
+      },
+      "title": "Records",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/$defs/InventorySource"
+    }
+  },
+  "required": [
+    "schema_version",
+    "source",
+    "records",
+    "counts"
+  ],
+  "title": "InventoryEnvelope",
+  "type": "object"
+}

@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+import structlog
 
 from meho_backplane.connectors.vcf_automation._identity import (
     is_provider_org,
@@ -42,6 +43,7 @@ from meho_backplane.operations._preview import PreviewContext, register_preview_
 __all__: list[str] = []
 
 _READ_ERRORS = (httpx.HTTPError, RuntimeError, ValueError)
+_log = structlog.get_logger(__name__)
 
 
 def _server(params: dict[str, Any]) -> dict[str, Any]:
@@ -67,7 +69,10 @@ async def _certificate(ctx: PreviewContext, preview: dict[str, Any]) -> None:
         return
     try:
         seen = await probe_ldap_server(connector, ctx.target, ctx.operator, params)
-    except _READ_ERRORS:
+    except _READ_ERRORS as exc:
+        _log.debug(
+            "vcfa_identity_preview_read_failed", read="certificate", error=type(exc).__name__
+        )
         return
     fingerprint = seen["certificate_sha256"]
     preview["certificate_sha256"] = fingerprint
@@ -92,8 +97,11 @@ async def _ldap_set_preview(ctx: PreviewContext) -> dict[str, Any] | None:
             ctx.target, "GET", PROVIDER_LDAP_SETTINGS_PATH, operator=ctx.operator
         )
         preview["current"] = ldap_view(current)
-    except _READ_ERRORS:
-        pass
+    except _READ_ERRORS as exc:
+        # The preview is best effort: "current" stays null and the park goes ahead.
+        _log.debug(
+            "vcfa_identity_preview_read_failed", read="provider_ldap", error=type(exc).__name__
+        )
     await _certificate(ctx, preview)
     return preview
 
@@ -113,8 +121,11 @@ async def _org_and_current(ctx: PreviewContext, template: str, kind: str) -> dic
             ctx.target, "GET", org_path(template, org), operator=ctx.operator
         )
         found["current"] = oidc_view(current, org) if kind == "oidc" else ldap_view(current, org)
-    except _READ_ERRORS:
-        pass
+    except _READ_ERRORS as exc:
+        # The preview is best effort: the fields it could not read stay null.
+        _log.debug(
+            "vcfa_identity_preview_read_failed", read=f"org_{kind}", error=type(exc).__name__
+        )
     return found
 
 

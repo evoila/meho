@@ -440,7 +440,7 @@ async def test_key_change_refuses_a_missing_key(salt: SaltConnector) -> None:
     assert raas.called("minions", "set_minion_key_state") == []
 
 
-@pytest.mark.parametrize("minion_id", ["web*", "a,b", "web[12]", "two words"])
+@pytest.mark.parametrize("minion_id", ["web*", "a,b", "web[12]", "two words", "web-1\n"])
 async def test_key_change_refuses_a_glob_or_list_id(salt: SaltConnector, minion_id: str) -> None:
     params = {"minions": [{"master_id": "<master-1>", "minion_id": minion_id}]}
     with _Raas({}) as raas:
@@ -656,7 +656,7 @@ async def test_run_state_waits_for_a_second_person_then_runs_on_the_card_minions
         assert block["object"] == {
             "kind": "salt_job",
             "fun": "state.apply",
-            "arg": {"arg": ["<state-a>,<state-b>"], "kwarg": {"test": True}},
+            "arg": {"kwarg": {"mods": "<state-a>,<state-b>", "test": True}},
             "target": {"master_id": "*", "tgt_type": "glob", "tgt": "<web-glob>"},
             "minion_count": 3,
             "minions_sha256": minions_sha256(
@@ -685,7 +685,7 @@ async def test_run_state_waits_for_a_second_person_then_runs_on_the_card_minions
             "cmd": "local",
             "fun": "state.apply",
             "tgt": _LIST_TARGET,
-            "arg": {"arg": ["<state-a>,<state-b>"], "kwarg": {"test": True}},
+            "arg": {"kwarg": {"mods": "<state-a>,<state-b>", "test": True}},
         }
     ]
 
@@ -819,7 +819,7 @@ async def test_run_command_card_shows_the_command_in_full(salt: SaltConnector) -
         assert call["status"] == "awaiting_approval", call
         block = (await _parked_effect(call))["blast_radius"]
         assert block["object"]["fun"] == "cmd.run"
-        assert block["object"]["arg"] == {"arg": ["systemctl restart <service-name>"]}
+        assert block["object"]["arg"] == {"kwarg": {"cmd": "systemctl restart <service-name>"}}
         resumed = await _approve_and_resume(call)
     assert resumed.status == "ok", resumed
     assert resumed.result["status"] == "accepted"
@@ -828,9 +828,54 @@ async def test_run_command_card_shows_the_command_in_full(salt: SaltConnector) -
             "cmd": "local",
             "fun": "cmd.run",
             "tgt": _LIST_TARGET,
-            "arg": {"arg": ["systemctl restart <service-name>"]},
+            "arg": {"kwarg": {"cmd": "systemctl restart <service-name>"}},
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("op_id", "params", "arg"),
+    [
+        (
+            "salt.job.run_command",
+            {"tgt": "<web-glob>", "command": "LANG=C df -h"},
+            {"kwarg": {"cmd": "LANG=C df -h"}},
+        ),
+        (
+            "salt.job.run_state",
+            {"tgt": "<web-glob>", "states": ["saltenv=dev"]},
+            {"kwarg": {"mods": "saltenv=dev"}},
+        ),
+    ],
+    ids=["command", "state"],
+)
+async def test_run_sends_a_name_value_text_as_a_keyword_value(
+    salt: SaltConnector, op_id: str, params: dict[str, Any], arg: dict[str, Any]
+) -> None:
+    card = _card_for(op_id, params)
+    assert card["blast_radius"]["object"]["arg"] == arg
+    with _Raas(_run_answers()) as raas:
+        result = await _run(op_id, params, card=card)
+    assert result["status"] == "ok", result
+    assert result["result"]["status"] == "accepted"
+    assert raas.called("cmd", "route_cmd")[0]["arg"] == arg
+
+
+@pytest.mark.parametrize("minion_id", ["<web-1>,<web-9>", "two words", "web*", "web[12]", "web?"])
+async def test_run_card_refuses_a_matched_id_it_cannot_name_alone(
+    salt: SaltConnector, minion_id: str
+) -> None:
+    args = _args("salt.job.run_state", _STATE_PARAMS)
+    answers = _run_answers(**{"tgt.get_target_group_minions": {"<master-1>": [minion_id]}})
+    with _Raas(answers) as raas:
+        preview = await preview_operation(_operator(), args)
+        call = await call_operation(
+            _operator(), {**args, "preview_hash": preview.get("preview_hash")}
+        )
+    assert call["status"] == "denied", call
+    assert "cannot name them one by one" in json.dumps(call)
+    assert raas.called("cmd", "route_cmd") == []
+    assert await _approval_rows() == 0
 
 
 @pytest.mark.parametrize(
@@ -840,6 +885,16 @@ async def test_run_command_card_shows_the_command_in_full(salt: SaltConnector) -
         "export DB_PASSWORD=<value>",
         "app-cli --token <value> sync",
         "app-cli --api-key <value> sync",
+        "curl -u <user>:<value> https://<host>/api",
+        "curl --user=<user>:<value> https://<host>/api",
+        "curl https://<user>:<value>@<host>/api",
+        "sshpass -p <value> ssh <user>@<host> uptime",
+        "mysql -u <user> -p<value> app",
+        "echo <value> | passwd --stdin <user>",
+        "echo '<user>:<value>' | sudo chpasswd",
+        "chpasswd <<< '<user>:<value>'",
+        "htpasswd -b /etc/nginx/htpasswd <user> <value>",
+        "net user <user> <value>",
     ],
 )
 async def test_run_command_refuses_a_command_with_a_secret(
@@ -859,7 +914,20 @@ async def test_run_command_refuses_a_command_with_a_secret(
 
 
 @pytest.mark.parametrize(
-    "command", ["systemctl restart nginx", "passwd -S <user>", "ls -la /etc/ssh", "uptime"]
+    "command",
+    [
+        "systemctl restart nginx",
+        "passwd -S <user>",
+        "ls -la /etc/ssh",
+        "uptime",
+        "LANG=C df -h",
+        "curl -u <user> https://<host>/api",
+        "curl https://<host>:8443/api",
+        "mysql -u <user> -p app",
+        "ssh <user>@<host> uptime",
+        "net user <user> /active:yes",
+        "cat /etc/passwd | wc -l",
+    ],
 )
 def test_plain_commands_are_not_taken_for_secrets(command: str) -> None:
     assert command_secret_reason(command) is None
@@ -985,8 +1053,13 @@ async def test_cancel_sends_nothing_for_a_job_that_does_not_run(
     assert raas.called("cmd", "stop_job") == []
 
 
-async def test_cancel_refuses_an_unknown_job(salt: SaltConnector) -> None:
-    with _Raas({("cmd", "get_cmds"): {"count": 0, "results": []}}) as raas:
+@pytest.mark.parametrize(
+    "rows",
+    [[], [{"fun": "state.apply", "state": "retrieved"}]],
+    ids=["no-row", "row-without-jid"],
+)
+async def test_cancel_refuses_an_unknown_job(salt: SaltConnector, rows: list[Any]) -> None:
+    with _Raas({("cmd", "get_cmds"): {"count": len(rows), "results": rows}}) as raas:
         result = await _run("salt.job.cancel", {"jid": _JID})
     assert result["status"] == "error", result
     assert "no job run with jid" in json.dumps(result)
@@ -1032,9 +1105,16 @@ async def test_status_read_gives_the_job_state_and_progress(salt: SaltConnector)
     assert (body["expected"], body["returned"]) == (3, 1)
 
 
-async def test_status_read_of_an_unknown_job_says_unknown(salt: SaltConnector) -> None:
+@pytest.mark.parametrize(
+    "rows",
+    [[], [{"fun": "state.apply", "state": "retrieved"}]],
+    ids=["no-row", "row-without-jid"],
+)
+async def test_status_read_of_an_unknown_job_says_unknown(
+    salt: SaltConnector, rows: list[Any]
+) -> None:
     answers: _Answers = {
-        ("cmd", "get_cmds"): {"count": 0, "results": []},
+        ("cmd", "get_cmds"): {"count": len(rows), "results": rows},
         ("ret", "get_returns"): _NO_RETURNS,
     }
     with _Raas(answers):

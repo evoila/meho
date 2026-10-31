@@ -21,7 +21,7 @@ __all__ = ["KEY_ACCEPT_OP", "KEY_DELETE_OP", "KEY_REJECT_OP", "KEY_WRITE_OPS"]
 MAX_KEYS = 50
 
 #: An exact master or minion id: no space, comma or glob character.
-_ID_PATTERN = r"^[^\s,*?\[\]]+$"
+_ID_PATTERN = r"^[^\s,*?\[\]]+$(?!\n)"
 
 _MINIONS_SCHEMA: dict[str, Any] = {
     "type": "array",

@@ -287,17 +287,21 @@ takes exactly one of the two (`oneOf`).
    has no card, it returns `status: "precondition_failed"`, `started:
    false`, and starts nothing.
 3. **Start.** `cmd.route_cmd` gets `cmd: local`, the function, its `arg`
-   (`{"arg": [...], "kwarg": {...}}`, as the vendor page shows) and a
+   (`{"kwarg": {...}}`, the vendor page's `arg` shape) and a
    `list` target per master that names exactly the approved minions. So
    the run never reaches a minion the approver did not see, even when the
    target expression matches more minions by then.
 
 `salt.job.run_state` takes `states` (applied in one call as a comma list;
 left out, it applies the highstate), `test` (a dry run) and `saltenv`.
-`salt.job.run_command` takes `command`. MEHO refuses a command that looks
-like it holds a secret: a `name=value`, `name: value` or `--name value`
-whose name is secret-shaped (`password`, `token`, `api_key`, ...), or text
-the shared redaction engine would change. So the command can be shown in
+`salt.job.run_command` takes `command`. Every value goes under `kwarg`:
+the states as `mods`, the command as `cmd`. A minion reads a plain
+argument of the form `name=value` as a keyword, so a command such as
+`LANG=C locale` sent as a plain argument would not reach `cmd.run` as its
+command. MEHO refuses a command that looks like it holds a secret: a
+`name=value`, `name: value` or `--name value` whose name is secret-shaped
+(`password`, `token`, `api_key`, ...), a password in a common
+command-line form, or text the shared redaction engine would change. So the command can be shown in
 full on the card and in the audit row. This check is a help, not a
 guarantee; the guidance tells callers never to put a secret into a command.
 
@@ -405,6 +409,9 @@ stays done.
   with `minion_id`). The check for a running job compares the `tgt` field
   of each `cmd.get_cmds` row; a server that does not return it never
   matches, so the check finds nothing. A lab proof must confirm both.
+- **Stop a command.** `cmd.stop_job` is a soft stop. It stops a state run
+  between two states; a lab proof must check that it also stops a long
+  `cmd.run`.
 - **LDAP users.** The HTTP bridge login with HTTP Basic is the vendor's
   documented way. A login for a user of another authentication backend
   (the Python client's `config_name`) is not supported yet.

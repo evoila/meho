@@ -31,9 +31,14 @@ the same minions (``cmd.get_cmds``). When one runs, it returns that job's
 ``jid`` and starts nothing. This is a help, not a lock.
 
 A command whose text looks like it holds a secret (a ``password=...``
-argument, or text the shared redaction engine would change) is refused, so
-the text can be shown in full on the card, in the audit row and in the
-trace.
+argument, a password in a common command-line form, or text the shared
+redaction engine would change) is refused, so the text can be shown in full
+on the card, in the audit row and in the trace.
+
+The command goes to ``cmd.run`` as the keyword ``cmd``, and the state names
+to ``state.apply`` as the keyword ``mods``. A minion reads a plain argument
+of the form ``name=value`` as a keyword, so a command such as
+``LANG=C locale`` would otherwise not reach ``cmd.run`` as its command.
 
 Stop a job
 ----------
@@ -113,13 +118,32 @@ TGT_TYPES: Final[tuple[str, ...]] = (
 
 #: A minion or master id MEHO can put into a ``list`` target: no comma, no
 #: space and no glob character, so it matches one minion only.
-_PLAIN_ID: Final[re.Pattern[str]] = re.compile(r"^[^\s,*?\[\]]+$")
+_PLAIN_ID: Final[re.Pattern[str]] = re.compile(r"[^\s,*?\[\]]+")
 
 #: ``name=value`` or ``name: value`` in a command, and ``--name value``.
 _ASSIGNED_NAME: Final[re.Pattern[str]] = re.compile(
     r"(?:^|[\s;&|(\"'])-{0,2}([A-Za-z_][\w.-]*)\s*[=:]"
 )
 _FLAG_NAME: Final[re.Pattern[str]] = re.compile(r"(?:^|\s)-{1,2}([A-Za-z][\w-]*)\s+\S")
+
+#: Common command-line forms that carry a password without a secret-shaped name.
+_SECRET_FORMS: Final[tuple[re.Pattern[str], ...]] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        # -u user:password, --user user:password
+        r"(?:^|\s)(?:-u|--user)(?:\s+|=)?[^\s:]*:\S",
+        # scheme://user:password@host
+        r"[a-z][a-z0-9+.-]*://[^/\s:@]*:[^/\s@]+@",
+        r"\bsshpass\b[^|;&]*\s-p",
+        # mysql -p<value>; a bare -p asks for the password
+        r"\b(?:mysql\w*|mariadb\w*)\b[^|;&]*\s-p\S",
+        r"\|\s*(?:sudo\s+(?:-\S+\s+)*)?(?:passwd|chpasswd)\b",
+        r"\b(?:passwd|chpasswd)\b[^|;&]*<<<",
+        r"\bhtpasswd\b[^|;&]*\s-[a-z]*b",
+        # net user <name> <password>; * asks for it, /option is no password
+        r"\bnet(?:\.exe)?\s+user\s+\S+\s+[^\s/*]",
+    )
+)
 
 _RUN_IRREVERSIBILITY: Final[str] = (
     "A Salt state or command can change anything on each minion, and Salt cannot undo "
@@ -138,6 +162,8 @@ def command_secret_reason(command: str) -> str | None:
     named = sorted({name for name in names if _secret_name(name)})
     if named:
         return f"the command passes a value for {', '.join(named)}"
+    if any(form.search(command) for form in _SECRET_FORMS):
+        return "the command passes a password on the command line"
     redacted = redact({"command": command}, get_default_policy()).redacted
     if isinstance(redacted, dict) and redacted.get("command") != command:
         return "the command holds text the secret filter would hide"
@@ -215,7 +241,9 @@ async def _resolve_minions(
             f"at most {MAX_RUN_MINIONS} at once. Narrow the target."
         )
     odd = [
-        f"{minion} on {master}" for master, minion in pairs if not _PLAIN_ID.match(master + minion)
+        f"{minion} on {master}"
+        for master, minion in pairs
+        if not _PLAIN_ID.fullmatch(master + minion)
     ]
     if odd:
         raise SaltChangeRefusedError(
@@ -242,12 +270,12 @@ def _list_target(pairs: list[tuple[str, str]]) -> dict[str, dict[str, str]]:
 
 
 def _state_call(params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """``state.apply`` and its ``arg``: the state names, or none for a highstate."""
+    """``state.apply`` and its ``arg``: the state names as ``mods``, or none for a highstate."""
     arg: dict[str, Any] = {}
+    kwarg: dict[str, Any] = {}
     states = params.get("states") or []
     if states:
-        arg["arg"] = [",".join(str(state) for state in states)]
-    kwarg: dict[str, Any] = {}
+        kwarg["mods"] = ",".join(str(state) for state in states)
     if params.get("test") is True:
         kwarg["test"] = True
     if params.get("saltenv"):
@@ -266,7 +294,7 @@ def _command_call(params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             f"Nothing was started: {reason}. Do not put a secret into a command: keep it "
             "in pillar data or in the Salt server's own secret store, and read it from there."
         )
-    return "cmd.run", {"arg": [command]}
+    return "cmd.run", {"kwarg": {"cmd": command}}
 
 
 def _card(
@@ -429,7 +457,7 @@ async def job_cancel_impl(
     """``salt.job.cancel`` -- read the job; stop it with ``cmd.stop_job`` when it runs."""
     jid = str(params["jid"])
     rows, _ = _results(await connector.rpc(target, operator, CMDS_RPC, {"jid": jid, "limit": 1}))
-    row = next((item for item in rows if item.get("jid") in (jid, None)), None)
+    row = next((item for item in rows if item.get("jid") == jid), None)
     if row is None:
         raise SaltChangeRefusedError(
             f"Nothing was stopped: RaaS has no job run with jid {jid!r}. salt.job.list "

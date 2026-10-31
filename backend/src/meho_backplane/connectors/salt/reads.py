@@ -366,7 +366,7 @@ async def job_result_impl(
             "failed_minions": 0,
             "results": [],
         }
-    job_row = next((row for row in cmd_rows if row.get("jid") in (jid, None)), None)
+    job_row = next((row for row in cmd_rows if row.get("jid") == jid), None)
     rows, count = _results(ret)
     results = [result_row(row) for row in rows]
     return {

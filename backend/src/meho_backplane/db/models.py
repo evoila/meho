@@ -3466,11 +3466,11 @@ class WebSession(Base):
       **current** tenant: a switch in the web interface changes it.
 
     * ``tenant_chosen`` -- ``False`` while a person with several
-      tenants has not picked one yet after login (migration ``0129``).
+      tenants has not picked one yet after login (migration ``0130``).
       The web interface then shows only the tenant picker.
 
     * ``can_switch_tenant`` -- ``True`` when the person has more than
-      one tenant or is a platform admin (migration ``0129``). Only a
+      one tenant or is a platform admin (migration ``0130``). Only a
       hint for the sidebar; the switch itself checks the token.
 
     * ``access_token`` / ``refresh_token`` -- Fernet-encrypted bytes.

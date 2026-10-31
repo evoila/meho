@@ -179,7 +179,7 @@ upcoming T4 login flow writes to:
   `created_at`, `expires_at`, `access_token` (bytea, Fernet
   ciphertext), `refresh_token` (bytea, Fernet ciphertext),
   `last_seen_at`, `revoked_at` (nullable; non-null = soft-deleted),
-  and since migration `0129` (#5240) `tenant_chosen` and
+  and since migration `0130` (#5240) `tenant_chosen` and
   `can_switch_tenant` (see "Current tenant, picker and switch").
   Indexes on `operator_sub` and `expires_at` (future
   bulk-revoke / idle-sweep surfaces).
@@ -539,7 +539,7 @@ session works in one of them at a time. Design:
 `docs/decisions/2026-10-28-several-tenants-per-person.md`, section 2.
 
 **Where the tenant lives.** `web_session.tenant_id` is the session's
-current tenant. Two columns (migration `0129`) go with it:
+current tenant. Two columns (migration `0130`) go with it:
 
 - `tenant_chosen` — `false` while a person with several tenants has not
   picked one after login.

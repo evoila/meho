@@ -58,6 +58,15 @@ var typedOpCLICoverage = map[string]string{
 	"fleet.about":            "about",
 	"fleet.environment.list": "environment list",
 	"fleet.api_file.get":     "", // agent surface only: the lab pins the vendor API files through MCP, no CLI verb
+	// Upgrades, binaries and environments: changes that wait for approval.
+	// Agent surface only for now; run them with "meho operation call" or MCP call_operation.
+	"fleet.binary.list":              "",
+	"fleet.binary.map":               "",
+	"fleet.product.upgrade.precheck": "",
+	"fleet.product.upgrade":          "",
+	"fleet.environment.precheck":     "",
+	"fleet.environment.create":       "",
+	"fleet.environment.delete":       "",
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed Fleet

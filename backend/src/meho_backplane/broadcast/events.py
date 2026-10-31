@@ -423,6 +423,14 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # ``vmware.appliance.local_account.policy.set`` sends only expiry
         # numbers and flags, so it is NOT pinned.
         "vmware.appliance.local_account.password.set",
+        # The HCX site pairing. Its params carry only a Vault *path*
+        # (``remote_secret_ref``); the remote site's user and password are
+        # read in-process and sent only in the ``POST
+        # /hybridity/api/cloudConfigs`` request BODY. The pin sets
+        # body_recorded=false for its flight-recorder spans, collapses the
+        # broadcast to aggregate-only and keeps a waiting approval's params in
+        # the encrypted handoff store.
+        "hcx.site_pairing.set",
         # The two steps of a new vCenter install that send a password (#4394):
         # the appliance import (the root password, ``root_password_secret_ref``)
         # and the setup start (the SSO password,

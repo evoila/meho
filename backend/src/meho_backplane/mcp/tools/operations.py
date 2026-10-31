@@ -76,6 +76,7 @@ from meho_backplane.operations.meta_tools import (
     preview_operation,
     search_operations,
 )
+from meho_backplane.operations.operation_run_service import MAX_RUN_WAIT_SECONDS
 
 __all__: list[str] = []
 
@@ -154,19 +155,28 @@ async def _call_operation_handler(
 ) -> dict[str, Any]:
     """Shim over :func:`call_operation`, plus async mode (#3695).
 
-    ``async`` and ``run_id`` are MCP controls, not dispatch arguments, so
-    they are taken out before the call reaches :func:`call_operation`.
+    ``async``, ``run_id`` and ``wait_seconds`` are MCP controls, not
+    dispatch arguments, so they are taken out before the call reaches
+    :func:`call_operation`.
     """
     call_arguments = dict(arguments)
     run_async = bool(call_arguments.pop("async", False))
     run_id = call_arguments.pop("run_id", None)
+    wait_seconds = call_arguments.pop("wait_seconds", None)
+    if wait_seconds is not None and run_id is None:
+        raise McpInvalidParamsError(
+            "`wait_seconds` only works with `run_id` (when you check a call)",
+            data={"reason": "wait_without_run_id"},
+        )
     if run_id is not None:
         if run_async:
             raise McpInvalidParamsError(
                 "send either `async: true` (start a call) or `run_id` (check a call), not both",
                 data={"reason": "async_with_run_id"},
             )
-        return await poll_call(operator, call_arguments, str(run_id))
+        return await poll_call(
+            operator, call_arguments, str(run_id), wait_seconds=wait_seconds or 0
+        )
     if run_async:
         return await submit_async_call(operator, call_arguments)
     return await call_operation(operator, call_arguments)
@@ -570,7 +580,9 @@ register_mcp_tool(
             "not call it again. For a long call (a deploy, a multi-step "
             'operation) pass `async: true`: you get `status="pending"` and '
             "`extras.run_id`; call again with the same `connector_id`, "
-            "`op_id` and that `run_id` to check it."
+            "`op_id` and that `run_id` to check it. Add `wait_seconds` to "
+            "the check so it waits for the call to end instead of checking "
+            "again and again."
         ),
         inputSchema={
             "type": "object",
@@ -651,6 +663,17 @@ register_mcp_tool(
                     "description": (
                         "Check a call started with `async: true` (send its "
                         "`extras.run_id`). Nothing is run again."
+                    ),
+                },
+                "wait_seconds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": MAX_RUN_WAIT_SECONDS,
+                    "default": 0,
+                    "description": (
+                        "Only with `run_id`. Wait up to this many seconds for "
+                        "the call to end, then answer. The answer comes as "
+                        "soon as the call ends. 0 answers at once."
                     ),
                 },
             },

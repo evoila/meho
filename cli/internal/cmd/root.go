@@ -135,7 +135,7 @@ func newRootCmdFor(args []string) *cobra.Command {
 		"external change-ticket reference sent on every backplane request, so the audit rows carry it "+
 			"(e.g. gh:evoila/meho#13; default: $"+api.WorkRefEnv+")",
 	)
-	root.PersistentPreRunE = applyWorkRef
+	root.PersistentPreRunE = applyRequestContext
 
 	root.AddCommand(newVersionCmd())
 	root.AddCommand(newLoginCmd())

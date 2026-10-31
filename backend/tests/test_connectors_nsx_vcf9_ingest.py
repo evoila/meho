@@ -45,6 +45,7 @@ from meho_backplane.connectors.nsx import (
     NSX_CONNECTOR_ID,
     NSX_IMPL_ID,
     NSX_PRODUCT,
+    Nsx4Connector,
     NsxConnector,
 )
 from meho_backplane.connectors.resolver import resolve_connector
@@ -178,18 +179,22 @@ def test_ingest_preflight_rejects_out_of_band_labels(label: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("version", ["9.0.2", "9.1.0.0", "4.2"])
-def test_resolver_dispatches_nsx_9x_target_to_nsx_connector(version: str) -> None:
+@pytest.mark.parametrize(
+    ("version", "expected_cls"),
+    [("9.0.2", NsxConnector), ("9.1.0.0", NsxConnector), ("4.2", Nsx4Connector)],
+)
+def test_resolver_dispatches_nsx_9x_target_to_nsx_connector(
+    version: str, expected_cls: type[NsxConnector]
+) -> None:
     """A 9.x-fingerprinted NSX target resolves to :class:`NsxConnector`.
 
     The resolver keys on the class's PEP 440 ``supported_version_range``
     (a :class:`packaging.specifiers.SpecifierSet`), not the class-pinned
-    ``version`` attribute — so widening the range is sufficient for
-    dispatch (#1530). The 4.x case proves the standalone NSX-T line still
-    binds through the same class.
+    ``version`` attribute (#1530). The 4.x case proves the standalone
+    NSX-T line binds to the NSX 4.x implementation instead (#4396).
     """
     target = _TargetStub(product=NSX_PRODUCT, version=version)
-    assert resolve_connector(target) is NsxConnector
+    assert resolve_connector(target) is expected_cls
 
 
 # ---------------------------------------------------------------------------

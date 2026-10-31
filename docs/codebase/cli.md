@@ -1106,6 +1106,12 @@ tenant_not_member` (#5239, `docs/codebase/backend.md`). The CLI side:
   person's tenants from `GET /api/v1/health` **without** the header (the
   backplane answers it with the list and does no tenant work), checks the
   argument against that list, and stores `{id, name}` in `config.json`.
+  A login in one tenant is always in that tenant, and the deep check
+  then needs the operator role; on a `403` the list is read from
+  `GET /api/v1/health/live` instead (`AuthedClient.GetLiveness`), which
+  every role may read and which carries the same tenant list. So a
+  read_only login can list and choose its tenant, also when the stored
+  tenant is one it has left.
   An unknown name exits 1 (`usage_error`) and lists the tenants with the
   role in each. A login without a tenant list has nothing to choose and
   gets the same exit code with a plain message.
@@ -1132,7 +1138,13 @@ tenant_not_member` (#5239, `docs/codebase/backend.md`). The CLI side:
 - `meho status` prints the tenant list with the role in each and marks
   the current one (`formatTenants`, #5239). A stored tenant the person
   has left gives a `403 tenant_not_member`; status prints the
-  backplane's reason and how to pick another tenant (exit 4).
+  backplane's reason and how to pick another tenant (exit 4). With the
+  read_only role in the current tenant the deep check answers `403
+  insufficient_role`; status then reads `GET /api/v1/health/live` and
+  prints the identity, the tenants, the database state and a note that
+  the other checks need the operator role (`output.PrintLiveness`,
+  exit 0; `--json` prints the `LivenessResponse`). The deep check stays
+  behind the operator role on the backplane.
 - The stored login is unchanged: one token holds all of the person's
   tenants, so a switch needs no new login. There is no global
   `--tenant` flag: several commands already use `--tenant` for "a
@@ -1143,8 +1155,10 @@ tenant_not_member` (#5239, `docs/codebase/backend.md`). The CLI side:
   against a fake backplane with two tenants (read in one tenant, switch,
   read again with the same token), plus the unknown name, the list, the
   `MEHO_TENANT` override, another `--backplane`, a person in one
-  tenant, a stale tenant on `meho status`, and the login that keeps the
-  choice.
+  tenant, a stale tenant on `meho status` and the switch away from it,
+  `meho status` in a tenant with the read_only role, a read_only person
+  in one tenant, and the login that keeps the choice. The fake backplane
+  refuses the deep check for the read_only role, as the real one does.
 
 ## Audit receipt on writes with no body (#4976)
 

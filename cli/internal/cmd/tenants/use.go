@@ -6,6 +6,7 @@ package tenants
 import (
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 
@@ -79,22 +80,42 @@ func runUse(cmd *cobra.Command, args []string, opts useOptions) error {
 // It sends no Meho-Tenant header, so a stored tenant the person has
 // left does not hide the list. A login in several tenants gets the
 // list without any tenant work on the backplane.
+//
+// A login in one tenant is always in that tenant, and the status
+// endpoint then needs the operator role. A read_only login gets 403
+// there, so the list is read from the liveness route instead, which
+// every role may read and which carries the same tenant list.
 func fetchTenants(cmd *cobra.Command, backplaneURL string, jsonOut bool) ([]api.TenantEntry, error) {
 	authed, err := newAuthedClient(cmd.Context(), backplaneURL)
 	if err != nil {
 		return nil, renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	resp, err := authed.GetHealth(api.WithTenant(cmd.Context(), ""))
+	ctx := api.WithTenant(cmd.Context(), "")
+	resp, err := authed.GetHealth(ctx)
 	if err != nil {
 		return nil, renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	if resp.JSON200 == nil {
+	if resp.JSON200 != nil {
+		return tenantsOf(resp.JSON200.Operator), nil
+	}
+	if resp.StatusCode() != http.StatusForbidden {
 		return nil, renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, jsonOut)
 	}
-	if resp.JSON200.Operator.Tenants == nil {
-		return nil, nil
+	live, err := authed.GetLiveness(ctx)
+	if err != nil {
+		return nil, renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return *resp.JSON200.Operator.Tenants, nil
+	if live.JSON200 == nil {
+		return nil, renderHTTPStatus(cmd, backplaneURL, live.StatusCode(), live.Body, jsonOut)
+	}
+	return tenantsOf(live.JSON200.Operator), nil
+}
+
+func tenantsOf(op api.OperatorIdentity) []api.TenantEntry {
+	if op.Tenants == nil {
+		return nil
+	}
+	return *op.Tenants
 }
 
 // currentTenant is the tenant commands work in now: MEHO_TENANT, else

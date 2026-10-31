@@ -32,11 +32,17 @@ const (
 // without the Meho-Tenant header is refused with 400 tenant_not_chosen;
 // a tenant outside the list gets 403 tenant_not_member. With single
 // set, the person is in lab-a only and no header is needed.
+//
+// As on the real backplane, the status endpoint with a current tenant
+// needs the operator role there (403 insufficient_role for lab-a), and
+// the liveness endpoint /api/v1/health/live answers every role but
+// needs a chosen tenant.
 type tenantBackplane struct {
 	single bool
 
 	mu      sync.Mutex
 	tenants []string // Meho-Tenant header of every request
+	seen    []string // path of every request
 	bearers map[string]bool
 }
 
@@ -78,6 +84,7 @@ func (b *tenantBackplane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	header := r.Header.Get(api.TenantHeader)
 	b.mu.Lock()
 	b.tenants = append(b.tenants, header)
+	b.seen = append(b.seen, r.URL.Path)
 	b.bearers[r.Header.Get("Authorization")] = true
 	b.mu.Unlock()
 
@@ -85,6 +92,9 @@ func (b *tenantBackplane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	current, status, detail := b.pick(header)
 	if r.URL.Path == "/api/v1/health" && status == http.StatusBadRequest {
 		current, status = nil, http.StatusOK // the status answer needs no tenant
+	}
+	if r.URL.Path == "/api/v1/health" && current != nil && current.role == "read_only" {
+		status, detail = http.StatusForbidden, "insufficient_role"
 	}
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -94,6 +104,10 @@ func (b *tenantBackplane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/api/v1/health":
 		_ = json.NewEncoder(w).Encode(b.health(current))
+	case "/api/v1/health/live":
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"operator": b.operator(current), "db": map[string]any{"migrated": true},
+		})
 	case "/api/v1/targets":
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"items": []map[string]any{{
@@ -107,7 +121,7 @@ func (b *tenantBackplane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (b *tenantBackplane) health(current *fakeTenant) map[string]any {
+func (b *tenantBackplane) operator(current *fakeTenant) map[string]any {
 	entries := []map[string]any{}
 	for _, t := range b.mine() {
 		entries = append(entries, map[string]any{
@@ -116,12 +130,33 @@ func (b *tenantBackplane) health(current *fakeTenant) map[string]any {
 		})
 	}
 	op := map[string]any{"sub": "alice-sub", "tenants": entries, "tenant_id": nil, "tenant_role": nil}
-	vault := map[string]any{"reachable": false, "read_ok": false, "detail": "tenant_not_chosen"}
 	if current != nil {
 		op["tenant_id"], op["tenant_role"] = current.id, current.role
+	}
+	return op
+}
+
+func (b *tenantBackplane) health(current *fakeTenant) map[string]any {
+	vault := map[string]any{"reachable": false, "read_ok": false, "detail": "tenant_not_chosen"}
+	if current != nil {
 		vault = map[string]any{"reachable": true, "read_ok": true}
 	}
-	return map[string]any{"operator": op, "vault": vault, "db": map[string]any{"migrated": true}}
+	return map[string]any{"operator": b.operator(current), "vault": vault, "db": map[string]any{"migrated": true}}
+}
+
+// livenessCall returns the path of the request before the last
+// liveness call and the Meho-Tenant header of that liveness call.
+func (b *tenantBackplane) livenessCall(t *testing.T) (before, tenant string) {
+	t.Helper()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i := len(b.seen) - 1; i > 0; i-- {
+		if b.seen[i] == "/api/v1/health/live" {
+			return b.seen[i-1], b.tenants[i]
+		}
+	}
+	t.Fatal("backplane saw no liveness call")
+	return "", ""
 }
 
 func (b *tenantBackplane) lastTenant(t *testing.T) string {
@@ -361,6 +396,88 @@ func TestStatus_StaleTenantSaysHowToPickAnother(t *testing.T) {
 	_, stderr, err := runMeho(t, "status")
 	if err == nil || !strings.Contains(stderr, "tenant_not_member:") || !strings.Contains(stderr, "`meho tenants use`") {
 		t.Errorf("status with a stale tenant: err=%v stderr=%q", err, stderr)
+	}
+	// The way out: the list and the switch send no stored tenant.
+	if out, stderr, err := runMeho(t, "tenants", "use", "lab-a"); err != nil || out != "Now working in tenant lab-a (read_only).\n" {
+		t.Errorf("switch away from the stale tenant: err=%v out=%q stderr=%q", err, out, stderr)
+	}
+}
+
+// TestStatus_ReaderTenantShowsCurrentTenant: after a switch to a
+// tenant where the person only reads, the deep check is refused with
+// 403 insufficient_role. status then shows the liveness answer: who
+// the person is, the current tenant, the database state, and that the
+// other checks need the operator role.
+func TestStatus_ReaderTenantShowsCurrentTenant(t *testing.T) {
+	bp, _, _ := newTenantBackplane(t, false)
+	if _, _, err := runMeho(t, "tenants", "use", "lab-a"); err != nil {
+		t.Fatalf("use lab-a: %v", err)
+	}
+
+	out, stderr, err := runMeho(t, "status")
+	if err != nil {
+		t.Fatalf("status in a read_only tenant: err=%v stderr=%q", err, stderr)
+	}
+	for _, want := range []string{
+		"Logged in as alice-sub\n",
+		"    lab-a  read_only  (current)\n",
+		"    lab-b  operator\n",
+		"  DB:    migrated\n",
+		"need the operator role in this tenant",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status output missing %q: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "Vault:") {
+		t.Errorf("the liveness answer carries no credential-store line: %q", out)
+	}
+	before, tenant := bp.livenessCall(t)
+	if before != "/api/v1/health" {
+		t.Errorf("status must try the deep check first, then the liveness route; the call before was %q", before)
+	}
+	if tenant != tenantAID {
+		t.Errorf("Meho-Tenant on the liveness call = %q; want the ID of lab-a", tenant)
+	}
+
+	out, _, err = runMeho(t, "status", "--json")
+	var live api.LivenessResponse
+	if err != nil || json.Unmarshal([]byte(out), &live) != nil || live.Operator.TenantId == nil ||
+		live.Operator.TenantId.String() != tenantAID || strings.Contains(out, "\"vault\"") {
+		t.Errorf("status --json in a read_only tenant: err=%v out=%q", err, out)
+	}
+}
+
+// TestTenantsUse_ReaderInOneTenant: a person with the read_only role
+// in their only tenant is always in that tenant, so the status
+// endpoint refuses them with 403. They can still list and choose the
+// tenant (from the liveness route), and status shows it. This also
+// gets them out of a stored tenant they have left.
+func TestTenantsUse_ReaderInOneTenant(t *testing.T) {
+	bp, url, cfgPath := newTenantBackplane(t, true)
+	if err := auth.SaveConfigAt(cfgPath, auth.Config{
+		BackplaneURL: url,
+		Tenant:       &auth.Tenant{ID: "cccccccc-0000-4000-8000-000000000003", Name: "lab-c"},
+	}); err != nil {
+		t.Fatalf("SaveConfigAt: %v", err)
+	}
+
+	out, stderr, err := runMeho(t, "tenants", "use")
+	if err != nil || out != "Your tenants:\n  lab-a  read_only\n" {
+		t.Fatalf("list as a reader in one tenant: err=%v out=%q stderr=%q", err, out, stderr)
+	}
+	if got := bp.lastTenant(t); got != "" {
+		t.Errorf("the list must be read without the header; got %q", got)
+	}
+	if out, stderr, err := runMeho(t, "tenants", "use", "lab-a"); err != nil || out != "Now working in tenant lab-a (read_only).\n" {
+		t.Fatalf("choose as a reader in one tenant: err=%v out=%q stderr=%q", err, out, stderr)
+	}
+	if cfg, _ := auth.LoadConfigAt(cfgPath); cfg.Tenant == nil || cfg.Tenant.Name != "lab-a" {
+		t.Errorf("stored tenant = %+v; want lab-a", cfg.Tenant)
+	}
+	out, stderr, err = runMeho(t, "status")
+	if err != nil || !strings.Contains(out, "    lab-a  read_only  (current)\n") {
+		t.Errorf("status as a reader in one tenant: err=%v out=%q stderr=%q", err, out, stderr)
 	}
 }
 

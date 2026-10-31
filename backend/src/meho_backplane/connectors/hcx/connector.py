@@ -41,7 +41,9 @@ Operations
 documentation that a running HCX Manager serves, so the vendor API files
 can be pinned. The other reads (``hcx.about``, site pairings, service
 meshes, appliances, the service mesh diagnostics, jobs, alerts and the
-inventory) live in :mod:`meho_backplane.connectors.hcx.typed_reads`.
+inventory) live in :mod:`meho_backplane.connectors.hcx.typed_reads`. The
+migration operations (validate, start, list, cancel, mobility groups and the
+switchover window) live in :mod:`meho_backplane.connectors.hcx.migrations`.
 
 Traces
 ------
@@ -435,6 +437,62 @@ class HcxConnector(HttpConnector):
         from meho_backplane.connectors.hcx.typed_reads import hcx_inventory_network_list_impl
 
         return await hcx_inventory_network_list_impl(self, operator, target, params)
+
+    async def migration_validate(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.migration.validate`` shim."""
+        from meho_backplane.connectors.hcx.migrations import hcx_migration_validate_impl
+
+        return await hcx_migration_validate_impl(self, operator, target, params)
+
+    async def migration_start(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.migration.start`` shim."""
+        from meho_backplane.connectors.hcx.migrations import hcx_migration_start_impl
+
+        return await hcx_migration_start_impl(self, operator, target, params)
+
+    async def migration_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.migration.list`` shim."""
+        from meho_backplane.connectors.hcx.migrations import hcx_migration_list_impl
+
+        return await hcx_migration_list_impl(self, operator, target, params)
+
+    async def migration_cancel(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.migration.cancel`` shim."""
+        from meho_backplane.connectors.hcx.migrations import hcx_migration_cancel_impl
+
+        return await hcx_migration_cancel_impl(self, operator, target, params)
+
+    async def mobility_group_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.mobility_group.list`` shim."""
+        from meho_backplane.connectors.hcx.migrations import hcx_mobility_group_list_impl
+
+        return await hcx_mobility_group_list_impl(self, operator, target, params)
+
+    async def mobility_group_set(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.mobility_group.set`` shim."""
+        from meho_backplane.connectors.hcx.migrations import hcx_mobility_group_set_impl
+
+        return await hcx_mobility_group_set_impl(self, operator, target, params)
+
+    async def migration_schedule(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.migration.schedule`` shim."""
+        from meho_backplane.connectors.hcx.migrations import hcx_migration_schedule_impl
+
+        return await hcx_migration_schedule_impl(self, operator, target, params)
 
     def trace_response_body(self, response: httpx.Response) -> Any:
         """Mask the secret-named fields of a vendor answer before the trace records it.

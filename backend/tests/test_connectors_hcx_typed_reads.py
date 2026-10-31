@@ -976,7 +976,7 @@ async def test_reads_are_registered_typed_safe_and_grouped(
         "hcx.inventory.datastore.list",
         "hcx.inventory.network.list",
     }
-    reads = [op for op in HCX_TYPED_OPS if op.op_id != "hcx.api_file.get"]
+    reads = [op for op in HCX_TYPED_OPS if op.op_id in expected]
     assert {op.op_id for op in HCX_READ_OPS} == first_eight
     assert {op.op_id for op in reads} == expected
     assert expected <= set(rows)

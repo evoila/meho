@@ -10879,6 +10879,70 @@
         }
       }
     },
+    "/api/v1/approvals/{request_id}/rerun": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Rerun Approval Request",
+        "description": "Run an approved request again after its run failed (#5417).\n\nNot a decision, so this route is not on the approvals-plane gate and not\nhuman-only: the requester (a person, an agent or a service principal)\nmay re-run **its own** request. No new approval is needed when nothing\nchanged: same params, same target, same preview, same work reference\n(the ``Meho-Work-Ref`` header), the ``expires_at`` deadline has not\npassed, and MEHO was not updated since the request was made. Otherwise\nthe re-run is refused and the requester asks again. Each re-run, and each\nrefused re-run, writes an ``approval.rerun`` audit row.\n\nHTTP status codes:\n\n* 200 \u2014 the request ran again. ``dispatch_status`` is the run's status.\n* 403 \u2014 the caller did not make the request.\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 the last run did not fail, another re-run is running, or\n  something changed and a new approval is needed.\n* 422 \u2014 MEHO does not keep this request's params; send them again.",
+        "operationId": "rerun_approval_request_api_v1_approvals__request_id__rerun_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RerunRequestBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerunResponseBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/approvals/{request_id}/decide": {
       "post": {
         "tags": [
@@ -33819,6 +33883,72 @@
         ],
         "title": "ReplayNode",
         "description": "One node of a per-session audit-replay tree (G8.2-T3).\n\nSubclasses :class:`AuditEntry` so it carries every audit field verbatim \u2014\nforward-compatible with the v0.2.next compliance-export contract, which\ntreats a replay node as an audit row plus its position in the session\ngraph. Two structural fields are added:\n\n* ``depth`` \u2014 distance from the session root. ``0`` for roots; assigned\n  during tree assembly in :func:`~meho_backplane.audit_query.replay.replay_session`.\n* ``children`` \u2014 the node's direct children, ordered by ``(occurred_at,\n  id)``. Self-referential \u2014 the forward reference is resolved by the\n  module-level :func:`ReplayNode.model_rebuild` call below.\n\nFrozen like its parent: a node handed to a caller cannot mutate after the\ntree is built."
+      },
+      "RerunRequestBody": {
+        "properties": {
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Params",
+            "description": "The original params, unchanged. Leave out to use the params MEHO stored with the request. Required for a credential write, whose params MEHO keeps only until the first run. Params that do not match the approved ones are refused (409)."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "RerunRequestBody",
+        "description": "POST body for ``\u2026/rerun`` (#5417)."
+      },
+      "RerunResponseBody": {
+        "properties": {
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Approval Request Id"
+          },
+          "attempt": {
+            "type": "integer",
+            "title": "Attempt"
+          },
+          "dispatch_status": {
+            "type": "string",
+            "title": "Dispatch Status"
+          },
+          "dispatch_op_id": {
+            "type": "string",
+            "title": "Dispatch Op Id"
+          },
+          "dispatch_result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              }
+            ],
+            "nullable": true,
+            "title": "Dispatch Result"
+          },
+          "dispatch_error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Dispatch Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_request_id",
+          "attempt",
+          "dispatch_status",
+          "dispatch_op_id",
+          "dispatch_result",
+          "dispatch_error"
+        ],
+        "title": "RerunResponseBody",
+        "description": "Response for ``\u2026/rerun`` (#5417): the attempt number and the run result."
       },
       "ResolvedTargetDescriptor": {
         "properties": {

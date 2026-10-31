@@ -29,6 +29,10 @@ Route inventory
   back its own pending request (#4987). Not a decision. Body:
   :class:`WithdrawRequestBody` (optional ``reason``). Access: any
   authenticated principal, but only the sender of the request.
+* ``POST /api/v1/approvals/{request_id}/rerun`` — the requester runs an
+  approved request again after its run failed, with no new approval when
+  nothing changed (#5417). Body: :class:`RerunRequestBody` (optional
+  ``params``). Access: any authenticated principal, but only the requester.
 
 Access model — approve-only, decoupled from dispatch (#3243)
 ------------------------------------------------------------
@@ -134,6 +138,13 @@ from meho_backplane.operations.approval_queue import (
     reject_request,
     resume_dispatch_after_approval,
     withdraw_request,
+)
+from meho_backplane.operations.approval_rerun import (
+    RerunForbiddenError,
+    RerunNeedsNewApprovalError,
+    RerunNotAllowedError,
+    RerunParamsRequiredError,
+    rerun_failed_request,
 )
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 from meho_backplane.settings import get_settings
@@ -1158,6 +1169,116 @@ async def withdraw_approval_request(
         audit_id=request._audit_id,  # type: ignore[attr-defined]
     )
     return _view(request)
+
+
+class RerunRequestBody(BaseModel):
+    """POST body for ``…/rerun`` (#5417)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    params: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "The original params, unchanged. Leave out to use the params MEHO "
+            "stored with the request. Required for a credential write, whose "
+            "params MEHO keeps only until the first run. Params that do not "
+            "match the approved ones are refused (409)."
+        ),
+    )
+
+
+class RerunResponseBody(BaseModel):
+    """Response for ``…/rerun`` (#5417): the attempt number and the run result."""
+
+    model_config = ConfigDict(frozen=True)
+
+    approval_request_id: uuid.UUID
+    #: Which run of the approved request this was. The first run after the
+    #: approval is attempt 1, so the first re-run is attempt 2.
+    attempt: int
+    dispatch_status: str
+    dispatch_op_id: str
+    dispatch_result: dict[str, Any] | list[Any] | None
+    dispatch_error: str | None
+
+
+@router.post("/{request_id}/rerun", response_model=RerunResponseBody)
+async def rerun_approval_request(
+    request_id: Annotated[uuid.UUID, Path()],
+    body: RerunRequestBody,
+    operator: Operator = Depends(verify_jwt_and_bind),
+) -> RerunResponseBody:
+    """Run an approved request again after its run failed (#5417).
+
+    Not a decision, so this route is not on the approvals-plane gate and not
+    human-only: the requester (a person, an agent or a service principal)
+    may re-run **its own** request. No new approval is needed when nothing
+    changed: same params, same target, same preview, same work reference
+    (the ``Meho-Work-Ref`` header), the ``expires_at`` deadline has not
+    passed, and MEHO was not updated since the request was made. Otherwise
+    the re-run is refused and the requester asks again. Each re-run, and each
+    refused re-run, writes an ``approval.rerun`` audit row.
+
+    HTTP status codes:
+
+    * 200 — the request ran again. ``dispatch_status`` is the run's status.
+    * 403 — the caller did not make the request.
+    * 404 — request not found (or belongs to another tenant).
+    * 409 — the last run did not fail, another re-run is running, or
+      something changed and a new approval is needed.
+    * 422 — MEHO does not keep this request's params; send them again.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="approval.rerun",
+        audit_op_class="write",
+        audit_approval_request_id=str(request_id),
+    )
+    try:
+        outcome = await rerun_failed_request(
+            operator=operator, request_id=request_id, params=body.params
+        )
+    except ApprovalNotFoundError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="approval_request_not_found",
+        ) from exc
+    except RerunForbiddenError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="not_request_owner",
+        ) from exc
+    except RerunNotAllowedError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=f"approval_rerun_not_allowed: {exc}",
+        ) from exc
+    except RerunNeedsNewApprovalError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=f"approval_rerun_needs_new_approval: {exc}",
+        ) from exc
+    except RerunParamsRequiredError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"approval_rerun_params_required: {exc}",
+        ) from exc
+    result = outcome.result
+    _log.info(
+        "approval_request_rerun",
+        approval_request_id=str(request_id),
+        op_id=result.op_id,
+        attempt=outcome.attempt,
+        dispatch_status=result.status,
+        operator_sub=operator.sub,
+    )
+    return RerunResponseBody(
+        approval_request_id=request_id,
+        attempt=outcome.attempt,
+        dispatch_status=result.status,
+        dispatch_op_id=result.op_id,
+        dispatch_result=result.result,
+        dispatch_error=result.error,
+    )
 
 
 # ---------------------------------------------------------------------------

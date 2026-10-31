@@ -18,7 +18,9 @@ Today the connector ships:
   pairings, service meshes, appliances and their tunnels, the service
   mesh diagnostics (start a run, list the runs, read the findings), jobs,
   alerts and the inventory for a migration (resource containers, the
-  compute tree, datastores and networks).
+  compute tree, datastores and networks), and
+- **four service mesh changes** (create, change, resync, delete) with the
+  status read `hcx.task.get`. Each change waits for a person's approval.
 
 Why `hcx.api_file.get` came first: Broadcom publishes no file and no
 versioned reference of the main HCX API (`/hybridity/api/...`). Only a
@@ -51,6 +53,11 @@ Package: `backend/src/meho_backplane/connectors/hcx/`.
 | `hcx.inventory.compute.list` | The vCenter instances HCX knows with their datacenters and clusters, as a flat list with parent ids. | `POST /hybridity/api/service/inventory/vc/list` | read (`safe`, no approval) | 4.11, 9.x |
 | `hcx.inventory.datastore.list` | The datastores of one or more clusters of a vCenter instance. | `POST /hybridity/api/service/inventory/vc/datastores/query` | read (`safe`, no approval) | 4.11, 9.x |
 | `hcx.inventory.network.list` | The networks (port groups, segments) of one site. | `POST /hybridity/api/service/inventory/networks` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.service_mesh.create` | Start the creation of a service mesh from two compute profiles (local, then paired site) and a list of services. Returns `accepted` with the interconnect task id. | `POST /hybridity/api/interconnect/serviceMesh` | change (`dangerous`) | 4.11, 9.x |
+| `hcx.service_mesh.update` | Change a service mesh: its services, compute profiles, uplinks, switch pairs, bandwidth or traffic settings. Reads the mesh, merges the change, sends it back. Returns `accepted` with the task id. | `GET` then `PUT /hybridity/api/interconnect/serviceMesh/{serviceMeshId}` | change (`dangerous`) | 4.11, 9.x |
+| `hcx.service_mesh.resync` | Resync a service mesh with its compute profiles: HCX computes the difference and applies it, and can redeploy appliances. Returns `accepted` with the task id. | `POST /hybridity/api/interconnect/serviceMesh/{serviceMeshId}/resync` | change (`dangerous`) | 4.11, 9.x |
+| `hcx.service_mesh.delete` | Start the deletion of a service mesh; HCX removes its appliances. Needs a preview first. Returns `accepted` with the task id. | `DELETE /hybridity/api/interconnect/serviceMesh/{serviceMeshId}?force=` | change (`destructive`) | 4.11, 9.x |
+| `hcx.task.get` | One interconnect task: state (QUEUED, RUNNING, SUCCESS, FAILED), progress, message, the vendor error, the steps. `not_reachable` when the Manager does not answer. | `GET /hybridity/api/interconnect/tasks/{interconnectTaskId}` | read (`safe`, no approval) | 4.11, 9.x |
 
 Every operation in the table exists on every version the connector
 covers, so none stops early with a version message.
@@ -80,6 +87,9 @@ covers, so none stops early with a version message.
   (`inventory_ops.py`) hold the other five. `HcxTypedOp`, the group keys
   and the schema helpers live in `op_types.py`, so every op module shares
   them.
+- `HCX_SERVICE_MESH_OPS` (`service_mesh_ops.py`) and
+  `service_mesh_writes.py` -- the service mesh changes, `hcx.task.get`,
+  their `VENDOR_CALLS` and the delete preview.
 - `typed_reads.py` -- the bodies of the thirteen reads, `VENDOR_CALLS`
   (every `(method, path)` they send; the reconcile lane checks them),
   `rows_of` (takes the rows out of `items` or `data.items`),
@@ -252,8 +262,8 @@ Groups (the text the agent reads in `list_operation_groups`):
 | Group | Reads |
 |---|---|
 | `hcx-manager` | `hcx.about`, `hcx.site_pairing.list` |
-| `hcx-service-mesh` | `hcx.service_mesh.list`, `hcx.appliance.list`, `hcx.service_mesh.diagnose`, `hcx.service_mesh.diagnostics.list`, `hcx.service_mesh.diagnostics.get` |
-| `hcx-jobs-alerts` | `hcx.job.get`, `hcx.alert.list` |
+| `hcx-service-mesh` | `hcx.service_mesh.list`, `hcx.appliance.list`, `hcx.service_mesh.diagnose`, `hcx.service_mesh.diagnostics.list`, `hcx.service_mesh.diagnostics.get`, and the changes `hcx.service_mesh.create`, `hcx.service_mesh.update`, `hcx.service_mesh.resync`, `hcx.service_mesh.delete` |
+| `hcx-jobs-alerts` | `hcx.job.get`, `hcx.task.get`, `hcx.alert.list` |
 | `hcx-inventory` | `hcx.inventory.list`, `hcx.inventory.compute.list`, `hcx.inventory.datastore.list`, `hcx.inventory.network.list` |
 
 What each read sends and returns:
@@ -331,6 +341,95 @@ hook is `HttpConnector.trace_response_body`, see
 `docs/codebase/redaction.md`). A test dispatches `hcx.site_pairing.list`
 with capture on and checks the stored span.
 
+### The service mesh changes
+
+The metadata lives in `service_mesh_ops.py`, the bodies and the delete
+preview in `service_mesh_writes.py` (`VENDOR_CALLS` lists every call).
+
+Risk and approval:
+
+- `hcx.service_mesh.create`, `update` and `resync` are `dangerous` and
+  have `requires_approval: true`. A person's call waits until a second
+  person approves it. An agent's call is refused unless the agent holds a
+  grant; with a grant it waits for approval.
+- `hcx.service_mesh.delete` is `destructive`. A person runs it: first
+  `preview_operation` with the same inputs, then `call_operation` with the
+  `preview_hash`. It then waits for a second person. An agent is always
+  refused.
+
+What each change sends:
+
+- `hcx.service_mesh.create` takes `name`, `compute_profiles` (two
+  entries: the local site's, then the paired site's: `endpoint_id`,
+  `compute_profile_id`, optional names and `uplink_networks`) and
+  `services` (`INTERCONNECT`, `VMOTION`, `BULK_MIGRATION`, `RAV`,
+  `NETWORK_EXTENSION`). Optional: `switch_pairs` (for network extension),
+  `uplink_max_bandwidth`, `app_path_resiliency`, `tcp_flow_conditioning`.
+  It sends them in the vendor field names (`computeProfiles`,
+  `switchPairCount`, `wanoptConfig`, `trafficEnggCfg`). Disaster Recovery
+  and WAN optimisation are left out: HCX 9.0 removed them.
+- `hcx.service_mesh.update` takes `service_mesh_id` and at least one
+  change: `services`, `compute_profiles`, `uplinks` (new uplink networks
+  of one compute profile the mesh uses) or one of the optional settings.
+  The vendor `PUT` needs the whole mesh, so the change reads it
+  (`GET .../serviceMesh/{serviceMeshId}`), replaces the fields that were
+  set, and sends back only the vendor's mesh fields (`serviceMeshId`,
+  `name`, `isLocalMesh`, `orchestratorInfo`, `switchPairCount`,
+  `wanoptConfig`, `services`, `computeProfiles`, `trafficEnggCfg`). An
+  uplink change for a profile the mesh does not use is refused before the
+  `PUT`.
+- `hcx.service_mesh.resync` takes `service_mesh_id` and sends
+  `POST .../serviceMesh/{serviceMeshId}/resync` with no body.
+- `hcx.service_mesh.delete` takes `service_mesh_id` and `force` (default
+  false; set it when the paired site does not answer) and sends
+  `DELETE .../serviceMesh/{serviceMeshId}?force=true|false`.
+
+These are vendor jobs: the Manager does the work after the call returns.
+
+1. **Start.** The Manager answers `202` with
+   `data.interconnectTaskId`. The change returns at once with
+   `{status: "accepted", service_mesh_id, interconnect_task_id,
+   status_read: "hcx.task.get", warnings, errors}`. `accepted` never means
+   the work is done. An answer without a task id is an error that carries
+   the Manager's error text.
+2. **Running check.** Before the start, the change asks
+   `POST /hybridity/api/interconnect/tasks/query` for `QUEUED` and
+   `RUNNING` tasks (with `entityIds` = the mesh id). If a task runs on the
+   same mesh (for create: on a mesh with the same name), the change
+   returns `status: "already_running"` with that task's id, type and state
+   and starts nothing. This is a help, not a lock: two callers can both
+   check before either starts.
+3. **Status.** `hcx.task.get` reads
+   `GET /hybridity/api/interconnect/tasks/{interconnectTaskId}` and returns
+   `status` (the vendor state), `done`, `progress`, `message`, `error`
+   (the task message and every step error, when the state is `FAILED`),
+   the object it works on, the times, the steps and `checked_at`. The
+   caller reads it until `done` is true. A `401` makes a new login, so an
+   expired login between the start and the read does not matter. When the
+   Manager does not answer (for example during its own upgrade), the read
+   returns `status: "not_reachable"` with the task id and `checked_at`; it
+   never says `failed` for that. An untrusted certificate or an address
+   MEHO refuses is still reported as an error.
+4. **Lost reply.** After a lost reply the caller does not start again.
+   It reads `hcx.service_mesh.list` (the mesh's `last_task_id` and
+   `last_task_status`) or `hcx.task.get`, and decides from what it finds.
+5. **Async mode.** Callers should use MEHO's async mode (`async: true`,
+   see `async-governed-dispatch.md`) for a start. MEHO then stores the
+   answer, with the task id, under a run handle, so a lost reply does not
+   lose the task id. MEHO keeps no task state between calls.
+
+None of the changes is a multi-step change on the vendor side: each
+sends one change call. The read before the update `PUT` changes nothing.
+
+The delete preview (`register_preview_builder`) reads the mesh and
+`GET /hybridity/api/interconnect/appliances`, and fills `blast_radius`:
+`object` (the mesh id, name, services and `force`), `children` (the
+appliances of the mesh) and `irreversibility` (the appliances are
+removed, migrations and network extensions through the mesh stop, a new
+mesh needs a new create and a new deployment). When the mesh does not
+exist (`404`), the preview fails, so the delete is refused before it
+waits for approval.
+
 ### Shutdown
 
 `aclose()` clears the token cache and closes the HTTP pool. No logout call
@@ -374,6 +473,22 @@ is sent.
   diagnostics calls come from the Terraform provider and the vendor
   reference, with no HCX version named. The datastore query always sends
   `computeType: ClusterComputeResource`, the only shape the provider uses.
+- The service mesh changes and `hcx.task.get` come from the vendor
+  reference ("Service Mesh" and "Tasks") and VMware's Terraform provider
+  for HCX. Two details differ from the first plan of this work: the mesh
+  changes answer with an interconnect task, which `hcx.task.get` reads
+  (not `hcx.job.get`), and resync has its own call
+  (`POST .../serviceMesh/{serviceMeshId}/resync`), so it is not a
+  `generateDiff` call followed by a `PUT` (`generateDiff` only starts a
+  task and returns no difference). The create call takes no `vcGuid`
+  query; the reference names none. The live proof confirms them.
+- The running check matches a task to the mesh by `entityDetails.id` (by
+  `entityDetails.name` for create). Every running task on the mesh counts,
+  also a diagnostics run, because the vendor task types are not
+  documented.
+- The uplink fields (`networks`, `overriddenUplink` in a compute profile
+  entry) come from the vendor schema, which does not describe them; the
+  live proof confirms them.
 - The vendor reference writes the job path as `/hybridity/api/jobs/{jobid}`
   (lower-case `id`); the reconcile lane uses that spelling.
 - `role` in `hcx.about` is derived from `systemType`. The vendor upgrade
@@ -390,7 +505,7 @@ is sent.
 ## References
 
 - Task #4608 (this connector, login, version helper and the read);
-  #4545 (the reads that build on it); #4395 (the same read for NSX);
+  #4545 (the reads that build on it); #4548 (the service mesh changes); #4395 (the same read for NSX);
   #4505 (the same shape for Site Recovery Manager).
 - `docs/decisions/spec-reconcile-guards-standard.md` -- the waiting lane.
 - `docs/codebase/connectors-nsx.md` -- the sibling connector this one

@@ -8,7 +8,9 @@ The typed ``vmware.composite.host.maintenance.exit`` is ``dangerous`` with
 ``host.evacuate``. The VMware floor (``ingest_safety.py``) raises the generic
 older-API method ``POST:/HostSystem/{moId}/ExitMaintenanceMode_Task`` to the
 same level on both catalogs, so no MEHO path ends maintenance mode on a
-written go in chat.
+written go in chat. The generic start, reboot, shut down and standby calls of
+the host power-state work (#4350) have their own tests in
+``test_connectors_vmware_rest_host_power_generic_approval.py``.
 
 The pinned-spec lane checks that the floor rule matches an operation in the
 vendor ``vi-json`` files on the spec shelf; it skips when the shelf is not
@@ -38,12 +40,7 @@ from tests._spec_shelf import assert_op_ids_served, require_shelf_spec
 _TYPED_OP_ID = "vmware.composite.host.maintenance.exit"
 _VIM_EXIT = "POST:/HostSystem/{moId}/ExitMaintenanceMode_Task"
 _VIM_ENTER = "POST:/HostSystem/{moId}/EnterMaintenanceMode_Task"
-_UNRELATED_POSTS = frozenset(
-    {
-        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
-        "POST:/HostSystem/{moId}/RebootHost_Task",
-    }
-)
+_VIM_READ = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
 
 #: ``(shelf product dir, file)`` of every pinned VI/JSON file: vCenter 9.0
 #: plus the three vCenter 8.0 updates (the same files the 8.0 VI-JSON lanes use).
@@ -112,9 +109,6 @@ paths:
   /HostSystem/{moId}/EnterMaintenanceMode_Task:
     post:
       responses: {'200': {description: ok}}
-  /HostSystem/{moId}/RebootHost_Task:
-    post:
-      responses: {'200': {description: ok}}
   /PropertyCollector/{moId}/RetrievePropertiesEx:
     post:
       responses: {'200': {description: ok}}
@@ -127,22 +121,17 @@ def test_ingested_generic_exit_waits_for_approval(version: str) -> None:
     rows = parse_openapi("file:///host-maintenance-exit.yaml", content=_HAND_MADE_SPEC)
     ops = _floored(rows, version)
 
-    assert set(ops) == {_VIM_EXIT, _VIM_ENTER} | _UNRELATED_POSTS
+    assert set(ops) == {_VIM_EXIT, _VIM_ENTER, _VIM_READ}
     assert _waits_for_approval(ops[_VIM_EXIT])
 
 
-@pytest.mark.parametrize("op_id", sorted(_UNRELATED_POSTS | {_VIM_ENTER}))
-def test_the_other_host_posts_keep_their_level(op_id: str) -> None:
-    """Only the exit is in this slice: the enter, the reboot and the read stay ``caution``.
-
-    The generic enter call has the same gap; it goes with the
-    ``host.maintenance.enter`` row of the host power-state work.
-    """
+def test_the_property_read_keeps_its_level() -> None:
+    """The floor raises the host writes only: the property read stays ``caution``."""
     rows = parse_openapi("file:///host-maintenance-exit.yaml", content=_HAND_MADE_SPEC)
     ops = _floored(rows, "9.0")
 
-    assert ops[op_id].safety_level == "caution"
-    assert ops[op_id].requires_approval is False
+    assert ops[_VIM_READ].safety_level == "caution"
+    assert ops[_VIM_READ].requires_approval is False
 
 
 #: ``(method, path, the rule accepts it)``.
@@ -154,7 +143,6 @@ _SAFETY_RULE_CASES: list[tuple[str, str, bool]] = [
     ("GET", "/HostSystem/{moId}/ExitMaintenanceMode_Task", False),
     ("POST", "/HostSystem/{moId}/ExitMaintenanceMode_Task?x=1", False),
     ("POST", "/HostSystem/{moId}/EnterMaintenanceMode_Task", False),
-    ("POST", "/HostSystem/{moId}/RebootHost_Task", False),
     ("POST", "/ClusterComputeResource/{moId}/ExitMaintenanceMode_Task", False),
     ("POST", "/HostSystem/ExitMaintenanceMode_Task", False),
 ]

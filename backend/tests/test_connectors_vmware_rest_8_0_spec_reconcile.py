@@ -259,6 +259,9 @@ _RUNTIME_METHOD_SITES: frozenset[tuple[str, str]] = frozenset(
         ("composites/_datastore_browse.py", "/{}/{}/{}"),
         ("composites/_host.py", "/HostServiceSystem/{}/{}"),
         ("composites/_host.py", "/HostStorageSystem/{}/{}"),
+        # The host power writes (#4350); their methods are the POST: constants
+        # of _host_power.py and _host_maintenance_enter.py.
+        ("composites/_host_power_common.py", "/{}/{}/{}"),
         ("composites/_write.py", "/{}/{}/{}"),
     }
 )

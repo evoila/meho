@@ -153,6 +153,9 @@ from meho_backplane.connectors.vmware_rest.composites._host import (
 from meho_backplane.connectors.vmware_rest.composites._host_cluster_llm_instructions import (
     HOST_CLUSTER_LLM_INSTRUCTIONS,
 )
+from meho_backplane.connectors.vmware_rest.composites._host_power_ops import (
+    HOST_POWER_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._library import (
     content_library_subscribed_create_composite,
     content_library_subscribed_items_list_composite,
@@ -578,8 +581,12 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "host": (
         "Use for ESXi hosts. Reads: list hosts (GET:/api/vcenter/host). Changes: "
         "move every running VM off a host, then put it into maintenance mode "
-        "(host.evacuate, dangerous); take a host out of maintenance mode "
-        "(host.maintenance.exit, dangerous); move a host's VM NICs to a "
+        "(host.evacuate, dangerous); start maintenance mode with a vSAN data "
+        "option, without moving VMs (host.maintenance.enter, dangerous); take a "
+        "host out of maintenance mode (host.maintenance.exit, dangerous); reboot "
+        "or shut down a host (host.reboot, host.shutdown, dangerous); put a host "
+        "into standby (host.standby.enter, dangerous) or wake it "
+        "(host.standby.exit, caution); move a host's VM NICs to a "
         "standard network, then take the host off a distributed switch "
         "(host.detach_from_vds, dangerous); mount an NFS export as a datastore "
         "(host.datastore_mount_nfs, dangerous); mark disks as flash or HDD "
@@ -2141,6 +2148,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # Install a new vCenter (#4394), dangerous / approval; the rows live in
     # their own module.
     *(_CompositeSpec(**row) for row in VCENTER_INSTALL_COMPOSITES),
+    # Host maintenance-mode start, reboot, shut down and standby (#4350), with
+    # approval; the rows live in their own module.
+    *(_CompositeSpec(**row) for row in HOST_POWER_COMPOSITES),
 )
 
 

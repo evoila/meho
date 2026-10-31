@@ -12,12 +12,16 @@ from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 
 __all__ = [
     "VMWARE_APPLIANCE_AND_ACCESS_WRITES",
+    "VMWARE_VIM_HOST_POWER_WRITES",
+    "VMWARE_VIM_HOST_WAKES",
     "VMWARE_VIM_SNAPSHOT_CREATES",
     "VMWARE_VIM_VM_STATE_WRITES",
     "is_vmware_appliance_or_access_write",
     "is_vmware_host_maintenance_exit",
     "is_vmware_library_item_delete",
     "is_vmware_tagging_removal",
+    "is_vmware_vim_host_power_write",
+    "is_vmware_vim_host_wake",
     "is_vmware_vim_snapshot_create",
     "is_vmware_vim_vm_state_write",
     "is_vmware_vm_relocate",
@@ -141,6 +145,25 @@ VMWARE_VIM_SNAPSHOT_CREATES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/VirtualMachine/{}/CreateSnapshotEx_Task"),
     }
 )
+
+# Host maintenance-mode start, reboot, shut down and standby on the older API
+# (#4350). Each is ``dangerous`` with approval, like the typed
+# ``host.maintenance.enter``, ``host.reboot``, ``host.shutdown`` and
+# ``host.standby.enter``. Ending maintenance mode has its own rule above.
+VMWARE_VIM_HOST_POWER_WRITES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("POST", "/HostSystem/{}/EnterMaintenanceMode_Task"),
+        ("POST", "/HostSystem/{}/RebootHost_Task"),
+        ("POST", "/HostSystem/{}/ShutdownHost_Task"),
+        ("POST", "/HostSystem/{}/PowerDownHostToStandBy_Task"),
+    }
+)
+
+# Waking a host from standby (#4350) waits for approval but keeps its
+# ``caution`` level, like the typed ``host.standby.exit``.
+VMWARE_VIM_HOST_WAKES: frozenset[tuple[str, str]] = frozenset(
+    {("POST", "/HostSystem/{}/PowerUpHostFromStandBy_Task")}
+)
 _PATH_PARAM_RE = re.compile(r"\{[^/{}]+\}")
 
 
@@ -247,6 +270,22 @@ def is_vmware_vim_snapshot_create(method: str, path: str) -> bool:
     return _operation_key(method, path) in VMWARE_VIM_SNAPSHOT_CREATES
 
 
+def is_vmware_vim_host_power_write(method: str, path: str) -> bool:
+    """Return whether ``(method, path)`` is in :data:`VMWARE_VIM_HOST_POWER_WRITES`.
+
+    Matches like :func:`is_vmware_vim_vm_state_write`.
+    """
+    return _operation_key(method, path) in VMWARE_VIM_HOST_POWER_WRITES
+
+
+def is_vmware_vim_host_wake(method: str, path: str) -> bool:
+    """Return whether ``(method, path)`` is in :data:`VMWARE_VIM_HOST_WAKES`.
+
+    Matches like :func:`is_vmware_vim_vm_state_write`.
+    """
+    return _operation_key(method, path) in VMWARE_VIM_HOST_WAKES
+
+
 def _requires_vmware_safety_floor(method: str, path: str) -> bool:
     """Identify VMware VM, host, appliance and access writes that require approval."""
     if method not in _WRITE_METHODS:
@@ -256,6 +295,7 @@ def _requires_vmware_safety_floor(method: str, path: str) -> bool:
         or is_vmware_host_maintenance_exit(method, path)
         or is_vmware_appliance_or_access_write(method, path)
         or is_vmware_vim_vm_state_write(method, path)
+        or is_vmware_vim_host_power_write(method, path)
     ):
         return True
     canonical_path, _query = _canonical(path)
@@ -282,9 +322,11 @@ def vmware_rest_safety_floor(
     The appliance, permission, session, certificate and host-image writes are
     :func:`is_vmware_appliance_or_access_write`. The older-API VM power,
     terminate, clone, snapshot revert and migrate calls are
-    :func:`is_vmware_vim_vm_state_write`. The older-API snapshot creates
-    (:func:`is_vmware_vim_snapshot_create`) keep their level and wait for
-    approval.
+    :func:`is_vmware_vim_vm_state_write`. The older-API host maintenance-mode
+    start, reboot, shut down and standby are :func:`is_vmware_vim_host_power_write`.
+    The older-API snapshot creates (:func:`is_vmware_vim_snapshot_create`) and
+    the host wake from standby (:func:`is_vmware_vim_host_wake`) keep their
+    level and wait for approval.
     """
     if version not in _FLOORED_VERSIONS:
         return proto
@@ -293,7 +335,9 @@ def vmware_rest_safety_floor(
         method, proto.path
     ):
         return proto.model_copy(update={"safety_level": "destructive", "requires_approval": True})
-    if is_vmware_vim_snapshot_create(method, proto.path):
+    if is_vmware_vim_snapshot_create(method, proto.path) or is_vmware_vim_host_wake(
+        method, proto.path
+    ):
         return proto.model_copy(update={"requires_approval": True})
     if not _requires_vmware_safety_floor(method, proto.path):
         return proto

@@ -241,7 +241,19 @@ _CAUTION_OP_IDS: tuple[str, ...] = (
 # supervisor.disable / #3281 + the storage-policy writes storage_policy.create
 # + storage_policy.delete / #3494 + the #3505 governed-allocation writes
 # resource_pool.create + resource_pool.delete + cluster.drs_vm_host_rule.create).
-_ALL_OP_IDS: tuple[str, ...] = _READ_OP_IDS + _CAUTION_OP_IDS + _WRITE_OP_IDS
+# --- Content library capture, publish and export (#4342): two caution and
+# two dangerous changes, all with approval. Their tiers are checked in
+# ``test_connectors_vmware_rest_composites_library_export.py``.
+_LIBRARY_EXPORT_OP_IDS: tuple[str, ...] = (
+    "vmware.composite.vm.capture_to_library",
+    "vmware.composite.content_library.publish.set",
+    "vmware.composite.content_library.item.export",
+    "vmware.composite.vm.export_ovf",
+)
+# --- end #4342
+_ALL_OP_IDS: tuple[str, ...] = (
+    _READ_OP_IDS + _CAUTION_OP_IDS + _WRITE_OP_IDS + _LIBRARY_EXPORT_OP_IDS
+)
 
 
 _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {

@@ -328,6 +328,12 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # This was the last guest-ops write riding broadcast unredacted
         # (flagged as the unpinned sibling in the #3255 pin above).
         "vmware.composite.vm.guest.file.write",
+        # #4342 — the content-library publish change. Its params hold only
+        # Vault references (``password_ref`` / ``current_password_ref``), but
+        # it reads the passwords and sends them to vCenter in the request
+        # body. Pinning it collapses the broadcast to aggregate-only and keeps
+        # the vendor bodies out of the flight recorder.
+        "vmware.composite.content_library.publish.set",
         # #3717 — the guest-ops READ composites that log into the guest.
         # process.list / env.read / file.read each resolve the guest OS
         # credential from secret_ref and send it as the vim

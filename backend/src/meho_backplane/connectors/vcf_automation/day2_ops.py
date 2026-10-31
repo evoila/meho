@@ -51,10 +51,15 @@ def day2_specs(prefix: str) -> tuple[Day2OpSpec, ...]:
     return (*deployment_specs(prefix), *iaas_specs(prefix))
 
 
-def vcfa_op(spec: Day2OpSpec, group_key: str) -> VcfaTypedOp:
-    """A ``vcfa-rest`` op (``vcfa.tenant.*``) from one spec; the handler gets ``tenant_``."""
+def vcfa_op(op_id: str, group_key: str) -> VcfaTypedOp:
+    """A ``vcfa-rest`` op from the spec named by *op_id*; the handler gets ``tenant_``.
+
+    The op id is written out in full at each call, so the CLI
+    guard that reads the op ids from the source files sees it.
+    """
+    spec = _VCFA_SPECS[op_id.removeprefix(_VCFA_PREFIX)]
     return VcfaTypedOp(
-        op_id=f"vcfa.tenant.{spec.name}",
+        op_id=op_id,
         handler_attr=f"tenant_{spec.handler}",
         plane="tenant",
         path=spec.path,
@@ -70,18 +75,28 @@ def vcfa_op(spec: Day2OpSpec, group_key: str) -> VcfaTypedOp:
     )
 
 
+_VCFA_PREFIX: Final = "vcfa.tenant."
 _VCFA_SPECS: Final = {spec.name: spec for spec in day2_specs("vcfa.tenant")}
 
-#: The ``vcfa-rest`` day-2 ops. The delete is ``VCFA_DEPLOY_OPS`` (it was there first).
-VCFA_DAY2_OPS: Final[tuple[VcfaTypedOp, ...]] = tuple(
-    vcfa_op(spec, VCFA_DAY2_GROUP)
-    for name, spec in _VCFA_SPECS.items()
-    if name != "deployment.delete"
+#: The ``vcfa-rest`` day-2 ops. The delete is in ``VCFA_DEPLOY_OPS`` (it was there first).
+VCFA_DAY2_OPS: Final[tuple[VcfaTypedOp, ...]] = (
+    vcfa_op(op_id="vcfa.tenant.deployment.actions.list", group_key=VCFA_DAY2_GROUP),
+    vcfa_op(op_id="vcfa.tenant.deployment.action.run", group_key=VCFA_DAY2_GROUP),
+    vcfa_op(op_id="vcfa.tenant.resource.action.run", group_key=VCFA_DAY2_GROUP),
+    vcfa_op(op_id="vcfa.tenant.deployment.lease.change", group_key=VCFA_DAY2_GROUP),
+    vcfa_op(op_id="vcfa.tenant.machine.list", group_key=VCFA_DAY2_GROUP),
+    vcfa_op(op_id="vcfa.tenant.block_device.list", group_key=VCFA_DAY2_GROUP),
+    vcfa_op(op_id="vcfa.tenant.machine.create", group_key=VCFA_DAY2_GROUP),
+    vcfa_op(op_id="vcfa.tenant.block_device.create", group_key=VCFA_DAY2_GROUP),
 )
 #: The ``vcfa-rest`` deployment delete, written from the shared spec.
 VCFA_DEPLOYMENT_DELETE: Final[VcfaTypedOp] = vcfa_op(
-    _VCFA_SPECS["deployment.delete"], "vcfa-tenant-writes"
+    op_id="vcfa.tenant.deployment.delete", group_key="vcfa-tenant-writes"
 )
 
+if {op.op_id for op in (*VCFA_DAY2_OPS, VCFA_DEPLOYMENT_DELETE)} != {
+    _VCFA_PREFIX + name for name in _VCFA_SPECS
+}:
+    raise AssertionError("every shared day-2 spec needs exactly one vcfa.tenant op")
 validate_typed_ops(VCFA_DAY2_OPS)
 validate_typed_ops((VCFA_DEPLOYMENT_DELETE,))

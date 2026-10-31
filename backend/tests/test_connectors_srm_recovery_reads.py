@@ -6,18 +6,22 @@
 Every read runs through ``dispatch()`` against a respx-mocked SRM REST API
 v2, with saved answers written by hand from the vendor API reference:
 
-* ``srm.pairing.list``: one flat row per pairing, paging, no certificate text;
+* ``srm.pairing.list``: one flat row per pairing, no certificate text;
+* paging: every page is read, also more than 50 of them; a vendor that
+  sends the same page twice stops the read with an error;
 * ``srm.remote_login``: the remote account from Vault in HTTP Basic next to
   the SRM session; a second ``401`` is a refused remote login; a secret
   without a password sends nothing; no password in the answer;
-* ``srm.plan.list``: state and ``needs_cleanup``;
+* ``srm.plan.list``: state, ``needs_cleanup``, the protection groups and
+  the newest run of each plan; a failed history task fills
+  ``last_run_error``;
 * ``srm.plan.get``: plan, groups, steps, VMs and one VM's settings; a view
   mode SRM refuses comes back as ``steps_error``;
 * ``srm.group.list``: groups, and the VMs of one group;
 * ``srm.issue.list``: each scope reaches its path; two scopes are refused
   before any HTTP request;
-* ``srm.history.list``: the task is checked until it ends; a failed task
-  and one report;
+* ``srm.history.list``: the task is checked until it ends; a second page
+  is a second task; a failed task and one report;
 * a vendor error reaches the answer; an id that is not one path segment
   is refused.
 
@@ -237,17 +241,54 @@ async def test_list_reads_every_page(
     connector: SrmConnector, api: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(recovery_reads, "PAGE_SIZE", 1)
-    route = api.get(f"{_P}/recovery-management/plans").mock(
+    route = api.get(f"{_P}/protection-management/groups").mock(
         side_effect=[
-            httpx.Response(200, json=_page([{"id": "plan-a", "status": "READY_STATE"}], 2)),
-            httpx.Response(200, json=_page([{"id": "plan-b", "status": "READY_STATE"}], 2)),
+            httpx.Response(200, json=_page([{"id": "group-a", "status": "OK"}], 2)),
+            httpx.Response(200, json=_page([{"id": "group-b", "status": "OK"}], 2)),
         ]
     )
-    result = await _dispatch("srm.plan.list", {"pairing_id": _PAIRING})
+    result = await _dispatch("srm.group.list", {"pairing_id": _PAIRING})
 
     assert result.status == "ok", result.error
-    assert [row["id"] for row in result.result["items"]] == ["plan-a", "plan-b"]
+    assert [row["id"] for row in result.result["items"]] == ["group-a", "group-b"]
     assert [call.request.url.params["offset"] for call in route.calls] == ["0", "1"]
+
+
+@pytest.mark.asyncio
+async def test_list_has_no_page_cap(
+    connector: SrmConnector, api: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """101 rows in pages of 2 are 51 pages: every row comes back, none is dropped."""
+    monkeypatch.setattr(recovery_reads, "PAGE_SIZE", 2)
+    rows = [{"id": f"group-{n}", "status": "OK"} for n in range(101)]
+
+    def page(request: httpx.Request) -> httpx.Response:
+        offset = int(request.url.params["offset"])
+        return httpx.Response(200, json=_page(rows[offset : offset + 2], len(rows)))
+
+    route = api.get(f"{_P}/protection-management/groups").mock(side_effect=page)
+    result = await _dispatch("srm.group.list", {"pairing_id": _PAIRING})
+
+    assert result.status == "ok", result.error
+    assert result.result["total"] == 101
+    assert [row["id"] for row in result.result["items"]] == [row["id"] for row in rows]
+    assert route.call_count == 51
+    assert route.calls.last.request.url.params["offset"] == "100"
+
+
+@pytest.mark.asyncio
+async def test_list_stops_with_an_error_when_the_vendor_ignores_the_offset(
+    connector: SrmConnector, api: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(recovery_reads, "PAGE_SIZE", 1)
+    route = api.get(f"{_P}/protection-management/groups").respond(
+        200, json=_page([{"id": "group-a", "status": "OK"}], 5)
+    )
+    result = await _dispatch("srm.group.list", {"pairing_id": _PAIRING})
+
+    assert result.status == "error"
+    assert "same page" in (result.error or "") + json.dumps(result.extras, default=str)
+    assert route.call_count == 2
 
 
 @pytest.fixture
@@ -376,7 +417,7 @@ async def test_remote_login_uses_the_prefix_an_operator_set_in_extras(
 
 
 @pytest.mark.asyncio
-async def test_plan_list_marks_plans_that_need_a_cleanup(
+async def test_plan_list_returns_state_groups_and_the_newest_run_of_each_plan(
     connector: SrmConnector, api: respx.MockRouter
 ) -> None:
     plans = [
@@ -384,15 +425,69 @@ async def test_plan_list_marks_plans_that_need_a_cleanup(
         {"id": "plan-b", "name": "<plan-b>", "status": "TEST_COMPLETE", "is_running": False},
         {"id": "plan-c", "name": "<plan-c>", "status": "RECOVERY_IN_PROGRESS", "progress": 40},
     ]
-    api.get(f"{_P}/recovery-management/plans").respond(200, json=_page(plans))
+    plans_path = f"{_P}/recovery-management/plans"
+    api.get(plans_path).respond(200, json=_page(plans))
+    api.get(f"{plans_path}/plan-a/protection-groups").respond(
+        200, json=_page([{"id": "group-1", "name": "<group-a>", "status": "OK"}])
+    )
+    api.get(f"{plans_path}/plan-b/protection-groups").respond(
+        200,
+        json=_page(
+            [
+                {"id": "group-1", "name": "<group-a>", "status": "OK"},
+                {"id": "group-2", "name": "<group-b>", "status": "OK"},
+            ]
+        ),
+    )
+    api.get(f"{plans_path}/plan-c/protection-groups").respond(200, json=_page([]))
+    # plan-a never ran; plan-b has two runs, the older one listed first; plan-c's task fails.
+    history_a = api.get(f"{plans_path}/plan-a/history-reports").respond(
+        202, json={"id": "task-a", "status": "SUCCESS", "result": {"list": []}}
+    )
+    api.get(f"{plans_path}/plan-b/history-reports").respond(
+        202,
+        json={
+            "id": "task-b",
+            "status": "SUCCESS",
+            "result": {
+                "list": [
+                    {**_REPORT, "run_key": 41, "start_time_ms": 1690000000000},
+                    {**_REPORT, "operation_type": "CLEANUP", "result_state": "SUCCESS"},
+                ]
+            },
+        },
+    )
+    api.get(f"{plans_path}/plan-c/history-reports").respond(
+        202, json={"id": "task-c", "status": "ERROR", "error": {"message": "made-up task error"}}
+    )
     result = await _dispatch("srm.plan.list", {"pairing_id": _PAIRING})
 
     assert result.status == "ok", result.error
+    assert result.result["pairing_id"] == _PAIRING
+    assert result.result["total"] == 3
     rows = {row["id"]: row for row in result.result["items"]}
+    assert [row["id"] for row in result.result["items"]] == ["plan-a", "plan-b", "plan-c"]
     assert rows["plan-a"]["needs_cleanup"] is False
     assert rows["plan-b"]["needs_cleanup"] is True
     assert rows["plan-c"]["progress"] == 40
-    assert result.result["pairing_id"] == _PAIRING
+    assert rows["plan-a"]["protection_group_ids"] == ["group-1"]
+    assert rows["plan-b"]["protection_group_names"] == ["<group-a>", "<group-b>"]
+    assert rows["plan-c"]["protection_group_ids"] == []
+    assert rows["plan-a"]["last_run_report_id"] is None
+    assert rows["plan-a"]["last_run_error"] is None
+    assert rows["plan-b"]["last_run_report_id"] == "42"
+    assert rows["plan-b"]["last_run_type"] == "CLEANUP"
+    assert rows["plan-b"]["last_run_result"] == "SUCCESS"
+    assert rows["plan-b"]["last_run_start_time"] == "2023-11-14T22:13:20Z"
+    assert rows["plan-b"]["last_run_errors"] == 0
+    assert rows["plan-b"]["last_run_warnings"] == 1
+    assert rows["plan-c"]["last_run_report_id"] is None
+    assert "made-up task error" in rows["plan-c"]["last_run_error"]
+    query = history_a.calls[0].request.url.params
+    assert (query["sort_by"], query["order_by"], query["offset"]) == ("start_time_ms", "desc", "0")
+    assert all(
+        not isinstance(value, dict) for row in result.result["items"] for value in row.values()
+    )
 
 
 @pytest.mark.asyncio
@@ -691,6 +786,36 @@ async def test_history_list_waits_for_the_task_and_returns_the_runs(
     assert items[0]["result_state"] == "WARNINGS"
     assert items[0]["start_time"] == "2023-11-14T22:13:20Z"
     assert "warnings" not in items[0]
+
+
+@pytest.mark.asyncio
+async def test_history_list_reads_every_page_as_its_own_task(
+    connector: SrmConnector, api: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three reports in pages of two: two list calls, two tasks, all three sorted newest first."""
+    monkeypatch.setattr(recovery_reads, "PAGE_SIZE", 2)
+    reports = [{**_REPORT, "run_key": 40 + n, "start_time_ms": 1690000000000 + n} for n in range(3)]
+
+    def page(request: httpx.Request) -> httpx.Response:
+        offset = int(request.url.params["offset"])
+        assert request.url.params["limit"] == "2"
+        return httpx.Response(
+            202,
+            json={
+                "id": f"task-{offset}",
+                "status": "SUCCESS",
+                "result": {"list": reports[offset : offset + 2], "_meta": {"total": 3}},
+            },
+        )
+
+    route = api.get(f"{_PLAN}/history-reports").mock(side_effect=page)
+    result = await _dispatch("srm.history.list", {"pairing_id": _PAIRING, "plan_id": "plan-0001"})
+
+    assert result.status == "ok", result.error
+    assert route.call_count == 2
+    assert [call.request.url.params["offset"] for call in route.calls] == ["0", "2"]
+    assert result.result["total"] == 3
+    assert [row["report_id"] for row in result.result["items"]] == ["42", "41", "40"]
 
 
 @pytest.mark.asyncio

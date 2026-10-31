@@ -41,7 +41,7 @@ lives in `connectors/vmware_shared/dr_rest.py` (the base class
 | `srm.api_file.get` | Read one API description file the appliance serves (the SRM API or the appliance setup API). Returns a checked copy (secret values replaced) with its size, SHA-256 and the SRM version; the text is in parts behind a result handle. | `GET /api/rest/srm/v2/open-api.yaml`, `GET /api/rest/configure/v2/open-api.yaml` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
 | `srm.pairing.list` | The site pairings. One row per pairing: the pairing id and, for both sites, the SRM server and the vCenter with id, name, address, status (OK, WARNING, ERROR), version and build. | `GET /pairings` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
 | `srm.remote_login` | Log in to the remote site of a pairing. The account comes from the Vault path in `secret_ref`, which must sit under an allowed folder (see below); the answer names the remote user, never the password. | `POST /pairings/{pairing_id}/remote-session`, then `GET /pairings/{pairing_id}/remote-session` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
-| `srm.plan.list` | The recovery plans. One row per plan: id, name, status, `needs_cleanup`, `is_running`, progress, site names, folder, description. | `GET /pairings/{pairing_id}/recovery-management/plans` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
+| `srm.plan.list` | The recovery plans. One row per plan: id, name, status, `needs_cleanup`, `is_running`, progress, site names, folder, description, the ids and names of its protection groups, and its newest run (`last_run_*`: report id, type, result, start time, error and warning counts). | `GET /pairings/{pairing_id}/recovery-management/plans`, then per plan `GET .../plans/{plan_id}/protection-groups` and `GET .../plans/{plan_id}/history-reports` with `GET /tasks/{taskId}` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
 | `srm.plan.get` | One plan with its protection groups, its recovery steps in one view mode (test, recovery, cleanup or reprotect), its VMs with priority and start action, and with `vm_id` that VM's full recovery settings. | `GET .../plans/{plan_id}`, `GET .../plans/{plan_id}/protection-groups`, `GET .../plans/{plan_id}/recovery-steps/{view_mode}`, `GET .../plans/{plan_id}/vms`, `GET .../plans/{plan_id}/vms/{vm_id}/recovery-settings` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
 | `srm.group.list` | The protection groups with replication type (HBR is vSphere Replication, ABR is array based), VM count and state; with `group_id` the VMs of that group with their protection state and errors. | `GET /pairings/{pairing_id}/protection-management/groups`, `GET .../groups/{group_id}/vms` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
 | `srm.issue.list` | Health issues (errors and warnings) of the pairing, or of one plan (`plan_id`), one group (`group_id`) or one SRM server (`srm_id`). | `GET /pairings/{pairing_id}/issues`, `GET .../plans/{plan_id}/issues`, `GET .../groups/{group_id}/issues`, `GET /pairings/{pairing_id}/srms/{srm_id}/issues` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
@@ -254,7 +254,10 @@ segment: the schema refuses `/`, `\`, `?`, `#`, `%`, `.` and `..`, and
 the code encodes the value before it builds the path.
 
 **Lists.** A list read asks for pages of 100 rows (`limit`, `offset`)
-until it has `_meta.total` rows, at most 50 pages. The answer is a few
+until the last page: a page with fewer than 100 rows, or `_meta.total`
+rows in all. There is no page cap. When SRM sends the same page twice,
+it ignored the offset; the read then stops with an error instead of
+returning part of the list as if it were complete. The answer is a few
 scalars (for example `pairing_id`, `total`) and `items`, a flat list of
 rows. A long list is stored behind a result handle; read it with
 `result_query`. Times come back as ISO 8601 UTC text, not milliseconds.
@@ -293,7 +296,14 @@ and MEHO logs in again, the remote login is gone; a read that needs the
 remote site then fails, and the caller runs `srm.remote_login` again.
 
 **`srm.plan.list`** adds `needs_cleanup`: true for `TEST_COMPLETE`,
-`TEST_INTERRUPTED`, `CLEANUP_INCOMPLETE` and `CLEANUP_INTERRUPTED`.
+`TEST_INTERRUPTED`, `CLEANUP_INCOMPLETE` and `CLEANUP_INTERRUPTED`. For
+each plan it also reads the plan's protection groups (`protection_group_ids`,
+`protection_group_names`) and its newest run: the first page of the
+plan's history, asked for newest first (`sort_by=start_time_ms`,
+`order_by=desc`), from which it takes the row with the latest start time.
+Four plans are read at a time. The `last_run_*` fields are null for a
+plan that never ran. A history task that fails or takes too long does not
+stop the list; the row says why in `last_run_error`.
 
 **`srm.plan.get`** makes four reads (plan, groups, steps, VMs) and a
 fifth with `vm_id`. `view_mode` defaults to `recovery`. SRM refuses some
@@ -313,7 +323,10 @@ counts `errors` and `warnings`.
 with a task (`202`). The read checks `GET /tasks/{taskId}` once a second
 for up to 60 seconds. A task that ends with `ERROR` or `CANCELLED`, or
 that runs longer, stops the read with its message. The reports come from
-the task's `result` (a list, `{"list": [...]}` or one report). `start_time`
+the task's `result` (a list, `{"list": [...]}` or one report). The list
+call takes `limit` and `offset` like the other lists, so the read asks
+for one task per page of 100 reports until the last page, then sorts all
+reports newest first. `start_time`
 and `end_time` (ISO 8601) become the vendor's `start_date` and
 `end_date`; without them SRM returns the last 7 days. `report_id` is the
 report's `run_key`. With `report_id` the read gets that report directly,
@@ -377,9 +390,12 @@ call is sent.
   file says only "Result is of type HistoryReport" and types `result` as
   a free object. The read accepts a list, `{"list": [...]}` or one report,
   and takes `run_key` as the `report_id`. The live test confirms this.
-- **`srm.plan.list` has no protection groups or last run per plan.** That
-  would cost one or two more vendor calls per plan. `srm.plan.get` returns
-  a plan's groups, and `srm.history.list` its runs.
+- **`srm.plan.list` makes two more vendor calls per plan** (groups and
+  the history task), four plans at a time. On a pairing with many plans
+  the read takes longer. Whether SRM honours `sort_by=start_time_ms` on
+  the history task is for the live test; the read picks the newest row of
+  the first page itself, so it is only wrong for a plan with more than
+  100 runs whose history SRM did not sort.
 - The 8.8 and 9.0 calls follow the 9.1 file and the vendor documentation.
   Their first live use is the pinning of the 8.8 and 9.0 files. If a call
   differs there, fix the call and the table above.

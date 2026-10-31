@@ -133,9 +133,31 @@ _PLAN_ROW_PROPERTIES: Final = {
     "description": _s("Description of the plan."),
 }
 
+_RUN_TYPES: Final = ["TEST", "CLEANUP", "FAILOVER", "REPROTECT"]
+_RUN_RESULTS: Final = ["SUCCESS", "WARNINGS", "ERRORS", "CANCELLED"]
+
+_PLAN_LIST_ROW_PROPERTIES: Final = {
+    **_PLAN_ROW_PROPERTIES,
+    "protection_group_ids": _texts("Ids of the protection groups in the plan."),
+    "protection_group_names": _texts("Names of the protection groups in the plan."),
+    "last_run_report_id": _s(
+        "Id of the newest run report (report_id for srm.history.list); null when the plan "
+        "never ran."
+    ),
+    "last_run_type": _s("Kind of the newest run.", _RUN_TYPES),
+    "last_run_result": _s("How the newest run ended.", _RUN_RESULTS),
+    "last_run_start_time": _s("When the newest run started, ISO 8601 UTC."),
+    "last_run_errors": _t("integer", "Number of errors in the newest run."),
+    "last_run_warnings": _t("integer", "Number of warnings in the newest run."),
+    "last_run_error": _s(
+        "Why the newest run could not be read (the SRM history task failed or took too "
+        "long); null when it could."
+    ),
+}
+
 PLAN_LIST_RESPONSE: Final = _list_response(
-    {"type": "object", "properties": _PLAN_ROW_PROPERTIES},
-    "One row per recovery plan.",
+    {"type": "object", "properties": _PLAN_LIST_ROW_PROPERTIES},
+    "One row per recovery plan, with its protection groups and its newest run.",
     pairing_id=_PAIRING_ID_OUT,
 )
 
@@ -302,10 +324,8 @@ HISTORY_LIST_RESPONSE: Final = _list_response(
         "properties": {
             "report_id": _s("Id of the run report (SRM run_key)."),
             "plan_name": _s("Name of the plan when it ran."),
-            "operation_type": _s("Kind of run.", ["TEST", "CLEANUP", "FAILOVER", "REPROTECT"]),
-            "result_state": _s(
-                "How the run ended.", ["SUCCESS", "WARNINGS", "ERRORS", "CANCELLED"]
-            ),
+            "operation_type": _s("Kind of run.", _RUN_TYPES),
+            "result_state": _s("How the run ended.", _RUN_RESULTS),
             "username": _s("User who started the run."),
             "start_time": _s("When the run started, ISO 8601 UTC."),
             "duration_ms": _t("integer", "How long the run took, in milliseconds."),

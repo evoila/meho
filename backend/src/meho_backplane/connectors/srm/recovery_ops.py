@@ -183,11 +183,12 @@ _REMOTE_LOGIN = SrmTypedOp(
 _PLAN_LIST = SrmTypedOp(
     op_id="srm.plan.list",
     handler_attr="plan_list",
-    summary="List the recovery plans of an SRM pairing with their state.",
+    summary="List the recovery plans of an SRM pairing with state, groups and newest run.",
     description=(
-        "Reads GET /pairings/{pairing_id}/recovery-management/plans. One row per plan: "
-        "id, name, status (for example READY_STATE, TEST_COMPLETE), needs_cleanup, "
-        "is_running, progress and the two site names."
+        "Reads GET /pairings/{pairing_id}/recovery-management/plans, then each plan's "
+        "protection groups and newest run. One row per plan: id, name, status, "
+        "needs_cleanup, is_running, progress, site names, group ids and names, and the "
+        "newest run's type, result and time."
     ),
     parameter_schema=_params(
         {"pairing_id": _PAIRING_ID}, ["pairing_id"], {"pairing_id": "<pairing-id>"}
@@ -199,20 +200,26 @@ _PLAN_LIST = SrmTypedOp(
     requires_approval=False,
     llm_instructions={
         "when_to_call": (
-            "Call to see which recovery plans exist and their state: ready, running, "
-            "or waiting for a cleanup after a test."
+            "Call to see which recovery plans exist, their state (ready, running, or "
+            "waiting for a cleanup after a test), which protection groups each holds, "
+            "and how its newest run ended. The read makes two more vendor calls per "
+            "plan, so it takes longer on a pairing with many plans."
         ),
         "output_shape": (
             "{pairing_id, total, items: [{id, name, status, needs_cleanup, is_running, "
             "progress, protected_site_name, recovery_site_name, location_name, "
-            "description}]}. needs_cleanup is true for TEST_COMPLETE, TEST_INTERRUPTED, "
-            "CLEANUP_INCOMPLETE and CLEANUP_INTERRUPTED. A long list is stored behind a "
-            "result handle; read it with result_query."
+            "description, protection_group_ids, protection_group_names, "
+            "last_run_report_id, last_run_type, last_run_result, last_run_start_time, "
+            "last_run_errors, last_run_warnings, last_run_error}]}. needs_cleanup is true "
+            "for TEST_COMPLETE, TEST_INTERRUPTED, CLEANUP_INCOMPLETE and "
+            "CLEANUP_INTERRUPTED. The last_run_* fields are null when the plan never "
+            "ran; last_run_error says why the run could not be read. A long list is "
+            "stored behind a result handle; read it with result_query."
         ),
         "next_step": (
-            "For one plan's groups, steps and VMs call srm.plan.get. For its last runs "
-            "call srm.history.list. For a plan in a bad state call srm.issue.list with "
-            "plan_id."
+            "For one plan's steps and VMs call srm.plan.get. For all its runs, or the "
+            "error texts of the newest run (report_id = last_run_report_id), call "
+            "srm.history.list. For a plan in a bad state call srm.issue.list with plan_id."
         ),
         "result_scalars": {"keys": ["pairing_id", "total"]},
     },

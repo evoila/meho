@@ -10,7 +10,8 @@ Recovery, all through the SRM REST API v2:
 * ``srm.remote_login`` -- ``POST /pairings/{pairing_id}/remote-session``
   with the remote site's account from Vault, then
   ``GET /pairings/{pairing_id}/remote-session``;
-* ``srm.plan.list`` -- ``GET .../recovery-management/plans``;
+* ``srm.plan.list`` -- ``GET .../recovery-management/plans``, then per
+  plan its protection groups and its newest run;
 * ``srm.plan.get`` -- one plan, its protection groups, its recovery steps
   in one view mode, its VMs and (optional) one VM's recovery settings;
 * ``srm.group.list`` -- ``GET .../protection-management/groups``, or the
@@ -25,11 +26,17 @@ The entry methods live on
 functions here, so an ``srm.*`` operation only binds to an SRM connector.
 A list comes back as ``items`` (flat rows) next to a few scalars, so MEHO
 stores a long list behind a result handle.
+
+A vendor list is paged with ``limit`` and ``offset``. A read fetches every
+page until the last one (a short page, or ``_meta.total`` rows). There is no
+page cap: a vendor that ignores ``offset`` and sends the same page twice
+stops the read with an error, so no row goes missing in silence.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
@@ -90,9 +97,11 @@ __all__ = [
 #: namespace of the target's own ``secret_ref``.
 REMOTE_SECRET_PREFIX_EXTRA: Final = "remote_secret_prefix"
 
-#: Rows asked for per page, and the most pages one read fetches.
+#: Rows asked for per page.
 PAGE_SIZE: Final = 100
-MAX_PAGES: Final = 50
+
+#: How many plans ``srm.plan.list`` reads the groups and the newest run of at once.
+PLAN_DETAIL_CONCURRENCY: Final = 4
 
 #: How long ``srm.history.list`` waits for the vendor task that builds the
 #: list, and how often it checks the task.
@@ -170,27 +179,65 @@ def _pick(source: Any, fields: tuple[str, ...]) -> dict[str, Any]:
     return {field: data.get(field) for field in fields}
 
 
+def _total(payload: Any) -> int | None:
+    """``_meta.total`` of a vendor list payload; ``None`` when it is not given."""
+    meta = payload.get("_meta") if isinstance(payload, dict) else None
+    total = meta.get("total") if isinstance(meta, dict) else None
+    return total if isinstance(total, int) and not isinstance(total, bool) else None
+
+
+def _list_page(payload: Any) -> list[dict[str, Any]]:
+    """The rows of one vendor list page (``{"list": [...], "_meta": {...}}``)."""
+    page = payload.get("list") if isinstance(payload, dict) else None
+    return [row for row in page if isinstance(row, dict)] if isinstance(page, list) else []
+
+
+async def _all_pages(
+    fetch: Callable[[int], Awaitable[Any]],
+    rows_of: Callable[[Any], list[dict[str, Any]]],
+    what: str,
+) -> list[dict[str, Any]]:
+    """Every row of a paged vendor list.
+
+    *fetch* gets the offset of the next page and returns its payload;
+    *rows_of* takes the rows out of a payload. The read ends at a short
+    page, or when it holds ``_meta.total`` rows. A page equal to the one
+    before it means the vendor ignored the offset; the read then stops with
+    an error instead of returning part of the list as if it were complete.
+    """
+    rows: list[dict[str, Any]] = []
+    previous: list[dict[str, Any]] | None = None
+    while True:
+        payload = await fetch(len(rows))
+        page = rows_of(payload)
+        if not page:
+            return rows
+        if page == previous:
+            raise RuntimeError(
+                f"SRM sent the same page of {what} twice (offset {len(rows)}); it ignored "
+                "the offset, so the list cannot be read in full."
+            )
+        previous = page
+        rows.extend(page)
+        total = _total(payload)
+        if len(page) < PAGE_SIZE or (total is not None and len(rows) >= total):
+            return rows
+
+
 async def _list_all(
     conn: SrmConnector, operator: Operator, target: DrTargetLike, path: str
 ) -> list[dict[str, Any]]:
     """Every row of a vendor list (``{"list": [...], "_meta": {"total"}}``), page by page."""
-    rows: list[dict[str, Any]] = []
-    for _ in range(MAX_PAGES):
-        payload = await conn._get_json(
+
+    async def fetch(offset: int) -> Any:
+        return await conn._get_json(
             target,
             path,
             operator=operator,
-            params={"limit": str(PAGE_SIZE), "offset": str(len(rows))},
+            params={"limit": str(PAGE_SIZE), "offset": str(offset)},
         )
-        page = payload.get("list") if isinstance(payload, dict) else None
-        if not isinstance(page, list) or not page:
-            break
-        rows.extend(row for row in page if isinstance(row, dict))
-        meta = payload.get("_meta")
-        total = meta.get("total") if isinstance(meta, dict) else None
-        if len(page) < PAGE_SIZE or (isinstance(total, int) and len(rows) >= total):
-            break
-    return rows
+
+    return await _all_pages(fetch, _list_page, path.rsplit("/", 1)[-1])
 
 
 # ---------------------------------------------------------------------------
@@ -303,13 +350,80 @@ def _plan_row(plan: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def _last_run_columns(report: dict[str, Any] | None, error: str | None) -> dict[str, Any]:
+    row = _report_row(report or {}, detail=False)
+    return {
+        "last_run_report_id": row["report_id"],
+        "last_run_type": row["operation_type"],
+        "last_run_result": row["result_state"],
+        "last_run_start_time": row["start_time"],
+        "last_run_errors": row["error_count"],
+        "last_run_warnings": row["warning_count"],
+        "last_run_error": error,
+    }
+
+
+async def _plan_details(
+    conn: SrmConnector,
+    operator: Operator,
+    target: DrTargetLike,
+    ids: dict[str, Any],
+    gate: asyncio.Semaphore,
+) -> dict[str, Any]:
+    """The group names and ids of one plan, and the columns of its newest run.
+
+    The newest run comes from the first page of the plan's history, asked
+    for newest first; the read then takes the newest row of that page, so
+    it is right even when SRM does not sort. A history task that fails or
+    takes too long fills ``last_run_error`` instead of stopping the list.
+    """
+    async with gate:
+        groups = await _list_all(conn, operator, target, _path(conn, PLAN_GROUPS, **ids))
+        query = {
+            "sort_by": "start_time_ms",
+            "order_by": "desc",
+            "limit": str(PAGE_SIZE),
+            "offset": "0",
+        }
+        reports: list[dict[str, Any]] = []
+        error: str | None = None
+        try:
+            task = await conn._get_json(
+                target, _path(conn, HISTORY_REPORTS, **ids), operator=operator, params=query
+            )
+            task = await _wait_for_task(conn, operator, target, task)
+            reports = _task_reports(task.get("result"))
+        except RuntimeError as exc:
+            error = str(exc)
+    newest = max(reports, key=_report_start, default=None)
+    return {
+        "protection_group_ids": [group.get("id") for group in groups],
+        "protection_group_names": [group.get("name") for group in groups],
+        **_last_run_columns(newest, error),
+    }
+
+
+def _report_start(report: dict[str, Any]) -> float:
+    start = report.get("start_time_ms")
+    return float(start) if isinstance(start, int | float) and not isinstance(start, bool) else 0.0
+
+
 async def plan_list(
     conn: SrmConnector, operator: Operator, target: DrTargetLike, params: dict[str, Any]
 ) -> dict[str, Any]:
-    """``srm.plan.list`` -- one row per recovery plan with its state."""
+    """``srm.plan.list`` -- one row per recovery plan with its state, groups and newest run."""
     pairing_id = params["pairing_id"]
-    path = _path(conn, PLANS, pairing_id=pairing_id)
-    items = [_plan_row(row) for row in await _list_all(conn, operator, target, path)]
+    plans = await _list_all(conn, operator, target, _path(conn, PLANS, pairing_id=pairing_id))
+    gate = asyncio.Semaphore(PLAN_DETAIL_CONCURRENCY)
+    details = await asyncio.gather(
+        *(
+            _plan_details(
+                conn, operator, target, {"pairing_id": pairing_id, "plan_id": plan["id"]}, gate
+            )
+            for plan in plans
+        )
+    )
+    items = [{**_plan_row(plan), **detail} for plan, detail in zip(plans, details, strict=True)]
     return {"pairing_id": pairing_id, "total": len(items), "items": items}
 
 
@@ -567,6 +681,24 @@ async def _wait_for_task(
     return task
 
 
+async def _history_reports(
+    conn: SrmConnector,
+    operator: Operator,
+    target: DrTargetLike,
+    ids: dict[str, Any],
+    query: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Every report of a plan's history. Each page is a vendor task the read waits for."""
+    path = _path(conn, HISTORY_REPORTS, **ids)
+
+    async def fetch(offset: int) -> Any:
+        page_query = {**query, "limit": str(PAGE_SIZE), "offset": str(offset)}
+        task = await conn._get_json(target, path, operator=operator, params=page_query)
+        return (await _wait_for_task(conn, operator, target, task)).get("result")
+
+    return await _all_pages(fetch, _task_reports, "history reports")
+
+
 async def history_list(
     conn: SrmConnector, operator: Operator, target: DrTargetLike, params: dict[str, Any]
 ) -> dict[str, Any]:
@@ -588,16 +720,9 @@ async def history_list(
             query["start_date"] = _ms(str(params["start_time"]), "start_time")
         if params.get("end_time"):
             query["end_date"] = _ms(str(params["end_time"]), "end_time")
-        task = await conn._get_json(
-            target,
-            _path(conn, HISTORY_REPORTS, **ids),
-            operator=operator,
-            params=query or None,
-        )
-        task = await _wait_for_task(conn, operator, target, task)
-        reports = _task_reports(task.get("result"))
+        reports = await _history_reports(conn, operator, target, ids, query)
+        reports.sort(key=_report_start, reverse=True)
         items = [_report_row(report, detail=False) for report in reports]
-        items.sort(key=lambda row: row["start_time"] or "", reverse=True)
     return {
         "pairing_id": pairing_id,
         "plan_id": plan_id,

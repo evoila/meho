@@ -404,6 +404,76 @@ handlers, the org-create check and the park-time preview are in
   (`change` / `unchanged` / `invalid_request`). Without a connector it shows
   `would: set_if_different` and no current state.
 
+**Approvals, policies, ABX actions and event subscriptions (shared with
+vRA 8).** An agent can list the requests that wait for an Automation approval
+and decide one, list and set policies, list ABX actions, read an action run,
+and list event subscriptions. A person can also run an ABX action and change
+an event subscription. A VM Apps org of VCF Automation 9 serves the same
+approval, policy, ABX and event broker APIs as Aria Automation 8, so the nine
+ops are written once in `connectors/vmware_shared/`:
+
+- `vra_governance.py` and `vra_extensibility.py`: the handlers, the preview
+  builders and `VraGovCalls` (the GET and send each connector hands in).
+- `vra_governance_ops.py` and `vra_extensibility_ops.py`: the metadata, the
+  group texts and the shared registrar.
+- `vra_handlers.py`: the `VraSharedHandlers` mixin with the nine handler
+  methods. This connector and the vRA 8 connector both inherit it and add
+  `vra_gov_calls` with their own login.
+
+This connector registers them as `vcfa.tenant.*` in the groups
+`vcfa-tenant-governance` and `vcfa-tenant-extensibility`
+(`governance_ops.py`, with its own registrar). The vRA 8 connector registers
+the same ops as `vcfa.vra8.*` ([connectors-vra8.md](connectors-vra8.md)).
+`/approval/api/*`, `/policy/api/*`, `/abx/api/*` and `/event-broker/api/*`
+ride the tenant login.
+
+| op_id (VCF Automation 9 / Aria Automation 8) | what it does and returns | risk level / approval | wire | versions |
+|---|---|---|---|---|
+| `vcfa.tenant.approval.list` / `vcfa.vra8.approval.list` | Requests that wait for an approval, or were decided: `{approvals: [flat rows: id, status, action, requestId, requestedBy, deploymentName, projectName, catalogItemName, policyNames, pendingApprovers, ...], totalElements}` | safe | `GET /approval/api/approvals` (`requestState`, `search`, `page`, `size`) | 8.18, 9.x |
+| `vcfa.tenant.approval.decide` / `vcfa.vra8.approval.decide` | Approves or rejects one waiting request: `{status: decided / not_pending, decision, approval, guidance}` | dangerous, approval | `GET /approval/api/approvals/{id}` (still `PENDING`?), `POST /approval/api/approvals/action` | 8.18, 9.x |
+| `vcfa.tenant.policy.list` / `vcfa.vra8.policy.list` | Policies (approval, lease, day-2 actions, content sharing, ...): `{policies: [flat rows: id, name, typeId, enforcementType, projectId, definition, ...], totalElements}` | safe | `GET /policy/api/policies` (`search`, `expandDefinition`, `$top`, `$skip`) | 8.18, 9.x |
+| `vcfa.tenant.policy.set` / `vcfa.vra8.policy.set` | Creates or changes a policy: `{status: created / changed / unchanged / invalid_request, policy, guidance}` | dangerous, approval | `GET /policy/api/policies[/{id}]`, `POST /policy/api/policies?dryRun=true`, then `?dryRun=false` | 8.18, 9.x |
+| `vcfa.tenant.abx.action.list` / `vcfa.vra8.abx.action.list` | ABX actions: `{actions: [flat rows: id, name, actionType, runtime, projectId, shared, system, inputNames, ...], totalElements}` | safe | `GET /abx/api/resources/actions` (`page`, `size`, `nameCriteria`) | 8.18, 9.x |
+| `vcfa.tenant.abx.action.run` / `vcfa.vra8.abx.action.run` | Runs one action with inputs: `{status: started / invalid_request / precondition_failed, run: {id, actionId, name, runState, projectId}, guidance}` | destructive, approval, preview | `GET /abx/api/resources/actions/{id}`, `POST /abx/api/resources/actions/{id}/action-runs` | 8.18, 9.x |
+| `vcfa.tenant.abx.run.get` / `vcfa.vra8.abx.run.get` | State of a run: `{id, runState, done, errorMessage, inputs, outputs, log_lines_total, log_lines}` | safe | `GET /abx/api/resources/action-runs/{id}` | 8.18, 9.x |
+| `vcfa.tenant.subscription.list` / `vcfa.vra8.subscription.list` | Event subscriptions: `{subscriptions: [flat rows: id, name, eventTopicId, runnableType, runnableId, blocking, priority, disabled, criteria, projectIds, system], totalElements}` | safe | `GET /event-broker/api/subscriptions` (`page`, `size`) | 8.18, 9.x |
+| `vcfa.tenant.subscription.set` / `vcfa.vra8.subscription.set` | `action` create, update, disable, enable or delete: `{status: created / changed / disabled / enabled / deleted / unchanged / invalid_request / precondition_failed, subscription, guidance}` | destructive, approval, preview | `POST /event-broker/api/subscriptions`, `GET`, `PATCH` or `DELETE /event-broker/api/subscriptions/{id}`, `GET /event-broker/api/topics/{id}` (preview of a create) | 8.18, 9.x |
+
+- **Versions.** Every op exists on Aria Automation 8.18 and on VCF
+  Automation 9.0, 9.1 and 9.1.1, so no op stops early with a version
+  message.
+- **Approval in two places.** Deciding an Automation approval is itself a
+  change in MEHO: a second person must approve the MEHO call first (an agent
+  needs a grant). The decide op reads the Automation approval again and sends
+  nothing when it no longer waits (`not_pending`). The Automation login of the
+  target must be an approver of the request.
+- **Destructive changes.** Running an ABX action and changing an event
+  subscription can make any change, so both are `destructive`: an agent is
+  always refused, a person calls `preview_operation` first and then
+  `call_operation` with the `preview_hash`. The preview builder reads the
+  action or the subscription (for a create: the event topic, the ABX action it
+  runs, and that no subscription has the name), fills `blast_radius`
+  (`object`, `children`, `irreversibility`) and refuses when the object does
+  not exist or is a system subscription. When the approved call runs, the
+  handler reads the object again. When the action's name, runtime or content
+  id, or the subscription's name, topic or runnable, differ from the approval
+  card, nothing changes (`precondition_failed`).
+- **Safe to run twice.** `policy.set` without `id` changes the policy with
+  the same name, type and project; when nothing differs it sends nothing.
+  A subscription create finds an existing one by name and answers
+  `unchanged`; update, disable and enable send only the fields that differ.
+- **Secrets.** The source code, configuration and input defaults of an ABX
+  action are never returned, only the input names. A run input with a secret
+  name is refused: a script reads its secrets from Automation action
+  constants, never from MEHO. Run inputs, outputs, error text and log lines,
+  and policy definitions, go through the secret-name scrub.
+- **Spec check.** `tests/test_vra_governance_spec_reconcile.py` pins all
+  shared calls. The policy calls are checked against
+  `vra-catalog-deployment.json` of the pinned `vra-sdk-go` v0.6.5 shelf. No
+  pinned file holds the approval, ABX or event broker calls; they follow the
+  vendor's published API references, and the live test after the merge
+  proves them.
+
 Source: `backend/src/meho_backplane/connectors/vcf_automation/`.
 
 The connector is **dual-plane**: a single registry triple covers both the
@@ -554,7 +624,8 @@ before resolving headers.
 
 Plane classification (`_plane_for_path`):
 
-- `/iaas/api/*`, `/blueprint/api/*`, `/deployment/api/*` → tenant plane.
+- `/iaas/api/*`, `/blueprint/api/*`, `/deployment/api/*`, `/approval/api/*`,
+  `/policy/api/*`, `/abx/api/*`, `/event-broker/api/*` → tenant plane.
 - Everything else (`/cloudapi/*`, `/api/*`) → provider plane.
 
 The provider plane Bearer JWT authenticates both `/cloudapi/*` and the

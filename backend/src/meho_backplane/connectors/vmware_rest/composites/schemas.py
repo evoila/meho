@@ -2307,7 +2307,8 @@ CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "minLength": 1,
             "description": (
                 "Name of the ClusterVmGroup to create for the rule's VMs. Group names are "
-                "unique within a cluster — a clash returns ``status='group_exists'``."
+                "unique within a cluster — a clash returns ``status='group_exists'``. With "
+                "``use_existing_groups=true``: the name of a VM group that already exists."
             ),
         },
         "host_group_name": {
@@ -2315,7 +2316,18 @@ CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "minLength": 1,
             "description": (
                 "Name of the ClusterHostGroup to create for the rule's hosts. Group names are "
-                "unique within a cluster — a clash returns ``status='group_exists'``."
+                "unique within a cluster — a clash returns ``status='group_exists'``. With "
+                "``use_existing_groups=true``: the name of a host group that already exists."
+            ),
+        },
+        "use_existing_groups": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "``false`` (default): create both groups from ``vms`` and ``hosts``. ``true``: "
+                "create no group; put the rule on the VM group and host group that already "
+                "exist (leave out ``vms`` and ``hosts``). A missing group returns "
+                "``status='group_not_found'``."
             ),
         },
         "vms": {
@@ -2358,7 +2370,26 @@ CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": "Whether the rule is enabled on creation. Defaults to true.",
         },
     },
-    "required": ["cluster", "rule_name", "vm_group_name", "host_group_name", "vms", "hosts"],
+    "required": ["cluster", "rule_name", "vm_group_name", "host_group_name"],
+    # New groups need vms + hosts; existing groups take neither.
+    "oneOf": [
+        {
+            "required": ["vms", "hosts"],
+            "properties": {
+                "use_existing_groups": {
+                    "const": False,
+                    "description": "New groups: false or left out.",
+                }
+            },
+        },
+        {
+            "required": ["use_existing_groups"],
+            "properties": {
+                "use_existing_groups": {"const": True, "description": "Existing groups: true."}
+            },
+            "not": {"anyOf": [{"required": ["vms"]}, {"required": ["hosts"]}]},
+        },
+    ],
     "additionalProperties": False,
     "examples": [
         {
@@ -2370,7 +2401,14 @@ CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "hosts": ["<host-name>"],
             "affine": True,
             "mandatory": False,
-        }
+        },
+        {
+            "cluster": "domain-c7",
+            "rule_name": "<rule-name>",
+            "vm_group_name": "<existing-vm-group>",
+            "host_group_name": "<existing-host-group>",
+            "use_existing_groups": True,
+        },
     ],
 }
 
@@ -3729,6 +3767,7 @@ CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "created",
                 "rule_exists",
                 "group_exists",
+                "group_not_found",
                 "insufficient_vms",
                 "insufficient_hosts",
                 "timeout",
@@ -3737,6 +3776,8 @@ CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "``'created'`` — the ReconfigureComputeResource_Task add reached terminal "
                 "success; ``'rule_exists'`` / ``'group_exists'`` — the rule or a group name is "
                 "already present (idempotence keys; refused before any write); "
+                "``'group_not_found'`` — with ``use_existing_groups=true``, the VM group or "
+                "host group does not exist (refused before any write); "
                 "``'insufficient_vms'`` / ``'insufficient_hosts'`` — none of the requested VM / "
                 "host names resolved in the cluster (refused before any write); ``'timeout'`` — "
                 "the reconfigure task did not reach a terminal state within the poll bound."
@@ -3744,8 +3785,14 @@ CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "cluster": {"type": "string", "description": "ClusterComputeResource moid."},
         "rule_name": {"type": "string", "description": "Name of the rule."},
-        "vm_group_name": {"type": "string", "description": "Name of the created VM group."},
-        "host_group_name": {"type": "string", "description": "Name of the created host group."},
+        "vm_group_name": {
+            "type": "string",
+            "description": "Name of the VM group (new, or existing).",
+        },
+        "host_group_name": {
+            "type": "string",
+            "description": "Name of the host group (new, or existing).",
+        },
         "affine": {
             "type": "boolean",
             "description": (
@@ -8556,6 +8603,178 @@ CLUSTER_DRS_RULE_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_sch
         "key": {"type": ["integer", "null"], "description": "Key of a rule with this name."},
         "rule_type": {"type": ["string", "null"], "description": "Type of that rule."},
     },
+)
+
+_DRS_GROUP_NAME_PARAM: dict[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "description": "Exact name of an existing DRS VM group or host group on the cluster.",
+}
+
+_DRS_MEMBER_NAMES_PARAM: dict[str, Any] = {
+    "type": "array",
+    "items": {"type": "string", "minLength": 1},
+    "minItems": 1,
+    "uniqueItems": True,
+}
+
+_DRS_MEMBER_ROWS: dict[str, Any] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "moid": {"type": "string", "description": "VM or host moid."},
+            "name": {"type": ["string", "null"], "description": "VM or host name."},
+        },
+    },
+}
+
+_DRS_GROUP_RULES: dict[str, Any] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "description": "Always ``drs_rule``."},
+            "name": {"type": ["string", "null"], "description": "Rule name."},
+            "key": {"type": ["integer", "null"], "description": "Rule key (vim ``key``)."},
+            "rule_type": {"type": ["string", "null"], "description": "Type of the rule."},
+        },
+    },
+}
+
+#: ``vmware.composite.cluster.drs_group.members.set`` parameter schema.
+CLUSTER_DRS_GROUP_MEMBERS_SET_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "string",
+            "pattern": CLUSTER_MOID_PATTERN,
+            "description": "Cluster moid, e.g. 'domain-c7' (the cluster the group is on).",
+        },
+        "group_name": _DRS_GROUP_NAME_PARAM,
+        "add": {
+            **_DRS_MEMBER_NAMES_PARAM,
+            "description": (
+                "Names to add: VM names for a VM group, host names for a host group. Each "
+                "must be in the cluster, or nothing changes (``names_not_found``)."
+            ),
+        },
+        "remove": {
+            **_DRS_MEMBER_NAMES_PARAM,
+            "description": (
+                "Names to remove. A name that is not in the group is skipped and listed "
+                "under ``not_members``."
+            ),
+        },
+    },
+    "required": ["cluster", "group_name"],
+    "anyOf": [{"required": ["add"]}, {"required": ["remove"]}],
+    "additionalProperties": False,
+    "examples": [
+        {"cluster": "domain-c7", "group_name": "<vm-group-name>", "add": ["<vm-name>"]},
+        {"cluster": "domain-c7", "group_name": "<host-group-name>", "remove": ["<host-name>"]},
+    ],
+}
+
+#: ``vmware.composite.cluster.drs_group.members.set`` response schema.
+CLUSTER_DRS_GROUP_MEMBERS_SET_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "updated",
+                "unchanged",
+                "invalid_request",
+                "group_not_found",
+                "names_not_found",
+                "mismatch",
+                "timeout",
+            ],
+            "description": (
+                "``'updated'`` -- the change ran and the group reads back with the new "
+                "members; ``'unchanged'`` -- nothing to change, nothing written; "
+                "``'invalid_request'`` -- a bad or unknown cluster, or a name in both lists; "
+                "``'group_not_found'`` -- no VM or host group has that name; "
+                "``'names_not_found'`` -- a name to add is not in the cluster (see "
+                "``not_found``); ``'mismatch'`` -- the task succeeded but the members read back "
+                "differently; ``'timeout'`` -- the task outran the poll bound. Only "
+                "``updated``, ``mismatch`` and ``timeout`` wrote anything. A vSphere fault is "
+                "not a status: the call fails."
+            ),
+        },
+        "cluster": {"type": "string", "description": "Cluster moid."},
+        "cluster_name": {"type": ["string", "null"], "description": "Cluster name."},
+        "group_name": {"type": "string", "description": "Group name."},
+        "group_kind": {"type": "string", "enum": ["vm", "host"], "description": "Group kind."},
+        "rules": {**_DRS_GROUP_RULES, "description": "The rules that use this group."},
+        "members_before": {**_DRS_MEMBER_ROWS, "description": "Every member before the change."},
+        "member_count_before": {"type": "integer", "description": "Number of members before."},
+        "added": {**_DRS_MEMBER_ROWS, "description": "Members that are added."},
+        "removed": {**_DRS_MEMBER_ROWS, "description": "Members that are removed."},
+        "already_members": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Names to add that were already in the group.",
+        },
+        "not_members": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Names to remove that were not in the group (skipped).",
+        },
+        "not_found": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Names to add that are not in the cluster.",
+        },
+        "member_count_after": {"type": "integer", "description": "Planned number of members."},
+        "members": {
+            **_DRS_MEMBER_ROWS,
+            "description": "Every member as read back after the change.",
+        },
+        "task": {"type": ["string", "null"], "description": "vim Task moid, when one ran."},
+        "task_state": {"type": ["string", "null"], "description": "Terminal task state."},
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["status", "cluster", "group_name"],
+}
+
+#: ``vmware.composite.cluster.drs_group.delete`` parameter schema.
+CLUSTER_DRS_GROUP_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "string",
+            "pattern": CLUSTER_MOID_PATTERN,
+            "description": "Cluster moid, e.g. 'domain-c7' (the cluster the group is on).",
+        },
+        "group_name": _DRS_GROUP_NAME_PARAM,
+    },
+    "required": ["cluster", "group_name"],
+    "additionalProperties": False,
+    "examples": [{"cluster": "domain-c7", "group_name": "<group-name>"}],
+}
+
+#: ``vmware.composite.cluster.drs_group.delete`` response schema.
+CLUSTER_DRS_GROUP_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
+    ["deleted", "unchanged", "invalid_request", "precondition_failed", "still_present", "timeout"],
+    _DELETE_STATUS_COMMON
+    + " Here ``'precondition_failed'`` means a rule still uses the group (see "
+    "``blockers``). ``'invalid_request'`` -- the cluster moid does not exist. ``'timeout'`` "
+    "-- ReconfigureComputeResource_Task outran the poll bound.",
+    object_properties={
+        "kind": {"type": "string", "description": "Always ``drs_group``."},
+        "cluster": {"type": "string", "description": "Cluster moid."},
+        "cluster_name": {"type": ["string", "null"], "description": "Cluster name."},
+        "name": {"type": "string", "description": "Group name."},
+        "group_kind": {
+            "type": ["string", "null"],
+            "description": "``vm`` or ``host``; another vim group type by its type name.",
+        },
+        "members": {**_DRS_MEMBER_ROWS, "description": "Every member; they stay."},
+        "member_count": {"type": "integer", "description": "Number of members."},
+    },
+    blocker_properties=_DRS_GROUP_RULES["items"]["properties"],
 )
 
 _DATASTORE_MOID_PARAM: dict[str, Any] = {

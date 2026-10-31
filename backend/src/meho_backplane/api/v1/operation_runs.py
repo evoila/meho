@@ -20,7 +20,8 @@ Route inventory
   optional ``?status=`` filter. Role: ``operator``.
 * ``GET /api/v1/operations/runs/{handle}`` — poll one run's durable state;
   the persisted result envelope is present once ``status='succeeded'``. 404
-  for an unknown / cross-tenant handle. Role: ``operator``.
+  for an unknown / cross-tenant handle. Optional ``?wait_seconds=N`` waits
+  up to N seconds for the run to end (#5264). Role: ``operator``.
 * ``POST /api/v1/operations/runs/{handle}/cancel`` — cancel a non-terminal
   run. 404 unknown / cross-tenant; 409 already-terminal. Role: ``operator``.
 
@@ -49,7 +50,10 @@ from meho_backplane.operations.operation_run import (
     OperationRunNotFoundError,
     UnauthorizedOperationRunCancellationError,
 )
-from meho_backplane.operations.operation_run_service import get_operation_run_service
+from meho_backplane.operations.operation_run_service import (
+    MAX_RUN_WAIT_SECONDS,
+    get_operation_run_service,
+)
 
 __all__ = ["router"]
 
@@ -180,6 +184,15 @@ async def list_operation_runs(
 @router.get("/runs/{handle}", response_model=OperationRunStatusResponse)
 async def get_operation_run_status(
     handle: uuid.UUID,
+    wait_seconds: int = Query(
+        default=0,
+        ge=0,
+        le=MAX_RUN_WAIT_SECONDS,
+        description=(
+            "Wait up to this many seconds for the run to end, then answer. "
+            f"0 (the default) answers at once. At most {MAX_RUN_WAIT_SECONDS}."
+        ),
+    ),
     operator: Operator = _require_operator,
 ) -> OperationRunStatusResponse:
     """Poll an async operation run's durable state by handle (the run id).
@@ -188,6 +201,10 @@ async def get_operation_run_status(
     that submitted the run has returned — the dropped-response-class fix: the
     full result envelope is retrievable here even if the submit response was
     lost in transit. An unknown / cross-tenant handle is 404.
+
+    With ``wait_seconds`` the answer comes as soon as the run ends, or when
+    the time is up with the run still ``pending`` or ``running``. The wait
+    holds no database connection.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_RUN_OP_IDS["status"],
@@ -196,6 +213,8 @@ async def get_operation_run_status(
     service = get_operation_run_service()
     try:
         row = await service.poll(operator, handle)
+        if wait_seconds > 0:
+            row = await service.wait_until_done(operator, row, wait_seconds=wait_seconds)
     except OperationRunNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,

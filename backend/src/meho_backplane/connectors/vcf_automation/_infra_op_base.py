@@ -107,21 +107,31 @@ def list_answer(what: str, fields: dict[str, Any]) -> dict[str, Any]:
 
 
 def change_answer(
-    key: str, what: str, fields: dict[str, Any], statuses: list[str]
+    key: str,
+    what: str,
+    fields: dict[str, Any],
+    statuses: list[str],
+    *,
+    changed: bool = True,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """The answer of a change; ``changed`` adds the list of the vendor fields sent."""
+    properties: dict[str, Any] = {
+        "status": field("string", "What happened.", enum=statuses),
+        key: {**obj(f"The {what}.", fields), "type": ["object", "null"]},
+        **(extra or {}),
+        "guidance": field(S, "What to do next, or why nothing was done."),
+    }
+    if changed:
+        properties["changed"] = {
+            "type": "array",
+            "description": "The vendor fields that were sent.",
+            "items": {"type": "string"},
+        }
     return {
         "type": "object",
         "description": f"What the change did to the {what}.",
-        "properties": {
-            "status": field("string", "What happened.", enum=statuses),
-            key: {**obj(f"The {what}.", fields), "type": ["object", "null"]},
-            "changed": {
-                "type": "array",
-                "description": "The vendor fields that were sent.",
-                "items": {"type": "string"},
-            },
-            "guidance": field(S, "What to do next, or why nothing was done."),
-        },
+        "properties": properties,
         "required": ["status", "guidance"],
         "additionalProperties": True,
     }

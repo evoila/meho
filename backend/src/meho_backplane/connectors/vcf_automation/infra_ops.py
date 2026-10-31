@@ -199,6 +199,7 @@ def _project_create(prefix: str) -> VcfaTypedOp:
                 "orgId": field(S, "The id of the organization."),
             },
             ["created", "unchanged", "invalid_request"],
+            changed=False,
         ),
         safety="caution",
         when="Call to create a project, the scope for deployments, with its users and zones.",

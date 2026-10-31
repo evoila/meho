@@ -195,6 +195,21 @@ def cloud_account_create_op(prefix: str) -> VcfaTypedOp:
                 "type": field(S, "The account type."),
             },
             ["submitted", "unchanged", "invalid_request"],
+            changed=False,
+            extra={
+                "request": {
+                    **obj(
+                        "The vendor request that adds the account.",
+                        {
+                            "id": field(S, "The request id."),
+                            "status": field(S, "The request state."),
+                            "progress": field(["integer", "null"], "Progress in percent."),
+                            "message": field(S, "The vendor message."),
+                        },
+                    ),
+                    "type": ["object", "null"],
+                }
+            },
         ),
         safety="dangerous",
         when="Call to connect VCF Automation to a vCenter or an NSX Manager.",

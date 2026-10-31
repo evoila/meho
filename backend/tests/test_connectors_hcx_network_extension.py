@@ -89,8 +89,8 @@ _EXTEND_PARAMS: dict[str, Any] = {
     "destination": {"endpoint_id": "endpoint-0002", "resource_id": "resource-0002"},
     "destination_gateway_id": "router-0002",
     "source_appliance_id": "appliance-0001",
-    "gateway": "192.0.2.1",
-    "netmask": "255.255.255.0",
+    "gateway": "<gateway-address>",
+    "netmask": "<netmask>",
     "mobility_optimized_networking": True,
 }
 
@@ -98,8 +98,8 @@ _EXTEND_PARAMS: dict[str, Any] = {
 def _extension(state: str = "SUCCESS", **extra: Any) -> dict[str, Any]:
     return {
         "stretchId": _STRETCH_ID,
-        "gateway": "192.0.2.1",
-        "netmask": "255.255.255.0",
+        "gateway": "<gateway-address>",
+        "netmask": "<netmask>",
         "operationStatus": {"state": state},
         "sourceNetwork": {
             "networkId": _NETWORK_ID,
@@ -373,7 +373,7 @@ async def test_extend_starts_the_job_and_says_accepted() -> None:
     assert body["destinationNetwork"] == {"gatewayId": "router-0002"}
     assert body["sourceAppliance"] == {"applianceId": "appliance-0001"}
     assert body["features"] == {"egressOptimization": False, "mobilityOptimizedNetworking": True}
-    assert (body["gateway"], body["netmask"], body["dns"]) == ("192.0.2.1", "255.255.255.0", [])
+    assert (body["gateway"], body["netmask"], body["dns"]) == ("<gateway-address>", "<netmask>", [])
     assert "vcGuid" not in body
 
 
@@ -530,7 +530,7 @@ async def test_mon_set_turns_mon_on_and_sets_the_policy_routes() -> None:
     params = {
         "stretch_id": _STRETCH_ID,
         "mobility_optimized_networking": True,
-        "policy_routes": {"allow": ["198.51.100.0/24"], "deny": ["203.0.113.0/24"]},
+        "policy_routes": {"allow": ["<subnet-a>/<prefix>"], "deny": ["<subnet-b>/<prefix>"]},
     }
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         _login(mock)
@@ -553,8 +553,8 @@ async def test_mon_set_turns_mon_on_and_sets_the_policy_routes() -> None:
     assert "operationStatus" not in mon_body
     assert _body(routes) == {
         "endpointId": "endpoint-0002",
-        "allow": ["198.51.100.0/24"],
-        "deny": ["203.0.113.0/24"],
+        "allow": ["<subnet-a>/<prefix>"],
+        "deny": ["<subnet-b>/<prefix>"],
     }
 
 
@@ -564,7 +564,7 @@ async def test_mon_set_failure_at_step_two_lists_what_ran_and_what_failed() -> N
     params = {
         "stretch_id": _STRETCH_ID,
         "mobility_optimized_networking": True,
-        "policy_routes": {"allow": ["198.51.100.0/24"]},
+        "policy_routes": {"allow": ["<subnet-a>/<prefix>"]},
     }
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         _login(mock)
@@ -590,7 +590,7 @@ async def test_mon_set_failure_at_step_one_runs_no_later_step() -> None:
     params = {
         "stretch_id": _STRETCH_ID,
         "mobility_optimized_networking": False,
-        "policy_routes": {"allow": ["198.51.100.0/24"]},
+        "policy_routes": {"allow": ["<subnet-a>/<prefix>"]},
     }
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         _login(mock)

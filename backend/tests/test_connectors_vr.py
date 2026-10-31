@@ -455,6 +455,9 @@ async def test_each_product_stores_a_handler_on_its_own_class(
                 select(EndpointDescriptor).where(
                     EndpointDescriptor.product.in_([VR_PRODUCT, SRM_PRODUCT]),
                     EndpointDescriptor.impl_id.in_([VR_IMPL_ID, SRM_IMPL_ID]),
+                    EndpointDescriptor.op_id.in_(
+                        ["vr.about", "vr.api_file.get", "srm.about", "srm.api_file.get"]
+                    ),
                 )
             )
         )

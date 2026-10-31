@@ -12,14 +12,19 @@ same class: all three versions serve the same API v2.
 Today the connector ships:
 
 - the **login** to the SRM API,
-- **version detection** (MEHO reads the SRM version and build), and
-- two **reads**: `srm.about` and `srm.api_file.get`.
+- **version detection** (MEHO reads the SRM version and build),
+- two **server reads**: `srm.about` and `srm.api_file.get`, and
+- seven **recovery reads**: pairings, the login to the remote site,
+  recovery plans, protection groups, health issues and run history.
 
-Why these come first: Broadcom does not offer the SRM 8.8 and 9.0 API
-files as downloads; a running appliance serves them. `srm.api_file.get`
-is how the lab pins those files. The other SRM operations (pairings,
-protection groups, recovery plans, test recovery and more) are built on
-this connector after the files are pinned.
+Broadcom does not offer the SRM 8.8 and 9.0 API files as downloads; a
+running appliance serves them. `srm.api_file.get` is how the lab pins
+those files.
+
+**No SOAP client is needed.** The SRM REST API v2 covers the usual work:
+pairings, the remote login, recovery plans, protection groups, issues,
+history reports, and (in later Tasks) test, recovery, reprotect and the
+inventory mappings. Every operation here uses that REST API.
 
 Package: `backend/src/meho_backplane/connectors/srm/`.
 
@@ -34,8 +39,19 @@ lives in `connectors/vmware_shared/dr_rest.py` (the base class
 |---|---|---|---|---|
 | `srm.about` | SRM server name, status, version, build and the paired vCenter, plus a short view of the certificates. MEHO uses the same call to detect the version. | `GET /api/rest/srm/v2/server/info` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
 | `srm.api_file.get` | Read one API description file the appliance serves (the SRM API or the appliance setup API). Returns a checked copy (secret values replaced) with its size, SHA-256 and the SRM version; the text is in parts behind a result handle. | `GET /api/rest/srm/v2/open-api.yaml`, `GET /api/rest/configure/v2/open-api.yaml` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
+| `srm.pairing.list` | The site pairings. One row per pairing: the pairing id and, for both sites, the SRM server and the vCenter with id, name, address, status (OK, WARNING, ERROR), version and build. | `GET /pairings` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
+| `srm.remote_login` | Log in to the remote site of a pairing. The account comes from the Vault path in `secret_ref`; the answer names the remote user, never the password. | `POST /pairings/{pairing_id}/remote-session`, then `GET /pairings/{pairing_id}/remote-session` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
+| `srm.plan.list` | The recovery plans. One row per plan: id, name, status, `needs_cleanup`, `is_running`, progress, site names, folder, description. | `GET /pairings/{pairing_id}/recovery-management/plans` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
+| `srm.plan.get` | One plan with its protection groups, its recovery steps in one view mode (test, recovery, cleanup or reprotect), its VMs with priority and start action, and with `vm_id` that VM's full recovery settings. | `GET .../plans/{plan_id}`, `GET .../plans/{plan_id}/protection-groups`, `GET .../plans/{plan_id}/recovery-steps/{view_mode}`, `GET .../plans/{plan_id}/vms`, `GET .../plans/{plan_id}/vms/{vm_id}/recovery-settings` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
+| `srm.group.list` | The protection groups with replication type (HBR is vSphere Replication, ABR is array based), VM count and state; with `group_id` the VMs of that group with their protection state and errors. | `GET /pairings/{pairing_id}/protection-management/groups`, `GET .../groups/{group_id}/vms` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
+| `srm.issue.list` | Health issues (errors and warnings) of the pairing, or of one plan (`plan_id`), one group (`group_id`) or one SRM server (`srm_id`). | `GET /pairings/{pairing_id}/issues`, `GET .../plans/{plan_id}/issues`, `GET .../groups/{group_id}/issues`, `GET /pairings/{pairing_id}/srms/{srm_id}/issues` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
+| `srm.history.list` | The runs of a plan (test, cleanup, recovery, reprotect) in a time range, newest first, with result and error counts; with `report_id` one run with its error and warning texts. | `GET .../plans/{plan_id}/history-reports`, then `GET /tasks/{taskId}`; `GET .../plans/{plan_id}/history-reports/{report_id}` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
 
-Both operations exist on every covered version, so neither needs a
+The recovery read paths are relative to `/api/rest/srm/v2`; `...` stands
+for `/pairings/{pairing_id}/recovery-management` (plans) or
+`/pairings/{pairing_id}/protection-management` (groups).
+
+Every operation exists on every covered version, so none needs a
 version check yet. The Tasks that add 9.x-only operations add that check.
 
 ## Registering targets
@@ -92,6 +108,14 @@ other modes raise `NotImplementedError`.
   schemas and the shared `llm_instructions` texts come from
   `connectors/vmware_shared/dr_rest_schemas.py`.
 - `API_FILES` (`api_file.py`) -- the two files the read can fetch.
+- `recovery_ops.py` -- the metadata and group texts of the seven
+  recovery reads; `recovery_schemas.py` -- their response schemas;
+  `recovery_paths.py` -- their vendor paths and `VENDOR_CALLS`, the list
+  the reconcile test checks; `recovery_reads.py` -- their bodies. The
+  entry methods (`pairing_list`, `remote_login`, `plan_list`, `plan_get`,
+  `group_list`, `issue_list`, `history_list`) are on `SrmConnector`, for
+  the same reason as `about`.
+- `SrmTypedOp` (`_op.py`) -- the metadata record of one operation.
 - `dr_api_file_get` (`connectors/vmware_shared/dr_api_file.py`) -- the read's
   body, shared with `vr.api_file.get`.
 - `connectors/_shared/api_file_read.py` -- the vendor-neutral steps of an
@@ -222,6 +246,66 @@ of the joined text equals `sha256`. The copy is not byte for byte the
 vendor file: it is the parsed file written back, with secrets replaced.
 Pin and compare the copy.
 
+### The recovery reads
+
+All seven need `pairing_id` (from `srm.pairing.list`), except
+`srm.pairing.list` itself. Every id the caller gives becomes one path
+segment: the schema refuses `/`, `\`, `?`, `#`, `%`, `.` and `..`, and
+the code encodes the value before it builds the path.
+
+**Lists.** A list read asks for pages of 100 rows (`limit`, `offset`)
+until it has `_meta.total` rows, at most 50 pages. The answer is a few
+scalars (for example `pairing_id`, `total`) and `items`, a flat list of
+rows. A long list is stored behind a result handle; read it with
+`result_query`. Times come back as ISO 8601 UTC text, not milliseconds.
+
+**`srm.pairing.list`** flattens the four server objects of a pairing
+(`local_srm`, `remote_srm`, `local_vc`, `remote_vc`) into columns such
+as `remote_srm_status`. Certificates are left out.
+
+**`srm.remote_login`** reads the Vault path in `secret_ref` (KV version 2,
+mount `secret`, keys `username` and `password`) under the caller's
+identity, then sends `POST /pairings/{pairing_id}/remote-session` with
+the SRM session header and HTTP Basic of that account. It then reads the
+remote user back. The password is never in the answer, a log line or
+the stored vendor call (the flight recorder hides the `Authorization`
+header). A Vault refusal is reported as a problem with `secret_ref`. A
+secret without both keys stops before any request. A `401` may mean
+that MEHO's SRM session ended or that the remote site refused the
+account: the read drops the SRM session, logs in again and tries once
+more. A second `401` is reported as a refused remote login.
+
+The remote login belongs to MEHO's SRM session. When that session ends
+and MEHO logs in again, the remote login is gone; a read that needs the
+remote site then fails, and the caller runs `srm.remote_login` again.
+
+**`srm.plan.list`** adds `needs_cleanup`: true for `TEST_COMPLETE`,
+`TEST_INTERRUPTED`, `CLEANUP_INCOMPLETE` and `CLEANUP_INTERRUPTED`.
+
+**`srm.plan.get`** makes four reads (plan, groups, steps, VMs) and a
+fifth with `vm_id`. `view_mode` defaults to `recovery`. SRM refuses some
+view modes in some plan states; then `steps` is empty and `steps_error`
+holds the HTTP status and the vendor text. Every other error stops the
+read.
+
+**`srm.group.list`** returns `kind: "groups"` rows, or with `group_id`
+`kind: "vms"` rows.
+
+**`srm.issue.list`** takes at most one of `plan_id`, `group_id` and
+`srm_id` (the schema says so with `oneOf`). Rows carry `severity` (ERROR
+or WARNING), `issue_type`, the object, the text and the time; the answer
+counts `errors` and `warnings`.
+
+**`srm.history.list`** without `report_id`: SRM answers the list call
+with a task (`202`). The read checks `GET /tasks/{taskId}` once a second
+for up to 60 seconds. A task that ends with `ERROR` or `CANCELLED`, or
+that runs longer, stops the read with its message. The reports come from
+the task's `result` (a list, `{"list": [...]}` or one report). `start_time`
+and `end_time` (ISO 8601) become the vendor's `start_date` and
+`end_date`; without them SRM returns the last 7 days. `report_id` is the
+report's `run_key`. With `report_id` the read gets that report directly,
+with its `errors` and `warnings` texts.
+
 ### Shutdown
 
 `aclose()` clears the session cache and closes the HTTP pool. No logout
@@ -240,6 +324,15 @@ call is sent.
 
 ## Tests
 
+- `backend/tests/test_connectors_srm_recovery_reads.py` -- the seven
+  recovery reads through `dispatch()` with hand-written answers: flat
+  rows and paging, the remote login (account sent, never returned; a
+  refused login; a secret without a password sends nothing), plan state,
+  a refused view mode, groups and group VMs, each issue scope, two scopes
+  refused, the history task checked until it ends, a failed task, one
+  report, a vendor error, ids that are not one path segment, and
+  registration with group texts.
+
 - `backend/tests/test_connectors_srm.py` -- login, both reads through
   `dispatch()`, replaced and counted secrets, a replaced copy that still
   parses with every value type kept, two targets on one address, a `401`
@@ -249,8 +342,9 @@ call is sent.
 - `backend/tests/test_connectors_shared_api_file_read.py` -- the shared
   read steps, including `text_redactor` and what the flight recorder and
   a raised `401` carry.
-- `backend/tests/test_connectors_srm_spec_reconcile.py` -- the login and
-  `server/info` paths against the pinned 9.1 file
+- `backend/tests/test_connectors_srm_spec_reconcile.py` -- the login,
+  `server/info` and every recovery read path (`VENDOR_CALLS`) against the
+  pinned 9.1 file
   (`vcf-protection-and-recovery-9.1/recovery-srm-v2.yaml` on the spec
   shelf). The 8.8 and 9.0 files join this lane once the lab pins them.
 
@@ -266,13 +360,20 @@ call is sent.
   from the vendor's. Pin and compare the copy, not the vendor bytes.
   `hcx.api_file.get` and `fleet.api_file.get` do not run the extra
   redaction pass yet, so a file like this still stops there.
+- **The shape of the history task result is not in the vendor file.** The
+  file says only "Result is of type HistoryReport" and types `result` as
+  a free object. The read accepts a list, `{"list": [...]}` or one report,
+  and takes `run_key` as the `report_id`. The live test confirms this.
+- **`srm.plan.list` has no protection groups or last run per plan.** That
+  would cost one or two more vendor calls per plan. `srm.plan.get` returns
+  a plan's groups, and `srm.history.list` its runs.
 - The 8.8 and 9.0 calls follow the 9.1 file and the vendor documentation.
   Their first live use is the pinning of the 8.8 and 9.0 files. If a call
   differs there, fix the call and the table above.
 
 ## References
 
-- Task #4505 (this connector); #4506 (the vSphere Replication connector,
+- Task #4505 (this connector); Task #4552 (the recovery reads); #4506 (the vSphere Replication connector,
   the second target of a 9.1 appliance, `connectors-vr.md`).
 - `docs/codebase/connectors-hcx.md`, `docs/codebase/connectors-vcf-fleet.md`
   -- the sibling API file reads.

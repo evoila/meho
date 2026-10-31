@@ -48,6 +48,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _supervisor,
     _teardown,
     _teardown_network,
+    _vapp,
     _vm_allocation,
     _vm_cdrom_library_iso,
     _vm_cdrom_tools,
@@ -126,6 +127,12 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
         _write._SUB_OPS_RESOURCE_POOL_CREATE + _write._VIM_SUB_OPS_RESOURCE_POOL_CREATE
     ),
     "vmware.composite.resource_pool.delete": _write._SUB_OPS_RESOURCE_POOL_DELETE,
+    # --- vApps (#4341): the vApp read (also the task poll) and one vim write each.
+    "vmware.composite.vapp.create": _vapp._VIM_SUB_OPS_VAPP_CREATE,
+    "vmware.composite.vapp.power": _vapp._VIM_SUB_OPS_VAPP_POWER,
+    "vmware.composite.vapp.start_order.set": _vapp._VIM_SUB_OPS_VAPP_START_ORDER,
+    "vmware.composite.vapp.delete": _vapp._VIM_SUB_OPS_VAPP_DELETE,
+    # --- end vApps (#4341)
     "vmware.composite.folder.create": _write._VIM_SUB_OPS_FOLDER_CREATE,
     "vmware.composite.vm.resize": _write._SUB_OPS_VM_RESIZE,
     "vmware.composite.vm.nic.repoint": _write._SUB_OPS_VM_NIC_REPOINT,

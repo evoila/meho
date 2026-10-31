@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 87 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 91 hand-authored composites
 that orchestrate cross-spec workflows: 20 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -22,7 +22,7 @@ read `datastore.file.list` / `#3432` + the vSAN folder list
 read `datastore.vsan.folder.list` / `#4022` + the orphan folder check
 `datastore.orphan_dirs` / `#3814` + the VM limit and
 reservation read `vm.resource_allocation.show` / `#3880` + the migration
-inventory read `vmware.migration.inventory`) and 67 write
+inventory read `vmware.migration.inventory`) and 71 write
 composites (G3.1-T6 / `#509`, incl. the three vCenter install changes
 `vcenter.appliance.deploy` / `vcenter.install` / `vcenter.deployment.answer`
 (`#4394`), the destructive-tier `vm.destroy` / `#3198`, the
@@ -38,7 +38,9 @@ mutating VI-JSON `vm.disk.grow` / `#2893` + the WSFC/FCI shared-attach
 `cluster.drs_rule.create` + `folder.create` / `#2895`, the governed
 resource-pool allocation writes `resource_pool.create` (`caution`) +
 `resource_pool.delete` (`dangerous`) and the VM-Host affinity
-`cluster.drs_vm_host_rule.create` (`caution`) / `#3505`, the `#2891`
+`cluster.drs_vm_host_rule.create` (`caution`) / `#3505`, the four vApp
+operations `vapp.create` + `vapp.start_order.set` (`caution`), `vapp.power`
+(`dangerous`) and `vapp.delete` (`destructive`) / `#4341` (see **vApps**), the `#2891`
 post-clone hardware reconfigure trio `vm.resize` / `vm.nic.repoint` /
 `vm.device.cdrom`, the VM CPU / memory limit + reservation write
 `vm.resource_allocation.set` (`caution`, with its safe read
@@ -565,10 +567,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 87
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 91
   `_CompositeSpec` rows (20 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 50 dangerous/destructive
-  writes + 17 caution writes); each row carries its
+  cache-refresh read `datastore.refresh` — + 52 dangerous/destructive
+  writes + 19 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
   (`llm_instructions`) of the VM and folder writes and the VM allocation
@@ -1438,12 +1440,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 87 `vmware.composite.*` rows with
+   queued registrar and upserts: the 91 `vmware.composite.*` rows with
    `source_kind="composite"` — 20 reads (19 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 67 writes, all `requires_approval=True`
-   (38 `safety_level="dangerous"`; 17 `safety_level="caution"` —
+   service principals), and 71 writes, all `requires_approval=True`
+   (39 `safety_level="dangerous"`; 19 `safety_level="caution"` —
    `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
@@ -1451,8 +1453,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    `vm.tools.installer.unmount`, `vm.cdrom.mount_library_iso` +
    `vm.cdrom.unmount_library_iso`, `vm.snapshot.create`,
    `content_library.create` + `content_library.item.upload`,
-   `cluster.drs_group.members.set`;
-   and 12 `safety_level="destructive"` — `vm.destroy` / `#3198`,
+   `cluster.drs_group.members.set`, `vapp.create` + `vapp.start_order.set` / `#4341`;
+   and 13 `safety_level="destructive"` — `vm.destroy` / `#3198`,
+   `vapp.delete` / `#4341`,
    `namespace.delete`, `storage_policy.delete`, `cluster.drs_rule.delete`,
    `cluster.drs_group.delete`,
    `vm.snapshot.delete`, and the six `#3339` teardown deletes) —
@@ -1840,7 +1843,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 87 composites (20 reads + 67 writes) land as `source_kind="composite"`
+The 91 composites (20 reads + 71 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1937,7 +1940,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 87 composites are hand-authored aggregators the connector ships as
+The 91 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -2872,6 +2875,45 @@ Code: `composites/_drs_group.py` (shared group reads + `members.set`),
 (called from the create handler in `_write.py`). The governed sub-op
 manifests are in `_governed_subops.py`. All three are on `vmware-rest-8.0` and
 `vmware-rest-9.0`.
+
+### vApps
+
+Four operations create a vApp, start and stop it in its start order, set
+that order, and delete it (`#4341`). A vApp is a resource pool that groups
+VMs and starts and stops them in a set order. vCenter's REST API has no call
+for it, so the operations use the VIM API as VI-JSON: read the objects
+(`RetrievePropertiesEx`), run one vim write through the governed write seam
+(`_write._write_vmomi_sub_op`), poll the task where the method is a
+`*_Task`, and read the vApp again to return its new state. They are on both
+catalogs (`vmware-rest-8.0` and `vmware-rest-9.0`), wait for approval, and
+need no catalog ingest. A change takes the vApp id (`vapp`, such as
+`resgroup-v42`), never a name, so after approval it runs on the vApp the
+approver saw. An object that is in the asked state already answers
+`unchanged` and nothing is sent. A vendor fault (task fault, or the HTTP 500
+fault body of a call without a task) fails the call with the fault type and
+text.
+
+| Operation | What it does | Returns | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.composite.vapp.create` | `ResourcePool.CreateVApp` in a cluster's root resource pool (`cluster`) or in a pool (`resource_pool`), shown in a VM folder (`folder`). Default resources: no reservation, no limit, normal shares. Checks first that the pool and folder exist and that the folder holds vApps. A vApp of the same name in the pool is `unchanged`; a resource pool of that name is refused. | `status` (`created`, `unchanged`, ...), the vApp (`vapp`, `name`, `state`, `vms`), `resource_pool`, `folder` | `caution` | 8.0, 9.x |
+| `vmware.composite.vapp.power` | `action=power_on`: `VirtualApp.PowerOnVApp_Task`, vCenter starts the VMs in their start order. `action=power_off`: `PowerOffVApp_Task`, the VMs stop in the reverse order, or all at once with `force=true`. A vApp that is starting or stopping is refused. | `status` (`powered_on`, `powered_off`, `unchanged`, `not_confirmed`, ...), `state_before`, `state`, `vms` with each VM's power state and start settings | `dangerous` | 8.0, 9.x |
+| `vmware.composite.vapp.start_order.set` | `VirtualApp.UpdateVAppConfig` with one `VAppEntityConfigInfo` per given VM: start group, start and stop delay, wait for the guest, start and stop action. Fields left out keep their value. Each VM must be in the vApp. | `status` (`updated`, `unchanged`, `not_confirmed`, ...), `vms` as read after the change | `caution` | 8.0, 9.x |
+| `vmware.composite.vapp.delete` | `VirtualApp.Destroy_Task`: deletes the vApp and every VM in it with their disks. Refused when the vApp is not stopped, a VM in it is not powered off, or it holds other vApps or resource pools. | the teardown envelope: `status` (`deleted`, `unchanged`, `still_present`, ...), `object` (vApp, VM count, what is lost), `children` (the VMs) | `destructive` | 8.0, 9.x |
+
+The VM rows (`vms`) come in start order: `vm`, `name`, `power_state`,
+`start_order`, `start_delay`, `wait_for_guest`, `start_action`,
+`stop_action`, `stop_delay`. The vApp state comes from `summary` (read
+whole, because `vAppState` is on the `VirtualAppSummary` subtype only). The
+delete uses the plan-then-act seam of `_teardown.py`: one read-only plan
+feeds the approval-card `blast_radius` (`object`, `children`,
+`irreversibility`) and the handler. A person calls `preview_operation` first,
+and an agent is always refused. The other three have approval previews that
+show the objects now and whether the call would stop before the change.
+Code: `composites/_vapp.py` (shared reads, views and write steps),
+`_vapp_change.py` (create, power), `_vapp_start_order.py`, `_vapp_delete.py`
+and `_vapp_schemas.py`. The sub-operation lists `_vapp._VIM_SUB_OPS_VAPP_*`
+are pinned by the reconcile lane against the pinned `vi-json.yaml`. Tests:
+`test_connectors_vmware_rest_composites_vapp.py`.
 
 ### VM snapshot operations (`vmware.snapshot.list`, `vm.snapshot.create` / `.delete` / `.revert`)
 

@@ -19,7 +19,7 @@ records the launcher's contract and invariants.
 
 | File | Role |
 |---|---|
-| `manifest.json` | MCPB 0.3 manifest. `mcp_config` runs `node server/index.mjs <backplane_url> <ca_cert>`; env carries `MEHO_MCP_CLIENT_ID`, `MEHO_MCP_SCOPES`, and `NODE_EXTRA_CA_CERTS` (older-Node CA fallback). |
+| `manifest.json` | MCPB 0.3 manifest. `mcp_config` runs `node server/index.mjs <backplane_url> <ca_cert>`; env carries `MEHO_MCP_CLIENT_ID`, `MEHO_MCP_SCOPES`, `MEHO_TENANT` (the optional `tenant` setting, #5242), and `NODE_EXTRA_CA_CERTS` (older-Node CA fallback). |
 | `server/index.mjs` | The launcher. Validates argv, injects the internal CA, takes the sign-in lock, rewrites `process.argv`, imports the login guard, which imports the vendored `mcp-remote` entry in-process. |
 | `server/signin-lock.mjs` | One sign-in at a time (#3857). A per-endpoint lock file, so two copies started together do not both run the browser login. |
 | `../claude-code-plugin/lib/login-guard.mjs` | The login guard (#4003), shared with the Claude Code plugin. Not in this folder: `build.sh` copies it to `server/login-guard.mjs` in the staged bundle. |
@@ -52,6 +52,14 @@ records the launcher's contract and invariants.
    read, defaulted when empty, and deleted from `process.env`.
    `offline_access` gets an offline refresh token, so the login outlasts the
    realm's SSO idle limit (30 minutes by default).
+   `MEHO_TENANT` (#5242) is read, trimmed, and deleted from `process.env`.
+   Empty, whitespace, or an unsubstituted `${user_config.tenant}`
+   placeholder means no tenant. A tenant adds
+   `--header "Meho-Tenant: <tenant>"` to the `mcp-remote` argv, the header
+   the backplane reads to pick the current tenant
+   (`auth/current_tenant.py`, `TENANT_HEADER`). `mcp-remote` puts custom
+   headers into the key of its saved login, so each tenant value has its
+   own saved login.
 4. **mcp-remote entry.** Resolved from the bundle's `node_modules` via the
    package's `bin` mapping.
 5. **Sign-in lock (#3857).** `acquireSignInLock(url.href)` waits until it
@@ -88,6 +96,7 @@ records the launcher's contract and invariants.
    the lock file cannot be used, the launcher starts without the lock.
 6. **Hand-off.** `process.argv` becomes
    `[node, server/login-guard.mjs, entry, url, --static-oauth-client-info, {"client_id"}, --static-oauth-client-metadata, {"scope"}]`,
+   plus `--header, "Meho-Tenant: <tenant>"` when a tenant is set,
    the launcher sets `MEHO_LOGIN_GUARD_PREFIX` / `MEHO_LOGIN_GUARD_RECONNECT`
    (the bundle's log prefix and the "turn the extension off and on" hint),
    and imports the guard. The guard reads and deletes those two variables,
@@ -133,6 +142,10 @@ records the launcher's contract and invariants.
   `login-guard.mjs`; `build.sh` copies the plugin's file, and
   `mcpb-bundle.yml` also runs on changes to that file. The guard's own
   contract (argv shape, rules) is documented in its header.
+- **One tenant per session (#5242).** The tenant is fixed when the launcher
+  starts; there is no MCP tool to change it. No setting sends no header, so
+  a login with one tenant behaves as before. The Claude Code plugin shim
+  (`bin/meho-mcp-remote`, `MEHO_TENANT`) sends the same header.
 - **argv[3] is load-bearing.** The manifest's third `args` item must stay
   `${user_config.ca_cert}`; the suite pins the manifest `args` array.
 

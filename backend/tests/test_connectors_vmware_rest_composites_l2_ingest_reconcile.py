@@ -1324,6 +1324,7 @@ def test_host_vi_json_paths_exist_in_the_pinned_spec() -> None:
 from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
     _datastore_files,
     _drs_rule_delete,
+    _folder_teardown,
     _library_delete,
     _snapshot,
     _teardown,
@@ -1353,6 +1354,17 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
         {
             "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
             "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+            "POST:/Folder/{moId}/Destroy_Task",
+        },
+    ),
+    # folder.teardown (#4624): the reads, the VM Destroy_Task of vm.destroy's
+    # vim arm and the Destroy_Task of folder.delete.
+    "_VIM_SUB_OPS_FOLDER_TEARDOWN": (
+        _folder_teardown,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+            "POST:/VirtualMachine/{moId}/Destroy_Task",
             "POST:/Folder/{moId}/Destroy_Task",
         },
     ),

@@ -336,3 +336,65 @@ def http_status_error(status: int, text: str = "") -> httpx.HTTPStatusError:
     return httpx.HTTPStatusError(
         f"{status}", request=request, response=httpx.Response(status, request=request, text=text)
     )
+
+
+class FolderTeardownFake(VimFake):
+    """:class:`VimFake` plus the REST seam ``folder.teardown`` uses (#4624).
+
+    Adds the REST power-off / guest-shutdown / VM ``DELETE`` calls of
+    ``vm.power`` and ``vm.destroy`` (recorded in ``rest_calls``), the live
+    ``about`` version that picks the destroy arm, and per-object faults. A
+    deleted object also leaves the ``childEntity`` of its folder, like in
+    vCenter.
+    """
+
+    def __init__(self, *, about: str = "9.0.0") -> None:
+        super().__init__()
+        self.about = about
+        self.rest_calls: list[tuple[str, str]] = []
+        #: moid -> (fault type, message) its ``Destroy_Task`` fails with.
+        self.destroy_faults: dict[str, Fault] = {}
+        #: VMs whose guest shutdown fails (no VMware Tools: HTTP 503).
+        self.no_tools: set[str] = set()
+        #: VMs that ignore a guest shutdown (they stay powered on).
+        self.ignore_shutdown: set[str] = set()
+
+    def _remove(self, mo_type: str, moid: str) -> None:
+        self.objects.pop((mo_type, moid), None)
+        for (kind, _), props in self.objects.items():
+            if kind == "Folder" and "childEntity" in props:
+                props["childEntity"] = [r for r in props["childEntity"] if r["value"] != moid]
+
+    async def _about_version(self, target: Any, operator: Operator) -> str:
+        return self.about
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return f"/api{path}"
+
+    async def _post_json(
+        self, target: Any, path: str, *, operator: Operator, verb: str = "POST", **_: Any
+    ) -> dict[str, Any]:
+        self.rest_calls.append((verb, path))
+        vm = path.split("/")[4].split("?")[0]
+        if verb == "DELETE":
+            self._remove("VirtualMachine", vm)
+        elif path.endswith("/guest/power?action=shutdown"):
+            if vm in self.no_tools:
+                raise http_status_error(503, "VMware Tools is not running")
+            if vm not in self.ignore_shutdown:
+                self.objects[("VirtualMachine", vm)]["runtime.powerState"] = "poweredOff"
+        elif path.endswith("/power?action=stop"):
+            self.objects[("VirtualMachine", vm)]["runtime.powerState"] = "poweredOff"
+        else:
+            raise AssertionError(f"unexpected REST call {verb} {path}")
+        return {}
+
+    async def _post_vmomi_json(self, target: Any, path: str, **kwargs: Any) -> Any:
+        mo_type, moid, method = path.strip("/").split("/")
+        if method == "Destroy_Task" and moid in self.destroy_faults:
+            self.calls.append((path, kwargs.get("json")))
+            return self._fault_task(*self.destroy_faults[moid])
+        result = await super()._post_vmomi_json(target, path, **kwargs)
+        if method == "Destroy_Task" and (mo_type, moid) not in self.objects:
+            self._remove(mo_type, moid)
+        return result

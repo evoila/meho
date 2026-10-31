@@ -52,6 +52,7 @@ _PARAMETER_SCHEMAS: dict[str, dict[str, Any]] = {
     "vm.snapshot.delete": schemas.VM_SNAPSHOT_DELETE_PARAMETER_SCHEMA,
     "folder.create": schemas.FOLDER_CREATE_PARAMETER_SCHEMA,
     "folder.delete": schemas.FOLDER_DELETE_PARAMETER_SCHEMA,
+    "folder.teardown": schemas.FOLDER_TEARDOWN_PARAMETER_SCHEMA,
 }
 
 _READ_ONLY = {"vm.resource_allocation.show"}

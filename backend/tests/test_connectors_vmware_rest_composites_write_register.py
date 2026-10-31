@@ -152,6 +152,7 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.network.portgroup.delete",
     "vmware.composite.host.standard_portgroup.delete",
     "vmware.composite.folder.delete",
+    "vmware.composite.folder.teardown",
     "vmware.composite.datastore.file.delete",
     "vmware.composite.datastore.dir.create",
     "vmware.composite.content_library.delete",
@@ -404,6 +405,10 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     "vmware.composite.folder.delete": (
         "meho_backplane.connectors.vmware_rest.composites._teardown.folder_delete_composite"
     ),
+    "vmware.composite.folder.teardown": (
+        "meho_backplane.connectors.vmware_rest.composites._folder_teardown."
+        "folder_teardown_composite"
+    ),
     "vmware.composite.datastore.file.delete": (
         "meho_backplane.connectors.vmware_rest.composites."
         "_datastore_files.datastore_file_delete_composite"
@@ -490,6 +495,7 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.network.portgroup.delete": "networking",
     "vmware.composite.host.standard_portgroup.delete": "networking",
     "vmware.composite.folder.delete": "vm",
+    "vmware.composite.folder.teardown": "vm",
     "vmware.composite.datastore.file.delete": "storage",
     "vmware.composite.datastore.dir.create": "storage",
     "vmware.composite.content_library.delete": "content_library",
@@ -687,6 +693,7 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
             "vmware.composite.network.portgroup.delete",
             "vmware.composite.host.standard_portgroup.delete",
             "vmware.composite.folder.delete",
+            "vmware.composite.folder.teardown",
             "vmware.composite.datastore.file.delete",
             "vmware.composite.content_library.delete",
             "vmware.composite.content_library.item.delete",
@@ -1067,6 +1074,13 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "precondition_failed",
             "still_present",
             "timeout",
+        },
+        "vmware.composite.folder.teardown": {
+            "deleted",
+            "unchanged",
+            "precondition_failed",
+            "invalid_request",
+            "still_present",
         },
         "vmware.composite.datastore.file.delete": {
             "deleted",

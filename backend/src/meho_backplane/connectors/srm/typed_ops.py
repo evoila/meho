@@ -11,15 +11,26 @@ Protection and Recovery:
 * ``srm.api_file.get`` -- ``GET`` one of the two API files the appliance
   serves; the body lives in :mod:`meho_backplane.connectors.vmware_shared.dr_api_file`.
 
+The appliance setup operations (``srm.appliance.*`` and
+``srm.storage_adapter.install``) are defined in
+:mod:`meho_backplane.connectors.srm.appliance_ops` and
+:mod:`meho_backplane.connectors.srm.appliance_ops_more` and joined into
+:data:`SRM_TYPED_OPS` here.
+
 The dataclass + tuple + registrar shape mirrors
 :mod:`meho_backplane.connectors.hcx.typed_ops`.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING
 
+from meho_backplane.connectors.srm._op import SrmTypedOp
+from meho_backplane.connectors.srm.appliance_ops import (
+    APPLIANCE_TYPED_OPS,
+    SETUP_WHEN_TO_USE_BY_GROUP,
+)
+from meho_backplane.connectors.srm.appliance_ops_more import APPLIANCE_MORE_TYPED_OPS
 from meho_backplane.connectors.vmware_shared.dr_rest_schemas import (
     API_FILE_NEXT_STEP,
     API_FILE_OUTPUT_SHAPE,
@@ -43,23 +54,6 @@ _GROUP_SERVER = "srm-server"
 _GROUP_API_DOCS = "srm-api-docs"
 
 
-@dataclass(frozen=True)
-class SrmTypedOp:
-    """Metadata for one SRM typed op registered at lifespan startup."""
-
-    op_id: str
-    handler_attr: str
-    summary: str
-    description: str
-    parameter_schema: dict[str, Any]
-    response_schema: dict[str, Any] | None
-    group_key: str | None
-    tags: tuple[str, ...]
-    safety_level: Literal["safe", "caution", "dangerous", "destructive"]
-    requires_approval: bool
-    llm_instructions: dict[str, Any] | None
-
-
 #: Curated ``when_to_use`` text per group. Says what the group holds; it
 #: makes no claim about the safety of the whole group.
 SRM_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
@@ -75,6 +69,7 @@ SRM_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "its size, SHA-256 and the SRM version, with the text in parts behind a "
         "result handle, so a vendor API file can be pinned and compared. One read."
     ),
+    **SETUP_WHEN_TO_USE_BY_GROUP,
 }
 
 _ABOUT = SrmTypedOp(
@@ -155,7 +150,12 @@ _API_FILE_GET = SrmTypedOp(
     },
 )
 
-SRM_TYPED_OPS: tuple[SrmTypedOp, ...] = (_ABOUT, _API_FILE_GET)
+SRM_TYPED_OPS: tuple[SrmTypedOp, ...] = (
+    _ABOUT,
+    _API_FILE_GET,
+    *APPLIANCE_TYPED_OPS,
+    *APPLIANCE_MORE_TYPED_OPS,
+)
 
 
 async def register_srm_typed_operations(

@@ -709,6 +709,35 @@ API with eleven hand-written path constants (thirteen `METHOD:/path` pairs).
   goes on the shelf, the check gets a compare test, and this entry is
   withdrawn.
 
+### idb-wsa-3.3 and idb-rest-9.0 — no API file exists; the check pins the list (#4508)
+
+The `idb` connectors (Workspace ONE Access 3.3 and VCF Identity Broker 9.x)
+call twelve hand-written path constants (twelve `METHOD:/path` pairs).
+
+- **Check file:** `backend/tests/test_connectors_idb_spec_reconcile.py`. It
+  reads the `*_PATH` constants of `connectors/idb/_paths.py` live, gives each
+  one its HTTP method, and pins the full `METHOD:/path` list. It also checks
+  that every path is in the reference list in the docstring of `_paths.py`.
+  All tests run always; there is no compare test.
+- **What was checked (2026-10-31).** Identity Broker documents its API only
+  as web pages (<https://developer.broadcom.com/xapis/vmware-identity-broker/latest/>);
+  no API file is linked. The token, `properties`, OpenID discovery and SCIM
+  search paths were checked against its operation index. For Workspace ONE
+  Access 3.3 no API reference exists. The login and SCIM search paths match
+  the archived Identity Manager swagger file (`apidocs/swagger.json` in
+  `omnissa-archive/idm`, not tied to 3.3). The identity provider and
+  directory list paths come from the VMware PowerCLI example module
+  `VMware.WorkspaceOneAccess`, the health path from the Identity Manager 3.3
+  monitoring docs, and the directory sync path only from community
+  write-ups. The decision record
+  `docs/decisions/2026-10-23-identity-broker-connector.md` lists them.
+- **Residual risk, named.** The Workspace ONE Access directory, identity
+  provider and sync calls are not in any API reference. A wrong path or body
+  shows up only in the lab proof. The pinned list makes sure every path change
+  in MEHO is made on purpose.
+- **Activation:** a vendor API file for either product. Then the file goes on
+  the shelf, the check gets a compare test, and this entry is withdrawn.
+
 ## Red lane = finding (the protocol)
 
 A red lane on first run against the real shelf is **the guard working**,

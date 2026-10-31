@@ -4,6 +4,8 @@
 # Tests of the form-2 scripts in deploy/linux-server/: the install script
 # (#4733), its host firewall (#4635), RKE2's CIS profile (#4636), the
 # update (#4736), and the scripts that build and check the download (#4734).
+# Also of the appliance build scripts in deploy/appliance/ (#4811): the
+# build, the clean script and the OVF rewrite.
 #
 # shellcheck checks every shell script there: the *.sh files and any file
 # that starts with a shell shebang, so a script without an extension (for
@@ -44,6 +46,7 @@ on:
     branches: [main]
     paths:
       - 'deploy/linux-server/**'
+      - 'deploy/appliance/**'
       - 'deploy/charts/meho/**'
       - '.github/workflows/linux-server-test.yml'
   workflow_dispatch:
@@ -112,8 +115,8 @@ jobs:
           set -euo pipefail
           mapfile -t scripts < <(
             {
-              find deploy/linux-server -type f -name '*.sh'
-              grep -rlE --exclude-dir=tests '^#!(/usr/bin/env |/bin/)(ba)?sh' deploy/linux-server || true
+              find deploy/linux-server deploy/appliance -type f -name '*.sh'
+              grep -rlE --exclude-dir=tests '^#!(/usr/bin/env |/bin/)(ba)?sh' deploy/linux-server deploy/appliance || true
             } | sort -u
           )
           printf 'checking %s\n' "${scripts[@]}"
@@ -193,3 +196,9 @@ jobs:
           MEHO_REQUIRE_NFT_CHECK: '1'
           MEHO_REQUIRE_APT_CHECK: '1'
         run: python -m unittest discover -s deploy/linux-server/tests -v
+
+      - name: Run the appliance build unit tests
+        # The clean script against a fake build VM, the OVF rewrite against
+        # the Ubuntu cloud image's descriptor, and build.sh against a stub
+        # govc. No vCenter.
+        run: python -m unittest discover -s deploy/appliance/tests -v

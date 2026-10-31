@@ -420,7 +420,7 @@ method, raw body allowed, one new login on a `401`). `plane_for_path` sends
 | `integration.list` | the integrations (flat rows, no secret, no certificate), or the Git content sources with their last sync (`view: git_sources`), or one integration (`id`), or the state of one Git sync (`sync_request_id`) or vendor request (`request_tracker_id`) as `job` | safe | `GET /iaas/api/integrations[/{id}]`, `GET /content/api/sources`, `GET /content/api/sourcecontrol/sync-history`, `GET .../sync-requests/{id}`, `GET /iaas/api/request-tracker/{id}` | 8.18, 9.x |
 | `integration.set` | adds (`integration_type`: `vro`, `ipam`, `com.github.saas`, `com.gitlab.saas`, `org.bitbucket`) or changes (`id`) an integration: the vendor's test first, then the save; returns `status` (`saved`, `test_failed`, `failed`, `unfinished`, `exists`, `invalid_request`), the two trackers and the steps. It carries the tag `credential`, so traces keep no request body | dangerous, approval | `POST /iaas/api/integrations?validateOnly=true`, `POST /iaas/api/integrations` or `PATCH /iaas/api/integrations/{id}`, `GET /iaas/api/request-tracker/{id}` | 8.18, 9.x |
 | `integration.delete` | lists what uses the integration and stops (`in_use`) unless `confirm_in_use`; then removes it and follows the tracker | destructive, approval, preview first | `GET /iaas/api/external-network-ip-ranges`, `GET /iaas/api/network-profiles`, `GET /content/api/sources`, `DELETE /iaas/api/integrations/{id}`, `GET /iaas/api/request-tracker/{id}` | 8.18, 9.x |
-| `ipam_package.import` | downloads a provider zip from an https URL, uploads it with the vendor's resumable upload and imports it; returns the file (name, size, SHA-256, source, target) and the provider id | destructive, approval, preview first | `GET /provisioning/ipam/api/providers`, `POST` + `PATCH /provisioning/ipam/api/providers/packages/import[/{upload}]` | 8.18, 9.x |
+| `ipam_package.import` | needs the zip's SHA-256 (`expected_sha256`, shown in the preview); downloads a provider zip from an https URL, stops when the SHA-256 does not match, uploads it with the vendor's resumable upload and imports it; returns the file (name, size, SHA-256, source, target) and the provider id | destructive, approval, preview first | `GET /provisioning/ipam/api/providers`, `POST` + `PATCH /provisioning/ipam/api/providers/packages/import[/{upload}]` | 8.18, 9.x |
 | `git_repo.set` | `add`: a Git repository (branch, folder, content type) as a content source of a project, then a sync; answers `accepted` with the sync id. `remove`: deletes a content source | dangerous, approval | `POST /content/api/sources`, `POST /content/api/sourcecontrol/sync-requests`, `DELETE /content/api/sources/{id}` | 8.18, 9.x |
 
 On VCF Automation 9 the ops work in a "VM Apps" organization. An "All Apps"
@@ -481,7 +481,11 @@ and is not covered.
 - **Previews.** `integration.delete` reads the integration and its users and
   fills `blast_radius` (`object`, `children`, `irreversibility`); it
   refuses an unknown id. `ipam_package.import` checks the URL with a `HEAD`
-  (refuses `404`, `410` and redirects) and lists the providers.
+  (refuses `404`, `410` and redirects), lists the providers and shows the
+  required `expected_sha256` as `blast_radius.object.sha256`. The preview
+  hash covers that value, and the run stops before the upload when the
+  downloaded zip has another SHA-256. So the approved run imports only the
+  package the person approved.
 - **Spec check.** `tests/test_vcfa_integration_spec_reconcile.py` checks every
   path against `vra-iaas.json` and `vra-content.json` of the pinned
   `vra-sdk-go` v0.6.5 shelf, for both connectors. The two IPAM provider calls

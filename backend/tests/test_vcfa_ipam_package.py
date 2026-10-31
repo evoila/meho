@@ -59,6 +59,8 @@ def _package(version: str = "1.5.4") -> bytes:
 
 
 PACKAGE = _package()
+SHA = hashlib.sha256(PACKAGE).hexdigest()
+PARAMS = {"package_url": PACKAGE_URL, "expected_sha256": SHA}
 
 
 @pytest.fixture(autouse=True)
@@ -107,22 +109,19 @@ async def test_import_waits_for_a_person_and_a_preview(vcfa: VcfAutomationConnec
     with respx.mock(assert_all_called=False) as mock:
         mount_logins_full(mock)
         download = mock.get(PACKAGE_URL)
-        result = await run(
-            "vcfa.tenant.ipam_package.import", {"package_url": PACKAGE_URL}, approved=False
-        )
+        result = await run("vcfa.tenant.ipam_package.import", PARAMS, approved=False)
     assert result["status"] == "denied", result
     assert result["extras"]["error_code"] == "preview_binding_required"
     assert not download.called
 
 
 async def test_a_good_import(vcfa: VcfAutomationConnector) -> None:
-    sha = hashlib.sha256(PACKAGE).hexdigest()
     with respx.mock(assert_all_called=False) as mock:
         mount_logins_full(mock)
         routes = _mount_upload(mock, providers_after=[_NEW_PROVIDER])
         result = await run(
             "vcfa.tenant.ipam_package.import",
-            {"package_url": PACKAGE_URL, "expected_sha256": sha.upper()},
+            {"package_url": PACKAGE_URL, "expected_sha256": SHA.upper()},
         )
     data = result["result"]
     assert data["status"] == "imported", data
@@ -130,7 +129,7 @@ async def test_a_good_import(vcfa: VcfAutomationConnector) -> None:
     assert data["package"] == {
         "file_name": "example-ipam.zip",
         "size": len(PACKAGE),
-        "sha256": sha,
+        "sha256": SHA,
         "source": PACKAGE_URL,
         "target": "/provisioning/ipam/api/providers/packages/import",
         "provider_name": "example-ipam",
@@ -155,7 +154,7 @@ async def test_a_second_import_of_the_same_version(vcfa: VcfAutomationConnector)
         mock.get(PACKAGE_URL).respond(200, content=PACKAGE)
         mock.get(PROVIDERS).respond(200, json=[_NEW_PROVIDER])
         start = mock.post(IMPORT)
-        result = await run("vcfa.tenant.ipam_package.import", {"package_url": PACKAGE_URL})
+        result = await run("vcfa.tenant.ipam_package.import", PARAMS)
     data = result["result"]
     assert data["status"] == "unchanged"
     assert data["provider"]["id"] == "prov-new"
@@ -168,7 +167,7 @@ async def test_an_upload_that_expired(vcfa: VcfAutomationConnector) -> None:
         mount_logins_full(mock)
         routes = _mount_upload(mock, providers_after=[])
         routes["patch"].mock(side_effect=[httpx.Response(404)])
-        result = await run("vcfa.tenant.ipam_package.import", {"package_url": PACKAGE_URL})
+        result = await run("vcfa.tenant.ipam_package.import", PARAMS)
     data = result["result"]
     assert data["status"] == "failed"
     steps = {step["step"]: step for step in data["steps"]}
@@ -193,7 +192,7 @@ async def test_the_login_expires_during_the_upload(vcfa: VcfAutomationConnector)
         login = mock.post(f"{BASE_URL}/iaas/api/login").respond(200, json={"token": "t"})
         routes = _mount_upload(mock, providers_after=[_NEW_PROVIDER])
         routes["patch"].mock(side_effect=patch)
-        result = await run("vcfa.tenant.ipam_package.import", {"package_url": PACKAGE_URL})
+        result = await run("vcfa.tenant.ipam_package.import", PARAMS)
     assert result["result"]["status"] == "imported", result
     assert login.call_count == 2
 
@@ -208,7 +207,7 @@ async def test_a_failure_in_the_middle_still_cleans_up(vcfa: VcfAutomationConnec
                 httpx.Response(500, json={"message": "Provider bundle is not valid"}),
             ]
         )
-        result = await run("vcfa.tenant.ipam_package.import", {"package_url": PACKAGE_URL})
+        result = await run("vcfa.tenant.ipam_package.import", PARAMS)
     data = result["result"]
     assert data["status"] == "failed"
     assert [s["result"] for s in data["steps"]] == ["done", "done", "done", "failed", "not_run"]
@@ -223,7 +222,7 @@ async def test_a_redirect_is_not_followed(vcfa: VcfAutomationConnector) -> None:
         mock.get(PACKAGE_URL).respond(302, headers={"Location": "https://other.example.test/x"})
         other = mock.get("https://other.example.test/x")
         start = mock.post(IMPORT)
-        result = await run("vcfa.tenant.ipam_package.import", {"package_url": PACKAGE_URL})
+        result = await run("vcfa.tenant.ipam_package.import", PARAMS)
     data = result["result"]
     assert data["status"] == "failed"
     assert "redirect" in data["steps"][0]["error"]
@@ -265,12 +264,12 @@ async def test_a_url_with_a_credential_is_refused(vcfa: VcfAutomationConnector, 
     assert not download.called
 
 
-def _ctx(vcfa: VcfAutomationConnector, target: Any) -> Any:
+def _ctx(vcfa: VcfAutomationConnector, target: Any, params: Any = None) -> Any:
     return SimpleNamespace(
         connector_instance=vcfa,
         operator=OPERATOR,
         target=target,
-        params={"package_url": PACKAGE_URL},
+        params=PARAMS if params is None else params,
         descriptor=SimpleNamespace(op_id="vcfa.tenant.ipam_package.import"),
     )
 
@@ -287,6 +286,7 @@ async def test_preview_fills_the_blast_radius(vcfa: VcfAutomationConnector) -> N
         "kind": "ipam_provider_package",
         "source": PACKAGE_URL,
         "size": "1234",
+        "sha256": SHA,
     }
     assert blast["children"] == [{"kind": "ipam_provider", **_NEW_PROVIDER}]
     assert blast["irreversibility"]
@@ -299,6 +299,47 @@ async def test_preview_refuses_a_missing_package(vcfa: VcfAutomationConnector) -
         mock.head(PACKAGE_URL).respond(404)
         with pytest.raises(LookupError):
             await builder(_ctx(vcfa, await resolved_target()))
+
+
+async def test_preview_refuses_a_missing_sha256(vcfa: VcfAutomationConnector) -> None:
+    builder = _PREVIEW_BUILDERS["vcfa.tenant.ipam_package.import"]
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        head = mock.head(PACKAGE_URL)
+        with pytest.raises(ValueError, match="expected_sha256 is required"):
+            await builder(_ctx(vcfa, await resolved_target(), {"package_url": PACKAGE_URL}))
+    assert not head.called
+
+
+@pytest.mark.parametrize("sha", [None, "", "abc", "g" * 64])
+async def test_an_import_without_a_good_sha256_is_refused(
+    monkeypatch: pytest.MonkeyPatch, sha: str | None
+) -> None:
+    """The handler refuses before it downloads or sends anything."""
+    params: dict[str, Any] = {"package_url": PACKAGE_URL}
+    if sha is not None:
+        params["expected_sha256"] = sha
+    leftovers = []
+    monkeypatch.setattr(vcfa_ipam_package, "remove_leftovers", lambda: leftovers.append(1))
+    with respx.mock(assert_all_called=False) as mock:
+        download = mock.get(PACKAGE_URL)
+        with pytest.raises(ValueError, match="expected_sha256 is required"):
+            await vcfa_ipam_package.ipam_package_import(SimpleNamespace(), params)  # type: ignore[arg-type]
+    assert not download.called
+    assert not leftovers
+
+
+async def test_the_dispatcher_refuses_an_import_without_sha256(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        download = mock.get(PACKAGE_URL)
+        start = mock.post(IMPORT)
+        result = await run("vcfa.tenant.ipam_package.import", {"package_url": PACKAGE_URL})
+    assert result["status"] != "ok", result
+    assert not download.called
+    assert not start.called
 
 
 def test_leftovers_of_a_dead_run_are_removed(tmp_path: Path) -> None:

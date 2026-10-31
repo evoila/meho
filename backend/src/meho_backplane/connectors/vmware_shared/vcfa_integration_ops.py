@@ -329,13 +329,19 @@ _IMPORT = IntegrationOpSpec(
             ),
             "expected_sha256": field(
                 "string",
-                "The SHA-256 the zip must have (64 hex characters). Strongly advised.",
+                "The SHA-256 the zip must have (64 hex characters). The preview shows it; the "
+                "run stops before the upload when the zip does not match.",
                 pattern="^[A-Fa-f0-9]{64}$(?!\\n)",
             ),
         },
-        "required": ["package_url"],
+        "required": ["package_url", "expected_sha256"],
         "additionalProperties": False,
-        "examples": [{"package_url": "https://<file-server>/<ipam-package>.zip"}],
+        "examples": [
+            {
+                "package_url": "https://<file-server>/<ipam-package>.zip",
+                "expected_sha256": "0" * 64,
+            }
+        ],
     },
     response_schema={
         "type": "object",
@@ -389,8 +395,8 @@ _IMPORT = IntegrationOpSpec(
             "preview_hash. " + ASYNC_HINT
         ),
         "preconditions": (
-            "The zip is on an https URL MEHO can reach without a login. Give expected_sha256 "
-            "from the vendor's download page. A person must approve it."
+            "The zip is on an https URL MEHO can reach without a login. expected_sha256 is "
+            "required: take it from the vendor's download page. A person must approve it."
         ),
         "output_shape": (
             "{status, package: {file_name, size, sha256, source, target, ...}, provider: {id, "

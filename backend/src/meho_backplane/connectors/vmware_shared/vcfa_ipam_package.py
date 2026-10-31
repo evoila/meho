@@ -14,8 +14,9 @@ MEHO does this work inside its own call. The steps:
    address screen as a target host, no redirect is followed, and no
    credential is ever sent. The bytes go to a temporary file named
    ``meho-ipam-package-*.zip.part``; MEHO counts the size and the SHA-256.
-2. **check** — the file must be a zip. When the call gives
-   ``expected_sha256``, it must match. MEHO reads ``registration.yaml`` in
+2. **check** — the file must be a zip and its SHA-256 must match
+   ``expected_sha256``. The call must give it, and the preview shows it, so
+   the approved run imports only the bytes the person approved. MEHO reads ``registration.yaml`` in
    the zip for the provider name and version: when the vendor already has
    that provider version, MEHO stops with ``unchanged`` (safe to run twice).
 3. **upload** — the vendor takes the package over the tus resumable-upload
@@ -41,6 +42,7 @@ import contextlib
 import hashlib
 import io
 import os
+import re
 import tempfile
 import time
 import zipfile
@@ -86,6 +88,7 @@ MAX_PACKAGE_BYTES: Final[int] = 512 * 1024 * 1024
 UPLOAD_CHUNK_BYTES: int = 9 * 1024 * 1024
 #: A temporary file older than this is a leftover of a run that died.
 _STALE_SECONDS: Final[int] = 3600
+_SHA256: Final = re.compile(r"[0-9a-f]{64}")
 _TUS: Final[dict[str, str]] = {"Tus-Resumable": "1.0.0"}
 _TIMEOUT: Final = httpx.Timeout(60.0, connect=15.0)
 
@@ -105,6 +108,21 @@ def package_url(raw: Any) -> httpx.URL:
             "credential to it. Put the package where it can be read without a login."
         )
     return httpx.URL(raw)
+
+
+def expected_sha256(raw: Any) -> str:
+    """Check ``expected_sha256``: 64 hex characters, given back in lower case.
+
+    The import needs it, so the approved run imports only the package bytes
+    the person saw in the preview.
+    """
+    value = raw.strip().lower() if isinstance(raw, str) else ""
+    if not _SHA256.fullmatch(value):
+        raise ValueError(
+            "expected_sha256 is required: the SHA-256 of the zip as 64 hex characters, for "
+            "example from the vendor's download page; nothing was sent"
+        )
+    return value
 
 
 def shown_url(url: httpx.URL) -> str:
@@ -257,13 +275,14 @@ def _answer(status: str, guidance: str, steps: Steps, **extra: Any) -> dict[str,
 async def ipam_package_import(calls: Calls, params: Mapping[str, Any]) -> dict[str, Any]:
     """``<ns>.ipam_package.import``; see the module text for the steps."""
     url = package_url(params.get("package_url"))
+    expected = expected_sha256(params.get("expected_sha256"))
     steps = Steps("download", "check", "upload", "import", "verify")
     leftovers = await asyncio.to_thread(remove_leftovers)
     fd, raw_path = tempfile.mkstemp(prefix=TEMP_PREFIX, suffix=".zip.part")
     os.close(fd)
     package = _Package(path=Path(raw_path), file_name=url.path.rsplit("/", 1)[-1] or "package.zip")
     try:
-        answer = await _run(calls, params, url, package, steps, {"leftovers_removed": leftovers})
+        answer = await _run(calls, expected, url, package, steps, {"leftovers_removed": leftovers})
     finally:
         with contextlib.suppress(OSError):
             package.path.unlink()
@@ -285,7 +304,7 @@ def _package_view(url: httpx.URL, package: _Package) -> dict[str, Any]:
 
 async def _run(
     calls: Calls,
-    params: Mapping[str, Any],
+    expected: str,
     url: httpx.URL,
     package: _Package,
     steps: Steps,
@@ -297,8 +316,7 @@ async def _run(
         steps.done(step)
         step = "check"
         _read_registration(package)
-        expected = str(params.get("expected_sha256") or "").lower()
-        if expected and expected != package.sha256:
+        if expected != package.sha256:
             raise PackageError("the SHA-256 of the package does not match expected_sha256")
         before = await list_providers(calls)
         steps.done(step)
@@ -371,6 +389,7 @@ async def ipam_package_import_preview(ctx: PreviewContext) -> dict[str, Any] | N
     if connector is None or ctx.target is None:
         return None
     url = package_url(ctx.params.get("package_url"))
+    sha256 = expected_sha256(ctx.params.get("expected_sha256"))
     async with _client() as client:
         try:
             head = await client.head(url)
@@ -387,6 +406,7 @@ async def ipam_package_import_preview(ctx: PreviewContext) -> dict[str, Any] | N
                 "kind": "ipam_provider_package",
                 "source": shown_url(url),
                 "size": head.headers.get("content-length"),
+                "sha256": sha256,
             },
             "children": [{"kind": "ipam_provider", **row} for row in providers],
             "irreversibility": "partly_reversible",

@@ -565,10 +565,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 85
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 90
   `_CompositeSpec` rows (20 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 49 dangerous/destructive
-  writes + 16 caution writes); each row carries its
+  cache-refresh read `datastore.refresh` — + 53 dangerous/destructive
+  writes + 17 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
   (`llm_instructions`) of the VM and folder writes and the VM allocation
@@ -1438,21 +1438,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 85 `vmware.composite.*` rows with
+   queued registrar and upserts: the 90 `vmware.composite.*` rows with
    `source_kind="composite"` — 20 reads (19 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 65 writes, all `requires_approval=True`
-   (38 `safety_level="dangerous"`; 16 `safety_level="caution"` —
-   `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
+   service principals), and 70 writes, all `requires_approval=True`
+   (41 `safety_level="dangerous"`; 17 `safety_level="caution"` —
+   `host.connect` / `#4349`, `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
    `vm.resource_allocation.set` / `#3880`, `datastore.dir.create` / `#3339`,
    `vm.tools.installer.unmount`, `vm.cdrom.mount_library_iso` +
    `vm.cdrom.unmount_library_iso`, `vm.snapshot.create`,
    `content_library.create` + `content_library.item.upload`;
-   and 11 `safety_level="destructive"` — `vm.destroy` / `#3198`,
-   `namespace.delete`, `storage_policy.delete`, `cluster.drs_rule.delete`,
+   and 12 `safety_level="destructive"` — `vm.destroy` / `#3198`,
+   `host.remove` / `#4349`, `namespace.delete`, `storage_policy.delete`, `cluster.drs_rule.delete`,
    `vm.snapshot.delete`, and the six `#3339` teardown deletes) —
    plus the `vmware.host.usage` row with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
@@ -1838,7 +1838,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 85 composites (20 reads + 65 writes) land as `source_kind="composite"`
+The 90 composites (20 reads + 70 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1935,7 +1935,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 85 composites are hand-authored aggregators the connector ships as
+The 90 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the

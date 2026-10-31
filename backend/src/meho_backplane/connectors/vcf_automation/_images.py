@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Handlers and the approval preview for the VCFA image ops (see :mod:`.image_ops`).
+"""Handlers and the approval preview for the image ops (see :mod:`.image_ops`).
+
+VCF Automation 9 (``vcfa.tenant.*``) and Aria Automation 8 (``vcfa.vra8.*``,
+:mod:`meho_backplane.connectors.vra8.image_ops`) both run them: the two speak
+the same ``/iaas/api`` calls. Each handler takes the op id prefix for its guidance.
 
 The image name change carries the two traps of the vendor API:
 
@@ -25,7 +29,8 @@ fails instead of writing a stale mapping.
 
 Every ``/iaas/api`` call pins ``apiVersion`` (:data:`._paths.TENANT_IAAS_API_VERSION`).
 Path ids are percent-encoded with an empty safe set, like
-``vcfa.tenant.deployment.get``.
+``vcfa.tenant.deployment.get``; an empty id, ``.`` or ``..`` is refused,
+because it would not stay one path segment.
 """
 
 from __future__ import annotations
@@ -55,17 +60,22 @@ from meho_backplane.operations._preview import PreviewContext, register_preview_
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
-    from meho_backplane.connectors.vcf_automation.connector import VcfAutomationConnector
-    from meho_backplane.connectors.vcf_automation.session import VcfAutomationTargetLike
+    from meho_backplane.connectors._shared.vcf_auth import VcfTargetLike
+    from meho_backplane.connectors.adapters.http import HttpConnector
 
 __all__ = [
+    "TENANT_PREFIX",
     "MappingPlan",
     "plan_mapping_change",
+    "register_mapping_update_preview",
     "tenant_cloud_account_enumerate_images",
     "tenant_fabric_image_list",
     "tenant_image_profile_list",
     "tenant_image_profile_mapping_update",
 ]
+
+#: The op id prefix of the VCF Automation 9 tenant plane.
+TENANT_PREFIX = "vcfa.tenant"
 
 _API_VERSION: dict[str, str] = {"apiVersion": TENANT_IAAS_API_VERSION}
 
@@ -80,8 +90,15 @@ _TRACKER_DONE: dict[str, str] = {"FINISHED": "finished", "FAILED": "failed"}
 PROFILE_LOCK_WAIT_SECONDS: float = 30.0
 
 
+_BAD_SEGMENTS = frozenset({"", ".", ".."})
+
+
 def _segment(value: Any) -> str:
-    return quote(str(value), safe="")
+    """One percent-encoded path segment; refuses an empty id, ``.`` and ``..``."""
+    text = str(value)
+    if text in _BAD_SEGMENTS:
+        raise ValueError(f"the id {text!r} is not a valid path segment")
+    return quote(text, safe="")
 
 
 # ---------------------------------------------------------------------------
@@ -90,12 +107,12 @@ def _segment(value: Any) -> str:
 
 
 async def tenant_image_profile_list(
-    connector: VcfAutomationConnector,
+    connector: HttpConnector,
     operator: Operator,
-    target: VcfAutomationTargetLike,
+    target: VcfTargetLike,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    """``vcfa.tenant.image_profile.list`` -- ``GET /iaas/api/image-profiles``."""
+    """``<prefix>.image_profile.list`` -- ``GET /iaas/api/image-profiles``."""
     del params  # schema declares the param object empty
     return await connector._request_json(
         target, "GET", TENANT_IMAGE_PROFILES_PATH, operator=operator, params=_API_VERSION
@@ -103,12 +120,12 @@ async def tenant_image_profile_list(
 
 
 async def tenant_fabric_image_list(
-    connector: VcfAutomationConnector,
+    connector: HttpConnector,
     operator: Operator,
-    target: VcfAutomationTargetLike,
+    target: VcfTargetLike,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    """``vcfa.tenant.fabric_image.list`` -- ``GET /iaas/api/fabric-images``."""
+    """``<prefix>.fabric_image.list`` -- ``GET /iaas/api/fabric-images``."""
     query: dict[str, Any] = {k: params[k] for k in ("$filter", "$top", "$skip") if k in params}
     return await connector._request_json(
         target,
@@ -134,12 +151,14 @@ def _tracker_view(tracker: dict[str, Any]) -> dict[str, Any]:
 
 
 async def tenant_cloud_account_enumerate_images(
-    connector: VcfAutomationConnector,
+    connector: HttpConnector,
     operator: Operator,
-    target: VcfAutomationTargetLike,
+    target: VcfTargetLike,
     params: dict[str, Any],
+    *,
+    prefix: str = TENANT_PREFIX,
 ) -> dict[str, Any]:
-    """``vcfa.tenant.cloud_account.enumerate_images`` -- start, then wait for the tracker.
+    """``<prefix>.cloud_account.enumerate_images`` -- start, then wait for the tracker.
 
     Waits at most :data:`ENUMERATION_WAIT_SECONDS`. A request still running
     then is a result (``in_progress``), not an error: the enumeration is
@@ -168,7 +187,7 @@ async def tenant_cloud_account_enumerate_images(
         "status": status,
         "request": _tracker_view(tracker),
         "guidance": (
-            "read vcfa.tenant.fabric_image.list to find the new templates"
+            f"read {prefix}.fabric_image.list to find the new templates"
             if status == "finished"
             else "the enumeration failed; see request.message"
         ),
@@ -304,13 +323,32 @@ def _param_problem(params: dict[str, Any]) -> str | None:
         return "give either 'fabric_image_id' or 'remove': true, not both"
     if not params.get("remove") and not params.get("fabric_image_id"):
         return "give 'fabric_image_id' (the template the name should give), or 'remove': true"
+    for key in ("profile_id", "fabric_image_id"):
+        if key in params and str(params[key]) in _BAD_SEGMENTS:
+            return f"'{key}' must not be empty, '.' or '..'"
     return None
 
 
+def _precondition_problem(plan: MappingPlan, params: dict[str, Any]) -> str | None:
+    """Why the name no longer gives ``expected_old_fabric_image_id`` (if given), or ``None``.
+
+    ``None`` as the expected value means the name must not exist yet. So a
+    change approved for one old template never overwrites a newer one.
+    """
+    if "expected_old_fabric_image_id" not in params:
+        return None
+    expected = params["expected_old_fabric_image_id"]
+    current = plan.old_target.get("fabric_image_id") if plan.old_target else None
+    if (plan.old_target is None) == (expected is None) and current == expected:
+        return None
+    now = "does not exist" if plan.old_target is None else f"gives fabric image {current!r}"
+    return f"the name {plan.image_name!r} {now} now, not the expected {expected!r}"
+
+
 async def _read_profile(
-    connector: VcfAutomationConnector,
+    connector: HttpConnector,
     operator: Operator,
-    target: VcfAutomationTargetLike,
+    target: VcfTargetLike,
     profile_id: str,
 ) -> dict[str, Any]:
     path = TENANT_IMAGE_PROFILE_PATH.format(id=_segment(profile_id))
@@ -320,9 +358,9 @@ async def _read_profile(
 
 
 async def _read_fabric_image(
-    connector: VcfAutomationConnector,
+    connector: HttpConnector,
     operator: Operator,
-    target: VcfAutomationTargetLike,
+    target: VcfTargetLike,
     fabric_image_id: str,
 ) -> dict[str, Any] | None:
     """The fabric image, or ``None`` when the appliance answers 404."""
@@ -367,7 +405,7 @@ class _ProfileLock:
 _profile_locks: dict[int, _ProfileLock] = {}
 
 
-def _lock_key(target: VcfAutomationTargetLike, profile_id: str) -> int:
+def _lock_key(target: VcfTargetLike, profile_id: str) -> int:
     """A stable signed-63-bit key for one profile of one target (a PG ``bigint``)."""
     raw = f"{target.tenant_id}\0{target.id}\0{profile_id}".encode()
     digest = hashlib.blake2b(raw, digest_size=8).digest()
@@ -375,7 +413,7 @@ def _lock_key(target: VcfAutomationTargetLike, profile_id: str) -> int:
 
 
 @asynccontextmanager
-async def _profile_lock(target: VcfAutomationTargetLike, profile_id: str) -> AsyncIterator[None]:
+async def _profile_lock(target: VcfTargetLike, profile_id: str) -> AsyncIterator[None]:
     """Hold the profile's lock in this process and across workers, or fail after the wait.
 
     Only taking the locks is bounded by :data:`PROFILE_LOCK_WAIT_SECONDS`.
@@ -413,10 +451,11 @@ async def _profile_lock(target: VcfAutomationTargetLike, profile_id: str) -> Asy
 
 
 async def _resolve(
-    connector: VcfAutomationConnector,
+    connector: HttpConnector,
     operator: Operator,
-    target: VcfAutomationTargetLike,
+    target: VcfTargetLike,
     params: dict[str, Any],
+    prefix: str,
 ) -> tuple[MappingPlan | None, str | None]:
     """Read what the change needs and plan it; ``(None, problem)`` when it cannot run."""
     problem = _param_problem(params)
@@ -429,7 +468,7 @@ async def _resolve(
         if image is None:
             return None, (
                 f"no fabric image with id {params['fabric_image_id']!r}; "
-                "find it with vcfa.tenant.fabric_image.list"
+                f"find it with {prefix}.fabric_image.list"
             )
         problem = _region_problem(profile, image)
         if problem is not None:
@@ -438,12 +477,14 @@ async def _resolve(
 
 
 async def tenant_image_profile_mapping_update(
-    connector: VcfAutomationConnector,
+    connector: HttpConnector,
     operator: Operator,
-    target: VcfAutomationTargetLike,
+    target: VcfTargetLike,
     params: dict[str, Any],
+    *,
+    prefix: str = TENANT_PREFIX,
 ) -> dict[str, Any]:
-    """``vcfa.tenant.image_profile.mapping.update`` -- change one name, keep the others.
+    """``<prefix>.image_profile.mapping.update`` -- change one name, keep the others.
 
     The profile is read and written under :func:`_profile_lock`, so two
     changes to the same profile run one after the other and the second
@@ -453,9 +494,19 @@ async def tenant_image_profile_mapping_update(
     if problem is not None:
         return {"status": "invalid_request", "guidance": f"{problem}; nothing was written"}
     async with _profile_lock(target, str(params["profile_id"])):
-        plan, problem = await _resolve(connector, operator, target, params)
+        plan, problem = await _resolve(connector, operator, target, params, prefix)
         if plan is None:
             return {"status": "invalid_request", "guidance": f"{problem}; nothing was written"}
+        problem = _precondition_problem(plan, params)
+        if problem is not None:
+            return {
+                "status": "precondition_failed",
+                **plan.view(),
+                "guidance": (
+                    f"{problem}; nothing was written. Read {prefix}.image_profile.list "
+                    "and ask again"
+                ),
+            }
         if plan.action is None:
             return {
                 "status": "unchanged",
@@ -468,10 +519,14 @@ async def tenant_image_profile_mapping_update(
         updated = await connector._post_json(
             target, path, operator=operator, verb="PATCH", params=_API_VERSION, json=plan.body
         )
-    return {"status": "updated", **plan.view(), "guidance": _answer_guidance(plan, updated)}
+    return {
+        "status": "updated",
+        **plan.view(),
+        "guidance": _answer_guidance(plan, updated, prefix),
+    }
 
 
-def _answer_guidance(plan: MappingPlan, updated: dict[str, Any]) -> str | None:
+def _answer_guidance(plan: MappingPlan, updated: dict[str, Any], prefix: str) -> str | None:
     """What the ``PATCH`` answer lacks, or ``None`` when it carries every name sent.
 
     An answer with an empty mapping is checked like any other: after a
@@ -483,14 +538,14 @@ def _answer_guidance(plan: MappingPlan, updated: dict[str, Any]) -> str | None:
     raw = mappings.get("mapping") if isinstance(mappings, dict) else None
     if not isinstance(raw, dict):
         return (
-            "the appliance answered without a mapping; read vcfa.tenant.image_profile.list to check"
+            f"the appliance answered without a mapping; read {prefix}.image_profile.list to check"
         )
     missing = sorted(set(plan.body["imageMapping"]) - set(raw))
     if not missing:
         return None
     return (
         f"the appliance answered without these names: {missing}; "
-        "read vcfa.tenant.image_profile.list to check"
+        f"read {prefix}.image_profile.list to check"
     )
 
 
@@ -499,32 +554,41 @@ def _answer_guidance(plan: MappingPlan, updated: dict[str, Any]) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-async def _mapping_update_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Show the old and the new template, read at park time when a connector is given.
+def register_mapping_update_preview(prefix: str) -> None:
+    """Register the approval preview of ``<prefix>.image_profile.mapping.update``.
 
-    Without a connector (the egress-free ``preview_operation`` path) only the
-    request is echoed. A failed read degrades to the echo plus ``read_error``.
+    It shows the old and the new template, read at park time. Without a
+    connector (``preview_operation``) it echoes the request; a failed read
+    gives the echo plus ``read_error``.
     """
-    p = ctx.params
-    if not isinstance(p.get("profile_id"), str) or not isinstance(p.get("image_name"), str):
-        return None
-    echo = {
-        "action": "update_image_mapping",
-        "profile_id": p["profile_id"],
-        "image_name": p["image_name"],
-        "fabric_image_id": p.get("fabric_image_id"),
-        "remove": bool(p.get("remove")),
-    }
-    if ctx.connector_instance is None:
-        return {**echo, "old_target": None, "read": "skipped"}
-    connector = cast("VcfAutomationConnector", ctx.connector_instance)
-    try:
-        plan, problem = await _resolve(connector, ctx.operator, ctx.target, p)
-    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-        return {**echo, "old_target": None, "read": "failed", "read_error": type(exc).__name__}
-    if plan is None:
-        return {**echo, "old_target": None, "read": "done", "problem": problem}
-    return {**echo, **plan.view(), "read": "done"}
+
+    async def _preview(ctx: PreviewContext) -> dict[str, Any] | None:
+        p = ctx.params
+        if not isinstance(p.get("profile_id"), str) or not isinstance(p.get("image_name"), str):
+            return None
+        echo = {
+            "action": "update_image_mapping",
+            "profile_id": p["profile_id"],
+            "image_name": p["image_name"],
+            "fabric_image_id": p.get("fabric_image_id"),
+            "remove": bool(p.get("remove")),
+        }
+        if "expected_old_fabric_image_id" in p:
+            echo["expected_old_fabric_image_id"] = p["expected_old_fabric_image_id"]
+        if ctx.connector_instance is None:
+            return {**echo, "old_target": None, "read": "skipped"}
+        connector = cast("HttpConnector", ctx.connector_instance)
+        try:
+            plan, problem = await _resolve(connector, ctx.operator, ctx.target, p, prefix)
+        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+            return {**echo, "old_target": None, "read": "failed", "read_error": type(exc).__name__}
+        if plan is None:
+            return {**echo, "old_target": None, "read": "done", "problem": problem}
+        problem = _precondition_problem(plan, p)
+        extra = {"problem": problem} if problem is not None else {}
+        return {**echo, **plan.view(), "read": "done", **extra}
+
+    register_preview_builder(f"{prefix}.image_profile.mapping.update", _preview)
 
 
-register_preview_builder("vcfa.tenant.image_profile.mapping.update", _mapping_update_preview)
+register_mapping_update_preview(TENANT_PREFIX)

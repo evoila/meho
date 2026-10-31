@@ -60,6 +60,20 @@ on a **fresh boot with zero catalog ingest**.
 | `vcfa-vra8-inventory` | `vcfa.vra8.project.list`, `.deployment.list`, `.deployment.get`, `.about` |
 | `vcfa-vra8-content` | `vcfa.vra8.blueprint.list`, `.catalog-item.list` |
 | `vcfa-vra8-api-files` | `vcfa.vra8.api_file.get` (see [API description files](#api-description-files-vcfavra8api_fileget) below) |
+| `vcfa-vra8-images` | `vcfa.vra8.image_profile.list`, `.fabric_image.list`, `.cloud_account.enumerate_images` (caution, approval), `.image_profile.mapping.update` (dangerous, approval) |
+
+**Image names (image profiles).** The four `vcfa-vra8-images` ops read the
+image names and the template each name gives, make Aria Automation read new
+templates now, and change one name while every other name stays. They are the
+VCF Automation 9 image ops on this connector: the same handlers
+(`vcf_automation/_images.py`, through the `Vra8ImageOpsMixin` in
+`vra8/_images.py`) and the same schemas. One difference: on vRA 8 the name
+change requires `expected_old_fabric_image_id` (`null` for a new name), so
+every run checks the template the approver saw. Metadata and their own
+registrar are in `vra8/image_ops.py`. Details: "Image ops" in
+[`connectors-vcf-automation.md`](connectors-vcf-automation.md). Their calls are
+checked against the pinned `vra-iaas.json` in
+`tests/test_connectors_vra8_images_spec_reconcile.py`.
 
 Op ids are namespaced `vcfa.vra8.*` (distinct from the modern impl's
 `vcfa.provider.*` / `vcfa.tenant.*`): the two impls publish different read surfaces

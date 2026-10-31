@@ -24,6 +24,10 @@ profile's own region (``_links.region.href``). Handlers live in
 spec (``ImageProfile``, ``ImageMapping``, ``ImageMappingDescription``,
 ``FabricImage``, ``RequestTracker``), the file the spec-reconcile lane
 pins.
+
+The parameter and response schemas are shared with the Aria Automation 8
+ops (:mod:`meho_backplane.connectors.vra8.image_ops`), which run the same
+handlers.
 """
 
 from __future__ import annotations
@@ -45,11 +49,24 @@ from meho_backplane.connectors.vcf_automation._paths import (
 )
 from meho_backplane.connectors.vcf_automation.typed_ops import VcfaTypedOp, validate_typed_ops
 
-__all__ = ["VCFA_IMAGE_OPS"]
+__all__ = [
+    "ENUMERATE_IMAGES_PARAMS",
+    "ENUMERATE_IMAGES_RESPONSE",
+    "FABRIC_IMAGE_LIST_PARAMS",
+    "FABRIC_IMAGE_PAGE_RESPONSE",
+    "IMAGE_PROFILE_LIST_PARAMS",
+    "IMAGE_PROFILE_PAGE_RESPONSE",
+    "MAPPING_UPDATE_RESPONSE",
+    "VCFA_IMAGE_OPS",
+    "mapping_update_params",
+]
 
 _GROUP = "vcfa-tenant-images"
+_PREFIX = "vcfa.tenant"
 
 _ID: dict[str, Any] = {"type": "string", "minLength": 1, "maxLength": 256}
+#: An id that goes into a URL path: '.' and '..' would not stay one segment.
+_PATH_ID: dict[str, Any] = {**_ID, "not": {"enum": [".", ".."]}}
 
 _CONSTRAINTS = list_of(
     "Placement rules for machines made from this image.",
@@ -61,7 +78,7 @@ _CONSTRAINTS = list_of(
 
 #: One entry of a profile's mapping: the template a name gives.
 _MAPPING_ENTRY_FIELDS: dict[str, Any] = {
-    "id": field("string", "The fabric image id (the template VCF Automation knows)."),
+    "id": field("string", "The fabric image id (the template Automation knows)."),
     "name": field("string", "The template name in vCenter."),
     "externalId": field("string", "The template id in vCenter."),
     "osFamily": field("string", "The operating system family of the template."),
@@ -114,7 +131,7 @@ _FABRIC_IMAGE_FIELDS: dict[str, Any] = {
         "description": "The ids of the cloud accounts that see this template.",
         "items": {"type": "string"},
     },
-    "updatedAt": field("string", "When VCF Automation last saw a change (ISO 8601, UTC)."),
+    "updatedAt": field("string", "When Automation last saw a change (ISO 8601, UTC)."),
 }
 
 _TARGET: dict[str, Any] = {
@@ -130,6 +147,187 @@ _TARGET: dict[str, Any] = {
     "type": ["object", "null"],
 }
 
+IMAGE_PROFILE_LIST_PARAMS: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+    "examples": [{}],
+}
+
+IMAGE_PROFILE_PAGE_RESPONSE: Final[dict[str, Any]] = iaas_page(
+    "image profiles", _IMAGE_PROFILE_FIELDS
+)
+
+FABRIC_IMAGE_LIST_PARAMS: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "$filter": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional OData filter, for example \"name eq '<template-name>'\".",
+        },
+        "$top": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Optional number of items to return (page size).",
+        },
+        "$skip": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Optional number of items to skip (offset).",
+        },
+    },
+    "additionalProperties": False,
+    "examples": [{"$filter": "name eq '<template-name>'"}],
+}
+
+FABRIC_IMAGE_PAGE_RESPONSE: Final[dict[str, Any]] = iaas_page("fabric images", _FABRIC_IMAGE_FIELDS)
+
+ENUMERATE_IMAGES_PARAMS: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "cloud_account_id": {
+            **_PATH_ID,
+            "description": (
+                "The cloud account id: 'cloudAccountId' of an image profile, or one of "
+                "the 'cloudAccountIds' of a fabric image."
+            ),
+        },
+    },
+    "required": ["cloud_account_id"],
+    "additionalProperties": False,
+    "examples": [{"cloud_account_id": "<cloud-account-id>"}],
+}
+
+ENUMERATE_IMAGES_RESPONSE: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "status": field(
+            "string",
+            "finished, failed, or in_progress when the wait time ended first.",
+            enum=["finished", "failed", "in_progress"],
+        ),
+        "request": obj(
+            "The last state of the request.",
+            {
+                "id": field("string", "The request id."),
+                "status": field("string", "FINISHED, INPROGRESS or FAILED."),
+                "progress": field("integer", "The progress, in percent."),
+                "message": field(["string", "null"], "The status message."),
+            },
+        ),
+        "guidance": field(["string", "null"], "What to do next, or null."),
+    },
+    "required": ["status", "request", "guidance"],
+    "additionalProperties": False,
+}
+
+
+def mapping_update_params(prefix: str, *, require_expected: bool = False) -> dict[str, Any]:
+    """The parameters of ``<prefix>.image_profile.mapping.update``.
+
+    With ``require_expected`` the caller must pass
+    ``expected_old_fabric_image_id`` (``null`` is allowed for a new name).
+    Then every run checks the template the approver saw, so an approved
+    change never overwrites a newer one.
+    """
+    required = ["profile_id", "image_name"]
+    if require_expected:
+        required.append("expected_old_fabric_image_id")
+    first_word = "Required" if require_expected else "Optional"
+    return {
+        "type": "object",
+        "properties": {
+            "profile_id": {
+                **_PATH_ID,
+                "description": f"The image profile id (from {prefix}.image_profile.list).",
+            },
+            "image_name": {
+                **_ID,
+                "description": "The image name to change, for example 'RHEL 9'. Case counts.",
+            },
+            "fabric_image_id": {
+                **_PATH_ID,
+                "description": (
+                    "The fabric image id the name should give (from "
+                    f"{prefix}.fabric_image.list). Needed unless 'remove' is true."
+                ),
+            },
+            "remove": {
+                "type": "boolean",
+                "description": "True to remove the name. Then leave out 'fabric_image_id'.",
+            },
+            "expected_old_fabric_image_id": {
+                "type": ["string", "null"],
+                "maxLength": 256,
+                "description": (
+                    f"{first_word}. The fabric image id the name gives now, from "
+                    f"{prefix}.image_profile.list; null when the name does not exist yet. "
+                    "When the name gives something else at run time, nothing is written."
+                ),
+            },
+        },
+        "required": required,
+        "additionalProperties": False,
+        "examples": [
+            {
+                "profile_id": "<image-profile-id>",
+                "image_name": "<image-name>",
+                "fabric_image_id": "<fabric-image-id>",
+                "expected_old_fabric_image_id": "<old-fabric-image-id>",
+            },
+            {
+                "profile_id": "<image-profile-id>",
+                "image_name": "<image-name>",
+                "remove": True,
+                "expected_old_fabric_image_id": "<old-fabric-image-id>",
+            },
+        ],
+    }
+
+
+MAPPING_UPDATE_RESPONSE: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "status": field(
+            "string",
+            "updated, unchanged (nothing to change, nothing written), "
+            "invalid_request (nothing written) or precondition_failed (the name "
+            "no longer gives expected_old_fabric_image_id; nothing written).",
+            enum=["updated", "unchanged", "invalid_request", "precondition_failed"],
+        ),
+        "profile": obj(
+            "The image profile.",
+            {
+                "id": field("string", "The image profile id."),
+                "name": field(["string", "null"], "The image profile name."),
+                "region_id": field(["string", "null"], "The region id sent with the change."),
+            },
+        ),
+        "change": obj(
+            "What changes for the one image name.",
+            {
+                "image_name": field("string", "The image name."),
+                "action": field(
+                    ["string", "null"],
+                    "add, repoint or remove; null when nothing changes.",
+                ),
+                "old_target": _TARGET,
+                "new_target": _TARGET,
+            },
+        ),
+        "other_names": {
+            "type": "array",
+            "description": "The other image names of the profile, all sent back unchanged.",
+            "items": {"type": "string"},
+        },
+        "guidance": field(["string", "null"], "What happened or what to fix, or null."),
+    },
+    "required": ["status", "guidance"],
+    "additionalProperties": True,
+}
+
+
 _IMAGE_PROFILE_LIST = VcfaTypedOp(
     op_id="vcfa.tenant.image_profile.list",
     handler_attr="tenant_image_profile_list",
@@ -140,13 +338,8 @@ _IMAGE_PROFILE_LIST = VcfaTypedOp(
         "Reads GET /iaas/api/image-profiles on the tenant plane. Each profile belongs to "
         "one region and maps image names (for example 'RHEL 9') to vCenter templates."
     ),
-    parameter_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-        "examples": [{}],
-    },
-    response_schema=iaas_page("image profiles", _IMAGE_PROFILE_FIELDS),
+    parameter_schema=IMAGE_PROFILE_LIST_PARAMS,
+    response_schema=IMAGE_PROFILE_PAGE_RESPONSE,
     group_key=_GROUP,
     tags=("read-only", "vcfa", "tenant", "images"),
     safety_level="safe",
@@ -179,29 +372,8 @@ _FABRIC_IMAGE_LIST = VcfaTypedOp(
         "Reads GET /iaas/api/fabric-images on the tenant plane: the vCenter templates an "
         "image name can point at. Supports $filter, $top and $skip."
     ),
-    parameter_schema={
-        "type": "object",
-        "properties": {
-            "$filter": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Optional OData filter, for example \"name eq '<template-name>'\".",
-            },
-            "$top": {
-                "type": "integer",
-                "minimum": 1,
-                "description": "Optional number of items to return (page size).",
-            },
-            "$skip": {
-                "type": "integer",
-                "minimum": 0,
-                "description": "Optional number of items to skip (offset).",
-            },
-        },
-        "additionalProperties": False,
-        "examples": [{"$filter": "name eq '<template-name>'"}],
-    },
-    response_schema=iaas_page("fabric images", _FABRIC_IMAGE_FIELDS),
+    parameter_schema=FABRIC_IMAGE_LIST_PARAMS,
+    response_schema=FABRIC_IMAGE_PAGE_RESPONSE,
     group_key=_GROUP,
     tags=("read-only", "vcfa", "tenant", "images"),
     safety_level="safe",
@@ -235,43 +407,8 @@ _ENUMERATE_IMAGES = VcfaTypedOp(
         "for its request to end. VCF Automation then knows new vCenter templates at once, "
         "not at the next collection. It only reads vCenter."
     ),
-    parameter_schema={
-        "type": "object",
-        "properties": {
-            "cloud_account_id": {
-                **_ID,
-                "description": (
-                    "The cloud account id: 'cloudAccountId' of an image profile, or one of "
-                    "the 'cloudAccountIds' of a fabric image."
-                ),
-            },
-        },
-        "required": ["cloud_account_id"],
-        "additionalProperties": False,
-        "examples": [{"cloud_account_id": "<cloud-account-id>"}],
-    },
-    response_schema={
-        "type": "object",
-        "properties": {
-            "status": field(
-                "string",
-                "finished, failed, or in_progress when the wait time ended first.",
-                enum=["finished", "failed", "in_progress"],
-            ),
-            "request": obj(
-                "The last state of the request.",
-                {
-                    "id": field("string", "The request id."),
-                    "status": field("string", "FINISHED, INPROGRESS or FAILED."),
-                    "progress": field("integer", "The progress, in percent."),
-                    "message": field(["string", "null"], "The status message."),
-                },
-            ),
-            "guidance": field(["string", "null"], "What to do next, or null."),
-        },
-        "required": ["status", "request", "guidance"],
-        "additionalProperties": False,
-    },
+    parameter_schema=ENUMERATE_IMAGES_PARAMS,
+    response_schema=ENUMERATE_IMAGES_RESPONSE,
     group_key=_GROUP,
     tags=("vcfa", "tenant", "images"),
     safety_level="safe",
@@ -301,79 +438,8 @@ _MAPPING_UPDATE = VcfaTypedOp(
         "PATCH /iaas/api/image-profiles/{id} and the profile's own region. All other "
         "names stay as they are."
     ),
-    parameter_schema={
-        "type": "object",
-        "properties": {
-            "profile_id": {
-                **_ID,
-                "description": "The image profile id (from vcfa.tenant.image_profile.list).",
-            },
-            "image_name": {
-                **_ID,
-                "description": "The image name to change, for example 'RHEL 9'. Case counts.",
-            },
-            "fabric_image_id": {
-                **_ID,
-                "description": (
-                    "The fabric image id the name should give (from "
-                    "vcfa.tenant.fabric_image.list). Needed unless 'remove' is true."
-                ),
-            },
-            "remove": {
-                "type": "boolean",
-                "description": "True to remove the name. Then leave out 'fabric_image_id'.",
-            },
-        },
-        "required": ["profile_id", "image_name"],
-        "additionalProperties": False,
-        "examples": [
-            {
-                "profile_id": "<image-profile-id>",
-                "image_name": "<image-name>",
-                "fabric_image_id": "<fabric-image-id>",
-            },
-            {"profile_id": "<image-profile-id>", "image_name": "<image-name>", "remove": True},
-        ],
-    },
-    response_schema={
-        "type": "object",
-        "properties": {
-            "status": field(
-                "string",
-                "updated, unchanged (nothing to change, nothing written) or "
-                "invalid_request (nothing written).",
-                enum=["updated", "unchanged", "invalid_request"],
-            ),
-            "profile": obj(
-                "The image profile.",
-                {
-                    "id": field("string", "The image profile id."),
-                    "name": field(["string", "null"], "The image profile name."),
-                    "region_id": field(["string", "null"], "The region id sent with the change."),
-                },
-            ),
-            "change": obj(
-                "What changes for the one image name.",
-                {
-                    "image_name": field("string", "The image name."),
-                    "action": field(
-                        ["string", "null"],
-                        "add, repoint or remove; null when nothing changes.",
-                    ),
-                    "old_target": _TARGET,
-                    "new_target": _TARGET,
-                },
-            ),
-            "other_names": {
-                "type": "array",
-                "description": "The other image names of the profile, all sent back unchanged.",
-                "items": {"type": "string"},
-            },
-            "guidance": field(["string", "null"], "What happened or what to fix, or null."),
-        },
-        "required": ["status", "guidance"],
-        "additionalProperties": True,
-    },
+    parameter_schema=mapping_update_params(_PREFIX),
+    response_schema=MAPPING_UPDATE_RESPONSE,
     group_key=_GROUP,
     tags=("write", "vcfa", "tenant", "images"),
     safety_level="caution",
@@ -385,11 +451,13 @@ _MAPPING_UPDATE = VcfaTypedOp(
         ),
         preconditions=(
             "Read the profile id with vcfa.tenant.image_profile.list and the fabric image "
-            "id with vcfa.tenant.fabric_image.list. A person must approve the call; the "
+            "id with vcfa.tenant.fabric_image.list. Pass the name's current fabric image "
+            "id as expected_old_fabric_image_id. A person must approve the call; the "
             "approval card shows the old and the new template."
         ),
         output_shape=(
-            "{status: updated | unchanged | invalid_request, profile: {id, name, "
+            "{status: updated | unchanged | invalid_request | precondition_failed, "
+            "profile: {id, name, "
             "region_id}, change: {image_name, action, old_target, new_target}, "
             "other_names, guidance}."
         ),

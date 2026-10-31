@@ -267,8 +267,14 @@ approval preview in `_images.py`, all on the tenant plane, in the group
   then is the result `in_progress`; a `FAILED` request is the result
   `failed`. Both are results, not op errors.
 - **The name change** takes `profile_id`, `image_name` and either
-  `fabric_image_id` (add or re-point) or `remove: true`. The `PATCH`
-  replaces the whole mapping, so the handler reads the profile first and
+  `fabric_image_id` (add or re-point) or `remove: true`.
+  `expected_old_fabric_image_id` is the template the name gives now
+  (`null`: the name does not exist yet). When the name gives something
+  else at run time, the answer is `precondition_failed` and nothing is
+  written. On the vRA 8 op (`vcfa.vra8.image_profile.mapping.update`)
+  the field is required, so an approved change never overwrites a newer
+  one. On the 9 op it is optional; a call without it skips this check.
+  The `PATCH` replaces the whole mapping, so the handler reads the profile first and
   sends every other name back as `{id, constraints?, cloudConfig?}` (the
   shape the vendor's Terraform provider sends). A re-pointed name keeps
   its constraints and cloud config. The region is the profile's own,
@@ -277,8 +283,10 @@ approval preview in `_images.py`, all on the tenant plane, in the group
 - **Envelope.** `{status, profile: {id, name, region_id}, change:
   {image_name, action, old_target, new_target}, other_names, guidance}`.
   `status` is `updated`, `unchanged` (the name already gives that
-  template, or a removed name does not exist; nothing written) or
+  template, or a removed name does not exist; nothing written),
+  `precondition_failed` (see above; nothing written) or
   `invalid_request` (both or neither of `fabric_image_id` / `remove`, an
+  id of `.` or `..`, an
   unknown fabric image, or a template of another region; checked before
   any write). A template of another cloud account is refused too: the
   profile's `cloudAccountId` must be in the image's `cloudAccountIds`,
@@ -299,6 +307,28 @@ approval preview in `_images.py`, all on the tenant plane, in the group
   image at park time and shows the old and the new template plus the
   other names. Without a connector (`preview_operation`) it only echoes
   the request; a failed read gives `read: failed`.
+- **Path ids.** A path id (`profile_id`, `fabric_image_id`,
+  `cloud_account_id`) of `.` or `..` is refused by the schema and again
+  by the handler, because it would not stay one path segment.
+
+**The same ops on Aria Automation 8.18.** The vRA 8 connector
+(`vcfa-vra8-8.0`, see `connectors-vra8.md`) has the same four ops with
+the `vcfa.vra8` prefix, in its group `vcfa-vra8-images`. They run the same
+handlers of `_images.py` (each handler takes the op id prefix, so its
+guidance names the right ops) and use the same parameter and response
+schemas from `image_ops.py`. Only the texts and two risk levels differ:
+
+| op_id | risk / approval | versions |
+|---|---|---|
+| `vcfa.vra8.image_profile.list` | safe | 8.18 |
+| `vcfa.vra8.fabric_image.list` | safe | 8.18 |
+| `vcfa.vra8.cloud_account.enumerate_images` | caution, approval | 8.18 |
+| `vcfa.vra8.image_profile.mapping.update` | dangerous, approval | 8.18 |
+
+They return the same answers as the VCF Automation 9 ops above: the two
+lists are the vendor page `{content, numberOfElements, totalElements}`
+(a long list goes behind a result handle), the enumeration
+`{status, request, guidance}`, and the name change the envelope above.
 
 `register_typed_operations` (a classmethod on the connector, queued onto
 the lifespan registrar list via `register_vcfa_typed_operations` in

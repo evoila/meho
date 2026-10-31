@@ -397,8 +397,11 @@ These are vendor jobs: the Manager does the work after the call returns.
    `RUNNING` tasks (with `entityIds` = the mesh id). If a task runs on the
    same mesh (for create: on a mesh with the same name), the change
    returns `status: "already_running"` with that task's id, type and state
-   and starts nothing. This is a help, not a lock: two callers can both
-   check before either starts.
+   and starts nothing. The query is paged: the body carries
+   `paging: {offset, pageSize}` (100 rows a page, `offset` counts rows)
+   and the answer `paging.totalSize`. The check reads page after page
+   until a task matches or the rows end, at most 50 pages. This is a
+   help, not a lock: two callers can both check before either starts.
 3. **Status.** `hcx.task.get` reads
    `GET /hybridity/api/interconnect/tasks/{interconnectTaskId}` and returns
    `status` (the vendor state), `done`, `progress`, `message`, `error`
@@ -481,14 +484,18 @@ is sent.
   (`POST .../serviceMesh/{serviceMeshId}/resync`), so it is not a
   `generateDiff` call followed by a `PUT` (`generateDiff` only starts a
   task and returns no difference). The create call takes no `vcGuid`
-  query; the reference names none. The live proof confirms them.
+  query; the reference names none. The vendor reference documents the
+  paging of the task query (`paging: {offset, pageSize}` in the body,
+  `paging: {offset, pageSize, totalSize}` in the answer) but not whether
+  `offset` counts rows or pages; the check counts rows. The live proof
+  will confirm them.
 - The running check matches a task to the mesh by `entityDetails.id` (by
   `entityDetails.name` for create). Every running task on the mesh counts,
   also a diagnostics run, because the vendor task types are not
   documented.
 - The uplink fields (`networks`, `overriddenUplink` in a compute profile
   entry) come from the vendor schema, which does not describe them; the
-  live proof confirms them.
+  live proof will confirm them.
 - The vendor reference writes the job path as `/hybridity/api/jobs/{jobid}`
   (lower-case `id`); the reconcile lane uses that spelling.
 - `role` in `hcx.about` is derived from `systemType`. The vendor upgrade

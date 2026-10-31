@@ -14,7 +14,9 @@ Before a start, each change asks the Manager for queued or running
 interconnect tasks (``POST /hybridity/api/interconnect/tasks/query``). If
 one runs on the same service mesh (for create: on a mesh with the same
 name), the change returns that task with ``status: already_running`` and
-starts nothing. This check is a help, not a lock.
+starts nothing. The query is paged (``paging: {offset, pageSize}`` in the
+body, ``paging.totalSize`` in the answer); the check reads page after page
+until it finds a match or the rows end. This check is a help, not a lock.
 
 The paths come from the vendor reference "HCX Workload Migration APIs"
 (Broadcom developer portal, no version named) and VMware's Terraform
@@ -65,6 +67,11 @@ _RESYNC_PATH: Final = "/hybridity/api/interconnect/serviceMesh/{serviceMeshId}/r
 _APPLIANCES_PATH: Final = "/hybridity/api/interconnect/appliances"
 _TASK_PATH: Final = "/hybridity/api/interconnect/tasks/{interconnectTaskId}"
 _TASK_QUERY_PATH: Final = "/hybridity/api/interconnect/tasks/query"
+#: Rows per page of the running check, the vendor default of the task list.
+_TASK_PAGE_SIZE: Final = 100
+#: Upper bound of pages the running check reads, so a Manager that pages
+#: wrongly cannot keep the check busy for ever.
+_MAX_TASK_PAGES: Final = 50
 
 #: Every vendor call of this module, as ``(method, path template)``.
 #: The reconcile lane checks each one against the pinned HCX API files.
@@ -186,22 +193,11 @@ def _apply_uplinks(body: dict[str, Any], uplinks: list[dict[str, Any]]) -> None:
             profile["overriddenUplink"] = True
 
 
-async def _running_task(
-    connector: HcxConnector,
-    operator: Operator,
-    target: HcxTargetLike,
-    *,
-    mesh_id: str | None = None,
-    name: str | None = None,
+def _matching_task(
+    rows: list[dict[str, Any]], mesh_id: str | None, name: str | None
 ) -> dict[str, Any] | None:
-    """Return a queued or running task on the mesh (by id, or by name for create), else ``None``."""
-    task_filter: dict[str, Any] = {"status": list(_ACTIVE_STATES)}
-    if mesh_id is not None:
-        task_filter["entityIds"] = [mesh_id]
-    payload = await connector._post_json(
-        target, _TASK_QUERY_PATH, operator=operator, json={"filter": task_filter}
-    )
-    for task in rows_of(payload):
+    """Return the first active task of *rows* on the mesh (by id, or by name), else ``None``."""
+    for task in rows:
         if str(task.get("status") or "").upper() not in _ACTIVE_STATES:
             continue
         entity = task.get("entityDetails")
@@ -210,6 +206,57 @@ async def _running_task(
             return task
         if name is not None and entity.get("name") == name:
             return task
+    return None
+
+
+def _is_last_page(payload: Any, rows_on_page: int, rows_read: int) -> bool:
+    """Whether a page of the task query is the last one.
+
+    ``paging.totalSize`` decides when the Manager gives it. Without it, a
+    page shorter than its page size is the last one.
+    """
+    paging = payload.get("paging") if isinstance(payload, dict) else None
+    paging = paging if isinstance(paging, dict) else {}
+    total = paging.get("totalSize")
+    if isinstance(total, int) and not isinstance(total, bool):
+        return rows_read >= total
+    page_size = paging.get("pageSize")
+    if not isinstance(page_size, int) or isinstance(page_size, bool) or page_size <= 0:
+        page_size = _TASK_PAGE_SIZE
+    return rows_on_page < page_size
+
+
+async def _running_task(
+    connector: HcxConnector,
+    operator: Operator,
+    target: HcxTargetLike,
+    *,
+    mesh_id: str | None = None,
+    name: str | None = None,
+) -> dict[str, Any] | None:
+    """Return a queued or running task on the mesh (by id, or by name for create), else ``None``.
+
+    Reads the task query page by page (``offset`` counts rows) until a task
+    matches or the rows end. Create filters by state only, so its match can
+    sit on a later page.
+    """
+    task_filter: dict[str, Any] = {"status": list(_ACTIVE_STATES)}
+    if mesh_id is not None:
+        task_filter["entityIds"] = [mesh_id]
+    rows_read = 0
+    for _ in range(_MAX_TASK_PAGES):
+        body = {
+            "filter": task_filter,
+            "paging": {"offset": rows_read, "pageSize": _TASK_PAGE_SIZE},
+        }
+        payload = await connector._post_json(target, _TASK_QUERY_PATH, operator=operator, json=body)
+        rows = rows_of(payload)
+        match = _matching_task(rows, mesh_id, name)
+        if match is not None:
+            return match
+        rows_read += len(rows)
+        if not rows or _is_last_page(payload, len(rows), rows_read):
+            return None
     return None
 
 

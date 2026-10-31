@@ -313,7 +313,10 @@ async def test_create_posts_the_mesh_and_answers_accepted(hcx: HcxConnector) -> 
         result = await _run("hcx.service_mesh.create", params)
 
     assert result.status == "ok", result.error
-    assert _body(query) == {"filter": {"status": ["QUEUED", "RUNNING"]}}
+    assert _body(query) == {
+        "filter": {"status": ["QUEUED", "RUNNING"]},
+        "paging": {"offset": 0, "pageSize": 100},
+    }
     assert create.calls[0].request.headers["x-hm-authorization"] == _TOKEN
     assert _body(create) == {
         "name": "<mesh-name>",
@@ -368,6 +371,99 @@ async def test_create_returns_a_running_task_of_the_same_mesh_and_starts_nothing
     assert result.result["status"] == "already_running"
     assert result.result["interconnect_task_id"] == "task-running"
     assert result.result["service_mesh_id"] == "mesh-new"
+
+
+async def test_create_finds_a_running_task_on_the_second_page_and_starts_nothing(
+    hcx: HcxConnector,
+) -> None:
+    """A matching task behind a full page of other tasks still stops the create."""
+    page_one = [
+        {
+            "interconnectTaskId": f"task-{index}",
+            "status": "RUNNING",
+            "entityDetails": {"id": f"mesh-{index}", "name": f"<other-{index}>"},
+        }
+        for index in range(100)
+    ]
+    running = {
+        "interconnectTaskId": "task-running",
+        "type": "<task-type>",
+        "status": "QUEUED",
+        "entityDetails": {"id": "mesh-new", "name": "<mesh-name>", "type": "<entity-type>"},
+    }
+
+    def page(request: httpx.Request) -> httpx.Response:
+        offset = json.loads(request.content)["paging"]["offset"]
+        items = page_one if offset == 0 else [running]
+        return httpx.Response(
+            200,
+            json={"items": items, "paging": {"offset": offset, "pageSize": 100, "totalSize": 101}},
+        )
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        query = mock.post(_TASKS_QUERY).mock(side_effect=page)
+        create = mock.post(_MESH_PATH).respond(202, json=_accepted_body())
+        result = await _run(
+            "hcx.service_mesh.create",
+            {"name": "<mesh-name>", "compute_profiles": _COMPUTE_PROFILES, "services": ["RAV"]},
+        )
+
+    assert result.status == "ok", result.error
+    assert not create.called
+    assert query.call_count == 2
+    assert [_body(query, i)["paging"] for i in range(2)] == [
+        {"offset": 0, "pageSize": 100},
+        {"offset": 100, "pageSize": 100},
+    ]
+    assert result.result["status"] == "already_running"
+    assert result.result["interconnect_task_id"] == "task-running"
+    assert result.result["service_mesh_id"] == "mesh-new"
+
+
+async def test_create_reads_every_page_before_it_starts(hcx: HcxConnector) -> None:
+    """Without a match the check reads up to ``totalSize`` rows, then the create runs."""
+    others = [
+        {"interconnectTaskId": f"task-{index}", "status": "RUNNING", "entityDetails": {"id": "x"}}
+        for index in range(100)
+    ]
+
+    def page(request: httpx.Request) -> httpx.Response:
+        offset = json.loads(request.content)["paging"]["offset"]
+        items = others if offset == 0 else others[:5]
+        return httpx.Response(200, json={"items": items, "paging": {"totalSize": 105}})
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        query = mock.post(_TASKS_QUERY).mock(side_effect=page)
+        create = mock.post(_MESH_PATH).respond(202, json=_accepted_body())
+        result = await _run(
+            "hcx.service_mesh.create",
+            {"name": "<mesh-name>", "compute_profiles": _COMPUTE_PROFILES, "services": ["RAV"]},
+        )
+
+    assert result.status == "ok", result.error
+    assert query.call_count == 2
+    assert create.called
+    assert result.result["status"] == "accepted"
+
+
+async def test_running_check_stops_on_a_short_page_without_a_total(hcx: HcxConnector) -> None:
+    """An answer without ``paging.totalSize`` ends after a page shorter than the page size."""
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        query = mock.post(_TASKS_QUERY).respond(
+            200, json={"items": [{"interconnectTaskId": "t", "status": "RUNNING"}]}
+        )
+        create = mock.post(_MESH_PATH).respond(202, json=_accepted_body())
+        result = await _run(
+            "hcx.service_mesh.create",
+            {"name": "<mesh-name>", "compute_profiles": _COMPUTE_PROFILES, "services": ["RAV"]},
+        )
+
+    assert result.status == "ok", result.error
+    assert query.call_count == 1
+    assert create.called
 
 
 async def test_create_vendor_error_reaches_the_answer(hcx: HcxConnector) -> None:

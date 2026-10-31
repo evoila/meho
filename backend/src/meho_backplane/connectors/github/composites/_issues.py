@@ -48,7 +48,6 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.github.connector import GitHubRestConnector
 
 __all__ = [
-    "MAX_LIST_PAGES",
     "SEARCH_RESULT_LIMIT",
     "build_search_query",
     "issue_comment_composite",
@@ -68,8 +67,6 @@ _SEARCH_PATH: Final = "/search/issues"
 _PAGE_SIZE: Final[int] = 100
 #: GitHub's search returns at most 1,000 hits for one query.
 SEARCH_RESULT_LIMIT: Final[int] = 1000
-#: Most pages of the plain issue list one exact search reads (10,000 rows).
-MAX_LIST_PAGES: Final[int] = 100
 #: Most pages of sub-issues one ``issue_view`` reads.
 _MAX_SUB_ISSUE_PAGES: Final[int] = 10
 
@@ -208,7 +205,11 @@ async def _list_issues(
     author: str | None,
     include_pull_requests: bool,
 ) -> dict[str, Any]:
-    """Exact mode without a phrase: read the plain issue list to the end."""
+    """Exact mode without a phrase: read the plain issue list to the end.
+
+    There is no page cap. GitHub's list has no total count and ends with a
+    short page, so MEHO reads until that page and the answer is complete.
+    """
     query: dict[str, Any] = {
         "state": state,
         "sort": "created",
@@ -222,8 +223,8 @@ async def _list_issues(
     if author is not None:
         query["creator"] = author
     hits: list[dict[str, Any]] = []
-    complete = False
-    for page in range(1, MAX_LIST_PAGES + 1):
+    page = 1
+    while True:
         rows = _rows(await repo.get(_ISSUES_PATH, params={**query, "page": page}))
         hits.extend(
             _hit(row, suggestion=False)
@@ -231,16 +232,14 @@ async def _list_issues(
             if include_pull_requests or "pull_request" not in row
         )
         if len(rows) < _PAGE_SIZE:
-            complete = True
             break
+        page += 1
     return {
         "mode": "exact",
-        "complete": complete,
+        "complete": True,
         "total_count": None,
         "count": len(hits),
-        "reason": None
-        if complete
-        else f"MEHO read {MAX_LIST_PAGES * _PAGE_SIZE} issues and stopped; add filters",
+        "reason": None,
         "query": None,
         "issues": hits,
     }

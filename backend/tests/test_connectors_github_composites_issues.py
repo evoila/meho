@@ -32,7 +32,6 @@ import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.github.composites._issues import (
-    MAX_LIST_PAGES,
     SEARCH_RESULT_LIMIT,
     issue_comment_composite,
     issue_create_composite,
@@ -233,13 +232,22 @@ async def test_exact_search_leaves_pull_requests_out_unless_asked() -> None:
 
 
 @pytest.mark.asyncio
-async def test_exact_search_stops_at_the_page_cap_and_says_incomplete() -> None:
-    connector = _RecordingConnector(get={_ISSUES_PATH: _paged_list(MAX_LIST_PAGES * 100 + 5)})
+async def test_exact_search_reads_past_100_pages_and_past_pull_requests() -> None:
+    # 10,005 rows, every second one a pull request: 101 pages, no cap.
+    connector = _RecordingConnector(get={_ISSUES_PATH: _paged_list(10_005, pull_every=2)})
     result = await _search(connector)
-    assert result["complete"] is False
-    assert result["count"] == MAX_LIST_PAGES * 100
-    assert "add filters" in result["reason"]
-    assert len(connector.get_calls) == MAX_LIST_PAGES
+    assert result["complete"] is True
+    assert result["reason"] is None
+    assert result["count"] == 5_003
+    assert len(connector.get_calls) == 101
+    assert [p["page"] for _, p in connector.get_calls if p] == list(range(1, 102))
+    assert result["issues"][-1]["number"] == 1, "the oldest issue is in"
+
+    connector = _RecordingConnector(get={_ISSUES_PATH: _paged_list(10_005, pull_every=2)})
+    result = await _search(connector, include_pull_requests=True)
+    assert result["complete"] is True
+    assert result["count"] == 10_005
+    assert len(connector.get_calls) == 101
 
 
 # ---------------------------------------------------------------------------

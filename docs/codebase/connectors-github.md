@@ -348,9 +348,8 @@ they work on a fresh install with no spec import.
 - `mode=exact` (the default) uses filters only: `state`, `labels` (all must
   match), `assignee`, `author`, and an optional exact `phrase`. Newest first.
   - Without a phrase, MEHO reads the plain issue list, 100 per page, to the
-    end. The list is complete. `total_count` is null, because this list
-    has no count. MEHO stops after 100 pages (10,000 issues) and then says
-    `complete: false`.
+    end. There is no page cap, so the list is complete. `total_count` is
+    null, because this list has no count.
   - With a phrase, MEHO uses GitHub's search with the phrase in double
     quotes, sorted by creation date, and reads up to 1,000 hits.
 - `mode=ranked` sends free text (`query`) to GitHub's search and keeps

@@ -555,6 +555,16 @@ header. So every lifted `Operator` (role probes, write gates, the
 approvals and runbooks lifts) carries the role of the current tenant.
 A session without a chosen tenant is checked with `allow_unchosen`.
 
+Every gate that works in a tenant also passes `request_tenant`, the
+tenant the session middleware loaded the request with
+(`UISessionContext.tenant_id`). The gate loads the session row again;
+when the row names another tenant by then (a switch in another browser
+tab between the two loads), the check raises `TenantChangedError` (409,
+"The tenant changed. Reload the page.", header `x-meho-tenant-changed`)
+before any role is returned. So a write never runs in the old tenant
+with the new tenant's role. Only the picker and the switch route check
+without `request_tenant`.
+
 **Login.** `_persist_session_from_tokens` checks the token with
 `allow_unchosen=True`. With several tenants the row gets
 `tenant_chosen=false` (and the first tenant as a placeholder), and the
@@ -565,7 +575,10 @@ callback redirects to `/ui/tenant`. With one tenant nothing changes.
 - `GET /ui/tenant` — "Choose a tenant". A standalone page (no sidebar,
   no background requests). It lists the person's tenants with the role
   in each; a platform admin also sees every other existing tenant
-  (role "Admin (platform admin)").
+  (role "Admin (platform admin)"). When the row still waits for the
+  first choice but a refreshed token lists one tenant only, the page
+  saves that tenant on the row first (`_settle_single_tenant`), so the
+  dashboard link it then shows does not lead back to the picker.
 - `POST /ui/tenant/switch` — a plain form with the CSRF token and the
   `tenant` field. It checks the token again (with a refresh on expiry),
   then once more with the wanted tenant. A tenant the token does not
@@ -588,6 +601,17 @@ with `{"detail": "The tenant changed. Reload the page."}` and the header
 `x-meho-tenant-changed`; nothing runs, and the script shows a reload
 banner. A request without the marker passes. The switch route is not
 checked.
+
+The broadcast live feed connects with the browser's `EventSource`, which
+sends no header. So the feed page puts the marker on the stream URL as
+the `meho_tenant` query parameter (`_stream_url` in
+`ui/routes/broadcast/feed.py`), and the middleware reads that parameter
+too. An old tab's reconnect after a switch is refused the same way, and
+the stream route never reads the parameter. The standalone wall page
+carries `data-meho-tenant` like `base.html`. An `EventSource` reports no
+status code, so on a stream error the feed controller calls
+`mehoPageTenant.probeTenantChanged()` (one `HEAD` request for the page
+with the header); a 409 shows the reload banner.
 
 **Removed from a tenant.** At the next check of a refreshed token (the
 drift-gated read revalidation in the middleware, or any route lift),

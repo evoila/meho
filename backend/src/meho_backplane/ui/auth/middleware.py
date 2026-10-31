@@ -740,6 +740,7 @@ async def require_ui_admin(
         _refreshed, operator = await verify_access_token_with_refresh(
             decrypted,
             expected_audience=settings.keycloak_audience,
+            request_tenant=session.tenant_id,
         )
     except HTTPException as exc:
         log.info(

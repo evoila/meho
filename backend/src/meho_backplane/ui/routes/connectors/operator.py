@@ -56,7 +56,7 @@ from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
 )
-from meho_backplane.ui.auth.tenant import TenantRemovedError
+from meho_backplane.ui.auth.tenant import TenantChangedError, TenantRemovedError
 
 __all__ = [
     "OperatorRoleProbe",
@@ -153,6 +153,7 @@ async def lift_operator_from_session(session_ctx: UISessionContext) -> Operator:
     _refreshed, operator = await verify_access_token_with_refresh(
         decrypted,
         expected_audience=settings.keycloak_audience,
+        request_tenant=session_ctx.tenant_id,
     )
     _assert_identity_matches(operator, session_ctx)
     return operator
@@ -196,7 +197,7 @@ async def resolve_role_probe(
         session_ctx = await require_ui_session(request)
     try:
         operator = await _lift_operator(session_ctx)
-    except TenantRemovedError:
+    except (TenantChangedError, TenantRemovedError):
         raise
     except Exception as exc:
         if (

@@ -69,12 +69,14 @@ Page tenant (#5240)
 
 Every console page carries the tenant it was made for: htmx sends it
 in the ``Meho-Tenant`` header (``static/src/app/page-tenant.js``), a
-plain form in the hidden ``meho_tenant`` field. When it differs from
-the session's current tenant (the person switched in another browser
-tab), the request is refused with ``409`` and "The tenant changed.
-Reload the page." -- for read-only methods too, so an old tab cannot
-load another tenant's data into its page. Nothing runs. The switch
-form (``/ui/tenant/switch``) is not checked: it names its new tenant.
+plain form in the hidden ``meho_tenant`` field, and a live-feed stream
+(the browser's ``EventSource`` can send no header) in the
+``meho_tenant`` query parameter of its URL. When it differs from the
+session's current tenant (the person switched in another browser tab),
+the request is refused with ``409`` and "The tenant changed. Reload the
+page." -- for read-only methods too, so an old tab cannot load another
+tenant's data into its page. Nothing runs. The switch form
+(``/ui/tenant/switch``) is not checked: it names its new tenant.
 
 Token issuance
 ==============
@@ -384,6 +386,18 @@ def _extract_header(scope: Scope, header_name: str) -> str | None:
     return None
 
 
+def _extract_query_param(scope: Scope, name: str) -> str | None:
+    """Return the first value of query parameter *name*, or ``None``."""
+    raw = scope.get("query_string")
+    if not isinstance(raw, (bytes, bytearray)) or not raw:
+        return None
+    try:
+        values = parse_qs(bytes(raw).decode("utf-8"), keep_blank_values=False).get(name)
+    except UnicodeDecodeError:
+        return None
+    return values[0] if values else None
+
+
 def _forbidden_response(reason: str) -> tuple[int, list[tuple[bytes, bytes]], bytes]:
     """Build the ASGI three-tuple (status, headers, body) for a 403.
 
@@ -516,11 +530,13 @@ def _page_tenant_changed(scope: Scope, form_page_tenant: str | None) -> bool:
 
     Every console page carries the tenant it was made for: htmx sends it
     in the ``Meho-Tenant`` header (``page-tenant.js``), a plain form in
-    the hidden ``meho_tenant`` field. After a switch in another browser
-    tab, the session's tenant differs, and the request must not run.
-    A request without the marker passes (an API-style call, or a page
-    from before this check existed). The switch form itself names its
-    new tenant, so it is not checked.
+    the hidden ``meho_tenant`` field, a live-feed stream in the
+    ``meho_tenant`` query parameter (an ``EventSource`` sends no header,
+    and it reconnects with the same URL). After a switch in another
+    browser tab, the session's tenant differs, and the request must not
+    run. A request without the marker passes (an API-style call, or a
+    page from before this check existed). The switch form itself names
+    its new tenant, so it is not checked.
     """
     if _select_path(scope) == TENANT_SWITCH_PATH:
         return False
@@ -529,7 +545,11 @@ def _page_tenant_changed(scope: Scope, form_page_tenant: str | None) -> bool:
     session_tenant = getattr(session_context, "tenant_id", None)
     if session_tenant is None:
         return False
-    page_tenant = _extract_header(scope, TENANT_HEADER) or form_page_tenant
+    page_tenant = (
+        _extract_header(scope, TENANT_HEADER)
+        or form_page_tenant
+        or _extract_query_param(scope, PAGE_TENANT_FORM_FIELD)
+    )
     if not page_tenant:
         return False
     return page_tenant.strip().lower() != str(session_tenant).lower()

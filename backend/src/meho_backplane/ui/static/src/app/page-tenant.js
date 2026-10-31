@@ -14,6 +14,13 @@
 // * as a hidden ``meho_tenant`` field in every plain ``<form method="post">``
 //   (a global ``submit`` listener), for the few forms outside htmx.
 //
+// A live feed (``EventSource``) can send no header; its URL carries the
+// marker as the ``meho_tenant`` query parameter instead (the server puts it
+// there). An ``EventSource`` reports no status code either, so
+// ``probeTenantChanged`` lets the feed ask: it sends one ``HEAD`` request
+// for the current page with the header, and shows the banner when the
+// answer is the 409 of a changed tenant.
+//
 // The server (``ui/csrf.py``) compares the value with the session's current
 // tenant. On a mismatch it answers ``409`` with the ``x-meho-tenant-changed``
 // header and runs nothing. For an htmx request this module then shows a
@@ -79,6 +86,41 @@
     return null;
   }
 
+  var probe = null;
+
+  function probeTenantChanged() {
+    var tenant = pageTenant();
+    if (!tenant || typeof window.fetch !== "function") {
+      return Promise.resolve(false);
+    }
+    if (probe) {
+      return probe;
+    }
+    var headers = {};
+    headers[TENANT_HEADER] = tenant;
+    probe = window
+      .fetch(window.location.pathname + window.location.search, {
+        method: "HEAD",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: headers,
+      })
+      .then(function (response) {
+        var changed = response.status === 409 && !!response.headers.get(CHANGED_HEADER);
+        if (changed) {
+          showTenantChangedBanner();
+        }
+        return changed;
+      })
+      .catch(function () {
+        return false;
+      })
+      .finally(function () {
+        probe = null;
+      });
+    return probe;
+  }
+
   function onBeforeOnLoad(event) {
     var xhr = event && event.detail && event.detail.xhr;
     if (!xhr || xhr.status !== 409 || typeof xhr.getResponseHeader !== "function") {
@@ -100,6 +142,7 @@
     onConfigRequest: onConfigRequest,
     onSubmit: onSubmit,
     onBeforeOnLoad: onBeforeOnLoad,
+    probeTenantChanged: probeTenantChanged,
     TENANT_HEADER: TENANT_HEADER,
     FORM_FIELD: FORM_FIELD,
     CHANGED_HEADER: CHANGED_HEADER,

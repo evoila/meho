@@ -13,7 +13,9 @@ These tests pin:
   writes an audit row and opens the dashboard; a refused switch changes
   nothing;
 * targets, approvals and the dashboard show only the current tenant;
-* a request from a page made for another tenant is refused and nothing runs;
+* a request from a page made for another tenant is refused and nothing runs,
+  also when the switch happens while the request runs, and also for the
+  live feed's stream connection;
 * after removal from a tenant, the next token check takes the person out;
 * a platform admin sees every existing tenant in the picker;
 * the account page lists the person's tenants with the role in each.
@@ -28,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 import warnings
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -49,6 +51,7 @@ from meho_backplane.db.models import (
     ApprovalRequest,
     ApprovalRequestStatus,
     AuditLog,
+    Document,
     Target,
     Tenant,
     WebSession,
@@ -72,9 +75,12 @@ from meho_backplane.ui.auth.session_store import (
     reset_fernet_cache_for_testing,
     rotate_refresh,
 )
+from meho_backplane.ui.auth.tenant import save_session_tenant
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
+from meho_backplane.ui.routes.broadcast import stream as stream_module
+from meho_backplane.ui.routes.kb import routes as kb_routes
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests._oidc_jwt_helpers import AUDIENCE, ISSUER, make_rsa_keypair, mint_token, public_jwks
 from tests._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
@@ -85,6 +91,7 @@ _TENANT_C = uuid.UUID("cccccccc-3333-3333-3333-cccccccccccc")
 
 _ENTRY_A_READERS = f"{_TENANT_A}:team-a:Readers"
 _ENTRY_B_OPERATORS = f"{_TENANT_B}:team-b:Operators"
+_ENTRY_B_ADMINS = f"{_TENANT_B}:team-b:Admins"
 
 _PERSON = "person-two-tenants"
 
@@ -495,6 +502,109 @@ def test_form_from_a_page_of_the_old_tenant_is_refused(keypair: Any) -> None:
     assert ok.status_code == 200
 
 
+def _kb_entries() -> list[Document]:
+    """The knowledge entries (``kb.create_entry`` writes ``Document`` rows)."""
+
+    async def _do() -> list[Document]:
+        async with get_sessionmaker()() as session:
+            return list((await session.execute(select(Document))).scalars().all())
+
+    return _run(_do())
+
+
+def test_switch_while_a_write_runs_is_refused(
+    monkeypatch: pytest.MonkeyPatch, keypair: Any
+) -> None:
+    """A switch between the page check and the write gate runs nothing.
+
+    The person reads in tenant A and is an admin in tenant B. The write
+    request passes the old-tab check in A; then, before the knowledge
+    write gate loads the session again, another tab switches the session
+    to B. The gate must not take B's admin role for a write in A.
+    """
+    _seed_tenants((_TENANT_A, "team-a"), (_TENANT_B, "team-b"))
+    token = mint_token(
+        keypair, sub=_PERSON, extra_claims={"meho_tenants": [_ENTRY_A_READERS, _ENTRY_B_ADMINS]}
+    )
+    session_id = _seed_session(token, tenant_id=_TENANT_A)
+    client = _client(session_id)
+    original_load = kb_routes.load_fresh_session
+
+    async def _load_after_a_switch_in_another_tab(loaded_id: uuid.UUID) -> Any:
+        await save_session_tenant(
+            loaded_id, tenant_id=_TENANT_B, tenant_chosen=True, can_switch=True
+        )
+        return await original_load(loaded_id)
+
+    monkeypatch.setattr(kb_routes, "load_fresh_session", _load_after_a_switch_in_another_tab)
+
+    response = client.post(
+        "/ui/kb/new",
+        data={"slug": "written-from-a", "body": "# Note", "tags": ""},
+        headers={
+            "X-CSRF-Token": mint_csrf_token(str(session_id)),
+            "HX-Request": "true",
+            "Meho-Tenant": str(_TENANT_A),
+        },
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "The tenant changed. Reload the page."
+    assert response.headers["x-meho-tenant-changed"] == "1"
+    assert _kb_entries() == []
+    assert _session_row(session_id).tenant_id == _TENANT_B
+
+
+def _finite_feed(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Replace the shared stream generator with one frame; record the reader."""
+    readers: list[Any] = []
+
+    async def _one_frame(operator: Any, **_kwargs: Any) -> AsyncIterator[str]:
+        readers.append(operator)
+        yield ": heartbeat\n\n"
+
+    monkeypatch.setattr(stream_module, "announcement_feed_frames", _one_frame)
+    return readers
+
+
+def test_live_feed_stream_carries_the_page_tenant(
+    monkeypatch: pytest.MonkeyPatch, keypair: Any
+) -> None:
+    """The broadcast stream URL names the page's tenant; a reconnect after a switch is refused."""
+    _seed_tenants((_TENANT_A, "team-a"), (_TENANT_B, "team-b"))
+    session_id = _seed_session(_two_tenant_token(keypair), tenant_id=_TENANT_A)
+    client = _client(session_id)
+    readers = _finite_feed(monkeypatch)
+
+    page = client.get("/ui/broadcast")
+    assert page.status_code == 200, page.text
+    stream_url = f"/ui/broadcast/stream?meho_tenant={_TENANT_A}"
+    assert f'sse-connect="{stream_url}"' in page.text
+    assert 'x-on:htmx:sse-error="onSseError()"' in page.text
+    wall = client.get("/ui/broadcast?wall=1")
+    assert f'data-meho-tenant="{_TENANT_A}"' in wall.text
+    assert f'sse-connect="{stream_url}"' in wall.text
+
+    # The first connection streams tenant A.
+    assert client.get(stream_url).status_code == 200
+    assert readers[-1].tenant_id == _TENANT_A
+
+    assert _switch(client, session_id, str(_TENANT_B)).status_code == 303
+
+    # The old tab's EventSource reconnects with the same URL: refused, no frame.
+    reconnect = client.get(stream_url)
+    assert reconnect.status_code == 409
+    assert reconnect.headers["x-meho-tenant-changed"] == "1"
+    assert len(readers) == 1
+    # The old tab's probe for the banner gets the same answer.
+    probe = client.head("/ui/broadcast", headers={"Meho-Tenant": str(_TENANT_A)})
+    assert probe.status_code == 409
+    # A page made for tenant B streams tenant B.
+    fresh = client.get(f"/ui/broadcast/stream?meho_tenant={_TENANT_B}")
+    assert fresh.status_code == 200
+    assert readers[-1].tenant_id == _TENANT_B
+
+
 # ---------------------------------------------------------------------------
 # Removed from a tenant
 # ---------------------------------------------------------------------------
@@ -549,6 +659,27 @@ def test_removal_on_a_page_load_goes_back_to_the_picker(
     assert "Choose a tenant to go on" in picker.text
 
 
+def test_picker_saves_the_only_tenant_left_before_the_first_choice(keypair: Any) -> None:
+    """A refreshed single-tenant token while the picker waits does not trap the person."""
+    _seed_tenants((_TENANT_A, "team-a"), (_TENANT_B, "team-b"))
+    session_id = _seed_session(_two_tenant_token(keypair), tenant_id=_TENANT_A, tenant_chosen=False)
+    client = _client(session_id)
+    _replace_token(
+        session_id,
+        mint_token(keypair, sub=_PERSON, extra_claims={"meho_tenants": [_ENTRY_A_READERS]}),
+    )
+
+    picker = client.get("/ui/tenant")
+
+    assert picker.status_code == 200, picker.text
+    assert 'data-field="tenant-current"' in picker.text
+    assert "Back to the dashboard" in picker.text
+    row = _session_row(session_id)
+    assert (row.tenant_id, row.tenant_chosen, row.can_switch_tenant) == (_TENANT_A, True, False)
+    # The dashboard link works: no redirect back to the picker.
+    assert client.get("/ui/").status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # Account page
 # ---------------------------------------------------------------------------
@@ -583,5 +714,15 @@ def test_every_page_loads_the_page_tenant_script() -> None:
 
     response = TestClient(_build_app()).get("/ui/static/src/app/page-tenant.js")
     assert response.status_code == 200
-    for needle in ("Meho-Tenant", "meho_tenant", "x-meho-tenant-changed", "dataset.mehoTenant"):
+    for needle in (
+        "Meho-Tenant",
+        "meho_tenant",
+        "x-meho-tenant-changed",
+        "dataset.mehoTenant",
+        "probeTenantChanged",
+        'method: "HEAD"',
+    ):
         assert needle in response.text
+    feed = (static_root_dir() / "src" / "app" / "broadcast-feed.js").read_text("utf-8")
+    assert "onSseError()" in feed
+    assert "probeTenantChanged" in feed

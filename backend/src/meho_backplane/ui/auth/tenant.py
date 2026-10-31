@@ -21,6 +21,10 @@ This module holds what the web interface adds on top:
   session's tenant (the person was taken out of it, or a platform admin
   lost the role). The session goes back to the picker, or to the only
   tenant left, and the request ends with :class:`TenantRemovedError`.
+* :class:`TenantChangedError` -- the session's tenant changed while a
+  request was running (a switch in another browser tab). The request
+  ends with the same 409 the old-tab check of :mod:`meho_backplane.ui.csrf`
+  gives, and nothing runs.
 
 Design: ``docs/decisions/2026-10-28-several-tenants-per-person.md``
 section 2, "Web interface".
@@ -49,6 +53,7 @@ __all__ = [
     "TENANT_REMOVED_DETAIL",
     "TENANT_REMOVED_NOTICE",
     "TENANT_SWITCH_PATH",
+    "TenantChangedError",
     "TenantRemovedError",
     "can_switch_tenant",
     "fall_back_after_removal",
@@ -95,6 +100,27 @@ class TenantRemovedError(HTTPException):
 
     def __init__(self) -> None:
         super().__init__(status_code=status.HTTP_409_CONFLICT, detail=TENANT_REMOVED_DETAIL)
+
+
+class TenantChangedError(HTTPException):
+    """The session's tenant changed while this request was running.
+
+    A request is checked twice: the session middleware loads the row
+    (and the old-tab check compares the page's tenant with it), then a
+    route gate loads the row again to check the token. A switch in
+    another browser tab between the two loads would give the gate the
+    new tenant's role while the handler still works in the old one. The
+    gate raises this error instead; the answer is the same ``409`` as the
+    old-tab check, with the header ``session-expiry.js`` shows the reload
+    banner on.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=TENANT_CHANGED_MESSAGE,
+            headers={TENANT_CHANGED_HEADER: "1"},
+        )
 
 
 def session_tenant_request(decrypted: DecryptedSession) -> tuple[str | None, bool]:

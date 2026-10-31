@@ -121,6 +121,7 @@ from meho_backplane.ui.auth.session_store import (
     rotate_refresh,
 )
 from meho_backplane.ui.auth.tenant import (
+    TenantChangedError,
     fall_back_after_removal,
     lost_tenant,
     session_tenant_request,
@@ -442,11 +443,35 @@ async def load_fresh_session(session_id: uuid.UUID) -> DecryptedSession | None:
     return decrypted
 
 
+def _assert_same_tenant(decrypted: DecryptedSession, request_tenant: uuid.UUID | None) -> None:
+    """Refuse the request when the row's tenant is not the request's tenant (#5240).
+
+    *request_tenant* is the tenant the session middleware loaded the
+    request with (and the old-tab check compared the page against). A
+    switch in another browser tab, or a removal fall-back, between that
+    load and this one would hand the caller the new tenant's role for a
+    handler that still works in the old tenant. ``None`` skips the check
+    (the picker and the switch route do not work in one tenant).
+    """
+    if request_tenant is None:
+        return
+    if decrypted.tenant_chosen and decrypted.tenant_id == request_tenant:
+        return
+    structlog.get_logger(__name__).info(
+        "ui_session_tenant_changed_during_request",
+        session_id=str(decrypted.id),
+        request_tenant_id=str(request_tenant),
+        session_tenant_id=str(decrypted.tenant_id) if decrypted.tenant_chosen else None,
+    )
+    raise TenantChangedError()
+
+
 async def _verify_session_token(
     decrypted: DecryptedSession,
     *,
     access_token: str,
     expected_audience: str,
+    request_tenant: uuid.UUID | None,
 ) -> Operator:
     """Check *access_token* for the session's current tenant (#5240).
 
@@ -454,7 +479,10 @@ async def _verify_session_token(
     ``Meho-Tenant`` header. When the token no longer allows it, the
     session is reset and :class:`~meho_backplane.ui.auth.tenant.TenantRemovedError`
     is raised (:func:`~meho_backplane.ui.auth.tenant.fall_back_after_removal`).
+    Before that, :func:`_assert_same_tenant` refuses a row whose tenant is
+    no longer *request_tenant*.
     """
+    _assert_same_tenant(decrypted, request_tenant)
     requested, allow_unchosen = session_tenant_request(decrypted)
     try:
         return await verify_jwt_for_audience(
@@ -477,6 +505,7 @@ async def verify_access_token_with_refresh(
     decrypted: DecryptedSession,
     *,
     expected_audience: str,
+    request_tenant: uuid.UUID | None = None,
 ) -> tuple[DecryptedSession, Operator]:
     """Verify the stored access token, silently refreshing on expiry.
 
@@ -497,6 +526,16 @@ async def verify_access_token_with_refresh(
     :class:`~meho_backplane.ui.auth.tenant.TenantRemovedError` (409)
     is raised.
 
+    *request_tenant* binds the check to the request: it is the tenant
+    the session middleware loaded the request with
+    (``UISessionContext.tenant_id``). Every gate that works in a tenant
+    passes it. When the row (before or after the refresh) names another
+    tenant, or no chosen tenant, the session changed under the request --
+    a switch in another browser tab -- and
+    :class:`~meho_backplane.ui.auth.tenant.TenantChangedError` (409,
+    "The tenant changed. Reload the page.") is raised before any role is
+    returned. Only the tenant picker and the switch route pass ``None``.
+
     Every other verification failure (bad signature, wrong audience,
     structural break) propagates untouched: those are not expiry
     conditions, a refresh would not repair them, and masking them
@@ -513,6 +552,7 @@ async def verify_access_token_with_refresh(
             decrypted,
             access_token=decrypted.access_token,
             expected_audience=expected_audience,
+            request_tenant=request_tenant,
         )
         return decrypted, operator
     except HTTPException as exc:
@@ -528,6 +568,7 @@ async def verify_access_token_with_refresh(
             refreshed,
             access_token=refreshed.access_token,
             expected_audience=expected_audience,
+            request_tenant=request_tenant,
         )
     except HTTPException as exc:
         if exc.status_code == status.HTTP_401_UNAUTHORIZED and exc.detail == _TOKEN_EXPIRED_DETAIL:

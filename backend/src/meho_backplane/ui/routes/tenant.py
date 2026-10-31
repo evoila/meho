@@ -150,12 +150,41 @@ async def lift_session_operator(session_ctx: UISessionContext) -> tuple[Decrypte
     """Check the session's token now and return the (maybe refreshed) session + Operator.
 
     The Operator works in the session's current tenant, or has
-    ``tenant_chosen=False`` when no tenant was picked yet.
+    ``tenant_chosen=False`` when no tenant was picked yet. The check is
+    not bound to the request's tenant (no ``request_tenant``): the picker
+    and the switch do not work in one tenant, and a switch in another
+    tab only changes which tenant the picker marks as current.
     """
     decrypted = await _load_session(session_ctx)
     return await verify_access_token_with_refresh(
         decrypted,
         expected_audience=get_settings().keycloak_audience,
+    )
+
+
+async def _settle_single_tenant(decrypted: DecryptedSession, operator: Operator) -> None:
+    """Save the only tenant left when the row still waits for a choice.
+
+    After login with several tenants the row has ``tenant_chosen=False``.
+    When a refreshed token lists one tenant by the time the picker opens,
+    the token check reports that tenant as chosen, but the row does not.
+    Without this write the picker would show it as current and offer the
+    dashboard, and the session middleware would send the person straight
+    back to the picker.
+    """
+    if decrypted.tenant_chosen or not operator.tenant_chosen:
+        return
+    await save_session_tenant(
+        decrypted.id,
+        tenant_id=operator.tenant_id,
+        tenant_chosen=True,
+        can_switch=can_switch_tenant(operator),
+    )
+    _log.info(
+        "ui_tenant_single_choice_saved",
+        session_id=str(decrypted.id),
+        operator_sub=operator.sub,
+        tenant_id=str(operator.tenant_id),
     )
 
 
@@ -190,7 +219,8 @@ async def _render_picker(
     notice: str | None,
 ) -> HTMLResponse:
     """Render ``GET /ui/tenant``."""
-    _decrypted, operator = await lift_session_operator(session_ctx)
+    decrypted, operator = await lift_session_operator(session_ctx)
+    await _settle_single_tenant(decrypted, operator)
     choices = await tenant_choices(operator)
     chosen = operator.tenant_chosen
     current_id = str(operator.tenant_id) if chosen else None

@@ -72,7 +72,7 @@ from meho_backplane.ui.auth.session_store import (
     revoke_other_sessions,
     revoke_session,
 )
-from meho_backplane.ui.auth.tenant import TenantRemovedError
+from meho_backplane.ui.auth.tenant import TenantChangedError, TenantRemovedError
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.connectors.operator import _lift_operator
 from meho_backplane.ui.routes.tenant import TenantChoice, tenant_choices
@@ -118,7 +118,7 @@ async def _lift_identity(session_ctx: UISessionContext) -> tuple[str, list[Tenan
     """
     try:
         operator = await _lift_operator(session_ctx)
-    except TenantRemovedError:
+    except (TenantChangedError, TenantRemovedError):
         raise
     except Exception as exc:
         _log.info(

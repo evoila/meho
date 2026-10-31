@@ -631,9 +631,12 @@ async def _resolve_secret_env(
         secret_data = cache.get(path)
         if secret_data is None:
             stub = _VaultRefTarget(name=label, host=host, secret_ref=path)
+            # The path comes from the params: check it before the read. A
+            # refused path raises SecretRefScopeError unchanged, so the
+            # dispatcher answers vault_credentials_read_error with only the
+            # path's first segment.
+            check_param_secret_ref(operator, path, param="secret_env")
             try:
-                # The path comes from the params: check it before the read.
-                check_param_secret_ref(operator, path, param="secret_env")
                 secret_data = await connector._resolve_secret(stub, operator)
             except (VaultClientError, CredentialsReadError) as exc:
                 # The underlying errors name the target / field / secret_ref

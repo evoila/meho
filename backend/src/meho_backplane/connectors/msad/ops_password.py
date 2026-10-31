@@ -236,9 +236,11 @@ async def _read_password(
         host=host if isinstance(host, str) and host else "unknown",
         secret_ref=path,
     )
+    # The path comes from the params: check it before the read. A refused
+    # path raises SecretRefScopeError unchanged, so the dispatcher answers
+    # vault_credentials_read_error with only the path's first segment.
+    check_param_secret_ref(operator, path, param="password_ref")
     try:
-        # The path comes from the params: check it before the read.
-        check_param_secret_ref(operator, path, param="password_ref")
         data = await connector._resolve_secret(stub, operator)
     except (VaultClientError, CredentialsReadError) as exc:
         raise ValueError(f"could not read password_ref {path}#{field}: {exc}") from exc

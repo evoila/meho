@@ -23,7 +23,8 @@ The tests run against the in-process Vault fake; no network.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
+import json
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock
@@ -88,16 +89,33 @@ def _set_env(monkeypatch: pytest.MonkeyPatch, **values: str) -> None:
     get_settings.cache_clear()
 
 
-def _operator(tenant: UUID = _TENANT_A, *, check_runner: bool = False) -> Operator:
+def _operator(
+    tenant: UUID = _TENANT_A,
+    *,
+    check_runner: bool = False,
+    role: TenantRole = TenantRole.OPERATOR,
+) -> Operator:
     return Operator(
         sub="secret-scope-test",
         name=None,
         email=None,
         raw_jwt="op.jwt",
         tenant_id=tenant,
-        tenant_role=TenantRole.OPERATOR,
+        tenant_role=role,
         check_runner_dispatch=check_runner,
     )
+
+
+def _assert_param_read_result(exc: SecretRefScopeError, param: str, full_path: str) -> None:
+    """The dispatcher's answer for *exc* names *param* and never the full path."""
+    from meho_backplane.operations._errors import result_vault_credentials_read_error
+
+    result = result_vault_credentials_read_error("op", exc, 1.0)
+    assert result.extras["error_code"] == "vault_credentials_read_error"
+    assert result.extras["param"] == param
+    dumped = json.dumps(result.model_dump(mode="json"))
+    assert full_path not in dumped
+    assert str(_TENANT_B) not in dumped
 
 
 @dataclass
@@ -290,18 +308,15 @@ def test_refusal_maps_to_the_param_read_error_result() -> None:
 
 async def test_linux_script_run_secret_env_outside_tenant_is_refused_before_read() -> None:
     from meho_backplane.connectors.linux import LinuxSshConnector
-    from meho_backplane.connectors.linux.ops_write import LinuxWriteError, _resolve_secret_env
+    from meho_backplane.connectors.linux.ops_write import _resolve_secret_env
 
+    path = f"{_OWN}/../{_TENANT_B}/db"
     connector = LinuxSshConnector()
     connector._resolve_secret = AsyncMock(return_value={"v": "x"})  # type: ignore[method-assign]
-    with pytest.raises(LinuxWriteError):
-        await _resolve_secret_env(
-            connector,
-            _Target(),
-            _operator(),
-            {"DB_PASS": (f"{_OWN}/../{_TENANT_B}/db", "v")},
-        )
+    with pytest.raises(SecretRefScopeError) as exc:
+        await _resolve_secret_env(connector, _Target(), _operator(), {"DB_PASS": (path, "v")})
     connector._resolve_secret.assert_not_awaited()
+    _assert_param_read_result(exc.value, "secret_env", path)
 
 
 async def test_linux_script_run_secret_env_in_own_tenant_is_read() -> None:
@@ -320,11 +335,111 @@ async def test_msad_password_ref_outside_tenant_is_refused_before_read() -> None
     from meho_backplane.connectors.msad import MsadConnector
     from meho_backplane.connectors.msad.ops_password import _read_password
 
+    path = f"{_OTHER}/ad/svc"
     connector = MsadConnector()
     connector._resolve_secret = AsyncMock(return_value={"pw": "x"})  # type: ignore[method-assign]
-    with pytest.raises(ValueError, match="password_ref"):
-        await _read_password(connector, _Target(), _operator(), (f"{_OTHER}/ad/svc", "pw"))
+    with pytest.raises(SecretRefScopeError) as exc:
+        await _read_password(connector, _Target(), _operator(), (path, "pw"))
     connector._resolve_secret.assert_not_awaited()
+    _assert_param_read_result(exc.value, "password_ref", path)
+
+
+@pytest.fixture
+async def _ssh_targets() -> AsyncIterator[None]:
+    """Register the Linux and AD ops and seed one target of each in tenant A."""
+    from meho_backplane.connectors.linux import LinuxSshConnector
+    from meho_backplane.connectors.msad import MsadConnector
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import Target as TargetORM
+    from meho_backplane.operations import reset_dispatcher_caches
+    from meho_backplane.operations.dispatcher import set_default_reducer
+    from meho_backplane.operations.reducer import PassThroughReducer
+
+    reset_dispatcher_caches()
+    set_default_reducer(PassThroughReducer())
+    await LinuxSshConnector.register_operations()
+    await MsadConnector.register_operations()
+    async with get_sessionmaker()() as session:
+        for name, product, version in (
+            ("scope-linux", "linux", "1.x"),
+            ("scope-ad", "msad", "2022.x"),
+        ):
+            session.add(
+                TargetORM(
+                    tenant_id=_TENANT_A,
+                    name=name,
+                    aliases=[],
+                    product=product,
+                    host=f"{name}.test.invalid",
+                    port=22,
+                    fqdn=None,
+                    secret_ref=f"{_OWN}/{name}",
+                    auth_model="shared_service_account",
+                    vpn_required=False,
+                    extras={},
+                    fingerprint={"version": version},
+                    notes="seeded by test_param_secret_ref_scope",
+                )
+            )
+        await session.commit()
+    yield
+    reset_dispatcher_caches()
+
+
+@pytest.mark.parametrize(
+    ("connector_id", "op_id", "target_name", "params", "param", "path"),
+    [
+        (
+            "linux-ssh-1.x",
+            "linux.script.run",
+            "scope-linux",
+            {"script": "echo hi", "secret_env": {"DB_PASS": f"{_OTHER}/app/db#cred"}},
+            "secret_env",
+            f"{_OTHER}/app/db",
+        ),
+        (
+            "msad-ssh-2022.x",
+            "msad.user.set-password",
+            "scope-ad",
+            {"identity": "jdoe", "password_ref": f"{_OTHER}/ad/jdoe#password"},
+            "password_ref",
+            f"{_OTHER}/ad/jdoe",
+        ),
+    ],
+)
+async def test_ssh_param_ref_outside_tenant_gives_param_read_error(
+    _ssh_targets: None,
+    monkeypatch: pytest.MonkeyPatch,
+    connector_id: str,
+    op_id: str,
+    target_name: str,
+    params: dict[str, Any],
+    param: str,
+    path: str,
+) -> None:
+    """The approved run stops with vault_credentials_read_error and no full path."""
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations import dispatch
+    from meho_backplane.targets.resolver import resolve_target
+
+    fake = install_fake_client(monkeypatch, secret={"cred": "x", "password": "x"})
+    async with get_sessionmaker()() as session:
+        target = await resolve_target(session, _TENANT_A, target_name)
+    result = await dispatch(
+        operator=_operator(role=TenantRole.TENANT_ADMIN),
+        connector_id=connector_id,
+        op_id=op_id,
+        target=target,
+        params=params,
+        _approved=True,
+    )
+    dumped = result.model_dump(mode="json")
+    assert dumped["status"] == "error", dumped
+    assert dumped["extras"]["error_code"] == "vault_credentials_read_error"
+    assert dumped["extras"]["param"] == param
+    assert dumped["extras"]["cause_class"] == "SecretRefScopeError"
+    assert path not in json.dumps(dumped)
+    assert fake.auth.jwt.login_calls == []
 
 
 async def test_keycloak_password_ref_outside_tenant_is_refused_before_read(

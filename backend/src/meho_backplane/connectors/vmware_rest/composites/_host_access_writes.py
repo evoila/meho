@@ -278,7 +278,11 @@ def _snmp_spec(
     trap_community = community or (current_communities[0] if current_communities else "")
     raw_traps = current.get("trapTargets")
     traps = [
-        {"hostName": t.get("hostName"), "port": t.get("port"), "community": t.get("community")}
+        {
+            "hostName": t.get("hostName"),
+            "port": t.get("port"),
+            "community": community or t.get("community"),
+        }
         for t in (raw_traps if isinstance(raw_traps, list) else [])
         if isinstance(t, dict) and t.get("hostName")
     ]
@@ -302,6 +306,25 @@ def _snmp_spec(
             if isinstance(o, dict)
         ]
     return spec
+
+
+def _spec_communities(spec: dict[str, Any]) -> tuple[str, ...]:
+    """Every community string the request body holds."""
+    found = [*spec["readOnlyCommunities"], *(t.get("community") for t in spec["trapTargets"])]
+    return tuple(dict.fromkeys(c for c in found if isinstance(c, str) and c))
+
+
+def _same_communities(current: dict[str, Any], spec: dict[str, Any]) -> bool:
+    raw_traps = current.get("trapTargets")
+    current_traps = [
+        t.get("community")
+        for t in (raw_traps if isinstance(raw_traps, list) else [])
+        if isinstance(t, dict) and t.get("hostName")
+    ]
+    return bool(
+        current.get("readOnlyCommunities") == spec["readOnlyCommunities"]
+        and current_traps == [t["community"] for t in spec["trapTargets"]]
+    )
 
 
 def _snmp_matches(state: dict[str, Any], spec: dict[str, Any]) -> bool:
@@ -346,7 +369,7 @@ async def host_snmp_set_composite(
         return stop(
             base, "community_required", "Trap targets need a community: set community_secret_ref."
         )
-    same_community = community is None or current.get("readOnlyCommunities") == [community]
+    same_community = community is None or _same_communities(current, spec)
     if same_community and _snmp_matches(base["before"], spec):
         return unchanged(base)
     step: Step = (
@@ -355,8 +378,7 @@ async def host_snmp_set_composite(
         {"spec": spec},
         {"host": host_moid, **requested},
     )
-    secrets = (community,) if community else ()
-    stopped = await run_steps(connector, operator, target, [step], base, secrets)
+    stopped = await run_steps(connector, operator, target, [step], base, _spec_communities(spec))
     if stopped is not None:
         return stopped
 

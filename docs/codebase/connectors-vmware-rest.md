@@ -5375,14 +5375,15 @@ refuses a change it does not allow (the answer is `failed` with the fault).
   `ReconfigureSnmpAgent` request body. `host.snmp.set` is pinned
   `credential_write` in `broadcast/events.py`, so the flight recorder keeps
   no body and the broadcast keeps no params. Answers and previews count the
-  communities and never show one; a fault text that holds the community is
-  replaced. An advanced setting whose key names a password, secret, token or
+  communities and never show one; a fault text that holds any community of
+  the request is replaced. An advanced setting whose key names a password, secret, token or
   community shows `<hidden>` in every answer, preview and approval request.
 - **SNMP fields left out.** MEHO reads the current agent settings and sends
   them back with only the asked fields changed, so a call that only turns
-  the agent on keeps the port, communities, trap targets and options. Trap
-  targets use the new community, or the first current one; with none, the
-  answer is `community_required`. To start the `snmpd` service, use
+  the agent on keeps the port, communities, trap targets and options. A new
+  community also goes to the trap targets that are kept. New trap targets
+  use the new community, or the first current one; with none, the answer is
+  `community_required`. To start the `snmpd` service, use
   `host.service_control`.
 - **Approval card.** Each change has a preview that shows the host, its
   current setting and what is asked.

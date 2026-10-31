@@ -504,6 +504,32 @@ async def test_snmp_set_hides_the_community_in_a_fault(
     assert NEW_COMMUNITY not in json.dumps(out)
 
 
+@pytest.mark.parametrize("echoed", [OLD_COMMUNITY, "trap-only-community"])
+async def test_snmp_set_hides_a_kept_community_in_a_fault(gate: GateRecorder, echoed: str) -> None:
+    vim = HostSecurityVim()
+    vim.snmp["trapTargets"][0]["community"] = "trap-only-community"
+    vim.fail["ReconfigureSnmpAgent"] = _fault("InvalidArgument", f"bad community {echoed}")
+    out = await _call(host_snmp_set_composite, vim, {"host": "esxi-a", "enabled": True})
+    assert out["status"] == "failed"
+    assert echoed not in json.dumps(out)
+
+
+async def test_snmp_set_puts_a_new_community_on_kept_trap_targets(
+    gate: GateRecorder, vault: list[dict[str, Any]]
+) -> None:
+    vim = HostSecurityVim()
+    vim.snmp["enabled"] = True
+    params = {"host": "esxi-a", "enabled": True, "community_secret_ref": "snmp/example"}
+    out = await _call(host_snmp_set_composite, vim, params)
+    assert out["status"] == "applied", out
+    spec = vim.body_of("ReconfigureSnmpAgent")["spec"]
+    assert spec["readOnlyCommunities"] == [NEW_COMMUNITY]
+    assert spec["trapTargets"][0]["hostName"] == "trap-old.example.invalid"
+    assert spec["trapTargets"][0]["community"] == NEW_COMMUNITY
+    again = await _call(host_snmp_set_composite, vim, params)
+    assert again["status"] == "unchanged"
+
+
 # ---------------------------------------------------------------------------
 # host.coredump.set
 # ---------------------------------------------------------------------------

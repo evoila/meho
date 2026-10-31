@@ -1279,6 +1279,87 @@ async def test_direct_park_resume_redispatches_original_call_on_stored_catalog(
     assert seen[0][0] is not call_arguments, "the agent's own dict must stay untouched"
 
 
+@pytest.mark.parametrize(
+    ("target_arg", "expected_fqdn"),
+    [
+        pytest.param(
+            {"name": "vcf-auto", "fqdn": "automation.invalid"},
+            "automation.invalid",
+            id="dict-with-fqdn",
+        ),
+        pytest.param("vcf-auto", "stored.invalid", id="bare-name"),
+    ],
+)
+async def test_direct_park_resume_keeps_the_per_call_fqdn(
+    monkeypatch: pytest.MonkeyPatch, target_arg: Any, expected_fqdn: str
+) -> None:
+    """The direct re-dispatch runs with the ``fqdn`` the agent's call named.
+
+    A dict-shaped ``target`` may carry a per-call ``fqdn``, the virtual host a
+    connector sends as the HTTP Host header and the TLS server name. The park
+    ran with it. The resume loads the target by the saved id, checks its
+    stored settings, and then applies the same override again, so the
+    approved call reaches the same virtual host as the call that waited. A
+    bare target name has no override, so the stored ``fqdn`` is used. The
+    stored row keeps its own value either way.
+    """
+    import meho_backplane.operations.meta_tools as meta_tools_module
+    from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
+
+    target_id = await _persist_target("vcf-auto", fqdn="stored.invalid")
+    requester = _make_operator(sub="agent-direct-fqdn")
+    params = {"name": "direct"}
+    request = await _park_approved(
+        requester=requester,
+        connector_id="apprestest-1.x",
+        op_id="apprestest.op",
+        params=params,
+        target_id=target_id,
+    )
+    assert request.target_hash is not None
+    seen: list[dict[str, Any]] = []
+
+    async def _spy(
+        _operator: Operator, arguments: dict[str, Any], *, resolved_target: Any = None
+    ) -> dict[str, Any]:
+        seen.append(
+            {
+                "target_id": getattr(resolved_target, "id", None),
+                "host": getattr(resolved_target, "host", None),
+                "fqdn": getattr(resolved_target, "fqdn", None),
+                "target_argument": arguments["target"],
+            }
+        )
+        return {"status": "ok"}
+
+    monkeypatch.setattr(meta_tools_module, "call_operation_with_approval", _spy)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=requester,
+        call_arguments={
+            "connector_id": "apprestest-1.x",
+            "op_id": "apprestest.op",
+            "params": params,
+            "target": target_arg,
+        },
+        awaiting_envelope={"op_id": "apprestest.op", "extras": {}},
+        approval_request_id=request.id,
+    )
+
+    assert resumed == {"status": "ok"}
+    assert seen == [
+        {
+            "target_id": target_id,
+            "host": "target.invalid",
+            "fqdn": expected_fqdn,
+            "target_argument": None,
+        }
+    ]
+    async with get_sessionmaker()() as s:
+        stored = await s.get(TargetORM, target_id)
+        assert stored is not None
+        assert stored.fqdn == "stored.invalid"
+
+
 async def test_credential_composite_subop_resume_uses_handoff_parent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1358,7 +1439,11 @@ async def test_credential_composite_subop_resume_uses_handoff_parent(
 
 
 async def _persist_target(
-    name: str, *, product: str = "apprestest", version: str | None = None
+    name: str,
+    *,
+    product: str = "apprestest",
+    version: str | None = None,
+    fqdn: str | None = None,
 ) -> uuid.UUID:
     """Persist one live target row in the test tenant and return its id."""
     target_id = uuid.uuid4()
@@ -1371,6 +1456,7 @@ async def _persist_target(
                 product=product,
                 version=version,
                 host="target.invalid",
+                fqdn=fqdn,
                 aliases=[],
             )
         )

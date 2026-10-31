@@ -146,6 +146,7 @@ __all__ = [
     "SearchOutcome",
     "UnknownConnectorError",
     "UnknownOperationError",
+    "apply_target_fqdn_override",
     "call_operation",
     "call_operation_with_approval",
     "describe_descriptor",
@@ -1475,14 +1476,31 @@ async def _resolve_target_or_error(
             # on the eventual audit row. Same shape as the targets routes.
             structlog.contextvars.bind_contextvars(audit_target_id=str(resolved_target.id))
 
-    # Per-call ``fqdn`` override -- applied in memory only. The DB row is not
-    # touched; the override travels with the resolved Target for the lifetime
-    # of this dispatch and is read by connectors that honour vhost routing
-    # (G3.6 VCF Automation). Non-string / empty values fall through silently.
+    apply_target_fqdn_override(resolved_target, target_arg)
+    return resolved_target, None
+
+
+def apply_target_fqdn_override(resolved_target: Any, target_arg: Any) -> None:
+    """Apply the per-call ``fqdn`` of a dict-shaped *target_arg* to *resolved_target*.
+
+    In memory only: the database row is not touched. The override travels
+    with the resolved target for the lifetime of one dispatch and is read by
+    connectors that route by virtual host (G3.6 VCF Automation: the HTTP
+    ``Host`` header and the TLS server name). The bare-string ``target``
+    shape carries no override; a non-string or empty value falls through
+    silently, and so does a missing target.
+
+    Shared by the name lookup of every call (:func:`_resolve_target_or_error`)
+    and by the agent waiter's resume after approval, which loads the target
+    by the id the approval row saved and then applies the override of the
+    agent's original call again, so the approved call reaches the same
+    virtual host as the call that waited for approval.
+    """
+    if resolved_target is None or not isinstance(target_arg, dict):
+        return
     fqdn_override = target_arg.get("fqdn")
     if isinstance(fqdn_override, str) and fqdn_override:
         resolved_target.fqdn = fqdn_override
-    return resolved_target, None
 
 
 async def _call_operation_impl(

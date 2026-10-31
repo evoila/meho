@@ -199,7 +199,8 @@ target's connection fields (`TARGET_HASH_FIELDS`: `product`, `host`,
 `port`, `fqdn`, `secret_ref`, `secret_field_map`, `auth_model`,
 `vpn_required`, `verify_tls`, `tls_ca_pin`, `tls_server_name`, `extras`).
 It reads the stored row, not the in-memory target of the call, so a
-per-call `fqdn` does not count. `rehydrate_resume_target` loads the target
+per-call `fqdn` does not count (the agent waiter applies it again after
+the check, see below). `rehydrate_resume_target` loads the target
 by id as before and compares the hash. When it differs, the run is refused
 with `error_code = "target_changed_since_approval"` and nothing is sent.
 The requester asks again. A rename, new aliases, notes, a new detected
@@ -2992,11 +2993,22 @@ What the agent waiter does:
   and `test_composite_resume_fails_closed_when_saved_target_deleted_and_name_reused`
   (unit) and the two `test_agent_waiter_composite_resume_*` tests (end to
   end).
+- **Per-call `fqdn`.** The agent's call may name a `fqdn` in its `target`
+  dict: the virtual host the connector sends as the HTTP Host header and
+  the TLS server name. The park ran with it. After the saved target passed
+  the checks above, the waiter applies the same value to it again
+  (`apply_target_fqdn_override` in `operations/meta_tools.py`, the same
+  helper the name lookup of every call uses), in memory only, before the
+  preview is built again and before the run. So the approved call reaches
+  the same virtual host as the call that waited. A bare target name has no
+  override, so the stored `fqdn` is used. This holds for a direct request
+  and for a composite sub-op. Covered by
+  `test_direct_park_resume_keeps_the_per_call_fqdn`. The operator surfaces
+  run with the stored `fqdn`: the request row keeps no per-call value.
 - **Direct request (no `resume_parent`).** It runs the agent's original
   `call_arguments` again with two changes: the target is the one the row
-  saved by id (the target name is not looked up again, and a per-call `fqdn`
-  is not applied again), and the `connector_id` is the catalog the request
-  row stored. The park may have
+  saved by id (the target name is not looked up again), and the
+  `connector_id` is the catalog the request row stored. The park may have
   run on a sibling catalog of the one the agent named (for example the agent
   named `vmware-rest-9.0` for an 8.0.3 vCenter, so the park stored
   `vmware-rest-8.0`). That stored catalog is the one policy checked and the

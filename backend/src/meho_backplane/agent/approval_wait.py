@@ -426,7 +426,12 @@ async def _resume_approved_or_already_resumed(
     request waited must not receive the approved write. A saved target that
     no longer resolves, or whose connection settings changed since the
     request was made, fails closed with a ``denied`` envelope before the
-    claim. A request with a preview hash must still build the same preview
+    claim. A per-call ``fqdn`` in the agent's original ``target`` dict is
+    applied to that loaded target again
+    (:func:`~meho_backplane.operations.meta_tools.apply_target_fqdn_override`),
+    as it was for the call that parked, so the approved call reaches the
+    same virtual host; the stored settings are checked first, and the row
+    is never changed. A request with a preview hash must still build the same preview
     (:func:`~meho_backplane.operations.approval_queue.refuse_resume_if_preview_changed`);
     else the run is refused and the refusal is stored as its result.
 
@@ -447,6 +452,7 @@ async def _resume_approved_or_already_resumed(
         refuse_resume_if_release_changed,
         rehydrate_resume_target,
     )
+    from meho_backplane.operations.meta_tools import apply_target_fqdn_override
 
     # Load the parked row (tenant-isolated). Its pre-generated
     # ``approval.request`` audit id is bound below so the resumed dispatch
@@ -481,6 +487,12 @@ async def _resume_approved_or_already_resumed(
     resolved_target, denied = await rehydrate_resume_target(operator, request)
     if denied is not None:
         return cast("dict[str, Any]", denied.model_dump(mode="json"))
+    # The agent's call may name a per-call ``fqdn`` (the virtual host the
+    # connector sends in the HTTP Host header and the TLS server name). The
+    # park ran with it, so the approved run must too. Applied after the
+    # stored settings were checked, in memory only, before the preview is
+    # built again and before the re-dispatch.
+    apply_target_fqdn_override(resolved_target, call_arguments.get("target"))
 
     if not await claim_resume(approval_request_id):
         _log.info(
@@ -548,7 +560,8 @@ async def _redispatch_approved(
     re-enters its parent composite with the approved sub-op cleared; a direct
     park (``resume_parent IS NULL``) re-dispatches the agent's original call
     with two changes: the target is *resolved_target*, the one the row saved
-    by id, and ``connector_id`` is the catalog the row stored. The park
+    by id (with the per-call ``fqdn`` of the agent's call applied again by
+    the caller), and ``connector_id`` is the catalog the row stored. The park
     may have run on a sibling catalog of the one the agent named (#3600), and
     that stored catalog is the one policy checked and the approver saw. The
     dispatcher never switches catalogs on an approved call, so the resume

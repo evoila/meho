@@ -19,15 +19,14 @@ op_id                  preview
                        labels?, annotations?,
                        string_data_secret_ref?, data_secret_ref?,
                        string_data_secret_mount?, data_secret_mount?}``
-``k8s.job.create``     ``{name, namespace, service_account_name?,
-                       containers, init_containers}``; each container
-                       is ``{name, image, env_var_names, env_from,
-                       command_bytes?}``
+``k8s.job.create``     ``{name, namespace, spec}``; ``spec`` is the Job
+                       spec from the params, made safe to show (below)
 ``k8s.cronjob.run``    ``{cronjob, namespace, job_name, schedule, suspend,
-                       concurrency_policy, active_jobs, containers,
-                       init_containers}``; containers as above.
-                       ``active_jobs`` names this CronJob's Jobs that
-                       still run. Read from the cluster at park time.
+                       concurrency_policy, active_jobs, job_spec}``;
+                       ``job_spec`` is the CronJob's job template spec,
+                       made safe the same way. ``active_jobs`` names this
+                       CronJob's Jobs that still run. Read from the
+                       cluster at park time.
 =====================  ========================================================
 
 What is never shown
@@ -39,10 +38,32 @@ What is never shown
   The ``*_secret_mount`` names are shown too: they say which store mount the
   paths are read from. The Secret's ``labels`` and ``annotations`` are
   metadata, not values, so they are shown in full.
-* A Job ``env`` value: only the variable names. ``env_from`` shows the names
-  of the Secrets and ConfigMaps the pod loads, not their content.
-* A Job ``command`` / ``args``: only their size in bytes, because a command
-  line can hold a token (the guest ``program.run`` preview does the same).
+* In a Job spec: every ``env`` value and every ``httpHeaders`` value (in a
+  probe or lifecycle ``httpGet``). The name stays. ``valueFrom`` and
+  ``envFrom`` stay too: they name a Secret or ConfigMap and a key, not a
+  value. All the rest of the spec is shown, so the approver sees what the
+  pods run and with which rights: ``command``, ``args``, ``image``,
+  ``securityContext``, ``hostPID`` / ``hostNetwork`` / ``hostIPC``,
+  ``nodeName``, ``nodeSelector``, ``tolerations``, ``affinity``,
+  ``volumes`` and ``volumeMounts``. A container's ``command`` and ``args``
+  are read as one command line, the way Kubernetes runs them. The words
+  stay, but these values are hidden: the value of a ``NAME=VALUE`` or
+  ``--name=value`` whose name holds a secret word (``PGPASSWORD=...``,
+  ``AWS_SECRET_ACCESS_KEY=...``, ``--password=...``, any length; inside a
+  quoted part, ``"PGPASSWORD=..."``, the value ends at the closing quote,
+  so the commands after it stay visible), the
+  argument after a secret flag (``--password x``, ``--token x``, ``-p x``;
+  the whole list item, or the whole shell word in a shell string, quotes
+  and backslash escapes included, also when the flag ends ``command`` and
+  the value starts ``args``), the
+  password in ``user:password`` after ``-u`` or ``--user``, the password
+  in a URL that carries a user and password and tokens with a known
+  vendor prefix (``ghp_...``). Then the shared
+  params redaction of the generic echo runs over the spec: it hides
+  secret-shaped text anywhere (JWTs, bearer tokens) and the value of a
+  field with a secret-shaped name (a ``secret`` volume, for example). A
+  secret on a command line with no known shape (``mytool hunter2``) is
+  shown.
 
 ``k8s.apply`` has its own builder in :mod:`meho_backplane.operations._preview`
 (a server dry-run). It uses :func:`apply_manifest_echo` and
@@ -57,8 +78,8 @@ What is never shown
   ``httpGet``: only the header name stays.
 * Every ``command`` and ``args`` list, at any depth (containers, init and
   ephemeral containers, probe and lifecycle ``exec``): only its size in
-  bytes stays, as ``{"hidden": true, "bytes": N}``, for the same reason as
-  the Job preview above.
+  bytes stays, as ``{"hidden": true, "bytes": N}``, because a command line
+  can hold a token.
 * The ``kubectl.kubernetes.io/last-applied-configuration`` annotation, in
   any ``annotations`` map at any depth (the document's own metadata, a pod
   template's metadata, a nested object): it is a full copy of an earlier
@@ -72,13 +93,19 @@ and the park then stores the ``preview_unavailable`` marker with the reason.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from typing import Any
 
 from kubernetes_asyncio import client
 
+from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.connectors.kubernetes.ops_write_dangerous import _parse_manifest
-from meho_backplane.operations._preview import PreviewContext, register_preview_builder
+from meho_backplane.operations._preview import (
+    PreviewContext,
+    _redact_echoed_params,
+    register_preview_builder,
+)
 
 #: Put in place of a value the approver must not see.
 _HIDDEN = "***REDACTED***"
@@ -145,79 +172,224 @@ async def _secret_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return preview
 
 
-def _env_from_names(container: dict[str, Any]) -> list[str]:
-    """``secret:<name>`` / ``config_map:<name>`` for each ``envFrom`` source."""
-    names: list[str] = []
-    for source in container.get("envFrom") or []:
-        if not isinstance(source, dict):
-            continue
-        for field, kind in (("secretRef", "secret"), ("configMapRef", "config_map")):
-            ref = source.get(field)
-            if isinstance(ref, dict) and ref.get("name"):
-                names.append(f"{kind}:{ref['name']}")
-    return names
-
-
 def _parts_bytes(parts: list[Any]) -> int:
     """Total UTF-8 size of the parts of a command line."""
     return sum(len(str(part).encode("utf-8")) for part in parts)
 
 
-def _command_bytes(container: dict[str, Any]) -> int:
-    """Total UTF-8 size of ``command`` + ``args``; the text itself is withheld."""
-    return _parts_bytes([*(container.get("command") or []), *(container.get("args") or [])])
+#: Words that make a variable or flag name secret-shaped on a command line,
+#: also inside a longer name (``PGPASSWORD``, ``AWS_SECRET_ACCESS_KEY``).
+_COMMAND_SECRET_WORDS = ("PASS", "PWD", "SECRET", "TOKEN", "KEY", "CREDENTIAL", "AUTH")
+
+#: Flags whose next word is ``user:password`` (``curl -u``, ``--user``).
+_USER_FLAGS = frozenset({"u", "user"})
 
 
-def _container_summary(container: Any) -> dict[str, Any] | None:
-    """Name, image, env var names and env sources of one container; no values."""
-    if not isinstance(container, dict):
-        return None
-    summary: dict[str, Any] = {
-        "name": container.get("name"),
-        "image": container.get("image"),
-        "env_var_names": sorted(
-            str(entry["name"])
-            for entry in container.get("env") or []
-            if isinstance(entry, dict) and "name" in entry
-        ),
-        "env_from": _env_from_names(container),
-    }
-    size = _command_bytes(container)
-    if size:
-        summary["command_bytes"] = size
-    return summary
+def _shell_word(stop: str = "") -> str:
+    """Regex for one shell word, read the way a POSIX shell reads it.
+
+    A word is bare text, escaped characters (``\\ `` and ``\\"`` are part of
+    the word, not an end of it), single-quoted parts and double-quoted parts
+    in which ``\\"`` does not close the quote, in any mix. So a password with
+    an escaped space or an escaped quote in it is one word. A quote that is
+    never closed runs to the end of the string, as in a shell. *stop* names
+    more characters that end bare text (shell operators, for a value).
+    """
+    return (
+        rf"""(?:[^\s'"\\{stop}]+|\\(?:[\s\S]|\Z)|'[^']*(?:'|\Z)|"(?:[^"\\]|\\[\s\S])*(?:"|\Z))+"""
+    )
 
 
-def _containers(pod_spec: dict[str, Any], field: str) -> list[dict[str, Any]]:
-    """Summaries of the containers listed under *field* of the pod spec."""
-    raw = pod_spec.get(field)
-    if not isinstance(raw, list):
-        return []
-    return [s for s in (_container_summary(c) for c in raw) if s is not None]
+#: The ``NAME=`` of a ``NAME=VALUE``, also as ``--name=``, at the start of a
+#: word or of a quoted part.
+_ASSIGNMENT_NAME = re.compile(r"(?<![A-Za-z0-9_.-])(?P<name>-{0,2}[A-Za-z_][A-Za-z0-9_.-]*)=")
+
+#: The value of an assignment, by the quote that is open where it starts.
+#: Outside quotes it is one shell word, so a quoted or escaped value may hold
+#: spaces. Inside quotes it ends at the closing quote; a word of a quoted
+#: shell string (``sh -c "tool --password=x run"``) ends at a space too.
+_BARE_VALUE = re.compile(_shell_word(";&|"))
+_QUOTED_PART_VALUE = {"'": re.compile(r"[^']*"), '"': re.compile(r'(?:[^"\\]|\\[\s\S])*')}
+_QUOTED_WORD_VALUE = {
+    "'": re.compile(r"""(?:"[^"']*"|[^\s'])*"""),
+    '"': re.compile(r"""(?:'[^'"]*'|[^\s"\\]|\\[\s\S])*"""),
+}
+
+#: The password in a URL that carries a user and password before the ``@``.
+_URL_PASSWORD = re.compile(r"(?P<head>[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@]*:)[^\s/@]+@")
+
+#: Tokens with a known vendor prefix (GitHub, GitLab, Slack, AWS key id).
+_KNOWN_TOKEN = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"
+    r"|glpat-[A-Za-z0-9_-]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b"
+)
+
+#: A command-line flag: ``-u``, ``--password``.
+_FLAG = re.compile(r"^--?(?P<name>[A-Za-z][A-Za-z0-9_-]*)$")
+
+#: One token of a shell string: whitespace, or a shell word in which a quoted
+#: or escaped part may hold spaces (``--password 'my phrase'``,
+#: ``--password my\\ phrase``). Joined back, the tokens give the string as
+#: it was.
+_TOKEN = re.compile(rf"""\s+|{_shell_word()}|\S+""")
+
+
+def _secret_shaped_name(name: str) -> bool:
+    """True when a variable or flag name on a command line can name a secret."""
+    upper = name.upper()
+    return is_secret_param_name(name) or any(word in upper for word in _COMMAND_SECRET_WORDS)
+
+
+def _hide_user_password(value: str) -> str:
+    """``user:password`` with the password hidden; other text as it is."""
+    user, sep, _ = value.partition(":")
+    return f"{user}:{_HIDDEN}" if sep else value
+
+
+def _assignment_value_end(text: str, start: int, quote: str, whole_part: bool) -> int:
+    """Index after the value of an assignment that starts at *start*.
+
+    *quote* is the quote open at *start* (``""`` outside quotes). The
+    value of a quoted part that is one assignment (``"PGPASSWORD=a b"``,
+    *whole_part*) runs to the closing quote, spaces included. A word of a
+    quoted shell string ends at a space or at the closing quote. Neither
+    runs past the closing quote.
+    """
+    if not quote:
+        pattern = _BARE_VALUE
+    elif whole_part:
+        pattern = _QUOTED_PART_VALUE[quote]
+    else:
+        pattern = _QUOTED_WORD_VALUE[quote]
+    match = pattern.match(text, start)
+    return start if match is None else match.end()
+
+
+def _hide_assignments(text: str) -> str:
+    """Hide the value of every ``NAME=VALUE`` with a secret-shaped name.
+
+    The scan tracks the quote that is open at each point, so a value that
+    starts inside a quoted part ends at the closing quote: the commands
+    after ``env "PGPASSWORD=x" pg_dump app`` stay visible. After ``-u`` or
+    ``--user`` as ``--user=name:password`` only the password is hidden.
+    """
+    out: list[str] = []
+    pos = 0
+    quote = ""
+    opened_at = -1
+    while pos < len(text):
+        char = text[pos]
+        if char == "\\" and quote != "'":
+            out.append(text[pos : pos + 2])
+            pos += 2
+            continue
+        if quote and char == quote:
+            quote = ""
+        elif not quote and char in "'\"":
+            quote, opened_at = char, pos
+        match = _ASSIGNMENT_NAME.match(text, pos)
+        if match is None:
+            out.append(char)
+            pos += 1
+            continue
+        name = match["name"]
+        out.append(match[0])
+        pos = match.end()
+        if _secret_shaped_name(name) or name.lstrip("-") in _USER_FLAGS:
+            end = _assignment_value_end(text, pos, quote, whole_part=opened_at == match.start() - 1)
+            value = text[pos:end]
+            out.append(_HIDDEN if _secret_shaped_name(name) else _hide_user_password(value))
+            pos = end
+    return "".join(out)
+
+
+def _hide_in_text(text: str) -> str:
+    """Hide secret values inside one command-line string."""
+    text = _hide_assignments(text)
+    text = _URL_PASSWORD.sub(lambda match: f"{match['head']}{_HIDDEN}@", text)
+    return _KNOWN_TOKEN.sub(_HIDDEN, text)
+
+
+def _hide_flag_value(pending: str, value: str) -> str:
+    """The value that follows a secret flag, hidden the way the flag asks."""
+    return _HIDDEN if pending == "secret" else _hide_user_password(value)
+
+
+def _hide_command_secrets(parts: list[Any]) -> list[Any]:
+    """Copy one command line (``command`` + ``args``) with its secret values hidden.
+
+    The words stay, so the approver still reads what runs. Hidden are: the
+    value of a ``NAME=VALUE`` (or ``--name=value``) with a secret-shaped
+    name, the password in a URL, tokens with a known vendor prefix, the
+    argument after a secret-shaped flag (``--password x``, ``-p x``) and
+    the password in ``user:password`` after ``-u`` or ``--user``. A flag
+    and its value may be two list items or two words of one string
+    (``sh -c "..."``). The argument after a flag is hidden whole: the
+    whole list item, or the whole shell word in a string, quotes and
+    backslash escapes included (``"a\\" b"``, ``a\\ b``), so a password
+    with a space or a quote in it does not leak in part.
+    """
+    hidden: list[Any] = []
+    pending: str | None = None
+    for part in parts:
+        if not isinstance(part, str):
+            hidden.append(part)
+            continue
+        if pending is not None and not part.startswith("-"):
+            hidden.append(_hide_flag_value(pending, part))
+            pending = None
+            continue
+        words = _TOKEN.findall(_hide_in_text(part))
+        for index, word in enumerate(words):
+            if word.isspace():
+                continue
+            if pending is not None and not word.startswith("-"):
+                words[index] = _hide_flag_value(pending, word)
+                pending = None
+                continue
+            pending = None
+            flag = _FLAG.match(word)
+            if flag is None:
+                continue
+            name = flag["name"]
+            if name in _USER_FLAGS:
+                pending = "user"
+            elif name == "p" or _secret_shaped_name(name):
+                pending = "secret"
+        hidden.append("".join(words))
+    return hidden
+
+
+def _job_spec_echo(ctx: PreviewContext, spec: Any) -> Any:
+    """A Job spec safe to show the approver (see the module docstring).
+
+    The ``env`` and ``httpHeaders`` values are hidden by structure; the
+    command lines stay, with their secret values hidden. Then the shared
+    params redaction runs over the result, so secret-shaped text is hidden
+    wherever it is.
+    """
+    tenant = str(ctx.operator.tenant_id) if ctx.operator.tenant_id is not None else None
+    redacted = _redact_echoed_params(
+        {"spec": _hide_values(spec, hide_commands=False)},
+        connector_id=ctx.connector_id,
+        tenant=tenant,
+        op_id=ctx.descriptor.op_id,
+    )
+    return redacted.get("spec")
 
 
 async def _job_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Preview ``k8s.job.create`` — the Job and what its pods run, never a value."""
-    spec = ctx.params.get("spec")
-    template = spec.get("template") if isinstance(spec, dict) else None
-    pod_spec = template.get("spec") if isinstance(template, dict) else None
-    if not isinstance(pod_spec, dict):
-        pod_spec = {}
-    preview: dict[str, Any] = {
+    """Preview ``k8s.job.create`` — the Job spec as it will be created, no secret value."""
+    return {
         "resource": "job",
         "name": ctx.params.get("name"),
         "namespace": ctx.params.get("namespace"),
-        "containers": _containers(pod_spec, "containers"),
-        "init_containers": _containers(pod_spec, "initContainers"),
+        "spec": _job_spec_echo(ctx, ctx.params.get("spec")),
     }
-    service_account = pod_spec.get("serviceAccountName")
-    if isinstance(service_account, str) and service_account:
-        preview["service_account_name"] = service_account
-    return preview
 
 
 async def _cronjob_run_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Preview ``k8s.cronjob.run`` — what the CronJob's template runs, never a value.
+    """Preview ``k8s.cronjob.run`` — the CronJob's job template spec, no secret value.
 
     Reads the CronJob through the connector. Declines (``None``) when no
     Kubernetes connector or target resolved, so the generic echo applies.
@@ -233,9 +405,6 @@ async def _cronjob_run_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     api_client = await connector._get_api_client(ctx.target, ctx.operator)
     cronjob = await read_cronjob(client.BatchV1Api(api_client), namespace, cronjob_name)
     spec = cronjob.spec
-    pod_spec = model_to_json(spec.job_template.spec.template.spec)
-    if not isinstance(pod_spec, dict):
-        pod_spec = {}
     active = cronjob.status.active if cronjob.status is not None else None
     return {
         "resource": "cronjob_run",
@@ -246,8 +415,7 @@ async def _cronjob_run_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "suspend": bool(spec.suspend),
         "concurrency_policy": spec.concurrency_policy,
         "active_jobs": [ref.name for ref in active or [] if ref.name],
-        "containers": _containers(pod_spec, "containers"),
-        "init_containers": _containers(pod_spec, "initContainers"),
+        "job_spec": _job_spec_echo(ctx, model_to_json(spec.job_template.spec)),
     }
 
 
@@ -255,9 +423,27 @@ async def _cronjob_run_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 #: ``env`` and the ``httpHeaders`` of a probe or lifecycle ``httpGet``.
 _NAME_VALUE_LISTS = ("env", "httpHeaders")
 
-#: Command-line lists shown only by their size: a container's ``command`` and
-#: ``args``, and the ``exec.command`` of a probe or lifecycle hook.
+#: Command-line lists: a container's ``command`` and ``args``, and the
+#: ``exec.command`` of a probe or lifecycle hook. In this order they make one
+#: command line, the way Kubernetes runs them.
 _COMMAND_LISTS = ("command", "args")
+
+
+def _hide_command_line(node: dict[str, Any]) -> dict[str, list[Any]]:
+    """The ``command`` and ``args`` lists of *node* with their secret values hidden.
+
+    Both lists are read as one command line, so a secret flag that ends
+    ``command`` hides the first argument of ``args``. Keys whose value is
+    not a list are left out.
+    """
+    lists = {key: node[key] for key in _COMMAND_LISTS if isinstance(node.get(key), list)}
+    hidden = _hide_command_secrets([part for parts in lists.values() for part in parts])
+    out: dict[str, list[Any]] = {}
+    start = 0
+    for key, parts in lists.items():
+        out[key] = hidden[start : start + len(parts)]
+        start += len(parts)
+    return out
 
 
 #: Fields of a Secret whose values are hidden; the key names stay.
@@ -276,14 +462,17 @@ def _hide_secret_values(secret: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _hide_values(node: Any) -> Any:
+def _hide_values(node: Any, *, hide_commands: bool = True) -> Any:
     """Copy *node*, hiding at any depth every value that can hold a secret.
 
     * The ``value`` of every entry in an ``env`` or ``httpHeaders`` list is
       hidden; the name stays. The entry's other fields are still walked, so
       a Secret or a command line nested in such an entry is hidden too.
     * Every ``command`` or ``args`` list becomes ``{"hidden": true, "bytes":
-      <size>}``, like the ``k8s.job.create`` preview's ``command_bytes``.
+      <size>}``. With ``hide_commands=False`` (the Job previews) the
+      command lines stay, so the approver reads what will run; only the
+      secret values on them are hidden, with ``command`` and ``args`` read
+      as one command line (:func:`_hide_command_line`).
     * Every dict with ``kind: Secret`` keeps only the key names of its
       ``data`` and ``stringData``. This catches a Secret nested in another
       object, not only a top-level Secret document.
@@ -292,23 +481,28 @@ def _hide_values(node: Any) -> Any:
     """
     if isinstance(node, dict):
         out: dict[str, Any] = {}
+        command_line = {} if hide_commands else _hide_command_line(node)
         for key, item in node.items():
-            if key in _NAME_VALUE_LISTS and isinstance(item, list):
+            if key in command_line:
+                out[key] = command_line[key]
+            elif key in _NAME_VALUE_LISTS and isinstance(item, list):
                 out[key] = [
-                    _hide_values({**entry, "value": _HIDDEN})
+                    _hide_values({**entry, "value": _HIDDEN}, hide_commands=hide_commands)
                     if isinstance(entry, dict) and "value" in entry
-                    else _hide_values(entry)
+                    else _hide_values(entry, hide_commands=hide_commands)
                     for entry in item
                 ]
             elif key in _COMMAND_LISTS and isinstance(item, list):
                 out[key] = {"hidden": True, "bytes": _parts_bytes(item)}
             elif key == "annotations" and isinstance(item, dict) and _LAST_APPLIED in item:
-                out[key] = _hide_values({**item, _LAST_APPLIED: _HIDDEN})
+                out[key] = _hide_values(
+                    {**item, _LAST_APPLIED: _HIDDEN}, hide_commands=hide_commands
+                )
             else:
-                out[key] = _hide_values(item)
+                out[key] = _hide_values(item, hide_commands=hide_commands)
         return _hide_secret_values(out) if out.get("kind") == "Secret" else out
     if isinstance(node, list):
-        return [_hide_values(item) for item in node]
+        return [_hide_values(item, hide_commands=hide_commands) for item in node]
     return node
 
 

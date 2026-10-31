@@ -344,9 +344,9 @@ real operator through the same loader.
 | `k8s.namespace.list`   | safe   | `CoreV1Api.list_namespace()` -- name / status / age.              |
 | `k8s.node.list`        | safe   | `CoreV1Api.list_node()` -- status / roles / version, plus `system_uuid` (the node's BIOS UUID), `os_image`, `architecture`, `cpu_capacity`, `memory_capacity` (`_node_identity.py`). |
 | `k8s.pod.list`         | safe   | Pods with selectors + server-side pagination.                     |
-| `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix.                     |
+| `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix. Includes init containers, their statuses, and `image_pull_secrets` (names only). |
 | `k8s.deployment.list`  | safe   | Deployments with live replica counts + image + strategy.          |
-| `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix.              |
+| `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix. Includes `image_pull_secrets` (names only). |
 | `k8s.job.list`         | safe   | `BatchV1Api.list_namespaced_job()` / `list_job_for_all_namespaces()` -- one row per Job with a one-word `state`, pod counts, `completions`, start / completion times. Same selectors + paging as `k8s.pod.list`. (`ops_job.py`) |
 | `k8s.job.info`         | safe   | One Job by exact name or unique prefix: the row fields plus conditions (reason + message), `backoff_limit`, `active_deadline_seconds`, template containers, `pod_selector` and up to 50 of its pods, newest first. (`ops_job.py`) |
 | `k8s.workload.list`    | safe   | `AppsV1Api` list for one `kind` (Deployment / StatefulSet / DaemonSet): desired `replicas` (DaemonSet: pods it should run), per-container `requests` / `limits` as API quantities, images, `volumes` with `claim_name`, StatefulSet `volume_claim_templates`, and `pod_selector`. `containers` holds the app containers and the sidecars (init containers with `restartPolicy: Always`); plain init containers are left out. Same selectors + paging as `k8s.deployment.list`. (`ops_workload_set.py`) |
@@ -364,16 +364,17 @@ real operator through the same loader.
 | `k8s.auth.can_i`       | safe   | `AuthorizationV1Api.create_self_subject_access_review()` -- may the target's kubeconfig identity do one verb on one resource (or one non-resource path)? `{allowed, denied, reason, evaluation_error}`. Same as `kubectl auth can-i`. (`ops_access.py`, #3840) |
 | `k8s.auth.rules`       | safe   | `AuthorizationV1Api.create_self_subject_rules_review()` -- every rule that identity has in one namespace, one row per rule, plus `incomplete`. Same as `kubectl auth can-i --list`. (`ops_access.py`, #3840) |
 | `k8s.admission_webhook.list` | safe | `AdmissionregistrationV1Api.list_validating_webhook_configuration()` + `list_mutating_webhook_configuration()` -- one row per webhook: rules, selectors, `failure_policy`, `side_effects`, `timeout_seconds`, service or URL. `caBundle` is left out. Optional `type` filter. (`ops_admission.py`, #3840) |
-| `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap; since_time / until_time read an older time window, oldest line first. |
+| `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap; since_time / until_time read an older time window, oldest line first. `container` also accepts an init container name. |
 | `k8s.exec`             | **dangerous** (`requires_approval=True`) | `CoreV1Api.connect_get_namespaced_pod_exec()` over the `WsApiClient` websocket transport -- bounded argv command-and-capture: stdout / stderr demuxed from the `v4.channel.k8s.io` channels + exit code parsed from the channel-3 status frame, per-stream 1 MiB cap, bounded timeout. Interactive `-it` deferred. |
 | `k8s.secret.list`     | safe   | `CoreV1Api.list_namespaced_secret()` / `list_secret_for_all_namespaces()` -- one row per Secret: name / namespace / type / `keys` (names only) / `key_count` / labels / `annotation_keys` (names only) / `owner_count` / created / resource_version. **Never a value.** Same `namespace` XOR `all_namespaces` + `label_selector` params as `k8s.configmap.list`. Needs `list` on `secrets`. (`ops_secret_list.py`) |
 | `k8s.secret.info`     | safe   | `CoreV1Api.read_namespaced_secret()` -- the list row fields plus `immutable`, `owners` (kind + name) and `key_sizes` (bytes per key). **Never a value.** Needs `get` on `secrets`. (`ops_secret_list.py`) |
 | `k8s.secret.read_to_ref` | **caution** (`requires_approval=True`) | `CoreV1Api.read_namespaced_secret()` -- reads one Secret's `data[data_key]` (default `value`), decodes it, and stages the value to a **tenant-scoped Vault `secret_ref`** via `vault.kv.put`; returns **only** the ref + provenance (SHA-256 / byte length), never the value. Classified `credential_read` (audit + broadcast aggregate-only). The governed VKS guest-kubeconfig read (`ops_secret_read.py`, #3496). |
+| `k8s.secret.compare_to_ref` | safe | `CoreV1Api.read_namespaced_secret()` -- checks that one Secret key holds the same value as its Vault copy `{path, key, mount?}`. Answers only `same` and, per copy, `found` / `matches_first` / version; never a value or a hash. Classified `credential_read`. (`ops_secret_compare.py`) |
 
 The multi-step read `k8s.migration.inventory` (group `migration`, `safe`)
 collects the cluster's nodes and workloads in the common migration inventory
-shape. It lives in `connectors/migration/source_k8s.py`; see
-`connectors-migration.md`.
+shape. It lives in `connectors/inventory/source_k8s.py`; see
+`connectors-inventory.md`.
 
 ### `k8s.exec` -- websocket command-and-capture (`ops_exec.py`)
 
@@ -768,6 +769,38 @@ A missing `data_key`, or a value that is not valid base64 / UTF-8, raises
 the error surfaces through the dispatcher's `connector_error` envelope,
 and nothing is written to Vault on failure.
 
+### Check a Secret against its Vault copy -- `k8s.secret.compare_to_ref`
+
+A Helm chart often reads a password from a Secret while the same password
+is kept in Vault. After a change the operator must prove that both copies
+match. `ops_secret_compare.py` answers that without showing the value.
+
+- Params: `namespace`, `name`, `key` and the Vault copy
+  `ref: {path, key, mount?}`.
+- The Secret is read with the connector's normal Kubernetes access. Its
+  value is base64-decoded, so it is compared with the plain text in Vault.
+  A Vault value that is not a string (a number, `null`, a list) never
+  matches the Secret.
+- The Vault copy is read with the caller's own Vault login and tenant
+  guard. Like `k8s.secret.read_to_ref`, it uses no Vault target
+  (`target=None`), so the deployment's Vault and the default role apply.
+  The read and the compare are the shared `read_kv_copy` /
+  `compare_copies` of `vault.kv.compare` (`connectors/vault/kv_compare.py`).
+- The two values are compared with `hmac.compare_digest` (constant time)
+  and dropped.
+- Answer: `{same, copies: [k8s copy, vault copy]}`. Each copy has
+  `source`, its names, `key`, `found`, `matches_first`, `version` (the
+  Secret's `resourceVersion` or the Vault version) and `reason`. Never a
+  value or a hash.
+- A copy that cannot be read answers `found: false` with `reason`
+  `forbidden` (Kubernetes 403, Vault 403, or a Vault path outside the
+  caller's tenant), `not_found` or `key_not_found`; the call does not
+  fail. Other Kubernetes errors, a Vault login failure or an unreachable
+  Vault fail the call.
+- `safe`, no approval. The op id is on `_CREDENTIAL_READ_OPS`, so the
+  flight recorder never stores the Secret body and the broadcast shows
+  only the outcome.
+
 ### Shared list-op request shape (`ops_listparams.py`)
 
 Every namespaced list op on this connector
@@ -886,6 +919,28 @@ definition. No secret value can appear in the result. The main use is
 a container waiting with `CreateContainerConfigError`: the status row
 says the container cannot start, and `value_from` / `env_from` say
 which Secret and key it asks for.
+
+### Image pull secrets in `k8s.pod.info` and `k8s.deployment.info` (#3686)
+
+Both ops return `image_pull_secrets`: the names of the Secrets in the pod
+spec's `imagePullSecrets` (for a Deployment, from its pod template), in
+spec order. The list is empty when the spec names none. It answers "is
+the image pulled with the expected pull secret?" without `kubectl get -o
+yaml`. `_image_pull_secret_names()` in `ops_workload.py` copies the names
+only. MEHO does not read the Secrets, so no secret content can appear in
+the result.
+
+### Init container logs in `k8s.logs` (#3686)
+
+`k8s.logs` passes `include_init_containers=True` to
+`resolve_pod_and_container()` in `ops_logs.py`. So an init container
+name (for example a `migrate` step) is a valid `container` value, and
+the `MultiContainerAmbiguityError` candidate list shows the app
+containers first, then the init containers. Auto-pick still looks only
+at the app containers: a pod with one app container and some init
+containers still resolves to the app container. `k8s.exec` uses the same
+resolver with the default (`False`), so its valid set stays the app
+containers.
 
 ### Job reads (`ops_job.py`)
 

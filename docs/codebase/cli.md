@@ -1037,7 +1037,7 @@ that header from one place, so every verb gets it without its own flag.
   the HTTP request row. So the rows the connector service writes
   inside the request (`meho_connector_edit_op`,
   `meho_connector_llm_grouping` for an ingest, enable / disable, ...)
-  carry the same work-ref, and `meho audit query --work-ref` finds
+  carry the same work-ref, and `meho audit query --filter-work-ref` finds
   them together with the request row. `backend/tests/
   test_audit_work_ref_control_plane.py` proves this round trip for
   `targets add`, `agent grant create`, `connector ingest` (sync and
@@ -1047,11 +1047,32 @@ that header from one place, so every verb gets it without its own flag.
   header first. So the MCP row and the dispatch row of each tool call
   carry it. A `work_ref` argument on `call_operation` still wins over the
   header. `backend/tests/test_mcp_work_ref_header.py` proves this.
-- Some commands have their own local `--work-ref` (`operation call`,
-  `scheduler create`, `runbook start`, `agent run`, and the filters on
-  `audit query`, `approvals list`, `broadcast recent`, ...). Cobra lets a local
-  flag hide the parent's persistent flag, so on those commands the flag
-  keeps its own meaning. Only `MEHO_WORK_REF` reaches the header there.
+- Some commands have their own local `--work-ref`: `operation call`,
+  `scheduler create`, `runbook start`, `agent run` and
+  `broadcast announce`. There it has the same meaning as the global
+  flag: it tags the run with the reference. Cobra lets a local flag hide
+  the parent's persistent flag, so only `MEHO_WORK_REF` reaches the
+  header there.
+- The six read commands that filter by reference (`audit query`,
+  `approvals list`, `scheduler list`, `runbook runs`, `agent run-list`,
+  `broadcast recent`) use `--filter-work-ref` for the filter (#4988).
+  They have no local `--work-ref`, so the global flag tags their request
+  like on every other command. Before #4988 their own `--work-ref`
+  filtered the answer and hid the global flag, so
+  `meho --work-ref X audit query ...` silently showed only the rows of
+  ticket X. For one release, a `--work-ref` on these commands still
+  filters too when `--filter-work-ref` is not given, and
+  `workref.Filter` (`cli/internal/cmd/workref/`) prints one warning
+  line on stderr that names `--filter-work-ref`. A filter value need
+  not have the `gh:<owner>/<repo>#<n>` shape: when it does not,
+  `applyWorkRef` skips the tag on these commands instead of failing,
+  and the value only filters. When `--filter-work-ref` is given, also
+  empty (`--filter-work-ref=""` means no filter), `--work-ref` only
+  tags, and a bad value is an error like on every other command.
+  `MEHO_WORK_REF` never filters. `TestWorkRefFlagHasOneMeaning` walks
+  the command tree and fails when a command adds its own `--work-ref`
+  that is not a tag; `TestFilterWorkRefOnReadCommands` checks the
+  header and the filter on the wire for all six commands.
 - No PersistentPreRun hooks exist below the root. If one is added, it
   must call `applyWorkRef` too (cobra runs only the nearest hook).
 
@@ -1738,7 +1759,7 @@ removes one through `DELETE /api/v1/targets/{name}`.
   `import.go`'s `doAuthedRequest` POST plumbing, so a static-bearer
   escape hatch is deliberately **not** offered — auth stays interactive
   `meho login` only.
-- `meho targets update <name-or-alias> [field flags] [--clear F]`
+- `meho targets update <name, alias or id> [field flags] [--clear F]`
   (Task #3854) — calls `PATCH /api/v1/targets/{name}` (`TargetUpdate`)
   for one target. The field flags have the same names as `add`'s and
   are sent only when set, so every other column keeps its value.
@@ -1782,15 +1803,15 @@ removes one through `DELETE /api/v1/targets/{name}`.
   paginated by name; `--cursor <last-name-seen>` walks pages. `--limit`
   is capped at 500 by the API; the CLI fails fast at the boundary so
   operators see the constraint without a 422 round-trip.
-- `meho targets describe <name-or-alias>` — calls
+- `meho targets describe <name, alias or id>` — calls
   `GET /api/v1/targets/{name}`. Renders the full `Target` read shape
   as a stable key-value summary including the post-#477 fields
   `fingerprint` (cached `FingerprintResult` from the last successful
   probe) and `preferred_impl_id` (operator override for the G0.6
-  resolver's tie-break ladder). Alias resolution happens server-side
-  via `resolve_target`; a 404 surfaces the resolver's near-miss list
+  resolver's tie-break ladder). The server finds the target by name,
+  alias or id (see [`targets.md`](targets.md)); a 404 surfaces the resolver's near-miss list
   so operators can correct a typo in one shot.
-- `meho targets probe <name-or-alias>` — calls
+- `meho targets probe <name, alias or id>` — calls
   `POST /api/v1/targets/{name}/probe`. Backend invokes the registered
   `Connector.fingerprint(target)`, persists the `FingerprintResult` to
   `targets.fingerprint` (so the G0.6 resolver reads it without
@@ -2595,8 +2616,11 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
 - `meho admin keycloak bootstrap-clients` — idempotently reconcile a
   realm against the recipe:
   1. Public device-code client (default name `meho-cli`,
-     `publicClient=true`, `oauth2DeviceAuthorizationGrantEnabled=true`,
-     every other flow off).
+     `publicClient=true`, `oauth2DeviceAuthorizationGrantEnabled=true`).
+     The standard flow is on too, with `pkce.code.challenge.method=S256`
+     and the one redirect URI `http://127.0.0.1:*`: `meho approvals
+     approve` uses it for the fresh browser sign-in an approval needs
+     (#3979). Implicit, password and service-account flows stay off.
   2. Public authorization-code+PKCE MCP client (default name
      `meho-mcp`, `standardFlowEnabled=true`,
      `pkce.code.challenge.method=S256`, default redirect URIs for the

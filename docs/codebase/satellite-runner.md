@@ -49,7 +49,11 @@ client polls land in #2499; the long-poll command plane in #2498.
     attributes a connector handler duck-reads (the runner has no local
     target table). v1 carries `name` / `product` / `version` /
     `fingerprint` / `extras` / `preferred_impl_id`; #2499 widens it with
-    the connection-routing set (host/port/secret_ref/TLS).
+    the connection-routing set (host/port/secret_ref/TLS). #3879 adds
+    `updated_at`: the executor drops the login it keeps for the target
+    when this value differs from the one it saw last, so a changed
+    secret or host is used on the next run and not only after the
+    kept login expires.
   - `RunnerResult` / `RunnerResultBatch` — each result carries a
     runner-generated `result_uid` (uuid4) so central ingest can
     deduplicate spool re-posts idempotently. `status` is a runner-level

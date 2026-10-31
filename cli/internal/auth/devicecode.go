@@ -40,6 +40,10 @@ type DiscoveryDocument struct {
 	// TokenEndpoint is where we poll for the token. Keycloak puts
 	// this at {realm}/protocol/openid-connect/token.
 	TokenEndpoint string `json:"token_endpoint"`
+	// AuthorizationEndpoint is where the browser sign-in starts
+	// (RFC 8414 §2). Only the fresh sign-in for an approval uses it
+	// (see RunFreshSignIn); the device flow does not.
+	AuthorizationEndpoint string `json:"authorization_endpoint"`
 }
 
 // DiscoveryError wraps the failure modes of FetchDiscovery so

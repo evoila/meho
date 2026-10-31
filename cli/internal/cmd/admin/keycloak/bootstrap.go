@@ -449,10 +449,23 @@ func (o BootstrapOptions) requiredCLIOptionalScopes() []string {
 // builders readable.
 func boolPtr(b bool) *bool { return &b }
 
+// cliRedirectURIs are the loopback callbacks of the CLI's fresh
+// browser sign-in for an approval (#3979, RFC 8252 §7.3). The CLI
+// listens on 127.0.0.1 with a random port, so the port is a wildcard.
+// localhost is not listed: the CLI uses the IP literal only.
+var cliRedirectURIs = []string{"http://127.0.0.1:*"}
+
 // desiredCLIClient builds the ClientRepresentation for the public
 // device-code client. Mirrors the reference shell script verbatim
 // (including the "Description" string pattern so re-runs against a
-// shell-script-created client don't churn the field).
+// shell-script-created client don't churn the field). Keycloak stores
+// the description in a 255-character column; a longer one fails the
+// create with HTTP 500.
+//
+// The standard (browser) flow is on with PKCE S256 and loopback
+// redirect URIs only: `meho approvals approve` uses it for the fresh
+// sign-in an approval needs (#3979). `meho login` still uses the
+// device flow.
 func (o BootstrapOptions) desiredCLIClient() *clientRep {
 	c := &clientRep{
 		ClientID:                  o.CLIClientID,
@@ -460,17 +473,18 @@ func (o BootstrapOptions) desiredCLIClient() *clientRep {
 		Description:               "Public OAuth client for RFC 8628 device-code flow used by `meho login` and any MCP-OAuth-2.1 client targeting <backplane-url>/mcp. Audience-mapped to " + o.BackplaneAudience + ". Provisioned by `meho admin keycloak bootstrap-clients` (#791).",
 		Enabled:                   boolPtr(true),
 		PublicClient:              boolPtr(true),
-		StandardFlowEnabled:       boolPtr(false),
+		StandardFlowEnabled:       boolPtr(true),
 		ImplicitFlowEnabled:       boolPtr(false),
 		DirectAccessGrantsEnabled: boolPtr(false),
 		ServiceAccountsEnabled:    boolPtr(false),
 		FrontchannelLogout:        boolPtr(false),
 		Attributes: map[string]string{
+			"pkce.code.challenge.method":                  "S256",
 			"oauth2.device.authorization.grant.enabled":   "true",
 			"use.refresh.tokens":                          "true",
 			"client.use.lightweight.access.token.enabled": "false",
 		},
-		RedirectURIs:        []string{},
+		RedirectURIs:        append([]string{}, cliRedirectURIs...),
 		WebOrigins:          []string{},
 		DefaultClientScopes: append([]string{"profile", "email"}, requiredDefaultScopes()...),
 	}

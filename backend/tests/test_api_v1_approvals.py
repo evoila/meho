@@ -90,7 +90,9 @@ def client() -> Iterator[TestClient]:
 
 
 def _token(key: Any, *, role: TenantRole, sub: str = "op-test") -> str:
-    return mint_token(key, sub=sub, tenant_role=role.value, tenant_id=str(_TENANT_A))
+    return mint_token(
+        key, sub=sub, tenant_role=role.value, tenant_id=str(_TENANT_A), fresh_sign_in=True
+    )
 
 
 # Every approval route+method gated by ``_require_operator``.
@@ -473,6 +475,7 @@ def _approve_only_token(key: Any, *, sub: str = "approve-only") -> str:
         tenant_role=TenantRole.READ_ONLY.value,
         tenant_id=str(_TENANT_A),
         approver=True,
+        fresh_sign_in=True,
     )
 
 

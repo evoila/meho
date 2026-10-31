@@ -276,6 +276,7 @@ async def _resolve_descriptor(
             op_id=op_id,
             triple=(product, version, impl_id),
             started=time.monotonic(),
+            target=target,
         )
         return {
             "status": "error",

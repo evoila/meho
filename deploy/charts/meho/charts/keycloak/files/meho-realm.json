@@ -151,21 +151,24 @@
     {
       "clientId": "meho-cli",
       "name": "MEHO CLI",
-      "description": "Public client for `meho login` (device flow).",
+      "description": "Public client for `meho login` (device flow) and the fresh browser sign-in of `meho approvals approve` (loopback, PKCE).",
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": true,
-      "standardFlowEnabled": false,
+      "standardFlowEnabled": true,
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "frontchannelLogout": false,
       "attributes": {
+        "pkce.code.challenge.method": "S256",
         "oauth2.device.authorization.grant.enabled": "true",
         "use.refresh.tokens": "true",
         "client.use.lightweight.access.token.enabled": "false"
       },
-      "redirectUris": [],
+      "redirectUris": [
+        "http://127.0.0.1:*"
+      ],
       "webOrigins": [],
       "defaultClientScopes": [
         "basic",

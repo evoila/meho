@@ -60,6 +60,7 @@ from kubernetes_asyncio.client.models import (
     V1EnvVarSource,
     V1LabelSelector,
     V1ListMeta,
+    V1LocalObjectReference,
     V1ObjectFieldSelector,
     V1ObjectMeta,
     V1Pod,
@@ -594,6 +595,7 @@ def test_pod_info_carries_per_container_statuses_and_volumes() -> None:
             ],
             init_containers=[V1Container(name="init-cfg", image="busybox")],
             volumes=[V1Volume(name="cfg")],
+            image_pull_secrets=[V1LocalObjectReference(name="regcred")],
             node_name="rke2-meho-01",
         ),
         status=V1PodStatus(
@@ -632,7 +634,18 @@ def test_pod_info_carries_per_container_statuses_and_volumes() -> None:
     assert info["container_statuses"][0]["ready"] is True
     assert info["container_statuses"][0]["restart_count"] == 1
     assert info["init_container_statuses"][0]["state"] == "terminated"
+    assert info["image_pull_secrets"] == ["regcred"]
     assert info["conditions"][0]["type"] == "Ready"
+
+
+def test_pod_info_without_pull_secrets_returns_empty_list() -> None:
+    pod = V1Pod(
+        metadata=V1ObjectMeta(name="app-x", namespace="default"),
+        spec=V1PodSpec(containers=[V1Container(name="app", image="app:1.0")]),
+        status=V1PodStatus(phase="Running"),
+    )
+    assert pod_info(pod)["image_pull_secrets"] == []
+    assert pod_info(V1Pod(metadata=V1ObjectMeta(name="bare")))["image_pull_secrets"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -720,6 +733,17 @@ def test_deployment_info_carries_status_block_and_conditions() -> None:
     assert info["status"]["observed_generation"] == 1
     assert info["conditions"][0]["type"] == "Available"
     assert info["conditions"][0]["reason"] == "MinimumReplicasAvailable"
+    assert info["image_pull_secrets"] == []
+
+
+def test_deployment_info_lists_pull_secret_names_only() -> None:
+    """Only the Secret names from the pod template are shown, in spec order."""
+    dep = _make_deployment(name="app")
+    dep.spec.template.spec.image_pull_secrets = [
+        V1LocalObjectReference(name="regcred"),
+        V1LocalObjectReference(name="mirror-pull"),
+    ]
+    assert deployment_info(dep)["image_pull_secrets"] == ["regcred", "mirror-pull"]
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 87 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 90 hand-authored composites
 that orchestrate cross-spec workflows: 20 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -22,7 +22,7 @@ read `datastore.file.list` / `#3432` + the vSAN folder list
 read `datastore.vsan.folder.list` / `#4022` + the orphan folder check
 `datastore.orphan_dirs` / `#3814` + the VM limit and
 reservation read `vm.resource_allocation.show` / `#3880` + the migration
-inventory read `vmware.migration.inventory`) and 67 write
+inventory read `vmware.migration.inventory`) and 70 write
 composites (G3.1-T6 / `#509`, incl. the three vCenter install changes
 `vcenter.appliance.deploy` / `vcenter.install` / `vcenter.deployment.answer`
 (`#4394`), the destructive-tier `vm.destroy` / `#3198`, the
@@ -72,7 +72,9 @@ DRS group writes `cluster.drs_group.members.set` (`caution`) and
 `cluster.drs_group.delete` (`destructive`) (see **Governed DRS group changes**), the
 CD drive add `vm.cdrom.add` (`dangerous`) and the VMware Tools installer unmount
 `vm.tools.installer.unmount` (`caution`) (see **VM hardware read, CD drive add and
-Tools installer unmount**), the content-library ISO mount and unmount
+Tools installer unmount**), the VM device changes `vm.disk.remove` (`destructive`),
+`vm.nic.remove` and `vm.controller.add` (both `dangerous`) (see **VM devices: remove a
+disk or a network adapter, add a controller**), the content-library ISO mount and unmount
 `vm.cdrom.mount_library_iso` + `vm.cdrom.unmount_library_iso` (both `caution`)
 (see **Content-library ISO mount and unmount**), the VM snapshot writes `vm.snapshot.create` (caution)
 + `vm.snapshot.delete` (destructive) (see **VM snapshot operations**), the licence
@@ -565,9 +567,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 87
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 90
   `_CompositeSpec` rows (20 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 50 dangerous/destructive
+  cache-refresh read `datastore.refresh` — + 53 dangerous/destructive
   writes + 17 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
@@ -1438,12 +1440,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 87 `vmware.composite.*` rows with
+   queued registrar and upserts: the 90 `vmware.composite.*` rows with
    `source_kind="composite"` — 20 reads (19 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 67 writes, all `requires_approval=True`
-   (38 `safety_level="dangerous"`; 17 `safety_level="caution"` —
+   service principals), and 70 writes, all `requires_approval=True`
+   (40 `safety_level="dangerous"`; 17 `safety_level="caution"` —
    `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
@@ -1452,10 +1454,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    `vm.cdrom.unmount_library_iso`, `vm.snapshot.create`,
    `content_library.create` + `content_library.item.upload`,
    `cluster.drs_group.members.set`;
-   and 12 `safety_level="destructive"` — `vm.destroy` / `#3198`,
+   and 13 `safety_level="destructive"` — `vm.destroy` / `#3198`,
    `namespace.delete`, `storage_policy.delete`, `cluster.drs_rule.delete`,
    `cluster.drs_group.delete`,
-   `vm.snapshot.delete`, and the six `#3339` teardown deletes) —
+   `vm.snapshot.delete`, `vm.disk.remove`, and the six `#3339` teardown deletes) —
    plus the `vmware.host.usage` row with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
    The typed row resolves and dispatches with **zero catalog ingest** —
@@ -1840,7 +1842,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 87 composites (20 reads + 67 writes) land as `source_kind="composite"`
+The 90 composites (20 reads + 70 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1937,7 +1939,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 87 composites are hand-authored aggregators the connector ships as
+The 90 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -2057,6 +2059,9 @@ enum) are:
 | `vm.power` | `ok`, `error`, `tools_unavailable` (single VM; `tools_unavailable` when a soft `guest_shutdown`/`guest_reboot` finds Tools down) |
 | `vm.power.bulk` | (per-VM `results` + aggregate `summary` + `aborted_on_failure`) |
 | `vm.disk.grow` | `grown`, `invalid_shrink`, `disk_not_found`, `timeout` (grow-only; `invalid_shrink` refuses a request ≤ current capacity before any write; `timeout` when the `ReconfigVM_Task` poll gives up) |
+| `vm.disk.remove` | `removed`, `not_found`, `invalid_request`, `precondition_failed`, `still_present`, `timeout` (vim `ReconfigVM_Task` polled; the teardown envelope plus `remaining_disks`) |
+| `vm.nic.remove` | `removed`, `not_found` (nothing sent), `refused` (HTTP 400, nothing changed), `still_present` |
+| `vm.controller.add` | `added`, `unchanged` (USB 3 controller already there), `refused`, `not_found`, `invalid_request`, `timeout` |
 | `vm.disk.attach` | `attached`, `invalid_vmdk_path`, `invalid_unit`, `controller_not_found`, `unit_in_use`, `timeout` (#3256; the first four are pre-write fail-closed refusals; `timeout` when the `ReconfigVM_Task` add poll gives up; a task *fault* raises `connector_error`) |
 | `vm.clone_from_template` | `cloned`, `template_not_found`, `ambiguous_template`, `not_a_template`, `timeout` (name-resolution refusals + the template assert are pre-write; `timeout` when the `CloneVM_Task` poll gives up; a task *fault* raises `connector_error`) |
 | `host.evacuate` | `evacuated`, `partial`, `aborted`, `timeout`, `not_in_cluster` (the maintenance-enter is the vim `EnterMaintenanceMode_Task`, polled; a task *fault* raises `connector_error`, #2970; a poll `timeout` is a status with the task id and a `warning` issue, not a failure, #4895; `not_in_cluster` is a pre-change refusal) |
@@ -2422,6 +2427,62 @@ installer is mounted now. The `vm` id goes into the URL path, so it must match
 of the three operations against the pinned `vcenter.yaml` of 8.0 and 9.0 (it
 skips without the vendor spec files). Tests use saved responses
 (`test_connectors_vmware_rest_typed_vm_hardware.py`).
+
+### VM devices: remove a disk or a network adapter, add a controller
+
+Three changes finish the daily VM device work next to the disk grow and
+attach, the NIC repoint and the CD drive add. Each takes the VM id (`vm`)
+only, never a name, so after approval it runs on the VM the approver saw. All
+three are on both catalogs (`vmware-rest-8.0` and `vmware-rest-9.0`); every
+vendor call exists in the pinned vCenter 8.0 U1, U2, U3 and 9.0 API files.
+
+| Operation | What it does | Vendor call | Returns | Risk |
+|---|---|---|---|---|
+| `vmware.composite.vm.disk.remove` | Takes one disk (`disk`, the disk id of `vmware.vm.hardware.show`) off the VM. With `delete_file` it also deletes the VMDK file; by default the file stays. | VIM `VirtualMachine.ReconfigVM_Task`, one `VirtualDeviceConfigSpec` `remove` of the disk device (with `fileOperation: destroy` when `delete_file`), task polled | the teardown envelope `{status, object, blockers, task, task_state, guidance}` plus `remaining_disks` (the disks left, read again after the task) | `destructive`, `requires_approval=True` |
+| `vmware.composite.vm.nic.remove` | Takes one network adapter (`nic`) off the VM. | REST `GET` then `DELETE /vcenter/vm/{vm}/hardware/ethernet/{nic}`, then `GET .../hardware/ethernet` | `{status, vm, nic, removed_nic, remaining_nics, error_type, guidance}` | `dangerous`, `requires_approval=True` |
+| `vmware.composite.vm.controller.add` | Adds one controller: `LSILOGICSAS` or `PVSCSI` (SCSI, optional `sharing`), `NVME`, `SATA` (AHCI), or `USB_XHCI` (USB 3). Optional `bus`. | REST `POST /vcenter/vm/{vm}/hardware/adapter/{scsi,sata,nvme}`, read back with the matching `GET`; for `USB_XHCI` VIM `ReconfigVM_Task` with a `VirtualUSBXHCIController` `add`, task polled, read back from `config.hardware.device` | `{status, vm, type, requested, controller: {kind, adapter, label, type, bus, sharing, pci_slot_number}, task, error_type, guidance}` | `dangerous`, `requires_approval=True` |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 U1, 8.0 U2, 8.0 U3 | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+- **Disk remove** (`composites/_vm_disk_remove.py`). vSphere REST can remove
+  a disk but always keeps its file, so the change uses the VIM API, like
+  `govc device.remove`. It uses the plan-then-act seam of `_teardown.py`: one
+  read of the VM (`name`, `runtime.powerState`, `config.hardware.device`)
+  feeds both the preview and the handler. Statuses: `removed`, `not_found`
+  (no such VM or disk, nothing sent), `invalid_request` (a bad id),
+  `precondition_failed` (a shared multi-writer disk with `delete_file`: other
+  VMs may use the file), `still_present`, `timeout`. A task fault raises with
+  the fault type and text (`connector_error`). The preview fills the
+  `blast_radius` block: `object` (VM, disk label, size, VMDK file, sharing,
+  controller and unit), `children` (the VMDK file when `delete_file`, else
+  none) and `irreversibility` (`permanent` with `delete_file`, else
+  `reversible-file-kept`). It raises when the VM or the disk does not exist,
+  so such a call never waits for approval.
+- **Network adapter remove** (`composites/_vm_nic_remove.py`). Reads the
+  adapter first: a 404 gives `not_found` and nothing is sent, so it is safe to
+  run twice. HTTP 400 gives `refused` with vCenter's reason. After the
+  `DELETE` it lists the adapters again: `removed`, or `still_present`. The
+  preview shows the adapter (label, model, MAC address, network).
+- **Controller add** (`composites/_vm_devices.py`). The pinned API files have
+  a REST create for SCSI, SATA and NVMe controllers, so only the USB 3
+  controller uses the VIM API (REST has no USB controller). `sharing` is only
+  for a SCSI type and `bus` not for `USB_XHCI`; another combination answers
+  `invalid_request` before any call. A VM has one USB 3 controller at most:
+  when it has one, nothing is sent (`unchanged`). HTTP 400 (for example a hot
+  add vCenter does not allow) gives `refused`, HTTP 404 `not_found`. The
+  preview shows the controllers of that kind the VM has now.
+
+Every write goes through the shared write seams (`_write._write_sub_op` and
+`_write._write_vmomi_sub_op`), so it is checked by policy like the other
+composite writes. `test_connectors_vmware_rest_vm_devices_reconcile.py`
+checks every REST call against the pinned `vcenter.yaml` of 8.0 and 9.0, the
+VIM methods and the VIM type of the USB controller against the 8.0 U1, U2,
+U3 and 9.0 VI/JSON files, and the REST request fields against the 9.0 file
+(it skips without the vendor spec files). Tests mock vCenter with `respx` on
+the vCenter 8 and 9 paths (`test_connectors_vmware_rest_vm_devices.py`).
 
 ### Content-library ISO mount and unmount
 
@@ -4294,6 +4355,9 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.snapshot.revert` | `{vm, snapshot_name}` or `{vm, snapshot_id}` echo | param echo, no I/O |
 | `vm.snapshot.create` | `{action, vm, snapshot_name, memory, quiesce}` echo | param echo, no I/O |
 | `vm.snapshot.delete` | mandatory `blast_radius` from the handler's own plan: the snapshot, and the snapshots below it when `remove_children` is set | live read (vim `RetrievePropertiesEx` of `VirtualMachine.snapshot`) |
+| `vm.disk.remove` | mandatory `blast_radius` from the handler's own plan: the disk, the VMDK file as the child when `delete_file`, `permanent` or `reversible-file-kept`; raises for an unknown VM or disk | live read (vim `RetrievePropertiesEx` of `config.hardware.device`) |
+| `vm.nic.remove` | `{summary, vm, nic: {label, type, mac_address, network, ...}}` | live read (`ethernet/{nic}`) |
+| `vm.controller.add` | `{summary, vm, requested, current_controllers}` | live read (`adapter/{kind}` list, or vim `config.hardware.device` for USB) |
 | `vm.migrate` | `{vm, cluster, target_host, target_host_source}` | param echo, no I/O |
 | `vm.power` | `{vm, name, power_state, verb, power_kind}` (`power_kind` = `hard` vs Tools-soft `guest`); a failed read keeps the moid, sets `name` / `power_state` to `null` and adds an `unavailable` note -- the request is still created (#3942) | live read, best-effort (`GET:/vcenter/vm/{vm}`) |
 | `cluster.drs_rule.create` | `{cluster, cluster_name, rule_type, rule_name, enabled, resolved, total_resolved}` | live read (`GET:/vcenter/vm` + `GET:/vcenter/cluster/{cluster}`) |

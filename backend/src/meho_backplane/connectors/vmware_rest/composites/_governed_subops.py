@@ -51,6 +51,9 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _vm_allocation,
     _vm_cdrom_library_iso,
     _vm_cdrom_tools,
+    _vm_devices,
+    _vm_disk_remove,
+    _vm_nic_remove,
     _write,
 )
 from meho_backplane.connectors.vmware_rest.composites._vcenter_install_ops import (
@@ -133,6 +136,12 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.vm.cdrom.add": _vm_cdrom_tools.SUB_OPS_VM_CDROM_ADD,
     "vmware.composite.vm.tools.installer.unmount": (
         _vm_cdrom_tools.SUB_OPS_VM_TOOLS_INSTALLER_UNMOUNT
+    ),
+    "vmware.composite.vm.disk.remove": _vm_disk_remove._VIM_SUB_OPS_VM_DISK_REMOVE,
+    "vmware.composite.vm.nic.remove": _vm_nic_remove.SUB_OPS_VM_NIC_REMOVE,
+    "vmware.composite.vm.controller.add": (
+        *_vm_devices.SUB_OPS_VM_CONTROLLER_ADD,
+        *_vm_devices._VIM_SUB_OPS_VM_CONTROLLER_ADD,
     ),
     "vmware.composite.vm.cdrom.mount_library_iso": (
         _vm_cdrom_library_iso.SUB_OPS_MOUNT_LIBRARY_ISO

@@ -247,6 +247,9 @@ from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_library_iso impo
 from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_tools import (
     VM_CDROM_TOOLS_COMPOSITES,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_devices import (
+    VM_DEVICES_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._vm_llm_instructions import (
     VM_LLM_INSTRUCTIONS,
 )
@@ -576,7 +579,10 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "vm.clone, vm.clone_from_template, vm.deploy_from_library, "
         "vm.import_from_library, dangerous); change CPU, memory, disks, NICs or "
         "CD drives (vm.resize, vm.disk.grow, vm.disk.attach, vm.nic.repoint, "
-        "vm.cdrom.add, vm.device.cdrom, dangerous); set CPU and memory limits "
+        "vm.cdrom.add, vm.device.cdrom, dangerous); remove a network adapter or "
+        "add a SCSI, NVMe, SATA or USB 3 controller (vm.nic.remove, "
+        "vm.controller.add, dangerous); remove a disk, and its file if asked "
+        "(vm.disk.remove, destructive); set CPU and memory limits "
         "(vm.resource_allocation.set, caution); unmount the VMware Tools "
         "installer (vm.tools.installer.unmount, caution); move a VM to another "
         "host (vm.migrate, dangerous); take a snapshot (vm.snapshot.create, "
@@ -2122,6 +2128,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # Add a CD drive and unmount the VMware Tools installer; the rows live in
     # their own module.
     *(_CompositeSpec(**row) for row in VM_CDROM_TOOLS_COMPOSITES),
+    # Remove a disk or a network adapter, add a controller; the rows live in
+    # their own module.
+    *(_CompositeSpec(**row) for row in VM_DEVICES_COMPOSITES),
     # Mount and unmount a content-library ISO on a VM; the rows live in their
     # own module.
     *(_CompositeSpec(**row) for row in VM_CDROM_LIBRARY_ISO_COMPOSITES),

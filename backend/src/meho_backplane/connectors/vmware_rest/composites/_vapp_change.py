@@ -403,7 +403,11 @@ async def vapp_power_composite(
         target,
         operator,
         op_id=OP_POWER_ON_VAPP_TASK if power_on else OP_POWER_OFF_VAPP_TASK,
-        vmomi_path=f"/{VAPP_MO_TYPE}/{vapp}/{method}",
+        vmomi_path=(
+            f"/{VAPP_MO_TYPE}/{vapp}/PowerOnVApp_Task"
+            if power_on
+            else f"/{VAPP_MO_TYPE}/{vapp}/PowerOffVApp_Task"
+        ),
         body={} if power_on else {"force": checked["force"]},
         params={"op": OP_ID_VAPP_POWER, "vapp": vapp, "action": params["action"]}
         | ({} if power_on else {"force": checked["force"]}),

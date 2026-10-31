@@ -418,7 +418,7 @@ registered on both connectors:
 
 | op (after the prefix) | what it does and returns | risk level / approval | wire | versions |
 |---|---|---|---|---|
-| `blueprint.get` | one template: its fields, draft YAML (`content`) and `inputs_schema` | safe | `GET /blueprint/api/blueprints/{blueprintId}`, `GET …/{blueprintId}/inputs-schema` | 8.18, 9.x |
+| `blueprint.get` | one template: its fields, draft YAML (`content`, secret values replaced by a marker), `inputs_schema` and `secrets_replaced` | safe | `GET /blueprint/api/blueprints/{blueprintId}`, `GET …/{blueprintId}/inputs-schema` | 8.18, 9.x |
 | `blueprint.create` | a new draft template in a project; `created` / `unchanged` (same name in the project) | caution, approval | `GET /blueprint/api/blueprints?name=&projects=`, then `POST /blueprint/api/blueprints` | 8.18, 9.x |
 | `blueprint.update` | changes the draft YAML, name, description or org-wide flag; `updated` (with `changed_fields`) / `unchanged` | dangerous, approval | `GET`, then `PUT /blueprint/api/blueprints/{blueprintId}` with the whole template | 8.18, 9.x |
 | `blueprint.delete` | deletes a template and all its versions; `deleted` / `unchanged` (404) | destructive, approval, preview first | `DELETE /blueprint/api/blueprints/{blueprintId}` | 8.18, 9.x |
@@ -426,7 +426,7 @@ registered on both connectors:
 | `blueprint.version.release` | `release`: makes a new version from the draft and releases it, or releases an existing one; `unrelease`: takes it out of the catalog | dangerous, approval | `GET …/versions?version=`, then `POST …/versions` (`release: true`), `POST …/versions/{version}/actions/release` or `…/unrelease` | 8.18, 9.x |
 | `blueprint.validate` | checks template YAML or a stored template; `{valid, validationMessages}`; saves nothing | safe | `POST /blueprint/api/blueprint-validation` | 8.18, 9.x |
 | `catalog.source.list` | flat rows of content sources, with `sourceProjectId` and the last import | safe | `GET /catalog/api/admin/sources` | 8.18, 9.x |
-| `catalog.source.create` | a source of type `com.vmw.blueprint` that imports the released templates of a project; `created` / `unchanged` (same name) | caution, approval | `GET …/sources?search=`, then `POST /catalog/api/admin/sources` | 8.18, 9.x |
+| `catalog.source.create` | a source of type `com.vmw.blueprint` that imports the released templates of a project; `created` / `unchanged` (same name, type and project; a name used by another type or project is refused) | caution, approval | `GET …/sources?search=`, then `POST /catalog/api/admin/sources` | 8.18, 9.x |
 | `catalog.share.list` | flat rows of shares (entitlements): project and shared source or item | safe | `GET /catalog/api/admin/entitlements` | 8.18, 9.x |
 | `catalog.share.set` | `share` a source (`CatalogSourceIdentifier`) or item (`CatalogItemIdentifier`) with a project, or `unshare`; `shared` / `unshared` / `unchanged` | dangerous, approval | `GET …/entitlements?projectId=`, then `POST /catalog/api/admin/entitlements` or `DELETE …/entitlements/{id}` | 8.18, 9.x |
 
@@ -446,9 +446,21 @@ registered on both connectors:
   `irreversibility: irreversible`, with a note that counts the released
   versions that leave the catalog. When the template does not exist it
   raises, so MEHO refuses to queue the delete (`blast_radius_required`).
-- **Secrets.** No op takes or returns a password, token or key. The
-  template YAML comes back as stored; a template should take a password
-  through a secret input, never as a value in the YAML.
+- **Secrets.** No op takes or returns a password, token or key. A
+  template should take a password through a secret input, never as a
+  value in the YAML. `blueprint.get` still hides any secret value it
+  finds in the YAML (`vcfa_yaml_secrets.scrub_template_yaml`, line by
+  line, so a `cloudConfig` block is checked too): the value of every
+  secret-named key (the rule of `is_secret_param_name`) and every PEM
+  private key block become a `[REDACTED:...]` marker, and
+  `secrets_replaced` counts them. References such as
+  `${secret.<name>}` or `${input.<name>}` stay. Every other line comes
+  back as written.
+- **No markers written back.** `blueprint.create` and `blueprint.update`
+  refuse `content` that holds `[REDACTED`, before any call to the
+  vendor. Otherwise a read, edit and update would write the marker into
+  the template in place of the real value. The caller gives the full
+  value or uses a secret input.
 - **No template list on 9.x.** Aria Automation 8 has
   `vcfa.vra8.blueprint.list`; VCF Automation 9 has no template list op
   yet, so a 9.x agent gets template ids from `blueprint.create` or from a

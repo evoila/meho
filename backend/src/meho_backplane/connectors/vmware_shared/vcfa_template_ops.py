@@ -91,7 +91,8 @@ _BLUEPRINT_GET = ContentOpSpec(
     summary="Read one cloud template with its YAML and its inputs.",
     description=(
         "Reads GET /blueprint/api/blueprints/{blueprintId} and its inputs-schema. "
-        "Returns the template fields, the draft YAML and the inputs a request needs."
+        "Returns the template fields, the draft YAML and the inputs a request needs. "
+        "Secret values in the YAML come back as a [REDACTED:...] marker."
     ),
     parameter_schema={
         "type": "object",
@@ -105,7 +106,13 @@ _BLUEPRINT_GET = ContentOpSpec(
         {
             "blueprint": obj(
                 "The template.",
-                {**_SUMMARY_FIELDS, "content": field(["string", "null"], "The draft YAML.")},
+                {
+                    **_SUMMARY_FIELDS,
+                    "content": field(
+                        ["string", "null"],
+                        "The draft YAML. Each secret value is a [REDACTED:...] marker.",
+                    ),
+                },
             ),
             "inputs_schema": obj(
                 "The inputs a request takes, as a JSON schema.",
@@ -121,6 +128,9 @@ _BLUEPRINT_GET = ContentOpSpec(
                     },
                 },
             ),
+            "secrets_replaced": field(
+                "integer", "How many secret values in the YAML were replaced by a marker."
+            ),
         },
     ),
     group="templates",
@@ -132,7 +142,10 @@ _BLUEPRINT_GET = ContentOpSpec(
         output_shape=(
             "{blueprint: {id, name, projectId, status, valid, totalVersions, "
             "totalReleasedVersions, content (YAML), validationMessages}, inputs_schema: "
-            "{properties, required}}."
+            "{properties, required}, secrets_replaced}. In content, the value of each "
+            "secret-named key (password, privateKey, token, ...) and each private key "
+            "block is a [REDACTED:...] marker; secrets_replaced counts them. References "
+            "such as ${secret.<name>} or ${input.<name>} stay."
         ),
         next_step=(
             "To change the YAML call {ns}.blueprint.update; to see the versions call "
@@ -199,7 +212,9 @@ _BLUEPRINT_CREATE = ContentOpSpec(
     llm_instructions=guidance(
         when_to_call="Call to add a new cloud template to a project.",
         preconditions=(
-            "Check the YAML with {ns}.blueprint.validate first. A person must approve the call."
+            "Check the YAML with {ns}.blueprint.validate first. Content that holds a "
+            "[REDACTED:...] marker is refused; give the full value or use a secret input "
+            "(${secret.<name>}). A person must approve the call."
         ),
         output_shape="{status: created | unchanged, blueprint: {id, name, status, valid}, "
         "guidance}.",
@@ -274,7 +289,10 @@ _BLUEPRINT_UPDATE = ContentOpSpec(
         when_to_call="Call to change what a cloud template builds.",
         preconditions=(
             "Read the template with {ns}.blueprint.get and check the new YAML with "
-            "{ns}.blueprint.validate. A second person must approve the call."
+            "{ns}.blueprint.validate. The YAML from {ns}.blueprint.get hides secret values "
+            "behind [REDACTED:...] markers; content that still holds a marker is refused. "
+            "Put back the full value or use a secret input (${secret.<name>}). A second "
+            "person must approve the call."
         ),
         output_shape=(
             "{status: updated | unchanged, blueprint: {id, name, status, valid, "

@@ -36,6 +36,10 @@ from urllib.parse import quote
 
 import httpx
 
+from meho_backplane.connectors.vmware_shared.vcfa_yaml_secrets import (
+    MARKER_PREFIX,
+    scrub_template_yaml,
+)
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:
@@ -230,9 +234,14 @@ async def blueprint_get(
         target,
         BLUEPRINT_INPUTS_SCHEMA_PATH.format(blueprintId=blueprint_id),
     )
+    content = row.get("content")
+    replaced = 0
+    if isinstance(content, str):
+        content, replaced = scrub_template_yaml(content)
     return {
-        "blueprint": {**summary(row), "content": row.get("content")},
+        "blueprint": {**summary(row), "content": content},
         "inputs_schema": inputs if isinstance(inputs, dict) else {},
+        "secrets_replaced": replaced,
     }
 
 
@@ -274,6 +283,22 @@ async def blueprint_validate(
 # ---------------------------------------------------------------------------
 
 
+def refuse_hidden_values(params: Mapping[str, Any]) -> None:
+    """Refuse template YAML that holds a marker MEHO put in place of a value.
+
+    A template read hides secret values behind ``[REDACTED:...]``. Writing
+    that YAML back would put the marker into the template in place of the
+    real value, so create and update stop before any vendor call.
+    """
+    content = params.get("content")
+    if isinstance(content, str) and MARKER_PREFIX in content:
+        raise ValueError(
+            "the template YAML holds a hidden value ([REDACTED:...]); MEHO does not write "
+            "it back. Give the full value, or use a secret input (${secret.<name>}) in the "
+            "template"
+        )
+
+
 async def _find_by_name(
     connector: ContentTransport, operator: Operator, target: Any, name: str, project_id: str
 ) -> dict[str, Any] | None:
@@ -295,6 +320,7 @@ async def blueprint_create(
     connector: ContentTransport, operator: Operator, target: Any, params: dict[str, Any]
 ) -> dict[str, Any]:
     """``*.blueprint.create``: a new draft template. Safe to run twice."""
+    refuse_hidden_values(params)
     name = str(params["name"])
     project_id = str(params["project_id"])
     existing = await _find_by_name(connector, operator, target, name, project_id)
@@ -340,6 +366,7 @@ async def blueprint_update(
     Reads the template first and sends the whole template back with the
     changes (``PUT`` replaces it). When nothing differs, nothing is sent.
     """
+    refuse_hidden_values(params)
     path = _blueprint_path(params["id"])
     current = await get_json(connector, operator, target, path)
     changes = {

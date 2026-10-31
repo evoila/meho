@@ -466,6 +466,10 @@ _PARTS_HELD_BACK: dict[str, str] = {
     "installer.cb.validation.start": "credential_write: the request carries bring-up passwords.",
     "sddc.credential.list": "credential_read: the page lists stored passwords.",
     "sddc.host.commission": "credential_write: the request carries host passwords.",
+    "installer.sddc.resources.calculate": (
+        "credential_write: the request carries the spec passwords. The main numbers "
+        "ride inline as flat result_scalars keys."
+    ),
     "vmware.composite.vm.guest.file.read": (
         "credential_write: it reads guest files, which can hold secrets."
     ),

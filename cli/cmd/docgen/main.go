@@ -162,6 +162,13 @@ func render(root *cobra.Command) string {
 		"reference: `operation call`, `scheduler create`, `runbook start`, `agent run`, " +
 		"and `broadcast announce`. On those commands only `$MEHO_WORK_REF` is sent as the " +
 		"header. List commands filter by reference with `--filter-work-ref`.\n\n")
+	sb.WriteString("## Current tenant\n\n")
+	sb.WriteString("One login can be in several tenants. MEHO then works in one current " +
+		"tenant, and every command sends it in the `Meho-Tenant` header. Choose it with " +
+		"`meho tenants use <name>`; without a name, `meho tenants use` lists your tenants " +
+		"and marks the current one. No new login is needed. `$MEHO_TENANT` (a tenant name " +
+		"or ID) wins over the stored choice for one shell. A login in one tenant needs " +
+		"none of this.\n\n")
 	for _, sub := range sortedSubcommands(root) {
 		renderCommand(&sb, sub, 0)
 	}

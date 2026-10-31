@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from types import SimpleNamespace
 
 import pytest
@@ -46,7 +46,7 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.operations import operation_run as run_lifecycle
 from meho_backplane.operations.operation_run import OperationRunNotFoundError
-from meho_backplane.operations.operation_run_service import OperationRunService
+from meho_backplane.operations.operation_run_service import OperationRunService, _RunState
 from meho_backplane.settings import get_settings
 
 
@@ -479,3 +479,132 @@ async def test_submit_approval_resume_persists_envelope(
         "result": {"vm_id": "vm-99"},
         "duration_ms": 7.0,
     }
+
+
+# ---------------------------------------------------------------------------
+# wait_until_done -- a run check that waits (#5264)
+# ---------------------------------------------------------------------------
+
+
+async def _set_status(run_id: uuid.UUID, status: OperationRunStatus) -> None:
+    async with get_sessionmaker()() as session:
+        row = await run_lifecycle.get_run(session, run_id)
+        assert row is not None
+        row.status = status.value
+        await session.commit()
+
+
+class _SessionCounter:
+    """Wrap the sessionmaker and count the sessions that are open right now."""
+
+    def __init__(self) -> None:
+        self.open = 0
+        self._real = get_sessionmaker()
+
+    def __call__(self) -> contextlib.AbstractAsyncContextManager[AsyncSession]:
+        @contextlib.asynccontextmanager
+        async def _session() -> AsyncIterator[AsyncSession]:
+            self.open += 1
+            try:
+                async with self._real() as session:
+                    yield session
+            finally:
+                self.open -= 1
+
+        return _session()
+
+
+async def _running_run() -> tuple[Operator, uuid.UUID]:
+    async with get_sessionmaker()() as session:
+        tenant_id = await _seed_tenant(session)
+    run_id = await _insert_run(tenant_id, status=OperationRunStatus.RUNNING)
+    return _operator(tenant_id=tenant_id), run_id
+
+
+@pytest.mark.asyncio
+async def test_wait_returns_when_the_run_ends_and_holds_no_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wait reads the run again after each pause and stops when it ended.
+
+    No database session is open while the wait pauses.
+    """
+    counter = _SessionCounter()
+    monkeypatch.setattr(
+        "meho_backplane.operations.operation_run_service.get_sessionmaker", lambda: counter
+    )
+    operator, run_id = await _running_run()
+    service = OperationRunService()
+    open_during_pause: list[int] = []
+
+    async def fake_pause(rid: uuid.UUID, seconds: float) -> None:
+        open_during_pause.append(counter.open)
+        if len(open_during_pause) == 2:
+            await _set_status(rid, OperationRunStatus.SUCCEEDED)
+
+    monkeypatch.setattr(service, "_pause", fake_pause)
+    row = await service.poll(operator, run_id)
+    done = await service.wait_until_done(operator, row, wait_seconds=30)
+
+    assert done.status == OperationRunStatus.SUCCEEDED.value
+    assert open_during_pause == [0, 0]
+
+
+@pytest.mark.asyncio
+async def test_wait_answers_running_when_the_time_is_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    operator, run_id = await _running_run()
+    service = OperationRunService()
+    monkeypatch.setattr(service, "wait_recheck_seconds", 0.05)
+    row = await service.poll(operator, run_id)
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    done = await service.wait_until_done(operator, row, wait_seconds=0.3)
+
+    assert done.status == OperationRunStatus.RUNNING.value
+    assert loop.time() - started >= 0.3
+
+
+@pytest.mark.asyncio
+async def test_wait_on_an_ended_run_does_not_pause(monkeypatch: pytest.MonkeyPatch) -> None:
+    operator, run_id = await _running_run()
+    await _set_status(run_id, OperationRunStatus.FAILED)
+    service = OperationRunService()
+
+    async def no_pause(rid: uuid.UUID, seconds: float) -> None:
+        raise AssertionError("an ended run must not pause")
+
+    monkeypatch.setattr(service, "_pause", no_pause)
+    row = await service.poll(operator, run_id)
+    done = await service.wait_until_done(operator, row, wait_seconds=30)
+    assert done.status == OperationRunStatus.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_pause_wakes_when_the_local_task_ends() -> None:
+    """A run this process runs wakes the pause at once when its task ends."""
+    service = OperationRunService()
+    run_id = uuid.uuid4()
+    task: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0.05))
+    service._store[run_id] = _RunState(task=task)
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    await service._pause(run_id, 30)
+    assert task.done()
+    assert loop.time() - started < 5
+
+
+@pytest.mark.asyncio
+async def test_pause_that_times_out_does_not_stop_the_run() -> None:
+    service = OperationRunService()
+    run_id = uuid.uuid4()
+    gate = asyncio.Event()
+    task = asyncio.create_task(gate.wait())
+    service._store[run_id] = _RunState(task=task)
+
+    await service._pause(run_id, 0.05)
+    assert not task.done()
+    gate.set()
+    assert await task is True
+    assert not task.cancelled()

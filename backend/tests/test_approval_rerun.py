@@ -30,7 +30,6 @@ import structlog
 from httpx import ASGITransport
 from sqlalchemy import select
 
-import meho_backplane.operations.approval_rerun as rerun_module
 import meho_backplane.operations.dispatcher as dispatcher_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -54,6 +53,7 @@ from meho_backplane.operations.approval_rerun import (
     RerunNotAllowedError,
     RerunParamsRequiredError,
     RerunRefusal,
+    rehydrate_resume_target,
     rerun_failed_request,
 )
 from meho_backplane.settings import get_settings
@@ -294,7 +294,7 @@ async def test_rerun_that_read_the_old_failure_is_refused_after_a_failed_rerun(
     monkeypatch.setattr(dispatcher_module, "dispatch", failing)
     request_id = await _park_failed()
 
-    real_rehydrate = rerun_module.rehydrate_resume_target
+    real_rehydrate = rehydrate_resume_target
     both_read = asyncio.Event()
     first_done = asyncio.Event()
     counts_read: list[int] = []
@@ -311,7 +311,9 @@ async def test_rerun_that_read_the_old_failure_is_refused_after_a_failed_rerun(
             await first_done.wait()
         return await real_rehydrate(operator, request)
 
-    monkeypatch.setattr(rerun_module, "rehydrate_resume_target", _gated_rehydrate)
+    monkeypatch.setattr(
+        "meho_backplane.operations.approval_rerun.rehydrate_resume_target", _gated_rehydrate
+    )
 
     async def _attempt() -> Any:
         try:

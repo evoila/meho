@@ -73,6 +73,11 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.vm.tools.installer.unmount",
         "vmware.composite.vm.cdrom.mount_library_iso",
         "vmware.composite.vm.cdrom.unmount_library_iso",
+        # ``.set`` / ``.upgrade`` are not classifier suffixes -> ``other``.
+        "vmware.composite.vm.boot.set",
+        "vmware.composite.vm.hardware.upgrade",
+        "vmware.composite.vm.tools.upgrade",
+        "vmware.composite.vm.advanced_settings.set",
         # #3880: ``.show`` / ``.set`` are not classifier suffixes -> ``other``.
         "vmware.composite.vm.resource_allocation.show",
         "vmware.composite.vm.resource_allocation.set",

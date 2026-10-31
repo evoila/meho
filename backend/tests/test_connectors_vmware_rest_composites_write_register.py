@@ -113,6 +113,11 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     # Mount and unmount a content-library ISO (both caution).
     "vmware.composite.vm.cdrom.mount_library_iso",
     "vmware.composite.vm.cdrom.unmount_library_iso",
+    # Boot settings, hardware and Tools upgrades, advanced settings (all dangerous).
+    "vmware.composite.vm.boot.set",
+    "vmware.composite.vm.hardware.upgrade",
+    "vmware.composite.vm.tools.upgrade",
+    "vmware.composite.vm.advanced_settings.set",
     # VM CPU / memory limit + reservation write (#3880) -- caution + approval.
     "vmware.composite.vm.resource_allocation.set",
     "vmware.composite.host.evacuate",
@@ -468,6 +473,10 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.tools.installer.unmount": "vm",
     "vmware.composite.vm.cdrom.mount_library_iso": "vm",
     "vmware.composite.vm.cdrom.unmount_library_iso": "vm",
+    "vmware.composite.vm.boot.set": "vm",
+    "vmware.composite.vm.hardware.upgrade": "vm",
+    "vmware.composite.vm.tools.upgrade": "vm",
+    "vmware.composite.vm.advanced_settings.set": "vm",
     "vmware.composite.vm.resource_allocation.set": "vm",
     "vmware.composite.license.assign": "vmware-licensing",
     "vmware.composite.vcenter.appliance.deploy": "vcenter_install",

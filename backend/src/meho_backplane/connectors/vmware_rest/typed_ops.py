@@ -94,6 +94,8 @@ __all__ = [
     "VMWARE_TASKS_RECENT_OP",
     "VMWARE_TYPED_OPS",
     "VMWARE_TYPED_WHEN_TO_USE_BY_GROUP",
+    "VMWARE_VM_ADVANCED_SETTINGS_SHOW_OP",
+    "VMWARE_VM_BOOT_SHOW_OP",
     "VMWARE_VM_HARDWARE_SHOW_OP",
     "VMWARE_VM_INFO_OP",
     "VmwareTypedOp",
@@ -484,6 +486,12 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vcenter_deployment_status i
     DEPLOYMENT_STATUS_WHEN_TO_USE,
     VMWARE_VCENTER_DEPLOYMENT_STATUS_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_vm_advanced_settings import (  # noqa: E402
+    VMWARE_VM_ADVANCED_SETTINGS_SHOW_OP,
+)
+from meho_backplane.connectors.vmware_rest.typed_ops_vm_boot import (  # noqa: E402
+    VMWARE_VM_BOOT_SHOW_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware import (  # noqa: E402
     VM_HARDWARE_GROUP_KEY,
     VM_HARDWARE_WHEN_TO_USE,
@@ -631,6 +639,8 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_DATASTORES_OP,
     VMWARE_VM_INFO_OP,
     VMWARE_VM_HARDWARE_SHOW_OP,
+    VMWARE_VM_BOOT_SHOW_OP,
+    VMWARE_VM_ADVANCED_SETTINGS_SHOW_OP,
     VMWARE_OBJECT_COLLECT_OP,
     VMWARE_TASKS_RECENT_OP,
     VMWARE_TASKS_HISTORY_OP,

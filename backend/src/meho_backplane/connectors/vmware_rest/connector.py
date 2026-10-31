@@ -3516,6 +3516,38 @@ class VmwareRestConnector(HttpConnector):
 
         return await vm_hardware_show_impl(self, operator, target, params)
 
+    async def vm_boot_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vm.boot.show`` -- one VM's firmware, secure boot and boot order.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vm_boot.vm_boot_show_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vm_boot import vm_boot_show_impl
+
+        return await vm_boot_show_impl(self, operator, target, params)
+
+    async def vm_advanced_settings_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vm.advanced_settings.show`` -- one VM's extraConfig keys and values.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vm_advanced_settings.vm_advanced_settings_show_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vm_advanced_settings import (
+            vm_advanced_settings_show_impl,
+        )
+
+        return await vm_advanced_settings_show_impl(self, operator, target, params)
+
     async def license_list(
         self,
         operator: Operator,

@@ -112,6 +112,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.vra8._images import Vra8ImageOpsMixin
 from meho_backplane.connectors.vra8._paths import _ABOUT_PATH
 from meho_backplane.connectors.vra8.session import (
     Vra8CredentialsLoader,
@@ -144,7 +145,7 @@ def _session_cache_key(target: Any) -> tuple[str, ...]:
     return credential_cache_key(target, domain)
 
 
-class Vra8Connector(HttpConnector):
+class Vra8Connector(Vra8ImageOpsMixin, HttpConnector):
     """vRealize Automation 8.x REST connector — two-step bearer session mint.
 
     Minted bearers cached in :attr:`_session_tokens` per credential

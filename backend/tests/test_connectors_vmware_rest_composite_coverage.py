@@ -50,6 +50,9 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.vm.deploy_from_library",
         "vmware.composite.vm.import_from_library",
         "vmware.composite.vm.snapshot.revert",
+        # ``.delete_all`` and ``.consolidate`` are not classifier suffixes -> ``other``.
+        "vmware.composite.vm.snapshot.delete_all",
+        "vmware.composite.vm.disks.consolidate",
         "vmware.composite.vm.destroy",
         "vmware.composite.vm.migrate",
         "vmware.composite.vm.power.bulk",

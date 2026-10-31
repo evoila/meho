@@ -77,6 +77,8 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.vm.snapshot.revert",
         "vmware.composite.vm.snapshot.create",
         "vmware.composite.vm.snapshot.delete",
+        "vmware.composite.vm.snapshot.delete_all",
+        "vmware.composite.vm.disks.consolidate",
         "vmware.composite.vm.destroy",
         "vmware.composite.vm.migrate",
         "vmware.composite.vm.power",

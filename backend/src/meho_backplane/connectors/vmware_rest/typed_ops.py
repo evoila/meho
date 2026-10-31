@@ -84,6 +84,7 @@ __all__ = [
     "VMWARE_HOST_STORAGE_DEVICES_OP",
     "VMWARE_HOST_USAGE_OP",
     "VMWARE_HOST_VSAN_HEALTH_OP",
+    "VMWARE_INVENTORY_FIND_OP",
     "VMWARE_LICENSE_ASSIGNED_LIST_OP",
     "VMWARE_LICENSE_LIST_OP",
     "VMWARE_NETWORK_PORTGROUP_SHOW_OP",
@@ -96,6 +97,7 @@ __all__ = [
     "VMWARE_TYPED_WHEN_TO_USE_BY_GROUP",
     "VMWARE_VM_HARDWARE_SHOW_OP",
     "VMWARE_VM_INFO_OP",
+    "VMWARE_VM_LIST_OP",
     "VmwareTypedOp",
     "host_usage_impl",
     "register_vmware_typed_operations",
@@ -438,6 +440,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_host_vsan_health import (  
     HOST_VSAN_HEALTH_WHEN_TO_USE,
     VMWARE_HOST_VSAN_HEALTH_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_inventory_find import (  # noqa: E402
+    INVENTORY_GROUP_KEY,
+    INVENTORY_WHEN_TO_USE,
+    VMWARE_INVENTORY_FIND_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_license import (  # noqa: E402
     LICENSE_GROUP_KEY,
     LICENSE_WHEN_TO_USE,
@@ -494,6 +501,9 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vm_info import (  # noqa: E
     VM_INFO_WHEN_TO_USE,
     VMWARE_VM_INFO_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_vm_list import (  # noqa: E402
+    VMWARE_VM_LIST_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_vm_question import (  # noqa: E402
     VM_QUESTION_GROUP_KEY,
     VM_QUESTION_WHEN_TO_USE,
@@ -541,6 +551,8 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # Shared with the three install composites: the same key and text.
     DEPLOYMENT_STATUS_GROUP_KEY: DEPLOYMENT_STATUS_WHEN_TO_USE,
     PORTGROUP_SHOW_GROUP_KEY: PORTGROUP_SHOW_WHEN_TO_USE,
+    # vm.list and inventory.find share one group.
+    INVENTORY_GROUP_KEY: INVENTORY_WHEN_TO_USE,
 }
 
 VMWARE_HOST_USAGE_OP = VmwareTypedOp(
@@ -621,7 +633,8 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: the OVF options of an item, the subscription URL check and the
 #: Supervisor library list); the install state of a new vCenter
 #: appliance, ``vcenter.deployment.status`` (#4394); and the settings of
-#: one distributed port group ``network.portgroup.show``. The tuple shape
+#: one distributed port group ``network.portgroup.show``; the VM list
+#: ``vm.list`` and the inventory search ``inventory.find``. The tuple shape
 #: lets future typed ops join without touching the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
@@ -651,6 +664,8 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     *CONTENT_LIBRARY_OPS,
     VMWARE_VCENTER_DEPLOYMENT_STATUS_OP,
     VMWARE_NETWORK_PORTGROUP_SHOW_OP,
+    VMWARE_VM_LIST_OP,
+    VMWARE_INVENTORY_FIND_OP,
 )
 
 

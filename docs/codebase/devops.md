@@ -1564,7 +1564,7 @@ incidents #634 / #697.
 Since #3251 the required unit lane is **sharded**: the required context
 `Python (ruff + mypy + pytest)` no longer maps to one monolithic job but
 to a **fan-in** (`python-unit-lane`) over a lint job (`python-lint`) and a
-4-way pytest matrix (`python-unit-shard`). The required-context
+5-way pytest matrix (`python-unit-shard`). The required-context
 _string_ is unchanged, so branch protection / the ruleset are untouched —
 see [Sharded unit lane (#3251)](#sharded-unit-lane-3251) below.
 
@@ -1741,7 +1741,7 @@ workflow files, this doc, and the changelog.
 | Job | Surface | Steps |
 | --- | --- | --- |
 | `python-lint` (`Python lint + typecheck (ruff + mypy)`) | `backend/src/` + `backend/tests/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict`. Non-required; whole-tree, unshardable-by-file, runs once on a GitHub-hosted runner (#3251, #4626). |
-| `python-unit-shard` (`Python unit shard N/4`) | `backend/` unit + acceptance subtree, split 4 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). A pull request that changes one connector runs one leg instead (`Python unit tests for connector <name>`, see [One-connector unit run](#one-connector-unit-run-5297)). |
+| `python-unit-shard` (`Python unit shard N/5`) | `backend/` unit + acceptance subtree, split 5 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). A pull request that changes one connector runs one leg instead (`Python unit tests for connector <name>`, see [One-connector unit run](#one-connector-unit-run-5297)). |
 | `python-outside-backend` (`Python tests that read files outside backend`) | the backend tests that read files outside `backend/` | Runs only on a PR with no `backend/` change (`backend_python=false`) that is not docs-only. `pytest -n 3` over the fixed list in `backend/tests/_outside_backend_tests.py`, on a GitHub-hosted runner. Non-required; the fan-in requires it on that path (#5296). See [No-backend path (#5296)](#no-backend-path-5296). |
 | `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252); on a no-backend diff it requires `python-outside-backend` to pass (#5296). |
 | `python-integration-shard` (`Python integration shard N/4`) | `backend/tests/integration/` + the G0.7 vSphere canary module, split 4 ways | `uv sync --locked --all-groups` -> `pytest -x -rs` over a file set split by measured time, against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. No xdist inside a shard. Non-required matrix (#5384). |
@@ -1749,9 +1749,9 @@ workflow files, this doc, and the changelog.
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
 
-The four `python-unit-shard` legs run on `meho-runners-ci-heavy`
-(dedicated ARC scale set, 6000m requests=limits, max 5 pods — #761 /
-rdc-gitops#55; four shards fit the 5-pod ceiling). The four
+The five `python-unit-shard` legs run on `meho-runners-ci-heavy`
+(dedicated ARC scale set, 6000m requests=limits — #761 /
+rdc-gitops#55; the pool size lives outside this repo). The four
 `python-integration-shard` legs, `python-migration-tests` and the
 nightly `python-coverage-combine` run on the dense `meho-runners-ci` pool
 (4-core): they pull their test images from the internal image mirror or
@@ -1811,25 +1811,25 @@ shape (deterministic file-level matrix + fan-in):
   checks that cannot be split by test file and cost ~1-2 min, so they run
   **once** on the light pool rather than N times per shard. Only pytest
   fans out.
-- **`python-unit-shard`** — the pytest sweep as a **4-way matrix split by
+- **`python-unit-shard`** — the pytest sweep as a **5-way matrix split by
   measured file time**. Each shard lists the test files with `find tests
   -name 'test_*.py' -not -path 'tests/integration/*' -not -path
   'tests/migrations/*' | sort` and pipes the list into
-  `tests/_unit_shard_split.py --shard N --total 4`. The splitter reads the
+  `tests/_unit_shard_split.py --shard N --total 5`. The splitter reads the
   measured seconds per test file from `tests/_unit_shard_durations.json`,
   sorts the files slowest first, and gives each file to the shard with
   the least time so far (a file without a measurement counts as the
   median; every file also carries a small fixed cost for import and
   collection, so files whose tests all skip still spread out). The same
-  list always gives the same split, and the four shards partition the
+  list always gives the same split, and the five shards partition the
   file set **exactly** (union == full, pairwise disjoint;
   `tests/test_unit_shard_split.py` pins both). The splitter prints the
   file count and the predicted seconds per shard on stderr, so the shard
   log shows when the measurements drift from the real wall. Each shard
   writes its per-test times with `-o junit_family=xunit1 --junitxml` and
   uploads them as the artifact `python-unit-shard-junit-<N>`. To refresh
-  the measurements, download the four artifacts of one green run and
-  pass them to `tests/_unit_shard_split.py --measure`; the module
+  the measurements, download the artifacts of one green run (one per
+  shard) and pass them to `tests/_unit_shard_split.py --measure`; the module
   docstring has the exact commands. Take the numbers from CI, not from a
   laptop: tests that need Docker or the spec shelf skip locally but run
   in CI, and a local measurement put all of them into one shard (584 s
@@ -1849,8 +1849,19 @@ shape (deterministic file-level matrix + fan-in):
   passed every test took 674-710 s, and the merge queue dropped good pull
   requests. With few runners busy, the four shards of one run took
   448-515 s. So the extra time came from the busy runners, not from
-  slower tests. To change the count, edit the
-  matrix and `TOTAL` in the pytest step together. File-level sharding is
+  slower tests. On 2026-10-30 the busy runners pushed the shards over
+  900 s 16 times in 18 hours, only shards 1 and 3, with every test
+  passing (#5433). Real per-test times from seven runs on `main` that
+  day showed two causes. The file times were a week old, and 181 newer
+  files had no measurement, so one shard carried up to 14% more test
+  time than the average. But even in a run that was well balanced, all
+  four shards took 783-805 s. Fresh file times alone would leave the
+  busiest run near 850 s per shard, so #5433 refreshed the file times
+  (now the mean of those seven runs) and raised the count to 5. In the
+  busiest of those runs the slowest shard carried 2,497 s of test time
+  with the old split and would carry 1,924 s with the new one. To
+  change the count, edit the matrix and `TOTAL` in the pytest step
+  together; `tests/test_unit_shard_split.py` checks that they match. File-level sharding is
   strictly coarser than what xdist `--dist loadscope` already does across
   workers (whole modules stay together, conftest semantics identical to a
   full run), so an xdist-safe suite is shard-safe — proven live by the
@@ -1972,7 +1983,7 @@ completes CI in minutes.
   fail-safe defaults (`docs_only=false`). `merge_group` and `push` NEVER
   fast-path (a queue batch may mix docs + code; a `main` push must always run
   the full matrix).
-- **What skips.** `python-lint`, the four `python-unit-shard` legs, and
+- **What skips.** `python-lint`, the five `python-unit-shard` legs, and
   the four `python-integration-shard` legs gain `needs: changes` and an
   `if:` that skips them when `docs_only == 'true'` (same #2140 shape as the
   `python-migration-tests` gate). The required contexts `Python (ruff +
@@ -2011,7 +2022,7 @@ runs one short job instead.
   quotes a path that holds a double quote, a backslash or a control
   character; such a line keeps every fail-safe default (full run and
   migration gate on).
-- **What skips.** `python-lint`, the four `python-unit-shard` legs and
+- **What skips.** `python-lint`, the five `python-unit-shard` legs and
   the four `python-integration-shard` legs skip by their own `if:` when
   `backend_python` is `false`, the same way as on a docs-only PR. The
   `python-integration` fan-in accepts the skipped legs on this path.
@@ -2043,10 +2054,10 @@ runs one short job instead.
 ### One-connector unit run (#5297)
 
 A pull request that changes only one connector folder runs **one** unit
-job instead of the four `python-unit-shard` legs. The job is named
+job instead of the five `python-unit-shard` legs. The job is named
 `Python unit tests for connector <name>`. It runs that connector's tests
 plus a fixed contract set. The merge queue and pushes to `main` always run
-the four shards, so every test still runs before a change lands on `main`.
+the five shards, so every test still runs before a change lands on `main`.
 
 - **Who decides.** The `changes` job sets the output `single_connector`.
   It pipes the changed files into

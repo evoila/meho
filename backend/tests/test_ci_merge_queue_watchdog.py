@@ -77,8 +77,8 @@ def _jobs(*changed: dict[str, Any]) -> str:
         for job in (
             _job("Detect migration + docs-only changes"),
             _job("Python lint + typecheck (ruff + mypy)"),
-            _job("Python unit shard 1/4"),
-            _job("Python unit shard 2/4"),
+            _job("Python unit shard 1/5"),
+            _job("Python unit shard 2/5"),
             _job("Python (ruff + mypy + pytest)"),
             _job("Python (integration testcontainers)"),
             _job("Python (database migrations)"),
@@ -186,7 +186,7 @@ def test_all_jobs_finished_ends_quietly(tmp_path: Path) -> None:
 
 def test_dropped_group_with_required_job_running_is_cancelled(tmp_path: Path) -> None:
     """The branch is gone and a second look at the jobs still shows required work open."""
-    polls = [_jobs(_job("Python unit shard 2/4", status="in_progress", conclusion=None))]
+    polls = [_jobs(_job("Python unit shard 2/5", status="in_progress", conclusion=None))]
     outcome = _run_watchdog(tmp_path, polls, branch_code="404")
     assert outcome.returncode == 0, outcome.output
     assert outcome.cancelled, outcome.output
@@ -204,7 +204,7 @@ def test_group_merged_between_jobs_lookup_and_branch_lookup_is_not_cancelled(
     jobs again, see that every required job has finished, and not cancel.
     """
     polls = [
-        _jobs(_job("Python unit shard 2/4", status="in_progress", conclusion=None)),
+        _jobs(_job("Python unit shard 2/5", status="in_progress", conclusion=None)),
         _jobs(),
     ]
     outcome = _run_watchdog(tmp_path, polls, branch_code="404")
@@ -218,7 +218,7 @@ def test_group_merged_between_jobs_lookup_and_branch_lookup_is_not_cancelled(
 def test_jobs_unreadable_after_branch_is_gone_keeps_the_run(tmp_path: Path) -> None:
     """A 404 with no fresh view of the jobs is not enough to cancel."""
     polls = [
-        _jobs(_job("Python unit shard 2/4", status="in_progress", conclusion=None)),
+        _jobs(_job("Python unit shard 2/5", status="in_progress", conclusion=None)),
         _API_FAILURE,
     ]
     outcome = _run_watchdog(tmp_path, polls, branch_code="404")
@@ -229,7 +229,7 @@ def test_jobs_unreadable_after_branch_is_gone_keeps_the_run(tmp_path: Path) -> N
 
 
 def test_live_group_with_required_job_running_keeps_the_run(tmp_path: Path) -> None:
-    polls = [_jobs(_job("Python unit shard 2/4", status="in_progress", conclusion=None))]
+    polls = [_jobs(_job("Python unit shard 2/5", status="in_progress", conclusion=None))]
     outcome = _run_watchdog(tmp_path, polls, branch_code="200")
     assert outcome.returncode == 0, outcome.output
     assert not outcome.cancelled, outcome.output
@@ -240,7 +240,7 @@ def test_failed_required_job_is_cancelled_before_the_branch_check(tmp_path: Path
     polls = [
         _jobs(
             _job("Go (golangci-lint + go test)", conclusion="failure"),
-            _job("Python unit shard 2/4", status="in_progress", conclusion=None),
+            _job("Python unit shard 2/5", status="in_progress", conclusion=None),
         )
     ]
     outcome = _run_watchdog(tmp_path, polls, branch_code="200")

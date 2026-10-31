@@ -386,9 +386,9 @@ A bring-up spec holds passwords and licence keys. A call never sends them as
 values:
 
 - The `spec` parameter refuses text in a field whose name ends with
-  `password`, `passwd`, `secret`, `license`, `licenseKey`, `privateKey` or
-  `passphrase`. MEHO checks this before the call waits for approval, so no
-  password is stored with an approval request.
+  `password`, `passwd`, `secret`, `license`, `licenseKey`, `licenseFile`,
+  `privateKey` or `passphrase`. MEHO checks this before the call waits for
+  approval, so no password or licence key is stored with an approval request.
 - The caller names each such value in `secrets`: a JSON Pointer into the
   spec and a Vault path (`secret_ref`, optional `secret_key` and
   `secret_mount`). MEHO reads it under the caller's identity and puts it into

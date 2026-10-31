@@ -3,12 +3,13 @@
 
 """Parameter and response schemas of the Cloud Builder operations.
 
-A bring-up spec holds passwords. A call never sends them as values: the
-``spec`` schema refuses text in any field whose name ends with ``password``,
-``passwd``, ``secret``, ``license``, ``licenseKey``, ``privateKey`` or
-``passphrase``, and the caller names each such value in ``secrets`` as a
-Vault reference. The check runs before the call waits for approval, so no
-password is stored with the approval request.
+A bring-up spec holds passwords and licence keys. A call never sends them as
+values: the ``spec`` schema refuses text in any field whose name ends with
+``password``, ``passwd``, ``secret``, ``license``, ``licenseKey``,
+``licenseFile``, ``privateKey`` or ``passphrase``, and the caller names each
+such value in ``secrets`` as a Vault reference. The check runs before the
+call waits for approval, so no password or licence key is stored with the
+approval request.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ __all__ = [
 
 #: Field names that must not hold text in a spec (searched, case-insensitive).
 SECRET_FIELD_PATTERN: Final = (
-    "(?i)(password|passwd|secret|licen[cs]e|licen[cs]ekey|privatekey|passphrase)$"
+    "(?i)(password|passwd|secret|licen[cs]e|licen[cs]ekey|licen[cs]efile|privatekey|passphrase)$"
 )
 
 #: A short placeholder spec. A real Cloud Builder spec has many more fields.
@@ -67,8 +68,8 @@ _SECRETS_EXAMPLE: Final[list[dict[str, str]]] = [
 _NO_SECRET_DEFS: Final[dict[str, Any]] = {
     "noSecretText": {
         "description": (
-            "Any JSON value. A field whose name ends with password, secret, license, "
-            "licenseKey, privateKey or passphrase must not hold text."
+            "Any JSON value. A field whose name ends with password, passwd, secret, "
+            "license, licenseKey, licenseFile, privateKey or passphrase must not hold text."
         ),
         "patternProperties": {
             SECRET_FIELD_PATTERN: {

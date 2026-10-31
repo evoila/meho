@@ -318,9 +318,21 @@ def test_a_spec_with_a_password_value_is_refused_before_approval(
     assert "Plain-Text-Value" not in json.dumps(errors)
 
 
-def test_a_licence_key_value_is_refused_too() -> None:
-    errors = validate_params(SDDC_START_PARAMS, {"spec": {"esxLicense": "AAAAA-BBBBB"}})
+@pytest.mark.parametrize("schema", [VALIDATION_START_PARAMS, SDDC_START_PARAMS, SDDC_RETRY_PARAMS])
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"esxLicense": "AAAAA-BBBBB"},
+        {"vcenterSpec": {"licenseFile": "AAAAA-BBBBB"}},
+        {"vsanSpec": {"licenseFile": "AAAAA-BBBBB"}},
+        {"nsxtSpec": {"nsxtLicense": "AAAAA-BBBBB"}},
+    ],
+)
+def test_a_licence_key_value_is_refused_too(schema: dict[str, Any], spec: dict[str, Any]) -> None:
+    params = {"spec": spec, **({"id": "bringup-1"} if "id" in schema["properties"] else {})}
+    errors = validate_params(schema, params)
     assert errors
+    assert "AAAAA-BBBBB" not in json.dumps(errors)
 
 
 def test_a_spec_without_secret_values_passes() -> None:

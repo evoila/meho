@@ -4879,6 +4879,18 @@ serve all of them; `tests/test_connectors_vmware_rest_vcenter_install_reconcile.
 checks them against the pinned `vcenter.yaml` of 8.0 U3 and 9.0 and the 9.0
 `vi-json.yaml`.
 
+**The body of the setup calls.** The install check, the install start and the
+answer send their spec under one `spec` key: `{"spec": {"auto_answer": ...,
+"vcsa_embedded": {...}}}` and `{"spec": {"question_id": ..., "answer_val":
+...}}` (`vcenter_deployment.setup_body`). The setup service on port 5480 reads
+each top-level key as a method parameter. A body with the spec fields at the
+top gets `400 INVALID_REQUEST Unexpected parameter 'auto_answer' in JSON body`
+on a real vCenter 8.0.3 appliance. The vendor's guide for this setup shows the
+wrapped body. The pinned `vcenter.yaml` shows the fields at the top, so the
+reconcile test checks the fields inside `spec`. When the check call itself
+fails (an HTTP error or no answer), `check.errors` holds the vendor's text or
+the reason, never the password.
+
 **The new appliance is its own target.** Before its setup, the appliance
 answers only on port 5480 (port 443 is closed). So steps 2 and later run on a
 MEHO target with the appliance address, port 5480, and a Vault login with

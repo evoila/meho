@@ -9006,9 +9006,10 @@ _COMPOSITE_DESCRIPTOR: Any = SimpleNamespace(source_kind="composite")
 class _FolderCreateConnector:
     """Recording double for folder.create: parent REST read + vim CreateFolder.
 
-    Serves the parent-folder resolution (``GET:/vcenter/folder``) and the
+    Serves the parent-folder resolution (``GET:/vcenter/folder``), the
     synchronous ``Folder.CreateFolder`` vim POST — which returns the new
-    Folder MoRef directly, so **no** ``RetrievePropertiesEx`` poll ever fires.
+    Folder MoRef directly, so no task is polled — and the one
+    ``RetrievePropertiesEx`` read-back of the new folder.
     """
 
     impl_id = "vmware-rest"
@@ -9026,6 +9027,8 @@ class _FolderCreateConnector:
         self.new_folder_moid = new_folder_moid
         self.rest_calls: list[tuple[str, Any]] = []
         self.vmomi_calls: list[tuple[str, Any]] = []
+        self.reads: list[Any] = []
+        self.read_fault: Exception | None = None
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         return f"{self._MOUNT}{path}"
@@ -9043,10 +9046,35 @@ class _FolderCreateConnector:
         return {"value": self.parents}
 
     async def _post_vmomi_json(
-        self, target: Any, path: str, *, operator: Operator, json: Any = None
+        self, target: Any, path: str, *, operator: Operator, json: Any = None, **_kw: Any
     ) -> Any:
+        if path.endswith("/RetrievePropertiesEx"):
+            self.reads.append(json)
+            if self.read_fault is not None:
+                raise self.read_fault
+            return _folder_read_back(self.new_folder_moid, self.vmomi_calls[-1][0])
         self.vmomi_calls.append((path, json))
         return {"type": "Folder", "value": self.new_folder_moid}
+
+
+def _folder_read_back(folder: str, create_path: str) -> dict[str, Any]:
+    """The ``RetrievePropertiesEx`` answer for the new folder under its parent."""
+    parent = create_path.split("/")[2]
+    return {
+        "objects": [
+            {
+                "obj": {"type": "Folder", "value": folder},
+                "propSet": [
+                    {"name": "name", "val": "new"},
+                    {"name": "parent", "val": {"type": "Folder", "value": parent}},
+                    {
+                        "name": "childType",
+                        "val": {"_typeName": "ArrayOfString", "_value": ["Folder"]},
+                    },
+                ],
+            }
+        ]
+    }
 
 
 async def test_folder_create_happy_path_is_synchronous_no_poll(gate: _GateRecorder) -> None:
@@ -9069,12 +9097,21 @@ async def test_folder_create_happy_path_is_synchronous_no_poll(gate: _GateRecord
     assert gate.gated_op_ids == ["POST:/Folder/{moId}/CreateFolder"]
     assert gate.calls[0]["params"] == {"parent_folder": "group-v1", "folder_name": "cluster-nodes"}
 
-    # Exactly one vmomi call — the CreateFolder itself. No RetrievePropertiesEx
-    # poll: CreateFolder is synchronous and returns the folder MoRef directly.
+    # One write — the CreateFolder itself, never polled: it is synchronous and
+    # returns the folder MoRef directly. Then one read-back of the new folder.
     assert len(conn.vmomi_calls) == 1
     path, body = conn.vmomi_calls[0]
     assert path == "/Folder/group-v1/CreateFolder"
     assert body == {"name": "cluster-nodes"}
+    assert len(conn.reads) == 1
+    assert out["folder_type"] == "VIRTUAL_MACHINE"
+    assert out["folder_info"] == {
+        "folder": "group-v99",
+        "name": "new",
+        "parent_folder_id": "group-v1",
+        "child_type": ["Folder"],
+    }
+    assert out["guidance"] is None
 
 
 async def test_folder_create_parent_not_found_fails_before_write(gate: _GateRecorder) -> None:
@@ -9202,13 +9239,100 @@ def test_folder_create_parameter_schema_parent_shapes() -> None:
     validator.validate({"parent_folder": "vm", "folder_name": "x"})
     validator.validate({"parent_folder": "vm", "datacenter": "datacenter-3", "folder_name": "x"})
     validator.validate({"parent_folder_id": "group-v4", "folder_name": "x"})
+    validator.validate({"parent_folder_id": "group-h4", "folder_name": "x"})
+    validator.validate({"parent_folder": "host", "folder_type": "HOST", "folder_name": "x"})
     for bad in (
         {"folder_name": "x"},
-        {"parent_folder_id": "group-h4", "folder_name": "x"},
+        {"parent_folder_id": "group-d4", "folder_name": "x"},
+        {"parent_folder_id": "group-p4", "folder_name": "x"},
+        {"parent_folder": "vm", "folder_type": "DATACENTER", "folder_name": "x"},
         {"parent_folder": "vm", "datacenter": "DC-East", "folder_name": "x"},
     ):
         with pytest.raises(ValidationError):
             validator.validate(bad)
+
+
+async def test_folder_create_host_folder_by_name(gate: _GateRecorder) -> None:
+    """folder_type=HOST looks the parent up among host folders and makes the folder there."""
+    conn = _FolderCreateConnector(
+        parents=[{"folder": "group-h5", "name": "host"}], new_folder_moid="group-h99"
+    )
+    out = await folder_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "parent_folder": "host",
+            "datacenter": "datacenter-3",
+            "folder_type": "HOST",
+            "folder_name": "<new-folder-name>",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "created"
+    assert out["folder_type"] == "HOST"
+    assert out["folder_info"]["parent_folder_id"] == "group-h5"
+    assert conn.rest_calls[0][1]["type"] == "HOST"
+    assert conn.vmomi_calls == [("/Folder/group-h5/CreateFolder", {"name": "<new-folder-name>"})]
+
+
+@pytest.mark.parametrize(
+    ("parent", "folder_type"),
+    [
+        ("group-v4", "VIRTUAL_MACHINE"),
+        ("group-h4", "HOST"),
+        ("group-s4", "DATASTORE"),
+        ("group-n4", "NETWORK"),
+    ],
+)
+async def test_folder_create_parent_id_sets_the_folder_type(
+    gate: _GateRecorder, parent: str, folder_type: str
+) -> None:
+    """A parent folder id names the folder kind; no lookup runs."""
+    conn = _FolderCreateConnector(new_folder_moid=f"{parent[:7]}99")
+    out = await folder_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"parent_folder_id": parent, "folder_name": "x"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["folder_type"] == folder_type
+    assert conn.rest_calls == []
+    assert conn.vmomi_calls[0][0] == f"/Folder/{parent}/CreateFolder"
+
+
+async def test_folder_create_host_parent_not_found_names_the_kind(gate: _GateRecorder) -> None:
+    conn = _FolderCreateConnector(parents=[])
+    out = await folder_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"parent_folder": "racks", "folder_type": "NETWORK", "folder_name": "x"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "parent_not_found"
+    assert out["issues"][0]["message"] == (
+        "parent network folder name 'racks' matched no network folder"
+    )
+    assert conn.vmomi_calls == []
+
+
+async def test_folder_create_read_back_failure_keeps_the_create(gate: _GateRecorder) -> None:
+    """A failed read-back after the create is reported, not raised: the folder exists."""
+    conn = _FolderCreateConnector()
+    conn.read_fault = RuntimeError("read failed")
+    out = await folder_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"parent_folder": "prod", "folder_name": "cluster-nodes"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "created"
+    assert out["folder"] == "group-v99"
+    assert out["folder_info"] is None
+    assert "did not read back" in out["guidance"]
 
 
 async def test_folder_create_gate_short_circuits_before_the_write(
@@ -9255,6 +9379,9 @@ async def test_folder_create_body_reaches_the_wire_respx(
             create = mock.post(f"{vijson}/Folder/group-v1/CreateFolder").respond(
                 200, json={"type": "Folder", "value": "group-v42"}
             )
+            mock.post(f"{vijson}/PropertyCollector/propertyCollector/RetrievePropertiesEx").respond(
+                200, json=_folder_read_back("group-v42", "/Folder/group-v1/CreateFolder")
+            )
             out = await folder_create_composite(
                 operator=_make_operator(),
                 target=_StubTarget(),
@@ -9264,6 +9391,7 @@ async def test_folder_create_body_reaches_the_wire_respx(
         assert isinstance(out, dict)
         assert out["status"] == "created"
         assert out["folder"] == "group-v42"
+        assert out["folder_info"]["parent_folder_id"] == "group-v1"
         assert create.called
         body = json.loads(create.calls[0].request.content)
         assert body == {"name": "cluster-nodes"}

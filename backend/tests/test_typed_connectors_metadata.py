@@ -97,6 +97,8 @@ _VMWARE_COMPOSITE_GROUPS: Final[frozenset[str]] = frozenset(
         "migration",
         # Install a new vCenter; shared with the typed status read.
         "vcenter_install",
+        # Datacenter create / delete, object rename / move.
+        "inventory",
     }
 )
 _BIND9_GROUPS: Final[frozenset[str]] = frozenset({"identity", "zone", "record", "config"})

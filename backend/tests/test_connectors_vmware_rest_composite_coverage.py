@@ -103,6 +103,9 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.vcenter.deployment.answer",
         # ``.inventory`` is not a classifier suffix -> ``other``; a read.
         "vmware.migration.inventory",
+        # ``.rename`` / ``.move`` are not classifier suffixes -> ``other``.
+        "vmware.composite.object.rename",
+        "vmware.composite.object.move",
     }
 )
 

@@ -36,7 +36,7 @@ re-wrapped.
 from __future__ import annotations
 
 from meho_backplane.connectors.vmware_rest import library_download
-from meho_backplane.connectors.vmware_rest.composites import _write
+from meho_backplane.connectors.vmware_rest.composites import _resource_pool_update, _write
 from tests._spec_shelf import openapi_request_body_props, require_shelf_spec
 
 # The full REST-Automation write surface: every ``/api`` op the connector sends a
@@ -73,6 +73,9 @@ _EXPECTED_REST_WRITE_OP_IDS = {
     # #3505 governed resource-pool create (a flat CreateSpec body — the DELETE
     # counterpart is a path-only op excluded by the POST/PATCH/PUT collector).
     "POST:/vcenter/resource-pool",
+    # The resource-pool update: a flat UpdateSpec body (cpu_allocation /
+    # memory_allocation at the top level).
+    "PATCH:/vcenter/resource-pool/{resourcePool}",
 }
 
 # The bodies #2973 flattened from the ``/rest`` ``{"spec": {...}}`` envelope to
@@ -108,7 +111,11 @@ def _rest_write_op_ids() -> set[str]:
     excluded from the flat-body contract.
     """
     ops: set[str] = set()
-    for module, prefix in ((_write, "_OP_"), (library_download, "OP_")):
+    for module, prefix in (
+        (_write, "_OP_"),
+        (library_download, "OP_"),
+        (_resource_pool_update, "_OP_"),
+    ):
         for name in dir(module):
             if not name.startswith(prefix):
                 continue

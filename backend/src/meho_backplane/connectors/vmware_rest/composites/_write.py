@@ -788,13 +788,13 @@ _DRS_RULE_TASK_TIMEOUT_SECONDS = 600.0
 #: ``vi-json.yaml`` reconcile lane introspects these to assert every
 #: declared vim path exists in the spec. drs_rule reads existing rules via
 #: ``RetrievePropertiesEx`` then writes ``ReconfigureComputeResource_Task``;
-#: folder.create is a single synchronous ``CreateFolder`` (no poll → no
-#: ``RetrievePropertiesEx``).
+#: folder.create is a single synchronous ``CreateFolder`` (no poll), then a
+#: ``RetrievePropertiesEx`` read-back of the new folder.
 _VIM_SUB_OPS_CLUSTER_DRS_RULE_CREATE: tuple[str, ...] = (
     _OP_RETRIEVE_PROPERTIES,
     _OP_RECONFIGURE_COMPUTE_RESOURCE_TASK,
 )
-_VIM_SUB_OPS_FOLDER_CREATE: tuple[str, ...] = (_OP_CREATE_FOLDER,)
+_VIM_SUB_OPS_FOLDER_CREATE: tuple[str, ...] = (_OP_CREATE_FOLDER, _OP_RETRIEVE_PROPERTIES)
 # cluster.drs_vm_host_rule.create (#3505): same vim shape as drs_rule.create —
 # a ``RetrievePropertiesEx`` read (existing rule + group names, collision
 # check) then one ``ReconfigureComputeResource_Task`` carrying the groupSpec +
@@ -8375,6 +8375,15 @@ def _moref_value(moref: Any) -> str | None:
     return moref if isinstance(moref, str) else None
 
 
+#: ``folder.create``'s ``folder_type`` -> the words its answers use for it.
+_FOLDER_TYPE_LABELS: dict[str, str] = {
+    "VIRTUAL_MACHINE": "VM",
+    "HOST": "host",
+    "DATASTORE": "datastore",
+    "NETWORK": "network",
+}
+
+
 async def _resolve_parent_vm_folder(
     *,
     connector: VmwareRestConnector,
@@ -8382,18 +8391,19 @@ async def _resolve_parent_vm_folder(
     operator: Operator,
     parent_name: str,
     datacenter_moid: str | None,
+    folder_type: str = "VIRTUAL_MACHINE",
 ) -> tuple[str | None, str | None, list[str]]:
-    """Resolve a VM-folder parent by display name to its moid.
+    """Resolve a parent folder of *folder_type* by display name to its moid.
 
-    Read-only ``GET:/vcenter/folder`` filtered by ``names`` + the
-    ``VIRTUAL_MACHINE`` folder type (the same listing ``vm.create`` resolves
-    its placement folder from), plus ``datacenters`` when *datacenter_moid*
-    is given. Returns ``(moid, None, [])`` on a unique match, ``(None,
-    "parent_not_found", [])`` on no match, or ``(None, "ambiguous_parent",
-    candidates)`` when the name resolves to more than one VM folder. The
-    caller never guesses a parent.
+    Read-only ``GET:/vcenter/folder`` filtered by ``names`` + the folder type
+    (``VIRTUAL_MACHINE`` by default -- the same listing ``vm.create`` resolves
+    its placement folder from -- or ``HOST`` / ``DATASTORE`` / ``NETWORK``),
+    plus ``datacenters`` when *datacenter_moid* is given. Returns ``(moid,
+    None, [])`` on a unique match, ``(None, "parent_not_found", [])`` on no
+    match, or ``(None, "ambiguous_parent", candidates)`` when the name resolves
+    to more than one folder. The caller never guesses a parent.
     """
-    query: dict[str, Any] = {"filter.names": [parent_name], "filter.type": "VIRTUAL_MACHINE"}
+    query: dict[str, Any] = {"filter.names": [parent_name], "filter.type": folder_type}
     if datacenter_moid is not None:
         query["filter.datacenters"] = [datacenter_moid]
     listing = await _read_sub_op(connector, target, operator, _OP_LIST_FOLDERS, query)
@@ -8418,6 +8428,7 @@ def _folder_create_refusal(
     datacenter_moid: str | None,
     new_name: str,
     candidates: list[str],
+    folder_type: str = "VIRTUAL_MACHINE",
 ) -> dict[str, Any]:
     """The failed ``folder.create`` envelope for an unresolved parent (#3588).
 
@@ -8429,9 +8440,11 @@ def _folder_create_refusal(
     because it also becomes the result's ``error`` line.
     """
     scope = f" in datacenter {datacenter_moid}" if datacenter_moid else ""
+    kind = _FOLDER_TYPE_LABELS.get(folder_type, folder_type)
     if status == "ambiguous_parent":
         message = (
-            f"parent VM folder name {parent_name!r}{scope} matched {len(candidates)} VM folders"
+            f"parent {kind} folder name {parent_name!r}{scope} matched "
+            f"{len(candidates)} {kind} folders"
         )
         guidance = (
             "pick the intended folder ID from `candidate_folders` and pass it as "
@@ -8439,21 +8452,67 @@ def _folder_create_refusal(
             "was created"
         )
     else:
-        message = f"parent VM folder name {parent_name!r}{scope} matched no VM folder"
+        message = f"parent {kind} folder name {parent_name!r}{scope} matched no {kind} folder"
         guidance = (
-            "check the parent name (it must be a VM folder, not a datacenter) or pass "
-            "`parent_folder_id`; no folder was created"
+            f"check the parent name (it must be a {kind} folder, not a datacenter) and "
+            "`folder_type`, or pass `parent_folder_id`; no folder was created"
         )
     return {
         "status": status,
         "parent_folder": parent_name,
         "parent_folder_id": None,
         "datacenter": datacenter_moid,
+        "folder_type": folder_type,
         "new_folder_name": new_name,
         "folder": None,
+        "folder_info": None,
         "candidate_folders": candidates,
         "issues": [{"category": "input", "severity": "error", "message": message}],
         "guidance": guidance,
+    }
+
+
+#: A parent folder id's letter after ``group-`` -> its ``folder_type``.
+_FOLDER_TYPE_BY_MOID_LETTER: dict[str, str] = {
+    "v": "VIRTUAL_MACHINE",
+    "h": "HOST",
+    "s": "DATASTORE",
+    "n": "NETWORK",
+}
+
+
+async def _read_back_folder(
+    connector: VmwareRestConnector, target: Any, operator: Operator, folder: str
+) -> dict[str, Any] | None:
+    """The new folder as read back (name, parent, child types), or ``None``.
+
+    Best effort: the folder exists already, so a failed read must not turn the
+    create into an error (a retry would only hit ``DuplicateName``). ``None``
+    makes the answer say that the folder did not read back.
+    """
+    # Imported here: _teardown_reads imports this module.
+    from meho_backplane.connectors.vmware_rest.composites._teardown_reads import read_object
+
+    try:
+        props = await read_object(
+            connector,
+            target,
+            operator,
+            mo_type=_FOLDER_MO_TYPE,
+            moid=folder,
+            props=["name", "parent", "childType"],
+        )
+    except Exception as exc:  # the create already happened; report, do not fail
+        _log.warning("folder_create_read_back_failed", folder=folder, error=type(exc).__name__)
+        return None
+    if props is None:
+        return None
+    child_type = props.get("childType")
+    return {
+        "folder": folder,
+        "name": props.get("name"),
+        "parent_folder_id": _moref_value(props.get("parent")),
+        "child_type": child_type if isinstance(child_type, list) else [],
     }
 
 
@@ -8464,7 +8523,7 @@ async def folder_create_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any] | OperationResult:
-    """Create a VM folder under a parent via the synchronous vim CreateFolder.
+    """Create a VM, host, datastore or network folder via the synchronous vim CreateFolder.
 
     Op-id: ``vmware.composite.folder.create``. ``/vcenter/folder`` is
     GET-only (spec-verified), so the create rides vim ``Folder.CreateFolder``,
@@ -8472,21 +8531,24 @@ async def folder_create_composite(
     ``ManagedObjectReference`` directly, not a ``*_Task``, so (unlike
     drs_rule / disk-grow) the returned MoRef is **not** polled.
 
-    Flow: take the ``parent_folder_id`` folder ID as is, or resolve the
-    ``parent_folder`` *name* to a moid (a *read*, scoped to ``datacenter``
-    when given). No match → ``status="parent_not_found"``, >1 match →
+    Flow: take the ``parent_folder_id`` folder ID as is (its ``group-v`` /
+    ``-h`` / ``-s`` / ``-n`` prefix names the folder kind), or resolve the
+    ``parent_folder`` *name* among the folders of ``folder_type`` (default
+    ``VIRTUAL_MACHINE``; a *read*, scoped to ``datacenter`` when given). No
+    match → ``status="parent_not_found"``, >1 match →
     ``status="ambiguous_parent"``; both carry an ``error`` issue so the
     operation fails instead of auditing ``ok`` for a write that never
     happened (#3588). Then issue the single ``CreateFolder`` through the
     governed vmomi write seam (:func:`_write_vmomi_sub_op` → the #2254 gate).
     A parked/denied gate returns the :class:`OperationResult` verbatim and no
     folder is created; otherwise the new folder MoRef is unwrapped into
-    ``status="created"``.
+    ``status="created"`` and the folder is read back (``folder_info``).
     """
     parent_name = params.get("parent_folder")
     parent_moid = params.get("parent_folder_id")
     datacenter_moid = params.get("datacenter")
     new_name = params["folder_name"]
+    folder_type = params.get("folder_type") or "VIRTUAL_MACHINE"
 
     if parent_moid is None:
         # The schema's anyOf makes ``parent_folder`` present when there is no pin.
@@ -8497,6 +8559,7 @@ async def folder_create_composite(
             operator=operator,
             parent_name=lookup_name,
             datacenter_moid=datacenter_moid,
+            folder_type=folder_type,
         )
         if parent_moid is None:
             return _folder_create_refusal(
@@ -8505,7 +8568,10 @@ async def folder_create_composite(
                 datacenter_moid=datacenter_moid,
                 new_name=new_name,
                 candidates=candidates,
+                folder_type=folder_type,
             )
+    else:
+        folder_type = _FOLDER_TYPE_BY_MOID_LETTER.get(parent_moid[6:7], folder_type)
 
     gate, folder_payload = await _write_vmomi_sub_op(
         connector,
@@ -8520,16 +8586,25 @@ async def folder_create_composite(
         return gate
 
     new_folder_moid = _moref_value(folder_payload)
+    folder_info = (
+        None
+        if new_folder_moid is None
+        else await _read_back_folder(connector, target, operator, new_folder_moid)
+    )
     return {
         "status": "created",
         "parent_folder": parent_name,
         "parent_folder_id": parent_moid,
         "datacenter": datacenter_moid,
+        "folder_type": folder_type,
         "new_folder_name": new_name,
         "folder": new_folder_moid,
+        "folder_info": folder_info,
         "candidate_folders": [],
         "issues": [],
-        "guidance": None,
+        "guidance": None
+        if folder_info is not None
+        else "vCenter created the folder, but it did not read back. Check with vmware.folder.list.",
     }
 
 

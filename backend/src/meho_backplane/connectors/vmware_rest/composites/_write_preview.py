@@ -924,7 +924,7 @@ async def _folder_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         return None
     parent = {
         key: value
-        for key in ("parent_folder", "parent_folder_id", "datacenter")
+        for key in ("parent_folder", "parent_folder_id", "datacenter", "folder_type")
         if isinstance(value := ctx.params.get(key), str)
     }
     if "parent_folder" not in parent and "parent_folder_id" not in parent:

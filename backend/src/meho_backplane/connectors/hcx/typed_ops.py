@@ -8,7 +8,9 @@
 site pairings, service mesh, jobs, alerts and inventory are defined in
 :mod:`meho_backplane.connectors.hcx.read_ops`,
 :mod:`meho_backplane.connectors.hcx.diagnostics_ops` and
-:mod:`meho_backplane.connectors.hcx.inventory_ops`. The dataclass +
+:mod:`meho_backplane.connectors.hcx.inventory_ops`; the profile, site pairing
+and certificate changes in :mod:`meho_backplane.connectors.hcx.profile_ops` and
+:mod:`meho_backplane.connectors.hcx.site_pairing_ops`. The dataclass +
 tuple + registrar shape mirrors :mod:`meho_backplane.connectors.nsx.typed_ops`.
 """
 
@@ -19,7 +21,12 @@ from typing import TYPE_CHECKING, Any
 from meho_backplane.connectors.hcx.diagnostics_ops import HCX_DIAGNOSTICS_OPS
 from meho_backplane.connectors.hcx.inventory_ops import HCX_INVENTORY_OPS
 from meho_backplane.connectors.hcx.op_types import HcxTypedOp
+from meho_backplane.connectors.hcx.profile_ops import (
+    HCX_PROFILE_OPS,
+    HCX_PROFILE_WHEN_TO_USE_BY_GROUP,
+)
 from meho_backplane.connectors.hcx.read_ops import HCX_READ_OPS, HCX_READ_WHEN_TO_USE_BY_GROUP
+from meho_backplane.connectors.hcx.site_pairing_ops import HCX_SITE_PAIRING_OPS
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -46,6 +53,7 @@ HCX_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "compared. It refuses every other path."
     ),
     **HCX_READ_WHEN_TO_USE_BY_GROUP,
+    **HCX_PROFILE_WHEN_TO_USE_BY_GROUP,
 }
 
 _PART_ITEM_SCHEMA: dict[str, Any] = {
@@ -182,6 +190,8 @@ HCX_TYPED_OPS: tuple[HcxTypedOp, ...] = (
     *HCX_READ_OPS,
     *HCX_DIAGNOSTICS_OPS,
     *HCX_INVENTORY_OPS,
+    *HCX_PROFILE_OPS,
+    *HCX_SITE_PAIRING_OPS,
 )
 
 

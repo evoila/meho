@@ -36,7 +36,10 @@ HCX_READ_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
     GROUP_MANAGER: (
         "Use to read the HCX Manager itself and its partner sites: the Manager "
         "version, build and role, connector or cloud (hcx.about), and the site "
-        "pairings with the paired site's address (hcx.site_pairing.list)."
+        "pairings with the paired site's address (hcx.site_pairing.list). It also "
+        "holds two changes, each of which waits for a person's approval: pair with "
+        "a remote site or remove a pairing (hcx.site_pairing.set), and trust the "
+        "remote site's certificate (hcx.certificate.trust)."
     ),
     GROUP_SERVICE_MESH: (
         "Use to check the HCX service meshes and their appliances: the service "

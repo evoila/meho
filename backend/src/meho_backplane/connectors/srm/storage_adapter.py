@@ -232,7 +232,7 @@ async def _keep_alive(api: SetupApi) -> None:
         await asyncio.sleep(KEEP_ALIVE_SECONDS)
         try:
             await api.call("GET", "/session")
-        except SetupApiError as exc:  # best effort; a dead session fails the upload itself
+        except Exception as exc:  # best effort; a dead session fails the upload itself
             _log.warning("srm_sra_keep_alive_failed", error_class=type(exc).__name__)
 
 

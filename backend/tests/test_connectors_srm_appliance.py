@@ -42,6 +42,7 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.srm import (
     SRM_CONNECTOR_ID,
@@ -389,6 +390,67 @@ async def test_task_get_logs_in_again_when_the_session_expired(
     assert second["state"] == "succeeded"
     assert login.call_count == 2
     assert task.calls[-1].request.headers["x-dr-session"] == "setup-2"
+
+
+def _other_operator() -> Operator:
+    return Operator(
+        sub="op-srm-setup-other",
+        name="Other SRM Operator",
+        email=None,
+        raw_jwt="op.srm.setup.other.jwt",
+        tenant_id=UUID("00000000-0000-0000-0000-0000000000d4"),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+
+async def test_each_operator_holds_their_own_setup_login(_stub_embedding: AsyncMock) -> None:
+    connector, _ = await _connector(_stub_embedding)
+    seen: list[str] = []
+
+    async def _loader(_t: object, operator: Operator, param: str, ref: str) -> dict[str, str]:
+        seen.append(operator.sub)
+        return {"username": "admin", "password": _ADMIN_PASSWORD}
+
+    connector.setup_credentials_loader = _loader
+    params = {"appliance_secret_ref": _ADMIN_REF, "task_id": "task-1"}
+    target = _Target()
+    async with respx.mock(base_url=_BASE_URL) as mock:
+        login = _login(mock, "setup-1", "setup-2")
+        task = mock.get(f"{_API}/tasks/task-1").respond(
+            200, json={"id": "task-1", "status": "RUNNING"}
+        )
+        await connector.appliance_task_get(_operator(), target, params)
+        await connector.appliance_task_get(_other_operator(), target, params)
+        await connector.appliance_task_get(_operator(), target, params)
+    assert login.call_count == 2
+    assert seen == ["op-srm-setup", "op-srm-setup-other"]
+    sessions = [call.request.headers["x-dr-session"] for call in task.calls]
+    assert sessions == ["setup-1", "setup-2", "setup-1"]
+
+
+async def test_operator_without_vault_access_does_not_get_a_cached_login(
+    _stub_embedding: AsyncMock,
+) -> None:
+    connector, _ = await _connector(_stub_embedding)
+
+    async def _loader(_t: object, operator: Operator, param: str, ref: str) -> dict[str, str]:
+        if operator.sub == "op-srm-setup-other":
+            raise SecretRefReadError(param=param, secret_ref=ref, cause=PermissionError())
+        return {"username": "admin", "password": _ADMIN_PASSWORD}
+
+    connector.setup_credentials_loader = _loader
+    params = {"appliance_secret_ref": _ADMIN_REF, "task_id": "task-1"}
+    target = _Target()
+    async with respx.mock(base_url=_BASE_URL) as mock:
+        login = _login(mock)
+        task = mock.get(f"{_API}/tasks/task-1").respond(
+            200, json={"id": "task-1", "status": "RUNNING"}
+        )
+        await connector.appliance_task_get(_operator(), target, params)
+        with pytest.raises(SecretRefReadError):
+            await connector.appliance_task_get(_other_operator(), target, params)
+    assert login.call_count == 1
+    assert task.call_count == 1
 
 
 @pytest.mark.parametrize(

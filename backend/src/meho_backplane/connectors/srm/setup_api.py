@@ -17,7 +17,7 @@ and never returns it.
 What this module gives the operations:
 
 * :class:`SetupApi` -- one call with the session header. The session id
-  is cached per appliance address and Vault reference. A ``401`` drops
+  is cached per appliance address, Vault reference and operator. A ``401`` drops
   the session, logs in again and sends the call once more, so a login
   that expired between a start and a status read does not fail the read.
 * :class:`SetupApiError` -- the vendor's answer was an error. The message
@@ -224,7 +224,15 @@ class SetupApi:
         self._target = target
         self._secret_ref = secret_ref
         self._param = param
-        self._key = (str(target.tenant_id), str(target.host), str(target.port), secret_ref)
+        # The operator is in the key: each operator reads the Vault reference
+        # under their own identity and holds their own login.
+        self._key = (
+            str(target.tenant_id),
+            str(target.host),
+            str(target.port),
+            secret_ref,
+            operator.sub,
+        )
 
     async def _login(self, client: httpx.AsyncClient) -> str:
         path = f"{SETUP_API_BASE}/session"

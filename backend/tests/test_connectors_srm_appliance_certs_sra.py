@@ -558,6 +558,27 @@ async def test_session_is_kept_alive_during_a_slow_download(
     assert routes["session"].calls[0].request.headers["x-dr-session"] == "setup-1"
 
 
+async def test_keep_alive_error_does_not_lose_the_answer_or_the_folder(
+    _stub_embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    connector = await _connector(_stub_embedding)
+    monkeypatch.setattr(sra, "KEEP_ALIVE_SECONDS", 0.01)
+
+    async def _slow(_request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.1)
+        return httpx.Response(200, content=_ARCHIVE)
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        routes = _mock_sra(mock)
+        routes["archive"].mock(side_effect=_slow)
+        routes["session"].mock(side_effect=RuntimeError("made-up keep-alive failure"))
+        body = await connector.storage_adapter_install(_operator(), _Target(), _sra_params())
+    assert routes["session"].call_count >= 1
+    assert body["outcome"] == "installed", body
+    assert body["cleanup"]["temporary_folder_removed"] is True
+    _no_temp_folders(tmp_path)
+
+
 async def test_old_leftovers_are_removed_and_new_ones_kept(tmp_path: Path) -> None:
     old = tmp_path / f"{sra.TEMP_PREFIX}old"
     new = tmp_path / f"{sra.TEMP_PREFIX}new"

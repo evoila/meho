@@ -269,8 +269,10 @@ reference, `appliance_secret_ref` (a KV v2 path with `username` and
 A wrong password gives an error that names `appliance_secret_ref` and
 HTTP 401, never the value.
 
-The session id goes in `x-dr-session`. It is cached per appliance address
-and Vault reference (`SrmConnector.setup_sessions`). A `401` on a later
+The session id goes in `x-dr-session`. It is cached per appliance address,
+Vault reference and operator (`SrmConnector.setup_sessions`), so each
+operator reads the Vault reference under their own identity and holds their
+own login. A `401` on a later
 call drops the session, logs in again and sends the call once more
 (`SetupApi.send`). So a login that expired between a start and a status
 read does not fail the read. This retry is inside the setup client; the

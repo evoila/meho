@@ -20,8 +20,9 @@
     trusted CA certificates (``POST /appliance/certificates/ca`` and
     ``.../ca/actions/remove``). These are done when the call returns.
 
-No PEM text and no password is in an answer: certificates are named by
-subject and SHA-256 fingerprint.
+No password is in an answer. The only PEM text in an answer is the signing
+request that ``srm.appliance.csr.create`` returns (it holds no secret);
+certificates are named by subject and SHA-256 fingerprint.
 """
 
 from __future__ import annotations

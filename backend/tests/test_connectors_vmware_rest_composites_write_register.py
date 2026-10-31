@@ -113,6 +113,13 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     # Mount and unmount a content-library ISO (both caution).
     "vmware.composite.vm.cdrom.mount_library_iso",
     "vmware.composite.vm.cdrom.unmount_library_iso",
+    # --- VM templates, register, instant clone (#4340): register is caution,
+    # the other four dangerous.
+    "vmware.composite.vm.template.mark",
+    "vmware.composite.vm.template.unmark",
+    "vmware.composite.vm.register",
+    "vmware.composite.vm.unregister",
+    "vmware.composite.vm.instant_clone",
     # VM CPU / memory limit + reservation write (#3880) -- caution + approval.
     "vmware.composite.vm.resource_allocation.set",
     "vmware.composite.host.evacuate",
@@ -468,6 +475,11 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.tools.installer.unmount": "vm",
     "vmware.composite.vm.cdrom.mount_library_iso": "vm",
     "vmware.composite.vm.cdrom.unmount_library_iso": "vm",
+    "vmware.composite.vm.template.mark": "vm",
+    "vmware.composite.vm.template.unmark": "vm",
+    "vmware.composite.vm.register": "vm",
+    "vmware.composite.vm.unregister": "vm",
+    "vmware.composite.vm.instant_clone": "vm",
     "vmware.composite.vm.resource_allocation.set": "vm",
     "vmware.composite.license.assign": "vmware-licensing",
     "vmware.composite.vcenter.appliance.deploy": "vcenter_install",
@@ -691,6 +703,7 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
         "vmware.composite.vm.snapshot.create",
         "vmware.composite.content_library.create",
         "vmware.composite.content_library.item.upload",
+        "vmware.composite.vm.register",
     }
     for row in rows:
         if row.op_id in (

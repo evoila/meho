@@ -73,6 +73,13 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.vm.tools.installer.unmount",
         "vmware.composite.vm.cdrom.mount_library_iso",
         "vmware.composite.vm.cdrom.unmount_library_iso",
+        # --- VM templates, register, instant clone (#4340): not classifier
+        # suffixes -> ``other``.
+        "vmware.composite.vm.template.mark",
+        "vmware.composite.vm.template.unmark",
+        "vmware.composite.vm.register",
+        "vmware.composite.vm.unregister",
+        "vmware.composite.vm.instant_clone",
         # #3880: ``.show`` / ``.set`` are not classifier suffixes -> ``other``.
         "vmware.composite.vm.resource_allocation.show",
         "vmware.composite.vm.resource_allocation.set",

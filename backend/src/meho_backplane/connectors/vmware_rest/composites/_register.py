@@ -247,8 +247,17 @@ from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_library_iso impo
 from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_tools import (
     VM_CDROM_TOOLS_COMPOSITES,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_instant_clone import (
+    VM_INSTANT_CLONE_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._vm_llm_instructions import (
     VM_LLM_INSTRUCTIONS,
+)
+from meho_backplane.connectors.vmware_rest.composites._vm_register import (
+    VM_REGISTER_COMPOSITES,
+)
+from meho_backplane.connectors.vmware_rest.composites._vm_template import (
+    VM_TEMPLATE_COMPOSITES,
 )
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
@@ -579,7 +588,12 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "vm.cdrom.add, vm.device.cdrom, dangerous); set CPU and memory limits "
         "(vm.resource_allocation.set, caution); unmount the VMware Tools "
         "installer (vm.tools.installer.unmount, caution); move a VM to another "
-        "host (vm.migrate, dangerous); take a snapshot (vm.snapshot.create, "
+        "host (vm.migrate, dangerous); turn a powered-off VM into a template "
+        "or a template back into a VM (vm.template.mark, vm.template.unmark, "
+        "dangerous); add a VM to the inventory from its files "
+        "(vm.register, caution) or remove it and keep the files "
+        "(vm.unregister, dangerous); make an instant clone of a running VM "
+        "(vm.instant_clone, dangerous); take a snapshot (vm.snapshot.create, "
         "caution), revert to one (vm.snapshot.revert, dangerous) or delete one "
         "(vm.snapshot.delete, destructive); delete a powered-off VM and its "
         "disks (vm.destroy, destructive); create a VM folder (folder.create, "
@@ -2147,6 +2161,12 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         requires_approval=True,
         llm_instructions=LICENSE_ASSIGN_LLM_INSTRUCTIONS,
     ),
+    # --- VM templates, register, instant clone (#4340): the rows live in
+    # their own modules.
+    *(_CompositeSpec(**row) for row in VM_TEMPLATE_COMPOSITES),
+    *(_CompositeSpec(**row) for row in VM_REGISTER_COMPOSITES),
+    *(_CompositeSpec(**row) for row in VM_INSTANT_CLONE_COMPOSITES),
+    # --- end VM templates, register, instant clone (#4340)
     # ----------------------------------------------------------------
     # Alarm changes (#4383) -- caution / approval
     # ----------------------------------------------------------------

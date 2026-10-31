@@ -479,6 +479,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent import (  # no
     TASKS_RECENT_WHEN_TO_USE,
     VMWARE_TASKS_RECENT_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_vcenter_deployment_status import (  # noqa: E402
+    DEPLOYMENT_STATUS_GROUP_KEY,
+    DEPLOYMENT_STATUS_WHEN_TO_USE,
+    VMWARE_VCENTER_DEPLOYMENT_STATUS_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware import (  # noqa: E402
     VM_HARDWARE_GROUP_KEY,
     VM_HARDWARE_WHEN_TO_USE,
@@ -533,6 +538,8 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # Shared with the content-library composites: the same key and text.
     CONTENT_LIBRARY_GROUP_KEY: CONTENT_LIBRARY_WHEN_TO_USE,
     DATACENTER_LIST_GROUP_KEY: DATACENTER_LIST_WHEN_TO_USE,
+    # Shared with the three install composites: the same key and text.
+    DEPLOYMENT_STATUS_GROUP_KEY: DEPLOYMENT_STATUS_WHEN_TO_USE,
     PORTGROUP_SHOW_GROUP_KEY: PORTGROUP_SHOW_WHEN_TO_USE,
 }
 
@@ -612,9 +619,10 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: ``datacenter.list``; the inventory folder list ``folder.list``; the
 #: six content-library reads (one library, one item, the files of an item,
 #: the OVF options of an item, the subscription URL check and the
-#: Supervisor library list); and the settings of one distributed port
-#: group ``network.portgroup.show``. The tuple shape lets future typed ops
-#: join without touching the registrar.
+#: Supervisor library list); the install state of a new vCenter
+#: appliance, ``vcenter.deployment.status`` (#4394); and the settings of
+#: one distributed port group ``network.portgroup.show``. The tuple shape
+#: lets future typed ops join without touching the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
@@ -641,6 +649,7 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_DATACENTER_LIST_OP,
     VMWARE_FOLDER_LIST_OP,
     *CONTENT_LIBRARY_OPS,
+    VMWARE_VCENTER_DEPLOYMENT_STATUS_OP,
     VMWARE_NETWORK_PORTGROUP_SHOW_OP,
 )
 

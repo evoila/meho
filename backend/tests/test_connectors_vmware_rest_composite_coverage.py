@@ -96,6 +96,9 @@ _CLASSIFIER_OTHER = frozenset(
         # ``other``, like ``host.service_control``.
         "vmware.composite.alarm.acknowledge",
         "vmware.composite.alarm.reset",
+        # #4394: ``.answer`` is not a classifier suffix -> ``other``. The
+        # deploy and the install send a password: they are credential_write.
+        "vmware.composite.vcenter.deployment.answer",
         # ``.inventory`` is not a classifier suffix -> ``other``; a read.
         "vmware.migration.inventory",
     }

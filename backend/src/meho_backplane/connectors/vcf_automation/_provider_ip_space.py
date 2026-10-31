@@ -34,6 +34,7 @@ from meho_backplane.connectors.vcf_automation._provider_start import (
     existing_card,
     object_view,
     one_existing,
+    read_with_job,
     running_answer,
     start_result,
 )
@@ -155,6 +156,7 @@ async def provider_ip_space_set(
         check_ids(ip_space=existing.get("id"))
         path = provider_path(target, PROVIDER_IP_SPACE_PATH, ipSpaceId=str(existing["id"]))
         resp = await send(connector, target, operator, "PUT", path, body=body)
+    job_id = job_id_of(resp)
     return start_result(
         "accepted",
         operation=operation,
@@ -163,8 +165,8 @@ async def provider_ip_space_set(
             "name": name,
             "region_id": region_id,
         },
-        job_id=job_id_of(resp),
-        status_read=read,
+        job_id=job_id,
+        status_read=read_with_job(read, job_id),
         guidance=(
             "VCF Automation accepted the job; it is not done yet. Read the status with "
             f"vcfa.provider.network.list until state is succeeded or failed. {ASYNC_NOTE}"

@@ -19,6 +19,10 @@ the reference list of each version.
 The organization calls (``/cloudapi/1.0.0/orgs/...``) and the Tier-0 list
 (``/cloudapi/1.0.0/nsxTResources/importableTier0Routers``) have the same
 path in every 9.x version.
+
+One call is a legacy ``/api`` call that the 9.x references do not list: the
+task read. The vendor's own SDK (``go-vcloud-director`` v3) follows the task
+link that every ``202`` answer carries through it on VCF Automation 9.
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ from meho_backplane.connectors.resolver import resolve_target_version
 from meho_backplane.connectors.vcf_automation.session import VcfAutomationTargetLike
 
 __all__ = [
+    "INFRA_TASK_PATH",
     "PROVIDER_EDGE_CLUSTERS_PATH",
     "PROVIDER_GATEWAYS_PATH",
     "PROVIDER_GATEWAY_PATH",
@@ -80,6 +85,8 @@ PROVIDER_REGIONAL_NETWORKING_SETTING_PATH: Final[str] = (
 )
 #: NSX edge clusters (``GET``).
 PROVIDER_EDGE_CLUSTERS_PATH: Final[str] = "/cloudapi/vcf/edgeClusters"
+#: One vendor task (``GET``; legacy ``/api``): the job a ``202`` answer started.
+INFRA_TASK_PATH: Final[str] = "/api/task/{id}"
 
 _VCF_PREFIX: Final = "/cloudapi/vcf/"
 _V1_PREFIX: Final = "/cloudapi/v1/"

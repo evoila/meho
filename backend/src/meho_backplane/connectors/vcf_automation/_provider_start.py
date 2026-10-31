@@ -45,6 +45,7 @@ __all__ = [
     "existing_card",
     "object_view",
     "one_existing",
+    "read_with_job",
     "running_answer",
     "start_result",
 ]
@@ -79,6 +80,13 @@ def start_result(status: str, *, guidance: str | None = None, **fields: Any) -> 
         "guidance": guidance,
     }
     return {**base, **fields}
+
+
+def read_with_job(read: dict[str, Any], job_id: str | None) -> dict[str, Any]:
+    """The status read *read* with the vendor job id, so it also reads the job."""
+    if job_id is None:
+        return read
+    return {**read, "params": {**read["params"], "job_id": job_id}}
 
 
 def object_view(row: Mapping[str, Any] | None, **extra: Any) -> dict[str, Any] | None:

@@ -10,6 +10,9 @@ body, and then works on its own. The object's ``status`` field shows how far
 it got (``PENDING``, ``CONFIGURING``, ``REALIZED``, ``REALIZATION_FAILED``);
 each row maps it to a job state (queued, running, succeeded, failed).
 
+With the ``job_id`` a change returned, the read also reads the vendor job
+(:mod:`._provider_job`): its state, progress and the vendor's error text.
+
 When the appliance does not answer (a connection error, a time-out, or HTTP
 502, 503 or 504, for example during its own upgrade), the read answers
 ``state: not_reachable`` with the job id it was given and the time. It never
@@ -34,6 +37,11 @@ from typing import TYPE_CHECKING, Any, Final
 import httpx
 
 from meho_backplane.connectors.vcf_automation._lookups import find_org, fiql_safe, list_all
+from meho_backplane.connectors.vcf_automation._provider_job import (
+    job_id_problem,
+    read_job,
+    with_job,
+)
 from meho_backplane.connectors.vcf_automation._provider_paths import (
     PROVIDER_EDGE_CLUSTERS_PATH,
     PROVIDER_GATEWAY_PATH,
@@ -517,26 +525,31 @@ async def provider_network_list(
     """``vcfa.provider.network.list`` — one kind of networking object as flat rows."""
     kind = params["kind"]
     job_id = params.get("job_id")
-    checked_at = now_iso()
     base: dict[str, Any] = {
         "kind": kind,
         "reachable": True,
-        "checked_at": checked_at,
+        "checked_at": now_iso(),
         "job_id": job_id,
         "state": None,
         "vendor_status": None,
+        "job_state": None,
+        "progress": None,
         "error": None,
         "count": 0,
         "items": [],
+        "job": None,
         "guidance": None,
     }
     try:
+        if job_id is not None and (problem := job_id_problem(job_id)) is not None:
+            raise VcfaProviderNetworkError(problem)
         if kind == "tier0_gateways":
             rows = await _tier0_rows(connector, target, operator, params)
         elif kind == "org_networking":
             rows = await _org_networking_rows(connector, target, operator, params)
         else:
             rows = await _object_rows(connector, target, operator, kind, params)
+        job = None if job_id is None else await read_job(connector, target, operator, job_id)
     except VcfaProviderNetworkError as exc:
         return {**base, "state": "invalid_request", "guidance": str(exc)}
     except (httpx.HTTPError, RuntimeError) as exc:
@@ -558,16 +571,10 @@ async def provider_network_list(
     if state == "failed":
         guidance = (
             "VCF Automation could not realize the object. The object holds no error text; "
-            "the task with this job id in the VCF Automation console has it."
+            "pass the job_id of the change to get the vendor's error text."
         )
-    return {
-        **base,
-        "state": state,
-        "vendor_status": vendor_status,
-        "count": len(rows),
-        "items": rows,
-        "guidance": guidance,
-    }
+    answer = {**base, "state": state, "vendor_status": vendor_status, "count": len(rows)}
+    return with_job({**answer, "items": rows, "guidance": guidance}, job)
 
 
 def drift_reason(op_id: str, current: Mapping[str, Any] | None) -> str | None:

@@ -39,6 +39,7 @@ from meho_backplane.connectors.vcf_automation._provider_start import (
     check_ids,
     object_view,
     one_existing,
+    read_with_job,
     running_answer,
     start_result,
 )
@@ -147,6 +148,7 @@ async def provider_regional_networking_set(
         body["serviceEdgeClusterRef"] = {"id": params["edge_cluster_id"]}
     path = provider_path(target, PROVIDER_REGIONAL_NETWORKING_PATH)
     resp = await send(connector, target, operator, "POST", path, body=body)
+    job_id = job_id_of(resp)
     return start_result(
         "accepted",
         operation="create",
@@ -156,8 +158,8 @@ async def provider_regional_networking_set(
             "org_id": org["id"],
             "region_id": params["region_id"],
         },
-        job_id=job_id_of(resp),
-        status_read=read,
+        job_id=job_id,
+        status_read=read_with_job(read, job_id),
         guidance=(
             "VCF Automation accepted the job; it now makes the organization's NSX project, "
             "transit gateway and default VPC. Read the status until state is succeeded. "

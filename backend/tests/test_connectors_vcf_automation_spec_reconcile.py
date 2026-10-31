@@ -491,7 +491,13 @@ _PROVIDER_PATHS_METHODS: dict[str, frozenset[str]] = {
     "PROVIDER_REGIONAL_NETWORKING_PATH": frozenset({"GET", "POST"}),
     "PROVIDER_REGIONAL_NETWORKING_SETTING_PATH": frozenset({"GET", "DELETE"}),
     "PROVIDER_EDGE_CLUSTERS_PATH": frozenset({"GET"}),
+    "INFRA_TASK_PATH": frozenset({"GET"}),
 }
+
+#: The legacy ``/api`` task read is an evidenced exclusion: no 9.x reference
+#: lists a legacy call, and the vendor's own SDK (``go-vcloud-director`` v3)
+#: uses it on VCF Automation 9 -- the task read behind every ``202`` task link.
+_PROVIDER_LEGACY_API_OP_IDS: frozenset[str] = frozenset({"GET:/api/task/{id}"})
 
 
 def _provider_network_op_ids(version: str) -> set[str]:
@@ -548,5 +554,12 @@ def test_provider_network_paths_are_in_the_reference_list_of_each_version(
     list_path = require_shelf_spec(spec_dir, list_file)
     label = f"{spec_dir}/{list_file}"
     served = _without_braces(_reference_list_op_ids(list_path, label))
-    declared = _without_braces(_provider_network_op_ids(version))
+    declared = _without_braces(_provider_network_op_ids(version) - _PROVIDER_LEGACY_API_OP_IDS)
     assert_op_ids_served(declared, served, spec_label=label)
+
+
+def test_provider_network_legacy_task_read_is_the_only_unlisted_call() -> None:
+    """Guard: the evidenced exclusion holds exactly the legacy task read."""
+    for version in ("9.0", "9.1"):
+        legacy = {op_id for op_id in _provider_network_op_ids(version) if ":/api/" in op_id}
+        assert legacy == _PROVIDER_LEGACY_API_OP_IDS

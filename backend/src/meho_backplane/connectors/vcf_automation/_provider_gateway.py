@@ -6,11 +6,13 @@
 A new gateway: read the free Tier-0 gateways of the region (always with the
 ``regionId`` filter; without a filter the list is empty), then ``POST`` the
 gateway with its first IP spaces (``ipSpaceRefs``). The backing type is
-``NSX_TIER0``, or ``NSX_VRF_TIER0`` for a Tier-0 VRF, as both the 9.0 and the
-9.1 reference say. An existing gateway: link the IP spaces it does not have
-yet, one ``POST`` to the IP space links each. When a link is refused part-way,
-the answer lists the links that started, the one that failed (with the
-vendor's error) and the ones that did not run; nothing is undone.
+``NSX_TIER0``, or ``NSX_VRF_TIER0`` for a Tier-0 VRF. The reference pages only
+show ``backingType`` as a string; the two values come from the vendor's Go SDK
+(``go-vcloud-director`` v3, ``types/v56/tm.go``). An existing gateway: link the
+IP spaces it does not have yet, one ``POST`` to the IP space links each. When a
+link is refused part-way, the answer lists the links that started, the one
+that failed (with the vendor's error) and the ones that did not run; nothing
+is undone.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ from meho_backplane.connectors.vcf_automation._provider_start import (
     existing_card,
     object_view,
     one_existing,
+    read_with_job,
     running_answer,
     start_result,
 )
@@ -253,7 +256,7 @@ async def provider_gateway_set(
         object={"id": None, "name": name, "region_id": region_id, "tier0_id": tier0.get("id")},
         job_id=job_id,
         steps=[{"step": "create_gateway", "status": "accepted", "job_id": job_id}],
-        status_read=read,
+        status_read=read_with_job(read, job_id),
         guidance=(
             "VCF Automation accepted the job; it is not done yet. Read the gateway with the "
             f"status read until state is succeeded; regional networking needs it then. {ASYNC_NOTE}"

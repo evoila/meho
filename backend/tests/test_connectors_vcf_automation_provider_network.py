@@ -130,6 +130,10 @@ def _args(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+#: The legacy task read of the made-up job.
+TASK = f"/api/task/{TASK_ID}"
+
+
 def _accepted(location: str = TASK_LOCATION) -> httpx.Response:
     return httpx.Response(202, headers={"Location": location})
 
@@ -281,15 +285,122 @@ async def test_status_read_of_one_object(
             200, json=gateway(status=vendor)
         )
         result = await run(
-            "vcfa.provider.network.list",
-            {"kind": "provider_gateways", "id": GATEWAY_ID, "job_id": TASK_ID},
+            "vcfa.provider.network.list", {"kind": "provider_gateways", "id": GATEWAY_ID}
         )
     out = result["result"]
     assert out["state"] == state
     assert out["vendor_status"] == vendor
-    assert out["job_id"] == TASK_ID
+    assert out["job"] is None
     if state == "failed":
-        assert "job id" in out["guidance"]
+        assert "job_id" in out["guidance"]
+
+
+def _task(status: str, **extra: Any) -> dict[str, Any]:
+    """A made-up vendor task, as the legacy task read answers it."""
+    return {
+        "id": f"urn:vcloud:task:{TASK_ID}",
+        "status": status,
+        "operationName": "providerGatewayCreate",
+        "startTime": "2026-01-01T00:00:00.000Z",
+        **extra,
+    }
+
+
+async def test_status_read_of_a_failed_job_gives_the_vendor_error(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    vendor_text = "Tier-0 gateway is already used by another provider gateway. " + "x" * 900
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(item(V90, "providerGateways", GATEWAY_ID)).respond(
+            200, json=gateway(status="REALIZATION_FAILED")
+        )
+        task_read = mock.get(TASK).respond(
+            200, json=_task("error", progress=100, error={"message": vendor_text})
+        )
+        result = await run(
+            "vcfa.provider.network.list",
+            {"kind": "provider_gateways", "id": GATEWAY_ID, "job_id": TASK_ID},
+        )
+    out = result["result"]
+    assert out["state"] == "failed"
+    assert out["job_state"] == "failed"
+    assert out["error"].startswith("Tier-0 gateway is already used")
+    assert len(out["error"]) <= 500
+    assert out["job"]["vendor_state"] == "error"
+    assert out["job"]["read"] is True
+    assert out["job_id"] == TASK_ID
+    assert "vendor's text" in out["guidance"]
+    # The legacy task read carries the classic Accept header.
+    assert "version=40.0" in task_read.calls.last.request.headers["Accept"]
+
+
+async def test_status_read_of_a_running_job_gives_its_progress(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(item(V90, "providerGateways", GATEWAY_ID)).respond(200, json=gateway())
+        mock.get(TASK).respond(200, json=_task("running", progress=40))
+        result = await run(
+            "vcfa.provider.network.list",
+            {"kind": "provider_gateways", "id": GATEWAY_ID, "job_id": f"urn:vcloud:task:{TASK_ID}"},
+        )
+    out = result["result"]
+    assert out["state"] == "running"
+    assert out["job_state"] == "running"
+    assert out["progress"] == 40
+    assert out["vendor_status"] == "REALIZED"
+    assert out["error"] is None
+
+
+async def test_status_read_when_the_task_read_gets_503_is_not_reachable(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(item(V90, "providerGateways", GATEWAY_ID)).respond(200, json=gateway())
+        mock.get(TASK).respond(503, text="upgrading")
+        result = await run(
+            "vcfa.provider.network.list",
+            {"kind": "provider_gateways", "id": GATEWAY_ID, "job_id": TASK_ID},
+        )
+    out = result["result"]
+    assert out["reachable"] is False
+    assert out["state"] == "not_reachable"
+    assert out["job_id"] == TASK_ID
+    assert out["checked_at"].endswith("Z")
+
+
+async def test_status_read_of_a_job_the_vendor_no_longer_has(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(item(V90, "ipSpaces", IP_SPACE_ID)).respond(404, json={"message": "gone"})
+        mock.get(TASK).respond(404, json={"message": "no task"})
+        result = await run(
+            "vcfa.provider.network.list",
+            {"kind": "ip_spaces", "id": IP_SPACE_ID, "job_id": TASK_ID},
+        )
+    out = result["result"]
+    assert out["state"] == "not_found"
+    assert out["job_state"] == "unknown"
+    assert out["job"]["read"] is False
+    assert "could not read the vendor job" in out["guidance"]
+
+
+@pytest.mark.parametrize("job_id", ["..", ".", "urn:vcloud:task:", "a/b"])
+async def test_status_read_refuses_a_bad_job_id(vcfa: VcfAutomationConnector, job_id: str) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        read = mock.get(item(V90, "providerGateways", GATEWAY_ID)).respond(200, json=gateway())
+        result = await run(
+            "vcfa.provider.network.list",
+            {"kind": "provider_gateways", "id": GATEWAY_ID, "job_id": job_id},
+        )
+    assert result["result"]["state"] == "invalid_request"
+    assert read.call_count == 0
 
 
 async def test_status_read_of_a_deleted_object_is_not_found(vcfa: VcfAutomationConnector) -> None:
@@ -402,7 +513,12 @@ async def test_ip_space_create_answers_accepted_with_the_task_id(
     assert out["job_id"] == TASK_ID
     assert out["status_read"] == {
         "op_id": "vcfa.provider.network.list",
-        "params": {"kind": "ip_spaces", "name": "example-ip-space", "region_id": REGION_ID},
+        "params": {
+            "kind": "ip_spaces",
+            "name": "example-ip-space",
+            "region_id": REGION_ID,
+            "job_id": TASK_ID,
+        },
     }
     assert "not done" in out["guidance"]
     body = json.loads(post.calls.last.request.content)
@@ -723,6 +839,7 @@ async def test_regional_networking_accepted(vcfa: VcfAutomationConnector) -> Non
         "kind": "regional_networking",
         "org_id": ORG_ID,
         "region_id": REGION_ID,
+        "job_id": TASK_ID,
     }
     assert json.loads(post.calls.last.request.content) == {
         "orgRef": {"id": ORG_ID},

@@ -90,7 +90,8 @@ _NETWORK_LIST = VcfaTypedOp(
             },
             "id": id_param("Read one object by id. Not for tier0_gateways and org_networking."),
             "job_id": id_param(
-                "The job id a start returned. It comes back in the answer, also when the "
+                "The job id a start returned. MEHO then also reads the vendor job: its "
+                "state, progress and error text. It comes back in the answer, also when the "
                 "appliance does not answer."
             ),
         },
@@ -122,9 +123,36 @@ _NETWORK_LIST = VcfaTypedOp(
                 "invalid_request for bad params. Null for a plain list.",
             ),
             "vendor_status": field(["string", "null"], "The vendor status of that one object."),
-            "error": field(["string", "null"], "Why the read failed, when not reachable."),
+            "job_state": field(
+                ["string", "null"],
+                "With job_id: the state of the vendor job (queued, running, succeeded, "
+                "failed, canceled, or unknown when MEHO could not read the job).",
+            ),
+            "progress": field(["integer", "null"], "With job_id: the job's progress in percent."),
+            "error": field(
+                ["string", "null"],
+                "The vendor's error text of a failed job (short, secrets filtered out), or "
+                "why the read failed when not reachable.",
+            ),
             "count": field("integer", "The number of rows."),
             "items": list_of("The objects, one flat row each.", ROW_FIELDS),
+            "job": nullable(
+                obj(
+                    "With job_id: the vendor job as read (GET /api/task/{id}).",
+                    {
+                        "id": field("string", "The job id."),
+                        "read": field("boolean", "False when MEHO could not read the job."),
+                        "state": field("string", "The job state, as job_state."),
+                        "vendor_state": field(["string", "null"], "The vendor's task status."),
+                        "progress": field(["integer", "null"], "Progress in percent."),
+                        "error": field(["string", "null"], "The vendor's error text."),
+                        "operation": field(["string", "null"], "The vendor's operation name."),
+                        "started_at": field(["string", "null"], "When the job started."),
+                        "ended_at": field(["string", "null"], "When the job ended."),
+                        "why_not_read": field(["string", "null"], "Why the job was not read."),
+                    },
+                )
+            ),
             "guidance": field(["string", "null"], "A short note on what to do next."),
         },
         "required": ["kind", "reachable", "state", "items"],
@@ -142,10 +170,11 @@ _NETWORK_LIST = VcfaTypedOp(
             "network.delete: pass the status_read params they returned."
         ),
         output_shape=(
-            "{kind, reachable, checked_at, job_id, state, vendor_status, error, count, items: "
-            "[flat rows], guidance}. state queued or running: read again later. succeeded: "
-            "done. failed: VCF Automation could not realize it. not_found after a delete: "
-            "gone. not_reachable: the appliance did not answer; this is not a failure."
+            "{kind, reachable, checked_at, job_id, state, vendor_status, job_state, progress, "
+            "error, count, items: [flat rows], job, guidance}. With job_id, state is the state "
+            "of the vendor job. state queued or running: read again later. succeeded: done. "
+            "failed: error has the vendor's text. not_found after a delete: gone. "
+            "not_reachable: the appliance did not answer; this is not a failure."
         ),
         next_step=(
             "Read again until state is succeeded or failed. If the login expired, MEHO logs "
@@ -159,6 +188,8 @@ _NETWORK_LIST = VcfaTypedOp(
                 "job_id",
                 "state",
                 "vendor_status",
+                "job_state",
+                "progress",
                 "error",
                 "count",
                 "guidance",

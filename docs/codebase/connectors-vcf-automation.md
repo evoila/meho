@@ -419,7 +419,7 @@ calls follow the vendor's "Provider Infrastructure APIs" reference lists of
 
 | op_id | what it does | returns | risk level / approval | versions |
 |---|---|---|---|---|
-| `vcfa.provider.network.list` | One kind of networking object as flat rows: IP spaces, provider gateways, IP space links, regional networking, edge clusters, free Tier-0 gateways, or an organization's networking settings. Also the status read of every networking job. | `{kind, reachable, checked_at, job_id, state, vendor_status, error, count, items, guidance}` | safe | 9.x |
+| `vcfa.provider.network.list` | One kind of networking object as flat rows: IP spaces, provider gateways, IP space links, regional networking, edge clusters, free Tier-0 gateways, or an organization's networking settings. Also the status read of every networking job. | `{kind, reachable, checked_at, job_id, state, vendor_status, job_state, progress, error, count, items, job, guidance}` | safe | 9.x |
 | `vcfa.provider.org.update` | Changes an organization's display name, description, on/off state and publish rights (`GET`, then `PUT /cloudapi/1.0.0/orgs/{orgUrn}`). Its name and kind never change. Turning it off stops its users from signing in. | `{status, org, previous, job_id, guidance}` | dangerous, approval | 9.x |
 | `vcfa.provider.org.networking.set` | Turns networking on or off and sets the short name for logs (`…/orgs/{orgUrn}/networkingSettings`). The short name is the id of the organization's NSX project, so MEHO never changes it once set. | `{status, org_id, settings, previous, guidance}` | dangerous, approval | 9.x |
 | `vcfa.provider.ip_space.set` | Creates an IP space (`POST …/ipSpaces`) or adds ranges and changes the default limits of one (`PUT …/ipSpaces/{ipSpaceId}`). A new range needs `range_is_new_in_nsx: true`. | start answer (below) | dangerous, approval | 9.x |
@@ -437,11 +437,23 @@ calls follow the vendor's "Provider Infrastructure APIs" reference lists of
 - **Vendor jobs.** VCF Automation answers a networking create, change or
   delete with HTTP 202, an empty body and the task in the `Location`
   header, and then works on its own. A start returns `accepted` with the
-  task id (`job_id`) and `status_read` (the op and params to read next). It
-  never says the work is done. The object's `status` shows the progress;
+  task id (`job_id`) and `status_read` (the op and params to read next; the
+  params carry the `job_id`). It never says the work is done. The object's `status` shows the progress;
   each row maps it to `job_state`: `PENDING` queued, `CONFIGURING` running,
   `REALIZED` succeeded, `REALIZATION_FAILED` failed. The object holds no
-  error text; the vendor task does. MEHO keeps no job state between calls.
+  error text; the vendor task does. So when the status read gets the
+  `job_id`, it also reads the task: `GET /api/task/{id}`, a legacy call with
+  the classic `application/*+json;version=40.0` Accept header. No 9.x
+  reference lists it; the vendor's own Go SDK (`go-vcloud-director` v3)
+  follows every `202` start through it on VCF Automation 9. The answer then
+  has `job_state` (queued, running, succeeded, failed, canceled), `progress`
+  in percent, and a `job` block. When the job failed, `error` has the
+  vendor's error text (secrets filtered out, at most 500 characters). The
+  job state then sets `state`, also while the object still shows its old
+  status. A job the vendor no longer knows (HTTP 404) gives `job.read:
+  false` and keeps the object's state. A bad `job_id` (empty, `.`, `..`, a
+  slash) is refused with `invalid_request` before any call. MEHO keeps no
+  job state between calls.
 - **A job that already runs.** Before a start, the op reads the object. When
   it reads `PENDING` or `CONFIGURING`, the op answers `already_running` and
   starts nothing. This helps but is not a lock: two callers can both check
@@ -453,7 +465,8 @@ calls follow the vendor's "Provider Infrastructure APIs" reference lists of
 - **Not reachable.** When the appliance does not answer (a connection error,
   a time-out, HTTP 502, 503 or 504), the status read answers
   `reachable: false`, `state: not_reachable`, the job id it was given and
-  `checked_at`. It never says `failed` then. An expired login is handled by
+  `checked_at`, also when only the task read gets no answer. It never says
+  `failed` then. An expired login is handled by
   the connector's usual 401 re-login.
 - **Part-way failure.** Linking IP spaces to an existing gateway sends one
   link per IP space. When one is refused, the answer is `failed_part_way`
@@ -465,8 +478,9 @@ calls follow the vendor's "Provider Infrastructure APIs" reference lists of
   answers an empty list. A gateway on 9.0 refuses the 9.1 fields
   (`inbound_remote_networks`, `allow_advertising_private_ip_blocks`, `nat`):
   9.0 would answer HTTP 400 "Unrecognized field", so MEHO stops first. The
-  backing type is `NSX_TIER0`, or `NSX_VRF_TIER0` for a Tier-0 VRF, as both
-  the 9.0 and 9.1 reference say. Regional networking needs the
+  backing type is `NSX_TIER0`, or `NSX_VRF_TIER0` for a Tier-0 VRF. The
+  reference pages only show `backingType` as a string; the two values come
+  from the vendor's Go SDK (`go-vcloud-director` v3, `types/v56/tm.go`). Regional networking needs the
   organization's short log name (else 400 "Short Log Name is not set") and a
   gateway that reads `REALIZED`; MEHO checks both first.
 - **Approval binds the state.** Each change has an approval card with the

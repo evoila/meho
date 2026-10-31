@@ -19,6 +19,7 @@ import json
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -26,7 +27,7 @@ from uuid import UUID
 import httpx
 import pytest
 import respx
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -40,6 +41,7 @@ from meho_backplane.connectors.vmware_rest.composites._register import (
     register_vmware_composite_operations,
     register_vmware_composite_operations_8_0,
 )
+from meho_backplane.connectors.vmware_rest.ingest_safety import vmware_rest_safety_floor
 from meho_backplane.connectors.vmware_rest.typed_ops import (
     register_vmware_typed_operations,
     register_vmware_typed_operations_8_0,
@@ -54,6 +56,7 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
 )
+from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.settings import get_settings
 from tests._vmware_host_config_fake import HOST, HostConfigVim
@@ -328,10 +331,65 @@ async def _bootstrap(vim: HostConfigVim) -> None:
         await s.commit()
 
 
+#: The generic (ingested) rows of the vim calls ``host.ntp.set`` makes.
+_NTP_GENERIC_OPS = (
+    "POST:/HostDateTimeSystem/{moId}/UpdateDateTimeConfig",
+    "POST:/HostServiceSystem/{moId}/UpdateServicePolicy",
+    "POST:/HostServiceSystem/{moId}/RestartService",
+    "POST:/HostServiceSystem/{moId}/StartService",
+)
+
+
+async def _store_generic_rows() -> None:
+    """Store the generic rows with the level the VMware floor gives them."""
+    now = datetime.now(UTC)
+    async with get_sessionmaker()() as s:
+        for op_id in _NTP_GENERIC_OPS:
+            method, path = op_id.split(":", 1)
+            proto = vmware_rest_safety_floor(
+                "9.0",
+                EndpointDescriptorProto(
+                    op_id=op_id,
+                    method=method,
+                    path=path,
+                    parameter_schema={"type": "object", "properties": {}},
+                    safety_level="caution",
+                    requires_approval=False,
+                ),
+            )
+            assert proto.requires_approval is True, op_id
+            s.add(
+                EndpointDescriptor(
+                    id=uuid.uuid4(),
+                    tenant_id=None,
+                    product="vmware",
+                    version="9.0",
+                    impl_id="vmware-rest",
+                    op_id=op_id,
+                    source_kind="ingested",
+                    method=method,
+                    path=path,
+                    handler_ref=None,
+                    summary="Generic host call.",
+                    tags=[],
+                    parameter_schema=proto.parameter_schema,
+                    safety_level=proto.safety_level,
+                    requires_approval=proto.requires_approval,
+                    is_enabled=True,
+                    embedding=[0.1] * 384,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        await s.commit()
+
+
 @pytest.mark.usefixtures("_db_env")
 async def test_an_ntp_change_waits_for_approval_then_runs_once() -> None:
+    """One approval runs all NTP steps, also when the generic rows wait for approval."""
     vim = HostConfigVim()
     await _bootstrap(vim)
+    await _store_generic_rows()
     servers = ["ntp-1.example.invalid"]
     call = await call_operation(
         _operator("op-requester"),
@@ -365,6 +423,9 @@ async def test_an_ntp_change_waits_for_approval_then_runs_once() -> None:
     assert resume.result["status"] == "applied"
     assert resume.result["after"]["servers"] == servers
     assert vim.writes() == ["UpdateDateTimeConfig", "UpdateServicePolicy", "RestartService"]
+    async with get_sessionmaker()() as s:
+        count = (await s.execute(select(func.count()).select_from(ApprovalRequest))).scalar_one()
+    assert count == 1
 
 
 @pytest.mark.usefixtures("_db_env")

@@ -98,6 +98,15 @@ var typedOpCLICoverage = map[string]string{
 	// `meho operation call` / MCP call_operation.
 	"vcfa.provider.feature_flag.list": "",
 	"vcfa.provider.feature_flag.set":  "",
+	// Regions and organization quotas: agent-surface-only, reached through
+	// `meho operation call` / MCP call_operation.
+	"vcfa.provider.infra.list":           "",
+	"vcfa.provider.region.get":           "",
+	"vcfa.provider.org_quota.list":       "",
+	"vcfa.provider.vcenter.register":     "",
+	"vcfa.provider.nsx_manager.register": "",
+	"vcfa.provider.region.set":           "",
+	"vcfa.provider.org_quota.set":        "",
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed VCFA

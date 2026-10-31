@@ -38,11 +38,12 @@ from typing import Final
 from meho_backplane.connectors.registry import register_connector_v2
 
 # Imported for its side effect: registers the park-time preview builders of
-# the provisioning writes (#3890), the image name change and the feature-flag
-# change, like the keycloak / vmware-rest previews.
+# the provisioning writes (#3890), the image name change, the feature-flag
+# change and the cloud account remove, like the keycloak / vmware-rest previews.
 from meho_backplane.connectors.vcf_automation import (  # noqa: F401
     _feature_flags,
     _images,
+    _infra,
     _provisioning_preview,
 )
 from meho_backplane.connectors.vcf_automation.connector import (
@@ -52,6 +53,7 @@ from meho_backplane.connectors.vcf_automation.connector import (
 from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
 from meho_backplane.connectors.vcf_automation.feature_flag_ops import VCFA_FEATURE_FLAG_OPS
 from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
+from meho_backplane.connectors.vcf_automation.infra_ops import VCFA_INFRA_OPS
 from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
 from meho_backplane.connectors.vcf_automation.provisioning_ops import VCFA_PROVISIONING_OPS
 from meho_backplane.connectors.vcf_automation.session import (
@@ -125,7 +127,7 @@ register_connector_v2(
 # Queue the typed-op upsert onto the lifespan-driven registrar list. The
 # runner (``run_typed_op_registrars``) iterates after
 # ``_eager_import_connectors`` so the typed descriptors (the seven reads,
-# the #3890 provisioning ops, and the network + deploy ops) land
+# the #3890 provisioning ops, the network + deploy ops and the infrastructure ops) land
 # before the first dispatch — no ingested catalog state required (VCFA
 # ships no vendor spec; typed conversion is the only working read path).
 register_typed_op_registrar(register_vcfa_typed_operations)
@@ -136,6 +138,7 @@ __all__ = [
     "VCFA_FEATURE_FLAG_OPS",
     "VCFA_IMAGE_OPS",
     "VCFA_IMPL_ID",
+    "VCFA_INFRA_OPS",
     "VCFA_NETWORK_OPS",
     "VCFA_PRODUCT",
     "VCFA_PROVISIONING_OPS",

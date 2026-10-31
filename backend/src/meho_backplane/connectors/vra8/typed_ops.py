@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
+from meho_backplane.connectors.vcf_automation._infra_text import infra_when_to_use
 from meho_backplane.connectors.vra8._llm_instructions import VRA8_READ_LLM_INSTRUCTIONS
 from meho_backplane.connectors.vra8._response_schemas import (
     ABOUT_RESPONSE,
@@ -71,6 +72,8 @@ _log = structlog.get_logger(__name__)
 _GROUP_INVENTORY = "vcfa-vra8-inventory"
 _GROUP_CONTENT = "vcfa-vra8-content"
 _GROUP_API_FILES = "vcfa-vra8-api-files"
+#: The cloud account, cloud zone, profile and project ops (:mod:`.infra_ops`).
+_GROUP_INFRA = "vcfa-vra8-infra"
 
 
 @dataclass(frozen=True)
@@ -125,6 +128,9 @@ VRA8_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Orchestrator inside the appliance), with its size, SHA-256, and the version "
         "and build of the appliance. Use it to get the 8.18 API files, which no "
         "vendor download contains."
+    ),
+    _GROUP_INFRA: infra_when_to_use(
+        "vcfa.vra8", "Aria Automation 8 (vRealize Automation 8)", with_vra8_only=True
     ),
 }
 
@@ -425,7 +431,7 @@ async def register_vra8_typed_operations(
     *,
     embedding_service: EmbeddingService | None = None,
 ) -> None:
-    """Upsert every op in :data:`VRA8_TYPED_OPS` into ``endpoint_descriptor``.
+    """Upsert :data:`VRA8_TYPED_OPS` and the infrastructure ops into ``endpoint_descriptor``.
 
     Queued onto the lifespan-driven registrar list via
     :func:`~meho_backplane.operations.typed_register.register_typed_op_registrar`
@@ -448,9 +454,11 @@ async def register_vra8_typed_operations(
     # runtime + model), which pure connector/handler unit tests should not pay.
     # Lifespan callers have it warmed by the time this runs.
     from meho_backplane.connectors.vra8.connector import Vra8Connector
+    from meho_backplane.connectors.vra8.infra_ops import VRA8_INFRA_OPS
     from meho_backplane.operations.typed_register import register_typed_operation
 
-    for op in VRA8_TYPED_OPS:
+    all_ops = (*VRA8_TYPED_OPS, *VRA8_INFRA_OPS)
+    for op in all_ops:
         handler = getattr(Vra8Connector, op.handler_attr, None)
         if handler is None:
             raise AttributeError(
@@ -484,7 +492,7 @@ async def register_vra8_typed_operations(
         )
     _log.info(
         "vra8_typed_operations_registered",
-        count=len(VRA8_TYPED_OPS),
+        count=len(all_ops),
         product=Vra8Connector.product,
         version=Vra8Connector.version,
         impl_id=Vra8Connector.impl_id,

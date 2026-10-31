@@ -98,6 +98,18 @@ var typedOpCLICoverage = map[string]string{
 	// `meho operation call` / MCP call_operation.
 	"vcfa.provider.feature_flag.list": "",
 	"vcfa.provider.feature_flag.set":  "",
+	// Infrastructure (cloud accounts, zones, profiles, project members):
+	// agent-surface-only, reached through `meho operation call` / MCP
+	// call_operation. The ids are written out in VCFA_INFRA_OP_IDS.
+	"vcfa.tenant.cloud_account.list":   "",
+	"vcfa.tenant.cloud_account.create": "",
+	"vcfa.tenant.cloud_account.delete": "",
+	"vcfa.tenant.zone.set":             "",
+	"vcfa.tenant.flavor_profile.list":  "",
+	"vcfa.tenant.flavor_profile.set":   "",
+	"vcfa.tenant.network_profile.list": "",
+	"vcfa.tenant.storage_profile.list": "",
+	"vcfa.tenant.project.members.set":  "",
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed VCFA

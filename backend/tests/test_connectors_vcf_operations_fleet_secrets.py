@@ -35,12 +35,13 @@ from tenacity import wait_none
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors._shared.vcf_auth import VcfTargetLike
+from meho_backplane.connectors.base import ConnectorUpstreamError
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vcf_operations import VROPS_TYPED_OPS, VcfOperationsConnector
 from meho_backplane.connectors.vcf_operations import fleet_secrets_checks as checks
 from meho_backplane.connectors.vcf_operations import fleet_secrets_handlers as handlers
 from meho_backplane.connectors.vcf_operations.fleet_secrets_ops import VROPS_FLEET_SECRETS_OPS
-from meho_backplane.operations._errors import result_connector_error
+from meho_backplane.operations._errors import result_connector_error, result_invalid_params
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
 from meho_backplane.operations._validate import validate_params
 
@@ -190,6 +191,21 @@ def test_rotate_takes_references_not_passwords() -> None:
     ).parameter_schema
     assert validate_params(schema, {**_ROTATE_PARAMS, "new_password_ref": "plain-text"})
     assert validate_params(schema, {**_ROTATE_PARAMS, "newPassword": "x"})
+
+
+def test_the_schema_refuses_a_private_key_without_quoting_it() -> None:
+    """The check runs before the call waits for approval, so the key is never stored."""
+    schema = next(
+        op for op in VROPS_FLEET_SECRETS_OPS if op.op_id == "vrops.fleet.certificate.replace"
+    ).parameter_schema
+    chain = "-----BEGIN " + "PRIVATE KEY-----\nkey-body-123"  # split for the hook
+    errors = validate_params(
+        schema, {"certificateId": "c-1", "caType": "VMCA", "certificateChain": chain}
+    )
+    assert errors
+    result = result_invalid_params("vrops.fleet.certificate.replace", errors, 1.0)
+    assert "key-body-123" not in json.dumps(errors)
+    assert "key-body-123" not in result.model_dump_json()
 
 
 def test_password_rotate_is_a_credential_write() -> None:
@@ -471,12 +487,88 @@ async def test_a_vendor_error_reaches_the_answer(
     async with respx.mock(base_url=_BASE_URL) as mock:
         mock.post(_ACQUIRE_PATH).respond(200, json={"token": "tok"})
         mock.request(method, path).respond(400, json=vendor_error)
-        with pytest.raises(httpx.HTTPStatusError) as info:
+        with pytest.raises((httpx.HTTPStatusError, ConnectorUpstreamError)) as info:
             await _handler(op_id)(connector, _operator(), _StubTarget(), dict(_CALLS[op_id]))
     await connector.aclose()
 
     result = result_connector_error(op_id, info.value, 1.0)
     assert "does not meet the password policy" in str(result.extras["upstream_message"])
+
+
+@pytest.mark.parametrize(
+    "echo",
+    ["new-pass-2", "old-pass-1"],
+)
+@pytest.mark.asyncio
+async def test_password_rotate_drops_vendor_text_that_repeats_a_password(
+    echo: str, secrets: AsyncMock
+) -> None:
+    del secrets
+    vendor_error = {
+        "message": f"The password {echo} does not meet the policy.",
+        "errorCause": [{"message": "Policy", "exceptionMessage": f"value={echo}"}],
+    }
+    connector = VcfOperationsConnector(credentials_loader=_stub_loader)
+    async with respx.mock(base_url=_BASE_URL) as mock:
+        mock.post(_ACQUIRE_PATH).respond(200, json={"token": "tok"})
+        mock.put(f"{_ACCOUNTS}/acct-1/password").respond(422, json=vendor_error)
+        with pytest.raises(ConnectorUpstreamError) as info:
+            await connector.fleet_password_rotate(_operator(), _StubTarget(), dict(_ROTATE_PARAMS))
+    await connector.aclose()
+
+    exc = info.value
+    assert exc.http_status == 422
+    assert exc.upstream_message is None
+    assert exc.__context__ is None
+    assert exc.__cause__ is None
+    result = result_connector_error("vrops.fleet.password.rotate", exc, 1.0)
+    for secret in ("new-pass-2", "old-pass-1"):
+        assert secret not in str(exc)
+        assert secret not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_password_rotate_keeps_vendor_text_without_a_password(secrets: AsyncMock) -> None:
+    del secrets
+    connector = VcfOperationsConnector(credentials_loader=_stub_loader)
+    async with respx.mock(base_url=_BASE_URL) as mock:
+        mock.post(_ACQUIRE_PATH).respond(200, json={"token": "tok"})
+        mock.put(f"{_ACCOUNTS}/acct-1/password").respond(
+            400,
+            json={
+                "message": "Bad request.",
+                "errorCause": [{"message": "Too short", "exceptionMessage": "min 15"}],
+            },
+        )
+        with pytest.raises(ConnectorUpstreamError) as info:
+            await connector.fleet_password_rotate(_operator(), _StubTarget(), dict(_ROTATE_PARAMS))
+    await connector.aclose()
+    assert info.value.upstream_message == "Bad request.; Too short — min 15"
+
+
+@pytest.mark.asyncio
+async def test_password_rotate_401_keeps_the_login_header_and_drops_the_body(
+    secrets: AsyncMock,
+) -> None:
+    del secrets
+    connector = VcfOperationsConnector(credentials_loader=_stub_loader)
+    async with respx.mock(base_url=_BASE_URL) as mock:
+        mock.post(_ACQUIRE_PATH).respond(200, json={"token": "tok"})
+        mock.put(f"{_ACCOUNTS}/acct-1/password").respond(
+            401, json={"message": "new-pass-2 rejected"}
+        )
+        with pytest.raises(httpx.HTTPStatusError) as info:
+            await connector.fleet_password_rotate(_operator(), _StubTarget(), dict(_ROTATE_PARAMS))
+    await connector.aclose()
+
+    exc = info.value
+    assert exc.response.status_code == 401
+    assert exc.response.content == b""
+    assert exc.request.content == b""
+    assert exc.request.method == "PUT"
+    assert exc.request.headers["Authorization"].endswith("tok")
+    assert exc.__context__ is None
+    assert "new-pass-2" not in str(exc)
 
 
 # --- status read ------------------------------------------------------------

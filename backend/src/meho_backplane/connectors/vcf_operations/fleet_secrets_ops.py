@@ -320,6 +320,7 @@ VROPS_FLEET_CERTIFICATE_REPLACE_OP = VropsTypedOp(
             "certificateChain": {
                 "type": "string",
                 "minLength": 1,
+                "not": {"pattern": "PRIVATE KEY"},
                 "description": (
                     "The signed certificate and its chain, PEM text. Needed for EXTERNAL_CA. "
                     "Never a private key: MEHO refuses one."

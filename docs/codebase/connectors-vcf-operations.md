@@ -397,8 +397,13 @@ vendor's VCF Operations 9.1.0 and 9.1.1 API files (both have all six calls).
   operator's identity, and puts them only in the vendor request body. The
   operation is pinned as a credential write (`_CREDENTIAL_WRITE_OPS`), so the
   approval input is stored encrypted, the broadcast shows no params, and the
-  flight recorder keeps no request body. The certificate replacement refuses a
-  `certificateChain` that holds a private key.
+  flight recorder keeps no request body. An error answer of the password
+  change is handled like the other password changes in MEHO
+  (`connectors/_shared/secret_echo.py`): the error keeps the status and the
+  vendor's message, but no vendor message that holds one of the two passwords,
+  and no request body. The parameter schema of the certificate replacement
+  refuses a `certificateChain` that holds a private key, so the check runs
+  before the call waits for approval; the handler checks again.
 - **Vendor jobs.** Both changes return as soon as the vendor accepted the
   request: `status: accepted`, the vendor `request_id`, and
   `status_read: vrops.fleet.request.get`. They never say the work is done.
@@ -407,8 +412,10 @@ vendor's VCF Operations 9.1.0 and 9.1.1 API files (both have all six calls).
   requests, so a start cannot look for one by itself. A caller that has the id
   of an earlier start passes it as `previous_request_id`. If that request has
   not ended (or its state is not known), the start returns
-  `status: already_running` with that id and starts nothing. This is a help,
-  not a lock: two callers can both read before either starts.
+  `status: already_running` with that id and starts nothing. A state MEHO does
+  not know counts as running on purpose: for a change that waits for
+  approval, starting nothing is the safe choice. This is a help, not a lock:
+  two callers can both read before either starts.
 - **A lost reply.** Do not start again blindly. For a certificate, read
   `vrops.fleet.certificate.list` (a new `expiryDate` means it worked). For a
   password, read `vrops.fleet.password.list` (a new `expiryDate`); a second

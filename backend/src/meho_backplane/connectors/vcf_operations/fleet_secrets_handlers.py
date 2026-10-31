@@ -44,12 +44,14 @@ from urllib.parse import quote
 import httpx
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.secret_echo import mentions_secret, response_text
 from meho_backplane.connectors._shared.vault_creds import (
     load_param_secret_data,
     strip_credential_value,
 )
 from meho_backplane.connectors._shared.vcf_auth import SessionLoginError
 from meho_backplane.connectors.adapters.http import SsrfBlockedError
+from meho_backplane.connectors.base import ConnectorUpstreamError
 from meho_backplane.connectors.vcf_operations.fleet_secrets_checks import (
     ENDED_OUTCOMES,
     parse_password_ref,
@@ -140,6 +142,8 @@ PASSWORD_ROW_FIELDS: Final[tuple[str, ...]] = (
 )
 
 _UNREACHABLE_STATUSES: Final = frozenset({502, 503, 504})
+_MAX_VENDOR_TEXT: Final = 300
+_MAX_VENDOR_MESSAGES: Final = 3
 _STATUS_READ: Final = "vrops.fleet.request.get"
 
 
@@ -223,6 +227,58 @@ def _error_text(payload: dict[str, Any]) -> str | None:
         if text:
             parts.append(text)
     return "; ".join(parts) or None
+
+
+def _vendor_messages(response: httpx.Response) -> list[str]:
+    """The vendor's error texts (``message``, then the ``errorCause`` texts), each cut short."""
+    try:
+        body = response.json()
+    except (ValueError, httpx.StreamError):
+        return []
+    if not isinstance(body, dict):
+        return []
+    message = body.get("message")
+    texts = [message if isinstance(message, str) else None, _error_text(body)]
+    return [text[:_MAX_VENDOR_TEXT] for text in texts if text][:_MAX_VENDOR_MESSAGES]
+
+
+def _password_change_error(
+    exc: httpx.HTTPStatusError, *, op_id: str, secrets: tuple[str, ...]
+) -> Exception:
+    """The error the password change raises for a vendor error answer.
+
+    It holds no raw vendor bytes and no request body:
+
+    * 401: a new :class:`httpx.HTTPStatusError` with an empty response. Its
+      request keeps only the method, the URL and the ``Authorization``
+      header, so the dispatcher can drop the old login and retry once.
+    * Any other status: :class:`ConnectorUpstreamError` with the status and
+      the vendor's error texts. When any vendor text holds one of *secrets*,
+      all vendor text is dropped.
+
+    The caller raises the result after its ``except`` block, so the new error
+    does not keep the original one as context.
+    """
+    status = exc.response.status_code
+    auth = exc.request.headers.get("Authorization")
+    request = httpx.Request(
+        exc.request.method, exc.request.url, headers={"Authorization": auth} if auth else None
+    )
+    if status == 401:
+        return httpx.HTTPStatusError(
+            f"VCF Operations answered HTTP 401 for {request.method} {request.url.path}",
+            request=request,
+            response=httpx.Response(401, request=request),
+        )
+    messages = _vendor_messages(exc.response)
+    texts = [response_text(exc.response), *messages]
+    if any(mentions_secret(texts, secret) for secret in secrets if secret):
+        messages = []
+    return ConnectorUpstreamError(
+        f"{op_id}: VCF Operations answered HTTP {status} when MEHO tried to change the password.",
+        http_status=status,
+        upstream_message="; ".join(messages) or None,
+    )
 
 
 def _request_view(payload: dict[str, Any], *, request_id: Any, checked_at: str) -> dict[str, Any]:
@@ -455,23 +511,30 @@ class VropsFleetSecretsHandlers(_Base):
         running = await self._still_running(operator, target, params, op_id=op_id)
         if running is not None:
             return running
-        body: dict[str, Any] = {
-            "currentPassword": await self._read_password_ref(
+        passwords = (
+            await self._read_password_ref(
                 operator, target, "current_password_ref", params["current_password_ref"]
             ),
-            "newPassword": await self._read_password_ref(
+            await self._read_password_ref(
                 operator, target, "new_password_ref", params["new_password_ref"]
             ),
-        }
+        )
+        body: dict[str, Any] = {"currentPassword": passwords[0], "newPassword": passwords[1]}
         if params.get("userName"):
             body["userName"] = params["userName"]
-        payload = await self._post_json(
-            target,
-            PASSWORD_ROTATE_PATH.format(passwordAccountKey=account_key),
-            operator=operator,
-            verb="PUT",
-            json=body,
-        )
+        error: Exception | None = None
+        try:
+            payload = await self._post_json(
+                target,
+                PASSWORD_ROTATE_PATH.format(passwordAccountKey=account_key),
+                operator=operator,
+                verb="PUT",
+                json=body,
+            )
+        except httpx.HTTPStatusError as exc:
+            error = _password_change_error(exc, op_id=op_id, secrets=passwords)
+        if error is not None:
+            raise error
         return _accepted(payload, op_id=op_id)
 
     async def fleet_request_get(

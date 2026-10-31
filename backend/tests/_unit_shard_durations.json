@@ -1012,6 +1012,7 @@
   "tests/test_ui_agents.py": 48.92,
   "tests/test_ui_agents_views.py": 0.03,
   "tests/test_ui_approvals.py": 159.52,
+  "tests/test_ui_approvals_in_order.py": 22.32,
   "tests/test_ui_audit.py": 72.07,
   "tests/test_ui_audit_drawer.py": 31.11,
   "tests/test_ui_audit_drawer_trace.py": 14.96,

@@ -621,7 +621,15 @@ async def test_registered_ops_are_typed_safe_and_documented(
         .all()
     )
     assert {r.op_id for r in rows} == {op.op_id for op in VR_TYPED_OPS}
-    assert {r.op_id for r in rows} == {"vr.about", "vr.api_file.get"}
+    assert {r.op_id for r in rows} == {
+        "vr.about",
+        "vr.api_file.get",
+        "vr.pairing.list",
+        "vr.replication.list",
+        "vr.replication.issues",
+        "vr.vm.check",
+        "vr.task.get",
+    }
     for row in rows:
         assert row.source_kind == "typed"
         assert row.handler_ref is not None

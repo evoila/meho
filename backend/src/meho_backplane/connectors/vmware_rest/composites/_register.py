@@ -6,7 +6,7 @@
 # this change (~1490 lines); splitting the metadata table is out of scope for
 # the #3349 governed-subop wiring.
 
-"""``register_vmware_composite_operations`` -- registrar for the 71 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 92 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -43,7 +43,7 @@ login), so it auto-parks for agent / service principals while a human
 seat still executes it immediately; see its caution row below. (The
 former ``host.network_uplinks`` and ``host.vsan_health`` reads were
 re-shipped as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 55 write
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 72 write
 composites (T6 / #509, single-VM ``vm.power`` / #2301, the guest-ops
 write ``vm.guest.file.write`` / #3100, the mutating
 VI-JSON ``vm.disk.grow`` / #2893, the folder-template
@@ -60,11 +60,14 @@ later Supervisor / #3281, storage-policy, content-library / #3495 and
 resource-pool / #3505 write families, the #3339 teardown deletes, the
 DRS rule delete ``cluster.drs_rule.delete``, the VM snapshot create +
 delete ``vm.snapshot.create`` / ``vm.snapshot.delete``, the licence assign
-``license.assign``, and the two alarm changes ``alarm.acknowledge`` /
-``alarm.reset`` / #4383) are all ``requires_approval=True``.
-33 pin ``safety_level="dangerous"`` (T4's default, passed explicitly for
-clarity at the call site; the helper would default to it anyway). 11 pin
-``safety_level="caution"`` -- the VM snapshot create ``vm.snapshot.create``,
+``license.assign``, the two alarm changes ``alarm.acknowledge`` /
+``alarm.reset`` / #4383, and the five host membership changes
+``host.add`` / ``host.move`` / ``host.connect`` / ``host.disconnect`` /
+``host.remove`` / #4349) are all ``requires_approval=True``.
+41 pin ``safety_level="dangerous"`` (T4's default, passed explicitly for
+clarity at the call site; the helper would default to it anyway). 18 pin
+``safety_level="caution"`` -- the host reconnect ``host.connect`` / #4349,
+the VM snapshot create ``vm.snapshot.create``,
 the two alarm changes ``alarm.acknowledge`` / ``alarm.reset`` / #4383 (they
 change only the state of alarms), the datastore directory create
 ``datastore.dir.create`` / #3339, the reversible VM allocation write
@@ -72,15 +75,19 @@ change only the state of alarms), the datastore directory create
 ``resource_pool.create`` + the VM-Host affinity
 ``cluster.drs_vm_host_rule.create``, plus ``namespace.create`` /
 ``storage_policy.create`` / ``content_library.subscribed.create`` /
-``content_library.subscribed.sync`` (``resource_pool.delete`` is a
-``dangerous`` reparent, not a destroy). 11 pin
+``content_library.subscribed.sync`` / ``content_library.create`` /
+``content_library.item.upload`` / ``vm.tools.installer.unmount`` /
+``vm.cdrom.mount_library_iso`` / ``vm.cdrom.unmount_library_iso``
+(``resource_pool.delete`` is a
+``dangerous`` reparent, not a destroy). 13 pin
 ``safety_level="destructive"`` -- ``vm.destroy`` / #3198 (the first
 destructive op -- the governed-delete tier, decision
 ``docs/decisions/governed-delete-operations.md``), ``namespace.delete``,
 ``storage_policy.delete``, the six #3339 teardown deletes
 (``network.portgroup.delete``, ``host.standard_portgroup.delete``,
 ``folder.delete``, ``datastore.file.delete``, ``content_library.delete``,
-``content_library.item.delete``), ``cluster.drs_rule.delete``, the DRS group
+``content_library.item.delete``), the host remove ``host.remove`` / #4349,
+``cluster.drs_rule.delete``, the DRS group
 delete ``cluster.drs_group.delete`` and the VM snapshot delete
 ``vm.snapshot.delete``. The DRS group member change
 ``cluster.drs_group.members.set`` is ``caution``. (The

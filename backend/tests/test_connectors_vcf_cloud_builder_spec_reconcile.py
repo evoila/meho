@@ -87,7 +87,7 @@ def test_version_detection_uses_the_about_call() -> None:
     assert f"GET:{ABOUT_PATH}" in READ_CALLS
 
 
-@pytest.mark.parametrize(("spec_dir", "list_file"), _REFERENCE_LISTS, ids=lambda v: str(v))
+@pytest.mark.parametrize(("spec_dir", "list_file"), _REFERENCE_LISTS, ids=str)
 def test_cloud_builder_calls_are_in_the_reference_list_of_each_version(
     spec_dir: str, list_file: str
 ) -> None:

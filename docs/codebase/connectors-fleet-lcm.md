@@ -49,11 +49,12 @@ happening, what can we upgrade to" drill path across five groups:
 51-op spec is pinnable, but the read core is hand-coded typed (the harbor / nsx
 #2358 pattern) precisely so it is live on a fresh boot with **no** operational
 `meho connector ingest` + `enable_reads` step — merging the read core makes it
-work, with no runbook the operator must still run. The wider surface
-(the full 51-op spec as `source_kind="ingested"` breadth + the component /
-upgrade / task **writes**) remains a follow-up, enabled operationally through
-the generic review flow (`ReviewService.enable_reads` over an ingest of the same
-pinned `fleet-lcm-openapi.yaml`). Registering this real `HttpConnector` subclass
+work, with no runbook the operator must still run. Six lifecycle changes
+ship the same way (see "Lifecycle changes" below). The rest of the spec (as
+`source_kind="ingested"` breadth, including the component and system writes)
+can be enabled operationally through the generic review flow
+(`ReviewService.enable_reads` over an ingest of the same pinned
+`fleet-lcm-openapi.yaml`). Registering this real `HttpConnector` subclass
 is also the load-bearing prerequisite for those future ingested rows to become
 dispatchable (a bare `GenericRestConnector` auto-shim is non-dispatchable — the
 `VmwareRestConnector` pattern).
@@ -62,6 +63,82 @@ dispatchable (a bare `GenericRestConnector` auto-shim is non-dispatchable — th
 below) are unit-tested end to end against a respx-mocked service and checked
 against the vendor files. A separate lab proof runs the login on VCF 9.1.0 and
 9.1.1.
+
+## Lifecycle changes (VCF 9.1 and newer)
+
+Six typed changes, written by hand, live on a fresh install with no spec
+ingest. Each one waits until a second person approves it
+(`requires_approval: true`). An agent may run a `caution` change after
+approval; a `dangerous` change also needs a grant. Every op here is on the
+`fleet-lcm-9.0` connector, which serves VCF 9.1.0 and 9.1.1 (range
+`>=9.1,<10.0`); a 9.0 fleet resolves to the older `fleet-rest` connector.
+
+| Operation | What it does | Vendor call | Returns | Risk | Versions |
+|---|---|---|---|---|---|
+| `fleet-lcm.task.retry` | Retry a failed task from the stage that failed. | `POST /v1/tasks/{taskId}?action=retry` | `accepted` + task id + status read | dangerous | 9.1+ |
+| `fleet-lcm.task.cancel` | Cancel a running task. The running stage ends first; nothing is undone. | `POST /v1/tasks/{taskId}?action=cancel` | `accepted` + task id + status read | dangerous | 9.1+ |
+| `fleet-lcm.upgrade-plan.create` | Check the plan spec, then create the plan. | `POST /v1/upgrade-plans/validations`, then `POST /v1/upgrade-plans` | the steps, the new plan | caution | 9.1+ |
+| `fleet-lcm.upgrade-plan.precheck` | Start the pre-check of a plan. | `POST /v1/upgrade-plans/{planId}?action=precheck` | `accepted` (or `already_running`) + task id | caution | 9.1+ |
+| `fleet-lcm.upgrade-plan.apply` | Start the upgrades of a plan. | `POST /v1/upgrade-plans/{planId}?action=apply` | `accepted` (or `already_running`) + task id | dangerous | 9.1+ |
+| `fleet-lcm.depot.sync` | Sync the depot metadata (the release catalog) now. | `POST /v1/depot-metadata?action=sync` | `accepted` + task id | caution | 9.1+ |
+| `fleet-lcm.task.info` (read) | One task: the vendor task plus `state`, `progress`, `errors`. The status read of every job. | `GET /v1/tasks/{taskId}` | task + state | safe | 9.1+ |
+
+The issue that asked for these named the status read `fleet-lcm.task.get`
+and used `upgrade_plan` in the ids. The connector already had
+`fleet-lcm.task.info` for the same call, and its ids use `upgrade-plan`, so
+the existing read was extended and the ids keep that pattern.
+
+**Vendor jobs.** Retry, cancel, pre-check, apply and depot sync start a job
+at the vendor and return at once:
+
+- The answer says `status: accepted`, gives the vendor's `task_id`, and names
+  the status read (`status_read: {op_id: fleet-lcm.task.info, params:
+  {taskId}}`). It never says the work is done.
+- `fleet-lcm.task.info` gives `state` (queued, running, succeeded, failed,
+  canceled, unknown), `progress` (stages done of stages total, and the stage
+  that runs now), and `errors` (the `ERROR` texts of the task, its stages and
+  its sub-tasks). The caller reads it until the job ends.
+- When the service does not answer (no connection, a timeout, or HTTP 502 /
+  503 / 504, for example while it upgrades itself), the read says `state:
+  not_reachable` with the task id, the reason and `checked_at`. It never says
+  `failed`. MEHO keeps no job state between calls.
+- When the login expired, the read gets a `401`; the dispatcher logs in again
+  and reads once more.
+- Before a pre-check or an apply, MEHO reads the plan. When its `executions`
+  list a run of the same kind (`PRECHECK` or `UPGRADE`) that has not ended,
+  MEHO returns that run's task id as `already_running` and starts nothing.
+  This is a help, not a lock: two callers can both read before either starts.
+- The depot sync has no MEHO check: the vendor runs one sync at a time and
+  returns the running sync's task when one runs.
+- After a lost reply, do not start again blindly. Read first: the plan
+  (`fleet-lcm.upgrade-plan.info`, its `executions`) for pre-check and apply,
+  the task (`fleet-lcm.task.info`) for retry and cancel, `fleet-lcm.task.list`
+  for the depot sync, and `fleet-lcm.upgrade-plan.list` for create.
+- Use MEHO's async mode for a start (`async: true`, see
+  [`async-governed-dispatch.md`](async-governed-dispatch.md)): MEHO stores the
+  start's answer, with the task id, under a run handle, so a lost reply does
+  not lose the task id.
+
+**Create, in two steps.** `fleet-lcm.upgrade-plan.create` posts the spec to
+the vendor's plan check (itself a job), reads that job until it ends (at most
+one minute), and creates the plan only when the check passed (no `ERROR` in
+`failedValidations`, no failed job). The answer lists `steps`, `steps_ran`,
+`step_failed` and `steps_not_run`. A failed check, or a check still running
+after the wait, creates nothing. A create that fails after the check passed
+lists the check as run and the create as failed with the vendor's text;
+nothing is undone. The vendor's create updates a matching plan, so a second
+call does not make a second plan.
+
+**No secrets.** No input takes a password. The vendor's `userInputSpec` can
+carry a VSP cluster password for a VCF Automation upgrade; MEHO offers only
+the non-secret fields (`additionalProperties: false`), so such an upgrade
+that needs a new cluster password is not possible through MEHO yet. The
+answers carry vendor task data only.
+
+Code: `lifecycle_ops.py` (metadata, schemas, `llm_instructions`),
+`lifecycle_handlers.py` (bodies and the status read), `op_types.py` (the
+shared `FleetLcmTypedOp` record). Tests:
+[`test_connectors_fleet_lcm_lifecycle.py`](../../backend/tests/test_connectors_fleet_lcm_lifecycle.py).
 
 ## Key types
 
@@ -177,8 +254,8 @@ The typed read-core ops dispatch through `meho_backplane.operations.dispatch`
 (via `POST /api/v1/operations/call` or MCP `call_operation`): the dispatcher
 resolves the persisted `module.ClassName.method` handler_ref to the connector's
 bound-method shim, threads `operator` / `target` / `params`, and the handler
-issues an authenticated `GET` on this connector's client — so the read rides
-`auth_headers` (the Bearer token). `execute()` is the G0.6
+issues an authenticated `GET` (or, for the six changes, `POST`) on this
+connector's client — so every call rides `auth_headers` (the Bearer token). `execute()` is the G0.6
 ABC-compatibility shim (builds a synthetic `Operator` and forwards to
 `dispatch`); it remains the path for any future `source_kind="ingested"` op.
 
@@ -225,10 +302,14 @@ names its main fields, each parameter schema carries one example call under
 ## Spec reconcile lane
 
 [`backend/tests/test_connectors_fleet_lcm_spec_reconcile.py`](../../backend/tests/test_connectors_fleet_lcm_spec_reconcile.py)
-asserts every hand-coded `GET:/path` the typed read core dispatches — the 13
-`/v1/*` path templates in `_paths.py` plus the connector's
-`_FLEET_LCM_HEALTH_PATH` probe (introspected from the live constants — the
-#2944 pattern) — is served by the pinned `fleet-lcm-9.0/fleet-lcm-openapi.yaml`.
+asserts every hand-coded `METHOD:/path` the typed ops dispatch — the 13 `GET`
+templates and the 7 `POST` templates (named `_*_POST_PATH`) in `_paths.py`,
+plus the connector's `_FLEET_LCM_HEALTH_PATH` probe (introspected from the
+live constants — the #2944 pattern) — is served by the pinned
+`fleet-lcm-9.0/fleet-lcm-openapi.yaml` (9.1.0) and by the 9.1.1 file next to
+it (`fleet-lcm-openapi-9.1.1.yaml`). The `?action=` part of a `POST` template
+is part of the vendor's own path key, so it compares byte for byte. CI
+requires both files.
 The typed health op and the probe share `/v1/health`; the pin asserts that link
 so the two never drift. **No server-base fold** is applied: the spec's server
 url `https://vcf.broadcom.com/fleet-lcm` is *absolute*, so `parse_openapi` does
@@ -270,17 +351,24 @@ copy. The 9.1 check skips until that file is on the shelf.
 - **The VCF Operations token is not released.** After the exchange MEHO does
   not call `token/release`. VCF Operations ends an unused token after six
   hours.
-- **Read core only; ingested breadth + writes are a follow-up.** The 13-op
-  typed read core dispatches on a fresh boot. The wider 51-op `/v1/*` surface
-  (as `source_kind="ingested"` breadth) and the component / upgrade / task
-  writes are enabled operationally through the generic review flow
+- **Typed ops: the read core and six changes.** The rest of the 51-op `/v1/*`
+  surface (as `source_kind="ingested"` breadth, including the component and
+  system writes) is enabled operationally through the generic review flow
   (`meho connector ingest` of `fleet-lcm-openapi.yaml` → `ReviewService.enable_reads`),
   not shipped here — see the operator runbook
   [`docs/cross-repo/fleet-lcm-onboarding.md`](../cross-repo/fleet-lcm-onboarding.md).
+- **The lifecycle changes are not yet proved live.** They follow the vendor
+  file and are tested with mocked answers. A separate lab proof runs them on
+  VCF 9.1.0 and 9.1.1. The vendor file does not list the task `type` values
+  or say which `resourceId` a plan's tasks carry, so MEHO does not rely on
+  them; the running-job check reads the plan's `executions` instead.
+- **A VCF Automation upgrade that needs a new VSP cluster password** cannot
+  be planned through MEHO yet (no password input is offered).
 
 ## References
 
 - Typed read-core Task: <https://github.com/evoila/meho/issues/3047>
+- Lifecycle changes Task: <https://github.com/evoila/meho/issues/4477>
 - Modern-impl skeleton Task: <https://github.com/evoila/meho/issues/3036>
 - Legacy re-band + resolution test Task: <https://github.com/evoila/meho/issues/3037>
 - Parent initiative: <https://github.com/evoila/meho/issues/3033>

@@ -34,16 +34,14 @@ not matter for the "resolve at all" guarantee, and the versioned entries
 carry the real per-band matching once a version is known.
 
 This package registers a curated **13-op typed read core** (#3047,
-:mod:`.typed_ops`) via :func:`register_typed_op_registrar`, so a VCF Fleet
-9.x target dispatches a modern ``/v1/*`` read on a fresh boot with zero
-catalog ingest — the read core that restores 9.0 fleet dispatch under the
-"modern default now" resolver decision. The wider surface (the full 51-op
-``fleet-lcm-openapi.yaml`` as ``source_kind="ingested"`` breadth plus the
-writes) is a follow-up, enabled operationally through the generic review
-flow (``ReviewService.enable_reads`` over ``meho connector ingest``);
-registering this hand-rolled :class:`HttpConnector` subclass is the
-load-bearing prerequisite for those ingested rows to become dispatchable
-(a bare ``GenericRestConnector`` auto-shim is non-dispatchable), the
+:mod:`.typed_ops`) and **six lifecycle changes** that wait for approval
+(:mod:`.lifecycle_ops`: retry and cancel a task; create, pre-check and apply
+an upgrade plan; sync the depot) via :func:`register_typed_op_registrar`, so
+a VCF Fleet 9.1 or newer target dispatches them on a fresh boot with zero
+catalog ingest. The rest of ``fleet-lcm-openapi.yaml`` can be ingested as
+``source_kind="ingested"`` rows; registering this hand-rolled
+:class:`HttpConnector` subclass is what makes those rows dispatchable (a
+bare ``GenericRestConnector`` auto-shim is non-dispatchable), the
 :class:`~meho_backplane.connectors.vmware_rest.connector.VmwareRestConnector`
 pattern.
 """

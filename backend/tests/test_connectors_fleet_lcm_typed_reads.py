@@ -26,7 +26,8 @@ dispatches a modern ``/v1/*`` read op end-to-end. Coverage:
   ``source_kind="typed"``, ``is_enabled=True`` (enabled at register time —
   the "fresh boot, zero ingest" property), ``safe`` / ungated / ``read-only``,
   with a canonical-key ``llm_instructions`` blob; their 5 groups land
-  ``review_status="enabled"``; no write op is registered.
+  ``review_status="enabled"``. The six lifecycle changes in the same table
+  are tested in :mod:`tests.test_connectors_fleet_lcm_lifecycle`.
 
 Mirrors :mod:`tests.test_connectors_harbor_typed_reads` for the
 dispatch-lifecycle + embedding-stub plumbing; the credential seam replaces
@@ -339,7 +340,8 @@ async def test_each_typed_op_dispatches_zero_catalog(
         )
 
     assert result.status == "ok", result.error
-    assert result.result == payload
+    # task.info adds MEHO's state/progress/errors to the vendor task.
+    assert {key: result.result[key] for key in payload} == payload
     assert route.called and route.call_count == 1
     assert route.calls[0].request.headers.get("authorization") == f"Bearer {_JWT}"
 
@@ -573,9 +575,13 @@ async def test_registered_ops_are_visible_to_search_operations(
 # ---------------------------------------------------------------------------
 
 
-def test_typed_ops_table_is_exactly_the_read_core() -> None:
-    assert {op.op_id for op in FLEET_LCM_TYPED_OPS} == _EXPECTED_OP_IDS
-    assert len(FLEET_LCM_TYPED_OPS) == 13
+def _read_ops() -> list[Any]:
+    return [op for op in FLEET_LCM_TYPED_OPS if op.safety_level == "safe"]
+
+
+def test_typed_ops_table_has_exactly_the_read_core() -> None:
+    assert {op.op_id for op in _read_ops()} == _EXPECTED_OP_IDS
+    assert len(_read_ops()) == 13
 
 
 def test_every_group_key_has_a_when_to_use() -> None:
@@ -626,9 +632,9 @@ def test_each_op_parameter_schema_disallows_additional_properties(op_id: str) ->
     assert op.parameter_schema.get("additionalProperties") is False
 
 
-def test_no_write_or_mutating_op_is_registered() -> None:
-    """Read-only core: no create/write op ships here (writes are a #3047 follow-up)."""
-    for op in FLEET_LCM_TYPED_OPS:
+def test_no_read_has_a_write_name_or_tag() -> None:
+    """The safe reads carry no write word and no write tag."""
+    for op in _read_ops():
         assert not any(
             token in op.op_id for token in (".create", ".delete", ".update", ".set", ".put")
         )

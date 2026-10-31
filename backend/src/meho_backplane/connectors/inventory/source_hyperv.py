@@ -34,7 +34,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
-from meho_backplane.connectors.migration.adapter_kit import (
+from meho_backplane.connectors.inventory.adapter_kit import (
     ChildReadError,
     InventoryBuilder,
     bytes_to_gb,
@@ -47,7 +47,7 @@ from meho_backplane.connectors.migration.adapter_kit import (
     target_name,
     usable_bios_uuid,
 )
-from meho_backplane.connectors.migration.contracts import (
+from meho_backplane.connectors.inventory.contracts import (
     Disk,
     IdentityHints,
     MissingReason,

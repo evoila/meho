@@ -24,7 +24,7 @@ stores it. This module holds what all adapters share:
 * :func:`store_inventory` stores the envelope whole and returns the short
   answer with the handle id. The inventory is always stored, also when it
   is small, so every adapter answer has a handle that
-  ``migration.inventory.csv`` and the later assessment steps can read.
+  ``inventory.export`` and the later assessment steps can read.
 
 Text from source systems (names, OS names, labels) is data. It goes into
 record fields and into child-call parameters, where each child operation
@@ -41,7 +41,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 from uuid import uuid4
 
-from meho_backplane.connectors.migration.contracts import (
+from meho_backplane.connectors.inventory.contracts import (
     InventoryCounts,
     InventoryEnvelope,
     InventorySource,
@@ -297,7 +297,7 @@ async def store_inventory(
 
     The envelope is a document record of the result handle store, the same
     record kind the JSONFlux reducer writes for a large single object, so
-    ``migration.inventory.csv`` and ``result_query`` read it. Raises
+    ``inventory.export`` and ``result_query`` read it. Raises
     :class:`RuntimeError` when the store did not keep it.
     """
     envelope = builder.envelope()

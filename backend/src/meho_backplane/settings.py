@@ -1479,6 +1479,15 @@ class Settings(BaseModel):
     gsm_wif_subject_token_type: str = Field(
         default="urn:ietf:params:oauth:token-type:jwt", min_length=1
     )
+    # Google Cloud projects whose Secret Manager secrets an operation may
+    # name in a parameter (for example ``password_secret_ref:
+    # gsm:<project>/<secret>``). Comma-separated project ids, whitespace
+    # ignored. Empty (the default) refuses every ``gsm:`` secret named in a
+    # parameter, and on a ``credentialBackend=gsm`` install every schemeless
+    # one too. A target's own ``secret_ref`` is not affected. Read through
+    # :attr:`gsm_param_allowed_project_set`. Set via
+    # ``GSM_PARAM_ALLOWED_PROJECTS``.
+    gsm_param_allowed_projects: str = Field(default="")
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -2225,6 +2234,13 @@ class Settings(BaseModel):
     vault_kv_folder_max_keys: int = Field(default=500, ge=1, le=10000)
 
     @property
+    def gsm_param_allowed_project_set(self) -> frozenset[str]:
+        """The project ids in :attr:`gsm_param_allowed_projects`, as a set."""
+        return frozenset(
+            entry.strip() for entry in self.gsm_param_allowed_projects.split(",") if entry.strip()
+        )
+
+    @property
     def keycloak_discovery_base(self) -> str:
         """Realm base URL for discovery and token calls, without a trailing slash.
 
@@ -2679,6 +2695,7 @@ def get_settings() -> Settings:
             os.environ.get("GSM_WIF_SUBJECT_TOKEN_TYPE", "").strip()
             or "urn:ietf:params:oauth:token-type:jwt"
         ),
+        gsm_param_allowed_projects=os.environ.get("GSM_PARAM_ALLOWED_PROJECTS", "").strip(),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(

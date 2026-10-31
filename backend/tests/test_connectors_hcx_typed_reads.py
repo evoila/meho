@@ -512,7 +512,10 @@ async def test_job_get_reads_one_job(_stub_embedding: AsyncMock, session: AsyncS
 
     assert result.status == "ok", result.error
     assert route.call_count == 1
-    assert result.result == job
+    assert {key: result.result[key] for key in job} == job
+    assert result.result["outcome"] == "succeeded"
+    assert result.result["error"] is None
+    assert result.result["checked_at"]
 
 
 @pytest.mark.asyncio

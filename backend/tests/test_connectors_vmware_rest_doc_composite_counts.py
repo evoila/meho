@@ -1,106 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Keep the composite counts in ``docs/codebase/connectors-vmware-rest.md`` true.
-
-The doc states how many vmware-rest composites exist, and how many are reads
-and writes, in a few places. Those numbers went stale more than once when new
-composites landed. This test reads each count from the doc and compares it to
-the ``_COMPOSITES`` registry tuple, so a new composite fails CI until the doc
-is updated too.
+"""Check that the read / write split of the vmware-rest composites adds up.
 
 A read is a composite with ``requires_approval=False``. That includes
 ``vm.guest.file.read``, which is ``caution`` but does not need approval.
+Every write needs approval and is never ``safe``.
+
+This test reads only the ``_COMPOSITES`` registry. The connector doc does
+not state how many composites exist, so nothing here reads the doc.
 """
 
 from __future__ import annotations
 
-import inspect
-import pathlib
-import re
 from collections import Counter
 
-import pytest
-
-from meho_backplane.connectors.vmware_rest.composites import _read
 from meho_backplane.connectors.vmware_rest.composites._register import _COMPOSITES
 
-_DOC = pathlib.Path(__file__).resolve().parents[2] / "docs/codebase/connectors-vmware-rest.md"
-
-_TOTAL = len(_COMPOSITES)
-_READS = sum(1 for spec in _COMPOSITES if not spec.requires_approval)
-_WRITES = _TOTAL - _READS
+_WRITES = sum(1 for spec in _COMPOSITES if spec.requires_approval)
 _WRITE_LEVELS = Counter(spec.safety_level for spec in _COMPOSITES if spec.requires_approval)
-
-#: Public ``async def`` handlers defined in ``_read.py`` itself (not imported into it).
-_READ_MODULE_HANDLERS = sorted(
-    name
-    for name, obj in vars(_read).items()
-    if name.endswith("_composite")
-    and inspect.iscoroutinefunction(obj)
-    and obj.__module__ == _read.__name__
-)
-
-
-def _doc_text() -> str:
-    # Join wrapped lines so a phrase split across two lines still matches.
-    return " ".join(_DOC.read_text(encoding="utf-8").split())
-
-
-#: (pattern, expected numbers in group order). Each pattern must match the doc
-#: at least once, and every match must carry the expected numbers.
-_COUNT_PHRASES: list[tuple[str, tuple[int, ...]]] = [
-    (r"plus (\d+) hand-authored composites", (_TOTAL,)),
-    (r"cross-spec workflows: (\d+) read composites", (_READS,)),
-    (r"\) and (\d+) write composites \(G3\.1-T6", (_WRITES,)),
-    (
-        r"`_COMPOSITES` tuple of (\d+) `_CompositeSpec` rows \((\d+) read .*?"
-        r"\+ (\d+) dangerous/destructive writes \+ (\d+) caution writes\)",
-        (
-            _TOTAL,
-            _READS,
-            _WRITE_LEVELS["dangerous"] + _WRITE_LEVELS["destructive"],
-            _WRITE_LEVELS["caution"],
-        ),
-    ),
-    (r"the (\d+) `vmware\.composite\.\*` rows", (_TOTAL,)),
-    (r"`source_kind=\"composite\"` — (\d+) reads \(", (_READS,)),
-    (r"and (\d+) writes, all `requires_approval=True`", (_WRITES,)),
-    (r"\((\d+) `safety_level=\"dangerous\"`;", (_WRITE_LEVELS["dangerous"],)),
-    (r"; (\d+) `safety_level=\"caution\"` —", (_WRITE_LEVELS["caution"],)),
-    (r"and (\d+) `safety_level=\"destructive\"` —", (_WRITE_LEVELS["destructive"],)),
-    (r"The (\d+) composites \((\d+) reads \+ (\d+) writes\)", (_TOTAL, _READS, _WRITES)),
-    (r"The (\d+) composites are hand-authored aggregators", (_TOTAL,)),
-]
-
-
-@pytest.mark.parametrize(("pattern", "expected"), _COUNT_PHRASES)
-def test_doc_composite_count_matches_registry(pattern: str, expected: tuple[int, ...]) -> None:
-    matches = re.findall(pattern, _doc_text())
-    assert matches, f"count phrase not found in {_DOC.name}: {pattern!r}"
-    for match in matches:
-        found = tuple(int(n) for n in ((match,) if isinstance(match, str) else match))
-        assert found == expected, (
-            f"{_DOC.name} says {found} for {pattern!r}, but the _COMPOSITES registry "
-            f"gives {expected}. Update the doc."
-        )
-
-
-def test_doc_read_module_handler_list_matches_module() -> None:
-    """The ``_read.py`` bullet names every handler in that file, and only those."""
-    match = re.search(
-        r"\(`composites/_read\.py`\) — (\d+) module-level `async def` handlers \((.*?)\)\.",
-        _doc_text(),
-    )
-    assert match, f"read-handler phrase not found in {_DOC.name}"
-    count, names_blob = match.groups()
-    names = sorted(re.findall(r"`(\w+)`", names_blob))
-    assert names == _READ_MODULE_HANDLERS, (
-        f"{_DOC.name} lists {names} for _read.py, but the module defines "
-        f"{_READ_MODULE_HANDLERS}. Update the doc."
-    )
-    assert int(count) == len(_READ_MODULE_HANDLERS)
-    assert len(_READ_MODULE_HANDLERS) > 0
 
 
 def test_registry_split_is_consistent() -> None:

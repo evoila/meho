@@ -41,9 +41,14 @@ Operations
 documentation that a running HCX Manager serves, so the vendor API files
 can be pinned. The other reads (``hcx.about``, site pairings, service
 meshes, appliances, the service mesh diagnostics, jobs, alerts and the
-inventory) live in :mod:`meho_backplane.connectors.hcx.typed_reads`. The
-migration operations (validate, start, list, cancel, mobility groups and the
-switchover window) live in :mod:`meho_backplane.connectors.hcx.migrations`.
+inventory) live in :mod:`meho_backplane.connectors.hcx.typed_reads`.
+The service mesh changes and the task read ``hcx.task.get`` live in
+:mod:`meho_backplane.connectors.hcx.service_mesh_writes`. The network
+extension operations (list, extend, unextend, Mobility Optimized
+Networking) live in :mod:`meho_backplane.connectors.hcx.network_extension`.
+The migration operations (validate, start, list, cancel, mobility groups
+and the switchover window) live in
+:mod:`meho_backplane.connectors.hcx.migrations`.
 
 Traces
 ------
@@ -437,6 +442,86 @@ class HcxConnector(HttpConnector):
         from meho_backplane.connectors.hcx.typed_reads import hcx_inventory_network_list_impl
 
         return await hcx_inventory_network_list_impl(self, operator, target, params)
+
+    async def service_mesh_create(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.service_mesh.create`` shim."""
+        from meho_backplane.connectors.hcx.service_mesh_writes import hcx_service_mesh_create_impl
+
+        return await hcx_service_mesh_create_impl(self, operator, target, params)
+
+    async def service_mesh_update(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.service_mesh.update`` shim."""
+        from meho_backplane.connectors.hcx.service_mesh_writes import hcx_service_mesh_update_impl
+
+        return await hcx_service_mesh_update_impl(self, operator, target, params)
+
+    async def service_mesh_resync(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.service_mesh.resync`` shim."""
+        from meho_backplane.connectors.hcx.service_mesh_writes import hcx_service_mesh_resync_impl
+
+        return await hcx_service_mesh_resync_impl(self, operator, target, params)
+
+    async def service_mesh_delete(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.service_mesh.delete`` shim."""
+        from meho_backplane.connectors.hcx.service_mesh_writes import hcx_service_mesh_delete_impl
+
+        return await hcx_service_mesh_delete_impl(self, operator, target, params)
+
+    async def task_get(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.task.get`` shim."""
+        from meho_backplane.connectors.hcx.service_mesh_writes import hcx_task_get_impl
+
+        return await hcx_task_get_impl(self, operator, target, params)
+
+    async def network_extension_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.network_extension.list`` shim."""
+        from meho_backplane.connectors.hcx.network_extension import (
+            hcx_network_extension_list_impl,
+        )
+
+        return await hcx_network_extension_list_impl(self, operator, target, params)
+
+    async def network_extension_extend(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.network_extension.extend`` shim."""
+        from meho_backplane.connectors.hcx.network_extension import (
+            hcx_network_extension_extend_impl,
+        )
+
+        return await hcx_network_extension_extend_impl(self, operator, target, params)
+
+    async def network_extension_unextend(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.network_extension.unextend`` shim."""
+        from meho_backplane.connectors.hcx.network_extension import (
+            hcx_network_extension_unextend_impl,
+        )
+
+        return await hcx_network_extension_unextend_impl(self, operator, target, params)
+
+    async def network_extension_mon_set(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.network_extension.mon.set`` shim."""
+        from meho_backplane.connectors.hcx.network_extension import (
+            hcx_network_extension_mon_set_impl,
+        )
+
+        return await hcx_network_extension_mon_set_impl(self, operator, target, params)
 
     async def migration_validate(
         self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]

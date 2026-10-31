@@ -390,22 +390,17 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   subscribed straight to the upstream VMware repo
   (`https://wp-content.vmware.com/v2/latest/lib.json`) and assign it as the
   Supervisor's TKr library via `#3281`'s enable spec
-  `default_kubernetes_service_content_library` field. The writes — for
-  example `subscribed.create` (`POST:/content/subscribed-library`, resolves the
+  `default_kubernetes_service_content_library` field. The writes (for
+  example `subscribed.create`: `POST:/content/subscribed-library`, resolves the
   `datastore` name to a `DATASTORE` storage backing, returns the new library
-  id) and `subscribed.sync`
-  (`POST:/content/subscribed-library/{libraryId}?action=sync`, respects
-  `on_demand`, asynchronous) — are registered **`caution` + `requires_approval=True`**
+  id) are registered **`caution` + `requires_approval=True`**
   (the issue's "write" tier: a write that always needs an approval decision,
   but not the `dangerous` intrinsic-risk of a VM/host mutation, and the first
-  `caution` composites on this connector). The reads — for example
-  `subscribed.status`
-  (`GET:/content/subscribed-library/{libraryId}`, surfaces `last_sync_time`,
-  the readiness signal) and `subscribed.items.list`
-  (item ids via `POST:/content/library/item?action=find`, then per-item
-  `GET:/content/library/item/{libraryItemId}`, JSONFlux-reduced) — are
-  registered `safe`. The writes ride the same `_write._write_sub_op` governance
-  seam the other write composites use (`dangerous` / `requires_approval=False`
+  `caution` composites on this connector). The reads (for example
+  `subscribed.status`: `GET:/content/subscribed-library/{libraryId}`, surfaces
+  `last_sync_time`, the readiness signal) are registered `safe`. The writes
+  ride the same `_write._write_sub_op` governance seam the other write
+  composites use (`dangerous` / `requires_approval=False`
   sub-op posture) and the reads use `_write._read_sub_op` /
   `_find_content_library_ids` (un-gated). **Delivery shape — thin typed
   composites, not the generic-ingested row:** the subscribe body carries a
@@ -4948,7 +4943,7 @@ Tests: `tests/test_connectors_vmware_rest_version_gate.py`.
 
 ### vSphere licences (`license.list`, `license.assigned.list`, `license.assign`)
 
-Three operations for the licences of a vCenter (part 1 of #4384). A licence
+The operations for the licences of a vCenter (part 1 of #4384). A licence
 key is a secret. **No result, log line, audit row, approval request or
 flight-recorder span holds a full key.**
 

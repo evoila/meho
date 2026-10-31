@@ -128,6 +128,7 @@ import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 
+from meho_backplane.auth.approval_sign_in import web_click_approval_auth
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
@@ -830,7 +831,7 @@ async def _decide(
             dispatch_status=dispatch_result.status,
             operator_sub=operator.sub,
         )
-        run = project_run_result(dispatch_result)
+        run = project_run_result(dispatch_result, parked_op_id=approval.op_id)
 
     context: dict[str, object] = {
         # The reason already passed validation in the service, so this
@@ -866,8 +867,14 @@ async def _commit_decision(
     try:
         async with sessionmaker() as db_session:
             if decision == "approved":
+                # The click is the proof that a person is present (#3979).
                 request = await approve_request(
-                    db_session, request_id, operator=operator, params=None, reason=reason
+                    db_session,
+                    request_id,
+                    operator=operator,
+                    params=None,
+                    reason=reason,
+                    approval_auth=web_click_approval_auth(operator),
                 )
             else:
                 request = await reject_request(

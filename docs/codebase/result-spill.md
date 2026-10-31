@@ -374,7 +374,7 @@ byte budget applies, and so does the terminal wire check (#3641).
 
 ### A handle for a small result (`result_handle` hint, #5143)
 
-Some operations take stored results as input: `migration.inventory.csv`
+Some operations take stored results as input: `inventory.export`
 reads inventories back by handle. A result under the limits normally comes
 back whole with **no** handle, so a one-VM inventory (about 1.7 KB) could not
 be passed on. An operation that other operations read by handle declares

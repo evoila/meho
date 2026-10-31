@@ -163,6 +163,20 @@ def _bound(label: str, hint: str) -> Callable[[ValidationError], tuple[str, str]
     return describe
 
 
+def _pattern(err: ValidationError) -> tuple[str, str]:
+    """Describe a pattern miss; add the field's own schema description to the hint.
+
+    The description often says where the right value comes from (for an id
+    field: the op that reads the id). It is schema text, not the caller's value.
+    """
+    hint = "change the value so it matches the pattern"
+    schema = err.schema if isinstance(err.schema, Mapping) else {}
+    description = schema.get("description")
+    if isinstance(description, str) and description.strip():
+        hint += f". Field: {description.strip()}"
+    return f"string matching pattern {_render(err.validator_value)}", hint
+
+
 def _fixed(expected: str, hint: str) -> Callable[[ValidationError], tuple[str, str]]:
     def describe(err: ValidationError) -> tuple[str, str]:
         return expected, hint
@@ -180,7 +194,7 @@ _DESCRIBERS: Final[dict[str, Callable[[ValidationError], tuple[str, str]]]] = {
         "no undeclared properties", "remove properties the op does not declare"
     ),
     "dependentRequired": _dependent,
-    "pattern": _bound("string matching pattern", "change the value so it matches the pattern"),
+    "pattern": _pattern,
     "format": _bound("string in format", "change the value to this format"),
     "minLength": _bound("string with at least this many characters:", "use a longer value"),
     "maxLength": _bound("string with at most this many characters:", "use a shorter value"),

@@ -8,8 +8,8 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 77 hand-authored composites
-that orchestrate cross-spec workflows: 19 read composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 82 hand-authored composites
+that orchestrate cross-spec workflows: 20 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
 in `#2258`; plus the four guest-operations reads `#3100` and the
@@ -19,9 +19,10 @@ the two SUBSCRIBED content-library reads `content_library.subscribed.status` +
 `content_library.subscribed.items.list` / `#3495` + the datastore
 cache-refresh read `datastore.refresh` / `#3789` + the datastore file list
 read `datastore.file.list` / `#3432` + the vSAN folder list
-read `datastore.vsan.folder.list` / `#4022` + the VM limit and
+read `datastore.vsan.folder.list` / `#4022` + the orphan folder check
+`datastore.orphan_dirs` / `#3814` + the VM limit and
 reservation read `vm.resource_allocation.show` / `#3880` + the migration
-inventory read `vmware.migration.inventory`) and 58 write
+inventory read `vmware.migration.inventory`) and 62 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
 governed vSphere Namespace `namespace.create` (caution) +
 `namespace.delete` (destructive) / `#3502` (see the **Governed vSphere
@@ -57,7 +58,9 @@ namespace-management writes `supervisor.enable` + `supervisor.disable`
 subsection under Control flow), and the two SUBSCRIBED content-library
 caution writes `content_library.subscribed.create` +
 `content_library.subscribed.sync` / `#3495` (see the **Content-library
-SUBSCRIBED composites** subsection), and the seven teardown composites /
+SUBSCRIBED composites** subsection), the two LOCAL content-library caution
+writes `content_library.create` + `content_library.item.upload` (see the
+**Local content-library create and item upload** subsection), and the seven teardown composites /
 `#3339` -- six destructive deletes `network.portgroup.delete`,
 `host.standard_portgroup.delete`, `folder.delete`, `datastore.file.delete`,
 `content_library.delete`, `content_library.item.delete`, plus the caution
@@ -65,7 +68,9 @@ SUBSCRIBED composites** subsection), and the seven teardown composites /
 DRS rule delete `cluster.drs_rule.delete` (see **Governed DRS rule delete**), the
 CD drive add `vm.cdrom.add` (`dangerous`) and the VMware Tools installer unmount
 `vm.tools.installer.unmount` (`caution`) (see **VM hardware read, CD drive add and
-Tools installer unmount**), the VM snapshot writes `vm.snapshot.create` (caution)
+Tools installer unmount**), the content-library ISO mount and unmount
+`vm.cdrom.mount_library_iso` + `vm.cdrom.unmount_library_iso` (both `caution`)
+(see **Content-library ISO mount and unmount**), the VM snapshot writes `vm.snapshot.create` (caution)
 + `vm.snapshot.delete` (destructive) (see **VM snapshot operations**), the licence
 assign `license.assign` (see **vSphere licences**), and the two caution alarm changes
 `alarm.acknowledge` + `alarm.reset` / `#4383` (see **Alarms**)). The
@@ -494,12 +499,72 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   family (`content_library.create`) via the `subscribed` infix, so the two do
   not collide. `_SUB_OPS_*` manifests are reconciled against the pinned
   `vcenter.yaml` by `test_connectors_vmware_rest_library_reconcile.py`.
+- **Local content-library create and item upload** (`composites/_library_local.py`,
+  `composites/_library_upload.py`, schemas and AI guidance in
+  `composites/_library_local_schemas.py`; group `content_library`). Two
+  `caution` + `requires_approval=True` writes, registered on the 9.0 and 8.0
+  catalogs. They replace the out-of-band `govc library.create` /
+  `library.import` steps that environment factories ran before a governed
+  deploy.
+  - `content_library.create` makes a LOCAL library on one datastore
+    (`POST:/content/local-library`, body `{name, description?,
+    storage_backings: [{type: DATASTORE, datastore_id}]}`). It first looks for
+    libraries with the same name (`POST:/content/library?action=find`). vCenter
+    allows two libraries with one name, but MEHO finds libraries by name, so it
+    does not make a second one: exactly one LOCAL library with the name gives
+    `unchanged` with its id (safe to run twice); any other match gives
+    `precondition_failed`. The datastore name is resolved through
+    `GET:/vcenter/datastore` (no match or more than one: nothing is sent). After
+    the create it reads `GET:/content/library/{libraryId}` back: present gives
+    `created`, absent gives `not_verified`. A vCenter HTTP 400 gives `refused`;
+    other faults raise. Publishing the library is not offered (it needs
+    credential handling); make a published library in vCenter if you need one.
+  - `content_library.item.upload` lets vCenter download one file from an
+    http(s) URL into a new item of a LOCAL library (server-side PULL; no file
+    bytes pass through MEHO). Steps: create the item
+    (`POST:/content/library/item`), open an update session
+    (`POST:/content/library/item/update-session`), add the file with
+    `source_type: PULL` and `source_endpoint: {uri, ssl_certificate_thumbprint?}`
+    (`POST:.../update-session/{updateSessionId}/file`), complete the session
+    (`?action=complete`; for a PULL vCenter goes on downloading after this
+    call), then read `GET:.../update-session/{updateSessionId}` every 5 s until
+    the state leaves `ACTIVE` or `wait_seconds` (default 300, at most 1800) runs
+    out. `DONE` reads the item back (`uploaded`); `ERROR` / `CANCELED` give
+    `upload_failed` with vCenter's message; a running download gives
+    `in_progress`. An item with that name that already has content
+    (`size > 0`) gives `unchanged`; an empty one (left by a failed try) is
+    reused, so a retry needs no clean-up. A fault after the item exists gives
+    `upload_failed` (or `in_progress` for vCenter's `RESOURCE_BUSY`) with the
+    item id, so the caller can retry or delete the empty item with
+    `content_library.item.delete`. Only `http` / `https` URLs without a user
+    name or password are accepted (vCenter would also take `file` and `ds`).
+    The three steps after the item create are `after_main_effect` writes that
+    save the library, item and session ids, the file name and their own step
+    as resume state (#4217): a step that waits for approval continues at that
+    step when approved, with no new reads and no second update session
+    (vCenter allows one active session per item). A park at the item create
+    saves nothing; its resume runs from the start and finds no item yet. A
+    pull-step resume without saved state is refused before any call. vCenter's
+    item GET has no `id`, so the `item` answer field carries the known item id.
+    This typed op is the governed path for the VMware rule that new VMware
+    work is typed; the raw ingested recipe in
+    `vmware-rest-governed-iso-path.md` stays for the long tail.
+  - Both have a preview: the create shows the resolved datastore and any
+    library that already has the name; the upload shows the library, the item
+    name, the URL and file name, and any item of that name. The preview shows
+    the URL without its query part, user name and password (`source_url_note`
+    says so when something was cut), so the token of a signed download URL
+    stays out of the approval row; the call still downloads from the full URL.
+    The add-file step has its own preview builder for the same reason: when
+    that step waits for approval by itself, the generic step preview would
+    echo the full `source_endpoint.uri`, and the shared redaction does not
+    know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 77
-  `_CompositeSpec` rows (19 read — incl. the `#3789` datastore
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 82
+  `_CompositeSpec` rows (20 read — incl. the `#3789` datastore
   cache-refresh read `datastore.refresh` — + 46 dangerous/destructive
-  writes + 12 caution writes); each row carries its
+  writes + 16 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
   (`llm_instructions`) of the VM and folder writes and the VM allocation
@@ -745,6 +810,63 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   - **Approval preview.** A preview builder shows the approver the
     question text, the label of the chosen answer, whether the question
     is still open, the running tasks and `tasks_error`.
+- **Content-library reads** (`typed_ops_content_library.py` for the
+  metadata, `content_library_reads.py` for the handlers,
+  `_content_library_schemas.py` for the group text and response schemas).
+  Six `safe` reads with `requires_approval: false`, in the group
+  `content_library`, on both `vmware-rest-8.0` and `vmware-rest-9.0`. They
+  call the vCenter REST API on the connector session, so they need no spec
+  ingest.
+
+  | Operation | What it returns | Vendor calls |
+  |---|---|---|
+  | `vmware.content_library.get` | One library by `library_id` or `library_name`: type, storage, publish or subscription settings, last sync, state, item count | `GET /content/library/{id}`, then `GET /content/local-library/{id}` or `GET /content/subscribed-library/{id}` by type, then `GET /content/library/item?library_id=` for the count. A name is found first with `POST /content/library?action=find` |
+  | `vmware.content_library.item.get` | One item: library, name, type, size in bytes, versions, cached or not, times, source item | `GET /content/library/item/{id}` |
+  | `vmware.content_library.item.files.list` | The files of one item: name, size, checksum, cached or not, and the datastores and storage URIs of each file | `GET /content/library/item/{id}/file` and `GET .../storage`, joined by file name |
+  | `vmware.content_library.item.ovf_options` | What an OVF item needs before a deploy: size options (the `deployment_option` keys of `vm.deploy_from_library`), networks, storage groups, disk sizes, licence texts, IP settings and properties | `POST /vcenter/ovf/library-item/{id}?action=filter` |
+  | `vmware.content_library.subscribed.probe` | Whether vCenter reaches a subscription URL, whether the source wants a login, the status, the certificate thumbprint and the error texts | `POST /content/subscribed-library?action=probe` |
+  | `vmware.supervisor.content_library.list` | The libraries the Supervisors use, with their status | `GET /vcenter/namespace-management/lifecycle/content/libraries` (vCenter 9.0 and newer) |
+
+  - **Ids.** A library or item id goes into a URL path, so it must be a
+    UUID: the parameter schema checks it, and the handler checks it again
+    with `id_problem` from `composites/_library_checks.py` before any
+    call. A name lookup that matches more than one library is refused.
+  - **Not found.** A vendor 404, and a library name that matches nothing,
+    raise `ConnectorResourceNotFoundError`, so the caller gets
+    `not_found`.
+  - **POST calls that change nothing.** The OVF `filter` and the
+    subscription `probe` are `POST` calls in the vendor API, but they only
+    read. Both descriptions say so. The `filter` body is `{"target":
+    {"resource_pool_id", "host_id"?, "folder_id"?}}` on vCenter 8 and 9 (the
+    raw 8.0 operation's schema puts the fields at the top, which vCenter
+    refuses). The `probe` body is `{"subscription_info": {"subscription_url",
+    "authentication_method": "NONE"}}`: the probe sends no login, so a source
+    that needs one answers `INVALID_CREDENTIALS`. That answer still means
+    vCenter reached the source, so `reachable` is true for `SUCCESS` and
+    for `INVALID_CREDENTIALS`, and `needs_login` is true only for the
+    second.
+  - **No secrets.** The rows copy named fields only, so the `password`
+    fields of the publish and subscription settings never reach the
+    result. The value of an OVF property whose type starts with `password`
+    is always `null`.
+  - **Version check.** `supervisor.content_library.list` calls
+    `require_vcenter_version(minimum="9.0")` first; on vCenter 8 it stops
+    with `connector_unsupported` before any call.
+  - **Long lists.** A long file list goes behind a result handle like any
+    other list.
+  - **Group text.** `CONTENT_LIBRARY_WHEN_TO_USE` lives in
+    `_content_library_schemas.py` and is shared with the content-library
+    composites (`composites/_register.py`) and the two typed finds, so the
+    group `content_library` has one text.
+  - **Vendor calls.** `VENDOR_OP_IDS` is built from the path constants the
+    handlers use, plus the shared find call `FIND_LIBRARY_CALL`, so the
+    reconcile test checks the paths that run.
+
+  Tests: `tests/test_connectors_vmware_rest_typed_content_library.py`
+  (saved vCenter answers over mocked HTTP, the result handle, metadata) and
+  `tests/test_connectors_vmware_rest_content_library_reconcile.py` (the
+  pinned 8.0 and 9.0 `vcenter.yaml` serve every path; the Supervisor list
+  only on 9.0).
 - **`vmware.host.storage_devices`** (`typed_ops_host_storage_devices.py`,
   handler `host_storage_devices`, `#3332`) — per-host raw SCSI storage
   devices, the `safe` read that supplies the runtime input
@@ -832,11 +954,29 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `snapshot_list`) — the snapshots of one VM (by `vm` moid) as a flat list in
   tree order. `safe`, in its own group `vmware-snapshot-list`, on both
   catalogs. See **VM snapshot operations** under Control flow.
+- **`vmware.cluster.list`** (`typed_ops_cluster_list.py`, handler
+  `cluster_list`) — the clusters of a vCenter, with the datacenter, the
+  number of hosts, and whether HA, DRS and vSAN are on. `safe`, in its own
+  group `vmware-clusters`, on both catalogs. See **Cluster list** under
+  Control flow.
+- **`vmware.resource_pool.list`** (`typed_ops_resource_pool_list.py`,
+  handler `resource_pool_list`) — the resource pools of a vCenter, with the
+  parent of each pool and its CPU and memory settings. `safe`, in its own
+  group `vmware-resource-pools`, on both catalogs. See **Resource pool list**
+  under Control flow.
 - **`vmware.datacenter.list`** (`typed_ops_datacenter_list.py`, handler
   `datacenter_list`) — the datacenters of a vCenter, with the number of
   clusters, hosts and datastores in each. `safe`, in its own group
   `vmware-datacenters`, on both catalogs. See **Datacenter list** under
   Control flow.
+- **`vmware.folder.list`** (`typed_ops_folder_list.py`, handler
+  `folder_list`) — the inventory folders of a vCenter, one flat row each, with
+  the datacenter and the parent. `safe`, in its own group `vmware-folders`, on
+  both catalogs. See **Folder list** under Control flow.
+- **`vmware.network.portgroup.show`** (`typed_ops_portgroup_show.py`,
+  handler `network_portgroup_show`) — all settings of one distributed port
+  group, by id or name. `safe`, in its own group `vmware-portgroup-settings`,
+  on both catalogs. See **Port group settings** under Control flow.
 - **`vcenter.sso_admin.api_file.get`** (`typed_ops_sso_admin_api_file.py`,
   handler `sso_admin_api_file_get`) — reads one SSO Admin API description
   file (the WSDL or one of its XSD files) that a vCenter serves. No vendor
@@ -1275,25 +1415,38 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    - VI-JSON needs vCenter 8.0 U1 or later, so the VI-JSON composites do
      not work on an 8.0 GA target.
    - When the 9.0 catalog refuses an ingested op for an 8.0.x target
-     (`unqualified_target_version`), the reason now names the catalog to
+     (`unqualified_target_version`), the reason names the catalog to
      use: `...; use connector vmware-rest-8.0 for this target`. The 8.0
      catalog does the same for a 9.x target.
+   - That hint is left out when the other catalog serves the target but
+     does not have the op turned on (#5069). This is true for all the
+     generic VIM calls (paths like `/PerformanceManager/{moId}/perfCounter`):
+     only the 9.0 catalog has them. On an 8.0.3 target the reason is then:
+     `this operation is not available for vmware 8.0.3: connector
+     vmware-rest-8.0 serves this target and does not have this operation;
+     use search_operations on connector vmware-rest-8.0 to find a typed
+     operation for this target`. The same call on `vmware-rest-8.0`
+     answers `unknown_op` and does not name `vmware-rest-9.0`, because the
+     9.0 catalog refuses the 8.0.x target. So the two connectors no longer
+     send the caller to each other. The preview gives the same answers.
 4. The registry's v2 table now resolves `(vmware, 9.0, vmware-rest)`
    to `VmwareRestConnector`. The G0.7 auto-shim's idempotency check
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 77 `vmware.composite.*` rows with
-   `source_kind="composite"` — 19 reads (18 with `safety_level="safe"` +
+   queued registrar and upserts: the 82 `vmware.composite.*` rows with
+   `source_kind="composite"` — 20 reads (19 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 58 writes, all `requires_approval=True`
-   (35 `safety_level="dangerous"`; 12 `safety_level="caution"` —
+   service principals), and 62 writes, all `requires_approval=True`
+   (35 `safety_level="dangerous"`; 16 `safety_level="caution"` —
    `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
    `vm.resource_allocation.set` / `#3880`, `datastore.dir.create` / `#3339`,
-   `vm.tools.installer.unmount`, `vm.snapshot.create`;
+   `vm.tools.installer.unmount`, `vm.cdrom.mount_library_iso` +
+   `vm.cdrom.unmount_library_iso`, `vm.snapshot.create`,
+   `content_library.create` + `content_library.item.upload`;
    and 11 `safety_level="destructive"` — `vm.destroy` / `#3198`,
    `namespace.delete`, `storage_policy.delete`, `cluster.drs_rule.delete`,
    `vm.snapshot.delete`, and the six `#3339` teardown deletes) —
@@ -1408,6 +1561,7 @@ unchanged consumers read:
 | disk_mark_flash | `HostStorageSystem.MarkAsSsd_Task` / `MarkAsNonSsd_Task` | `configManager.storageSystem` moid | Task MoRef → poll `Task.info` |
 | datastore.refresh (`#3789`) | `Datastore.RefreshDatastore` / `RefreshDatastoreStorageInfo` | Datastore moid (`server:/export` on ESXi) | void (204 / empty) → summary read back via `RetrievePropertiesEx` |
 | datastore.file.list (`#3432`) | `HostDatastoreBrowser.SearchDatastore_Task` / `SearchDatastoreSubFolders_Task` | `Datastore.browser` moid | Task MoRef → poll `Task.info`; `info.result` is the `HostDatastoreBrowserSearchResults` |
+| datastore.orphan_dirs (`#3814`) | `HostDatastoreBrowser.SearchDatastoreSubFolders_Task` (one per datastore, from the root) | `Datastore.browser` moid | Task MoRef → poll `Task.info`; `info.result` is the `HostDatastoreBrowserSearchResults[]` |
 
 *Native primitive typing (the codec crux).* An **explicit** `xsi:type` is
 authoritative (`xsd:boolean` → `bool`, integer → `int`, float → `float`, any
@@ -1680,7 +1834,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 77 composites (19 reads + 58 writes) land as `source_kind="composite"`
+The 82 composites (20 reads + 62 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1777,7 +1931,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 77 composites are hand-authored aggregators the connector ships as
+The 82 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -1921,6 +2075,8 @@ enum) are:
 | `datastore.file.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present`, `timeout` (#3339; `DeleteDatastoreFile_Task` polled; a task fault raises) |
 | `datastore.dir.create` | `created`, `unchanged`, `invalid_request`, `precondition_failed`, `not_verified` (#3339; synchronous `MakeDirectory` -- a vim fault raises) |
 | `content_library.delete` / `content_library.item.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present` (#3339 / #3331; REST `DELETE` -- a REST fault raises) |
+| `content_library.create` | `created`, `unchanged`, `precondition_failed`, `datastore_not_found`, `ambiguous_datastore`, `refused`, `not_verified` (#3331; HTTP 400 -> `refused`, other REST faults raise) |
+| `content_library.item.upload` | `uploaded`, `unchanged`, `in_progress`, `upload_failed`, `invalid_request`, `library_not_found`, `precondition_failed`, `refused`, `not_verified` (#3331; a fault before the item exists: HTTP 400 -> `refused`, others raise; after it exists -> `upload_failed` / `in_progress`) |
 
 `vm.create` is the only composite that issues a compensating
 mutation (`DELETE:/vcenter/vm/{vm}`) on partial failure. When that
@@ -2258,6 +2414,63 @@ installer is mounted now. The `vm` id goes into the URL path, so it must match
 of the three operations against the pinned `vcenter.yaml` of 8.0 and 9.0 (it
 skips without the vendor spec files). Tests use saved responses
 (`test_connectors_vmware_rest_typed_vm_hardware.py`).
+
+### Content-library ISO mount and unmount
+
+Two changes put an ISO from a vCenter content library into a VM and take it
+out again (`#3576`). They use the vSphere `Iso.Image` API. That API adds a new
+CD drive backed by the library item's ISO file, and removes that drive again.
+Both live in `composites/_vm_cdrom_library_iso.py`, are `caution`, wait for
+approval, and are on both catalogs (`vmware-rest-8.0` and `vmware-rest-9.0`).
+They call vSphere REST on the connector session through the shared write seam
+(`_write._write_sub_op`), so they need no catalog ingest. Like the CD drive
+add, they take the VM id (`vm`) only, and no VM name.
+
+- **`vmware.composite.vm.cdrom.mount_library_iso`**. The library item is
+  given by id (`library_item`) or by name (`library_item_name`, optionally
+  inside one library `library_name`). A name is looked up with
+  `POST /content/library?action=find` and
+  `POST /content/library/item?action=find`. No match gives
+  `library_not_found` / `item_not_found`; more than one match gives
+  `ambiguous_library` / `ambiguous_item` with the ids in `candidates`. In
+  these cases nothing is sent. Then one
+  `POST /vcenter/iso/image?action=mount` with `{library_item, vm}`. vCenter
+  answers with the new drive id (`cdrom`); MEHO reads the drive back
+  (`cdrom_info`). Not safe to run twice: each call adds a drive.
+  **The approved run mounts the item the approver saw.** The approval
+  preview looks the name up and shows the item id. After the approval, the
+  handler does not look the name up again: it reads the preview back with
+  `approved_preview(op_id)` (`operations/_preview.py`, bound by
+  `composite_resume_binding` on both resume paths, see
+  [approvals.md](approvals.md)) and mounts that id. So a rename or a
+  replaced item between park and approval cannot change what is mounted.
+  When the preview showed no id (the name fit no item or more than one, or
+  the read failed), the approved run sends nothing and answers
+  `item_not_pinned`. A mount write that policy holds saves the id as
+  `resume_state`, so its resume mounts the same item too.
+- **`vmware.composite.vm.cdrom.unmount_library_iso`**. One
+  `POST /vcenter/iso/image?action=unmount` with `{vm, cdrom}`, where `cdrom`
+  is the id the mount returned. vCenter answers 204.
+
+vCenter answers HTTP 400 when it refuses (for example an item with no `.iso`
+file, or a VM state that does not allow the change) and HTTP 404 when the VM,
+the item or the drive does not exist. The answer is then `refused` or
+`not_found` with vCenter's error type and message, and nothing changed. The
+approval previews are registered in the same module: the mount shows the
+resolved library item id and the drives the VM has now; the unmount shows the
+drive it will take off. `test_connectors_vmware_rest_cdrom_library_iso_reconcile.py`
+checks every REST call against the pinned `vcenter.yaml` of 8.0 and 9.0 (it
+skips without the vendor spec files), and checks that the two request bodies
+match the `Iso.Image` rows of `_governed_iso_recipe.py`. Tests use a REST fake
+(`test_connectors_vmware_rest_composites_cdrom_library_iso.py`).
+
+On the command line, `meho vmware vm cdrom mount-library-iso <vm-name-or-id>
+--library-item <id>` (or `--library-item-name <name> [--library-name <library>]`)
+and `meho vmware vm cdrom unmount-library-iso <vm-name-or-id> --cdrom <id>`
+(`cli/internal/cmd/vmware/vm_cdrom.go`) run the two operations through the
+same dispatch path as MCP. The VM name is resolved to its id on the client
+through the typed `vmware.vm.info` read, so the commands work before the
+catalog is ingested, and the approval names the VM id.
 
 ### Shared disks for WSFC/FCI — bus-sharing, eagerzeroedthick, shared-attach (#3256)
 
@@ -3357,6 +3570,27 @@ read (which surfaces the DVS / portgroup moids these writes take — there is
 no portgroup/switch REST list to resolve a display name against, so the moid
 is passed directly, the `host.detach_from_vds` `dvs`-moid convention).
 
+**The switch and portgroup fields must be moids, not names (#5073).** These
+fields declare a `pattern`:
+
+| Op | Field | Pattern (`schemas.py`) |
+|---|---|---|
+| `network.portgroup.create` | `vds` | `^dvs-[0-9]+$` (`DVS_MOID_PATTERN`) |
+| `network.portgroup.security.set` | `portgroup` | `^dvportgroup-[0-9]+$` (`PORTGROUP_MOID_PATTERN`) |
+| `network.portgroup.vlan.set` | `portgroup` | `^dvportgroup-[0-9]+$` (`PORTGROUP_MOID_PATTERN`) |
+| `host.detach_from_vds` | `dvs` | `^dvs-[0-9]+$` (`DVS_MOID_PATTERN`) |
+
+A name fails schema validation, so `preview_operation` and `call_operation`
+return `invalid_params` with a `validation_errors` entry at that field
+(`validator: "pattern"`). No approval request is made and vCenter is not
+contacted. The entry's `remediation` adds the field's description, which
+names `vmware.composite.network.portgroup.audit` as the op that reads the
+id. Before the pattern, a name passed the preview, waited for approval, and
+failed only when it ran, because the handlers use the value as a moid
+directly. The ops do not look a name up: two portgroups can share a name,
+and a write must not guess. `network.portgroup.delete` already had the
+portgroup pattern.
+
 **`network.portgroup.create`** creates a portgroup on an existing DVS through
 vim `DistributedVirtualSwitch.CreateDVPortgroup_Task` with one
 `DVPortgroupConfigSpec` — `name`, binding `type` (default `earlyBinding`, a
@@ -3419,8 +3653,8 @@ None of the three composites registers a park-time preview builder (matching
 
 ### AI guidance of the storage and network operations
 
-The fourteen storage and network multi-step operations (`datastore.usage`,
-`datastore.refresh`, `datastore.file.list`, `datastore.vsan.folder.list`, `datastore.dir.create`, `datastore.file.delete`, the three
+The sixteen storage and network multi-step operations (`datastore.usage`,
+`datastore.refresh`, `datastore.file.list`, `datastore.vsan.folder.list`, `datastore.orphan_dirs`, `datastore.dir.create`, `datastore.file.delete`, the three
 `storage_policy.*` operations, `network.portgroup.audit` / `.create` /
 `.security.set` / `.vlan.set` / `.delete` and `host.standard_portgroup.delete`)
 keep their AI guidance (`llm_instructions`: `when_to_call`, `preconditions`,
@@ -3787,6 +4021,69 @@ it does not use `resolve_for_path`; it calls `resolve_datastore` and
 - **Later.** The general file list `datastore.file.list` (`#3432`, above)
   covers VMFS and NFS. The two reads can be merged into one op later.
 
+### Orphan folder check (`datastore.orphan_dirs`, #3814)
+
+`vmware.composite.datastore.orphan_dirs` is a read composite (safety `safe`,
+no approval) in `composites/_datastore_orphans.py`. One call on a vCenter
+target answers "which top-level folders on my datastores does no registered
+VM use?" for every datastore, or for the names in `datastores`. It is the
+read half of a storage clean-up; the delete is `datastore.file.delete`.
+
+- **Reads.** `GET /vcenter/datastore` lists the datastores (with
+  `filter.names`, and the names are also filtered in code because some
+  builds ignore a list filter). One `read_many` reads `name`, `summary.type`,
+  `summary.accessible`, `browser` and `vm` of all of them. One `read_many`
+  reads the files of every VM on those datastores (`Datastore.vm`, so
+  templates and VMs with only a disk on a datastore are included) with the
+  props of the delete check (`_datastore_claims._CLAIM_PROPS`). Both reads
+  pass `all_pages=True`, so `read_many` follows every continuation token
+  through `vim_retrieve.retrieve_all_pages` (#4862) and a datastore or VM
+  on a later page is not missed; the deletes keep the default and refuse a
+  paged answer. Then, per datastore, one `SearchDatastoreSubFolders_Task`
+  from the root through the shared `_datastore_browse.search`. That one
+  browse gives the top-level folders (the root row) and the files directly
+  inside each of them (the depth-one rows).
+- **Rows.** One row per top-level folder: `datastore`, `datastore_moid`,
+  `folder`, `datastore_path`, `size_bytes` and `file_count` (the files
+  directly inside the folder, as #3814 asks; files in sub-folders are not
+  counted), `newest_modified` (latest change of the folder or a file
+  directly inside it), `claimed_by` (VM names) and `classification`. Folder
+  paths are matched exactly: on case-sensitive storage `Backup` and
+  `backup` are two rows. Rows are sorted newest change first.
+- **Classification.** `claimed` when a VM uses a file below the folder, by
+  the rules of the delete check (`_datastore_claims._claim_hits`: `layoutEx`,
+  device backings such as mounted ISO files, the `.vmx`). `system` for names
+  vSphere keeps for itself: a leading `.`, `contentlib-*`, `vsantraces`,
+  `vmkdump`, and `fcd` / `catalog` (first-class disks and their index; no VM
+  lists them). Everything else is `orphan`. `orphan` only means "no VM
+  registered in this vCenter uses it": ISO stores, content library storage
+  and the folders of VMs registered in another vCenter are also unused here.
+  The AI guidance says a row is a candidate to review, never a reason to
+  delete.
+- **vSAN.** The root browse gives each folder a UUID `path` and a
+  `friendlyName`. The row shows the friendly name in `folder` and the UUID
+  in `datastore_path`; a VM uses the folder when its files match either one
+  (as in `datastore.vsan.folder.list`).
+- **Skipped.** A datastore that is not accessible, has a type other than
+  VMFS / NFS / vSAN (vVol), has no readable browser, or whose browse fails
+  (for example a permission fault) goes into `skipped` with a reason. The
+  rest of the answer still comes back. A requested name that does not exist
+  is also listed there.
+- **`vm_check`.** `complete`, or `incomplete` when vCenter answered a read
+  only in part or the files of a VM could not be known. Then an `orphan` row
+  may still be in use.
+- **Answer.** `status` is `ok`, or `unsupported_host_target` for a target
+  that is not a vCenter (a standalone ESXi host: use `datastore.file.list`
+  with `include_usage` there). A long `directories` list becomes a result
+  handle. `llm_instructions.result_scalars` keeps the counts, `vm_check` and
+  `guidance` next to the handle, and `result_digest` names `directories` as
+  the collection (the answer also has the `skipped` list) and adds the
+  per-classification counts. `skipped` is stored with the rows.
+- **Cost.** The browses run one after the other, each bounded by the
+  browse task timeout of `_datastore_browse`. Tests use the shared vim fake
+  (`test_connectors_vmware_rest_composites_datastore_orphans.py`); the op
+  has not been run against a real vCenter yet.
+
 ### AI guidance of the guest, event, performance and typed reads
 
 The six guest operations (`vm.guest.*`), `event.tail`,
@@ -3923,7 +4220,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `cluster.patch` | `{cluster, resolved, total_resolved}` | live read (`GET:/vcenter/host?clusters=...`) |
 | `vm.resize` | `{vm, name, power_state, current, requested}` sizing from->to | live read (`GET:/vcenter/vm/{vm}`) |
 | `vm.nic.repoint` | `{vm, name, nic, mac_address, current_backing, requested_backing}` network from->to (`requested_backing` carries `backing_type`, so distributed and standard previews are identical) | live read (`ethernet/{nic}` + `GET:/vcenter/network`) |
-| `vm.device.cdrom` | `{vm, name, cdrom, action, current_backing, state}` (the host-local ISO path) | live read (`cdrom/{cdrom}`) |
+| `vm.device.cdrom` | `{vm, name, cdrom, action, current_backing, state, requested_backing}` drive from->to: the current backing (with the host-local ISO path) and, for `update`, the new backing (`type` plus `iso_file`, `host_device` or `device_access_type` when given); `null` for `remove` / `disconnect` | live read (`cdrom/{cdrom}`) |
 | `vm.resource_allocation.set` | `{vm, name, current: {cpu_allocation, memory_allocation}, requested}` limit / reservation from->to | live read (vim `RetrievePropertiesEx`) |
 | `network.portgroup.delete` / `host.standard_portgroup.delete` / `folder.delete` / `datastore.file.delete` / `content_library.delete` / `content_library.item.delete` | mandatory `blast_radius`: `{object: {..., present}, children, irreversibility, blockers?, refusal?}` -- the handler's own plan (#3339) | live read (vim `RetrievePropertiesEx` / browse, or REST GET) |
 | `datastore.dir.create` | `{action, datastore, path, create_parents}` | param echo, no I/O |
@@ -4227,6 +4524,53 @@ lowers a level, grants and the stored-delete review, a person's restore call
 waits for approval; the shelf-gated lane checks every rule against the
 pinned `vcenter.yaml` and `vi-json.yaml` files) and `test_delete_names.py`
 (the vSAN prefixes and the `action=delete` query).
+
+### Folder list (`vmware.folder.list`)
+
+What an operator or agent can do now: list the folders of a vCenter with one
+typed call, and find a folder id by name, type or datacenter. Before this, the
+only way was the ingested `GET:/vcenter/folder`, which has no summary.
+
+| Operation | Risk | vSphere calls | Versions |
+|---|---|---|---|
+| `vmware.folder.list` | `safe`, no approval | REST `GET /vcenter/folder`, REST `GET /vcenter/datacenter`, `Folder.parent` through `PropertyCollector.RetrievePropertiesEx` | vCenter 8.0 and 9.x |
+
+Parameters (all optional): `type` (`DATACENTER`, `DATASTORE`, `HOST`,
+`NETWORK`, `VIRTUAL_MACHINE`), `datacenters`, `parent_folders` and `names`.
+They are the vCenter filters, so `names` is an exact match. Each row:
+`id`, `name`, `type`, `datacenter_id`, `datacenter_name`, `parent_id`,
+`parent_type`, plus one `read_note` for the whole answer.
+
+How it reads:
+
+1. `GET /vcenter/folder` with the filters. This read must work: its error is
+   the error of the operation. vCenter returns at most 1000 folders and
+   refuses a filter that matches more, so the agent guidance says to narrow by
+   `type` or `datacenters`.
+2. The folder summary has no datacenter. The op lists the datacenters and
+   lists the folders again once per datacenter, with the same filters. A
+   folder found there is in that datacenter. Folders above the datacenters
+   (the root folder and the `DATACENTER` folders) have no datacenter.
+3. The summary has no parent either. One property read of `parent` over all
+   listed folders (every page, through `vim_retrieve.retrieve_all_pages`).
+   A top folder of a datacenter has a `Datacenter` parent.
+
+Reads 2 and 3 are best effort. When one fails, its fields are `null` and
+`read_note` says which read failed; the list stays. Read 3 can also fail for
+single folders inside a successful answer: vCenter then puts `parent` in that
+object's `missingSet` with a fault (for example no permission). Such a folder
+gets `null` parent fields, and `read_note` says for how many folders and with
+which fault type (only the type name, never the fault text, #3708), so it does
+not look like a folder with no parent. An empty list sends no extra reads. A long list comes back as a result handle, like every other
+set-shaped answer.
+
+Tests: `test_connectors_vmware_rest_typed_folder_list.py` (the real connector
+over mocked HTTP on vCenter 9.0 and 8.0, the filter names on the wire, the
+best-effort reads including a `missingSet` parent fault, the metadata) and
+`test_connectors_vmware_rest_folder_list_reconcile.py` (the two REST paths and
+their filters against the pinned 9.0 and 8.0 U3 `vcenter.yaml`, the summary
+fields and folder types against 9.0, and `Folder.parent` against the 9.0
+`vi-json.yaml`).
 
 ### Older-API VM power, clone, snapshot and migrate calls wait for approval (#3869)
 
@@ -4563,6 +4907,102 @@ a key; flight-recorder spans, with a control case without the tag),
 `vi-json.yaml`) and the source scan in
 `tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` (8.0 U1, U2, U3).
 
+### Cluster list (`vmware.cluster.list`)
+
+A typed read that lists the clusters of a vCenter. It is written by hand, so
+it has a clear summary, field descriptions and a risk level. It replaces the
+raw ingested `GET:/vcenter/cluster` operation for this common task.
+
+| Operation | What it does | Vendor calls | Risk |
+|---|---|---|---|
+| `vmware.cluster.list` | One row per cluster: `id` (moid), `name`, `datacenter_id`, `datacenter_name`, `host_count`, `ha_enabled`, `drs_enabled`, `vsan_enabled`, `read_note`. Optional filters: `datacenter` (moid), `folder` (moid), `name` pattern (`*` and `?`, letter case does not matter). | `GET /vcenter/datacenter`; per datacenter `GET /vcenter/cluster` with the `datacenters` filter (and `folders`); one `PropertyCollector.RetrievePropertiesEx` of `ClusterComputeResource` `summary.numHosts` and `configurationEx` for all clusters | `safe`; runs at once |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 and its updates (the host count and vSAN state need VI-JSON, so 8.0 U1 or newer; on older builds they are `null` with a `read_note`) | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+- **How it calls vCenter.** The two lists go through the REST mount
+  (`mount_op_path`, `/api` or the legacy `/rest`) on the connector's own
+  session, so it needs no spec ingest. The filters are written as
+  `filter.datacenters` and `filter.folders`; `adapt_op_query` sends the bare
+  names on `/api`. The REST cluster summary has no datacenter, so the clusters
+  are listed once per datacenter. HA and DRS come from that summary.
+- **Host count and vSAN.** One VI-JSON property read for all listed clusters,
+  through `retrieve_all_pages` (every page). `configurationEx` is read whole
+  because vCenter 8.0 refuses a path inside it; the operation takes
+  `vsanConfigInfo.enabled` from it. A cluster config with no vSAN part counts
+  as vSAN off.
+- **Errors.** A failed datacenter or cluster list fails the operation, so a
+  datacenter's clusters are never missing without an error. The property read
+  is best-effort: when it fails, `host_count` and `vsan_enabled` are `null` and
+  `read_note` names the call and the error. A property that vCenter could not
+  read (a `missingSet` entry) is named in `read_note` too.
+- **Cost.** One call, plus one call per datacenter, plus one property read
+  (more pages only for very many clusters).
+- **Large lists.** The rows are flat, so a long list comes back as a link to
+  the stored result (a result handle) that the caller reads with
+  `result_query`.
+
+Code: `typed_ops_cluster_list.py`. Tests:
+`tests/test_connectors_vmware_rest_typed_cluster_list.py` (saved answers, no
+live vCenter) and `tests/test_connectors_vmware_rest_cluster_list_reconcile.py`
+(the REST paths, filters and summary fields against the pinned vCenter 8.0 U3
+and 9.0 `vcenter.yaml`; the VI-JSON types against the pinned 9.0 and 8.0 U1,
+U2, U3 VI-JSON files; the two properties against the 9.0 file).
+
+### Resource pool list (`vmware.resource_pool.list`)
+
+A typed read that lists the resource pools of a vCenter. It is written by
+hand, so it has a clear summary, field descriptions and a risk level. It
+replaces the raw ingested `GET:/vcenter/resource-pool` operation for this
+common task. The pools themselves are made and removed by
+`vmware.composite.resource_pool.create` and `.delete`.
+
+| Operation | What it does | Vendor calls | Risk |
+|---|---|---|---|
+| `vmware.resource_pool.list` | One row per pool: `id` (moid), `name`, `parent_type` (`resource_pool`, `cluster` or `host`), `parent_id`, and for CPU (MHz) and memory (MB) the reservation, limit (`-1` is no limit), expandable reservation, shares level and shares; `read_note`. Optional filters `cluster`, `host`, `parent_pool` (sent to vCenter) and a `name` pattern (`*` and `?`, letter case does not matter, applied in MEHO). | `GET /vcenter/resource-pool` (plus one filtered call when a filter is set); `GET /vcenter/resource-pool/{resource_pool}` per pool; only for root pools `GET /vcenter/cluster`, `GET /vcenter/cluster/{cluster}`, and for roots still open `GET /vcenter/host` and the pools of each standalone host | `safe`; runs at once |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 and its updates (REST only, so no VI-JSON is needed) | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+- **How it finds the parent.** The REST details of a pool have no parent
+  field, only the ids of its child pools. So MEHO reads the details of every
+  pool and takes as parent the pool that names it as a child. A pool with no
+  parent pool is the hidden root pool (often named `Resources`) of a cluster
+  or a standalone host. The cluster details name their root pool
+  (`resource_pool`). A root that is still open after that belongs to a
+  standalone host: MEHO lists the hosts that are not in a cluster and the
+  pools of each one.
+- **How it calls vCenter.** Through the REST mount (`mount_op_path`, `/api`
+  or the legacy `/rest`) on the connector's own session, so it needs no spec
+  ingest. Filters are written as `filter.clusters`, `filter.hosts` and
+  `filter.parent_resource_pools`; `adapt_op_query` sends the bare names on
+  `/api`. The paths, filters and fields are the same in the vCenter 8.0 U3
+  and 9.0 API files (only the name inside `{...}` differs).
+- **Errors.** A failed pool list fails the operation. A failed details read
+  leaves that pool's settings `null` with a `read_note`. When any details
+  read failed, a pool can look like a root by mistake, so the host step is
+  skipped and an open parent is `null` with `parent not known`. A failed
+  cluster or host read stops the parent lookup. The parents found before
+  it stay; the open parents still unknown are `null` with `parent not
+  read`. The other rows stay.
+- **Cost.** One or two list calls, plus one details call per pool in the
+  vCenter. The cluster and host calls run only when a returned pool is a
+  root pool. With no match, no details call runs.
+- **Large lists.** The rows are flat, so a long list comes back as a link to
+  the stored result (a result handle) that the caller reads with
+  `result_query`.
+
+Code: `typed_ops_resource_pool_list.py`. Tests:
+`tests/test_connectors_vmware_rest_typed_resource_pool_list.py` (saved
+answers, no live vCenter) and
+`tests/test_connectors_vmware_rest_resource_pool_list_reconcile.py` (the
+paths, the filters and the fields against the pinned vCenter 8.0 U3 and 9.0
+`vcenter.yaml`).
+
 ### Datacenter list (`vmware.datacenter.list`)
 
 A typed read that lists the datacenters of a vCenter. It is written by hand,
@@ -4597,6 +5037,60 @@ Code: `typed_ops_datacenter_list.py`. Tests:
 no live vCenter) and
 `tests/test_connectors_vmware_rest_datacenter_list_reconcile.py` (the paths,
 the filter and the summary fields against the pinned vCenter 8.0 U3 and 9.0
+`vcenter.yaml`).
+
+### Port group settings (`vmware.network.portgroup.show`)
+
+A typed read that shows all settings of one distributed port group. It is
+written by hand, so it has a clear summary, field descriptions and a risk
+level. It replaces the raw ingested `GET:/DistributedVirtualPortgroup/{moId}/config`
+operation for this common task.
+
+| Operation | What it does | Vendor calls | Risk |
+|---|---|---|---|
+| `vmware.network.portgroup.show` | One row: `portgroup` (moid), `name`, `key`, `description`, `dvs` and `dvs_name` (the switch), `port_binding`, `num_ports`, `auto_expand`, `uplink_portgroup`, `config_version`, `vlan` (`access` with `vlan_id`, `trunk` with `ranges`, or `pvlan` with `pvlan_id`), `security`, `teaming` (load balancing, active and standby uplinks, `failback`, `notify_switches`, `beacon_probing`), `traffic_shaping.ingress` / `.egress`, `blocked`. Each policy carries `inherited` (the whole policy comes from the switch) and `inherited_settings` (one flag per field); the row carries `inherited_settings` for `vlan` and `blocked`. Takes `portgroup` (moid) or `name`. | VIM `PropertyCollector.RetrievePropertiesEx` of `DistributedVirtualPortgroup.config`, then of the switch `name` and `config.defaultPortConfig`; with `name`, first `GET /vcenter/network` with the `names` and `types` filters | `safe`; runs at once |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 U1, U2, U3 | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+- **How it calls vCenter.** On the connector's own session, so it needs no
+  spec ingest. The VIM reads go through `_post_vmomi_json` on the VI-JSON
+  path of the target's release (`/sdk/vim25/{release}`). The port group's
+  whole `config` object is read: vCenter 8.0.x answers deep paths such as
+  `config.defaultPortConfig.vlan` with HTTP 500. On the switch,
+  `config.defaultPortConfig` (its default port settings) is read with the
+  `name`, the same path the port group write composites use.
+- **Values.** Each setting is the `value` of a VIM policy object. `failback`
+  is the inverse of the VIM field `rollingOrder`. Bandwidth is in bits per
+  second, burst size in bytes. A setting the switch does not report is `null`.
+- **Inherited settings.** A port group can mix local and inherited settings
+  inside one policy, for example a local load balancing with inherited
+  uplinks. A setting that is inherited, by itself or through its policy, is
+  taken from the switch defaults, so the row shows the real uplinks and not an
+  empty list. Each policy says `inherited` (the whole policy comes from the
+  switch) and `inherited_settings` (true, false or null per field). When
+  vCenter cannot read the switch defaults (for example no permission on the
+  switch) and the port group inherits at least one setting, the call fails:
+  an inherited uplink list without the switch value would show as empty.
+  When the port group inherits nothing, the read only logs a warning.
+- **Errors.** An unknown id or name is a `not_found` result. A name used by
+  two port groups (for example in two datacenters) is an error that names the
+  ids. A `config` property vCenter could not read (a `missingSet` entry, for
+  example no permission) fails the call instead of showing empty settings.
+- **Size.** One small row, so no result handle.
+- **Related.** `vmware.composite.network.portgroup.audit` lists all port
+  groups with VLAN and VMs. The VLAN and security changes are
+  `network.portgroup.vlan.set` and `network.portgroup.security.set`.
+
+Code: `typed_ops_portgroup_show.py`, response schema in
+`_portgroup_show_schemas.py`. Tests:
+`tests/test_connectors_vmware_rest_typed_portgroup_show.py` (saved answers,
+no live vCenter; mocked HTTP on the vCenter 8.0.3 and 9.0 VI-JSON paths) and
+`tests/test_connectors_vmware_rest_portgroup_show_reconcile.py` (every VIM
+field the read uses against the pinned 9.0 `vi-json.yaml` and the 8.0 U1,
+U2 and U3 files; the network list filters against the pinned 8.0 U3 and 9.0
 `vcenter.yaml`).
 
 ## Dependencies
@@ -4940,8 +5434,9 @@ the filter and the summary fields against the pinned vCenter 8.0 U3 and 9.0
 
 ## References
 
-- Governed content-library ISO import-from-URL + `iso.image`
-  mount/unmount recipe (raw ingested ops, no composite):
+- Governed content-library ISO import-from-URL recipe (raw ingested ops);
+  the `iso.image` mount/unmount now runs through the two composites in
+  **Content-library ISO mount and unmount**:
   [vmware-rest-governed-iso-path.md](vmware-rest-governed-iso-path.md) (#3086).
 - Governed nested-hypervisor VM recipe (composite create with `VMKERNEL_*`
   pass-through + raw disk/cdrom adds + VI-JSON VHV via `nestedHVEnabled`):

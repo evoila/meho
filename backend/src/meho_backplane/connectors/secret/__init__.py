@@ -28,7 +28,9 @@ secret broker in two import-time steps:
   :func:`~meho_backplane.operations._preview.register_preview_builder`
   call, so a parked ``secret.move`` gets a **ref-only**
   ``proposed_effect`` (the parsed ``{kind, ref}`` of ``--from`` / ``--to``,
-  never the value) for the reviewer (#1579).
+  never the value) for the reviewer (#1579). Importing
+  :mod:`~meho_backplane.connectors.secret.handoff_preview` does the same
+  for the two handoff steps that move a secret to another MEHO instance.
 
 Unlike every other connector subpackage, this one calls neither
 ``register_connector`` nor ``register_connector_v2``: the synthetic
@@ -43,15 +45,20 @@ handler is a module-level function the dispatcher routes to with
 # The keycloak sink (#1578) lives under ``connectors/keycloak`` but
 # registers here so the broker's second kind lands on the same seam.
 from meho_backplane.connectors.keycloak import secret_endpoint as _keycloak_endpoint  # noqa: F401
+from meho_backplane.connectors.secret import handoff_preview as _handoff_preview  # noqa: F401
 from meho_backplane.connectors.secret import move_preview as _move_preview  # noqa: F401
 from meho_backplane.connectors.secret import vault_endpoint as _vault_endpoint  # noqa: F401
+from meho_backplane.connectors.secret.handoff_ops import register_secret_handoff_operations
 from meho_backplane.connectors.secret.ops import register_secret_broker_operations
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 
 # Queue the secret.move typed-op upsert onto the lifespan-driven
 # registrar list (run after the connector eager-import pass).
 register_typed_op_registrar(register_secret_broker_operations)
+# The two handoff steps that move a secret to another MEHO instance.
+register_typed_op_registrar(register_secret_handoff_operations)
 
 __all__ = [
     "register_secret_broker_operations",
+    "register_secret_handoff_operations",
 ]

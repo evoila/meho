@@ -73,6 +73,7 @@ where a malicious approver swaps the params between the "request" and the
 
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
 from collections.abc import Iterator
@@ -85,11 +86,14 @@ from enum import StrEnum
 from typing import Any, Final, Literal, NamedTuple, cast
 
 import structlog
-from sqlalchemy import CursorResult, and_, or_, select, update
+from sqlalchemy import CursorResult, and_, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.approval_sign_in import ApprovalAuth
+from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
+from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors.schemas import OperationResult
@@ -127,6 +131,7 @@ from meho_backplane.operations.approval_handoff import (
 from meho_backplane.operations.approval_handoff import (
     store as store_handoff,
 )
+from meho_backplane.operations.approval_outcome import with_approval_guidance
 from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.version import running_release_id
 
@@ -141,6 +146,7 @@ __all__ = [
     "ApprovalRequestAlreadyDecidedError",
     "ApprovalRequestExpiredError",
     "ApprovalResultState",
+    "ApprovalSignInReusedError",
     "ChainPosition",
     "DelegatedDecisionForbiddenError",
     "DelegatedReasonInvalidError",
@@ -314,6 +320,24 @@ class PreviewBindingMissingError(ApprovalError):
             f"approval_request {request_id} is destructive-tier but carries no "
             "preview_hash binding; approval refused (the preview-result-hash "
             "binding is mandatory for the destructive tier, #3197)"
+        )
+
+
+class ApprovalSignInReusedError(ApprovalError):
+    """This sign-in already gave an approval (#3979).
+
+    One fresh sign-in or one-time code allows exactly one approval. Raised
+    by :func:`approve_request` when an earlier ``approval.decision`` audit
+    row of the same person carries the same ``sign_in_key``. The REST layer
+    answers ``401`` with the same fresh sign-in challenge as a too-old
+    sign-in, so the command line asks for a new sign-in.
+    """
+
+    def __init__(self, request_id: uuid.UUID) -> None:
+        self.request_id = request_id
+        super().__init__(
+            f"approval_request {request_id}: this sign-in was already used for "
+            "an approval; one sign-in allows one approval"
         )
 
 
@@ -1065,6 +1089,8 @@ async def _write_audit_row(
     # name only, email is never widened onto this surface.
     if operator.name:
         payload["principal_name"] = operator.name
+    # #5239: the role of a platform admin without a group in this tenant.
+    payload.update(tenant_role_source_payload(operator))
     if extra_payload:
         payload.update(extra_payload)
     # policy-gate verdict (#130). The parked "request" row is written on the
@@ -1399,6 +1425,70 @@ async def create_pending_request(
     return request
 
 
+def _sign_in_lock_key(sign_in_key: str) -> int:
+    """Map a sign-in key to a stable, non-negative 63-bit advisory-lock key.
+
+    A blake2b digest under its own prefix, masked to 63 bits so it fits the
+    ``bigint`` that ``pg_advisory_xact_lock`` takes. The same shape as the
+    other advisory-lock keys in the code base.
+    """
+    label = f"meho:approval-sign-in\0{sign_in_key}"
+    digest = hashlib.blake2b(label.encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
+
+
+async def _refuse_reused_sign_in(
+    session: AsyncSession,
+    request_id: uuid.UUID,
+    operator: Operator,
+    approval_auth: ApprovalAuth,
+) -> None:
+    """Raise :class:`ApprovalSignInReusedError` when this sign-in already approved.
+
+    Looks at the person's ``approval.decision`` audit rows written since
+    the sign-in. The sign-in is at most a few minutes old, so the scan is
+    short. A web click is not single-use and is never checked.
+
+    Two approves with the same sign-in can run at the same moment, for two
+    different requests and on two replicas. So the check first takes a
+    transaction-level PostgreSQL advisory lock on the sign-in key. The
+    second approve waits until the first commits or rolls back, and then
+    its scan sees the first audit row. PostgreSQL releases the lock with
+    the transaction. On other databases (the single-writer SQLite test
+    path) there is no lock.
+
+    The scan starts :data:`~meho_backplane.auth.fresh_sign_in.CLOCK_SKEW_SECONDS`
+    before ``auth_time``: the fresh sign-in check accepts an ``auth_time``
+    that far in the future, so an earlier approve of the same sign-in can
+    have an audit time before ``auth_time``.
+    """
+    key = approval_auth.sign_in_key(operator.sub)
+    if key is None or approval_auth.auth_time is None:
+        return
+    conn = await session.connection()
+    if conn.dialect.name == "postgresql":
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:k)"), {"k": _sign_in_lock_key(key)}
+        )
+    since = datetime.fromtimestamp(approval_auth.auth_time - CLOCK_SKEW_SECONDS - 1, UTC)
+    rows = await session.execute(
+        select(AuditLog.payload).where(
+            AuditLog.operator_sub == operator.sub,
+            AuditLog.path == "approval.decision",
+            AuditLog.occurred_at >= since,
+        )
+    )
+    for (payload,) in rows:
+        earlier = payload.get("approval_auth") if isinstance(payload, dict) else None
+        if isinstance(earlier, dict) and earlier.get("sign_in_key") == key:
+            _log().warning(
+                "approval_sign_in_reused",
+                approval_request_id=str(request_id),
+                operator_sub=operator.sub,
+            )
+            raise ApprovalSignInReusedError(request_id)
+
+
 # code-quality-allow: 101 lines but ~70 are the Args/Raises docstring documenting
 # the four preconditions + the params/reason contract; the executable body is ~15
 # lines. Splitting it would scatter one linear approve flow for a line-count win.
@@ -1409,6 +1499,7 @@ async def approve_request(
     operator: Operator,
     params: dict[str, Any] | None = None,
     reason: str = "",
+    approval_auth: ApprovalAuth | None = None,
 ) -> ApprovalRequest:
     """Approve a pending request.
 
@@ -1461,6 +1552,10 @@ async def approve_request(
             MCP/CLI operator-decision path.
         reason: Optional human-readable approval reason (recorded in the
             audit payload). Mirrors :func:`reject_request`.
+        approval_auth: How the person proved they were present (#3979): a
+            web click, a fresh sign-in or a one-time code. Recorded in the
+            audit payload as ``approval_auth``. A token proof allows one
+            approval only. Every production approve path passes it.
 
     Returns:
         The updated, flushed :class:`ApprovalRequest`.
@@ -1480,6 +1575,8 @@ async def approve_request(
             (``Instructed-by:``) but its trailer block is incomplete (#3692).
         DelegatedDecisionForbiddenError: *reason* is a valid delegated
             decision but the deployment is not lab-class (#3693).
+        ApprovalSignInReusedError: *approval_auth* names a sign-in that
+            already gave an approval (#3979).
     """
     request = await _load_pending_for_approval(
         session, request_id, operator=operator, params=params
@@ -1488,6 +1585,8 @@ async def approve_request(
     # reason leaves the row pending (#3692, #3693).
     delegation = parse_delegation(reason)
     _check_delegated_allowed(delegation, request=request, operator=operator, decision="approved")
+    if approval_auth is not None:
+        await _refuse_reused_sign_in(session, request_id, operator, approval_auth)
 
     now = _now()
     request.status = ApprovalRequestStatus.APPROVED.value
@@ -1502,6 +1601,8 @@ async def approve_request(
     extra: dict[str, Any] = {"decision": "approved", "reviewed_by": operator.sub}
     if reason:
         extra["reason"] = reason
+    if approval_auth is not None:
+        extra["approval_auth"] = approval_auth.audit_payload(operator.sub)
     _record_delegation(extra, delegation, request=request, operator=operator, decision="approved")
 
     approve_audit_id = uuid.uuid4()
@@ -2029,7 +2130,7 @@ async def refuse_resume_if_release_changed(
         running_release=running,
         operator_sub=operator.sub,
     )
-    await persist_resume_result(request.id, refusal)
+    await persist_resume_result(request.id, refusal, parked_op_id=request.op_id)
     return refusal
 
 
@@ -2099,7 +2200,7 @@ def _dump_result_envelope(result: Any) -> dict[str, Any] | None:
     return projection if isinstance(projection, dict) else None
 
 
-async def persist_resume_result(request_id: uuid.UUID, result: Any) -> None:
+async def persist_resume_result(request_id: uuid.UUID, result: Any, *, parked_op_id: str) -> None:
     """Store the approved re-dispatch's reduced result envelope on the row (#3209).
 
     Called on the exactly-one-resumer winning path only, so it runs at most
@@ -2112,6 +2213,13 @@ async def persist_resume_result(request_id: uuid.UUID, result: Any) -> None:
     principal-scoped — via ``GET /api/v1/approvals/{id}/result`` to resume a
     non-idempotent parked op (VCF ``bringup.start``) by poll.
 
+    Before the write, the next step a failed multi-step operation names is
+    stamped into ``extras["approval_guidance"]`` (#5377,
+    :func:`~meho_backplane.operations.approval_outcome.with_approval_guidance`).
+    The run summary on the list and show views reads only that stamp, so a
+    row this code did not write shows no guidance. *parked_op_id* is the op
+    id of the request; a secret-class op gets no stamp.
+
     Fail-soft: the dispatch's own synchronous audit row already committed
     inside :func:`~meho_backplane.operations.dispatcher.dispatch` (the
     v0.1-spec §6 record of what executed), so this convenience-durability write
@@ -2123,6 +2231,7 @@ async def persist_resume_result(request_id: uuid.UUID, result: Any) -> None:
     dumped = _dump_result_envelope(result)
     if dumped is None:
         return
+    dumped = with_approval_guidance(dumped, parked_op_id=parked_op_id)
     from meho_backplane.db.engine import get_sessionmaker
 
     try:
@@ -2185,6 +2294,7 @@ def composite_resume_binding(
     subop_params_hash: str,
     resume_parent: dict[str, Any] | None,
     requester: ResumeRequester | None = None,
+    proposed_effect: dict[str, Any] | None = None,
 ) -> Iterator[tuple[str, dict[str, Any]] | None]:
     """Set up the re-entry of a parent composite for an approved sub-op park.
 
@@ -2215,11 +2325,48 @@ def composite_resume_binding(
     the start. It binds :data:`resume_requester_var` with *requester*, the
     requester of the request being re-run, so a step that waits again is
     saved for that requester on both resume paths (#4217).
-    """
-    if resume_parent is None:
-        yield None
-        return
 
+    For every park, direct or sub-op, the block also binds
+    :data:`~meho_backplane.operations._preview.approved_preview_var` with
+    the approved request's op id and the computed preview its park stored
+    (the ``preview`` body of *proposed_effect*, or ``{}``). A handler reads
+    it with :func:`~meho_backplane.operations._preview.approved_preview`,
+    so a name it resolved at park time is not looked up again after the
+    approval; the re-run acts on the object the approver saw (#5202).
+    """
+    from meho_backplane.operations._preview import approved_preview_var
+
+    preview_token = approved_preview_var.set((subop_op_id, _approved_preview_body(proposed_effect)))
+    try:
+        if resume_parent is None:
+            yield None
+        else:
+            with _composite_parent_binding(
+                subop_op_id=subop_op_id,
+                subop_params_hash=subop_params_hash,
+                resume_parent=resume_parent,
+                requester=requester,
+            ) as parent_call:
+                yield parent_call
+    finally:
+        approved_preview_var.reset(preview_token)
+
+
+def _approved_preview_body(proposed_effect: dict[str, Any] | None) -> dict[str, Any]:
+    """The computed preview a park stored, or ``{}`` when it stored none."""
+    body = (proposed_effect or {}).get("preview")
+    return body if isinstance(body, dict) else {}
+
+
+@contextmanager
+def _composite_parent_binding(
+    *,
+    subop_op_id: str,
+    subop_params_hash: str,
+    resume_parent: dict[str, Any],
+    requester: ResumeRequester | None,
+) -> Iterator[tuple[str, dict[str, Any]]]:
+    """Bind the composite re-entry vars of :func:`composite_resume_binding`."""
     from meho_backplane.operations.composite import (
         CompositeResumeState,
         composite_resume_scope_var,
@@ -2341,6 +2488,7 @@ async def _dispatch_resume_with_bound_context(
                 subop_params_hash=request.params_hash,
                 resume_parent=resume_parent,
                 requester=requester_of(request),
+                proposed_effect=request.proposed_effect,
             ) as parent_call,
         ):
             dispatch_op_id, dispatch_params = (
@@ -2364,7 +2512,7 @@ async def _dispatch_resume_with_bound_context(
     # instead of a second submit (#3209). Reached only by the exactly-one-resumer
     # winner, so the capture runs at most once; fail-soft, never breaks the
     # approve path.
-    await persist_resume_result(request.id, result)
+    await persist_resume_result(request.id, result, parked_op_id=request.op_id)
     return result
 
 

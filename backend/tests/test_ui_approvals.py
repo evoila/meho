@@ -56,6 +56,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -63,6 +64,7 @@ from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import (
     ApprovalRequest,
     ApprovalRequestStatus,
+    AuditLog,
     Target,
     Tenant,
 )
@@ -760,6 +762,59 @@ def test_approve_through_bff_decides_and_redispatches() -> None:
     assert _request_status(rid) == ApprovalRequestStatus.APPROVED.value
     # The parked op was re-dispatched via the shared resume helper.
     resume_mock.assert_awaited_once()
+
+
+def _decision_approval_auth(request_id: uuid.UUID) -> object:
+    """Read ``payload["approval_auth"]`` off the request's decision audit row."""
+
+    async def _do() -> object:
+        async with get_sessionmaker()() as session:
+            rows = (
+                await session.execute(
+                    select(AuditLog.payload).where(AuditLog.path == "approval.decision")
+                )
+            ).scalars()
+            for payload in rows:
+                if payload.get("approval_request_id") == str(request_id):
+                    return payload.get("approval_auth")
+        raise AssertionError("no approval.decision audit row")
+
+    return asyncio.run(_do())
+
+
+def test_approve_through_bff_needs_no_fresh_sign_in_and_records_the_click() -> None:
+    """A web approve needs no fresh sign-in; the audit row says "web" (#3979).
+
+    The reviewer's session token has no ``auth_time`` at all. The REST
+    routes would refuse that token; the console accepts the click.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    assert operator.auth_time is None
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, AsyncMock(return_value=_dispatch_result())),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                data={"reason": "looks safe"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    assert _request_status(rid) == ApprovalRequestStatus.APPROVED.value
+    assert _decision_approval_auth(rid) == {
+        "channel": "web",
+        "method": "web_click",
+        "auth_time": None,
+    }
 
 
 def test_reject_through_bff_decides_without_redispatch() -> None:
@@ -2657,6 +2712,140 @@ def test_approve_already_resumed_elsewhere_shows_the_approved_card() -> None:
     assert "Request approved" in body
     assert "the run failed" not in body
     assert 'data-testid="approval-outcome"' not in body
+
+
+# ---------------------------------------------------------------------------
+# The next step a failed multi-step operation names (#5377)
+# ---------------------------------------------------------------------------
+
+_CDROM_OP_ID = "vmware.composite.vm.device.cdrom"
+_CDROM_GUIDANCE = (
+    "The change did not answer in time and may still run (vCenter tasks: task-7). "
+    "Do not start it again yet. The VM waits on question _vmx1: show it to the user "
+    "and answer it with vmware.vm.question.answer."
+)
+
+#: The stored envelope of a CD-ROM change that timed out while the VM waits on a
+#: question, with the guidance stamp the approval store writes (#5377).
+_RESULT_UNKNOWN_ENVELOPE: dict[str, object] = {
+    "status": "error",
+    "op_id": _CDROM_OP_ID,
+    "error": "result_unknown: the device change timed out; its result is unknown",
+    "duration_ms": 30175.0,
+    "audit_id": _RUN_AUDIT_ID,
+    "extras": {"error_code": "result_unknown", "approval_guidance": _CDROM_GUIDANCE},
+    "result": {
+        "status": "result_unknown",
+        "vm_question": {"id": "_vmx1", "text": "The guest has locked the CD-ROM door."},
+        "guidance": _CDROM_GUIDANCE,
+    },
+}
+
+#: A VM resize result an older MEHO stored, before the guidance stamp existed:
+#: the body's ``guidance`` carries vendor error text, and there is no stamp.
+_OLD_PARTIAL_ENVELOPE: dict[str, object] = {
+    "status": "error",
+    "op_id": "vmware.composite.vm.resize",
+    "error": "partial: CPU applied; memory update failed",
+    "duration_ms": 900.0,
+    "audit_id": _RUN_AUDIT_ID,
+    "extras": {"error_code": "partial"},
+    "result": {
+        "status": "partial",
+        "guidance": "CPU applied; memory update failed: 500 at https://vc.example/api/vcenter/vm",
+    },
+}
+
+
+def test_detail_modal_shows_the_next_step_of_a_failed_run() -> None:
+    """The decided modal shows the guidance line, also to a later reader (#5377)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_ran_request(op_id=_CDROM_OP_ID, resume_result=_RESULT_UNKNOWN_ENVELOPE)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-testid="approval-guidance"' in body
+    assert "The VM waits on question _vmx1" in body
+    assert "result_unknown" in body
+    # The question text from vCenter stays on the owner-only /result read.
+    assert "locked the CD-ROM door" not in body
+
+
+def test_detail_modal_of_a_result_stored_before_the_stamp_has_no_next_step() -> None:
+    """Regression: an older stored result never shows its body text as the next step."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_ran_request(op_id="vmware.composite.vm.resize", resume_result=_OLD_PARTIAL_ENVELOPE)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "partial" in body
+    assert 'data-testid="approval-guidance"' not in body
+    assert "vc.example" not in body
+
+
+def test_detail_modal_of_a_plain_failed_run_has_no_next_step() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_ran_request(op_id="failed.op", resume_result=_FAILED_ENVELOPE)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    assert 'data-testid="approval-guidance"' not in response.text
+
+
+def test_approve_card_shows_the_next_step_of_a_failed_run() -> None:
+    """The card after an approve shows the guidance of the run it just started (#5377)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, op_id=_CDROM_OP_ID, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    failed = SimpleNamespace(
+        status="error",
+        op_id=_CDROM_OP_ID,
+        audit_id=uuid.UUID(_RUN_AUDIT_ID),
+        extras={"error_code": "result_unknown"},
+        result=_RESULT_UNKNOWN_ENVELOPE["result"],
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, AsyncMock(return_value=failed)),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                data={"reason": "looks safe"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Approved, but the run failed" in body
+    assert 'data-testid="approval-guidance"' in body
+    assert "The VM waits on question _vmx1" in body
+    assert "locked the CD-ROM door" not in body
 
 
 # ---------------------------------------------------------------------------

@@ -249,6 +249,15 @@ func (c *AuthedClient) AccessToken() string {
 	return c.box.snapshot()
 }
 
+// SignInClient returns the realm URL and the OAuth client id of the
+// stored login. A fresh browser sign-in for one approval uses them
+// (`meho approvals approve`, #3979).
+func (c *AuthedClient) SignInClient() (issuer, clientID string) {
+	c.box.mu.Lock()
+	defer c.box.mu.Unlock()
+	return c.box.current.Issuer, c.box.current.ClientID
+}
+
 // Refresh runs a one-shot refresh exchange against the IdP, replacing
 // the in-memory bearer if the IdP returns a fresh token. Returns
 // errNoRefreshToken (matched by IsNoRefreshToken) when the stored

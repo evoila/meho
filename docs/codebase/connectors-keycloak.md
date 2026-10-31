@@ -30,6 +30,10 @@ sessions of one user, so their refresh tokens stop working at once. #3886 adds a
 fourth destructive delete, `realm.delete` (write surface **eighteen**), so a
 short-lived realm (a test run, a demo, a failed set-up) is removed through
 MEHO too, not by a direct API call.
+`user.check_login` tests one login with a password from Vault and answers
+only `accepted`, `refused` or `error`, so an operator can prove a password
+change worked (the new password is accepted, the old one refused) without a
+`curl` call outside MEHO.
 
 Registry v2 triple: `(product="keycloak", version="26.x",
 impl_id="keycloak-admin")`, plus the `(keycloak, "", "")` wildcard so a
@@ -82,6 +86,10 @@ fresh target with no asserted version still resolves.
   `WHEN_TO_USE_WRITE_BY_GROUP` carries the write groups' blurbs (keyed with
   a `_write` suffix so they never collide with the read groups when
   `register_operations` merges both maps).
+- `LOGIN_CHECK_OPS` + `keycloak_user_check_login`
+  (`connectors/keycloak/ops_login_check.py`) — the login test op, its
+  group text (`WHEN_TO_USE_LOGIN_CHECK_BY_GROUP`) and its approval card.
+  It reuses `_read_password_from_vault` from `ops_write.py`.
 - `KeycloakWriteResult` (`connectors/keycloak/connector.py`) — the
   status + `Location` + `conflict` outcome of a mutating request;
   `created_uuid()` parses the new object's UUID out of `Location`.
@@ -433,6 +441,46 @@ for example at the end of an event or when someone leaves.
   `broadcast/events.py::_WRITE_OPS`, because `.logout` is not a write suffix).
 - CLI: `meho keycloak user logout (--id|--username)`.
 
+### Login test
+
+`keycloak.user.check_login` tries one login for one user and answers only
+whether it worked. Use it after `keycloak.user.reset_password`: the new
+password must be `accepted` and the old one `refused`.
+
+- Params: `username`, `password_secret_ref` (required), `realm` (default:
+  the target's managed realm), `client_id` (default `admin-cli`),
+  `password_secret_mount`, `password_secret_key`. The password is read from
+  Vault with the same helper and the same three params as
+  `user.reset_password`. It is never an op param.
+- One `POST /realms/{realm}/protocol/openid-connect/token` with the
+  `password` grant, sent without the admin token. No retry: every failed
+  try counts toward Keycloak's lockout for too many failed logins.
+- On success, the new session is ended at once:
+  `POST /realms/{realm}/protocol/openid-connect/logout` with `client_id` and
+  the refresh token. `session_ended` says whether Keycloak confirmed it.
+- The answer: `{result, http_status, error, error_description,
+  session_ended, realm, username, client_id}`. `refused` is any
+  `invalid_grant` answer: 401 `Invalid user credentials` (wrong password)
+  or 400 `Account disabled`. Any other answer is `error`, for example
+  400 `unauthorized_client` when the client has no direct access grants.
+  The answer never carries the password or a token. `error` and
+  `error_description` are copied only from a real OAuth2 error body: JSON
+  whose `error` is one of the six RFC 6749 §5.2 codes (the same gate as
+  `KeycloakAdminTokenError`). Any other body gives `null` for both, so a
+  proxy page that echoes the request never reaches the result or the
+  audit row. The description is cut short and the password masked.
+- The client must be public and allow direct access grants. `admin-cli` in
+  `master` has them by default.
+- Risk level `caution`, approval required, group `user_login_check`. The op
+  reads nothing secret back, but each try writes a login event in Keycloak,
+  and a refused try raises the user's failed-login count. The approval card
+  shows the user, realm, client and Vault path.
+- Pinned in `broadcast/events.py::_CREDENTIAL_WRITE_OPS`: the token request
+  body carries the password and the token answer carries tokens. So the
+  flight recorder never stores those bodies, the broadcast view is
+  aggregate-only, and a waiting approval keeps its params in the encrypted
+  handoff store.
+
 ### Governed deletes (#3944)
 
 `keycloak.user.delete`, `keycloak.group.delete` and `keycloak.client.delete`
@@ -596,10 +644,12 @@ paths at #3280, +4 delete paths at #3944, +1 user logout path at #3851,
 +3 realm-delete paths at #3886) are served by the pinned
 `keycloak-26.3` shelf spec (`keycloak-admin-openapi.json` — the vendor's
 Admin REST API OpenAPI at the lab's deployed 26.3.3, from Maven Central
-`org.keycloak:keycloak-api-docs-dist:26.3.3`, Apache-2.0). Two dispatched
+`org.keycloak:keycloak-api-docs-dist:26.3.3`, Apache-2.0). Three dispatched
 paths are pinned as evidenced exclusions rather than reconciled — the OIDC
 token mint (`POST /realms/{realm}/protocol/openid-connect/token`; specified
-by OAuth 2.0 / OIDC discovery, not the Admin REST OpenAPI) and
+by OAuth 2.0 / OIDC discovery, not the Admin REST OpenAPI), the OIDC logout
+the login test uses (`POST /realms/{realm}/protocol/openid-connect/logout`)
+and
 `GET /admin/serverinfo` (unmodeled by the published spec; already
 best-effort in `fingerprint`) — and an armed test asserts they stay
 unserved, so a future spec pin that begins serving one forces its promotion

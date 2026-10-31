@@ -91,6 +91,7 @@ any durable artifact.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from typing import Protocol, runtime_checkable
 
 import hvac.exceptions
@@ -100,6 +101,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError, vault_client_for_operator
 from meho_backplane.connectors._shared.credential_backend import (
+    WRAPPED_CREDENTIAL_SCHEME,
     CredentialsReadError,
     parse_credential_scheme,
     register_credential_backend,
@@ -120,6 +122,8 @@ __all__ = [
     "load_basic_credentials",
     "load_param_secret_data",
     "load_vault_secret_data",
+    "missing_secret_field_map_sources",
+    "secret_field_map_of",
     "secret_ref_prefix",
     "strip_credential_value",
 ]
@@ -172,6 +176,11 @@ class BasicCredentialsTargetLike(Protocol):
       (never a credential value).
     * ``secret_ref`` — the Vault KV-v2 path string the helper reads.
       ``None`` is rejected with a clear error (an unconfigured target).
+
+    A target may also carry an optional ``secret_field_map`` (#3711). It is
+    not part of the Protocol because most target-like stubs (a secret ref
+    taken from op params, for example) must not have one; the loaders read
+    it with :func:`secret_field_map_of`.
     """
 
     name: str
@@ -334,12 +343,67 @@ def _require_secret_ref(target: BasicCredentialsTargetLike) -> str:
     return target.secret_ref.strip()
 
 
+def secret_field_map_of(target: object) -> Mapping[str, str]:
+    """Return *target*'s ``secret_field_map``, or an empty map (#3711).
+
+    The map is ``{connector_field: source_field}``. Only a real target row
+    (or its wire projection) carries it; a stub target built around some
+    other secret ref has no such attribute and gets an empty map, so the
+    map never applies to a secret that is not the target's own.
+    """
+    field_map = getattr(target, "secret_field_map", None)
+    return field_map if isinstance(field_map, Mapping) else {}
+
+
+def _field_map_for_read(target: BasicCredentialsTargetLike) -> Mapping[str, str]:
+    """Return the map to apply to one read of *target*'s secret (#3711).
+
+    The map is applied exactly once between the centre and a satellite
+    runner. A ``wrapped:`` credential is brokered at the centre from the
+    **mapped** view of the target's secret (``broker_wrapped_credential``
+    reads through :func:`load_vault_secret_data`), so the runner that
+    unwraps it gets the connector's view already and must not apply the
+    map again. With two entries that chain, for example ``username ->
+    host_login`` and ``guest_username -> username``, a second pass would
+    give ``guest_username`` the host login. Every other ref (standing
+    ``vault:`` / ``gsm:`` / schemeless) applies the target's own map.
+    """
+    ref = target.secret_ref
+    if ref and parse_credential_scheme(ref.strip()) == WRAPPED_CREDENTIAL_SCHEME:
+        return {}
+    return secret_field_map_of(target)
+
+
+def _apply_secret_field_map(
+    secret_data: dict[str, object], field_map: Mapping[str, str]
+) -> dict[str, object]:
+    """Return *secret_data* as the connector should see it (#3711).
+
+    For every ``connector_field -> source_field`` entry, the connector field
+    takes the value of the source field: a read of ``X`` returns the
+    secret's ``map.get(X, X)``. When the source field is missing, the
+    connector field is missing too, so the connector reports it the same
+    way it reports any missing field. Unmapped fields are left as they are.
+    The input dict is not changed.
+    """
+    if not field_map:
+        return secret_data
+    view = dict(secret_data)
+    for connector_field, source_field in field_map.items():
+        if source_field in secret_data:
+            view[connector_field] = secret_data[source_field]
+        else:
+            view.pop(connector_field, None)
+    return view
+
+
 def _extract_fields(
     secret_data: dict[str, object],
     fields: tuple[str, ...],
     *,
     target_name: str,
     secret_ref: str,
+    field_map: Mapping[str, str],
 ) -> dict[str, str]:
     """Pull *fields* out of the secret data dict as a flat ``{field: str}``.
 
@@ -354,9 +418,14 @@ def _extract_fields(
     credentials: dict[str, str] = {}
     for field in fields:
         if field not in secret_data:
+            mapped = (
+                f" (mapped to source field {field_map[field]!r} by the target's secret_field_map)"
+                if field in field_map
+                else ""
+            )
             raise VaultCredentialsReadError(
                 f"vault secret for target {target_name!r} (secret_ref={secret_ref!r}) "
-                f"is missing required field {field!r}"
+                f"is missing required field {field!r}{mapped}"
             )
         credentials[field] = strip_credential_value(secret_data[field])
     return credentials
@@ -565,8 +634,13 @@ async def load_basic_credentials(
     # → the Vault KV-v2 read) selects the backend. ``store_ref`` is the
     # scheme-stripped ref, named in a missing-field error.
     store_ref, secret_data = await _resolve_and_load(target, operator, mount=mount)
+    field_map = _field_map_for_read(target)
     credentials = _extract_fields(
-        secret_data, fields, target_name=target.name, secret_ref=store_ref
+        _apply_secret_field_map(secret_data, field_map),
+        fields,
+        target_name=target.name,
+        secret_ref=store_ref,
+        field_map=field_map,
     )
 
     # Log only non-secret attribution: target / host / the field *names*
@@ -617,7 +691,8 @@ async def load_vault_secret_data(
     read-phase precondition / unwrap failures raise
     :class:`VaultCredentialsReadError`.
     """
-    _store_ref, secret_data = await _resolve_and_load(target, operator, mount=mount)
+    _store_ref, raw_data = await _resolve_and_load(target, operator, mount=mount)
+    secret_data = _apply_secret_field_map(raw_data, _field_map_for_read(target))
 
     # Log only the field-name set (no values). Sorted for a stable log
     # shape that diff-friendly observability tooling can pattern-match
@@ -629,6 +704,28 @@ async def load_vault_secret_data(
         fields=sorted(secret_data.keys()),
     )
     return secret_data
+
+
+async def missing_secret_field_map_sources(
+    target: BasicCredentialsTargetLike,
+    operator: Operator,
+    *,
+    mount: str = DEFAULT_KV_MOUNT,
+) -> list[str]:
+    """Return the mapped source fields *target*'s secret does not have (#3711).
+
+    Reads the target's own secret (same read as the other loaders) and
+    checks that every source field named in its ``secret_field_map`` is
+    present. Returns the missing source field names, sorted; an empty list
+    means the map is complete. A target with no map returns an empty list
+    without reading the secret. Field names only: no value is returned or
+    logged. Read errors propagate as in :func:`load_vault_secret_data`.
+    """
+    field_map = secret_field_map_of(target)
+    if not field_map:
+        return []
+    _store_ref, secret_data = await _resolve_and_load(target, operator, mount=mount)
+    return sorted({src for src in field_map.values() if src not in secret_data})
 
 
 async def load_param_secret_data(

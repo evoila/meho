@@ -312,6 +312,31 @@ class KubernetesSecretStore:
             raise CoreSecretsError(f'cannot create Secret "{name}": {_describe(exc)}') from None
         return True
 
+    async def put(self, name: str, data: Mapping[str, str]) -> None:
+        """Create the Secret, or replace the values of these keys if it exists.
+
+        The ``vault-init`` Job (#4044) stores what OpenBao gives it once.
+        """
+        if await self.create(name, data, "Opaque"):
+            return
+        try:
+            await self._api.patch_namespaced_secret(
+                name, self._namespace, {"stringData": dict(data)}, _request_timeout=_API_TIMEOUT_S
+            )
+        except ApiException as exc:
+            raise CoreSecretsError(f'cannot update Secret "{name}": {_describe(exc)}') from None
+
+    async def delete(self, name: str) -> None:
+        """Delete the Secret. One that does not exist is fine."""
+        try:
+            await self._api.delete_namespaced_secret(
+                name, self._namespace, _request_timeout=_API_TIMEOUT_S
+            )
+        except ApiException as exc:
+            if exc.status == 404:
+                return
+            raise CoreSecretsError(f'cannot delete Secret "{name}": {_describe(exc)}') from None
+
 
 def load_plan(environ: Mapping[str, str]) -> Plan:
     raw = environ.get(PLAN_ENV)

@@ -193,7 +193,9 @@ VROPS_FLEET_ROLE_LIST_OP = VropsTypedOp(
         "output_shape": (
             "{roles: [{roleName, roleDisplayName, type, roleDescription, componentRoles}], "
             "ssoRealms: [{id, name, vcfInstanceId, idpId, totalConfiguredComponents, "
-            "coverage, issues}]}. The built-in VCF Administrator role is vcf_administrator."
+            "coverage, issues}]}. When the result comes back as a handle, read the realms "
+            "with result_query path='/ssoRealms'. The built-in VCF Administrator role "
+            "is vcf_administrator."
         ),
         "next_step": (
             "Pass an ssoRealms[].id to vrops.fleet.principal.find to find a user or group, "

@@ -392,6 +392,10 @@ All paths start with `/suite-api/api/fleet-management/iam/`.
   Administrator role (`vcf_administrator`) from a user or group when no other
   user or group in the realm holds it. It looks through the users and groups
   that have a role (`filters: HAS_ROLE`) for another holder. Any scope counts.
+  For users it counts only roles given to the user directly
+  (`roleAssignmentTypes` holds `DIRECT`). A user who has the role only
+  through a group does not count, because that group may be the one being
+  changed. The group itself counts on its own row.
 - **Safety.** The two reads are `safe`. `vrops.fleet.role.assign` is
   `dangerous` with `requires_approval=True`: it waits until a person approves
   it, and an agent needs a grant for it.

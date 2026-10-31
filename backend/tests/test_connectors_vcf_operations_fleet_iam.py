@@ -514,7 +514,12 @@ async def test_removing_the_last_role_of_the_last_fleet_administrator_is_refused
             200,
             json={
                 "vidbUsers": [
-                    {"userId": _USER, "roles": [{"roleName": "VCF Administrator"}]},
+                    {
+                        "userId": _USER,
+                        "roles": [
+                            {"roleName": "VCF Administrator", "roleAssignmentTypes": ["DIRECT"]}
+                        ],
+                    },
                     {"userId": _OTHER_USER, "roles": [{"roleName": "VCF Viewer"}]},
                 ]
             },
@@ -547,6 +552,89 @@ async def test_removing_an_administrator_is_allowed_when_a_group_still_has_the_r
             {"ssoRealmId": _REALM, "principalId": _USER, "remove": ["vcf_administrator"]},
         )
     assert delete.called
+
+
+@pytest.mark.asyncio
+async def test_removing_the_role_from_the_only_administrator_group_is_refused() -> None:
+    # A member of the group gets the role only through that group. The 9.1
+    # user query still lists it, but it must not count as another holder.
+    group_roles = f"{_IAM}/ssorealms/{_REALM}/principals/{_GROUP}/roles"
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mount_basics(mock)
+        mock.get(group_roles).respond(
+            200, json={"vcfRoleAssignments": [_assignment("vcf_administrator")]}
+        )
+        mock.post(_USERS_QUERY).respond(
+            200,
+            json={
+                "vidbUsers": [
+                    {
+                        "userId": _OTHER_USER,
+                        "roles": [
+                            {"roleName": "VCF Administrator", "roleAssignmentTypes": ["GROUP"]}
+                        ],
+                    }
+                ]
+            },
+        )
+        mock.post(_GROUPS_QUERY).respond(
+            200, json={"vidbGroups": [{"groupId": _GROUP, "roles": ["vcf_administrator"]}]}
+        )
+        delete = mock.delete(group_roles).respond(204)
+        with pytest.raises(LastFleetAdministratorError, match="last user or group"):
+            await _run(
+                "fleet_role_assign",
+                {"ssoRealmId": _REALM, "principalId": _GROUP, "remove": ["vcf_administrator"]},
+            )
+    assert not delete.called
+
+
+@pytest.mark.asyncio
+async def test_removing_an_administrator_is_allowed_when_another_user_has_it_directly() -> None:
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mount_basics(mock)
+        mock.get(_PRINCIPAL_ROLES).respond(
+            200, json={"vcfRoleAssignments": [_assignment("vcf_administrator")]}
+        )
+        mock.post(_USERS_QUERY).respond(
+            200,
+            json={
+                "vidbUsers": [
+                    {
+                        "userId": _OTHER_USER,
+                        "roles": [
+                            {
+                                "roleName": "VCF Administrator",
+                                "roleAssignmentTypes": ["GROUP", "DIRECT"],
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        mock.post(_GROUPS_QUERY).respond(200, json={"vidbGroups": []})
+        delete = mock.delete(_PRINCIPAL_ROLES).respond(204)
+        await _run(
+            "fleet_role_assign",
+            {"ssoRealmId": _REALM, "principalId": _USER, "remove": ["vcf_administrator"]},
+        )
+    assert delete.called
+
+
+@pytest.mark.asyncio
+async def test_giving_a_held_role_again_with_the_same_scope_is_no_change() -> None:
+    held = _assignment("vcf_viewer")
+    held["roleScope"]["ssoName"] = "realm-name"
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mount_basics(mock)
+        mock.get(_PRINCIPAL_ROLES).respond(200, json={"vcfRoleAssignments": [held]})
+        put = mock.put(_PRINCIPAL_ROLES).respond(200)
+        result = await _run(
+            "fleet_role_assign",
+            {"ssoRealmId": _REALM, "principalId": _USER, "add": [{"roleName": "vcf_viewer"}]},
+        )
+    assert not put.called
+    assert result["changed"] is False
 
 
 @pytest.mark.asyncio

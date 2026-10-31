@@ -267,13 +267,28 @@ def _require_known_roles(unknown: set[str]) -> None:
         )
 
 
+def _assignment_key(assignment: Mapping[str, Any]) -> list[Any]:
+    row = _assignment_row(assignment)
+    return [
+        row["roleName"],
+        row["scopeType"],
+        sorted(str(i) for i in row["resourceIds"]),
+        row["expiresAt"],
+    ]
+
+
 def _same_assignments(
     left: Sequence[Mapping[str, Any]], right: Sequence[Mapping[str, Any]]
 ) -> bool:
-    """Do both lists hold the same assignments, in any order?"""
+    """Do both lists hold the same assignments, in any order?
+
+    Compares role, scope type, resource ids and expiry only. The vendor adds
+    more fields to the scope of a current assignment (names, for example)
+    that a new assignment does not carry.
+    """
 
     def key(items: Sequence[Mapping[str, Any]]) -> list[str]:
-        return sorted(json.dumps(item, sort_keys=True, default=str) for item in items)
+        return sorted(json.dumps(_assignment_key(item), default=str) for item in items)
 
     return key(left) == key(right)
 
@@ -415,7 +430,12 @@ class VropsFleetIamHandlers(_Base):
                 for row in rows:
                     if str(row.get("principalId")) == principal_id:
                         continue
-                    if _holds_admin_label(row.get("roles") or []):
+                    # 9.1 user rows also list roles a user gets through a
+                    # group, maybe the very group being changed. Count only
+                    # the roles given to the user directly; groups count
+                    # on their own rows.
+                    key = "directRoles" if principal_type == _USER else "roles"
+                    if _holds_admin_label(row.get(key) or []):
                         return True
                 seen = (page + 1) * _ADMIN_SCAN_PAGE_SIZE
                 if len(rows) < _ADMIN_SCAN_PAGE_SIZE or (total is not None and seen >= total):

@@ -260,6 +260,15 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "(vcfa.tenant.deployment.delete). A person must approve each call. Safe "
         "to run twice: an object that exists answers 'unchanged'."
     ),
+    "vcfa-provider-identity": (
+        "How people sign in to VCF Automation, on the provider plane. Read the "
+        "provider's LDAP and each org's LDAP and OIDC settings "
+        "(vcfa.provider.identity.show). Set the provider's own LDAP "
+        "(vcfa.provider.ldap.set), set or turn off an org's LDAP "
+        "(vcfa.provider.org.ldap.set), and set or remove an org's OIDC sign-in "
+        "(vcfa.provider.org.oidc.set). A bind password or client secret comes from "
+        "Vault; a person must approve each change."
+    ),
     "vcfa-tenant-images": (
         "Image names of the tenant org (image profiles), on the tenant plane. A cloud "
         "template asks for an image by name, for example 'RHEL 9'; the profile of each "

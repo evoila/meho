@@ -640,7 +640,9 @@ async def test_credential_write_agent_claim_winner_discards_handoff(
         await session.commit()
     assert request.execution_handle is not None
 
-    async def _redispatch(_operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _redispatch(
+        _operator: Operator, arguments: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
         assert arguments["params"] == params
         return {"status": "ok"}
 
@@ -829,7 +831,9 @@ def _forbid_dispatch(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
     calls: list[dict[str, Any]] = []
 
-    async def _spy(_operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _spy(
+        _operator: Operator, arguments: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
         calls.append(arguments)
         return {"status": "ok"}
 
@@ -1168,7 +1172,9 @@ async def test_post_approval_dispatch_outcome_is_returned_unchanged(
     requester = _make_operator(sub="agent-durable-outcome")
     request = await _park_request(requester=requester, status=ApprovalRequestStatus.APPROVED)
 
-    async def _dispatch(_operator: Operator, _arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _dispatch(
+        _operator: Operator, _arguments: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
         return dispatch_envelope
 
     monkeypatch.setattr(meta_tools_module, "call_operation_with_approval", _dispatch)
@@ -1253,7 +1259,10 @@ async def test_direct_park_resume_redispatches_original_call_on_stored_catalog(
     }
     seen: list[tuple[dict[str, Any], Any, Any]] = []
 
-    async def _spy(_operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _spy(
+        _operator: Operator, arguments: dict[str, Any], *, resolved_target: Any = None
+    ) -> dict[str, Any]:
+        assert resolved_target is None, "tenant-wide park: no saved target"
         seen.append((arguments, composite_resume_var.get(), composite_resume_scope_var.get()))
         return {"status": "ok"}
 

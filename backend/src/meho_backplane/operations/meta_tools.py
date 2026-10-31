@@ -1511,7 +1511,7 @@ async def _call_operation_impl(
 
     A caller that already holds the live target row passes it as
     *resolved_target*; then ``arguments["target"]`` is not read at all. The
-    agent waiter's composite re-entry uses this (#3421): it loads the target
+    agent waiter uses this on every resume: it loads the target
     the approval row saved by id, so the name the agent used when it parked
     cannot point at a different target by the time the approval lands.
     """
@@ -1672,10 +1672,11 @@ async def call_operation_with_approval(
     unenforced "coexist by design" note (#1117) had left open.
 
     *resolved_target*: the live target row to dispatch against, when the
-    caller already loaded it. The waiter's composite re-entry passes the
-    target the approval row saved by id (#3421), so ``arguments["target"]``
-    is ignored and no name lookup runs. A direct re-dispatch leaves it
-    ``None`` and resolves the agent's original ``target`` name as before.
+    caller already loaded it. The waiter passes the target the approval row
+    saved by id, for a composite re-entry and for a direct
+    re-dispatch, so ``arguments["target"]`` is ignored and no name lookup
+    runs. The waiter also sets ``arguments["target"]`` to ``None``, so a
+    tenant-wide op (no saved target) stays without a target.
     """
     return await _call_operation_impl(
         operator, arguments, approved=True, resolved_target=resolved_target

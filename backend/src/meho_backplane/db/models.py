@@ -6822,6 +6822,15 @@ class ApprovalRequest(Base):
       with no release identity (local development). Added by migration
       ``0120``.
 
+    * ``target_hash`` -- Text nullable. A SHA-256 over the target's
+      connection settings (host, port, credentials path, TLS settings,
+      extras and the other fields that decide where and how MEHO
+      connects) when the request was made
+      (:func:`~meho_backplane.operations.approval_queue.compute_target_hash`).
+      An approved run checks it against the target as it is now and
+      refuses to run when it differs. NULL for a request with no target
+      and on rows saved before this column. Added by migration ``0130``.
+
     Indexes
     -------
 
@@ -7034,6 +7043,9 @@ class ApprovalRequest(Base):
     rerun_count: Mapped[int] = mapped_column(
         sa.Integer(), nullable=False, default=0, server_default=sa.text("0")
     )
+    # The target's connection settings when the request was made. See the
+    # class docstring. Added by migration ``0130``.
+    target_hash: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     __table_args__ = (
         Index(

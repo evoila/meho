@@ -165,6 +165,11 @@ from meho_backplane.connectors.vmware_rest.soap import (
     parse_soap_fault,
     soap_action_for_version,
 )
+from meho_backplane.connectors.vmware_rest.soap_host_access import (
+    HOST_ACCESS_SOAP_METHODS,
+    build_host_access_envelope,
+    parse_host_access_response,
+)
 from meho_backplane.connectors.vmware_rest.soap_pbm import (
     PBM_PATH,
     build_pbm_create_envelope,
@@ -2435,11 +2440,15 @@ class VmwareRestConnector(HttpConnector):
                 str(body.get("datastorePath", "")),
                 body.get("searchSpec", {}) or {},
             )
+        if method in HOST_ACCESS_SOAP_METHODS:
+            # Host local users and Active Directory (``soap_host_access``).
+            return build_host_access_envelope(mo_type, moid, method, body)
         raise RuntimeError(
             f"vmware vim method {method!r} has no SOAP builder — the standalone-ESXi "
             f"SOAP transport (#3363) implements RetrievePropertiesEx / QueryBootDevices "
             f"/ CreateNasDatastore / MarkAs*_Task / RefreshDatastore(StorageInfo) / "
-            f"SearchDatastore(SubFolders)_Task only"
+            f"SearchDatastore(SubFolders)_Task and the host user and Active Directory calls "
+            f"only"
         )
 
     @staticmethod
@@ -2460,6 +2469,8 @@ class VmwareRestConnector(HttpConnector):
         """
         if method == "RetrievePropertiesEx":
             return parse_retrieve_result(xml)
+        if method in HOST_ACCESS_SOAP_METHODS:
+            return parse_host_access_response(method, xml)
         if method == "QueryBootDevices":
             return parse_boot_devices(xml)
         if method in ("RefreshDatastore", "RefreshDatastoreStorageInfo"):
@@ -3234,6 +3245,40 @@ class VmwareRestConnector(HttpConnector):
         )
 
         return await host_datastores_impl(self, operator, target, params)
+
+    async def host_local_user_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.local_user.list`` -- the local users of one ESXi host.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_access.host_local_user_list_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_access import (
+            host_local_user_list_impl,
+        )
+
+        return await host_local_user_list_impl(self, operator, target, params)
+
+    async def host_ad_status(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.ad.status`` -- the Active Directory domain of one host.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_access.host_ad_status_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_access import (
+            host_ad_status_impl,
+        )
+
+        return await host_ad_status_impl(self, operator, target, params)
 
     async def vm_info(
         self,

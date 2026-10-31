@@ -98,6 +98,10 @@ _CLASSIFIER_OTHER = frozenset(
         # ``other``, like ``host.service_control``.
         "vmware.composite.alarm.acknowledge",
         "vmware.composite.alarm.reset",
+        # ``.leave`` is not a classifier suffix -> ``other``. The user create,
+        # the password change and the domain join send a password: they are
+        # credential_write.
+        "vmware.composite.host.ad.leave",
         # #4394: ``.answer`` is not a classifier suffix -> ``other``. The
         # deploy and the install send a password: they are credential_write.
         "vmware.composite.vcenter.deployment.answer",

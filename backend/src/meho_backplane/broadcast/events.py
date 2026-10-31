@@ -439,6 +439,15 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # flight-recorder spans, collapses the broadcast to aggregate-only and
         # keeps a waiting approval's params in the encrypted handoff store.
         "keycloak.user.check_login",
+        # The host local-user create and password change, and the host's
+        # Active Directory join. The params carry only a Vault path
+        # (``password_secret_ref``); the password goes only into the call to
+        # the host (``CreateUser`` / ``UpdateUser`` / ``JoinDomain_Task``).
+        # The pin keeps those bodies out of the flight recorder, the params
+        # out of the broadcast and the vendor text out of an error result.
+        "vmware.composite.host.local_user.create",
+        "vmware.composite.host.local_user.password.set",
+        "vmware.composite.host.ad.join",
     }
 )
 

@@ -43,6 +43,8 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.datastore.usage",
         # ``datastore.refresh`` is pinned ``write`` in ``_WRITE_OPS``: it is
         # ``safe`` but makes the host rescan, so it is not a plain read.
+        # #3814: ``.orphan_dirs`` is not a classifier suffix -> ``other``; a read.
+        "vmware.composite.datastore.orphan_dirs",
         "vmware.composite.network.portgroup.audit",
         "vmware.composite.vm.clone",
         "vmware.composite.vm.deploy_from_library",

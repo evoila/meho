@@ -1884,8 +1884,77 @@ async def test_vm_device_cdrom_preview_live_reads_current_backing() -> None:
         "action": "remove",
         "current_backing": {"type": "ISO_FILE", "iso_file": "[esx-1-local] installer.iso"},
         "state": "CONNECTED",
+        "requested_backing": None,
     }
     assert recorder.specs == ["/vcenter/vm/vm-1", "/vcenter/vm/vm-1/hardware/cdrom/16000"]
+
+
+def _cdrom_recorder() -> _RecordingConnector:
+    recorder = _RecordingConnector()
+    recorder.responses.update(
+        {
+            "/vcenter/vm/vm-1": {"value": {"name": "web-1"}},
+            "/vcenter/vm/vm-1/hardware/cdrom/16000": {
+                "value": {
+                    "backing": {"type": "ISO_FILE", "iso_file": "[esx-1-local] installer.iso"},
+                    "state": "NOT_CONNECTED",
+                }
+            },
+        }
+    )
+    return recorder
+
+
+@pytest.mark.parametrize(
+    ("backing", "expected"),
+    [
+        ({"type": "CLIENT_DEVICE"}, {"type": "CLIENT_DEVICE"}),
+        (
+            {"type": "ISO_FILE", "iso_file": "[ds] a.iso"},
+            {"type": "ISO_FILE", "iso_file": "[ds] a.iso"},
+        ),
+        (
+            {"type": "HOST_DEVICE", "host_device": "cdrom0", "device_access_type": "PASSTHRU"},
+            {"type": "HOST_DEVICE", "host_device": "cdrom0", "device_access_type": "PASSTHRU"},
+        ),
+    ],
+)
+async def test_vm_device_cdrom_preview_update_shows_requested_backing(
+    backing: dict[str, str], expected: dict[str, str]
+) -> None:
+    """An ``update`` preview shows the new backing next to the current one (#5378)."""
+    recorder = _cdrom_recorder()
+    preview = await _write_preview._vm_device_cdrom_preview(
+        _make_preview_ctx(
+            {"vm": "vm-1", "cdrom": "16000", "action": "update", "backing": backing},
+            connector_instance=recorder,
+        )
+    )
+    assert preview is not None
+    assert preview["current_backing"] == {
+        "type": "ISO_FILE",
+        "iso_file": "[esx-1-local] installer.iso",
+    }
+    assert preview["requested_backing"] == expected
+
+
+@pytest.mark.parametrize("action", ["remove", "disconnect"])
+async def test_vm_device_cdrom_preview_no_requested_backing_without_update(action: str) -> None:
+    """``remove`` and ``disconnect`` set no new backing, even if one is passed (#5378)."""
+    recorder = _cdrom_recorder()
+    preview = await _write_preview._vm_device_cdrom_preview(
+        _make_preview_ctx(
+            {
+                "vm": "vm-1",
+                "cdrom": "16000",
+                "action": action,
+                "backing": {"type": "CLIENT_DEVICE"},
+            },
+            connector_instance=recorder,
+        )
+    )
+    assert preview is not None
+    assert preview["requested_backing"] is None
 
 
 async def test_hardware_builders_decline_on_malformed_params() -> None:
@@ -2038,11 +2107,53 @@ async def test_vm_device_cdrom_park_carries_current_backing(
             "action": "remove",
             "current_backing": {"type": "ISO_FILE", "iso_file": "[esx-1-local] pinned.iso"},
             "state": "CONNECTED",
+            "requested_backing": None,
         },
         "preview_populated": True,
         "safety_level": "dangerous",
     }
     # Only the read-only backing GETs fired — no DELETE.
+    assert recorder.specs == ["/vcenter/vm/vm-1", "/vcenter/vm/vm-1/hardware/cdrom/16000"]
+
+
+async def test_vm_device_cdrom_update_park_carries_requested_backing(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The parked ``update`` row carries the new backing next to the current one (#5378).
+
+    ``meho approvals show`` and the console render ``proposed_effect`` as
+    stored, so this row is what the approver sees.
+    """
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses.update(
+        {
+            "/vcenter/vm/vm-1": {"value": {"name": "web-1"}},
+            "/vcenter/vm/vm-1/hardware/cdrom/16000": {
+                "value": {
+                    "backing": {"type": "ISO_FILE", "iso_file": "[esx-1-local] pinned.iso"},
+                    "state": "NOT_CONNECTED",
+                }
+            },
+        }
+    )
+
+    _, row = await _park(
+        "vmware.composite.vm.device.cdrom",
+        {
+            "vm": "vm-1",
+            "cdrom": "16000",
+            "action": "update",
+            "backing": {"type": "CLIENT_DEVICE"},
+        },
+    )
+
+    preview = row.proposed_effect["preview"]
+    assert preview["current_backing"] == {
+        "type": "ISO_FILE",
+        "iso_file": "[esx-1-local] pinned.iso",
+    }
+    assert preview["requested_backing"] == {"type": "CLIENT_DEVICE"}
+    # Only the read-only backing GETs fired — no PATCH.
     assert recorder.specs == ["/vcenter/vm/vm-1", "/vcenter/vm/vm-1/hardware/cdrom/16000"]
 
 

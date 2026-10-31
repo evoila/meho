@@ -599,6 +599,10 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
         # only, so plain ``write``.
         "phpipam.address.reserve",
         "phpipam.address.release",
+        # Identity Broker / Workspace ONE Access: ``.sync`` is not a write
+        # suffix (see the ArgoCD note above). The params are a directory id
+        # only, so plain ``write``.
+        "idb.directory.sync",
         # MEHO's own registry writes, run through the dispatcher on synthetic
         # connectors. None of their verbs is a write suffix, so without a pin
         # they showed as ``other``. Their params carry no secret material

@@ -681,7 +681,9 @@ async def test_job_result_names_failed_states_and_replaces_secrets(
         "salt.job.result", {"jid": "20260101000000000001", "has_errors": True}
     )
     assert result.status == "ok", result.error
-    assert calls[0]["body"]["kwarg"] == {
+    assert calls[0]["body"]["method"] == "get_cmds"
+    assert calls[0]["body"]["kwarg"] == {"jid": "20260101000000000001", "limit": 1}
+    assert calls[1]["body"]["kwarg"] == {
         "jid": "20260101000000000001",
         "has_errors": True,
         "sort_by": "minion_id",
@@ -689,6 +691,11 @@ async def test_job_result_names_failed_states_and_replaces_secrets(
     }
     body = result.result
     assert body["jid"] == "20260101000000000001"
+    assert body["reachable"] is True
+    assert body["job_state"] == "completed_failures"
+    assert body["job_status"] == "failed"
+    assert body["job_ended"] is True
+    assert (body["expected"], body["returned"], body["returned_failed"]) == (2, 2, 1)
     assert body["count"] == 2
     assert body["failed_minions"] == 1
     failed, good = body["results"]
@@ -717,8 +724,14 @@ async def test_job_result_names_failed_states_and_replaces_secrets(
     assert "plain-secret-value" not in json.dumps(body)
 
 
+_NO_CMDS: dict[str, Any] = {"count": 0, "results": []}
+
+
 def _one_return(row: dict[str, Any]) -> _Answers:
-    return {("ret", "get_returns"): {"count": 1, "results": [row]}}
+    return {
+        ("cmd", "get_cmds"): _NO_CMDS,
+        ("ret", "get_returns"): {"count": 1, "results": [row]},
+    }
 
 
 def _state_entry(
@@ -1025,8 +1038,8 @@ async def test_job_result_withholds_state_names_ids_and_comments(
     ]
     assert result.audit_id is not None
     spans = await _vendor_call_spans(result.audit_id)
-    assert len(spans) == 1
-    recorded = spans[0].attributes["response_body"]["ret"]["results"][0]
+    assert len(spans) == 2
+    recorded = spans[1].attributes["response_body"]["ret"]["results"][0]
     assert recorded["failed_states"] == [cmd_state]
     assert recorded["return"] == row["return"]
     for text in (json.dumps(result.result), _render(spans)):
@@ -1102,8 +1115,8 @@ async def test_job_result_counts_failed_states_whose_id_names_a_password(
     ]
     assert result.audit_id is not None
     spans = await _vendor_call_spans(result.audit_id)
-    assert len(spans) == 1
-    recorded = spans[0].attributes["response_body"]["ret"]["results"][0]
+    assert len(spans) == 2
+    recorded = spans[1].attributes["response_body"]["ret"]["results"][0]
     assert recorded["states_total"] == 3
     assert recorded["states_failed"] == 2
     assert recorded["failed_states"] == failed
@@ -1152,8 +1165,8 @@ async def test_job_result_size_limit_holds_for_the_shown_state_list(
     ]
     assert result.audit_id is not None
     spans = await _vendor_call_spans(result.audit_id)
-    assert len(spans) == 1
-    recorded = spans[0].attributes["response_body"]["ret"]["results"][0]
+    assert len(spans) == 2
+    recorded = spans[1].attributes["response_body"]["ret"]["results"][0]
     for shown in (row, recorded):
         assert shown["return"] is None
         assert shown["return_truncated"] is True
@@ -1194,8 +1207,8 @@ async def test_job_result_withholds_the_default_value_of_a_key_lookup(
     assert row["fun_args_withheld"] is False
     assert result.audit_id is not None
     spans = await _vendor_call_spans(result.audit_id)
-    assert len(spans) == 1
-    recorded = spans[0].attributes["response_body"]["ret"]["results"][0]
+    assert len(spans) == 2
+    recorded = spans[1].attributes["response_body"]["ret"]["results"][0]
     assert recorded["fun_args"] == row["fun_args"]
     for text in (json.dumps(result.result), _render(spans)):
         assert "plain-secret-value" not in text
@@ -1304,6 +1317,7 @@ async def test_job_result_trace_holds_only_what_the_answer_shows(
     await _register(_stub_embedding)
     await _enable_trace_capture(session)
     answers: _Answers = {
+        ("cmd", "get_cmds"): _NO_CMDS,
         ("ret", "get_returns"): {
             "count": 3,
             "results": [
@@ -1329,14 +1343,14 @@ async def test_job_result_trace_holds_only_what_the_answer_shows(
                     "return": {"api_token": "plain-secret-value-9"},
                 },
             ],
-        }
+        },
     }
     result, _, _ = await _run("salt.job.result", {"jid": "1"}, answers)
     assert result.status == "ok", result.error
     assert result.audit_id is not None
     spans = await _vendor_call_spans(result.audit_id)
-    assert len(spans) == 1
-    span = spans[0]
+    assert len(spans) == 2
+    span = spans[1]
     assert span.name == f"POST {_BASE_URL}{_RPC}"
     assert span.attributes["body_recorded"] is True
     recorded = span.attributes["response_body"]
@@ -1502,7 +1516,7 @@ def test_unwrap_rpc_errors(payload: Any, message: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_registered_ops_are_typed_safe_and_documented(
+async def test_registered_reads_are_typed_safe_and_documented(
     _stub_embedding: AsyncMock, session: AsyncSession
 ) -> None:
     await register_salt_typed_operations()
@@ -1519,7 +1533,7 @@ async def test_registered_ops_are_typed_safe_and_documented(
         .all()
     )
     assert {r.op_id for r in rows} == {op.op_id for op in SALT_TYPED_OPS}
-    assert {r.op_id for r in rows} == {
+    reads = {
         "salt.about",
         "salt.minion.list",
         "salt.key.list",
@@ -1527,7 +1541,8 @@ async def test_registered_ops_are_typed_safe_and_documented(
         "salt.job.result",
         "salt.target.list",
     }
-    for row in rows:
+    assert reads <= {r.op_id for r in rows}
+    for row in (r for r in rows if r.op_id in reads):
         assert row.source_kind == "typed"
         assert row.handler_ref is not None
         assert row.safety_level == "safe"

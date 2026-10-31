@@ -16,7 +16,10 @@ Today the connector ships:
 - the **login** to the RaaS HTTP bridge,
 - **version detection** (MEHO reads the RaaS version), and
 - six **reads**: the server, the minions (the managed machines) and their
-  keys, the saved targets, the job runs and their results.
+  keys, the saved targets, the job runs and their results, and
+- six **changes**: accept, reject and delete minion keys; run a state or a
+  shell command on a target; stop a running job. Every change waits for a
+  person's approval.
 
 Package: `backend/src/meho_backplane/connectors/salt/`.
 
@@ -26,14 +29,30 @@ Package: `backend/src/meho_backplane/connectors/salt/`.
 | `salt.minion.list` | One page of minions: minion id, master, key state, presence, last contact, OS, OS release, kernel, Salt version. | `minions.get_minion_key_state`, `minions.get_minion_presence`, `minions.get_minion_cache` | read (`safe`, no approval) | 8.18, 9.1+ |
 | `salt.key.list` | Minion keys by state: accepted, pending, rejected, denied. | `minions.get_minion_key_state` | read (`safe`, no approval) | 8.18, 9.1+ |
 | `salt.job.list` | Recent job runs, newest first: jid, function, saved target, state, user, start time and minion counts. Filter by state to find failed runs. | `cmd.get_cmds` | read (`safe`, no approval) | 8.18, 9.1+ |
-| `salt.job.result` | The results of one run (one `jid`), one row per minion: success, return code, errors, the failed states (kind, outcome, timing), and the return when it is small (at most 8 KiB). | `ret.get_returns` | read (`safe`, no approval) | 8.18, 9.1+ |
+| `salt.job.result` | The state of one run (one `jid`) and its progress, then its results, one row per minion: success, return code, errors, the failed states (kind, outcome, timing), and the return when it is small (at most 8 KiB). The status read of a started job. | `cmd.get_cmds`, `ret.get_returns` | read (`safe`, no approval) | 8.18, 9.1+ |
 | `salt.target.list` | Saved targets (minion groups): id, name, description and, per master, the match type and match text. Pillar data is not read. | `tgt.get_target_group` | read (`safe`, no approval) | 8.18, 9.1+ |
+| `salt.key.accept` | Accept pending minion keys (also rejected or denied ones with a flag). Returns each key's state before and after. | `minions.get_minion_key_state`, `minions.set_minion_key_state` (`state: accept`) | change (`caution`) | 8.18, 9.1+ |
+| `salt.key.reject` | Reject minion keys (also accepted or denied ones with a flag). Returns each key's state before and after. | `minions.get_minion_key_state`, `minions.set_minion_key_state` (`state: reject`) | change (`dangerous`) | 8.18, 9.1+ |
+| `salt.key.delete` | Delete minion keys. Needs a preview; the card lists each key and its state. | `minions.get_minion_key_state`, `minions.set_minion_key_state` (`state: delete`) | change (`destructive`) | 8.18, 9.1+ |
+| `salt.job.run_state` | Apply states (or the highstate) to the minions of a target. Returns the `jid` as soon as RaaS accepts the job. Needs a preview. | `tgt.get_target_group_minions`, `cmd.get_cmds`, `cmd.route_cmd` (`cmd: local`, `fun: state.apply`) | change (`destructive`) | 8.18, 9.1+ |
+| `salt.job.run_command` | Run one shell command on the minions of a target. Returns the `jid`. Needs a preview that shows the command in full. | `tgt.get_target_group_minions`, `cmd.get_cmds`, `cmd.route_cmd` (`cmd: local`, `fun: cmd.run`) | change (`destructive`) | 8.18, 9.1+ |
+| `salt.job.cancel` | Stop a running job (the vendor's soft stop). | `cmd.get_cmds`, `cmd.stop_job` | change (`dangerous`) | 8.18, 9.1+ |
 
-All six operations exist on every covered version, so none needs a
-version check. The changes (accept, reject and delete keys; run a state or
-a command) come in a later Task.
+All twelve operations exist on every covered version, so none needs a
+version check.
 
-**Two calls differ from the first plan.** The RaaS 8.18 reference has no
+**Risk and approval.** Every change has `requires_approval: true`. A
+person's call waits until a second person approves it. An agent's call to
+`salt.key.accept` waits for approval; `salt.key.reject` and
+`salt.job.cancel` need a grant for the `dangerous` risk level; the three
+`destructive` changes are always refused for an agent, so only a person
+runs them, after `preview_operation`.
+
+**Three calls differ from the first plan.** `salt.job.cancel` calls the
+vendor's own stop method `cmd.stop_job` with the `jid`, not
+`cmd.route_cmd` with `saltutil.kill_job`: a kill job would need a target
+of its own, and `cmd.stop_job` is the documented way ("Pass a 'soft_kill'
+command through to the masters"). Also: The RaaS 8.18 reference has no
 `master.get_master_status`; `salt.about` uses `master.get_master_presence`.
 And there is no `jobs` resource: `job.get_jobs` lists saved job
 definitions, not runs. The runs with state, user and start time come from
@@ -72,14 +91,22 @@ accepted; other modes raise `NotImplementedError`.
 - `*_RPC` constants (`connector.py`) -- every RPC method the connector
   calls, as `(resource, method)`. The reconcile lane reads them.
 - `reads.py` -- the bodies of the six reads.
+- `key_writes.py` -- the bodies of the three key changes and the preview
+  builder of `salt.key.delete`.
+- `job_writes.py` -- the bodies of the run and stop changes, the target
+  resolution, the secret check of a command, and the preview builders of
+  `salt.job.run_state` and `salt.job.run_command`.
+- `SaltChangeRefusedError` (`connector.py`) -- MEHO refuses a change before
+  it calls the vendor; the message says why and what to do.
 - `returns.py` -- what `salt.job.result` shows of one job return row.
 - `trace.py` -- the filter the flight recorder runs on every `/rpc` answer.
 - `SALT_TYPED_OPS`, `register_salt_typed_operations` (`typed_ops.py`) --
   the op list, the group texts and the registrar. The op metadata itself
   is in `_ops_minions.py` (server, minions, keys, saved targets) and
-  `_ops_jobs.py` (job runs and results); `_op_common.py` holds the
-  `SaltTypedOp` dataclass, the key and job state lists and the shared
-  schema parts.
+  `_ops_jobs.py` (job runs and results), `_ops_key_writes.py` (key
+  changes) and `_ops_job_writes.py` (run and stop); `_op_common.py` holds
+  the `SaltTypedOp` dataclass, the key and job state lists, the plain job
+  status of each vendor job state, and the shared schema parts.
 
 ## Control flow
 
@@ -87,8 +114,9 @@ accepted; other modes raise `NotImplementedError`.
 
 Importing the package registers the class twice (versioned and wildcard)
 and queues `register_salt_typed_operations` on the typed-op registrar
-list. The lifespan runner writes the six descriptor rows before the first
-dispatch. No spec ingest is needed.
+list. The lifespan runner writes the twelve descriptor rows before the
+first dispatch. No spec ingest is needed. Importing the package also
+imports `key_writes` and `job_writes`, which register the preview builders.
 
 ### Login
 
@@ -137,7 +165,16 @@ next call logs in again. `fingerprint()` and `probe()` use it.
   is unique. On an estate with more than 2000 minions, presence
   and OS can be missing for some rows; then `details_complete` is false
   and the agent should narrow the read with `master_id` or `minion_id`.
-- **`salt.job.result`** shows the return of each minion only when it is
+- **`salt.job.result`** first reads the run with `cmd.get_cmds` (`jid`,
+  limit 1): `job_state` (the vendor's state), `job_status` (the same in
+  plain words: queued, running, paused, stopping, stopped, skipped,
+  succeeded, failed, incomplete, unknown), `job_ended`, and the progress
+  counts `expected`, `returned`, `returned_good`, `returned_failed`. When
+  the server does not answer (no connection, a timeout, or HTTP 502, 503 or
+  504), the read returns `reachable: false`, `job_status: "not reachable"`,
+  the `jid`, `checked_at` and the error, and does not say the job failed. A
+  `401` is not caught: the dispatcher logs in again and runs the read once
+  more. The read then shows the return of each minion only when it is
   at most 8 KiB as JSON and its content can be checked. A state run (a
   return whose every value has a `result`) is shown as a list with one
   entry per state: `state` (module and function, `cmd.run`), `name`,
@@ -202,6 +239,118 @@ next call logs in again. `fingerprint()` and `probe()` use it.
   long list behind a result handle; `result_scalars` keeps the counts
   inline.
 
+### The key changes
+
+`salt.key.accept`, `salt.key.reject` and `salt.key.delete` take 1 to 50
+keys, each as an exact `master_id` and `minion_id`. The schema refuses a
+space, a comma and the glob characters `* ? [ ]`, so a change never reaches
+more keys than the caller named. The body:
+
+1. reads the state of each key with `minions.get_minion_key_state`
+   (`master_id`, `minion_id`) and keeps the row that matches exactly;
+2. refuses the whole call when one key does not exist;
+3. calls `minions.set_minion_key_state` once with `state` (`accept`,
+   `reject` or `delete`), `minions` as `[master_id, minion_id]` pairs, and
+   the include flags the vendor page lists for that state
+   (`include_rejected` and `include_denied` for accept, `include_accepted`
+   and `include_denied` for reject);
+4. reads the states again. The answer has `key_state_before` and
+   `key_state_after` per key, and `changed_count`. The master applies the
+   change, so a key can show its old state for a few seconds.
+
+`salt.key.delete` is `destructive`. Its preview builder reads the keys and
+fills the approval card: `object` (the count and a hash of the keys with
+their states), `children` (each key with its state) and `irreversibility`.
+It refuses when a key does not exist. The approved run reads the keys
+again and compares the hash with the card. When a key or its state
+changed (or the run has no card), it returns `status:
+"precondition_failed"` and deletes nothing.
+
+### Run a state or a command
+
+`salt.job.run_state` (`fun: state.apply`) and `salt.job.run_command`
+(`fun: cmd.run`) are `destructive`: such code can change anything on many
+machines. The target is either `tgt_uuid` (a saved target) or `tgt` with
+`tgt_type` (glob by default) and `master_id` (`*` by default); the schema
+takes exactly one of the two (`oneOf`).
+
+1. **Preview.** The builder resolves the target to the minions it matches
+   now, with `tgt.get_target_group_minions` (`tgt_uuid`, or `tgt` as
+   `{master_id: {"tgt": ..., "tgt_type": ...}}`). The card holds `fun`,
+   `arg` (the state names, or the command text in full), the target as
+   given, `minion_count`, `minions_sha256` (a hash of the sorted
+   `[master_id, minion_id]` pairs), and every minion as a child. The
+   builder refuses a target that matches no minion, more than 500 minions,
+   or an id with a comma, a space or a glob character.
+2. **Approved run.** The body resolves the target again. When `fun`,
+   `arg`, the target or the minion hash differ from the card, or the run
+   has no card, it returns `status: "precondition_failed"`, `started:
+   false`, and starts nothing.
+3. **Start.** `cmd.route_cmd` gets `cmd: local`, the function, its `arg`
+   (`{"arg": [...], "kwarg": {...}}`, as the vendor page shows) and a
+   `list` target per master that names exactly the approved minions. So
+   the run never reaches a minion the approver did not see, even when the
+   target expression matches more minions by then.
+
+`salt.job.run_state` takes `states` (applied in one call as a comma list;
+left out, it applies the highstate), `test` (a dry run) and `saltenv`.
+`salt.job.run_command` takes `command`. MEHO refuses a command that looks
+like it holds a secret: a `name=value`, `name: value` or `--name value`
+whose name is secret-shaped (`password`, `token`, `api_key`, ...), or text
+the shared redaction engine would change. So the command can be shown in
+full on the card and in the audit row. This check is a help, not a
+guarantee; the guidance tells callers never to put a secret into a command.
+
+### Vendor jobs
+
+The vendor does the work after the start call returns.
+
+- **Start answer.** `status: "accepted"` and `started: true` mean RaaS
+  took the job; they never mean the work is done. The answer has the `jid`
+  and `status_read: "salt.job.result"`. When RaaS returns no `jid`, the
+  answer says so and tells the caller to find the run with `salt.job.list`.
+- **Status read.** `salt.job.result` with the `jid`, until `job_ended` is
+  true (see "The reads").
+- **A job that already runs.** Before a start, the body lists the jobs of
+  the same function that have not ended (`cmd.get_cmds` with the states
+  new, retrieved, resuming, resumed, pausing, paused, stopping). When one
+  has the same `list` target, the answer is `status: "already_running"`
+  with that job's `jid`, and nothing starts. This is a help, not a lock:
+  two callers can both check before either starts.
+- **A lost reply.** The caller does not start again blindly. It reads
+  `salt.job.list` (function, user, newest first) to find the `jid` first.
+  The guidance tells callers to pass `async: true` to `call_operation`
+  (`docs/codebase/async-governed-dispatch.md`), so MEHO keeps the start's
+  answer, with the `jid`, under a run handle.
+- **A login that expired.** The dispatcher logs in again on `401` and runs
+  the status read once more.
+- **No answer.** The status read says `not reachable` with the `jid` and
+  the time. MEHO keeps no job state between calls; the caller keeps the
+  `jid` (or the async run handle of the start).
+- **Multi-step changes.** Each change makes one vendor change call, so no
+  change can stop half-way.
+
+`salt.job.cancel` reads the run with `cmd.get_cmds`. It refuses an unknown
+`jid`. For a job that has ended it returns `status: "not_running"`, for a
+job that is stopping `already_stopping`, and sends nothing. Otherwise it
+calls `cmd.stop_job` with the `jid` and returns `status: "accepted"` and
+`stop_jid` (the job id of the stop command). Work a minion already did
+stays done.
+
+### Secrets in the changes
+
+- Results hold minion ids, key states, function names, counts and job ids;
+  no password, cookie or xsrf value.
+- `salt.job.result` withholds the text a command printed (see "The
+  reads"), so a command's output never reaches an answer.
+- The flight recorder stores no vendor body of a `destructive` operation.
+  For `salt.job.cancel` it keeps only the job fields of the reads and the
+  stop's job id.
+- An error of a change reaches the answer with the vendor's text, after the
+  dispatcher's normal redaction. The key changes carry the tag `minion`,
+  not `key`: the `key` tag would mark them as secret-bearing, and a minion
+  key is a public key.
+
 ### Shutdown
 
 `aclose()` clears the cached sessions, then closes the httpx pool.
@@ -225,6 +374,16 @@ next call logs in again. `fingerprint()` and `probe()` use it.
   cap in job results, no password, cookie or xsrf value in a result, no
   withheld value and no unread field (a custom grain, for example) in a
   stored trace, registration shape, version parsing, fingerprint.
+- `backend/tests/test_connectors_salt_writes.py` -- the six changes
+  through the dispatcher, with a respx-mocked RaaS: risk levels; each
+  change waits for approval, runs the right RPC call after approval, and
+  passes a vendor error on; the destructive ones are refused without a
+  `preview_hash` and for an agent, their cards list every key or minion,
+  and the full flow (preview, wait, a second person approves, run) works;
+  drift after the approval gives `precondition_failed`; a run reaches only
+  the card's minions; a running job is not started twice; a command with a
+  secret is refused; the status read gives the job state, says `not
+  reachable`, and logs in again after a `401`; the stored traces.
 - `backend/tests/test_connectors_salt_spec_reconcile.py` -- every `*_RPC`
   method is in the pinned RaaS 8.18 reference list
   (`salt-raas-8.18/salt-raas-8.18-reference-operations.tsv` on the spec
@@ -239,6 +398,13 @@ next call logs in again. `fingerprint()` and `probe()` use it.
 - **Answer fields.** Many reference pages only say the method returns a
   dict. The rows read the field names the pages and their examples show,
   with `.get`, so a missing field is `null`, not an error.
+- **Field names of the change answers.** The reference pages give
+  `tgt.get_target_group_minions` and `minions.set_minion_key_state` only
+  as "dict", and `cmd.route_cmd` as "str". The target resolution reads a
+  dict keyed by master whose value is a list of minion ids (or of rows
+  with `minion_id`). The check for a running job compares the `tgt` field
+  of each `cmd.get_cmds` row; a server that does not return it never
+  matches, so the check finds nothing. A lab proof must confirm both.
 - **LDAP users.** The HTTP bridge login with HTTP Basic is the vendor's
   documented way. A login for a user of another authentication backend
   (the Python client's `config_name`) is not supported yet.

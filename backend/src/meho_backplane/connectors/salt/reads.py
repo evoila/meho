@@ -15,8 +15,12 @@ reference shows only some answer keys, so every row reads its fields with
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
+import httpx
+
+from meho_backplane.connectors.salt._op_common import ENDED_JOB_STATUSES, JOB_STATUS_BY_STATE
 from meho_backplane.connectors.salt.connector import (
     CMDS_RPC,
     GET_VERSIONS_RPC,
@@ -290,25 +294,87 @@ async def job_list_impl(
     return {"count": count if count is not None else len(jobs), "jobs": jobs}
 
 
+#: HTTP answers that mean the RaaS server is not there now (a proxy in front
+#: of it, or the server during its own upgrade).
+_UNREACHABLE_STATUS: Final[frozenset[int]] = frozenset({502, 503, 504})
+
+
+#: The ``cmd.get_cmds`` fields ``salt.job.result`` shows next to the state.
+_PROGRESS_FIELDS: Final[tuple[str, ...]] = (
+    "fun",
+    "user",
+    "start_time",
+    "expected",
+    "returned",
+    "returned_good",
+    "returned_failed",
+)
+
+
+def _job_progress(row: dict[str, Any] | None) -> dict[str, Any]:
+    """The job state fields of ``salt.job.result``, from one ``cmd.get_cmds`` row."""
+    state = row.get("state") if row else None
+    status = JOB_STATUS_BY_STATE.get(str(state), "unknown")
+    return {
+        "job_state": state,
+        "job_status": status,
+        "job_ended": status in ENDED_JOB_STATUSES,
+        **{field: (row or {}).get(field) for field in _PROGRESS_FIELDS},
+    }
+
+
 async def job_result_impl(
     connector: SaltConnector,
     operator: Operator,
     target: SaltTargetLike,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    """``salt.job.result`` -- ``ret.get_returns`` for one ``jid``, one row per minion."""
+    """``salt.job.result`` -- the job state (``cmd.get_cmds``) and ``ret.get_returns``.
+
+    When the server does not answer, the read says ``not reachable`` with the
+    jid and the time, and does not say the job failed. A ``401`` is not
+    caught: the dispatcher logs in again and runs the read once more.
+    """
+    jid = params["jid"]
     kwarg = {
-        "jid": params["jid"],
+        "jid": jid,
         "minion_id": params.get("minion_id"),
         "has_errors": params.get("has_errors"),
         "sort_by": "minion_id",
         **_paging(params, LIST_PAGE_LIMIT),
     }
-    ret = await connector.rpc(target, operator, RETURNS_RPC, kwarg)
+    try:
+        cmd_rows, _ = _results(
+            await connector.rpc(target, operator, CMDS_RPC, {"jid": jid, "limit": 1})
+        )
+        ret = await connector.rpc(target, operator, RETURNS_RPC, kwarg)
+    except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+        if (
+            isinstance(exc, httpx.HTTPStatusError)
+            and exc.response.status_code not in _UNREACHABLE_STATUS
+        ):
+            raise
+        return {
+            "jid": jid,
+            "reachable": False,
+            "checked_at": datetime.now(UTC).isoformat(),
+            "error": f"{type(exc).__name__}: {exc}"[:300],
+            **_job_progress(None),
+            "job_status": "not reachable",
+            "job_ended": False,
+            "count": 0,
+            "failed_minions": 0,
+            "results": [],
+        }
+    job_row = next((row for row in cmd_rows if row.get("jid") in (jid, None)), None)
     rows, count = _results(ret)
     results = [result_row(row) for row in rows]
     return {
-        "jid": params["jid"],
+        "jid": jid,
+        "reachable": True,
+        "checked_at": datetime.now(UTC).isoformat(),
+        "error": None,
+        **_job_progress(job_row),
         "count": count if count is not None else len(results),
         "failed_minions": sum(1 for row in results if row["has_errors"] or row["success"] is False),
         "results": results,

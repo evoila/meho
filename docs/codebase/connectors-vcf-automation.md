@@ -404,6 +404,83 @@ handlers, the org-create check and the park-time preview are in
   (`change` / `unchanged` / `invalid_request`). Without a connector it shows
   `would: set_if_different` and no current state.
 
+**Integrations: Orchestrator, IPAM and Git (#4501).** Five ops connect an
+organization to Orchestrator, an IPAM provider or a Git server. They are
+written once in `connectors/vmware_shared/` (`vcfa_integration_*.py`,
+`vcfa_integrations.py`, `vcfa_git_sources.py`, `vcfa_ipam_package.py`) and
+registered on both Automation connectors: `vcfa.tenant.*` here (group
+`vcfa-tenant-integrations`, registrar `integration_ops.py`) and `vcfa.vra8.*`
+on `vcfa-vra8-8.0` (group `vcfa-vra8-integrations`). Both connector classes
+inherit `VcfaIntegrationOpsMixin` and add `_integration_send` (one request, any
+method, raw body allowed, one new login on a `401`). `plane_for_path` sends
+`/content/api/*` and `/provisioning/*` to the tenant login too.
+
+| op (`vcfa.tenant.` / `vcfa.vra8.`) | what it does and returns | risk level | vendor calls | versions |
+|---|---|---|---|---|
+| `integration.list` | the integrations (flat rows, no secret, no certificate), or the Git content sources with their last sync (`view: git_sources`), or one integration (`id`), or the state of one Git sync (`sync_request_id`) or vendor request (`request_tracker_id`) as `job` | safe | `GET /iaas/api/integrations[/{id}]`, `GET /content/api/sources`, `GET /content/api/sourcecontrol/sync-history`, `GET .../sync-requests/{id}`, `GET /iaas/api/request-tracker/{id}` | 8.18, 9.x |
+| `integration.set` | adds (`integration_type`: `vro`, `ipam`, `com.github.saas`, `com.gitlab.saas`, `org.bitbucket`) or changes (`id`) an integration: the vendor's test first, then the save; returns `status` (`saved`, `test_failed`, `failed`, `unfinished`, `exists`), the two trackers and the steps | dangerous, approval | `POST /iaas/api/integrations?validateOnly=true`, `POST /iaas/api/integrations` or `PATCH /iaas/api/integrations/{id}`, `GET /iaas/api/request-tracker/{id}` | 8.18, 9.x |
+| `integration.delete` | lists what uses the integration and stops (`in_use`) unless `confirm_in_use`; then removes it and follows the tracker | destructive, approval, preview first | `GET /iaas/api/external-network-ip-ranges`, `GET /iaas/api/network-profiles`, `GET /content/api/sources`, `DELETE /iaas/api/integrations/{id}`, `GET /iaas/api/request-tracker/{id}` | 8.18, 9.x |
+| `ipam_package.import` | downloads a provider zip from an https URL, uploads it with the vendor's resumable upload and imports it; returns the file (name, size, SHA-256, source, target) and the provider id | destructive, approval, preview first | `GET /provisioning/ipam/api/providers`, `POST` + `PATCH /provisioning/ipam/api/providers/packages/import[/{upload}]` | 8.18, 9.x |
+| `git_repo.set` | `add`: a Git repository (branch, folder, content type) as a content source of a project, then a sync; answers `accepted` with the sync id. `remove`: deletes a content source | dangerous, approval | `POST /content/api/sources`, `POST /content/api/sourcecontrol/sync-requests`, `DELETE /content/api/sources/{id}` | 8.18, 9.x |
+
+On VCF Automation 9 the ops work in a "VM Apps" organization. An "All Apps"
+organization has no IaaS API: `integration.list` answers with an error that
+says so (a `404` on `/iaas/api/integrations`). Wiring an external
+Orchestrator into the sign-in of an All Apps organization has no public API
+and is not covered.
+
+- **Secrets.** A password or token is a Vault reference
+  (`password_secret_ref`, optional `_mount` and `_key`), read under the
+  caller's identity only when the approved call runs. It goes only into the
+  request body. A vendor or tracker text that repeats it is replaced with a
+  fixed note. Results drop secret-named properties and the certificate.
+- **IPAM shape.** Learned on a real system; the public API file does not say
+  it. The running environment is `faasProviderEndpointId` (the id of the
+  `abx.endpoint` integration), the login goes at the top level
+  (`user_name` -> `privateKeyId`), and the certificate goes inside
+  `integrationProperties.certificate`. MEHO refuses `endpointId`, a login
+  inside the properties and a missing user, and puts the certificate where
+  each type reads it (`certificateInfo` for the other types). The vendor's
+  test runs the provider's validate action, which leaves one extensibility
+  action run record also when nothing is saved; the answer says so.
+- **Work MEHO does inside its call** (`integration.set`, `integration.delete`,
+  `ipam_package.import`). The handler runs until every step is done and
+  answers with the steps that ran, the failed step with the vendor's error,
+  and the steps that did not run. It undoes nothing. Call these ops with
+  `async: true` ([async-governed-dispatch.md](async-governed-dispatch.md)):
+  MEHO answers `202` with a run handle and stores the final answer. MEHO's
+  async mode does not resume: if MEHO restarts during the call, the run ends
+  as failed. Then read the target first (`integration.list`; for the IPAM
+  import, the providers) and call again: an existing name answers `exists`,
+  an imported provider version answers `unchanged`.
+- **IPAM package clean-up.** The download goes to a temporary file named
+  `meho-ipam-package-*.zip.part`, removed in a `finally` block. If the MEHO
+  process dies, the next import removes such files older than one hour. The
+  vendor drops an unfinished upload after a few minutes. The download uses
+  MEHO's own client: https only, no user info, query or fragment in the URL,
+  the same address screen as a target host, no redirect followed, no
+  credential sent. Answers show the URL without query.
+- **Git sync job** (`git_repo.set`). The start returns as soon as the vendor
+  accepted the sync: `accepted`, the sync id and the status read
+  (`integration.list` with `sync_request_id`). Before it starts, it reads the
+  sync history of the source and returns a running sync instead of a second
+  one (a help, not a lock). The status read gives the vendor's state
+  (`REQUESTED`, `STARTED`, `PROCESSING`, `COMPLETED`, `FAILED`, `SKIPPED`)
+  and message, logs in again when the login expired, and answers
+  `not_reachable` with the job id and the time when the system does not
+  answer (also on `502`/`503`/`504`). After a lost reply, read
+  `integration.list` with `view: git_sources` (each source with its last
+  sync) before you start again.
+- **Previews.** `integration.delete` reads the integration and its users and
+  fills `blast_radius` (`object`, `children`, `irreversibility`); it
+  refuses an unknown id. `ipam_package.import` checks the URL with a `HEAD`
+  (refuses `404`, `410` and redirects) and lists the providers.
+- **Spec check.** `tests/test_vcfa_integration_spec_reconcile.py` checks every
+  path against `vra-iaas.json` and `vra-content.json` of the pinned
+  `vra-sdk-go` v0.6.5 shelf, for both connectors. The two IPAM provider calls
+  are in no published API file (not in vra-sdk-go, not in the 9.0, 9.1 and
+  9.1.1 references); they are pinned as an exclusion.
+
 Source: `backend/src/meho_backplane/connectors/vcf_automation/`.
 
 The connector is **dual-plane**: a single registry triple covers both the

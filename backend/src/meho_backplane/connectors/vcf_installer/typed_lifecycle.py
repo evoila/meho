@@ -27,6 +27,14 @@ stops that call on an older target before any Vault read or vendor call. It
 raises :exc:`NotImplementedError`, which the dispatcher turns into an audited
 ``connector_unsupported`` answer.
 
+**Path ids.** The cancel and the spec read put a caller-given id into the
+vendor path. :func:`path_id` takes only one plain path segment (letters,
+digits, ``.``, ``_``, ``~``, ``-``; not ``.`` or ``..``), so an id can never
+change which vendor endpoint the call reaches. The same rule is the
+``pattern`` of both ``id`` params, so the dispatcher refuses a bad id as
+``invalid_params`` before any approval is asked for; the handler checks it
+again before it builds the URL.
+
 **Secret hygiene of the discovery calls.** The request body holds the other
 system's password. On a vendor error the handler raises a copy of the
 :class:`httpx.HTTPStatusError` that has no request body and keeps only the
@@ -39,6 +47,7 @@ re-login-once path.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -63,8 +72,10 @@ __all__ = [
     "DISCOVERY_VCENTER_OP_ID",
     "DISCOVERY_VCF_OPERATIONS_OP_ID",
     "INSTALLER_SDDC_CANCEL_OP_ID",
+    "INSTALLER_SDDC_SPEC_GET_OP_ID",
     "LIFECYCLE_9_1_ONLY_OP_IDS",
     "LIFECYCLE_DECLARED_OP_IDS",
+    "PATH_ID_PATTERN",
     "RELEASE_ROW_KEYS",
     "DiscoverySecretError",
     "installer_appliance_info_impl",
@@ -74,6 +85,7 @@ __all__ = [
     "installer_release_list_impl",
     "installer_sddc_cancel_impl",
     "installer_sddc_spec_get_impl",
+    "path_id",
     "require_installer_version",
 ]
 
@@ -81,6 +93,7 @@ DISCOVERY_VCENTER_OP_ID: Final = "installer.discovery.vcenter"
 DISCOVERY_SDDC_MANAGER_OP_ID: Final = "installer.discovery.sddc_manager"
 DISCOVERY_VCF_OPERATIONS_OP_ID: Final = "installer.discovery.vcf_operations"
 INSTALLER_SDDC_CANCEL_OP_ID: Final = "installer.sddc.cancel"
+INSTALLER_SDDC_SPEC_GET_OP_ID: Final = "installer.sddc.spec.get"
 
 # --- Vendor paths (the spec-reconcile lane reads LIFECYCLE_DECLARED_OP_IDS). ---
 _VCENTER_DISCOVERY_PATH: Final = "/v1/sddcs/vcenter-discovery"
@@ -133,12 +146,36 @@ _RELEASE_QUERY: Final = {
 #: The vendor error fields a discovery error keeps.
 _KEPT_ERROR_FIELDS: Final = ("errorCode", "message", "remediationMessage")
 
+#: One plain URL path segment: the RFC 3986 unreserved characters, and not
+#: the dot segments ``.`` / ``..``. Used as the ``pattern`` of every ``id``
+#: param this module puts into a vendor path, and checked again by
+#: :func:`path_id`.
+PATH_ID_PATTERN: Final = r"^(?!\.{1,2}$)[A-Za-z0-9._~-]+$"
+_PATH_ID_RE: Final = re.compile(PATH_ID_PATTERN)
+
 
 class DiscoverySecretError(Exception):
     """The Vault secret a discovery call names has no usable login.
 
     The message names the path and the missing key, never a value.
     """
+
+
+def path_id(value: Any, *, op_id: str) -> str:
+    """*value* as one plain path segment, or :exc:`ValueError`.
+
+    Refuses a slash, a backslash, ``?``, ``#``, ``%``, whitespace, control
+    characters, and the dot segments ``.`` and ``..`` — anything that could
+    make the built URL reach another vendor endpoint than the one the op
+    names. The message repeats the id, so the caller sees what was refused.
+    """
+    text = str(value)
+    if not _PATH_ID_RE.fullmatch(text):
+        raise ValueError(
+            f"{op_id}: id={text!r} is not a plain id. Allowed: letters, digits, "
+            "'.', '_', '~' and '-' (and not '.' or '..'). Nothing was sent."
+        )
+    return text
 
 
 def require_installer_version(target: Any, *, op_id: str, minimum: str, feature: str) -> None:
@@ -360,9 +397,9 @@ async def installer_sddc_cancel_impl(
     task is not ``IN_PROGRESS``) or ``404`` propagates as
     :class:`httpx.HTTPStatusError`; the dispatcher puts the vendor message in
     the answer. The op waits for approval, so by the time this runs a person
-    has approved it.
+    has approved it. The id must be one plain path segment (:func:`path_id`).
     """
-    task_id = str(params["id"])
+    task_id = path_id(params["id"], op_id=INSTALLER_SDDC_CANCEL_OP_ID)
     await connector._post_json(
         target, _TASK_PATH.replace("{id}", task_id), operator=operator, verb="DELETE"
     )
@@ -443,8 +480,9 @@ async def installer_sddc_spec_get_impl(
     ``credentials``, ``nsxtAdminPassword``, a licence key, ...) gets the
     ``[REDACTED:param_name]`` marker, at every depth, by the shared
     :func:`~meho_backplane.redaction.secret_fields.scrub_secret_fields` rule.
+    The id must be one plain path segment (:func:`path_id`).
     """
-    sddc_id = str(params["id"])
+    sddc_id = path_id(params["id"], op_id=INSTALLER_SDDC_SPEC_GET_OP_ID)
     payload = await connector._get_json(
         target, _SDDC_SPEC_PATH.replace("{id}", sddc_id), operator=operator
     )

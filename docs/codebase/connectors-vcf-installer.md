@@ -268,6 +268,13 @@ are in `installer-appliance`.
   On a task that is not `IN_PROGRESS` it answers `409`; that message reaches
   the caller in `extras.upstream_message`. Poll `installer.sddc.bringup.status`
   afterwards.
+- **Path ids.** The `id` of the cancel and of the spec read goes into the
+  vendor path. It must be one plain path segment: letters, digits, `.`, `_`,
+  `~` and `-`, and not `.` or `..` (`typed_lifecycle.PATH_ID_PATTERN`). The
+  schema `pattern` makes the dispatcher refuse anything else as
+  `invalid_params` before an approval is asked for, and the handler
+  (`typed_lifecycle.path_id`) checks again before it builds the URL. So an id
+  can never point the call at another vendor endpoint.
 - **Release rows.** Each vendor `Release` keeps `product`, `version`,
   `releaseDate`, `minInstallerVersion`, `minCompatibleVcfVersion`, `eol` and a
   `bom` map (component name to version). The long `description`, `sku`,

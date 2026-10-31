@@ -41,6 +41,8 @@ from meho_backplane.connectors.vcf_installer.typed_lifecycle import (
     DISCOVERY_VCENTER_OP_ID,
     DISCOVERY_VCF_OPERATIONS_OP_ID,
     INSTALLER_SDDC_CANCEL_OP_ID,
+    INSTALLER_SDDC_SPEC_GET_OP_ID,
+    PATH_ID_PATTERN,
 )
 
 __all__ = [
@@ -256,15 +258,17 @@ _SDDC_CANCEL = InstallerTypedOp(
             "id": {
                 "type": "string",
                 "minLength": 1,
+                "pattern": PATH_ID_PATTERN,
                 "description": (
                     "The id of the running bring-up task, from installer.sddc.list or "
-                    "installer.sddc.bringup.start."
+                    "installer.sddc.bringup.start. One plain id: letters, digits, "
+                    "'.', '_', '~' and '-'."
                 ),
             },
         },
         "required": ["id"],
         "additionalProperties": False,
-        "examples": [{"id": "<bringup-task-id>"}],
+        "examples": [{"id": "bringup-task-id-example"}],
     },
     response_schema=SDDC_CANCEL_RESPONSE,
     group_key=_GROUP_BRINGUP,
@@ -292,7 +296,7 @@ _SDDC_CANCEL = InstallerTypedOp(
 )
 
 _SDDC_SPEC_GET = InstallerTypedOp(
-    op_id="installer.sddc.spec.get",
+    op_id=INSTALLER_SDDC_SPEC_GET_OP_ID,
     handler_attr="sddc_spec_get",
     summary="Read the SddcSpec a bring-up used, with passwords removed.",
     description=(
@@ -306,12 +310,16 @@ _SDDC_SPEC_GET = InstallerTypedOp(
             "id": {
                 "type": "string",
                 "minLength": 1,
-                "description": "The bring-up task id, from installer.sddc.list.",
+                "pattern": PATH_ID_PATTERN,
+                "description": (
+                    "The bring-up task id, from installer.sddc.list. One plain id: "
+                    "letters, digits, '.', '_', '~' and '-'."
+                ),
             },
         },
         "required": ["id"],
         "additionalProperties": False,
-        "examples": [{"id": "<bringup-task-id>"}],
+        "examples": [{"id": "bringup-task-id-example"}],
     },
     response_schema=SDDC_SPEC_RESPONSE,
     group_key=_GROUP_BRINGUP,

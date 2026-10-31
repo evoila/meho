@@ -336,6 +336,56 @@ async def test_cancel_deletes_the_task() -> None:
     await connector.aclose()
 
 
+_BAD_PATH_IDS = (
+    "../system/trusted-certificates/example-id",
+    "..",
+    ".",
+    "task-1/extra",
+    "task-1\\extra",
+    "task-1?x=1",
+    "task-1#frag",
+    "task-1%2F..",
+    "task 1",
+    "task-1\n",
+    "",
+)
+
+
+@pytest.mark.parametrize("bad_id", _BAD_PATH_IDS)
+@pytest.mark.asyncio
+async def test_cancel_refuses_an_id_that_is_not_one_path_segment(bad_id: str) -> None:
+    """A traversal or URL control character in the id never reaches the vendor."""
+    connector = _make_connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        token = mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-1"})
+        route = mock.route()
+        with pytest.raises(ValueError, match=r"installer\.sddc\.cancel: id="):
+            await connector.sddc_cancel(_OPERATOR, _StubTarget(), {"id": bad_id})
+
+    assert route.call_count == 0
+    assert token.call_count == 0
+    await connector.aclose()
+
+
+@pytest.mark.parametrize("bad_id", _BAD_PATH_IDS)
+@pytest.mark.asyncio
+async def test_spec_get_refuses_an_id_that_is_not_one_path_segment(bad_id: str) -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        token = mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-1"})
+        route = mock.route()
+        with pytest.raises(ValueError, match=r"installer\.sddc\.spec\.get: id="):
+            await connector.sddc_spec_get(_OPERATOR, _StubTarget(), {"id": bad_id})
+
+    assert route.call_count == 0
+    assert token.call_count == 0
+    await connector.aclose()
+
+
+def test_path_id_takes_a_plain_id() -> None:
+    assert _lifecycle.path_id("a1b2.c3_d~e-f", op_id="x") == "a1b2.c3_d~e-f"
+
+
 # ------------------------------------------------------------------ reads
 
 
@@ -483,6 +533,43 @@ async def test_dispatch_cancel_waits_for_approval() -> None:
         )
 
     assert result.status == "awaiting_approval", result
+    assert route.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_dispatch_cancel_with_a_traversal_id_is_invalid_params_before_approval() -> None:
+    """The schema pattern stops a bad id before an approval is asked for or a call is sent."""
+    target = await _setup_dispatch("9.1.0.0")
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        route = mock.route()
+        result = await dispatch(
+            operator=_OPERATOR,
+            connector_id=_CONNECTOR_ID,
+            op_id="installer.sddc.cancel",
+            target=target,
+            params={"id": "../system/trusted-certificates/example-id"},
+        )
+
+    assert result.status == "error", result
+    assert result.extras["error_code"] == "invalid_params"
+    assert route.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_dispatch_spec_get_with_a_traversal_id_is_invalid_params() -> None:
+    target = await _setup_dispatch("9.1.0.0")
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        route = mock.route()
+        result = await dispatch(
+            operator=_OPERATOR,
+            connector_id=_CONNECTOR_ID,
+            op_id="installer.sddc.spec.get",
+            target=target,
+            params={"id": "../system/trusted-certificates/example-id"},
+        )
+
+    assert result.status == "error", result
+    assert result.extras["error_code"] == "invalid_params"
     assert route.call_count == 0
 
 

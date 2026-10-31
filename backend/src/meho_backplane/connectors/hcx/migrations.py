@@ -234,28 +234,51 @@ def _first_item(payload: Any) -> dict[str, Any]:
     return rows[0] if rows else {}
 
 
+def _status_read_params(
+    group_id: Any, running: list[dict[str, Any]], vm_ids: list[str] | None
+) -> dict[str, Any]:
+    """The ``hcx.migration.list`` parameters that follow a start; never a null value.
+
+    The group id when it is known; the ids of the running migrations for
+    ``already_running``; else the VM ids, so a start whose group was not
+    made can still be followed. An empty object when nothing is known.
+    """
+    read_params: dict[str, Any] = {}
+    if group_id:
+        read_params["mobility_group_id"] = group_id
+    running_ids = [row["migration_id"] for row in running if row.get("migration_id")]
+    if running_ids:
+        read_params["migration_ids"] = running_ids
+    elif not group_id and vm_ids:
+        read_params["vm_ids"] = list(vm_ids)
+    return read_params
+
+
 def _job_answer(
     status: str,
     group_id: Any,
     *,
     item: dict[str, Any] | None = None,
     running: list[dict[str, Any]] | None = None,
+    vm_ids: list[str] | None = None,
     steps: list[dict[str, Any]],
 ) -> dict[str, Any]:
     item = item or {}
+    group_id = item.get("migrationGroupId") or group_id
+    running = running or []
     return _redact_object(
         {
             "status": status,
-            "mobility_group_id": item.get("migrationGroupId") or group_id,
+            "mobility_group_id": group_id,
             "migrations": _migration_results(item),
             "running": [
                 {key: row.get(key) for key in ("migration_id", "vm_id", "state", "outcome")}
-                for row in running or []
+                for row in running
             ],
             **_notes(item),
             "steps": steps,
             "status_read": STATUS_READ,
-            "status_read_params": {"mobility_group_id": item.get("migrationGroupId") or group_id},
+            "status_read_params": _status_read_params(group_id, running, vm_ids),
         }
     )
 
@@ -312,7 +335,7 @@ async def hcx_migration_start_impl(
     vm_ids = [vm["vm_id"] for vm in group["vms"]]
     running = await _running(connector, operator, target, {"entityId": vm_ids})
     if running:
-        return _job_answer("already_running", None, running=running, steps=[])
+        return _job_answer("already_running", None, running=running, vm_ids=vm_ids, steps=[])
     created = _first_item(
         await connector._post_json(
             target, _GROUPS_PATH, operator=operator, json={"items": [group_item(group)]}
@@ -329,7 +352,7 @@ async def hcx_migration_start_impl(
             _step("create_group", "failed", errors or "HCX returned no mobility group id"),
             _step("start_group", "not_run"),
         ]
-        return _job_answer("failed", None, item=created, steps=steps)
+        return _job_answer("failed", None, item=created, vm_ids=vm_ids, steps=steps)
     try:
         item = await _start_group(connector, operator, target, new_id)
     except (httpx.HTTPStatusError, httpx.TransportError) as exc:

@@ -383,6 +383,10 @@ What each operation sends and returns:
   `status`, `mobility_group_id`, `migrations` (`migration_id`, `vm_id`,
   errors, warnings), `running`, `errors`, `warnings`, `steps`,
   `status_read` (`hcx.migration.list`) and `status_read_params`.
+  `status_read_params` holds only known values, never null: the
+  `mobility_group_id` when there is one, the `migration_ids` of the
+  running migrations for `already_running`, or the `vm_ids` when no
+  group was made. Passed as they are, `hcx.migration.list` accepts them.
 - `hcx.migration.list` sends `{"filter": {...}}` with `skipDrafts: true`
   (unless `include_drafts`), and `state`, `migrationId`, `entityId`,
   `migrationGroupId` from the inputs. Each row keeps the vendor fields and
@@ -521,6 +525,10 @@ is sent.
   switchover type (`RAV`, `vMotion`, `vSphereReplication`,
   `ColdMigration`), the value public HCX examples use. The live proof
   confirms it, and the epoch-millisecond unit of the schedule times.
+- The check for a running migration of the same VMs (before a start of
+  VMs) and the `vm_ids` filter of `hcx.migration.list` send an
+  `entityId` filter on the migration query. The reference does not show
+  that filter; the live proof must confirm that HCX accepts it.
 - The reference gives no list of migration states. `outcome` reads the
   vendor progress flags first; the state names `MIGRATED`,
   `MIGRATE_FAILED` and `MIGRATE_CANCELED` come from VMware's PowerShell

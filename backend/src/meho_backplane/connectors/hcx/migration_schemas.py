@@ -253,8 +253,24 @@ JOB_ANSWER_SCHEMA: Final[dict[str, Any]] = {
         "status_read": string_schema("The operation that follows the migrations."),
         "status_read_params": {
             "type": "object",
-            "description": "The parameters to pass to the status read.",
-            "properties": {"mobility_group_id": string_schema("Id of the mobility group.")},
+            "description": (
+                "The parameters to pass to the status read. Holds only the keys that are "
+                "known: the group id, the ids of the running migrations (already_running), "
+                "or the VM ids when no group was made. Can be empty."
+            ),
+            "properties": {
+                "mobility_group_id": {"type": "string", "description": "Id of the mobility group."},
+                "migration_ids": {
+                    "type": "array",
+                    "description": "Ids of the migrations that still run.",
+                    "items": {"type": "string", "description": "Id of one migration."},
+                },
+                "vm_ids": {
+                    "type": "array",
+                    "description": "Ids of the VMs, when no mobility group id is known.",
+                    "items": {"type": "string", "description": "Id of one VM (entityId)."},
+                },
+            },
         },
     },
 }

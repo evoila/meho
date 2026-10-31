@@ -146,9 +146,10 @@ _START = HcxTypedOp(
         "next_step": (
             "Call hcx.migration.list with status_read_params until every migration's "
             "outcome is succeeded, failed or cancelled. If status is already_running, "
-            "follow the running migrations instead. If status is failed or no_answer after "
-            "create_group was done, read hcx.migration.list with the mobility_group_id, "
-            "then call again with that mobility_group_id, not with group."
+            "status_read_params holds the ids of the running migrations; follow those. "
+            "If status is failed or no_answer after create_group was done, read "
+            "hcx.migration.list with the mobility_group_id, then call again with that "
+            "mobility_group_id, not with group."
         ),
     },
 )
@@ -373,7 +374,9 @@ _GROUP_LIST = HcxTypedOp(
                         "type": ["boolean", "null"],
                         "description": "True when the group is archived.",
                     },
+                    "migration_wave_id": string_schema("Id of the wave the group is in."),
                     "migration_wave_name": string_schema("Name of the wave the group is in."),
+                    "pairing_id": string_schema("Id of the site pairing it uses."),
                     "service_mesh_id": string_schema("Id of the service mesh it uses."),
                     "created": string_schema("When the group was made."),
                     "last_updated": string_schema("When the group last changed."),

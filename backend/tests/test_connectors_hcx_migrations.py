@@ -455,6 +455,55 @@ async def test_start_does_not_start_again_while_a_migration_runs(registered: Non
 
 
 @pytest.mark.asyncio
+async def test_already_running_status_read_params_work_with_the_status_read(
+    registered: None,
+) -> None:
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        query = _query_route(mock, [_migration("TRANSFER_IN_PROGRESS", isDone=False)])
+        by_group = await _call(
+            "hcx.migration.start", {"mobility_group_id": _GROUP_ID}, approved=True
+        )
+        by_vms = await _call("hcx.migration.start", {"group": _GROUP_INPUT}, approved=True)
+        group_status = await _call("hcx.migration.list", by_group.result["status_read_params"])
+        vms_status = await _call("hcx.migration.list", by_vms.result["status_read_params"])
+
+    assert by_group.result["status_read_params"] == {
+        "mobility_group_id": _GROUP_ID,
+        "migration_ids": [_MIGRATION_ID],
+    }
+    assert by_vms.result["status_read_params"] == {"migration_ids": [_MIGRATION_ID]}
+    for status in (group_status, vms_status):
+        assert status.status == "ok", status.error
+        assert status.result["items"][0]["migration_id"] == _MIGRATION_ID
+    assert _body(query, 3) == {"filter": {"skipDrafts": True, "migrationId": [_MIGRATION_ID]}}
+
+
+@pytest.mark.asyncio
+async def test_start_vms_without_a_group_id_follows_the_vms(registered: None) -> None:
+    error = {"items": [{"errors": [{"message": "name is taken"}]}]}
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        query = _query_route(mock, [])
+        mock.post(_GROUPS).respond(200, json=error)
+        start = mock.post(_GROUPS_START).respond(202, json=_group_answer())
+        result = await _call("hcx.migration.start", {"group": _GROUP_INPUT}, approved=True)
+        status = await _call("hcx.migration.list", result.result["status_read_params"])
+
+    assert result.status == "ok", result.error
+    answer = result.result
+    assert answer["status"] == "failed"
+    assert answer["steps"] == [
+        {"step": "create_group", "state": "failed", "error": "name is taken"},
+        {"step": "start_group", "state": "not_run", "error": None},
+    ]
+    assert answer["status_read_params"] == {"vm_ids": [_VM_ID]}
+    assert not start.called
+    assert status.status == "ok", status.error
+    assert _body(query, 1) == {"filter": {"skipDrafts": True, "entityId": [_VM_ID]}}
+
+
+@pytest.mark.asyncio
 async def test_start_vms_makes_a_group_and_starts_it(registered: None) -> None:
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         _login(mock)

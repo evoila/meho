@@ -186,7 +186,9 @@ _REQUEST_GET = FleetTypedOp(
             "and read again later; the request did not fail. If failed, fix what "
             "failed_step.message says, then call fleet.request.retry."
         ),
-        "result_scalars": {"keys": ["request_id", "state", "outcome", "checked_at", "error"]},
+        "result_scalars": {
+            "keys": ["request_id", "state", "reason", "outcome", "checked_at", "error"]
+        },
     },
 )
 
@@ -269,6 +271,9 @@ _REQUEST_RETRY = FleetTypedOp(
             "handle. After a lost reply, do not retry blindly: read the request first; if "
             "it is running again, the retry went through."
         ),
+        "result_scalars": {
+            "keys": ["status", "reason", "request_id", "state", "outcome", "status_read"]
+        },
     },
 )
 

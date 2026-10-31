@@ -5574,7 +5574,7 @@ meho vcf-fleet datacenter
 
 #### `meho vcf-fleet datacenter list`
 
-List Fleet-managed datacenters (wrapper-verified reachability probe)
+List Fleet-managed datacenters and the vCenters in each
 
 ```
 meho vcf-fleet datacenter list [flags]

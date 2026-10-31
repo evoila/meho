@@ -461,6 +461,9 @@ async def test_reduced_page_is_never_labeled_source_complete() -> None:
 #: entry needs a reason. Keep this list short: a new op belongs here only if
 #: it is credential-class and its parts are secret-shaped.
 _PARTS_HELD_BACK: dict[str, str] = {
+    "fleet.locker.certificate.import": (
+        "credential_write: the request carries the private key; the answer is one certificate."
+    ),
     "sddc.credential.list": "credential_read: the page lists stored passwords.",
     "sddc.host.commission": "credential_write: the request carries host passwords.",
     "installer.sddc.resources.calculate": (

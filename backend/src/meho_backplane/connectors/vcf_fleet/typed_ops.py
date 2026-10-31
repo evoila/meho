@@ -61,41 +61,19 @@ a ``module.ClassName.method`` dotted path.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
+
+from meho_backplane.connectors.vcf_fleet._op_meta import FleetTypedOp
+from meho_backplane.connectors.vcf_fleet.typed_ops_locker import (
+    FLEET_LOCKER_OPS,
+    FLEET_LOCKER_WHEN_TO_USE_BY_GROUP,
+)
 
 __all__ = [
     "FLEET_TYPED_OPS",
     "FLEET_TYPED_WHEN_TO_USE_BY_GROUP",
     "FleetTypedOp",
 ]
-
-
-@dataclass(frozen=True)
-class FleetTypedOp:
-    """Metadata for one typed Fleet op the connector registers at startup.
-
-    Fields mirror the keyword arguments
-    :func:`~meho_backplane.operations.typed_register.register_typed_operation`
-    accepts so the registrar can splat the dataclass into the helper
-    without per-op boilerplate. ``handler_attr`` is the attribute name on
-    :class:`~meho_backplane.connectors.vcf_fleet.connector.VcfFleetConnector`
-    exposing the async handler; the registrar resolves the bound method
-    against the class at registration time so the dispatcher can recover
-    the callable from the persisted ``module.ClassName.method`` path.
-    """
-
-    op_id: str
-    handler_attr: str
-    summary: str
-    description: str
-    parameter_schema: dict[str, Any]
-    response_schema: dict[str, Any] | None
-    group_key: str | None
-    tags: tuple[str, ...]
-    safety_level: Literal["safe", "caution", "dangerous", "destructive"]
-    requires_approval: bool
-    llm_instructions: dict[str, Any] | None
 
 
 #: Curated ``when_to_use`` blurbs per typed group. ``register_typed_operation``
@@ -120,6 +98,7 @@ FLEET_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "parts behind a result handle, so a vendor API file can be pinned and compared. "
         "It refuses every other path."
     ),
+    **FLEET_LOCKER_WHEN_TO_USE_BY_GROUP,
 }
 
 _PART_ITEM_SCHEMA: dict[str, Any] = {
@@ -398,13 +377,15 @@ _API_FILE_GET = FleetTypedOp(
 )
 
 
-#: The typed read ops :class:`VcfFleetConnector` registers at lifespan
+#: The typed ops :class:`VcfFleetConnector` registers at lifespan
 #: startup — the #2304 audited set (about/health probe + component
 #: inventory), then the API description read that pins the vendor files.
 #: Ordered probe → inventory → documentation to match the operator's
-#: typical "is it up, what's on it, what does its API look like" path.
+#: typical "is it up, what's on it, what does its API look like" path. The
+#: locker and product-certificate ops (``typed_ops_locker``) come last.
 FLEET_TYPED_OPS: tuple[FleetTypedOp, ...] = (
     _ABOUT,
     _ENVIRONMENT_LIST,
     _API_FILE_GET,
+    *FLEET_LOCKER_OPS,
 )

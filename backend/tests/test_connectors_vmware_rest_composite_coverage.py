@@ -78,6 +78,10 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.host.datastore_mount_nfs",
         "vmware.composite.host.disk_mark_flash",
         "vmware.composite.host.service_control",
+        # ``.set`` is not a classifier suffix -> ``other``.
+        "vmware.composite.host.ntp.set",
+        "vmware.composite.host.dns.set",
+        "vmware.composite.host.syslog.set",
         # #3717 — guest.env.read / guest.file.read moved OUT of ``other`` into
         # ``credential_write``: they log into the guest and their vim
         # ``NamePasswordAuthentication`` request body must never be recorded by

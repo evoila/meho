@@ -300,11 +300,12 @@ HOST_CLUSTER_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
     _P + "host.service_control": {
         "when_to_call": (
             "Call to start, stop or restart one ESXi host service, and optionally set "
-            "when it starts. Only TSM-SSH (SSH), TSM (ESXi Shell), ntpd and ptpd are "
-            "allowed."
+            "when it starts. Only TSM-SSH (SSH), TSM (ESXi Shell), ntpd, ptpd, snmpd "
+            "(SNMP), sfcbd-watchdog (CIM) and slpd (SLP) are allowed."
         ),
         "preconditions": (
-            "service must be one of TSM-SSH, TSM, ntpd or ptpd; any other is refused "
+            "service must be one of TSM-SSH, TSM, ntpd, ptpd, snmpd, sfcbd-watchdog or "
+            "slpd; any other is refused "
             "(service_not_allowed, no change). On a vCenter target, host is required. "
             "Turn SSH off again when the work is done."
         ),
@@ -315,11 +316,12 @@ HOST_CLUSTER_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
         "output_shape": (
             "{status: applied|service_not_allowed|host_not_found|ambiguous_host|"
             "config_manager_unreadable|unsupported_host_target|host_required, host, "
-            "service, action, policy, policy_updated, allowed_services, candidate_hosts, "
-            "guidance, issues}."
+            "service, action, policy, policy_updated, service_state: {key, label, running, "
+            "policy}, allowed_services, candidate_hosts, guidance, issues}."
         ),
         "next_step": (
-            "On applied, the service changed. On ambiguous_host, call again with one of "
+            "On applied, service_state shows the service as read back. On ambiguous_host, "
+            "call again with one of "
             "candidate_hosts."
         ),
     },

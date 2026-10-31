@@ -72,7 +72,9 @@ resolved VM + host group sets).
 ``vm.nic.repoint``        live-read: ``{vm, name, nic, mac_address,
                           current_backing, requested_backing}`` network from->to
 ``vm.device.cdrom``       live-read: ``{vm, name, cdrom, action,
-                          current_backing, state}`` (the host-local ISO path)
+                          current_backing, state, requested_backing}``
+                          drive from->to (``requested_backing`` is
+                          ``None`` for ``remove`` / ``disconnect``)
 ``guest.customization_``  echo: spec_name, os_type, hostname_scheme,
 ``spec.create``           nic_count, static_ip_summary (IDENTITY only --
                           never the Windows admin / product-key /
@@ -1147,14 +1149,29 @@ async def _vm_nic_repoint_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-async def _vm_device_cdrom_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Preview ``vm.device.cdrom`` — live-read the current backing + state.
+_CDROM_BACKING_PREVIEW_KEYS = ("type", "iso_file", "host_device", "device_access_type")
 
-    The host-local ISO path in the current backing is exactly what the
-    approver needs to see before removing / updating / disconnecting the
-    device. Reads the CD-ROM via :func:`._write._read_cdrom` and the VM
-    ``name`` via :func:`._write._read_vm_info`; no DELETE / PATCH /
-    disconnect fires here.
+
+def _cdrom_requested_backing(action: str, backing: Any) -> dict[str, Any] | None:
+    """Return the new CD-ROM backing an ``update`` sets, or ``None``.
+
+    ``remove`` and ``disconnect`` set no new backing. An ``update`` without
+    a ``backing`` object is refused by the handler before any write, so it
+    also previews as ``None``.
+    """
+    if action != "update" or not isinstance(backing, dict):
+        return None
+    return {key: backing[key] for key in _CDROM_BACKING_PREVIEW_KEYS if key in backing}
+
+
+async def _vm_device_cdrom_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.device.cdrom`` — live-read the current backing, show the new one.
+
+    The approver sees the drive from->to: the current backing (with the
+    host-local ISO path) and state, read via :func:`._write._read_cdrom`,
+    next to ``requested_backing`` -- the new backing an ``update`` sets
+    (``None`` for ``remove`` / ``disconnect``). The VM ``name`` comes from
+    :func:`._write._read_vm_info`; no DELETE / PATCH / disconnect fires here.
     """
     vm = ctx.params.get("vm")
     cdrom = ctx.params.get("cdrom")
@@ -1186,6 +1203,7 @@ async def _vm_device_cdrom_preview(ctx: PreviewContext) -> dict[str, Any] | None
         "action": action,
         "current_backing": cdrom_info.get("backing") if cdrom_info else None,
         "state": cdrom_info.get("state") if cdrom_info else None,
+        "requested_backing": _cdrom_requested_backing(action, ctx.params.get("backing")),
     }
 
 

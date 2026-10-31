@@ -464,6 +464,15 @@ _MON_SET = HcxTypedOp(
                 "properties": {
                     "step": {"type": "string", "description": "Name of the step."},
                     "error": {"type": "string", "description": "The vendor's error text."},
+                    "outcome": {
+                        "type": "string",
+                        "enum": ["rejected", "unknown"],
+                        "description": (
+                            "rejected: HCX answered with an error, the step did not apply. "
+                            "unknown: the connection was lost; HCX may have taken the step. "
+                            "Check with hcx.network_extension.list."
+                        ),
+                    },
                 },
             },
             "steps_not_run": {
@@ -495,12 +504,13 @@ _MON_SET = HcxTypedOp(
         ),
         "output_shape": (
             "{status: accepted|partial|failed, stretch_id, steps_ran, step_failed: "
-            "{step, error}|null, steps_not_run, warnings}."
+            "{step, error, outcome: rejected|unknown}|null, steps_not_run, warnings}."
         ),
         "next_step": (
             "Call hcx.network_extension.list and check mobility_optimized_networking and "
             "state. On partial, the steps in steps_ran stay done; nothing is undone. Fix "
-            "the cause in step_failed and call again with only the steps that did not run."
+            "the cause in step_failed and call again with only the steps that did not run. "
+            "When step_failed.outcome is unknown, the list shows whether that step applied."
         ),
     },
 )

@@ -398,10 +398,22 @@ waits for approval too.
   `PUT /hybridity/api/networkExtensions/{extensionId}` and step 2
   `PUT /hybridity/api/l2Extensions/policyRoutes` with
   `{endpointId, allow, deny}`. The policy routes replace the routes of the
-  site. A step fails on an HTTP error other than `401`, or on an answer
-  whose `errors` list is not empty. The run stops there. The answer is
+  site. A step fails on an HTTP error, on an answer whose `errors` list is
+  not empty (both `outcome: rejected`, the step did not apply), or on a
+  lost connection (`outcome: unknown`: the Manager may have taken the
+  step; the list read shows it). The run stops there. The answer is
   `{status: accepted|partial|failed, stretch_id, steps_ran, step_failed:
-  {step, error}|null, steps_not_run, warnings}`. Nothing is undone.
+  {step, error, outcome}|null, steps_not_run, warnings}`. Nothing is
+  undone, and a step that ran is never lost from the answer. A `401` at a
+  step makes a new login and one more send of that step only; the steps
+  before it are not repeated. A second `401` on the same step is raised
+  when no step ran yet, so the dispatcher reports the login failure. A
+  lost connection at the first step is raised when the request never
+  left MEHO (a blocked destination, an untrusted certificate). Every
+  vendor text in the answer (an error body, an `errors` or `warnings`
+  message) goes through the secret filter: a secret-named field of a JSON
+  error body is replaced before the body becomes text, and the text goes
+  through the default redaction policy.
 
 Vendor jobs (extend and unextend):
 

@@ -12,7 +12,9 @@
   extension starts nothing;
 * a vendor error reaches the answer;
 * Mobility Optimized Networking runs its steps in order and, when a step
-  fails, lists what ran, what failed and what did not run;
+  fails, lists what ran, what failed and what did not run; a lost
+  connection keeps the steps that ran; a `401` at step two logs in again
+  and repeats only that step; a vendor error text holds no secret;
 * the status read ``hcx.job.get``: a failed job, a login that expired
   between the start and the read, and a Manager that does not answer.
 
@@ -608,8 +610,139 @@ async def test_mon_set_failure_at_step_one_runs_no_later_step() -> None:
     assert result.result["step_failed"] == {
         "step": "mobility_optimized_networking",
         "error": "MON is not supported here",
+        "outcome": "rejected",
     }
     assert result.result["steps_not_run"] == ["policy_routes"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_registered")
+async def test_mon_set_error_body_without_messages_holds_no_secret() -> None:
+    params = {"stretch_id": _STRETCH_ID, "mobility_optimized_networking": True}
+    body = {"status": "error", "detail": "MON refused", "password": "made-up-mon-password"}
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        mock.get(_LIST).respond(200, json={"items": [_extension()]})
+        mock.put(f"/hybridity/api/networkExtensions/{_STRETCH_ID}").respond(500, json=body)
+        result = await _dispatch("hcx.network_extension.mon.set", params, approved=True)
+
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "failed"
+    error = result.result["step_failed"]["error"]
+    assert error.startswith("HTTP 500: ")
+    assert "MON refused" in error
+    rendered = json.dumps(result.result) + json.dumps(result.extras, default=str)
+    for secret in (_PASSWORD, _TOKEN, "made-up-mon-password"):
+        assert secret not in rendered
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_registered")
+async def test_mon_set_error_and_warning_texts_hold_no_secret() -> None:
+    params = {
+        "stretch_id": _STRETCH_ID,
+        "mobility_optimized_networking": True,
+        "policy_routes": {"allow": ["<subnet-a>/<prefix>"]},
+    }
+    warning = 'retrying with {"password": "made-up-warning-password"}'
+    error = 'bad routes for {"token": "made-up-error-token"}'
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        mock.get(_LIST).respond(200, json={"items": [_extension()]})
+        mock.put(f"/hybridity/api/networkExtensions/{_STRETCH_ID}").respond(
+            202, json={"warnings": [{"message": warning}], "errors": []}
+        )
+        mock.put(_POLICY_ROUTES).respond(200, json={"errors": [{"message": error}]})
+        result = await _dispatch("hcx.network_extension.mon.set", params, approved=True)
+
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "partial"
+    assert result.result["warnings"][0].startswith("retrying with ")
+    assert result.result["step_failed"]["error"].startswith("bad routes for ")
+    rendered = json.dumps(result.result) + json.dumps(result.extras, default=str)
+    for secret in ("made-up-warning-password", "made-up-error-token"):
+        assert secret not in rendered
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_registered")
+async def test_mon_set_keeps_the_step_that_ran_when_the_connection_drops() -> None:
+    params = {
+        "stretch_id": _STRETCH_ID,
+        "mobility_optimized_networking": True,
+        "policy_routes": {"allow": ["<subnet-a>/<prefix>"]},
+    }
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        mock.get(_LIST).respond(200, json={"items": [_extension()]})
+        mon = mock.put(f"/hybridity/api/networkExtensions/{_STRETCH_ID}").respond(202, json={})
+        mock.put(_POLICY_ROUTES).mock(side_effect=httpx.ReadError("connection lost"))
+        result = await _dispatch("hcx.network_extension.mon.set", params, approved=True)
+
+    assert result.status == "ok", result.error
+    assert mon.call_count == 1
+    assert result.result["status"] == "partial"
+    assert result.result["steps_ran"] == ["mobility_optimized_networking"]
+    assert result.result["step_failed"]["step"] == "policy_routes"
+    assert result.result["step_failed"]["outcome"] == "unknown"
+    assert "ReadError" in result.result["step_failed"]["error"]
+    assert result.result["steps_not_run"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_registered")
+async def test_mon_set_reports_a_lost_connection_at_the_first_step() -> None:
+    params = {
+        "stretch_id": _STRETCH_ID,
+        "mobility_optimized_networking": True,
+        "policy_routes": {"allow": ["<subnet-a>/<prefix>"]},
+    }
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        mock.get(_LIST).respond(200, json={"items": [_extension()]})
+        mock.put(f"/hybridity/api/networkExtensions/{_STRETCH_ID}").mock(
+            side_effect=httpx.ConnectError("connection refused")
+        )
+        routes = mock.put(_POLICY_ROUTES).respond(200, json={})
+        result = await _dispatch("hcx.network_extension.mon.set", params, approved=True)
+
+    assert result.status == "ok", result.error
+    assert routes.call_count == 0
+    assert result.result["status"] == "failed"
+    assert result.result["steps_ran"] == []
+    assert result.result["step_failed"]["step"] == "mobility_optimized_networking"
+    assert result.result["step_failed"]["outcome"] == "unknown"
+    assert result.result["steps_not_run"] == ["policy_routes"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_registered")
+async def test_mon_set_logs_in_again_at_step_two_and_repeats_only_that_step() -> None:
+    params = {
+        "stretch_id": _STRETCH_ID,
+        "mobility_optimized_networking": True,
+        "policy_routes": {"allow": ["<subnet-a>/<prefix>"]},
+    }
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = mock.post(_SESSIONS)
+        login.side_effect = [
+            httpx.Response(200, headers={"x-hm-authorization": "netext-hm-token-1"}),
+            httpx.Response(200, headers={"x-hm-authorization": "netext-hm-token-2"}),
+        ]
+        lst = mock.get(_LIST).respond(200, json={"items": [_extension()]})
+        mon = mock.put(f"/hybridity/api/networkExtensions/{_STRETCH_ID}").respond(202, json={})
+        routes = mock.put(_POLICY_ROUTES)
+        routes.side_effect = [httpx.Response(401), httpx.Response(200, json={})]
+        result = await _dispatch("hcx.network_extension.mon.set", params, approved=True)
+
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "accepted"
+    assert result.result["steps_ran"] == ["mobility_optimized_networking", "policy_routes"]
+    assert login.call_count == 2
+    assert lst.call_count == 1
+    assert mon.call_count == 1
+    assert routes.call_count == 2
+    assert routes.calls[1].request.headers["x-hm-authorization"] == "netext-hm-token-2"
 
 
 @pytest.mark.asyncio

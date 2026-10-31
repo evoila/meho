@@ -23,11 +23,24 @@ steps: turn the feature on or off
 routes (``PUT /hybridity/api/l2Extensions/policyRoutes``). A step that
 fails stops the run. The answer lists the steps that ran, the step that
 failed with the vendor's error and the steps that did not run. Nothing is
-undone.
+undone. A step that ran is never lost: when the connection drops during a
+later step, the answer still names it, and the failed step says
+``outcome: unknown``, because the Manager may have taken the request
+before the connection broke. A ``401`` at a step means the Manager did
+nothing with it: the operation logs in again and sends that step once
+more; the steps before it are not repeated. A second ``401`` on the same
+step is raised when no step ran yet, so the dispatcher reports the login
+failure; after a step ran, it is the failed step of the answer.
 
-A ``401`` is raised as :class:`httpx.HTTPStatusError`, so the dispatcher
-logs in again and runs the call once more. A ``401`` means the Manager did
-nothing, so the second run is safe.
+Every vendor text in an answer (an error body, an ``errors`` or
+``warnings`` message) goes through the secret filter first: a secret-named
+field of a JSON error body is replaced before the body becomes text, and
+the text itself goes through the default redaction policy.
+
+For the other operations a ``401`` is raised as
+:class:`httpx.HTTPStatusError`, so the dispatcher logs in again and runs
+the call once more. A ``401`` means the Manager did nothing, so the second
+run is safe.
 
 The paths come from Broadcom's "HCX Workload Migration APIs" reference and
 from VMware's own Terraform provider and PowerCLI module for HCX, which use
@@ -38,13 +51,22 @@ served, and they are the calls that return the job id.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.adapters.http import SsrfBlockedError
 from meho_backplane.connectors.hcx.session import HcxTargetLike
-from meho_backplane.connectors.hcx.typed_reads import _segment, redact_secrets, rows_of
+from meho_backplane.connectors.hcx.typed_reads import (
+    _is_tls_verify_failure,
+    _segment,
+    redact_secrets,
+    rows_of,
+)
+from meho_backplane.redaction import get_default_policy, redact
+from meho_backplane.redaction.secret_fields import scrub_secret_fields, scrub_secret_fields_in_text
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.hcx.connector import HcxConnector
@@ -97,6 +119,9 @@ BUSY_STATE_WORDS: Final[tuple[str, ...]] = (
 
 #: Longest vendor error text an answer carries.
 _ERROR_TEXT_MAX: Final = 2000
+
+#: Written in place of a vendor text when the secret filter itself fails.
+_TEXT_WITHHELD: Final = "<text from HCX withheld: the secret filter failed>"
 
 _MON_STEP: Final = "mobility_optimized_networking"
 _ROUTES_STEP: Final = "policy_routes"
@@ -275,38 +300,91 @@ async def hcx_network_extension_unextend_impl(
     }
 
 
+def _clean_text(text: str) -> str:
+    """*text* with every secret filtered out, cut to :data:`_ERROR_TEXT_MAX`.
+
+    The value of each quoted secret-named pair is replaced first (the
+    default policy does not see ``"password": "..."`` behind a quote), then
+    the default redaction policy runs. The filter runs before the cut, so a
+    secret never leaves a fragment behind. When the filter itself fails,
+    the text is withheld.
+    """
+    try:
+        cleaned = redact(scrub_secret_fields_in_text(text), get_default_policy()).redacted
+    except Exception:  # fail-closed: a vendor text never bypasses the filter
+        return _TEXT_WITHHELD
+    if not isinstance(cleaned, str):
+        return _TEXT_WITHHELD
+    return cleaned[:_ERROR_TEXT_MAX]
+
+
 def _vendor_error(exc: httpx.HTTPStatusError) -> str:
-    """The vendor's error text of *exc*: the ``errors`` messages, else the body text."""
+    """The vendor's error text of *exc*: the ``errors`` messages, else the body.
+
+    A JSON body with no ``errors`` message has its secret-named fields
+    replaced before it becomes text, so a password the Manager echoes in
+    an error body never reaches the answer.
+    """
     response = exc.response
     try:
         body = response.json()
     except ValueError:
         body = None
     messages = _messages(body)
-    text = "; ".join(messages) if messages else response.text
-    return f"HTTP {response.status_code}: {text}"[:_ERROR_TEXT_MAX]
+    if messages:
+        text = "; ".join(messages)
+    elif body is not None:
+        text = json.dumps(scrub_secret_fields(body), default=str)
+    else:
+        text = response.text
+    return _clean_text(f"HTTP {response.status_code}: {text}")
+
+
+def _texts(body: Any, key: str) -> list[str]:
+    """The cleaned ``message`` of each item under *key* of *body*."""
+    items = body.get(key) if isinstance(body, dict) else None
+    if not isinstance(items, list):
+        return []
+    return [
+        _clean_text(str(item.get("message")))
+        for item in items
+        if isinstance(item, dict) and item.get("message")
+    ]
 
 
 def _messages(body: Any) -> list[str]:
-    errors = body.get("errors") if isinstance(body, dict) else None
-    if not isinstance(errors, list):
-        return []
-    return [
-        str(item.get("message"))
-        for item in errors
-        if isinstance(item, dict) and item.get("message")
-    ]
+    return _texts(body, "errors")
 
 
 def _warnings(body: Any) -> list[str]:
-    warnings = body.get("warnings") if isinstance(body, dict) else None
-    if not isinstance(warnings, list):
-        return []
-    return [
-        str(item.get("message"))
-        for item in warnings
-        if isinstance(item, dict) and item.get("message")
-    ]
+    return _texts(body, "warnings")
+
+
+def _never_sent(exc: httpx.TransportError) -> bool:
+    """True when MEHO refused the request before it left, or the Manager's certificate failed."""
+    return isinstance(exc, SsrfBlockedError) or _is_tls_verify_failure(exc)
+
+
+async def _put_step(
+    connector: HcxConnector,
+    operator: Operator,
+    target: HcxTargetLike,
+    path: str,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    """``PUT`` one step. On a ``401``, log in again and send the same step once more.
+
+    A ``401`` means the Manager did nothing with the request, so one more
+    send of this step is safe, and the steps before it stay as they are. A
+    second ``401`` is raised to the caller.
+    """
+    try:
+        return await connector._post_json(target, path, operator=operator, verb="PUT", json=body)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != httpx.codes.UNAUTHORIZED:
+            raise
+        await connector.invalidate_session(target, rejected=exc.request)
+    return await connector._post_json(target, path, operator=operator, verb="PUT", json=body)
 
 
 def _mon_body(row: dict[str, Any], enabled: bool) -> dict[str, Any]:
@@ -348,8 +426,13 @@ async def hcx_network_extension_mon_set_impl(
     Reads the extension first (its row is the body of the MON change and
     names the remote site of the policy routes). Then it runs each asked
     step in order and stops at the first that fails. A failed step is an
-    HTTP error other than ``401``, or an answer whose ``errors`` list is
-    not empty.
+    HTTP error (``outcome: rejected``), an answer whose ``errors`` list is
+    not empty (``rejected``), or a lost connection (``unknown``: the
+    Manager may have taken the step). A ``401`` makes a new login and one
+    more send of that step only. A lost connection at the first step is
+    raised when the request never left MEHO (a blocked destination, an
+    untrusted certificate); a ``401`` that survives the new login is
+    raised when no step ran yet.
     """
     stretch_id = params["stretch_id"]
     path = _NETWORK_EXTENSION_PATH.format(extensionId=_segment("extension", stretch_id))
@@ -365,17 +448,22 @@ async def hcx_network_extension_mon_set_impl(
     warnings: list[str] = []
     for name, step_path, body in steps:
         try:
-            answer = await connector._post_json(
-                target, step_path, operator=operator, verb="PUT", json=body
-            )
+            answer = await _put_step(connector, operator, target, step_path, body)
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == httpx.codes.UNAUTHORIZED:
+            if exc.response.status_code == httpx.codes.UNAUTHORIZED and not ran:
                 raise
-            failed = {"step": name, "error": _vendor_error(exc)}
+            failed = {"step": name, "error": _vendor_error(exc), "outcome": "rejected"}
+            break
+        except httpx.TransportError as exc:
+            if not ran and _never_sent(exc):
+                raise
+            error = _clean_text(f"{type(exc).__name__}: {exc}")
+            failed = {"step": name, "error": error, "outcome": "unknown"}
             break
         errors = _messages(answer)
         if errors:
-            failed = {"step": name, "error": "; ".join(errors)[:_ERROR_TEXT_MAX]}
+            error = "; ".join(errors)[:_ERROR_TEXT_MAX]
+            failed = {"step": name, "error": error, "outcome": "rejected"}
             break
         warnings.extend(_warnings(answer))
         ran.append(name)

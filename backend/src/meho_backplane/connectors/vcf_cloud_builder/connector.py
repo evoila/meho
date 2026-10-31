@@ -34,14 +34,18 @@ Secrets in later reads
 ----------------------
 
 A start sends the spec's passwords and licence keys; a vendor error text of
-a later status read can echo one. The connector remembers the values each
-start read, by the target's host, and hides them in the status reads and in
-the flight-recorder body of every answer from that host.
+a later status read can echo one. The connector remembers, by the target's
+host, the values each start read and the ids of the jobs it started. A status
+read of a job it started, and the flight-recorder body of that answer, hide
+the remembered values. A status read of a job it did not start (one from
+before a restart of MEHO, or started by someone else) shows no vendor error
+text at all, because MEHO cannot know which values such a text may echo.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
@@ -69,6 +73,7 @@ from meho_backplane.connectors.schemas import (
 from meho_backplane.connectors.vcf_cloud_builder._jobs import (
     SecretMemory,
     hide_secrets_everywhere,
+    hide_vendor_texts,
 )
 from meho_backplane.connectors.vcf_cloud_builder.typed_reads import ABOUT_PATH
 from meho_backplane.connectors.vcf_installer.session import (
@@ -84,6 +89,12 @@ _log = structlog.get_logger(__name__)
 
 #: The status Cloud Builder sends when it does not accept the login.
 _LOGIN_REFUSED = 401
+
+#: The path of one validation or one bring-up; group 1 is the job id.
+_JOB_PATH = re.compile(r"^/v1/sddcs/(?:validations/)?([^/]+)$")
+
+#: The keys of a vendor ``Error`` that hold text.
+_VENDOR_TEXT_KEYS = ("message", "remediationMessage")
 
 
 class CloudBuilderConnector(HttpConnector):
@@ -112,13 +123,23 @@ class CloudBuilderConnector(HttpConnector):
         """The secret values the starts sent to *target* since MEHO started."""
         return self._secret_memory.known(target.host)
 
+    def remember_job(self, target: InstallerTargetLike, job_id: object) -> None:
+        """Note that a start of this MEHO created the job *job_id* on *target*."""
+        self._secret_memory.remember_job(target.host, job_id)
+
+    def knows_job(self, target: InstallerTargetLike, job_id: object) -> bool:
+        """``True`` when a start of this MEHO created the job *job_id* on *target*."""
+        return self._secret_memory.knows_job(target.host, job_id)
+
     def trace_response_body(self, response: httpx.Response) -> Any:
-        """Hide the remembered secrets and every licence key before the trace records a body.
+        """Hide the secrets before the trace records a body.
 
         The flight recorder's own rules know secrets by shape (a token, a
         key file) and by op family (a login). A spec password that a
         validation check echoes is neither, so the connector hides it here
-        with the same rule the status reads use. A body that is not JSON is
+        with the same rules the status reads use: the remembered values and
+        every licence key are hidden, and for a job this MEHO did not start
+        every vendor error text is hidden. A body that is not JSON is
         recorded as the shared engine sees fit.
         """
         try:
@@ -126,8 +147,12 @@ class CloudBuilderConnector(HttpConnector):
         except ValueError:
             return None
         url = getattr(getattr(response, "request", None), "url", None)
-        secrets = self._secret_memory.known(getattr(url, "host", ""))
-        return hide_secrets_everywhere(payload, secrets)
+        host = getattr(url, "host", "")
+        match = _JOB_PATH.match(str(getattr(url, "path", "")))
+        hidden = hide_secrets_everywhere(payload, self._secret_memory.known(host))
+        if match and self._secret_memory.knows_job(host, match.group(1)):
+            return hidden
+        return hide_vendor_texts(hidden, _VENDOR_TEXT_KEYS)
 
     async def auth_headers(self, target: InstallerTargetLike, operator: Operator) -> dict[str, str]:
         """Return ``{"Authorization": "Basic <b64>"}`` for the Cloud Builder ``admin`` account."""

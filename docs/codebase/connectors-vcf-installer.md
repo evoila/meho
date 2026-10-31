@@ -595,12 +595,17 @@ values:
   note. The calls that send a spec carry the `credential` tag, so the flight
   recorder keeps no request or answer body.
 - A later status read can get a check or task error that echoes a value of
-  the spec. The connector remembers the values each start read, by the
-  target's host, and hides them in the status reads and in the
-  flight-recorder body of every answer from that host. Only the newest
-  values are kept, and they are gone after a restart of MEHO. A text shaped
-  like a VMware licence key (five groups of five letters or digits) is
-  hidden by its shape, so a rejected key stays hidden after a restart too.
+  the spec. The connector remembers, by the target's host, the values each
+  start read and the ids of the jobs it started. A status read of a job it
+  started, and the flight-recorder body of that answer, hide the remembered
+  values. A text shaped like a VMware licence key (five groups of five
+  letters or digits) is hidden by its shape in every case.
+- For a job this MEHO did not start (one started before a restart of MEHO,
+  or by someone else), the status read and the flight-recorder body show no
+  vendor error text at all. MEHO cannot know which values such a text may
+  echo. The state, the failed check or task and the counts stay visible,
+  and each hidden text says why and what to do: read the report, or start
+  the job again. Only the newest values and ids are kept.
 - The reports are vendor files. MEHO does not change their content.
 
 ### Vendor jobs

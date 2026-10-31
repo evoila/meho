@@ -20,21 +20,24 @@ and the time, never ``failed``. MEHO keeps no job state between calls.
 
 A vendor error text of a check or a task can echo a value of the spec an
 earlier start sent. The status reads hide the secret values the connector
-remembers for the target, and every licence key by its shape (see
-:class:`~meho_backplane.connectors.vcf_cloud_builder._jobs.SecretMemory`).
+remembers for the target, and every licence key by its shape. For a job this
+MEHO did not start (for example one started before a restart of MEHO) they
+hide every vendor error text, because MEHO cannot know which values it may
+echo (see :class:`~meho_backplane.connectors.vcf_cloud_builder._jobs.SecretMemory`).
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import httpx
 
 from meho_backplane.connectors.vcf_cloud_builder._jobs import (
     error_list_text,
     hide_secrets_everywhere,
+    hide_vendor_texts,
     not_reachable,
     now_iso,
     sddc_state,
@@ -117,6 +120,20 @@ def page_elements(payload: Any) -> list[dict[str, Any]]:
     return [row for row in rows or () if isinstance(row, dict)]
 
 
+def _safe_view(
+    connector: CloudBuilderConnector,
+    target: InstallerTargetLike,
+    job_id: object,
+    view: dict[str, Any],
+) -> dict[str, Any]:
+    """*view* without the secrets: the remembered values, every licence key, and
+    every vendor error text when this MEHO did not start the job."""
+    hidden = hide_secrets_everywhere(view, connector.known_secrets(target))
+    if not connector.knows_job(target, job_id):
+        hidden = hide_vendor_texts(hidden, ("error",))
+    return cast("dict[str, Any]", hidden)
+
+
 async def about_impl(
     connector: CloudBuilderConnector,
     operator: Operator,
@@ -184,7 +201,7 @@ async def validation_status_impl(
         payload = await connector.send(target, "GET", path, operator=operator)
     except httpx.TransportError as exc:
         return not_reachable(exc, id_key="id", job_id=validation_id, target=target)
-    view = hide_secrets_everywhere(validation_view(payload), secrets)
+    view = _safe_view(connector, target, validation_id, validation_view(payload))
     return {**view, "checked_at": now_iso()}
 
 
@@ -250,7 +267,7 @@ async def sddc_status_impl(
         payload = await connector.send(target, "GET", path, operator=operator)
     except httpx.TransportError as exc:
         return not_reachable(exc, id_key="id", job_id=sddc_id, target=target)
-    view = hide_secrets_everywhere(sddc_view(payload), secrets)
+    view = _safe_view(connector, target, sddc_id, sddc_view(payload))
     return {**view, "checked_at": now_iso()}
 
 

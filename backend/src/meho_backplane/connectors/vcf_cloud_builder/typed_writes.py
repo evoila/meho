@@ -261,7 +261,10 @@ async def _run_change(
     stop = await _check_running(connector, operator, run)
     if stop is not None:
         return stop
-    return await _start(connector, operator, run, plan.path, spec)
+    answer = await _start(connector, operator, run, plan.path, spec)
+    if answer["status"] == "accepted":
+        connector.remember_job(target, answer["job"]["id"])
+    return answer
 
 
 async def validation_start_impl(

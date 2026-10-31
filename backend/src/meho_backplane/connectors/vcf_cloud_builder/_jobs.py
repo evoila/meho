@@ -17,9 +17,12 @@ returns. The operations in this package follow the vendor job rules:
 This module also holds :func:`fill_secrets`, which reads the passwords a call
 names by Vault reference and puts them into a copy of the spec. The values
 never go into a result: :func:`hide_secrets` replaces a vendor text that holds
-one, and :class:`SecretMemory` keeps the values a start read, so a status read
-made later (which has no spec) can hide them too. A text shaped like a VMware
-licence key is hidden by its shape, also after a restart of MEHO.
+one, and :class:`SecretMemory` keeps the values a start read and the ids of
+the jobs it started, so a status read made later (which has no spec) can hide
+them too. For a job this MEHO did not start (for example one started before
+a restart), :func:`hide_vendor_texts` hides every vendor error text, because
+MEHO cannot know which values it may echo. A text shaped like a VMware
+licence key is hidden by its shape in every case.
 """
 
 from __future__ import annotations
@@ -56,6 +59,7 @@ __all__ = [
     "fill_secrets",
     "hide_secrets",
     "hide_secrets_everywhere",
+    "hide_vendor_texts",
     "not_reachable",
     "now_iso",
     "sddc_state",
@@ -76,7 +80,16 @@ _HIDDEN_TEXT: Final = "[MEHO hid this text: it held a secret from Vault]"
 _LICENCE_KEY_SHAPE: Final = re.compile(r"\b[A-Z0-9]{5}(?:-[A-Z0-9]{5}){4}\b")
 _HIDDEN_KEY_TEXT: Final = "[MEHO hid a licence key]"
 
-#: How many secret values :class:`SecretMemory` keeps per target (the newest).
+#: The text put in place of a vendor error text of a job this MEHO did not
+#: start. MEHO cannot know which secret values such a text may echo.
+_UNKNOWN_JOB_TEXT: Final = (
+    "[MEHO hid this text: it may hold a secret of the spec, and MEHO did not start "
+    "this job (for example it started before a restart of MEHO). Read the report, "
+    "or start the job again]"
+)
+
+#: How many secret values and job ids :class:`SecretMemory` keeps per target
+#: (the newest).
 _SECRET_MEMORY_SIZE: Final = 64
 
 #: ``executionStatus`` values of a validation that is still active on Cloud
@@ -195,19 +208,42 @@ def hide_secrets_everywhere(value: Any, secrets: Iterable[str]) -> Any:
     return value
 
 
+def hide_vendor_texts(value: Any, keys: Iterable[str]) -> Any:
+    """A copy of *value* where every text under one of *keys*, at any depth, is a note.
+
+    For a job this MEHO did not start: the vendor texts may echo secret
+    values MEHO has no memory of, so none of them is shown. Empty texts and
+    ``None`` stay as they are, so "no error" is still visible.
+    """
+    hidden = frozenset(keys)
+    if isinstance(value, dict):
+        return {
+            key: _UNKNOWN_JOB_TEXT
+            if key in hidden and isinstance(item, str) and item
+            else hide_vendor_texts(item, hidden)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [hide_vendor_texts(item, hidden) for item in value]
+    return value
+
+
 class SecretMemory:
-    """The secret values the starts sent to each Cloud Builder, kept in memory.
+    """What the starts sent to each Cloud Builder, kept in memory.
 
     A status read runs in a later call and has no spec, so it cannot read the
-    secrets from Vault again. The connector remembers the values a start read,
-    by the host of the target, and hides them in the vendor texts of later
-    reads and in their flight-recorder bodies. Only the newest values are
-    kept, and they are gone after a restart of MEHO (licence keys stay hidden
-    by their shape).
+    secrets from Vault again. The connector remembers, by the host of the
+    target, the values a start read and the ids of the jobs it started. A
+    later read of a job it started hides the values in the vendor texts and
+    in the flight-recorder body. A read of a job it did not start (one from
+    before a restart of MEHO, or started by someone else) shows no vendor
+    error text at all: MEHO cannot know which values such a text may echo.
+    Only the newest values and ids are kept.
     """
 
     def __init__(self) -> None:
         self._values: dict[str, deque[str]] = {}
+        self._jobs: dict[str, deque[str]] = {}
 
     @staticmethod
     def key(host: object) -> str:
@@ -222,8 +258,21 @@ class SecretMemory:
     def known(self, host: object) -> tuple[str, ...]:
         return tuple(self._values.get(self.key(host), ()))
 
+    def remember_job(self, host: object, job_id: object) -> None:
+        """Note that this MEHO started the job *job_id* on *host*."""
+        if not job_id:
+            return
+        jobs = self._jobs.setdefault(self.key(host), deque(maxlen=_SECRET_MEMORY_SIZE))
+        if str(job_id) not in jobs:
+            jobs.append(str(job_id))
+
+    def knows_job(self, host: object, job_id: object) -> bool:
+        """``True`` when this MEHO started the job *job_id* on *host*."""
+        return bool(job_id) and str(job_id) in self._jobs.get(self.key(host), ())
+
     def clear(self) -> None:
         self._values.clear()
+        self._jobs.clear()
 
 
 def _error_texts(error: Mapping[str, Any]) -> list[str]:

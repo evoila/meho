@@ -291,6 +291,7 @@ from meho_backplane.operations._audit import (
     AuditCommitError,
     audit_rejection_safe,
     audit_safe,
+    descriptor_op_class,
     parent_audit_id_var,
     policy_decision_var,
     reveal_secret_var,
@@ -337,6 +338,7 @@ from meho_backplane.operations._errors import (
     wrap_ok_result,
 )
 from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
     get_or_create_connector_instance,
     import_handler,
     is_unbound_method,
@@ -1322,9 +1324,11 @@ async def _reduce_and_audit_success(
         # a successful return for every op, read or write (postulate 7 /
         # v0.1-spec §6). The outcome is uncertain and must not be retried.
         return result_audit_commit_failed(op_id, duration_ms)
+    # The two write checks below use the class the audit row above stores.
+    op_class = descriptor_op_class(descriptor)
     activity_advisory = await build_target_activity_advisory(
         operator,
-        op_id=descriptor.op_id,
+        op_class=op_class,
         target_name=getattr(target, "name", None),
     )
     # Second extras fragment beside #2550: the checks-alert advisory
@@ -1338,7 +1342,7 @@ async def _reduce_and_audit_success(
     # stays a clobber-free union of the three fragments.
     reflex_advisory = await build_reflex_advisory(
         operator,
-        op_id=descriptor.op_id,
+        op_class=op_class,
         target_name=getattr(target, "name", None),
     )
     return wrap_ok_result(
@@ -3376,6 +3380,7 @@ async def dispatch(
             op_id=op_id,
             triple=(product, version, impl_id),
             started=started,
+            target=target,
         )
     # #4139: an op that needs a target (every ingested op, or a typed op
     # bound to a connector) and got none fails here with one clear line,
@@ -3592,7 +3597,7 @@ async def dispatch(
             # strand an approved op behind an announce it can no longer add.
             announce_block = await announce_gate_blocks(
                 operator,
-                op_id=op_id,
+                op_class=descriptor_op_class(descriptor),
                 safety_level=descriptor.safety_level,
                 target_name=getattr(target, "name", None),
             )
@@ -3682,6 +3687,12 @@ async def dispatch(
                 exception_message or "",
                 _elapsed_ms(started),
             )
+
+        # #3879: a target changed on another server (or by this one, before
+        # this process saw it) must not be served with the login kept for its
+        # old values. One dict lookup per dispatch; a drop only on a change.
+        if target is not None:
+            await forget_target_if_changed(target)
 
         # --- Steps 6/7/8/9: branch + reduce + audit + broadcast -----------
         return await _execute_and_audit(

@@ -20,7 +20,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from meho_backplane.connectors.migration.contracts import (
+from meho_backplane.connectors.inventory.contracts import (
     CALCULATION_RESULT_SCHEMA_VERSION,
     INVENTORY_SCHEMA_VERSION,
     calculation_result_json_schema,

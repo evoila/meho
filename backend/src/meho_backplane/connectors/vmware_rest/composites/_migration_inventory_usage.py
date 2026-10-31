@@ -34,7 +34,7 @@ from uuid import UUID
 import httpx
 import structlog
 
-from meho_backplane.connectors.migration.contracts import MissingReason, Stat, Utilization
+from meho_backplane.connectors.inventory.contracts import MissingReason, Stat, Utilization
 from meho_backplane.connectors.result_handle_store import (
     ResultHandleStore,
     ResultRecordKindError,

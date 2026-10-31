@@ -189,16 +189,15 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     start a CronJob's job now) + ``SECRET_READ_OPS`` (#3496 governed
     guest-cluster kubeconfig read: ``k8s.secret.read_to_ref``) +
     ``SECRET_WRITE_OPS`` (``k8s.secret.update`` / ``k8s.secret.delete``) +
+    ``SECRET_LIST_OPS`` (``k8s.secret.{list,info}``, names only) +
+    ``SECRET_COMPARE_OPS`` (``k8s.secret.compare_to_ref``) +
     ``ACCESS_OPS`` / ``ADMISSION_OPS`` (#3840: ``k8s.auth.can_i`` /
     ``k8s.auth.rules`` / ``k8s.admission_webhook.list``).
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
     :class:`KubernetesOp` + ``_K8S_ABOUT_OP``, then imports the op tuples
-    from their ``ops_*`` modules. The arrangement keeps the canary op's
-    metadata co-located with the dataclass definition while letting
-    the larger surfaces live in their own modules next to their
-    helpers.
+    from their ``ops_*`` modules, which live next to their helpers.
     """
     from meho_backplane.connectors.kubernetes.ops_access import ACCESS_OPS
     from meho_backplane.connectors.kubernetes.ops_admission import ADMISSION_OPS
@@ -209,6 +208,8 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     from meho_backplane.connectors.kubernetes.ops_events import EVENT_OPS
     from meho_backplane.connectors.kubernetes.ops_job import JOB_OPS
     from meho_backplane.connectors.kubernetes.ops_network import NETWORK_OPS
+    from meho_backplane.connectors.kubernetes.ops_secret_compare import SECRET_COMPARE_OPS
+    from meho_backplane.connectors.kubernetes.ops_secret_list import SECRET_LIST_OPS
     from meho_backplane.connectors.kubernetes.ops_secret_read import SECRET_READ_OPS
     from meho_backplane.connectors.kubernetes.ops_secret_write import SECRET_WRITE_OPS
     from meho_backplane.connectors.kubernetes.ops_storage import STORAGE_OPS
@@ -237,6 +238,8 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
         *WRITE_DANGEROUS_OPS,
         *SECRET_READ_OPS,
         *SECRET_WRITE_OPS,
+        *SECRET_LIST_OPS,
+        *SECRET_COMPARE_OPS,
         *ACCESS_OPS,
         *ADMISSION_OPS,
     )
@@ -264,7 +267,8 @@ def _logs_op() -> KubernetesOp:
             "``GET /api/v1/namespaces/{namespace}/pods/{name}/log`` route "
             "and returns the lines in one response. Honours the standard "
             "kubectl-style knobs -- ``--tail`` (default 100, capped at "
-            "5000), ``--container`` (required for multi-container pods), "
+            "5000), ``--container`` (required for multi-container pods; "
+            "an init container name is accepted too), "
             "``--since`` (duration string -- '5m', '1h', '24h', '7d'), "
             "and ``--previous`` (logs from the prior container "
             "instance after a restart). Pod name resolution accepts an "

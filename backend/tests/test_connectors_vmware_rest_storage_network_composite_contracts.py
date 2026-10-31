@@ -31,6 +31,7 @@ _PARAMETER_SCHEMAS: dict[str, dict[str, Any]] = {
     "datastore.refresh": schemas.DATASTORE_REFRESH_PARAMETER_SCHEMA,
     "datastore.file.list": schemas.DATASTORE_FILE_LIST_PARAMETER_SCHEMA,
     "datastore.vsan.folder.list": schemas.DATASTORE_VSAN_FOLDER_LIST_PARAMETER_SCHEMA,
+    "datastore.orphan_dirs": schemas.DATASTORE_ORPHAN_DIRS_PARAMETER_SCHEMA,
     "datastore.dir.create": schemas.DATASTORE_DIR_CREATE_PARAMETER_SCHEMA,
     "datastore.file.delete": schemas.DATASTORE_FILE_DELETE_PARAMETER_SCHEMA,
     "storage_policy.list": schemas.STORAGE_POLICY_LIST_PARAMETER_SCHEMA,
@@ -49,6 +50,7 @@ _READ_ONLY = {
     "datastore.refresh",
     "datastore.file.list",
     "datastore.vsan.folder.list",
+    "datastore.orphan_dirs",
     "storage_policy.list",
     "network.portgroup.audit",
 }

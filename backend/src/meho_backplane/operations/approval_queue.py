@@ -82,13 +82,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Final, NamedTuple, cast
+from typing import Any, Final, Literal, NamedTuple, cast
 
 import structlog
 from sqlalchemy import CursorResult, and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op
@@ -127,6 +128,7 @@ from meho_backplane.operations.approval_handoff import (
 from meho_backplane.operations.approval_handoff import (
     store as store_handoff,
 )
+from meho_backplane.operations.approval_outcome import with_approval_guidance
 from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.version import running_release_id
 
@@ -136,10 +138,12 @@ __all__ = [
     "MAX_REASON_LENGTH",
     "ApprovalError",
     "ApprovalExpiredReason",
+    "ApprovalListOrder",
     "ApprovalNotFoundError",
     "ApprovalRequestAlreadyDecidedError",
     "ApprovalRequestExpiredError",
     "ApprovalResultState",
+    "ChainPosition",
     "DelegatedDecisionForbiddenError",
     "DelegatedReasonInvalidError",
     "Delegation",
@@ -167,6 +171,7 @@ __all__ = [
     "get_request",
     "list_pending",
     "parse_delegation",
+    "pending_chain_positions",
     "read_approval_result",
     "record_approval_step_event",
     "refuse_resume_if_release_changed",
@@ -1062,6 +1067,8 @@ async def _write_audit_row(
     # name only, email is never widened onto this surface.
     if operator.name:
         payload["principal_name"] = operator.name
+    # #5239: the role of a platform admin without a group in this tenant.
+    payload.update(tenant_role_source_payload(operator))
     if extra_payload:
         payload.update(extra_payload)
     # policy-gate verdict (#130). The parked "request" row is written on the
@@ -2026,7 +2033,7 @@ async def refuse_resume_if_release_changed(
         running_release=running,
         operator_sub=operator.sub,
     )
-    await persist_resume_result(request.id, refusal)
+    await persist_resume_result(request.id, refusal, parked_op_id=request.op_id)
     return refusal
 
 
@@ -2096,7 +2103,7 @@ def _dump_result_envelope(result: Any) -> dict[str, Any] | None:
     return projection if isinstance(projection, dict) else None
 
 
-async def persist_resume_result(request_id: uuid.UUID, result: Any) -> None:
+async def persist_resume_result(request_id: uuid.UUID, result: Any, *, parked_op_id: str) -> None:
     """Store the approved re-dispatch's reduced result envelope on the row (#3209).
 
     Called on the exactly-one-resumer winning path only, so it runs at most
@@ -2109,6 +2116,13 @@ async def persist_resume_result(request_id: uuid.UUID, result: Any) -> None:
     principal-scoped — via ``GET /api/v1/approvals/{id}/result`` to resume a
     non-idempotent parked op (VCF ``bringup.start``) by poll.
 
+    Before the write, the next step a failed multi-step operation names is
+    stamped into ``extras["approval_guidance"]`` (#5377,
+    :func:`~meho_backplane.operations.approval_outcome.with_approval_guidance`).
+    The run summary on the list and show views reads only that stamp, so a
+    row this code did not write shows no guidance. *parked_op_id* is the op
+    id of the request; a secret-class op gets no stamp.
+
     Fail-soft: the dispatch's own synchronous audit row already committed
     inside :func:`~meho_backplane.operations.dispatcher.dispatch` (the
     v0.1-spec §6 record of what executed), so this convenience-durability write
@@ -2120,6 +2134,7 @@ async def persist_resume_result(request_id: uuid.UUID, result: Any) -> None:
     dumped = _dump_result_envelope(result)
     if dumped is None:
         return
+    dumped = with_approval_guidance(dumped, parked_op_id=parked_op_id)
     from meho_backplane.db.engine import get_sessionmaker
 
     try:
@@ -2182,6 +2197,7 @@ def composite_resume_binding(
     subop_params_hash: str,
     resume_parent: dict[str, Any] | None,
     requester: ResumeRequester | None = None,
+    proposed_effect: dict[str, Any] | None = None,
 ) -> Iterator[tuple[str, dict[str, Any]] | None]:
     """Set up the re-entry of a parent composite for an approved sub-op park.
 
@@ -2212,11 +2228,48 @@ def composite_resume_binding(
     the start. It binds :data:`resume_requester_var` with *requester*, the
     requester of the request being re-run, so a step that waits again is
     saved for that requester on both resume paths (#4217).
-    """
-    if resume_parent is None:
-        yield None
-        return
 
+    For every park, direct or sub-op, the block also binds
+    :data:`~meho_backplane.operations._preview.approved_preview_var` with
+    the approved request's op id and the computed preview its park stored
+    (the ``preview`` body of *proposed_effect*, or ``{}``). A handler reads
+    it with :func:`~meho_backplane.operations._preview.approved_preview`,
+    so a name it resolved at park time is not looked up again after the
+    approval; the re-run acts on the object the approver saw (#5202).
+    """
+    from meho_backplane.operations._preview import approved_preview_var
+
+    preview_token = approved_preview_var.set((subop_op_id, _approved_preview_body(proposed_effect)))
+    try:
+        if resume_parent is None:
+            yield None
+        else:
+            with _composite_parent_binding(
+                subop_op_id=subop_op_id,
+                subop_params_hash=subop_params_hash,
+                resume_parent=resume_parent,
+                requester=requester,
+            ) as parent_call:
+                yield parent_call
+    finally:
+        approved_preview_var.reset(preview_token)
+
+
+def _approved_preview_body(proposed_effect: dict[str, Any] | None) -> dict[str, Any]:
+    """The computed preview a park stored, or ``{}`` when it stored none."""
+    body = (proposed_effect or {}).get("preview")
+    return body if isinstance(body, dict) else {}
+
+
+@contextmanager
+def _composite_parent_binding(
+    *,
+    subop_op_id: str,
+    subop_params_hash: str,
+    resume_parent: dict[str, Any],
+    requester: ResumeRequester | None,
+) -> Iterator[tuple[str, dict[str, Any]]]:
+    """Bind the composite re-entry vars of :func:`composite_resume_binding`."""
     from meho_backplane.operations.composite import (
         CompositeResumeState,
         composite_resume_scope_var,
@@ -2338,6 +2391,7 @@ async def _dispatch_resume_with_bound_context(
                 subop_params_hash=request.params_hash,
                 resume_parent=resume_parent,
                 requester=requester_of(request),
+                proposed_effect=request.proposed_effect,
             ) as parent_call,
         ):
             dispatch_op_id, dispatch_params = (
@@ -2361,7 +2415,7 @@ async def _dispatch_resume_with_bound_context(
     # instead of a second submit (#3209). Reached only by the exactly-one-resumer
     # winner, so the capture runs at most once; fail-soft, never breaks the
     # approve path.
-    await persist_resume_result(request.id, result)
+    await persist_resume_result(request.id, result, parked_op_id=request.op_id)
     return result
 
 
@@ -2866,6 +2920,11 @@ async def _load_for_tenant(
 # ---------------------------------------------------------------------------
 
 
+#: Sort order of an approval list (#3596): ``"newest"`` is ``created_at``
+#: descending (the long-standing default), ``"oldest"`` is ascending.
+ApprovalListOrder = Literal["oldest", "newest"]
+
+
 async def list_pending(
     session: AsyncSession,
     *,
@@ -2874,6 +2933,7 @@ async def list_pending(
     work_ref: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    order: ApprovalListOrder = "newest",
 ) -> list[ApprovalRequest]:
     """Page through approval requests in *tenant_id*.
 
@@ -2884,17 +2944,78 @@ async def list_pending(
     change ticket (``"gh:evoila/meho#1"``); ``None`` applies no work_ref
     filter. Tenant-isolated by the WHERE clause — cross-tenant ids are
     invisible.
-    """
-    from sqlalchemy import select
 
+    ``order`` (#3596) picks the sort: ``"newest"`` (default) lists the
+    newest request first; ``"oldest"`` lists the oldest first, which is the
+    order a chain of requests under one change ticket was sent in. The
+    oldest-first order breaks ties on ``id`` so it matches the step numbers
+    :func:`pending_chain_positions` gives.
+    """
     stmt = select(ApprovalRequest).where(ApprovalRequest.tenant_id == tenant_id)
     if status is not None:
         stmt = stmt.where(ApprovalRequest.status == status)
     if work_ref is not None:
         stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
-    stmt = stmt.order_by(ApprovalRequest.created_at.desc()).limit(limit).offset(offset)
+    if order == "oldest":
+        stmt = stmt.order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
+    else:
+        stmt = stmt.order_by(ApprovalRequest.created_at.desc())
+    stmt = stmt.limit(limit).offset(offset)
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+@dataclass(frozen=True)
+class ChainPosition:
+    """Where one pending request sits in its change-ticket group (#3596).
+
+    ``step`` is 1 for the oldest pending request of the group; ``total`` is
+    how many requests of the group still wait for a decision.
+    """
+
+    work_ref: str
+    step: int
+    total: int
+
+
+async def pending_chain_positions(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    work_ref: str | None = None,
+) -> dict[uuid.UUID, ChainPosition]:
+    """Number the pending requests of each multi-request change ticket (#3596).
+
+    Requests sent under one ``work_ref`` are often steps of one chain: a
+    later step needs an earlier one to have run. This reads every pending
+    request of *tenant_id* that has a ``work_ref`` (only that ``work_ref``
+    when one is given), groups them by ``work_ref``, and numbers each group
+    oldest first. Only groups with two or more pending requests are
+    returned; a lone request has no order to show. The numbers count
+    pending requests only, so step 1 is always the oldest request that
+    still waits. Tenant-isolated by the WHERE clause.
+    """
+    stmt = (
+        select(ApprovalRequest.id, ApprovalRequest.work_ref)
+        .where(
+            ApprovalRequest.tenant_id == tenant_id,
+            ApprovalRequest.status == ApprovalRequestStatus.PENDING.value,
+            ApprovalRequest.work_ref.is_not(None),
+        )
+        .order_by(ApprovalRequest.created_at.asc(), ApprovalRequest.id.asc())
+    )
+    if work_ref is not None:
+        stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
+    groups: dict[str, list[uuid.UUID]] = {}
+    for request_id, ref in (await session.execute(stmt)).all():
+        groups.setdefault(ref, []).append(request_id)
+    positions: dict[uuid.UUID, ChainPosition] = {}
+    for ref, ids in groups.items():
+        if len(ids) < 2:
+            continue
+        for step, request_id in enumerate(ids, start=1):
+            positions[request_id] = ChainPosition(work_ref=ref, step=step, total=len(ids))
+    return positions
 
 
 async def get_request(
@@ -3028,20 +3149,51 @@ async def record_approval_step_event(
 
     No Broadcast event is published (#3758). The stored approval row is
     what waiters, the approvals bell and the console read.
+
+    A ``pending`` event of a request that shares its ``work_ref`` with
+    other pending requests also carries ``chain_step`` / ``chain_total``
+    (#3596): "this is step k of N waiting under this change ticket".
     """
     from meho_backplane.operations.addon_step_events import AddonStepEventService
 
+    payload: dict[str, object] = {
+        "approval_request_id": str(request.id),
+        "decision": decision,
+        "connector_id": request.connector_id,
+        "approval_op_id": request.op_id,
+        "work_ref": request.work_ref,
+    }
+    if decision == "pending" and request.work_ref is not None:
+        position = await _chain_position_fail_open(tenant_id, request)
+        if position is not None:
+            payload["chain_step"] = position.step
+            payload["chain_total"] = position.total
     await AddonStepEventService().record_if_owned_committed(
         tenant_id=tenant_id,
         owner_principal_sub=request.principal_sub,
         event_kind=f"approval.{decision}",
         work_ref=request.work_ref,
         audit_id=audit_id,
-        payload={
-            "approval_request_id": str(request.id),
-            "decision": decision,
-            "connector_id": request.connector_id,
-            "approval_op_id": request.op_id,
-            "work_ref": request.work_ref,
-        },
+        payload=payload,
     )
+
+
+async def _chain_position_fail_open(
+    tenant_id: uuid.UUID, request: ApprovalRequest
+) -> ChainPosition | None:
+    """Return *request*'s step in its change-ticket group, or ``None`` (#3596).
+
+    Fail-open like the step event itself: a read error only drops the
+    step number from the event.
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+
+    try:
+        async with get_sessionmaker()() as session:
+            positions = await pending_chain_positions(
+                session, tenant_id=tenant_id, work_ref=request.work_ref
+            )
+    except Exception:
+        _log().exception("approval_chain_position_failed", approval_request_id=str(request.id))
+        return None
+    return positions.get(request.id)

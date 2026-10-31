@@ -60,12 +60,17 @@ Route inventory
   (Pending / Approved / Rejected / Expired / All), a work_ref filter, and
   the decision-history list. The bell's ``hx-get`` carries ``HX-Request:
   true`` and keeps getting the existing **pending panel** modal fragment,
-  so the bell-click flow is unchanged.
+  so the bell-click flow is unchanged. The panel lists oldest first, with
+  "Step k of N" per row, when a change ticket (``work_ref``) has two or
+  more pending requests (#3596); otherwise newest first.
 * ``GET /ui/approvals/list`` -- the decision-history partial (#1827): the
   HTMX swap target for the status tabs / work_ref filter / "load more"
   offset pager on the full page. Reuses ``list_pending`` with an explicit
   ``status`` (``None`` for the All tab), an optional ``work_ref``, and a
-  real ``offset`` pager (not the badge's 50-row glance cap).
+  real ``offset`` pager (not the badge's 50-row glance cap). ``order``
+  (#3596) is the oldest/newest toggle; empty means oldest first on the
+  Pending tab when a change ticket has two or more pending requests, else
+  newest first.
 * ``GET /ui/approvals/{id}`` -- the request-detail modal fragment
   (op_id / connector_id / proposed_effect / requester principal_sub /
   created_at) with Approve + Deny buttons. A **decided** row (#1827)
@@ -132,9 +137,11 @@ from meho_backplane.operations.approval_context import (
 )
 from meho_backplane.operations.approval_queue import (
     MAX_REASON_LENGTH,
+    ApprovalListOrder,
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ApprovalRequestExpiredError,
+    ChainPosition,
     DelegatedDecisionForbiddenError,
     DelegatedReasonInvalidError,
     Delegation,
@@ -146,6 +153,7 @@ from meho_backplane.operations.approval_queue import (
     get_request,
     list_pending,
     parse_delegation,
+    pending_chain_positions,
     record_approval_step_event,
     reject_request,
     resume_dispatch_after_approval,
@@ -216,6 +224,13 @@ _DEFAULT_HISTORY_TAB: Final[str] = "pending"
 #: rejected (422) rather than silently coerced.
 _HISTORY_PARTIAL_ROWS: Final[str] = "rows"
 _HISTORY_PARTIALS: Final[frozenset[str]] = frozenset({"", _HISTORY_PARTIAL_ROWS})
+
+#: The ``order`` choices on the history view (#3596). The empty default
+#: means "pick for me": oldest first on the Pending tab when a change ticket
+#: has two or more pending requests (so a chain reads in the order it was
+#: sent), newest first otherwise. ``oldest`` / ``newest`` are the explicit
+#: toggle. A foreign value is rejected (422).
+_HISTORY_ORDERS: Final[frozenset[str]] = frozenset({"", "oldest", "newest"})
 
 #: Operator-docs page the self-approval guidance deep-links to (#2669).
 #: Mirrors ``ui/maturity.py``'s ``MATURITY_INDEX_URL`` convention -- the
@@ -303,14 +318,38 @@ async def _list_pending_for_session(session: UISessionContext) -> list[ApprovalR
         )
 
 
+async def _list_panel_for_session(
+    session: UISessionContext,
+) -> tuple[list[ApprovalRequest], dict[uuid.UUID, ChainPosition]]:
+    """List the pending requests for the bell panel, with chain steps (#3596).
+
+    When any change ticket (``work_ref``) has two or more pending requests,
+    the panel lists oldest first, so a chain reads in the order it was sent
+    and the approver meets step 1 before step 2. Otherwise it keeps the
+    newest-first order. Returns the rows and the step of each grouped row.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session:
+        positions = await pending_chain_positions(db_session, tenant_id=session.tenant_id)
+        rows = await list_pending(
+            db_session,
+            tenant_id=session.tenant_id,
+            status="pending",
+            limit=_PENDING_LIMIT,
+            order="oldest" if positions else "newest",
+        )
+    return rows, positions
+
+
 async def _list_history_for_session(
     session: UISessionContext,
     *,
     status_filter: str | None,
     work_ref: str | None,
     offset: int,
+    order: ApprovalListOrder,
 ) -> tuple[list[ApprovalRequest], bool]:
-    """Page through this tenant's approval history (newest-first).
+    """Page through this tenant's approval history in *order*.
 
     Reuses the same ``list_pending`` substrate the badge + panel call, but
     with an explicit ``status`` (``None`` for the All tab) + ``work_ref``
@@ -330,6 +369,7 @@ async def _list_history_for_session(
             work_ref=work_ref,
             limit=_HISTORY_PAGE_SIZE + 1,
             offset=offset,
+            order=order,
         )
     has_more = len(rows) > _HISTORY_PAGE_SIZE
     return rows[:_HISTORY_PAGE_SIZE], has_more
@@ -354,7 +394,7 @@ async def _get_request_or_404(session: UISessionContext, request_id: uuid.UUID) 
 
 async def _get_request_with_context_or_404(
     session: UISessionContext, request_id: uuid.UUID
-) -> tuple[ApprovalRequest, ReviewerContext, Delegation | None]:
+) -> tuple[ApprovalRequest, ReviewerContext, Delegation | None, ChainPosition | None]:
     """Fetch one request + its resolved reviewer context in one session (#3353).
 
     The redacted, human-legible judging context (resolved target name,
@@ -366,7 +406,11 @@ async def _get_request_with_context_or_404(
     Fail-open: the resolver never raises, so a resolution miss just yields
     an empty context and the modal keeps the raw ids. The delegated-decision
     block (#3692) is read off the decision audit row in the same session so
-    the decided banner shows who instructed the approver.
+    the decided banner shows who instructed the approver. The chain step
+    (#3596) is read in the same session too: a pending request that shares
+    its ``work_ref`` with other pending requests is "step k of N", so the
+    modal can name it and ask for one more confirm before an out-of-order
+    approve -- whichever link opened the modal.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
@@ -383,7 +427,13 @@ async def _get_request_with_context_or_404(
             ) from exc
         reviewer_context = await resolve_reviewer_context(db_session, row)
         delegation = await get_decision_delegation(db_session, row)
-    return row, reviewer_context, delegation
+        chain: ChainPosition | None = None
+        if row.status == "pending" and row.work_ref is not None:
+            positions = await pending_chain_positions(
+                db_session, tenant_id=session.tenant_id, work_ref=row.work_ref
+            )
+            chain = positions.get(row.id)
+    return row, reviewer_context, delegation, chain
 
 
 def _is_self_approval_blocked(operator: Operator, request: ApprovalRequest) -> bool:
@@ -439,6 +489,7 @@ def build_approvals_router() -> APIRouter:
         work_ref: str = Query(default="", max_length=_MAX_WORK_REF_LENGTH),
         offset: int = Query(default=0, ge=0),
         partial: str = Query(default=""),
+        order: str = Query(default=""),
     ) -> HTMLResponse:
         """Render the decision-history list partial (delegates below).
 
@@ -448,7 +499,7 @@ def build_approvals_router() -> APIRouter:
         block (the tab / filter / pager swap target). A query value outside
         the known set is rejected as a 422 rather than silently coerced.
         """
-        return await _render_history(request, session, tab, work_ref, offset, partial)
+        return await _render_history(request, session, tab, work_ref, offset, order, partial)
 
     @router.get("/ui/approvals", response_class=HTMLResponse)
     async def approvals_index(
@@ -457,6 +508,7 @@ def build_approvals_router() -> APIRouter:
         tab: str = Query(default=_DEFAULT_HISTORY_TAB),
         work_ref: str = Query(default="", max_length=_MAX_WORK_REF_LENGTH),
         offset: int = Query(default=0, ge=0),
+        order: str = Query(default=""),
     ) -> HTMLResponse:
         """Render the approvals surface, content-negotiated by ``HX-Request``.
 
@@ -466,7 +518,7 @@ def build_approvals_router() -> APIRouter:
         """
         if _is_htmx(request):
             return await _render_panel(request, session)
-        return await _render_index(request, session, tab, work_ref, offset)
+        return await _render_index(request, session, tab, work_ref, offset, order)
 
     @router.get("/ui/approvals/{request_id}", response_class=HTMLResponse)
     async def approval_detail(
@@ -515,9 +567,9 @@ async def _render_badge(request: Request, session: UISessionContext) -> HTMLResp
 
 async def _render_panel(request: Request, session: UISessionContext) -> HTMLResponse:
     """Render the pending-requests panel (the modal body listing the queue)."""
-    pending = await _list_pending_for_session(session)
+    pending, positions = await _list_panel_for_session(session)
     context: dict[str, object] = {
-        "requests": [project_request_to_view(row) for row in pending],
+        "requests": [project_request_to_view(row, chain=positions.get(row.id)) for row in pending],
     }
     return get_templates().TemplateResponse(request, "approvals/_panel.html", context)
 
@@ -537,11 +589,22 @@ def _resolve_history_tab(tab: str) -> str:
     return tab
 
 
+def _resolve_history_order(order: str) -> str:
+    """Validate an ``order`` choice (#3596), mapping an unknown one to a 422."""
+    if order not in _HISTORY_ORDERS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Unknown approvals order '{order}'.",
+        )
+    return order
+
+
 async def _build_history_context(
     session: UISessionContext,
     tab: str,
     work_ref: str,
     offset: int,
+    order: str = "",
 ) -> dict[str, object]:
     """Assemble the shared context for the history page + its list partial.
 
@@ -550,17 +613,36 @@ async def _build_history_context(
     identical across a direct navigation and a tab/pager swap. The
     ``work_ref`` filter is applied only when non-blank (a blank box means
     "no work_ref filter", i.e. every request for the active tab).
+
+    ``order`` (#3596) is the operator's oldest/newest toggle. When it is
+    empty, the Pending tab lists oldest first if a change ticket has two or
+    more pending requests, and every other view lists newest first. The
+    resolved order rides the pager links, so "Load more" keeps it.
     """
     tab = _resolve_history_tab(tab)
+    order_choice = _resolve_history_order(order)
     work_ref_filter = work_ref.strip() or None
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session:
+        positions = await pending_chain_positions(
+            db_session, tenant_id=session.tenant_id, work_ref=work_ref_filter
+        )
+    resolved_order: ApprovalListOrder
+    if order_choice == "oldest" or (order_choice == "" and tab == "pending" and positions):
+        resolved_order = "oldest"
+    else:
+        resolved_order = "newest"
     rows, has_more = await _list_history_for_session(
         session,
         status_filter=_HISTORY_TABS[tab],
         work_ref=work_ref_filter,
         offset=offset,
+        order=resolved_order,
     )
     return {
-        "requests": [project_request_to_view(row) for row in rows],
+        "requests": [project_request_to_view(row, chain=positions.get(row.id)) for row in rows],
+        "order": resolved_order,
+        "order_choice": order_choice,
         "status_pill_class": STATUS_PILL_CLASS,
         "result_state_pill": RESULT_STATE_PILL,
         "active_tab": tab,
@@ -579,6 +661,7 @@ async def _render_index(
     tab: str,
     work_ref: str,
     offset: int,
+    order: str = "",
 ) -> HTMLResponse:
     """Render the full-page approvals console for a normal navigation.
 
@@ -588,7 +671,7 @@ async def _render_index(
     No CSRF cookie is set here: this surface is read-only (the decision
     POSTs live on the detail modal, which mints its own token).
     """
-    context = await _build_history_context(session, tab, work_ref, offset)
+    context = await _build_history_context(session, tab, work_ref, offset, order)
     context["active_surface"] = "approvals"
     context["page_title"] = "Approvals"
     return get_templates().TemplateResponse(request, "approvals/index.html", context)
@@ -600,6 +683,7 @@ async def _render_history(
     tab: str,
     work_ref: str,
     offset: int,
+    order: str = "",
     partial: str = "",
 ) -> HTMLResponse:
     """Render the decision-history list partial for the HTMX tab/pager swap.
@@ -615,7 +699,7 @@ async def _render_history(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Unknown approvals list partial '{partial}'.",
         )
-    context = await _build_history_context(session, tab, work_ref, offset)
+    context = await _build_history_context(session, tab, work_ref, offset, order)
     template = (
         "approvals/_history_rows_oob.html"
         if partial == _HISTORY_PARTIAL_ROWS
@@ -646,14 +730,14 @@ async def _render_detail_modal(
     bare error to the actionable single-operator guidance (#2669).
     """
     operator = await _resolve_operator(session)
-    approval, reviewer_context, delegation = await _get_request_with_context_or_404(
+    approval, reviewer_context, delegation, chain = await _get_request_with_context_or_404(
         session, request_id
     )
 
     self_approval_blocked = _is_self_approval_blocked(operator, approval)
     csrf_token = mint_csrf_token(str(session.session_id))
     context: dict[str, object] = {
-        "request": project_request_to_view(approval, delegation),
+        "request": project_request_to_view(approval, delegation, chain),
         # Redacted reviewer context (#3353), resolved from the shared
         # resolver so the modal renders the same substance ``meho approvals
         # show`` does. Always present in this context (StrictUndefined-safe)
@@ -743,7 +827,7 @@ async def _decide(
             dispatch_status=dispatch_result.status,
             operator_sub=operator.sub,
         )
-        run = project_run_result(dispatch_result)
+        run = project_run_result(dispatch_result, parked_op_id=approval.op_id)
 
     context: dict[str, object] = {
         # The reason already passed validation in the service, so this

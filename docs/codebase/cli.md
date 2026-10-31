@@ -202,7 +202,9 @@ cli/
     │   ├── doctor.go          # `meho doctor` (#3666) — command, report model, redaction, exit codes.
     │   ├── doctor_offline.go  # offline layer: binary, config, credential store, plugin shim/lock/cache, plugin settings, CA bundle.
     │   ├── doctor_online.go   # authenticated layer: DNS, token + refresh, MCP handshake, working-surface compare.
+    │   ├── doctor_server.go   # server layer (#4740): runs `meho-host check --json` as root on a form-2 server.
     │   ├── doctor_test.go     # offline, credential-store, redaction, and httptest MCP-stub tests.
+    │   ├── doctor_server_test.go # server layer with a fake meho-host: root, not root, laptop, bad answers, time limit.
     │   ├── audit/            # G8.1-T3 #467 — `meho audit …` verb tree.
     │   │   ├── audit.go          # NewRootCmd + shared typed-client helpers (G0.12-T5 #1263).
     │   │   ├── query.go          # `meho audit query` (POST /api/v1/audit/query).
@@ -1035,7 +1037,7 @@ that header from one place, so every verb gets it without its own flag.
   the HTTP request row. So the rows the connector service writes
   inside the request (`meho_connector_edit_op`,
   `meho_connector_llm_grouping` for an ingest, enable / disable, ...)
-  carry the same work-ref, and `meho audit query --work-ref` finds
+  carry the same work-ref, and `meho audit query --filter-work-ref` finds
   them together with the request row. `backend/tests/
   test_audit_work_ref_control_plane.py` proves this round trip for
   `targets add`, `agent grant create`, `connector ingest` (sync and
@@ -1045,11 +1047,32 @@ that header from one place, so every verb gets it without its own flag.
   header first. So the MCP row and the dispatch row of each tool call
   carry it. A `work_ref` argument on `call_operation` still wins over the
   header. `backend/tests/test_mcp_work_ref_header.py` proves this.
-- Some commands have their own local `--work-ref` (`operation call`,
-  `scheduler create`, `runbook start`, `agent run`, and the filters on
-  `audit query`, `approvals list`, `broadcast recent`, ...). Cobra lets a local
-  flag hide the parent's persistent flag, so on those commands the flag
-  keeps its own meaning. Only `MEHO_WORK_REF` reaches the header there.
+- Some commands have their own local `--work-ref`: `operation call`,
+  `scheduler create`, `runbook start`, `agent run` and
+  `broadcast announce`. There it has the same meaning as the global
+  flag: it tags the run with the reference. Cobra lets a local flag hide
+  the parent's persistent flag, so only `MEHO_WORK_REF` reaches the
+  header there.
+- The six read commands that filter by reference (`audit query`,
+  `approvals list`, `scheduler list`, `runbook runs`, `agent run-list`,
+  `broadcast recent`) use `--filter-work-ref` for the filter (#4988).
+  They have no local `--work-ref`, so the global flag tags their request
+  like on every other command. Before #4988 their own `--work-ref`
+  filtered the answer and hid the global flag, so
+  `meho --work-ref X audit query ...` silently showed only the rows of
+  ticket X. For one release, a `--work-ref` on these commands still
+  filters too when `--filter-work-ref` is not given, and
+  `workref.Filter` (`cli/internal/cmd/workref/`) prints one warning
+  line on stderr that names `--filter-work-ref`. A filter value need
+  not have the `gh:<owner>/<repo>#<n>` shape: when it does not,
+  `applyWorkRef` skips the tag on these commands instead of failing,
+  and the value only filters. When `--filter-work-ref` is given, also
+  empty (`--filter-work-ref=""` means no filter), `--work-ref` only
+  tags, and a bad value is an error like on every other command.
+  `MEHO_WORK_REF` never filters. `TestWorkRefFlagHasOneMeaning` walks
+  the command tree and fails when a command adds its own `--work-ref`
+  that is not a tag; `TestFilterWorkRefOnReadCommands` checks the
+  header and the filter on the wire for all six commands.
 - No PersistentPreRun hooks exist below the root. If one is added, it
   must call `applyWorkRef` too (cobra runs only the nearest hook).
 
@@ -1159,11 +1182,62 @@ makes exactly the calls it reports, and none with `--no-network`.
    server lists for this session but the client did not see is a
    `surface_gap`.
 
+### Server layer (form-2 server only, #4740)
+
+`runServerChecks` in `doctor_server.go`. It runs last, after the
+authenticated layer. It is the ADR 0007 amendment of 2026-10-16: the
+checks of the built-in Kubernetes (RKE2) live in `meho-host check`, and
+the doctor runs them on the server, so the CLI needs no Kubernetes
+library.
+
+- **No `/usr/local/sbin/meho-host`** (a laptop): no server layer and no
+  line. The output is the same as before #4740. The path is the
+  constant `mehoHostPath`; `install.sh` of install form 2 puts the file
+  there.
+- **`--no-network`**: one `skip` line. `meho-host check` asks the
+  Kubernetes API, and the backplane runs in that same cluster.
+- **Not root** (effective user id is not 0): one `warn` line with the
+  hint "RKE2 checks need root: run `sudo meho doctor`". The doctor does
+  not run `meho-host` and does not ask for a password.
+- **Root**: runs `meho-host check --json` with a 60-second limit
+  (`mehoHostTimeout`) and adds one line per check, in its order, after
+  the doctor's own lines. `meho-host` exits 1 when a line is red. With
+  valid JSON that is a normal answer: the lines decide, not the exit
+  code.
+
+The status words map one to one: `ok`, `warn` and `fail` (the words
+`meho-host` uses), and `skip`. A line with another word becomes a
+`fail` line that names the word. These answers become one `fail` line
+named `meho-host check`, with a hint to run `sudo meho-host check`:
+no output, output that is not valid JSON, an empty list, a command that
+could not start, and the time limit. The detail names the exit status
+and the first line of `meho-host`'s error output, where it prints its
+own `[FAIL]` message.
+
+`exec.CommandContext` stops only `meho-host` itself at the limit. A
+`kubectl` or `rke2` that it started can keep the output pipe open, so
+`Cmd.WaitDelay` (5 seconds) bounds the wait for the output after that.
+Such a child process ends on its own; `kubectl` has a 10-second request
+limit in `meho-host`.
+
+The seams in `doctorDeps` are `stat` (the file check), `geteuid` (the
+user id), `runCommand` (runs the command and returns its standard output
+and standard error) and `serverTimeout`. The human output prints the
+server lines after the summary of the authenticated layer (scopes,
+working surface, session id). The JSON output has them at the end of
+`checks`, with `"layer":"server"`.
+
+Under `sudo`, the doctor runs as root. The offline and authenticated
+layers then read the settings and the login that root sees, which are
+usually not those of the admin's own user.
+
 Failure classes: `dns`, `tls`, `unreachable` (from `internal/netdiag`),
 `not_logged_in`, `refresh_rejected`, `no_refresh_token`, `unauthorized`,
 `surface_gap`, `unexpected`. Exit codes follow the `meho status`
 taxonomy: 2 login problem, 3 network problem, 4 unexpected answer or
-surface gap, 1 an offline check failed, 0 no failure.
+surface gap, 1 an offline or server check failed, 0 no failure. The
+first failed line decides, so a red server line gives 1 only when no
+earlier line failed. Warning lines keep 0.
 
 The scopes shown are the CLI login's scopes. A Claude client logs in on
 its own through `mcp-remote` and can hold other scopes (for example
@@ -1667,8 +1741,8 @@ removes one through `DELETE /api/v1/targets/{name}`.
   The optional flags mirror the `TargetCreate` fields one-for-one
   (`--alias` repeatable, `--version`, `--port`, `--fqdn`,
   `--secret-ref`, `--auth-model`, `--verify-tls`, `--tls-ca-pin`,
-  `--tls-server-name`, `--preferred-impl`, `--note`) and are sent only
-  when set, so the server's defaults apply to the rest — notably an
+  `--tls-server-name`, `--vpn-required`, `--preferred-impl`, `--note`)
+  and are sent only when set, so the server's defaults apply to the rest — notably an
   omitted `--secret-ref` derives the per-tenant default credential path
   (#1723) rather than persisting "no credential". `--no-secret-ref`
   (Task #3854; cannot be combined with `--secret-ref`) sends an
@@ -1685,10 +1759,12 @@ removes one through `DELETE /api/v1/targets/{name}`.
   `import.go`'s `doAuthedRequest` POST plumbing, so a static-bearer
   escape hatch is deliberately **not** offered — auth stays interactive
   `meho login` only.
-- `meho targets update <name-or-alias> [field flags] [--clear F]`
+- `meho targets update <name, alias or id> [field flags] [--clear F]`
   (Task #3854) — calls `PATCH /api/v1/targets/{name}` (`TargetUpdate`)
   for one target. The field flags have the same names as `add`'s and
   are sent only when set, so every other column keeps its value.
+  For example, `--vpn-required=false` clears the VPN flag, and an
+  update without `--vpn-required` leaves it as it is (#5075).
   `--alias` replaces the whole alias list and `--extra key=value`
   replaces the whole `extras` map, matching the server's PATCH
   semantics. `--clear <field>` (repeatable) sends an explicit JSON null
@@ -1727,15 +1803,15 @@ removes one through `DELETE /api/v1/targets/{name}`.
   paginated by name; `--cursor <last-name-seen>` walks pages. `--limit`
   is capped at 500 by the API; the CLI fails fast at the boundary so
   operators see the constraint without a 422 round-trip.
-- `meho targets describe <name-or-alias>` — calls
+- `meho targets describe <name, alias or id>` — calls
   `GET /api/v1/targets/{name}`. Renders the full `Target` read shape
   as a stable key-value summary including the post-#477 fields
   `fingerprint` (cached `FingerprintResult` from the last successful
   probe) and `preferred_impl_id` (operator override for the G0.6
-  resolver's tie-break ladder). Alias resolution happens server-side
-  via `resolve_target`; a 404 surfaces the resolver's near-miss list
+  resolver's tie-break ladder). The server finds the target by name,
+  alias or id (see [`targets.md`](targets.md)); a 404 surfaces the resolver's near-miss list
   so operators can correct a typo in one shot.
-- `meho targets probe <name-or-alias>` — calls
+- `meho targets probe <name, alias or id>` — calls
   `POST /api/v1/targets/{name}/probe`. Backend invokes the registered
   `Connector.fingerprint(target)`, persists the `FingerprintResult` to
   `targets.fingerprint` (so the G0.6 resolver reads it without

@@ -41,7 +41,7 @@ grep for ``/admin`` / ``/realms`` string literals). The
 display metadata derived from the same filled constant, never
 dispatched (the vcf-operations lane's display-metadata precedent).
 
-Two hand-coded paths are dispatched but deliberately **excluded** from
+Three hand-coded paths are dispatched but deliberately **excluded** from
 the reconcile — the #2970 decision-table class "surface lives outside
 the pinned spec", evidenced rather than repointed (the pinned spec's
 only top-level path family is ``/admin/realms``; verified 2026-08-18,
@@ -52,6 +52,10 @@ first armed run):
   (RFC 6749 §3.2) / per-realm OIDC discovery
   (``/realms/{realm}/.well-known/openid-configuration``), not by the
   Admin REST OpenAPI document. No served alternative exists.
+* ``POST:/realms/{realm}/protocol/openid-connect/logout`` — the OIDC
+  logout endpoint ``keycloak.user.check_login`` uses to end the session
+  its login test opened. Specified by OIDC, not by the Admin REST
+  OpenAPI document. No served alternative exists.
 * ``GET:/admin/serverinfo`` — the admin console's server-info endpoint
   (best-effort version read; the connector already treats any failure
   as non-fatal ``version=None``). Stable in practice but not modeled by
@@ -126,6 +130,7 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
 #: serverinfo). Method per constant, mirroring the dispatch seams.
 _EXCLUDED_METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_TOKEN_PATH": ("POST",),
+    "_LOGOUT_PATH": ("POST",),
     "_SERVERINFO_PATH": ("GET",),
 }
 
@@ -213,6 +218,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
     ]
     assert sorted(_op_ids(_EXCLUDED_METHODS_BY_CONSTANT)) == [
         "GET:/admin/serverinfo",
+        "POST:/realms/{realm}/protocol/openid-connect/logout",
         "POST:/realms/{realm}/protocol/openid-connect/token",
     ]
 

@@ -19,6 +19,9 @@ readonly MEHO_STATE_DIR=/var/lib/meho
 readonly MEHO_CONFIG_DIR=/etc/meho
 readonly MEHO_JOIN_TOKEN_FILE=/etc/meho/join-token
 readonly MEHO_HOST_PATH=/usr/local/sbin/meho-host
+# The files of lib/ that meho-host sources. install.sh copies them here;
+# meho-host finds them at ../lib/meho-host from its own folder.
+readonly MEHO_HOST_LIB_DIR=/usr/local/lib/meho-host
 readonly MEHO_PLACE_VALUES=/etc/meho/values-place.yaml
 readonly MEHO_INSTALL_RECORD=/etc/meho/install.json
 readonly MEHO_FIRST_LOGIN_FILE=/var/lib/meho/first-login-passwords
@@ -39,6 +42,7 @@ readonly TRAEFIK_CONFIG_MANIFEST=rke2-traefik-config.yaml
 readonly MEHO_IMAGES_ARCHIVE=images/meho-images.linux-amd64.tar.zst
 readonly STORAGE_MANIFEST=storage/local-path-storage.yaml
 readonly MEHO_HOST_FILE=meho-host
+readonly MEHO_HOST_LIB_FILES=(lib/firewall.sh lib/cis.sh)
 readonly VERSION_FILE=VERSION
 readonly SINGLE_NODE_VALUES=chart/values-single-node.yaml
 readonly HELM_FILE=bin/helm

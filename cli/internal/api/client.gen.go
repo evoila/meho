@@ -836,6 +836,12 @@ const (
 	MehoBackplaneUiRoutesTopologyTableSortColumnName      MehoBackplaneUiRoutesTopologyTableSortColumn = "name"
 )
 
+// Defines values for ListApprovalsApiV1ApprovalsGetParamsOrder.
+const (
+	ListApprovalsApiV1ApprovalsGetParamsOrderNewest ListApprovalsApiV1ApprovalsGetParamsOrder = "newest"
+	ListApprovalsApiV1ApprovalsGetParamsOrderOldest ListApprovalsApiV1ApprovalsGetParamsOrder = "oldest"
+)
+
 // Defines values for ListEndpointApiV1ConnectorsGetParamsStatus.
 const (
 	ListEndpointApiV1ConnectorsGetParamsStatusAll      ListEndpointApiV1ConnectorsGetParamsStatus = "all"
@@ -1696,6 +1702,7 @@ type ApprovalResultView struct {
 type ApprovalResumeOutcomeView struct {
 	AuditId      *openapi_types.UUID `json:"audit_id"`
 	ErrorCode    *string             `json:"error_code"`
+	Guidance     *string             `json:"guidance"`
 	ResultStatus *string             `json:"result_status"`
 	ResumedAt    *string             `json:"resumed_at"`
 }
@@ -5982,6 +5989,12 @@ type HealthResponse struct {
 	// they serialise as a UUID string / role value under
 	// ``model_dump(mode="json")`` — the same wire shape the
 	// ``meho://tenant/<id>/info`` resource returns.
+	//
+	// ``tenants`` (#5239) lists every tenant of the person, with the role
+	// in each, when the token carries a tenant list (empty otherwise). A
+	// login with several tenants that chose none gets ``tenant_id`` and
+	// ``tenant_role`` as ``None``: the status answer then only lists the
+	// tenants.
 	Operator OperatorIdentity `json:"operator"`
 	Pairings *[]PairingHealth `json:"pairings,omitempty"`
 
@@ -6578,6 +6591,12 @@ type LivenessResponse struct {
 	// they serialise as a UUID string / role value under
 	// ``model_dump(mode="json")`` — the same wire shape the
 	// ``meho://tenant/<id>/info`` resource returns.
+	//
+	// ``tenants`` (#5239) lists every tenant of the person, with the role
+	// in each, when the token carries a tenant list (empty otherwise). A
+	// login with several tenants that chose none gets ``tenant_id`` and
+	// ``tenant_role`` as ``None``: the status answer then only lists the
+	// tenants.
 	Operator OperatorIdentity `json:"operator"`
 
 	// SensorRunner Liveness of this process's sensor evaluation loop (#2763).
@@ -7187,11 +7206,17 @@ type OperationRunSummaryResponse struct {
 // they serialise as a UUID string / role value under
 // “model_dump(mode="json")“ — the same wire shape the
 // “meho://tenant/<id>/info“ resource returns.
+//
+// “tenants“ (#5239) lists every tenant of the person, with the role
+// in each, when the token carries a tenant list (empty otherwise). A
+// login with several tenants that chose none gets “tenant_id“ and
+// “tenant_role“ as “None“: the status answer then only lists the
+// tenants.
 type OperatorIdentity struct {
-	Email    *string            `json:"email"`
-	Name     *string            `json:"name"`
-	Sub      string             `json:"sub"`
-	TenantId openapi_types.UUID `json:"tenant_id"`
+	Email    *string             `json:"email"`
+	Name     *string             `json:"name"`
+	Sub      string              `json:"sub"`
+	TenantId *openapi_types.UUID `json:"tenant_id"`
 
 	// TenantRole Per-tenant role granted to the operator by the JWT issuer.
 	//
@@ -7209,7 +7234,8 @@ type OperatorIdentity struct {
 	// 3.11+) gives the members ``str`` semantics for free, so
 	// ``f"role={role}"`` renders as ``"role=tenant_admin"`` rather than
 	// ``"role=TenantRole.TENANT_ADMIN"``.
-	TenantRole TenantRole `json:"tenant_role"`
+	TenantRole TenantRole     `json:"tenant_role"`
+	Tenants    *[]TenantEntry `json:"tenants,omitempty"`
 }
 
 // OrderBy One “ORDER BY“ term: a known column plus a direction.
@@ -7848,10 +7874,12 @@ type ResolvedTargetDescriptor struct {
 	Port            *int                    `json:"port"`
 	PreferredImplId *string                 `json:"preferred_impl_id"`
 	Product         string                  `json:"product"`
+	SecretFieldMap  *map[string]string      `json:"secret_field_map,omitempty"`
 	SecretRef       *string                 `json:"secret_ref"`
 	TenantId        openapi_types.UUID      `json:"tenant_id"`
 	TlsCaPin        *string                 `json:"tls_ca_pin"`
 	TlsServerName   *string                 `json:"tls_server_name"`
+	UpdatedAt       *time.Time              `json:"updated_at"`
 	VerifyTls       *bool                   `json:"verify_tls,omitempty"`
 	Version         *string                 `json:"version"`
 }
@@ -9654,6 +9682,7 @@ type Target struct {
 	Port                  *int                    `json:"port"`
 	PreferredImplId       *string                 `json:"preferred_impl_id"`
 	Product               string                  `json:"product"`
+	SecretFieldMap        *map[string]string      `json:"secret_field_map,omitempty"`
 	SecretRef             *string                 `json:"secret_ref"`
 	TenantId              openapi_types.UUID      `json:"tenant_id"`
 	TlsCaPin              *string                 `json:"tls_ca_pin"`
@@ -9700,13 +9729,14 @@ type TargetCreate struct {
 	PreferredImplId       *string                 `json:"preferred_impl_id"`
 
 	// Product Connector product slug. Must match the ``product`` field of a registered connector class; see ``GET /api/v1/connectors`` for the live list and ``docs/codebase/error-message-shape.md`` for the 422 shape returned on miss.
-	Product       TargetCreateProduct `json:"product"`
-	SecretRef     *string             `json:"secret_ref"`
-	TlsCaPin      *string             `json:"tls_ca_pin"`
-	TlsServerName *string             `json:"tls_server_name"`
-	VerifyTls     *bool               `json:"verify_tls,omitempty"`
-	Version       *string             `json:"version"`
-	VpnRequired   *bool               `json:"vpn_required,omitempty"`
+	Product        TargetCreateProduct `json:"product"`
+	SecretFieldMap *map[string]string  `json:"secret_field_map,omitempty"`
+	SecretRef      *string             `json:"secret_ref"`
+	TlsCaPin       *string             `json:"tls_ca_pin"`
+	TlsServerName  *string             `json:"tls_server_name"`
+	VerifyTls      *bool               `json:"verify_tls,omitempty"`
+	Version        *string             `json:"version"`
+	VpnRequired    *bool               `json:"vpn_required,omitempty"`
 }
 
 // TargetCreateProduct Connector product slug. Must match the “product“ field of a registered connector class; see “GET /api/v1/connectors“ for the live list and “docs/codebase/error-message-shape.md“ for the 422 shape returned on miss.
@@ -9772,6 +9802,7 @@ type TargetSummary struct {
 	Port                  *int                    `json:"port"`
 	PreferredImplId       *string                 `json:"preferred_impl_id"`
 	Product               string                  `json:"product"`
+	SecretFieldMap        *map[string]string      `json:"secret_field_map,omitempty"`
 	SecretRef             *string                 `json:"secret_ref"`
 	TenantId              openapi_types.UUID      `json:"tenant_id"`
 	TlsCaPin              *string                 `json:"tls_ca_pin"`
@@ -9829,6 +9860,7 @@ type TargetUpdate struct {
 	Port                  *int                    `json:"port"`
 	PreferredImplId       *string                 `json:"preferred_impl_id"`
 	Product               *string                 `json:"product"`
+	SecretFieldMap        *map[string]*string     `json:"secret_field_map"`
 	SecretRef             *string                 `json:"secret_ref"`
 	TlsCaPin              *string                 `json:"tls_ca_pin"`
 	TlsServerName         *string                 `json:"tls_server_name"`
@@ -9866,6 +9898,33 @@ type TemplateSummary struct {
 
 // TemplateSummaryStatus defines model for TemplateSummary.Status.
 type TemplateSummaryStatus string
+
+// TenantEntry One tenant of the person, with the role there (#5239).
+//
+// “current“ is “True“ for the tenant this request works in.
+type TenantEntry struct {
+	Current  bool               `json:"current"`
+	Name     string             `json:"name"`
+	TenantId openapi_types.UUID `json:"tenant_id"`
+
+	// TenantRole Per-tenant role granted to the operator by the JWT issuer.
+	//
+	// The set is intentionally small in v0.2: a closed three-value enum
+	// lets the RBAC primitive (Task #234, ``require_role``) make
+	// exhaustive comparisons without leaking arbitrary string handling
+	// into route code. A richer policy engine — topology-aware
+	// permissions, ABAC, approval workflows — is a separate v0.2.next
+	// Goal; widening this enum is the only ratcheting mechanism in the
+	// interim.
+	//
+	// Values are the literal strings the Keycloak protocol-mapper recipe
+	// (Task #235) emits, so a JWT carrying ``"tenant_admin"`` materialises
+	// cleanly as :attr:`TENANT_ADMIN`. ``StrEnum`` (PEP 663, stdlib in
+	// 3.11+) gives the members ``str`` semantics for free, so
+	// ``f"role={role}"`` renders as ``"role=tenant_admin"`` rather than
+	// ``"role=TenantRole.TENANT_ADMIN"``.
+	TenantRole TenantRole `json:"tenant_role"`
+}
 
 // TenantFlightRecorderPolicy Resolved per-tenant flight-recorder policy -- the PATCH read-back shape.
 //
@@ -10943,10 +11002,16 @@ type ListApprovalsApiV1ApprovalsGetParams struct {
 	// Limit Return at most this many requests (1..500). Omit for no limit.
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 
-	// Offset Skip this many requests first (newest first). Defaults to 0.
-	Offset        *int    `form:"offset,omitempty" json:"offset,omitempty"`
-	Authorization *string `json:"authorization,omitempty"`
+	// Offset Skip this many requests first, in the chosen order. Defaults to 0.
+	Offset *int `form:"offset,omitempty" json:"offset,omitempty"`
+
+	// Order Sort by creation time. 'newest' (default) lists the newest request first; 'oldest' lists the oldest first, which is the order a chain of requests under one change ticket was sent in.
+	Order         *ListApprovalsApiV1ApprovalsGetParamsOrder `form:"order,omitempty" json:"order,omitempty"`
+	Authorization *string                                    `json:"authorization,omitempty"`
 }
+
+// ListApprovalsApiV1ApprovalsGetParamsOrder defines parameters for ListApprovalsApiV1ApprovalsGet.
+type ListApprovalsApiV1ApprovalsGetParamsOrder string
 
 // GetApprovalRequestApiV1ApprovalsRequestIdGetParams defines parameters for GetApprovalRequestApiV1ApprovalsRequestIdGet.
 type GetApprovalRequestApiV1ApprovalsRequestIdGetParams struct {
@@ -11984,6 +12049,7 @@ type ApprovalsIndexUiApprovalsGetParams struct {
 	Tab     *string `form:"tab,omitempty" json:"tab,omitempty"`
 	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	Offset  *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Order   *string `form:"order,omitempty" json:"order,omitempty"`
 }
 
 // ApprovalsHistoryUiApprovalsListGetParams defines parameters for ApprovalsHistoryUiApprovalsListGet.
@@ -11992,6 +12058,7 @@ type ApprovalsHistoryUiApprovalsListGetParams struct {
 	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	Offset  *int    `form:"offset,omitempty" json:"offset,omitempty"`
 	Partial *string `form:"partial,omitempty" json:"partial,omitempty"`
+	Order   *string `form:"order,omitempty" json:"order,omitempty"`
 }
 
 // UiAuditPageUiAuditGetParams defines parameters for UiAuditPageUiAuditGet.
@@ -25057,6 +25124,22 @@ func NewListApprovalsApiV1ApprovalsGetRequest(server string, params *ListApprova
 
 		}
 
+		if params.Order != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "order", runtime.ParamLocationQuery, *params.Order); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -37278,6 +37361,22 @@ func NewApprovalsIndexUiApprovalsGetRequest(server string, params *ApprovalsInde
 
 		}
 
+		if params.Order != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "order", runtime.ParamLocationQuery, *params.Order); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -37389,6 +37488,22 @@ func NewApprovalsHistoryUiApprovalsListGetRequest(server string, params *Approva
 		if params.Partial != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "partial", runtime.ParamLocationQuery, *params.Partial); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Order != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "order", runtime.ParamLocationQuery, *params.Order); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

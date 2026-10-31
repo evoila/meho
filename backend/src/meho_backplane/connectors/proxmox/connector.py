@@ -572,16 +572,21 @@ class ProxmoxConnector(HttpConnector):
         )
 
     async def invalidate_credentials(self, target: ProxmoxTargetLike) -> None:
-        """Duck-typed credential-eviction hook for the dispatch path (#2396).
+        """Duck-typed credential-eviction hook for the dispatch path (#2396, #3879).
 
         Drops the cached credentials for *target* so the next credential read
-        re-reads Vault. Called by the dispatcher on an establish-auth failure
-        so an operator's out-of-band restage converges on the next dispatch
-        without a backplane restart. Holds :attr:`_creds_lock` so the pop is
-        serialised against an in-flight load.
+        re-reads Vault, and the login ticket minted from them so the next
+        call logs in again with the new username and password. Without the
+        ticket drop a narrower credential would still send the old ticket
+        until it expires. Called by the dispatcher on an establish-auth
+        failure and by the target update route after a target change. Each
+        pop holds its own lock so it is serialised against an in-flight load
+        or login.
         """
         async with self._creds_lock:
             self._creds_cache.pop(target_cache_key(target), None)
+        async with self._ticket_lock:
+            self._ticket_cache.pop(credential_cache_key(target), None)
 
     async def aclose(self) -> None:
         """Clear cached credentials + tickets, then tear down the httpx pool."""

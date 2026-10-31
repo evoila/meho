@@ -20,7 +20,7 @@ from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 from scripts.generate_inventory_schemas import SCHEMA_FILES, render_schema
 
-from meho_backplane.connectors.migration.contracts import (
+from meho_backplane.connectors.inventory.contracts import (
     CalculationResult,
     Finding,
     InventoryEnvelope,

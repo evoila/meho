@@ -28,7 +28,7 @@ truth:
   `approval.withdraw` row when the sender takes the request back).
 - **T5 wires the operator surfaces on top:** `GET /api/v1/approvals/{id}`
   (inspect), `meho_approvals_{list,get,approve,reject}` MCP tools, and
-  `meho approvals {list,show,approve,reject,withdraw}` CLI verbs. Since #3758 no
+  `meho approvals {list,show,result,approve,reject,withdraw}` CLI verbs. Since #3758 no
   approval step is published to Broadcast. `record_approval_step_event`
   records `approval.{pending,approved,rejected,expired,withdrawn}` only for the
   paired add-on that asked (#3027); the audit log records every step; the
@@ -1249,11 +1249,47 @@ example a Vault write that Vault refused). `result_state` already tells
 | `result_status` | `status` of the stored result: `ok`, `error`, `denied`, ... `null` while no result is stored. |
 | `error_code` | `extras.error_code` of a failed run, for example `connector_error`. |
 | `audit_id` | The audit row the dispatcher wrote for the run. |
+| `guidance` | The next step a failed multi-step operation names (#5377), for example "The VM waits on question _vmx1: show it to the user and answer it with vmware.vm.question.answer." `null` for any other run. |
 
 `resume_outcome` is `null` for a request that is not approved, and before
 the run starts. The result body and the free-text `error` stay on the
 owner-only `/result` read: an odd or missing field reads as `null`, never
 raises.
+
+**Where `guidance` comes from (#5377).** A multi-step operation can end with
+its own error answer (#3809): a `result` body with an `error` issue, whose
+`status` word (for example `result_unknown`) the dispatcher copies into
+`extras.error_code`. So `error_code` already carries that word. When the
+approval store writes the result on the row (`persist_resume_result`), it
+stamps the body's `guidance` text into `extras.approval_guidance`
+(`with_approval_guidance` in `operations/approval_outcome.py`). The summary
+reads only that stamp, never the body. The stamp is written only when all
+of these hold:
+
+- the run did not end `ok`;
+- the body's `status` equals `error_code`, so the body is MEHO's own error
+  answer, not a vendor answer;
+- neither the run's op nor the parked op is in a secret class
+  (`credential_read`, `credential_mint`, `credential_write`).
+
+So no param and no vendor text of an operation that sends or reads a secret
+reaches the summary (the rule of #4854). For other operations the text is
+MEHO's own words: a multi-step operation keeps a vendor error in its
+`issues`, never in its `guidance`, because every approver reads the
+guidance. Like every error result, the body has already passed the
+dispatcher's secret cleanup (`redact_error_result`). The text is cut at 500
+characters. For
+`vmware.composite.vm.device.cdrom`, the text names the running task ids and
+the question id; the question text and any read error stay in the body
+(`vm_question`, `tasks_error`).
+
+A result stored before the stamp existed has no `extras.approval_guidance`,
+so its summary has no `guidance`. This matters after an upgrade: an older
+connector could copy vendor error text into the body's `guidance` (the VM
+resize step did), and that text must not reach the list and show views.
+It stays on the owner-only `/result` read. The card after an approve in
+the console stamps the fresh result the same way before it reads the
+summary.
 
 Where it shows:
 
@@ -1263,14 +1299,17 @@ Where it shows:
   `resume_outcome`, same shape.
 - **CLI** `meho approvals list`: a `RUN` column (`not-run`, `started`,
   `ok`, `FAILED`, or `-` when the request is not approved). `meho approvals
-  show` and `approve`: `Run:`, `Run started:`, `Run result:`, `Error code:`
-  and `Run audit:` lines, with the `meho audit show <id>` command for the
-  audit row.
+  show` and `approve`: `Run:`, `Run started:`, `Run result:`, `Error code:`,
+  `Next step:` (the `guidance`, when set) and `Run audit:` lines, with the
+  `meho audit show <id>` command for the audit row. `approve` reads the
+  request again after the decision, so it prints the same summary as
+  `show`.
 - **Console** `/ui/approvals`: a run badge next to the `approved` pill in
   the history list (`ran OK`, `run failed`, ...). The detail modal of a
   failed run shows a red banner with the error code and a link to the audit
   row (`/ui/audit?audit_id=<id>`). The card after an approve says "Approved,
-  but the run failed" when the run returned an error. When another resumer
+  but the run failed" when the run returned an error. Both show a "Next
+  step" line with the `guidance`, when set. When another resumer
   (usually the waiting requester) already ran the operation
   (`already_resumed`), it shows the normal "Request approved" card.
 
@@ -1286,8 +1325,13 @@ poll `/result` to learn whether the run ended.
 
 **Pinned by tests:** `tests/test_approval_resume_outcome.py` (summary
 shape, odd envelopes, a resume that errors shows on REST show, list and
-MCP), `tests/test_ui_approvals.py` (run badge, failed-run modal, failed
-approve card) and `cli/internal/cmd/approvals/approvals_test.go`.
+MCP, the `guidance` stamp rules, a credential operation with no vendor
+text, and a result stored before the stamp that shows no guidance),
+`tests/test_ui_approvals.py` (run badge, failed-run modal, failed approve
+card, the "Next step" line, and no "Next step" for an older stored result),
+`tests/test_connectors_vmware_rest_typed_vm_question.py` (a CD-ROM change
+that times out on a VM question names the question id in the summary) and
+`cli/internal/cmd/approvals/approvals_test.go`.
 
 ### The add-on governed-destroy round trip (#3478)
 
@@ -1499,6 +1543,7 @@ got one in #4850; `k8s.secret.update` came later with its own builder
 | `sddc.host.validate` | an agent's call | host count; per host: `fqdn`, `username`, `storageType`, `networkPoolId` | the ESXi password and any other spec field |
 | `sddc.host.commission` | every call | the same as `sddc.host.validate` | the same |
 | `holodeck.router.patch` | every call | HoloRouter version, whether the call only checks (`verify_only`, a 9.1 router), the patch ids and the module file each one edits | nothing secret exists; the op takes no params |
+| `secret.handoff.import` | every call | the store target name (the other instance's Vault), the sink `{kind, ref}`, `expect_sha256`, the reason | the one-time handoff token (`connectors/secret/handoff_preview.py`) |
 | `vmware.composite.vm.guest.file.read` | an agent's call | VM, guest path, whether MEHO downloads the bytes (`fetch_content`, `max_inline_bytes`), the guest login's store path (`guest_secret_ref`) | the guest login |
 
 `k8s.secret.delete` is not a credential write (its params are only the
@@ -2023,7 +2068,7 @@ token-decode + live decouple verification, and a rollback note — lives in
 
 | Verb | Path | Access | Purpose |
 |---|---|---|---|
-| `GET` | `/api/v1/approvals` | operator **or** approver | List, newest first, filtered by `status` (default: `pending`; `all` = every state, #5129). Optional `limit` (1..500, no limit when omitted) and `offset`. |
+| `GET` | `/api/v1/approvals` | operator **or** approver | List, newest first, filtered by `status` (default: `pending`; `all` = every state, #5129). Optional `limit` (1..500, no limit when omitted) and `offset`. Optional `order=oldest\|newest` (default `newest`, #3596): `oldest` lists `created_at ASC`. |
 | `GET` | `/api/v1/approvals/{id}` | operator **or** approver | **Inspect one request** (T5). 404 on cross-tenant. |
 | `GET` | `/api/v1/approvals/{id}/result` | **request owner** (any role) | **Read the approved dispatch's result** (#3209). Principal-scoped: only `principal_sub` reads it; any other principal gets 403 `not_request_owner`. Writes an `approval.result` audit row. |
 | `POST` | `/api/v1/approvals/{id}/approve` | **human** operator **or** approver | Approve. Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1); 403 `human_principal_required` for a machine `principal_kind` (#289). |
@@ -2058,7 +2103,14 @@ dispatcher re-checks `required_role` at `tools/call`.
 `meho approvals list / show <id> / approve <id> / reject <id> [--reason]`
 verbs that hit the REST surface via the generated typed client.
 `meho approvals withdraw <id> [--reason]` lets the sender take back its own
-pending request (#4987). `list`
+pending request (#4987). `meho approvals result <id> [--json]` lets the
+sender read the output of its approved run from the owner-only `/result`
+read (#5313). It prints the stored result the way `meho operation call`
+does (with the `meho operation result-query` command for a result
+handle), says in plain words when there is no result yet, and shows the
+403 `not_request_owner` answer as `insufficient_role` (exit 5). `show`
+adds a `Run output:` line naming that command once the run is done, and
+the parked hint of every call that waits for approval names it too. `list`
 has a `RUN` column and `show` / `approve` print how the run of an approved
 request ended (#3543, see "Approved, but the run failed" above).
 `list` shows only pending requests unless `--status` is set; `--status all`
@@ -2066,9 +2118,11 @@ shows every state. An empty list names the state it filtered on and points
 to `--status all` (#5129). `--limit` / `--offset` go to the server as
 `limit` / `offset`. When `--offset` skips every match, the empty message
 says the page is empty and points to a smaller `--offset`, so it does not
-claim the tenant has no requests. When `--work-ref` matches nothing, the
+claim the tenant has no requests. When `--filter-work-ref` matches nothing, the
 empty message names the change ticket and points to removing the filter,
-for the same reason.
+for the same reason. `--order oldest|newest` picks the sort (#3596). It
+defaults to newest first, but to **oldest first when `--filter-work-ref` is
+set**, so the steps of one change ticket read in the order they were sent.
 
 ### Operator console (`backend/src/meho_backplane/ui/routes/approvals/`)
 
@@ -2107,8 +2161,8 @@ no new gate, service call, route, or migration.
 | Verb | Path | Purpose |
 |---|---|---|
 | `GET` | `/ui/approvals/badge` | Live **pending** count for the app-shell bell. Always `status='pending'` — it counts actionable work, not history. |
-| `GET` | `/ui/approvals` | Content-negotiated. A normal navigation (no `HX-Request`) → the **full-page console**: status tabs (Pending / Approved / Rejected / Expired / All), a `work_ref` filter, and the decision-history list. The bell's `hx-get` (`HX-Request: true`) → the existing pending **panel** modal fragment (unchanged). (G10.8-T #1827) |
-| `GET` | `/ui/approvals/list` | Decision-history partial — the HTMX swap target for the status tabs / `work_ref` filter / "Load more" offset pager. Reuses `list_pending(status=…, work_ref=…, offset=…)`; `tab=all` passes `status=None`. Pages with a real offset, not the badge's 50-row glance cap. (G10.8-T #1827) |
+| `GET` | `/ui/approvals` | Content-negotiated. A normal navigation (no `HX-Request`) → the **full-page console**: status tabs (Pending / Approved / Rejected / Expired / All), a `work_ref` filter, an oldest/newest toggle (`order`, #3596), and the decision-history list. The bell's `hx-get` (`HX-Request: true`) → the pending **panel** modal fragment, oldest first with step numbers when a change ticket has two or more pending requests (#3596). (G10.8-T #1827) |
+| `GET` | `/ui/approvals/list` | Decision-history partial — the HTMX swap target for the status tabs / `work_ref` filter / oldest-newest toggle / "Load more" offset pager. Reuses `list_pending(status=…, work_ref=…, offset=…, order=…)`; `tab=all` passes `status=None`. `order` is `oldest`, `newest`, or empty (the default rule in "Chains of requests under one change ticket" below); any other value is a 422. Pages with a real offset, not the badge's 50-row glance cap. (G10.8-T #1827) |
 | `GET` | `/ui/approvals/{id}` | Request-detail modal. A pending row offers Approve/Deny; a **decided** row renders read-only with a decision banner ("Approved/Rejected by X at T"). An approved row also shows how its run ended; a failed run turns the banner red (#3543). The `proposed_effect` envelope renders **structurally** (#2447), not as raw JSON (below). |
 | `POST` | `/ui/approvals/{id}/approve` | Approve in-process + re-dispatch the parked op + fail-open broadcast. |
 | `POST` | `/ui/approvals/{id}/reject` | Reject in-process + broadcast; the op never runs. |
@@ -2132,6 +2186,68 @@ of the open Pending tab without a reload. The decision **reason** lives on
 the `audit_log` decision row, not the `ApprovalRequest` row, so the
 history view shows who/when (`reviewed_by` / `decided_at`) but not the
 free-text reason (an `audit_log` read deferred to a follow-up).
+
+### Chains of requests under one change ticket: oldest first and step numbers (#3596)
+
+Approving runs the operation at once. When an agent sends several requests
+that depend on each other (step 2 needs step 1 to have run), approving them
+newest first runs them in the wrong order, and the later steps fail. The
+requests of such a chain share one change ticket (`work_ref`). MEHO now
+shows that order on the surfaces an approver uses. Nothing here changes what
+"approve" runs, and nothing stores an order on the row.
+
+- **Step numbers.** `approval_queue.pending_chain_positions(session,
+  tenant_id=…, work_ref=None)` reads the pending requests that have a
+  `work_ref`, groups them by `work_ref`, and numbers each group oldest
+  first (`created_at`, then `id`). It returns a `ChainPosition(work_ref,
+  step, total)` per request, only for groups with **two or more** pending
+  requests. The numbers count pending requests only: once step 1 is
+  decided, the old step 2 becomes step 1 of the rest.
+- **Sort order.** `list_pending(order="oldest"|"newest")` (default
+  `newest`) and `GET /api/v1/approvals?order=` (default `newest`, so a
+  client that does not send it gets the same answer as before). `oldest`
+  sorts on `created_at ASC, id ASC`, the same order the step numbers use.
+- **Bell panel.** When any change ticket has two or more pending requests,
+  the panel lists oldest first and shows "Step k of N in change ticket
+  `<work_ref>`" on each grouped row. Otherwise it stays newest first. The
+  approver does not need to type a filter.
+- **Full-page console.** The Pending tab uses the same rule when no
+  `order` is given (the rule looks only at the `work_ref` filter when one
+  is set). Every other tab is newest first by default. The "Oldest first" /
+  "Newest first" toggle sets `order` explicitly; the live refresh and the
+  `work_ref` box keep that choice, a tab switch drops it, and "Load more"
+  carries the order the first page used. Pending rows in a group show the
+  "Step k of N" badge.
+- **Detail modal.** A pending request in a group shows "Step k of N
+  waiting in this change ticket" and a link to the Pending tab filtered to
+  that ticket, oldest first. When k > 1, an earlier step still waits, so
+  the consequence banner says so and the Approve armer opens **one more
+  confirm** first (`data-approval-confirm="out-of-order"`): "You are
+  approving step k of N before the earlier steps. This runs at once and
+  cannot be un-approved." Only after "Approve step k anyway" does the
+  normal approve confirm appear. The route computes the step for every way
+  the modal opens (bell, history row, or a deep link from a "waiting for
+  approval" result), so the link used cannot skip it. This is a console
+  prompt, not a server rule: REST and CLI approve a later step without
+  asking.
+- **"Waiting for approval" result in the console.** When an operator runs
+  an operation (`operations/_result.html`) or a Vault write
+  (`vault/_write_result.html`) and it waits for approval, the result
+  fragment calls `render.parked_request_chain(tenant_id, envelope)`. It
+  loads the parked request named by `extras.approval_request_id` and
+  numbers it among the pending requests of its `work_ref`. When the ticket
+  has two or more pending requests, the fragment says "Step k of N waiting
+  in change ticket `<work_ref>`" and its first link opens the Pending tab
+  filtered to that ticket, oldest first; the per-request modal link stays
+  as the second link. A lone request, a request with no `work_ref`, or an
+  id outside the tenant keeps the plain per-request link.
+- **Step event for the requesting add-on.** The `approval.pending` add-on
+  step event (`record_approval_step_event`) adds `chain_step` and
+  `chain_total` to its payload when the new request is one of two or more
+  pending requests under its `work_ref`. A read error only drops the two
+  fields (fail-open, like the event itself).
+- **CLI.** `meho approvals list --order oldest|newest`; oldest is the
+  default when `--filter-work-ref` is set (see the CLI section above).
 
 ### Structured `proposed_effect` render in the modal (#2447)
 
@@ -2427,6 +2543,34 @@ each write runs once).
 
 A direct (non-composite) park is unchanged — `resume_parent` is NULL, so
 the resume keeps the generic re-dispatch of the stored `op_id`.
+
+#### The approved run acts on what the approver saw (#5202)
+
+A park stores the request's parameters (hash-pinned) and the preview its
+builder computed (`proposed_effect.preview`). The re-run gets only the
+parameters. When a parameter is a *name* that the preview resolved to an
+id, a re-run that looks the name up again may act on another object than
+the one the approver saw (a rename, or a deleted and re-created item).
+
+So `composite_resume_binding` also binds, for every park (direct or
+sub-op) and for the whole re-run, `approved_preview_var`
+(`operations/_preview.py`) with the parked op id and the stored computed
+preview (`{}` when the park stored none). A handler reads it with
+`approved_preview(op_id)`:
+
+- `None`: an ordinary dispatch, or the re-run of a different op (a sub-op
+  park re-runs its parent composite, which must not read the sub-op's
+  preview as its own). The handler resolves live.
+- a dict: the approved run of this op. The handler must act on what the
+  preview shows, and refuse (send nothing) when the preview shows no id,
+  because the approver then saw no object at all.
+
+First user: `vmware.composite.vm.cdrom.mount_library_iso`, whose mount by
+item name reads the pinned `library_item` from its preview and answers
+`item_not_pinned` without it. Tests:
+`test_resume_binding_hands_the_approved_preview_to_the_parked_op` in
+`test_operations_subop_policy_gate.py` and the `after_approval` tests in
+`test_connectors_vmware_rest_composites_cdrom_library_iso.py`.
 
 #### Both resume surfaces read `resume_parent` (#3421)
 

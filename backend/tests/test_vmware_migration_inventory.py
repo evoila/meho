@@ -35,13 +35,13 @@ from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors.migration.azure_migrate_csv import inventory_to_csv
-from meho_backplane.connectors.migration.contracts import (
+from meho_backplane.connectors.inventory.azure_migrate_csv import inventory_to_csv
+from meho_backplane.connectors.inventory.contracts import (
     CountCheck,
     InventoryEnvelope,
     ServerRecord,
 )
-from meho_backplane.connectors.migration.inventory_load import load_inventories
+from meho_backplane.connectors.inventory.inventory_load import load_inventories
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.vmware_rest.composites import (
     _migration_inventory,

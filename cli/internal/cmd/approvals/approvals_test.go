@@ -706,8 +706,8 @@ func TestPrintDetailOmitsReleaseWhenUnset(t *testing.T) {
 }
 
 // TestPrintListTableEmpty — an empty list names the state filter that
-// produced it and how to see more; only --status all with no --work-ref
-// and no offset says "none at all". With --work-ref, the message names
+// produced it and how to see more; only --status all with no --filter-work-ref
+// and no offset says "none at all". With --filter-work-ref, the message names
 // the change ticket and points to removing the filter, so an empty match
 // for one ticket is not read as an empty tenant. With an --offset, the
 // page is empty because the offset skipped every match, so the message
@@ -727,9 +727,9 @@ func TestPrintListTableEmpty(t *testing.T) {
 		{"", "", 15, "no pending approval requests after skipping 15 (this page is empty; use a smaller --offset)"},
 		{"pending", "", 3, "no pending approval requests after skipping 3 (this page is empty; use a smaller --offset)"},
 		{"rejected", "", 1, "no rejected approval requests after skipping 1 (this page is empty; use a smaller --offset)"},
-		{"all", "gh:evoila/meho#1", 0, `no approval requests for change ticket "gh:evoila/meho#1" (remove --work-ref to see every request)`},
-		{"", "gh:evoila/meho#1", 0, `no pending approval requests for change ticket "gh:evoila/meho#1" (use --status all or remove --work-ref to see more)`},
-		{"approved", "gh:evoila/meho#1", 0, `no approved approval requests for change ticket "gh:evoila/meho#1" (use --status all or remove --work-ref to see more)`},
+		{"all", "gh:evoila/meho#1", 0, `no approval requests for change ticket "gh:evoila/meho#1" (remove --filter-work-ref to see every request)`},
+		{"", "gh:evoila/meho#1", 0, `no pending approval requests for change ticket "gh:evoila/meho#1" (use --status all or remove --filter-work-ref to see more)`},
+		{"approved", "gh:evoila/meho#1", 0, `no approved approval requests for change ticket "gh:evoila/meho#1" (use --status all or remove --filter-work-ref to see more)`},
 		{"all", "gh:evoila/meho#1", 2, `no approval requests for change ticket "gh:evoila/meho#1" after skipping 2 (this page is empty; use a smaller --offset)`},
 	}
 	for _, tc := range cases {
@@ -746,7 +746,7 @@ func TestPrintListTableEmpty(t *testing.T) {
 	}
 }
 
-// TestListSendsWorkRef confirms --work-ref reaches the wire as
+// TestListSendsWorkRef confirms --filter-work-ref reaches the wire as
 // work_ref, so the server does the exact-match filter the empty message
 // then names.
 func TestListSendsWorkRef(t *testing.T) {
@@ -765,6 +765,61 @@ func TestListSendsWorkRef(t *testing.T) {
 	}
 	if got := seen.Get("work_ref"); got != "gh:evoila/meho#1" {
 		t.Errorf("expected work_ref=gh:evoila/meho#1 on the wire, got %q", got)
+	}
+}
+
+// TestListOrderOnTheWire pins --order (#3596): unset with no --filter-work-ref
+// leaves `order` off the wire (server default, newest first); --filter-work-ref
+// alone sends order=oldest; an explicit --order always wins.
+func TestListOrderOnTheWire(t *testing.T) {
+	cases := []struct {
+		name string
+		opts listOpts
+		want string
+	}{
+		{"default", listOpts{}, ""},
+		{"work ref defaults to oldest", listOpts{WorkRef: "gh:evoila/meho#1"}, "oldest"},
+		{"explicit newest with work ref", listOpts{WorkRef: "gh:evoila/meho#1", Order: "newest"}, "newest"},
+		{"explicit oldest", listOpts{Order: "oldest"}, "oldest"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var seen url.Values
+			srv := mockBackplane(t, map[string]mockHandler{
+				"GET /api/v1/approvals": func(w http.ResponseWriter, r *http.Request) {
+					seen = r.URL.Query()
+					writeJSON(t, w, http.StatusOK, []api.ApprovalRequestView{})
+				},
+			})
+			defer srv.Close()
+
+			stderr, err := runListWithMock(t, srv, tc.opts)
+			if err != nil {
+				t.Fatalf("runList: %v (stderr: %s)", err, stderr.String())
+			}
+			if _, present := seen["order"]; tc.want == "" && present {
+				t.Errorf("order should stay off the wire; got %q", seen.Get("order"))
+			}
+			if got := seen.Get("order"); got != tc.want {
+				t.Errorf("expected order=%q on the wire, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestListRejectsUnknownOrder — a value other than oldest/newest fails
+// before any request.
+func TestListRejectsUnknownOrder(t *testing.T) {
+	cmd := &cobra.Command{Use: "list"}
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	cmd.SetContext(context.Background())
+	err := runList(cmd, listOpts{Order: "random", JSONOut: true})
+	if err == nil {
+		t.Fatal("expected an error for --order random")
+	}
+	if !strings.Contains(stderr.String(), "--order must be oldest or newest") {
+		t.Errorf("error should name the accepted values; got:\n%s", stderr.String())
 	}
 }
 
@@ -1238,5 +1293,63 @@ func TestPrintListTableRendersRunState(t *testing.T) {
 		if len(fields) < 3 || fields[2] != want {
 			t.Errorf("row %d: RUN = %v, want %q (line %q)", i, fields, want, lines[i+1])
 		}
+	}
+}
+
+// guidanceRunView is an approved request whose run ended result_unknown
+// while the VM waits on a question (#5377): the run summary carries the
+// next step MEHO names.
+func guidanceRunView(t *testing.T) api.ApprovalRequestView {
+	t.Helper()
+	d := failedRunView(t)
+	errorCode := "result_unknown"
+	guidance := "The change did not answer in time and may still run (vCenter tasks: task-7). " +
+		"Do not start it again yet. The VM waits on question _vmx1: show it to the user " +
+		"and answer it with vmware.vm.question.answer."
+	d.ResumeOutcome.ErrorCode = &errorCode
+	d.ResumeOutcome.Guidance = &guidance
+	return d
+}
+
+// TestPrintDetailAndDecisionRenderGuidance: show and approve print the
+// next step of a run that waits on a VM question (#5377).
+func TestPrintDetailAndDecisionRenderGuidance(t *testing.T) {
+	d := guidanceRunView(t)
+	want := []string{
+		"Run:          FAILED",
+		"Error code:   result_unknown",
+		"Next step:    The change did not answer in time",
+		"The VM waits on question _vmx1",
+	}
+
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	var buf bytes.Buffer
+	printDecision(&buf, stubID, &d)
+	for name, out := range map[string]string{"show": stdout.String(), "approve": buf.String()} {
+		for _, w := range want {
+			if !strings.Contains(out, w) {
+				t.Errorf("%s render missing %q in:\n%s", name, w, out)
+			}
+		}
+	}
+}
+
+// TestPrintDecisionOkRunHasNoGuidance: a run that ended ok prints as
+// before, with no "Next step:" line (#5377).
+func TestPrintDecisionOkRunHasNoGuidance(t *testing.T) {
+	d := newApprovalView(t, "approved", "T-test")
+	executed := api.ApprovalResultStateExecuted
+	resultStatus := "ok"
+	d.ResultState = &executed
+	d.ResumeOutcome = &api.ApprovalResumeOutcomeView{ResultStatus: &resultStatus}
+	var buf bytes.Buffer
+	printDecision(&buf, stubID, &d)
+	out := buf.String()
+	if !strings.Contains(out, "Run:          ok") || !strings.Contains(out, "Run result:   ok") {
+		t.Errorf("ok run render changed:\n%s", out)
+	}
+	if strings.Contains(out, "Next step:") {
+		t.Errorf("ok run printed a Next step line:\n%s", out)
 	}
 }

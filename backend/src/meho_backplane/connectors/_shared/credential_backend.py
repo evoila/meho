@@ -64,6 +64,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CREDENTIAL_BACKEND_REGISTRY",
     "DEFAULT_CREDENTIAL_BACKEND",
+    "WRAPPED_CREDENTIAL_SCHEME",
     "CredentialBackend",
     "CredentialsReadError",
     "UnknownCredentialBackendError",
@@ -102,6 +103,12 @@ DEFAULT_CREDENTIAL_BACKEND: str = "vault"
 #: as a backend kind; anything else (notably a path segment with a slash)
 #: leaves the ref schemeless.
 _SCHEME_TOKEN = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*$")
+
+#: The credential-seam scheme a per-work-item single-use wrapped credential
+#: rides on: ``wrapped:<vault-wrapping-token>``. Defined here, not in
+#: ``wrapped_creds``, so the shared credential reader can recognise the
+#: scheme without importing the module that depends on it.
+WRAPPED_CREDENTIAL_SCHEME = "wrapped"
 
 
 @runtime_checkable

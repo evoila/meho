@@ -124,8 +124,9 @@ _VCENTER_REGISTER = VcfaTypedOp(
         ),
         preconditions=(
             "Store the vCenter password in Vault and pass its path. Run preview_operation "
-            "first: it shows the certificate fingerprint. Check it against the vCenter's own "
-            "before you approve. " + JOB_RULES
+            "first: it shows the certificate fingerprint. Check it against the certificate to "
+            "trust (the vCenter's own, or the issuer at the top when the chain has more than "
+            "one) before you approve. " + JOB_RULES
         ),
         output_shape=(
             "{status, object: {kind, name, url, id, state}, job: {id, href, status_read}, "

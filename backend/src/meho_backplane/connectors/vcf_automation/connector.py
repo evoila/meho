@@ -1163,8 +1163,8 @@ class VcfAutomationConnector(HttpConnector):
         target: VcfAutomationTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """``vcfa.provider.nsx_manager.register`` — see :mod:`._infra_connect`."""
-        from meho_backplane.connectors.vcf_automation._infra_connect import (
+        """``vcfa.provider.nsx_manager.register`` — see :mod:`._infra_nsx`."""
+        from meho_backplane.connectors.vcf_automation._infra_nsx import (
             provider_nsx_manager_register,
         )
 

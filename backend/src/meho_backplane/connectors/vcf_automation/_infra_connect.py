@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Connect a vCenter or an NSX manager to VCF Automation (provider plane).
+"""Connect a vCenter to VCF Automation (provider plane).
 
 * ``vcfa.provider.vcenter.register`` runs the next steps a vCenter needs:
   trust its certificate (only the one the approver saw), add it (switched
@@ -9,8 +9,8 @@
   Supervisors appear. Each vendor step is a job: the call returns as soon as
   VCF Automation accepted the job, with the job id. Call it again with the
   same inputs to run the next step; it skips the steps that are done.
-* ``vcfa.provider.nsx_manager.register`` adds an NSX manager. The vendor
-  refuses a body without ``description``, so it is always sent.
+* ``vcfa.provider.nsx_manager.register`` lives in :mod:`._infra_nsx` and
+  uses the shared helpers here (:func:`match_existing`, :func:`answer`).
 
 Credentials come from a Vault reference (``password_secret_ref``) read
 under the caller's identity. The password goes only into the request body;
@@ -42,13 +42,11 @@ from meho_backplane.connectors.vcf_automation._infra_common import (
     vendor_error_text,
 )
 from meho_backplane.connectors.vcf_automation._infra_paths import (
-    INFRA_NSX_MANAGERS_PATH,
     INFRA_TEST_CONNECTION_PATH,
     INFRA_TRUSTED_CERTIFICATES_PATH,
     INFRA_VCENTER_PATH,
     INFRA_VCENTER_REFRESH_PATH,
     INFRA_VCENTERS_PATH,
-    provider_vcf_path,
     safe_segment,
 )
 from meho_backplane.connectors.vcf_automation._infra_reads import list_vcf
@@ -68,25 +66,23 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vcf_automation.session import VcfAutomationTargetLike
 
 __all__ = [
-    "NSX_REGISTER_OP_ID",
     "VCENTER_REGISTER_OP_ID",
     "StepFailedError",
+    "answer",
     "certificate_fingerprint",
-    "provider_nsx_manager_register",
+    "match_existing",
+    "name_taken_guidance",
     "provider_vcenter_register",
     "run_step",
 ]
 
 VCENTER_REGISTER_OP_ID: Final = "vcfa.provider.vcenter.register"
-NSX_REGISTER_OP_ID: Final = "vcfa.provider.nsx_manager.register"
 _STATUS_READ: Final = "vcfa.provider.infra.list"
 _VC_STEPS: Final = ("trust_certificate", "add", "enable", "refresh")
 #: vCenter listener states: VCF Automation is connecting now.
 _VC_CONNECTING: Final = frozenset({"CONNECTING", "CONNECTED_SYNCING"})
 #: vCenter listener states that need the vCenter switched on again.
 _VC_NEEDS_ENABLE: Final = frozenset({"INITIAL", "INVALID_SETTINGS", "DISCONNECTED"})
-#: NSX manager states of a job that still runs.
-_NSX_RUNNING: Final = frozenset({"PENDING", "CONFIGURING"})
 _PEM_BLOCK: Final = re.compile(
     r"-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----", re.DOTALL
 )
@@ -149,14 +145,35 @@ def _endpoint(url: str) -> tuple[str, int]:
     return (parts.hostname or "").lower(), parts.port or 443
 
 
-def _same_endpoint(row: Mapping[str, Any], url: str, name: str) -> bool:
-    row_url = str(row.get("url") or "")
-    if row_url and _endpoint(row_url) == _endpoint(url):
-        return True
-    return str(row.get("name") or "").casefold() == name.casefold()
+def match_existing(
+    rows: list[dict[str, Any]], url: str, name: str
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """The existing object at *url* (host and port), or another one that has *name*.
+
+    Returns ``(match, name_taken_by)``. An object counts as the one asked for
+    only when its address matches. A different object with the same name is
+    returned second, so the caller can refuse the call.
+    """
+    wanted = _endpoint(url)
+    for row in rows:
+        row_url = str(row.get("url") or "")
+        if row_url and _endpoint(row_url) == wanted:
+            return row, None
+    taken = next(
+        (row for row in rows if str(row.get("name") or "").casefold() == name.casefold()), None
+    )
+    return None, taken
 
 
-def _answer(
+def name_taken_guidance(kind: str, name: str, row: Mapping[str, Any]) -> str:
+    return (
+        f"A {kind} named {name!r} already exists with the URL {row.get('url')!r}, which is "
+        "not the URL in this call; nothing was written. Use another name, or pass that URL "
+        f"to work on the existing {kind}."
+    )
+
+
+def answer(
     status: str,
     log: StepLog,
     *,
@@ -229,7 +246,14 @@ async def _vcenter_plan(
     """What the call would do now: ``would``, the vCenter as read, its certificate."""
     url, name = str(params["url"]), str(params["name"])
     rows = await list_vcf(connector, target, operator, INFRA_VCENTERS_PATH)
-    existing = next((row for row in rows if _same_endpoint(row, url, name)), None)
+    existing, name_taken_by = match_existing(rows, url, name)
+    if name_taken_by is not None:
+        return {
+            "would": "name_taken",
+            "existing": None,
+            "name_taken_by": name_taken_by,
+            "certificate": None,
+        }
     if existing is None:
         would = "add"
     else:
@@ -245,7 +269,7 @@ async def _vcenter_plan(
     cert = None
     if would in {"add", "enable"}:
         cert = await _certificate_check(connector, target, operator, url)
-    return {"would": would, "existing": existing, "certificate": cert}
+    return {"would": would, "existing": existing, "name_taken_by": None, "certificate": cert}
 
 
 def _vc_object(params: Mapping[str, Any], existing: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -276,7 +300,8 @@ def _approval_problem(plan: Mapping[str, Any]) -> str | None:
             return (
                 "the vCenter now shows a certificate other than the one the approver saw; "
                 "nothing was trusted or written. Preview the call again and compare the "
-                "fingerprint with the vCenter's own"
+                "fingerprint with the certificate to trust (the issuer when the chain has "
+                "more than one)"
             )
     return None
 
@@ -378,6 +403,42 @@ _VC_NEXT: Final[dict[str, str]] = {
 }
 
 
+def _vcenter_early_answer(
+    params: Mapping[str, Any], plan: Mapping[str, Any], obj: dict[str, Any], log: StepLog
+) -> dict[str, Any] | None:
+    """The answer when the plan says to write nothing, or ``None`` to go on."""
+    if plan["name_taken_by"] is not None:
+        for step in _VC_STEPS:
+            log.mark(step, "skipped", "another vCenter has this name")
+        return answer(
+            "invalid_request",
+            log,
+            obj=obj,
+            guidance=name_taken_guidance("vCenter", str(params["name"]), plan["name_taken_by"]),
+        )
+    problem = _approval_problem(plan)
+    if problem is not None:
+        return answer(
+            "precondition_failed",
+            log,
+            obj=obj,
+            certificate=_public_cert(plan["certificate"]),
+            guidance=problem,
+        )
+    would = plan["would"]
+    if would not in {"already_running", "unchanged"}:
+        return None
+    for step in _VC_STEPS:
+        log.mark(step, "skipped", f"the vCenter state is {obj['state']}")
+    guidance = (
+        "VCF Automation is connecting to this vCenter now; read vcfa.provider.infra.list "
+        "until the state is CONNECTED. Nothing was started."
+        if would == "already_running"
+        else "Nothing to do: the vCenter is added, on and connected."
+    )
+    return answer(would, log, obj=obj, guidance=guidance)
+
+
 async def provider_vcenter_register(
     connector: VcfAutomationConnector,
     operator: Operator,
@@ -388,30 +449,18 @@ async def provider_vcenter_register(
     log = StepLog(_VC_STEPS)
     plan = await _vcenter_plan(connector, target, operator, params)
     obj, cert = _vc_object(params, plan["existing"]), plan["certificate"]
-    problem = _approval_problem(plan)
-    if problem is not None:
-        return _answer(
-            "precondition_failed", log, obj=obj, certificate=_public_cert(cert), guidance=problem
-        )
+    early = _vcenter_early_answer(params, plan, obj, log)
+    if early is not None:
+        return early
     would = plan["would"]
-    if would in {"already_running", "unchanged"}:
-        for step in _VC_STEPS:
-            log.mark(step, "skipped", f"the vCenter state is {obj['state']}")
-        guidance = (
-            "VCF Automation is connecting to this vCenter now; read vcfa.provider.infra.list "
-            "until the state is CONNECTED. Nothing was started."
-            if would == "already_running"
-            else "Nothing to do: the vCenter is added, on and connected."
-        )
-        return _answer(would, log, obj=obj, guidance=guidance)
     if cert is not None:
         refusal = _certificate_refusal(cert)
         if refusal is not None:
-            return _answer(
+            return answer(
                 "invalid_request", log, obj=obj, certificate=_public_cert(cert), guidance=refusal
             )
         if cert.get("needs_trust") and approved_preview(VCENTER_REGISTER_OP_ID) is None:
-            return _answer(
+            return answer(
                 "certificate_not_trusted",
                 log,
                 obj=obj,
@@ -420,14 +469,15 @@ async def provider_vcenter_register(
                     "VCF Automation does not trust the vCenter certificate, and MEHO trusts a "
                     "certificate only after a person approved its fingerprint. Run "
                     "preview_operation for this call, compare the fingerprint with the "
-                    "vCenter's own, and ask for approval. Nothing was written."
+                    "certificate to trust (the vCenter's own, or the issuer at the top when "
+                    "the chain has more than one), and ask for approval. Nothing was written."
                 ),
             )
     password = None
     if would in {"add", "enable"}:
         password = await read_password(operator, target, params)
         if password is None:
-            return _answer(
+            return answer(
                 "invalid_request", log, obj=obj, guidance=password_missing_guidance(params)
             )
     try:
@@ -435,7 +485,7 @@ async def provider_vcenter_register(
         await _trust_step(call, log, cert, str(params["url"]))
         job = await _start_vcenter_job(call, params, plan, log, password)
     except StepFailedError:
-        return _answer(
+        return answer(
             "failed_part_way",
             log,
             obj=obj,
@@ -446,7 +496,7 @@ async def provider_vcenter_register(
                 "are skipped."
             ),
         )
-    return _answer(
+    return answer(
         "accepted", log, obj=obj, job=job, certificate=_public_cert(cert), guidance=_VC_NEXT[would]
     )
 
@@ -464,6 +514,8 @@ async def _vcenter_register_preview(ctx: PreviewContext) -> dict[str, Any] | Non
         "url": params.get("url"),
         "username": params.get("username"),
         "would": "unknown",
+        "current_name": None,
+        "current_url": None,
         "current_state": None,
         "certificate": None,
     }
@@ -471,118 +523,15 @@ async def _vcenter_register_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     if connector is None or not params.get("url") or not params.get("name"):
         return preview
     plan = await _vcenter_plan(connector, ctx.target, ctx.operator, params)
+    row = plan["existing"] or plan["name_taken_by"] or {}
     return {
         **preview,
         "would": plan["would"],
-        "current_state": (plan["existing"] or {}).get("listenerState"),
+        "current_name": row.get("name"),
+        "current_url": row.get("url"),
+        "current_state": row.get("listenerState"),
         "certificate": _public_cert(plan["certificate"]),
     }
 
 
-# ---------------------------------------------------------------------------
-# vcfa.provider.nsx_manager.register
-# ---------------------------------------------------------------------------
-
-
-def _nsx_object(params: Mapping[str, Any], existing: Mapping[str, Any] | None) -> dict[str, Any]:
-    return {
-        "kind": "nsx_manager",
-        "name": (existing or {}).get("name") or params["name"],
-        "url": (existing or {}).get("url") or params["url"],
-        "id": (existing or {}).get("id"),
-        "state": (existing or {}).get("status"),
-    }
-
-
-async def provider_nsx_manager_register(
-    connector: VcfAutomationConnector,
-    operator: Operator,
-    target: VcfAutomationTargetLike,
-    params: dict[str, Any],
-) -> dict[str, Any]:
-    """``vcfa.provider.nsx_manager.register`` -- add an NSX manager (one job)."""
-    log = StepLog(("add",))
-    url, name = str(params["url"]), str(params["name"])
-    rows = await list_vcf(connector, target, operator, INFRA_NSX_MANAGERS_PATH)
-    existing = next((row for row in rows if _same_endpoint(row, url, name)), None)
-    if existing is not None:
-        state = existing.get("status")
-        running = state in _NSX_RUNNING
-        log.mark("add", "skipped", f"an NSX manager with this URL or name exists ({state})")
-        return _answer(
-            "already_running" if running else "unchanged",
-            log,
-            obj=_nsx_object(params, existing),
-            guidance=(
-                "VCF Automation is still setting this NSX manager up; read "
-                "vcfa.provider.infra.list until its state is REALIZED. Nothing was started."
-                if running
-                else "Nothing to do: this NSX manager is already added."
-            ),
-        )
-    password = await read_password(operator, target, params)
-    if password is None:
-        return _answer(
-            "invalid_request",
-            log,
-            obj=_nsx_object(params, None),
-            guidance=password_missing_guidance(params),
-        )
-    body = {
-        "name": name,
-        # The vendor refuses a body without a description, even an empty one.
-        "description": params.get("description") or "",
-        "url": url,
-        "username": params["username"],
-        "password": password,
-    }
-    resp = await connector._send_with_retry(
-        target,
-        "POST",
-        provider_vcf_path(target, INFRA_NSX_MANAGERS_PATH),
-        operator=operator,
-        json=body,
-    )
-    job = job_from_response(resp, status_read=_STATUS_READ)
-    log.mark("add", "started", "VCF Automation accepted the job", job_id=job["id"])
-    return _answer(
-        "accepted",
-        log,
-        obj=_nsx_object(params, None),
-        job=job,
-        guidance=(
-            "Read vcfa.provider.infra.list (with job_id) until the NSX manager state is "
-            "REALIZED, then use it in vcfa.provider.region.set."
-        ),
-    )
-
-
-async def _nsx_register_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Park-time preview: the NSX manager to add, or the one that exists."""
-    params = ctx.params
-    preview: dict[str, Any] = {
-        "action": "register_nsx_manager",
-        "name": params.get("name"),
-        "url": params.get("url"),
-        "username": params.get("username"),
-        "would": "unknown",
-        "current_state": None,
-    }
-    connector: Any = ctx.connector_instance
-    if connector is None or not params.get("url") or not params.get("name"):
-        return preview
-    rows = await list_vcf(connector, ctx.target, ctx.operator, INFRA_NSX_MANAGERS_PATH)
-    url, name = str(params["url"]), str(params["name"])
-    existing = next((row for row in rows if _same_endpoint(row, url, name)), None)
-    if existing is None:
-        return {**preview, "would": "add"}
-    state = existing.get("status")
-    return {
-        **preview,
-        "would": "already_running" if state in _NSX_RUNNING else "unchanged",
-        "current_state": state,
-    }
-
-
 register_preview_builder(VCENTER_REGISTER_OP_ID, _vcenter_register_preview)
-register_preview_builder(NSX_REGISTER_OP_ID, _nsx_register_preview)

@@ -45,7 +45,9 @@ from meho_backplane.operations._vendor_text import VENDOR_TEXT_WITHHELD
 from tests._vcfa_infra_support import (
     CERT_FINGERPRINT,
     CERT_PEM,
+    NSX_ID,
     NSX_MANAGERS,
+    NSX_URL,
     REGION_ID,
     REGION_POLICIES,
     REGION_REF,
@@ -57,6 +59,7 @@ from tests._vcfa_infra_support import (
     TEST_CONNECTION,
     TRUSTED_CERTS,
     VC_ID,
+    VC_URL,
     VC_UUID,
     VCENTERS,
     VDC_ID,
@@ -371,6 +374,43 @@ async def test_connecting_vcenter_starts_nothing(vcfa: VcfAutomationConnector) -
     assert not add.called
 
 
+async def test_vcenter_same_name_other_url_is_refused(vcfa: VcfAutomationConnector) -> None:
+    other = {**_VC_PARAMS, "url": "https://vc-other.test.invalid"}
+    read_secret = AsyncMock(return_value={"password": PASSWORD})
+    with (
+        respx.mock(base_url=BASE_URL, assert_all_called=False) as mock,
+        approved_with(_VC_OP, {"would": "enable", "certificate": None}),
+        pytest.MonkeyPatch.context() as patch,
+    ):
+        patch.setattr(lookups_module, "load_vault_secret_data", read_secret)
+        _mount_vc(mock, [vcenter(state="DISCONNECTED")], "SUCCESS")
+        trust = mock.post(TRUSTED_CERTS).respond(201)
+        add = mock.post(VCENTERS).respond(202)
+        put = mock.put(f"{VCENTERS}/{quoted(VC_ID)}").respond(202)
+        probe_call = mock.post(TEST_CONNECTION)
+        result = await run(_VC_OP, other)
+    out = result["result"]
+    assert out["status"] == "invalid_request", out
+    assert VC_URL in out["guidance"] and "nothing was written" in out["guidance"]
+    assert out["object"]["url"] == other["url"] and out["object"]["id"] is None
+    assert not any(call.called for call in (trust, add, put, probe_call))
+    read_secret.assert_not_called()
+
+
+async def test_vcenter_preview_shows_the_vcenter_it_matched(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    other = {**_VC_PARAMS, "url": "https://vc-other.test.invalid"}
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        _mount_vc(mock, [vcenter(state="DISCONNECTED")], "SUCCESS")
+        taken = await _preview(_VC_OP, other, vcfa)
+        same = await _preview(_VC_OP, {**_VC_PARAMS, "url": f"{VC_URL}:443/"}, vcfa)
+    assert taken["would"] == "name_taken"
+    assert taken["current_url"] == VC_URL and taken["certificate"] is None
+    assert same["would"] == "enable"
+    assert same["current_url"] == VC_URL and same["current_state"] == "DISCONNECTED"
+
+
 async def test_vcenter_add_failure_after_the_trust_lists_the_steps(
     vcfa: VcfAutomationConnector,
 ) -> None:
@@ -435,6 +475,24 @@ async def test_nsx_add_always_sends_a_description(vcfa: VcfAutomationConnector) 
     assert PASSWORD not in json.dumps(result)
 
 
+async def test_an_answer_with_the_created_object_gives_no_job_id(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(NSX_MANAGERS).respond(200, json=page([]))
+        mock.post(NSX_MANAGERS).respond(
+            201, json={"id": NSX_ID, "href": f"{BASE_URL}{NSX_MANAGERS}/{NSX_ID}"}
+        )
+        result = await run(_NSX_OP, _NSX_PARAMS)
+    assert result["result"]["status"] == "accepted", result
+    assert result["result"]["job"] == {
+        "id": None,
+        "href": None,
+        "status_read": "vcfa.provider.infra.list",
+    }
+
+
 async def test_nsx_already_added_is_unchanged(vcfa: VcfAutomationConnector) -> None:
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         mount_logins(mock)
@@ -443,6 +501,20 @@ async def test_nsx_already_added_is_unchanged(vcfa: VcfAutomationConnector) -> N
         result = await run(_NSX_OP, _NSX_PARAMS)
     assert result["result"]["status"] == "already_running"
     assert not add.called
+
+
+async def test_nsx_same_name_other_url_is_refused(vcfa: VcfAutomationConnector) -> None:
+    other = {**_NSX_PARAMS, "url": "https://nsx-other.test.invalid"}
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(NSX_MANAGERS).respond(200, json=page([nsx_manager()]))
+        add = mock.post(NSX_MANAGERS).respond(202)
+        result = await run(_NSX_OP, other)
+        preview = await _preview(_NSX_OP, other, vcfa)
+    assert result["result"]["status"] == "invalid_request", result
+    assert NSX_URL in result["result"]["guidance"]
+    assert not add.called
+    assert preview["would"] == "name_taken" and preview["current_url"] == NSX_URL
 
 
 async def test_nsx_vendor_400_reaches_the_answer_without_vendor_text(

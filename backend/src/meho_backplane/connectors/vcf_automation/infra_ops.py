@@ -18,7 +18,8 @@ Changes (dangerous, a person approves each call):
 
 Each change starts a vendor job and returns ``accepted`` with the job id and
 the status read to follow. Handlers live in :mod:`._infra_reads`,
-:mod:`._infra_connect`, :mod:`._infra_region` and :mod:`._infra_quota`.
+:mod:`._infra_connect`, :mod:`._infra_nsx`, :mod:`._infra_region` and
+:mod:`._infra_quota`.
 """
 
 from __future__ import annotations

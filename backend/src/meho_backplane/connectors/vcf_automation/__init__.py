@@ -45,6 +45,7 @@ from meho_backplane.connectors.vcf_automation import (  # noqa: F401
     _feature_flags,
     _images,
     _infra_connect,
+    _infra_nsx,
     _infra_quota,
     _infra_region,
     _provisioning_preview,

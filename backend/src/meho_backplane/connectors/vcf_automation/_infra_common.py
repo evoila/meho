@@ -70,6 +70,7 @@ _JOB_STATE: Final[dict[str, str]] = {
 }
 #: Longest vendor error text kept in an answer.
 _ERROR_TEXT_MAX: Final = 500
+_TASK_URN_PREFIX: Final = "urn:vcloud:task:"
 
 
 @dataclass(frozen=True)
@@ -144,9 +145,11 @@ def vendor_error_text(exc: BaseException, *, hide: tuple[str, ...] = ()) -> str:
 def job_from_response(resp: httpx.Response, *, status_read: str) -> dict[str, Any]:
     """The vendor job a ``202`` answer started: ``{id, href, status_read}``.
 
-    The id comes from a task body (``id`` / ``href``) or else from the
-    ``Location`` header. An answer with neither (an empty ``202``) gives
-    ``id: null``; the caller then reads the object with *status_read*.
+    The id comes from a task body (an ``id`` of the form
+    ``urn:vcloud:task:...`` or an ``href`` with ``/task/``) or else from the
+    ``Location`` header. Any other body (for example the object the call
+    created) gives no job id. An answer with no task (an empty ``202``)
+    gives ``id: null``; the caller then reads the object with *status_read*.
     """
     href: str | None = resp.headers.get("Location") or None
     task_id: str | None = None
@@ -155,9 +158,12 @@ def job_from_response(resp: httpx.Response, *, status_read: str) -> dict[str, An
     except ValueError:
         body = None
     if isinstance(body, dict):
-        href = str(body.get("href") or href or "") or None
-        raw = body.get("id")
-        task_id = uuid_of(str(raw)) if raw else None
+        body_href = str(body.get("href") or "")
+        if "/task/" in body_href:
+            href = body_href
+        raw = str(body.get("id") or "")
+        if raw.startswith(_TASK_URN_PREFIX):
+            task_id = uuid_of(raw) or None
     if task_id is None and href and "/task/" in href:
         task_id = href.rstrip("/").rsplit("/", 1)[-1] or None
     return {"id": task_id, "href": href, "status_read": status_read}

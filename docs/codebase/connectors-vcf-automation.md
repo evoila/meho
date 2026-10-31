@@ -411,8 +411,9 @@ seven exist on VCF Automation 9.0, 9.1 and 9.1.1 (the whole range of this
 connector), so no op needs a version check of its own. Metadata is in
 `infra_ops.py` (reads, and the full list `VCFA_INFRA_OPS`) and
 `infra_change_ops.py` (changes); shared schema parts in `_infra_schemas.py`.
-Handlers: `_infra_reads.py`, `_infra_connect.py` (vCenter, NSX manager),
-`_infra_region.py`, `_infra_quota.py`; shared job, step and state helpers in
+Handlers: `_infra_reads.py`, `_infra_connect.py` (vCenter),
+`_infra_nsx.py` (NSX manager), `_infra_region.py`, `_infra_quota.py`;
+shared job, step and state helpers in
 `_infra_common.py`; paths in `_infra_paths.py`. Group:
 `vcfa-provider-infra`. Wire facts follow `go-vcloud-director` v3
 (`vsphere_vcenter.go`, `nsxt_manager_openapi.go`, `trusted_certificates.go`,
@@ -424,8 +425,8 @@ and the provider API references of 9.0, 9.1 and 9.1.1.
 | `vcfa.provider.infra.list` | safe | one flat list of vCenters (connection state), NSX managers (state) and Supervisors (region, or free); the job of `job_id` | 9.x | `GET /cloudapi/1.0.0/virtualCenters`, `GET /cloudapi/vcf/nsxManagers`, `GET /cloudapi/vcf/supervisors` |
 | `vcfa.provider.region.get` | safe | one region (state, capacity, NSX manager, Supervisors, storage policy names) with its zones, storage policies and VM classes; the job of `job_id` | 9.x | `GET /cloudapi/vcf/regions` (by name) or `GET …/regions/{regionUrn}`, `GET /cloudapi/vcf/zones`, `GET /cloudapi/vcf/regionStoragePolicies`, `GET /cloudapi/vcf/virtualMachineClasses` (each filtered by region) |
 | `vcfa.provider.org_quota.list` | safe | one row per quota: org, region, status, Supervisors, CPU and memory per zone, storage limits, VM classes, warnings; the job of `job_id` | 9.x | `GET /cloudapi/vcf/virtualDatacenters`, `GET /cloudapi/vcf/virtualDatacenterStoragePolicies`, `GET …/virtualDatacenters/{vdcUrn}/virtualMachineClasses` |
-| `vcfa.provider.vcenter.register` | dangerous, approval | `accepted` + job id; or `certificate_not_trusted` with the fingerprint, `already_running`, `unchanged`, `precondition_failed`, `failed_part_way` | 9.x | `POST /cloudapi/1.0.0/testConnection` (certificate), `POST /cloudapi/1.0.0/ssl/trustedCertificates`, `POST /cloudapi/1.0.0/virtualCenters`, `PUT …/virtualCenters/{vcUrn}`, `POST /api/admin/extension/vimServer/{id}/action/refresh` |
-| `vcfa.provider.nsx_manager.register` | dangerous, approval | `accepted` + job id; or `already_running`, `unchanged` | 9.x | `POST /cloudapi/vcf/nsxManagers` |
+| `vcfa.provider.vcenter.register` | dangerous, approval | `accepted` + job id; or `certificate_not_trusted` with the fingerprint, `already_running`, `unchanged`, `invalid_request`, `precondition_failed`, `failed_part_way` | 9.x | `POST /cloudapi/1.0.0/testConnection` (certificate), `POST /cloudapi/1.0.0/ssl/trustedCertificates`, `POST /cloudapi/1.0.0/virtualCenters`, `PUT …/virtualCenters/{vcUrn}`, `POST /api/admin/extension/vimServer/{id}/action/refresh` |
+| `vcfa.provider.nsx_manager.register` | dangerous, approval | `accepted` + job id; or `already_running`, `unchanged`, `invalid_request` | 9.x | `POST /cloudapi/vcf/nsxManagers` |
 | `vcfa.provider.region.set` | dangerous, approval | `accepted` + job id; or `already_running`, `unchanged`, `precondition_failed` | 9.x | `POST /cloudapi/vcf/regions`, `PUT …/regions/{regionUrn}` |
 | `vcfa.provider.org_quota.set` | dangerous, approval | `accepted` / `changed` + steps; or `already_running`, `unchanged`, `precondition_failed`, `failed_part_way`; warnings | 9.x | `POST`/`PUT /cloudapi/vcf/virtualDatacenters[/{vdcUrn}]`, `POST /cloudapi/vcf/virtualDatacenterStoragePolicies` (`values` list), `PUT …/virtualDatacenterStoragePolicies/{vdcStoragePolicyUrn}`, `PUT …/virtualDatacenters/{vdcUrn}/virtualMachineClasses` (`values` list) |
 
@@ -438,7 +439,8 @@ and the provider API references of 9.0, 9.1 and 9.1.1.
   the vendor SDK uses them).
 - **Vendor jobs.** Each change returns as soon as VCF Automation accepted
   the job: `status: accepted`, `job: {id, href, status_read}`. The id comes
-  from the task body or the `Location` header; a `202` with an empty body
+  from a task in the body (`urn:vcloud:task:` id or a `/task/` href) or
+  the `Location` header; any other body gives no job id; a `202` with an empty body
   gives `id: null`, and the caller reads the object until it is READY. The
   answer never says the work is done. The status reads take `job_id` and
   then also read `GET /api/task/{id}`: state (queued, running, succeeded,
@@ -454,13 +456,21 @@ and the provider API references of 9.0, 9.1 and 9.1.1.
   `CONNECTING`, an NSX manager that is `PENDING`/`CONFIGURING`, a region or
   quota that is `NOT_READY` answers `already_running` and starts nothing.
   This is a help, not a lock.
+- **Which vCenter or NSX manager.** Both register ops match an existing
+  object by the host and port of its URL. When another object already has
+  the same name but a different URL, the call answers `invalid_request`,
+  names that URL, and writes nothing (no password read, no certificate
+  check). The preview says `would: name_taken` and shows the name, URL and
+  state of the object it matched (`current_name`, `current_url`,
+  `current_state`).
 - **vCenter steps.** One call runs the next step: trust the certificate,
   then add (switched on), or switch on again (a half-added vCenter in
   `INITIAL`), or refresh a `CONNECTED` vCenter so its Supervisors appear.
   Call again with the same inputs after each job; done steps are skipped.
   The certificate comes from `testConnection` (VCF Automation's own view);
   the one trusted is the single certificate or the last of the chain, as
-  the vendor SDK does. MEHO trusts it only after approval, and only when
+  the vendor SDK does. So for a CA-signed vCenter the fingerprint is the
+  issuer's, not the vCenter's own. MEHO trusts it only after approval, and only when
   its SHA-256 fingerprint equals the one in the approval preview;
   otherwise `certificate_not_trusted` or `precondition_failed`, and
   nothing is written.

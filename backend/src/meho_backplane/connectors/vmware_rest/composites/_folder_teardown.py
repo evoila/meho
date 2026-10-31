@@ -14,18 +14,28 @@ function (:func:`._folder_teardown_plan.plan_folder_teardown`) feeds the
 park-time blast radius and this handler, which plans again on the live state
 after approval.
 
-**The fence.** ``expected_vms`` (required) names every VM and template the
-caller means to delete. Approval binds the params, so it binds this list. The
-handler refuses before any write when the folder holds a VM that is not on the
-list, so a VM moved into the folder after the approval request is never
-deleted. An expected VM that is no longer under the folder is reported
-``unchanged`` and not touched, so a second run is safe.
+**The fence.** ``expected_vms``, ``expected_folders`` and ``expected_disks``
+(all required) name every VM and template, every sub-folder and every disk
+file the caller means to delete. Approval binds the params, so it binds these
+lists. The handler refuses before any write when the folder holds a VM,
+sub-folder or disk that is not on them, so nothing added after the approval
+request is ever deleted. An expected VM or sub-folder that is no longer under
+the folder is reported ``unchanged`` and not touched, so a second run is safe.
+
+**The boundary during the run.** The plan is read once, before the first
+write. The guest shutdown wait and the deletes take time, and an object may be
+moved out of the folder meanwhile. So right before each delete (and before a
+hard power off that follows the guest wait) the handler reads the object's
+parent again and skips an object that is no longer under the folder; its row
+says ``unchanged`` with the reason. A folder is only deleted when it reads
+empty.
 
 Refused before any write (``precondition_failed``, with ``blockers``): a root
 or datacenter top folder, a folder that cannot hold VMs, a vApp or another
 object type under the folder, a VM that another product manages
-(``config.managedBy``, for example vSphere Cluster Services), a VM that is not
-in ``expected_vms``, and an answer vCenter did not fully give.
+(``config.managedBy``, for example vSphere Cluster Services), a VM, sub-folder
+or disk that is not in the expected lists, more objects than the preview can
+list, and an answer vCenter did not fully give.
 
 The steps use the same vendor calls as ``vm.power`` (REST hard power off, or
 a guest shutdown first), ``vm.destroy`` (vim ``Destroy_Task`` before vCenter
@@ -71,10 +81,12 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     _OP_RETRIEVE_PROPERTIES,
     _VIRTUAL_MACHINE_MO_TYPE,
     _guest_power_vm_op_id,
+    _moref_value,
     _power_vm_op_id,
     _vim_destroy_required,
     _write_sub_op,
 )
+from meho_backplane.connectors.vmware_rest.vim_body import unwrap_vim_value
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -113,6 +125,40 @@ _ROW_DELETED: Final = "deleted"
 _ROW_UNCHANGED: Final = "unchanged"
 _ROW_FAILED: Final = "failed"
 
+_MOVED_DETAIL: Final = "moved out of the folder while the call ran; not touched"
+
+
+class _Run:
+    """What one run knows while its steps go: the folder set, the moved and done objects."""
+
+    def __init__(self, plan: TeardownPlan) -> None:
+        self.top: str = plan.object["moid"]
+        #: The folder and its sub-folders: an object's parent must be one of them.
+        self.inside: set[str] = {self.top, *(f["moid"] for f in plan.context["folders"])}
+        #: Objects that left the folder while the call ran, so they were skipped.
+        self.moved: set[str] = set()
+        #: What was deleted so far, for the message of a failed call.
+        self.done: list[str] = []
+
+
+async def _vm_still_inside(
+    connector: VmwareRestConnector, target: Any, operator: Operator, run: _Run, moid: str
+) -> bool:
+    """Read the parent of VM *moid* again; ``False`` (and noted) when it left the folder.
+
+    A VM that is gone also gives ``False`` without a note: the read-back
+    reports it ``deleted``.
+    """
+    props = await read_object(
+        connector, target, operator, mo_type=_VIRTUAL_MACHINE_MO_TYPE, moid=moid, props=["parent"]
+    )
+    if props is None:
+        return False
+    if _moref_value(unwrap_vim_value(props.get("parent"))) in run.inside:
+        return True
+    run.moved.add(moid)
+    return False
+
 
 async def _wait_powered_off(
     connector: VmwareRestConnector,
@@ -140,10 +186,15 @@ async def _power_off(
     connector: VmwareRestConnector,
     target: Any,
     operator: Operator,
+    run: _Run,
     vms: list[dict[str, Any]],
     params: dict[str, Any],
 ) -> OperationResult | None:
-    """Power off every VM that is not off; a parked / denied step is returned."""
+    """Power off every VM that is not off; a parked / denied step is returned.
+
+    After a guest shutdown wait the VMs that still run are checked to be
+    under the folder before the hard power off.
+    """
     running = [vm for vm in vms if vm["power_state"] != POWERED_OFF]
     hard = [vm["moid"] for vm in running]
     if params.get("power_off", "hard") == "guest":
@@ -162,7 +213,12 @@ async def _power_off(
             asked.append(vm["moid"])
         timeout_s = float(params.get("guest_timeout_s", 120))
         still = await _wait_powered_off(connector, target, operator, asked, timeout_s)
-        hard = [m for m in hard if m not in asked or m in still]
+        hard = [
+            m
+            for m in hard
+            if (m not in asked or m in still)
+            and await _vm_still_inside(connector, target, operator, run, m)
+        ]
     for moid in hard:
         gate, _ = await _write_sub_op(connector, target, operator, _OP_HARD_POWER_OFF, {"vm": moid})
         if gate is not None:
@@ -196,13 +252,21 @@ async def _destroy_vm(
 
 
 async def _destroy_folder(
-    connector: VmwareRestConnector, target: Any, operator: Operator, moid: str
+    connector: VmwareRestConnector, target: Any, operator: Operator, run: _Run, moid: str
 ) -> OperationResult | None:
-    """Delete one folder that must be empty now; anything left in it stops the run."""
+    """Delete one folder that must be empty now; anything left in it stops the run.
+
+    A sub-folder that was moved out of the folder meanwhile is skipped.
+    """
     props = await read_object(
-        connector, target, operator, mo_type=_FOLDER_MO_TYPE, moid=moid, props=["childEntity"]
-    )
+        connector, target, operator, mo_type=_FOLDER_MO_TYPE, moid=moid,
+        props=["childEntity", "parent"],
+    )  # fmt: skip
     if props is None:
+        return None
+    parent = _moref_value(unwrap_vim_value(props.get("parent")))
+    if moid != run.top and parent not in run.inside:
+        run.moved.add(moid)
         return None
     left = moref_values(props.get("childEntity"))
     if left:
@@ -238,27 +302,34 @@ async def _run_steps(
     operator: Operator,
     plan: TeardownPlan,
     params: dict[str, Any],
-    done: list[str],
+    run: _Run,
 ) -> OperationResult | None:
-    """Power off, delete the VMs, the sub-folders bottom up, then the folder."""
+    """Power off, delete the VMs, the sub-folders bottom up, then the folder.
+
+    Each delete first checks that the object is still under the folder.
+    """
     vms = plan.context["vms"]
-    gate = await _power_off(connector, target, operator, vms, params)
+    gate = await _power_off(connector, target, operator, run, vms, params)
     if gate is not None:
         return gate
     vim = _vim_destroy_required(await connector._about_version(target, operator))
     for vm in vms:
+        moid = vm["moid"]
+        if not await _vm_still_inside(connector, target, operator, run, moid):
+            continue
         gate = await _destroy_vm(connector, target, operator, vm, vim=vim)
         if gate is not None:
             return gate
-        done.append(vm["moid"])
+        run.done.append(moid)
     folders = [f["moid"] for f in plan.context["folders"]]
     if params.get("delete_folder", True) is not False:
-        folders.append(plan.object["moid"])
+        folders.append(run.top)
     for moid in folders:
-        gate = await _destroy_folder(connector, target, operator, moid)
+        gate = await _destroy_folder(connector, target, operator, run, moid)
         if gate is not None:
             return gate
-        done.append(moid)
+        if moid not in run.moved:
+            run.done.append(moid)
     return None
 
 
@@ -267,6 +338,7 @@ async def _read_back_rows(
     target: Any,
     operator: Operator,
     plan: TeardownPlan,
+    run: _Run,
     delete_folder: bool,
 ) -> list[dict[str, Any]]:
     """One row per object of the plan, from a fresh read after the writes."""
@@ -277,6 +349,9 @@ async def _read_back_rows(
         targets.append((_FOLDER_MO_TYPE, plan.object))
     rows: list[dict[str, Any]] = []
     for mo_type, obj in targets:
+        if obj["moid"] in run.moved:
+            rows.append(_row(obj, _ROW_UNCHANGED, _MOVED_DETAIL))
+            continue
         after = await read_object(
             connector, target, operator, mo_type=mo_type, moid=obj["moid"], props=["name"]
         )
@@ -294,9 +369,7 @@ async def _read_back_rows(
 
 def _missing_rows(plan: TeardownPlan) -> list[dict[str, Any]]:
     detail = "not under the folder (already deleted or moved away); not touched"
-    return [
-        _row({"kind": "vm", "moid": m}, _ROW_UNCHANGED, detail) for m in plan.context["missing"]
-    ]
+    return [_row(m, _ROW_UNCHANGED, detail) for m in plan.context["missing"]]
 
 
 def _response(
@@ -340,19 +413,19 @@ async def folder_teardown_composite(
     if not plan.present:
         rows = [_row(plan.object, _ROW_UNCHANGED, "the folder does not exist")]
         return _response(plan, STATUS_UNCHANGED, rows + _missing_rows(plan), None)
-    done: list[str] = []
+    run = _Run(plan)
     try:
-        gate = await _run_steps(connector, target, operator, plan, params, done)
+        gate = await _run_steps(connector, target, operator, plan, params, run)
     except Exception as exc:
         raise RuntimeError(
             f"folder.teardown of {plan.object['moid']!r} stopped: {exc}. "
-            f"Already deleted: {', '.join(done) or 'nothing'}. Run it again to finish "
+            f"Already deleted: {', '.join(run.done) or 'nothing'}. Run it again to finish "
             "(objects that are gone are reported unchanged)."
         ) from exc
     if gate is not None:
         return gate
     delete_folder = params.get("delete_folder", True) is not False
-    rows = await _read_back_rows(connector, target, operator, plan, delete_folder)
+    rows = await _read_back_rows(connector, target, operator, plan, run, delete_folder)
     rows += _missing_rows(plan)
     if any(r["status"] == _ROW_FAILED for r in rows):
         guidance = "some objects still read back after the delete; re-check them (see 'rows')"

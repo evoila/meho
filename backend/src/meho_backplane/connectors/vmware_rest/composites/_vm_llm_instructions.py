@@ -502,15 +502,20 @@ VM_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
             "with one approval."
         ),
         "preconditions": (
-            "Pass the folder moid and, in expected_vms, the id of every VM and template under "
-            "it at every depth (list them first, e.g. with GET:/api/vcenter/vm filtered by "
-            "folder). A VM not on the list, a vApp, a VM managed by another product, or a "
-            "root or datacenter folder is refused before any change. A second person must "
-            "always approve it."
+            "Pass the folder moid and three lists that name what may be deleted: expected_vms "
+            "(every VM and template id under it at every depth; list them with "
+            "GET:/api/vcenter/vm filtered by folder), expected_folders (every sub-folder id; "
+            "GET:/api/vcenter/folder with parent_folders) and expected_disks (the vmdk_file of "
+            "every disk of those VMs; GET:/api/vcenter/vm/{vm}). A VM, sub-folder or disk not "
+            "on its list, a vApp, a VM managed by another product, a root or datacenter "
+            "folder, or more than 50 objects is refused before any change. A second person "
+            "must always approve it."
         ),
         "parameter_hints": {
             "folder": "VM folder moid, e.g. 'group-v1234'.",
             "expected_vms": "Every VM id under the folder, e.g. ['vm-101', 'vm-102'].",
+            "expected_folders": "Every sub-folder id, e.g. ['group-v1235']; [] for none.",
+            "expected_disks": "Every disk file, e.g. ['[datastore1] vm-101/vm-101.vmdk'].",
             "power_off": "'hard' (default) or 'guest' (guest shutdown first).",
         },
         "output_shape": (
@@ -521,8 +526,8 @@ VM_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
             "reason}], guidance}."
         ),
         "next_step": (
-            "On precondition_failed, fix each blocker (or correct expected_vms) and call "
-            "again. After a failed call, call again: objects already gone are reported "
+            "On precondition_failed, fix each blocker (or correct the expected lists) and "
+            "call again. After a failed call, call again: objects already gone are reported "
             "unchanged."
         ),
     },

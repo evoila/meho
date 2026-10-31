@@ -8481,6 +8481,28 @@ FOLDER_TEARDOWN_PARAMETER_SCHEMA: dict[str, Any] = {
                 "for a folder without VMs."
             ),
         },
+        "expected_folders": {
+            "type": "array",
+            "items": {"type": "string", "pattern": VM_FOLDER_MOID_PATTERN},
+            "uniqueItems": True,
+            "description": (
+                "Ids of every sub-folder under the folder, at every depth, e.g. "
+                "['group-v1235']. The call is refused when the folder holds a sub-folder "
+                "that is not on this list. Use [] for a folder without sub-folders."
+            ),
+        },
+        "expected_disks": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "uniqueItems": True,
+            "description": (
+                "Datastore paths of every disk file of the VMs in expected_vms, e.g. "
+                "['[datastore1] vm-101/vm-101.vmdk'] (the vmdk_file of each disk in "
+                "GET /api/vcenter/vm/{vm}). The call is refused when a VM has a disk that "
+                "is not on this list, so a disk added later is never deleted. Use [] for "
+                "VMs without disks."
+            ),
+        },
         "power_off": {
             "type": "string",
             "enum": ["hard", "guest"],
@@ -8510,9 +8532,19 @@ FOLDER_TEARDOWN_PARAMETER_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": ["folder", "expected_vms"],
+    "required": ["folder", "expected_vms", "expected_folders", "expected_disks"],
     "additionalProperties": False,
-    "examples": [{"folder": "group-v1234", "expected_vms": ["vm-101", "vm-102"]}],
+    "examples": [
+        {
+            "folder": "group-v1234",
+            "expected_vms": ["vm-101", "vm-102"],
+            "expected_folders": ["group-v1235"],
+            "expected_disks": [
+                "[datastore1] vm-101/vm-101.vmdk",
+                "[datastore1] vm-102/vm-102.vmdk",
+            ],
+        }
+    ],
 }
 
 _FOLDER_TEARDOWN_ROW_SCHEMA: dict[str, Any] = {
@@ -8590,7 +8622,13 @@ FOLDER_TEARDOWN_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "kind": {"type": "string", "description": "``vm``, ``template`` or vim type."},
+                    "kind": {
+                        "type": "string",
+                        "description": (
+                            "``vm``, ``template``, ``folder``, ``disk`` (moid is its VM, "
+                            "name its file) or a vim type."
+                        ),
+                    },
                     "moid": {"type": "string", "description": "Object moid."},
                     "name": {"type": ["string", "null"], "description": "Object name."},
                     "reason": {"type": "string", "description": "Why it blocks."},

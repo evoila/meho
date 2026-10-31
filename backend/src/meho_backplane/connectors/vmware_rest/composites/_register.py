@@ -1961,9 +1961,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         summary="Power off and delete every VM in one VM folder, then the folder.",
         description=(
             "Deletes a disposable system in one VM folder: powers off and deletes every "
-            "VM and template under it, then the sub-folders and the folder. A VM missing "
-            "from expected_vms, a vApp or a managed VM stops the call. Destructive: a "
-            "second person must always approve it."
+            "VM and template under it, then the sub-folders and the folder. A VM, "
+            "sub-folder or disk missing from the expected lists, a vApp or a managed VM "
+            "stops the call. Destructive: a second person must always approve it."
         ),
         parameter_schema=FOLDER_TEARDOWN_PARAMETER_SCHEMA,
         response_schema=FOLDER_TEARDOWN_RESPONSE_SCHEMA,

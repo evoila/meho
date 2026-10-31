@@ -11,8 +11,10 @@ So the approver reads exactly the refusal the handler applies.
 The plan reads the folder, walks every sub-folder level by level, and reads
 every VM and template under it (power state, template flag, ``managedBy``,
 disks, NICs, snapshots). It refuses on a root or datacenter top folder, a
-folder that cannot hold VMs, a vApp or another object type, a managed VM, a VM
-that is not in ``expected_vms``, and an answer vCenter did not fully give.
+folder that cannot hold VMs, a vApp or another object type, a managed VM, a VM,
+sub-folder or disk that is not in ``expected_vms`` / ``expected_folders`` /
+``expected_disks``, more objects than the preview can list, and an answer
+vCenter did not fully give.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.vmware_rest.composites._teardown import (
     _DATACENTER_MO_TYPE,
+    LIST_CAP,
     STATUS_INVALID_REQUEST,
     STATUS_PRECONDITION_FAILED,
     TeardownPlan,
@@ -149,15 +152,41 @@ async def _walk(
     return vms, list(folders.values()), others, complete
 
 
+class _Expected:
+    """The three approved lists: what the caller says the folder holds."""
+
+    def __init__(self, params: dict[str, Any]) -> None:
+        self.vms: set[str] = set(params["expected_vms"])
+        self.folders: set[str] = set(params["expected_folders"])
+        self.disks: set[str] = set(params["expected_disks"])
+
+    def missing(self, vms: set[str], folders: set[str]) -> list[dict[str, Any]]:
+        """Expected VMs and sub-folders that are not under the folder (nothing to do)."""
+        rows = [{"kind": "vm", "moid": m} for m in sorted(self.vms - vms)]
+        rows += [{"kind": "folder", "moid": m} for m in sorted(self.folders - folders)]
+        return rows
+
+
+def _unexpected(obj: dict[str, Any], kind: str, name: Any, param: str) -> dict[str, Any]:
+    reason = f"not in {param} (the folder changed, or the list is incomplete)"
+    return {"kind": kind, "moid": obj["moid"], "name": name, "reason": reason}
+
+
 async def _blockers(
     connector: VmwareRestConnector,
     target: Any,
     operator: Operator,
-    vms: list[dict[str, Any]],
+    plan: TeardownPlan,
     others: list[dict[str, Any]],
-    expected: set[str],
+    expected: _Expected,
 ) -> list[dict[str, Any]]:
-    """What stops the teardown: vApps / other objects, managed VMs, unexpected VMs."""
+    """What stops the teardown: vApps / other objects, managed VMs, unexpected objects.
+
+    An object the approved lists do not name -- a VM, a sub-folder, or a disk
+    of an expected VM -- is a blocker, so the plan never grows past what the
+    approver read.
+    """
+    vms = plan.context["vms"]
     rows: list[dict[str, Any]] = []
     for mo_type in sorted({o["kind"] for o in others}):
         moids = [o["moid"] for o in others if o["kind"] == mo_type]
@@ -176,26 +205,41 @@ async def _blockers(
             rows.append(
                 {"kind": vm["kind"], "moid": vm["moid"], "name": vm["name"], "reason": reason}
             )
-        if vm["moid"] not in expected:
-            reason = "not in expected_vms (the folder changed, or the list is incomplete)"
-            rows.append(
-                {"kind": vm["kind"], "moid": vm["moid"], "name": vm["name"], "reason": reason}
-            )
+        if vm["moid"] not in expected.vms:
+            rows.append(_unexpected(vm, vm["kind"], vm["name"], "expected_vms"))
+            continue
+        rows.extend(
+            _unexpected(vm, "disk", disk["file"], "expected_disks")
+            for disk in vm["disks"]
+            if disk["file"] not in expected.disks
+        )
+    rows.extend(
+        _unexpected(f, "folder", f.get("name"), "expected_folders")
+        for f in plan.context["folders"]
+        if f["moid"] not in expected.folders
+    )
     return rows
 
 
 def _input_problem(params: dict[str, Any]) -> str | None:
-    """Why the folder / expected_vms input is malformed, or ``None``."""
+    """Why the folder / expected_* input is malformed, or ``None``."""
     problem = moid_problem(params.get("folder"), VM_FOLDER_MOID_PATTERN, "folder")
     if problem is not None:
         return problem
-    expected = params.get("expected_vms")
-    if not isinstance(expected, list):
-        return "expected_vms must be a list of VM ids, like ['vm-101']"
-    for vm in expected:
-        problem = moid_problem(vm, VM_MOID_PATTERN, "expected_vms entry")
-        if problem is not None:
-            return problem
+    for param, pattern, example in (
+        ("expected_vms", VM_MOID_PATTERN, "['vm-101']"),
+        ("expected_folders", VM_FOLDER_MOID_PATTERN, "['group-v102']"),
+    ):
+        expected = params.get(param)
+        if not isinstance(expected, list):
+            return f"{param} must be a list of ids, like {example}"
+        for moid in expected:
+            problem = moid_problem(moid, pattern, f"{param} entry")
+            if problem is not None:
+                return problem
+    disks = params.get("expected_disks")
+    if not isinstance(disks, list) or not all(isinstance(d, str) and d for d in disks):
+        return "expected_disks must be a list of disk file paths, like ['[ds1] vm-101/vm-101.vmdk']"
     return None
 
 
@@ -208,8 +252,11 @@ async def plan_folder_teardown(
     """Plan the teardown of one VM folder (read-only).
 
     ``plan.context`` carries ``vms`` (one row per VM / template), ``folders``
-    (the sub-folders, deepest first) and ``missing`` (expected VMs not under
-    the folder). ``plan.children`` is the capped list the approver reads.
+    (the sub-folders, deepest first) and ``missing`` (expected VMs and
+    sub-folders not under the folder, as ``{kind, moid}`` rows).
+    ``plan.children`` lists every VM and sub-folder: a plan with more than
+    :data:`LIST_CAP` objects is refused, so the approver always reads the
+    whole plan.
     """
     folder = params.get("folder")
     obj: dict[str, Any] = {"kind": "folder", "moid": folder}
@@ -218,12 +265,13 @@ async def plan_folder_teardown(
     if problem is not None:
         return TeardownPlan(obj, False, refusal=(STATUS_INVALID_REQUEST, problem), context=empty)
     folder = str(folder)
-    expected = set(params["expected_vms"])
+    expected = _Expected(params)
     props = await read_object(
         connector, target, operator, mo_type=_FOLDER_MO_TYPE, moid=folder, props=_FOLDER_PROPS
     )
     if props is None:
-        return TeardownPlan(obj, False, context={**empty, "missing": sorted(expected)})
+        missing = expected.missing(set(), set())
+        return TeardownPlan(obj, False, context={**empty, "missing": missing})
     parent = unwrap_vim_value(props.get("parent"))
     obj.update(name=props.get("name"), parent=_moref_value(parent))
     plan = TeardownPlan(obj, True, context=empty)
@@ -249,17 +297,25 @@ async def plan_folder_teardown(
     plan.context = {
         "vms": vms,
         "folders": folders,
-        "missing": sorted(expected - set(vm_parents)),
+        "missing": expected.missing(set(vm_parents), {f["moid"] for f in folders}),
     }
     plan.children = capped([*vms, *folders])
-    plan.blockers = capped(await _blockers(connector, target, operator, vms, others, expected))
+    plan.blockers = capped(await _blockers(connector, target, operator, plan, others, expected))
     if not (complete and vms_ok):
         detail = "vCenter did not fully answer the read of the folder content; nothing was changed"
+        plan.refusal = (STATUS_PRECONDITION_FAILED, detail)
+    elif len(vms) + len(folders) > LIST_CAP:
+        detail = (
+            f"folder {folder!r} holds {len(vms)} VM(s) and {len(folders)} sub-folder(s); this "
+            f"op shows the approver at most {LIST_CAP} objects, so tear down its sub-folders "
+            "first, one at a time"
+        )
         plan.refusal = (STATUS_PRECONDITION_FAILED, detail)
     elif plan.blockers:
         detail = (
             f"folder {folder!r} holds objects this op will not delete (see 'blockers'): "
-            "delete vApps first, leave managed VMs alone, and list every VM in expected_vms"
+            "delete vApps first, leave managed VMs alone, and list every VM, sub-folder "
+            "and disk in expected_vms, expected_folders and expected_disks"
         )
         plan.refusal = (STATUS_PRECONDITION_FAILED, detail)
     return plan
@@ -288,7 +344,10 @@ def teardown_blast_radius(plan: TeardownPlan, params: dict[str, Any]) -> dict[st
         vm_count=len(vms),
         folder_count=len(plan.context["folders"]),
         delete_folder=delete_folder,
-        missing_expected_vms=plan.context["missing"],
+        missing_expected_vms=[m["moid"] for m in plan.context["missing"] if m["kind"] == "vm"],
+        missing_expected_folders=[
+            m["moid"] for m in plan.context["missing"] if m["kind"] == "folder"
+        ],
     )
     return preview
 

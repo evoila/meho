@@ -2753,8 +2753,10 @@ the folder (also in sub-folders), deletes every VM and VM template with its
 disks, deletes the sub-folders bottom up and then the folder. It is
 `destructive` with `requires_approval=True`.
 
-Parameters: `folder` (a VM folder moid, `group-v...`; never a name),
-`expected_vms` (required: the id of every VM and template under the folder),
+Parameters: `folder` (a VM folder moid, `group-v...`; never a name), the
+three required lists `expected_vms` (the id of every VM and template under
+the folder), `expected_folders` (the id of every sub-folder) and
+`expected_disks` (the datastore path of every disk file of those VMs),
 `power_off` (`hard`, the default, or `guest`: a guest shutdown first, then a
 hard power off after `guest_timeout_s`, default 120 s; a VM without VMware
 Tools is powered off hard at once) and `delete_folder` (default `true`; with
@@ -2771,17 +2773,31 @@ the live state after approval. Refused before any change
 - a vApp, or any other object type, under the folder (delete vApps first);
 - a VM another product manages (`config.managedBy` is set, for example
   vSphere Cluster Services);
-- a VM under the folder that is not in `expected_vms`;
+- a VM, a sub-folder or a disk file under the folder that is not in
+  `expected_vms`, `expected_folders` or `expected_disks`;
+- more than 50 VMs and sub-folders together (the preview lists at most 50
+  objects, and the approver must read every one; tear down the sub-folders
+  first, one at a time);
 - an answer vCenter did not fully give (a paged answer, a left-out object, a
   property it could not read).
 
-**Why `expected_vms`.** The preview hash covers only the request (connector,
-operation, parameters), and the handler cannot see the plan the approver
-read. `expected_vms` is a parameter, so the approval binds it. The handler
-refuses when the live folder holds a VM that is not on the list, so a VM
-moved into the folder after the approval request is never deleted. An
-expected VM that is no longer under the folder is reported `unchanged` and
-not touched, so a second run is safe.
+**Why the expected lists.** The preview hash covers only the request
+(connector, operation, parameters), and the handler cannot see the plan the
+approver read. The three lists are parameters, so the approval binds them.
+The handler refuses when the live folder holds a VM, a sub-folder or a disk
+that is not on its list, so nothing added after the approval request (a VM
+moved in, a new empty sub-folder, a disk attached to a VM) is ever deleted:
+the plan can only shrink after approval, never grow. An expected VM or
+sub-folder that is no longer under the folder is reported `unchanged` and not
+touched, so a second run is safe.
+
+**The folder boundary during the run.** The plan is read before the first
+write, but the guest shutdown wait and the deletes take time. So right before
+each VM delete, and before a hard power off that follows the guest wait, the
+handler reads the VM's `parent` again; before each sub-folder delete it reads
+the sub-folder's `parent`. An object whose parent is no longer the folder or
+one of its sub-folders is skipped and reported `unchanged` ("moved out of the
+folder while the call ran"). A folder is only deleted when it reads empty.
 
 **The steps.** The same vendor calls as the single-object ops, each through
 the same step check (`_write._write_sub_op` / `_write_vmomi_sub_op`):
@@ -2790,7 +2806,7 @@ the same step check (`_write._write_sub_op` / `_write_vmomi_sub_op`):
 | --- | --- |
 | power off (like `vm.power`) | REST `POST /vcenter/vm/{vm}/power?action=stop`; with `power_off=guest` first `POST /vcenter/vm/{vm}/guest/power?action=shutdown`, then a power-state read until off or `guest_timeout_s` |
 | delete a VM (like `vm.destroy`) | vim `VirtualMachine.Destroy_Task` before vCenter 9.0, REST `DELETE /vcenter/vm/{vm}` from 9.0; a template always uses vim `Destroy_Task` |
-| delete a folder (like `folder.delete`) | vim `Folder.Destroy_Task`, after a read that finds the folder empty |
+| delete a folder (like `folder.delete`) | vim `Folder.Destroy_Task`, after a read that finds the folder empty and (for a sub-folder) still under the folder |
 
 Then it reads every object again and returns one row per object (`deleted`,
 `unchanged`, or `failed` when it still reads back). A vendor fault, a task
@@ -4215,7 +4231,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.device.cdrom` | `{vm, name, cdrom, action, current_backing, state}` (the host-local ISO path) | live read (`cdrom/{cdrom}`) |
 | `vm.resource_allocation.set` | `{vm, name, current: {cpu_allocation, memory_allocation}, requested}` limit / reservation from->to | live read (vim `RetrievePropertiesEx`) |
 | `network.portgroup.delete` / `host.standard_portgroup.delete` / `folder.delete` / `datastore.file.delete` / `content_library.delete` / `content_library.item.delete` | mandatory `blast_radius`: `{object: {..., present}, children, irreversibility, blockers?, refusal?}` -- the handler's own plan (#3339) | live read (vim `RetrievePropertiesEx` / browse, or REST GET) |
-| `folder.teardown` | mandatory `blast_radius`: the shared block above plus `summary` (plain words: how many VMs it powers off and deletes), `power_off_count`, `vm_count`, `folder_count`, `delete_folder`, `missing_expected_vms`; `children` are the VM rows (disks, NICs, snapshot count) and the sub-folders (#4624) | live read (vim `RetrievePropertiesEx`) |
+| `folder.teardown` | mandatory `blast_radius`: the shared block above plus `summary` (plain words: how many VMs it powers off and deletes), `power_off_count`, `vm_count`, `folder_count`, `delete_folder`, `missing_expected_vms`, `missing_expected_folders`; `children` are every VM row (disks, NICs, snapshot count) and every sub-folder -- a plan with more than 50 objects is refused, so the list is never cut (#4624) | live read (vim `RetrievePropertiesEx`) |
 | `datastore.dir.create` | `{action, datastore, path, create_parents}` | param echo, no I/O |
 | `vm.create` | creation-spec echo (name, guest_os, placement pins — folder_name, folder (#3115), resource_pool, datastore, host (#3096) — sizing, networks, disks_gb (#3117), nested_hv, power-on) | param echo, no I/O |
 | `vm.clone` | clone-coordinates echo | param echo, no I/O |

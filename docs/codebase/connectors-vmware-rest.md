@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 87 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 90 hand-authored composites
 that orchestrate cross-spec workflows: 20 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -22,7 +22,7 @@ read `datastore.file.list` / `#3432` + the vSAN folder list
 read `datastore.vsan.folder.list` / `#4022` + the orphan folder check
 `datastore.orphan_dirs` / `#3814` + the VM limit and
 reservation read `vm.resource_allocation.show` / `#3880` + the migration
-inventory read `vmware.migration.inventory`) and 67 write
+inventory read `vmware.migration.inventory`) and 70 write
 composites (G3.1-T6 / `#509`, incl. the three vCenter install changes
 `vcenter.appliance.deploy` / `vcenter.install` / `vcenter.deployment.answer`
 (`#4394`), the destructive-tier `vm.destroy` / `#3198`, the
@@ -74,7 +74,10 @@ CD drive add `vm.cdrom.add` (`dangerous`) and the VMware Tools installer unmount
 `vm.tools.installer.unmount` (`caution`) (see **VM hardware read, CD drive add and
 Tools installer unmount**), the content-library ISO mount and unmount
 `vm.cdrom.mount_library_iso` + `vm.cdrom.unmount_library_iso` (both `caution`)
-(see **Content-library ISO mount and unmount**), the VM snapshot writes `vm.snapshot.create` (caution)
+(see **Content-library ISO mount and unmount**), the VM security changes
+`vm.vtpm.add` (`dangerous`), `vm.vtpm.remove` (`destructive`) and
+`vm.encryption.set` (`dangerous`) (see **VM security: virtual TPM and
+encryption**), the VM snapshot writes `vm.snapshot.create` (caution)
 + `vm.snapshot.delete` (destructive) (see **VM snapshot operations**), the licence
 assign `license.assign` (see **vSphere licences**), and the two caution alarm changes
 `alarm.acknowledge` + `alarm.reset` / `#4383` (see **Alarms**)). The
@@ -565,9 +568,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 87
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 90
   `_CompositeSpec` rows (20 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 50 dangerous/destructive
+  cache-refresh read `datastore.refresh` — + 53 dangerous/destructive
   writes + 17 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
@@ -1438,12 +1441,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 87 `vmware.composite.*` rows with
+   queued registrar and upserts: the 90 `vmware.composite.*` rows with
    `source_kind="composite"` — 20 reads (19 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 67 writes, all `requires_approval=True`
-   (38 `safety_level="dangerous"`; 17 `safety_level="caution"` —
+   service principals), and 70 writes, all `requires_approval=True`
+   (40 `safety_level="dangerous"`; 17 `safety_level="caution"` —
    `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
@@ -1452,10 +1455,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    `vm.cdrom.unmount_library_iso`, `vm.snapshot.create`,
    `content_library.create` + `content_library.item.upload`,
    `cluster.drs_group.members.set`;
-   and 12 `safety_level="destructive"` — `vm.destroy` / `#3198`,
+   and 13 `safety_level="destructive"` — `vm.destroy` / `#3198`,
    `namespace.delete`, `storage_policy.delete`, `cluster.drs_rule.delete`,
    `cluster.drs_group.delete`,
-   `vm.snapshot.delete`, and the six `#3339` teardown deletes) —
+   `vm.snapshot.delete`, `vm.vtpm.remove`, and the six `#3339` teardown deletes) —
    plus the `vmware.host.usage` row with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
    The typed row resolves and dispatches with **zero catalog ingest** —
@@ -1840,7 +1843,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 87 composites (20 reads + 67 writes) land as `source_kind="composite"`
+The 90 composites (20 reads + 70 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1937,7 +1940,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 87 composites are hand-authored aggregators the connector ships as
+The 90 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -2479,6 +2482,39 @@ and `meho vmware vm cdrom unmount-library-iso <vm-name-or-id> --cdrom <id>`
 same dispatch path as MCP. The VM name is resolved to its id on the client
 through the typed `vmware.vm.info` read, so the commands work before the
 catalog is ingested, and the approval names the VM id.
+
+### VM security: virtual TPM and encryption
+
+Three changes add or remove a virtual TPM and encrypt or decrypt a VM
+(`#4337`). vCenter's REST API has no call for them, so they use the VIM API
+as VI-JSON: read the VM (`RetrievePropertiesEx`), run one
+`VirtualMachine.ReconfigVM_Task` through the governed write seam
+(`_write._write_vmomi_sub_op`), poll the task, and read the VM again to
+return its new state. They are on both catalogs (`vmware-rest-8.0` and
+`vmware-rest-9.0`), wait for approval, and need no catalog ingest. Each takes
+the VM id (`vm`) only, so after approval the change runs on the VM the
+approver saw. All three need the VM powered off and stop with
+`precondition_failed` before any write when it is on. A VM already in the
+asked state answers `unchanged` and nothing is sent.
+
+| Operation | What it does | Returns | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.composite.vm.vtpm.add` | Adds a `VirtualTPM` device (`deviceChange` add). Checks first that the VM uses EFI firmware and hardware version 14 or newer. vCenter makes the keys from the default key provider. | `status` (`added`, `unchanged`, ...), the VM name and power state, the new vTPM (`key`, `label`) | `dangerous` | 8.0, 9.x |
+| `vmware.composite.vm.vtpm.remove` | Removes the VM's `VirtualTPM` device (`deviceChange` remove). The keys the guest kept in it (for example BitLocker keys) are lost. | the teardown envelope: `status` (`removed`, `unchanged`, `still_present`, ...), `object` (VM, vTPM, what is lost) | `destructive` | 8.0, 9.x |
+| `vmware.composite.vm.encryption.set` | `action=encrypt` or `decrypt`: gives the VM home (`vmProfile`) and every disk (`profile`) the storage policy `storage_policy_id`. Encrypt sends no `crypto`, so vCenter makes new keys from the default key provider; it is refused for a VM with snapshots. Decrypt sends `CryptoSpecDecrypt` for the VM and for each encrypted disk. | `status` (`encrypted`, `decrypted`, `unchanged`, `not_confirmed`, ...), `before` and `after`: whether the VM home and each disk are encrypted, and the key provider id | `dangerous` | 8.0, 9.x |
+
+The answers carry no key material: no key id, no vTPM certificate, only
+whether a part is encrypted and the id of the key provider. The vTPM remove
+uses the plan-then-act seam of `_teardown.py`: one read-only plan feeds the
+approval-card `blast_radius` (`object`, `children`, `irreversibility`) and
+the handler. A person calls `preview_operation` first, and an agent is always
+refused. The add and the encryption change have approval previews that show
+the VM, its state now, and whether the call would stop before the change.
+Code: `composites/_vm_security.py` (shared reads and the reconfigure step),
+`_vm_vtpm.py`, `_vm_encryption.py` and `_vm_security_schemas.py`. The
+sub-operation list `_vm_security._VIM_SUB_OPS_VM_SECURITY` is pinned by the
+reconcile lane against the pinned `vi-json.yaml`. Tests:
+`test_connectors_vmware_rest_composites_vm_security.py`.
 
 ### Shared disks for WSFC/FCI — bus-sharing, eagerzeroedthick, shared-attach (#3256)
 

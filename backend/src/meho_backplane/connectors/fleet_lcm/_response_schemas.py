@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Response schemas for the ``fleet-lcm`` typed read core.
+"""Response schemas for the ``fleet-lcm`` typed reads.
 
 Each schema names the main fields of the vendor answer, so the AI knows what a
 read returns before it calls it. The field names come from the VCF Fleet LCM
@@ -291,6 +291,28 @@ FLEET_LCM_RESPONSE_SCHEMAS: dict[str, dict[str, Any]] = {
                 },
             ),
             "result": _field("object", "The task result, for example a precheck result."),
+            "task_id": _field("string", "The task id (also when the service did not answer)."),
+            "state": _field(
+                "string",
+                "MEHO's plain state: queued, running, succeeded, failed, canceled, unknown, "
+                "or not_reachable (the service did not answer; not a failure).",
+            ),
+            "progress": _object(
+                "Stage progress; null when the vendor lists no stages.",
+                {
+                    "stages_total": _field("integer", "The number of stages."),
+                    "stages_done": _field("integer", "Stages that succeeded or were skipped."),
+                    "current_stage": _field("string", "The stage that runs now, if any."),
+                },
+            ),
+            "errors": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "The ERROR texts of the task, its stages and its sub-tasks.",
+            },
+            "reachable": _field("boolean", "False when the service did not answer."),
+            "unreachable_reason": _field("string", "Why the read got no answer."),
+            "checked_at": _field("string", "When MEHO read the task (ISO 8601, UTC)."),
         },
     ),
     "fleet-lcm.upgrade-plan.list": _object(

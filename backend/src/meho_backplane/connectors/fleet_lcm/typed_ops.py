@@ -28,19 +28,26 @@ The dataclass + tuple + module-level registrar shape mirrors
 convention: typed ops own the curated read core, generic review
 (``ReviewService.enable_reads`` over an operator ingest of the full 51-op
 ``fleet-lcm-openapi.yaml``) owns the wider write / breadth surface as a
-follow-up. The wider surface (component / upgrade-plan / task **writes**)
-is deliberately out of scope here — this is a read core.
+follow-up. The six lifecycle changes (retry and cancel a task; create,
+pre-check and apply an upgrade plan; sync the depot) live in
+:mod:`meho_backplane.connectors.fleet_lcm.lifecycle_ops` and are appended
+to :data:`FLEET_LCM_TYPED_OPS`, so this registrar registers them too.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from meho_backplane.connectors.fleet_lcm._llm_instructions import FLEET_LCM_READ_LLM_INSTRUCTIONS
 from meho_backplane.connectors.fleet_lcm._response_schemas import FLEET_LCM_RESPONSE_SCHEMAS
+from meho_backplane.connectors.fleet_lcm.lifecycle_ops import (
+    FLEET_LCM_LIFECYCLE_OPS,
+    GROUP_LIFECYCLE,
+    GROUP_TASKS,
+)
+from meho_backplane.connectors.fleet_lcm.op_types import FleetLcmTypedOp
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -61,35 +68,8 @@ _log = structlog.get_logger(__name__)
 _GROUP_SYSTEM = "fleet-lcm-system"
 _GROUP_SDDC = "fleet-lcm-sddc"
 _GROUP_COMPONENTS = "fleet-lcm-components"
-_GROUP_TASKS = "fleet-lcm-tasks"
-_GROUP_LIFECYCLE = "fleet-lcm-lifecycle"
-
-
-@dataclass(frozen=True)
-class FleetLcmTypedOp:
-    """Metadata for one Fleet LCM typed op registered at lifespan startup.
-
-    Fields mirror the keyword arguments
-    :func:`~meho_backplane.operations.typed_register.register_typed_operation`
-    accepts so :func:`register_fleet_lcm_typed_operations` can splat the
-    dataclass into the helper without per-op boilerplate. ``handler_attr``
-    is the attribute name on :class:`FleetLcmConnector` exposing the async
-    handler; the registrar resolves the bound method against the class at
-    registration time. Mirrors
-    :class:`~meho_backplane.connectors.harbor.typed_ops.HarborTypedOp`.
-    """
-
-    op_id: str
-    handler_attr: str
-    summary: str
-    description: str
-    parameter_schema: dict[str, Any]
-    response_schema: dict[str, Any] | None
-    group_key: str
-    tags: tuple[str, ...]
-    safety_level: Literal["safe", "caution", "dangerous", "destructive"]
-    requires_approval: bool
-    llm_instructions: dict[str, Any] | None
+_GROUP_TASKS = GROUP_TASKS
+_GROUP_LIFECYCLE = GROUP_LIFECYCLE
 
 
 #: Short text per typed-op group. The agent reads it through
@@ -112,13 +92,16 @@ FLEET_LCM_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "runs. All reads."
     ),
     _GROUP_TASKS: (
-        "Reads of the fleet's tasks (upgrades, prechecks, component actions): list "
-        "them, or read one by id with its stages and messages. All reads."
+        "The fleet's tasks (upgrades, prechecks, depot syncs, component actions). "
+        "Two reads: list the tasks, or read one by id with its state, stages and "
+        "errors (the status read for every fleet job). Two changes: retry a failed "
+        "task, or cancel a running one."
     ),
     _GROUP_LIFECYCLE: (
-        "Reads for upgrade planning: the upgrade plans, one plan by id with its "
-        "components, and the release versions the fleet can move to. All reads; "
-        "nothing here starts an upgrade."
+        "Upgrade planning and the depot. Three reads: the upgrade plans, one plan "
+        "by id with its components and runs, and the release versions the fleet can "
+        "move to. Four changes: create an upgrade plan (it is checked first), run "
+        "its pre-check, apply it (start the upgrades), and sync the depot metadata."
     ),
 }
 
@@ -197,10 +180,11 @@ def _op(
     )
 
 
-#: The typed ops :class:`FleetLcmConnector` registers at lifespan startup —
-#: the 13-op modern read core. Every op is safe, read-only, and ungated; the
-#: wire path lives in the handler (see ``._paths``), so the descriptor rows
-#: carry ``method=None`` / ``path=None`` (typed convention).
+#: The typed ops :class:`FleetLcmConnector` registers at lifespan startup:
+#: the 13 safe reads, then the six changes of :mod:`.lifecycle_ops` (each
+#: waits for approval). The wire path lives in the handler (see ``._paths``),
+#: so the descriptor rows carry ``method=None`` / ``path=None`` (typed
+#: convention).
 FLEET_LCM_TYPED_OPS: tuple[FleetLcmTypedOp, ...] = (
     # ---- System / service ----
     _op(
@@ -301,10 +285,10 @@ FLEET_LCM_TYPED_OPS: tuple[FleetLcmTypedOp, ...] = (
     _op(
         "fleet-lcm.task.info",
         "task_info",
-        "Read one fleet task by id, with its stages and messages.",
-        "Reads one task via GET /v1/tasks/{taskId}: state, times, who started it, "
-        "whether it can be retried or cancelled, its stages, sub-tasks, messages and "
-        "result. Needs a task id. Read-only.",
+        "Read one fleet task by id: state, progress, stages and error text.",
+        "Reads GET /v1/tasks/{taskId}: the vendor task plus a plain state, the stage "
+        "progress and the error texts. Says not_reachable, not failed, when the "
+        "service does not answer. The status read of every fleet job. Read-only.",
         _GROUP_TASKS,
         ("task",),
         _schema("taskId", _TASK_ID_PROP, "<task-id>"),
@@ -340,6 +324,7 @@ FLEET_LCM_TYPED_OPS: tuple[FleetLcmTypedOp, ...] = (
         _GROUP_LIFECYCLE,
         ("release",),
     ),
+    *FLEET_LCM_LIFECYCLE_OPS,
 )
 
 

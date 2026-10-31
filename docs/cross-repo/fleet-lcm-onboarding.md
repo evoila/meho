@@ -63,6 +63,13 @@ for the reads):
 | `fleet-lcm-lifecycle` | `fleet-lcm.upgrade-plan.info` | One upgrade plan by id |
 | `fleet-lcm-lifecycle` | `fleet-lcm.release-version.list` | Targetable release versions |
 
+Six changes sit in the same groups. Each one waits until a second person
+approves it (see [the connector doc](../codebase/connectors-fleet-lcm.md)):
+`fleet-lcm.task.retry` and `fleet-lcm.task.cancel` (group `fleet-lcm-tasks`),
+`fleet-lcm.upgrade-plan.create`, `.precheck` and `.apply`, and
+`fleet-lcm.depot.sync` (group `fleet-lcm-lifecycle`). The vendor runs each
+one as a job; follow it with `fleet-lcm.task.info`.
+
 There is **no dedicated `meho fleet-lcm …` CLI verb tree** — the modern
 surface is dispatched through the generic `meho operation …` /
 `meho connector …` verbs and the agent meta-tools (below).
@@ -184,12 +191,13 @@ meho operation groups fleet-lcm-9.0
 
 ## Optional — ingest the wider `/v1/*` breadth
 
-The typed read core is the curated, always-on read surface. The **full 51-op**
-`/v1/*` surface — the wider read breadth plus the component / upgrade-plan /
-task **writes** — is **not** code-shipped; it is enabled operationally by
-ingesting the pinned `fleet-lcm-openapi.yaml` through the generic G0.7
-pipeline and reviewing the operator-facing groups. Do this only when the read
-core is insufficient (e.g. you need a write op or a niche read).
+The typed ops (the read core and the six changes above) are the curated,
+always-on surface. The rest of the **51-op** `/v1/*` surface (more reads, and
+the component and system writes) is **not** code-shipped; it is enabled
+operationally by ingesting the pinned `fleet-lcm-openapi.yaml` through the
+generic G0.7 pipeline and reviewing the operator-facing groups. Do this only
+when the typed ops are not enough (e.g. you need a component write or a niche
+read).
 
 Follow the connector-agnostic runbook in
 [`docs/cross-repo/connector-ingestion.md`](./connector-ingestion.md); the
@@ -243,7 +251,7 @@ Agents use `search_operations` / `call_operation` with
 | `connector_auth_failed` naming `token/acquire` | VCF Operations refused the username or password | Fix the account in the secret; the next call reads Vault again |
 | `connector_error` naming `token/acquire` with HTTP 404 | The login went to an address that is not VCF Operations | Add `vcf_ops_url` with the VCF Operations address |
 | `connector_auth_failed` naming `token/exchange` | VCF Operations refused to hand out a fleet lifecycle token for this account | Give the account access to fleet management in VCF Operations |
-| `op_id unknown_op` for a write op | Writes are the ingested-breadth follow-up, not shipped in the read core | Ingest + enable the breadth (above), or use a read core op |
+| `op_id unknown_op` for a write op | Only the six typed changes are code-shipped; other writes are the ingested breadth | Use a typed change, or ingest + enable the breadth (above) |
 | `connector_auth_failed` after a re-login on fleet calls | The fleet API refused even a fresh token | Check the account's fleet roles in VCF Operations; as a last resort store a `token` |
 
 ## Related resources

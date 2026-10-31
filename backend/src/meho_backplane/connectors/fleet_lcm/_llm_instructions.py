@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Per-op ``llm_instructions`` blobs for the ``fleet-lcm`` typed read core.
+"""Per-op ``llm_instructions`` blobs for the ``fleet-lcm`` typed reads.
 
 Split out of :mod:`~meho_backplane.connectors.fleet_lcm.typed_reads` (which
 holds the op bodies) purely to keep each module under the file-size budget;
@@ -197,25 +197,29 @@ _TASK_LIST_INSTRUCTIONS: dict[str, object] = {
 
 _TASK_INFO_INSTRUCTIONS: dict[str, object] = {
     "when_to_call": (
-        "Call to read one async task in full by its id — its status, timing, "
-        "and sub-task detail. Requires taskId (a UUID) from "
-        "fleet-lcm.task.list, or the upgrade.taskId from "
-        "fleet-lcm.system.info."
+        "Call to read one fleet task by id: its state, progress and error texts. "
+        "This is the status read of every fleet job (retry, cancel, pre-check, "
+        "apply, depot sync): call it with the task_id the change returned until "
+        "state is succeeded, failed or canceled. The taskId can also come from "
+        "fleet-lcm.task.list or the upgrade.taskId of fleet-lcm.system.info."
     ),
     "output_shape": (
-        "Task object with id, name, resourceId, type, status, createTime / "
-        "updateTime, createdBy / updatedBy, cancellable / retriable, "
-        "parentTaskId, a description with a localizedMessage, stages[] (id, "
-        "name, status), subTasks[], messages[] (timestamp, level, message) and "
-        "a result."
+        "The vendor Task (id, name, type, status, resourceId, times, cancellable, "
+        "retriable, stages[], subTasks[], messages[], result) plus task_id, state "
+        "(queued / running / succeeded / failed / canceled / unknown / "
+        "not_reachable), progress {stages_total, stages_done, current_stage}, "
+        "errors[] (the ERROR texts), reachable and checked_at. When the service "
+        "does not answer, only task_id, state=not_reachable, unreachable_reason "
+        "and checked_at are set."
     ),
     "parameter_hints": {
-        "taskId": "The task UUID from fleet-lcm.task.list or fleet-lcm.system.info.",
+        "taskId": "The task UUID from a fleet change or from fleet-lcm.task.list.",
     },
     "next_step": (
-        "If the task failed, surface its description.localizedMessage to the "
-        "operator. If retriable=true, a retry is available via the fleet's "
-        "task-retry action (a write op, outside this read core)."
+        "queued or running: read again in a minute. failed: report errors; if "
+        "retriable is true, fleet-lcm.task.retry runs it again from the failed "
+        "stage. not_reachable: the service may be upgrading itself; this is not a "
+        "failure, read again in a few minutes with the same taskId."
     ),
 }
 

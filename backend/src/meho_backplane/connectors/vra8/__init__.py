@@ -41,8 +41,9 @@ This package registers a curated **6-op typed read core** (#3058, :mod:`.typed_o
 via :func:`register_typed_op_registrar`, so a vRA 8 target dispatches a
 migration-inventory read on a fresh boot with zero catalog ingest. Because vRA 8's
 vendor spec is Swagger 2.0 (OA3-only ingest can't consume it — typed, not ingested),
-a wider ingested breadth surface is not a follow-up here — the read core is the
-connector's surface.
+a wider ingested breadth surface is not a follow-up here. The same registrar also
+registers the cloud template and catalog ops (:mod:`.content_ops`), which are
+written once for this connector and VCF Automation 9.
 """
 
 from typing import Final

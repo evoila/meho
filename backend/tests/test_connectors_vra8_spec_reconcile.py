@@ -39,9 +39,26 @@ Dispatch-fidelity of each path is proven live-mocked in
 
 from __future__ import annotations
 
+from meho_backplane.connectors.vmware_shared.vcfa_content_ops import CONTENT_OPS
 from meho_backplane.connectors.vra8 import _paths as _paths_module
 from meho_backplane.connectors.vra8 import api_file as _api_file
 from meho_backplane.connectors.vra8 import connector as _connector
+from tests._spec_shelf import assert_op_ids_served, require_shelf_spec
+from tests.test_connectors_vcf_automation_spec_reconcile import (
+    CONTENT_OP_IDS,
+    content_declared_op_ids,
+    content_path_constants,
+    swagger2_served_op_ids,
+)
+
+#: The vendor API files on the shelf that serve the cloud template and catalog
+#: paths. They are the same files the ``vcf-automation`` tenant lane uses: the
+#: ``vmware/vra-sdk-go`` v0.6.5 Swagger files describe Aria Automation 8.
+_CONTENT_SPEC_DIR = "vcf-automation-9.0"
+_CONTENT_SPEC_FILES = (
+    "swagger-vra-sdk-go-v0.6.5/vra-blueprint.json",
+    "swagger-vra-sdk-go-v0.6.5/vra-catalog-deployment.json",
+)
 
 #: HTTP method per hand-coded path constant. The two login endpoints are POSTed
 #: (``._auth.vra8_login``); every read path (the ``/iaas/api/about`` fingerprint
@@ -181,3 +198,30 @@ def test_probe_constant_links_to_about_path() -> None:
     """
     assert _paths_module._ABOUT_PATH == "/iaas/api/about"
     assert "/iaas/api/about" in _connector._VRA8_PROBE_METHOD
+
+
+def test_content_op_paths_are_pinned() -> None:
+    """The cloud template and catalog ops send exactly the pinned ``METHOD:/path`` set.
+
+    These ops are written once for both Automation connectors
+    (``connectors/vmware_shared``); every op path is one of the swept constants.
+    """
+    assert content_declared_op_ids() == CONTENT_OP_IDS
+    swept = set(content_path_constants().values())
+    assert {spec.path for spec in CONTENT_OPS} <= swept
+
+
+def test_content_op_paths_are_served_by_the_vra_api_files() -> None:
+    """Every cloud template and catalog path is in the vendor's blueprint or catalog file.
+
+    Skips when the spec shelf is not set up (``MEHO_CONSUMER_DOCS_ROOT``); CI
+    sets it up.
+    """
+    served: set[str] = set()
+    for spec_file in _CONTENT_SPEC_FILES:
+        served |= swagger2_served_op_ids(require_shelf_spec(_CONTENT_SPEC_DIR, spec_file))
+    assert_op_ids_served(
+        content_declared_op_ids(),
+        served,
+        spec_label=f"{_CONTENT_SPEC_DIR} vra-blueprint + vra-catalog-deployment",
+    )

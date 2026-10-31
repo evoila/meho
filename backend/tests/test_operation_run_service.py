@@ -35,7 +35,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import meho_backplane.operations.approval_queue as approval_queue
 import meho_backplane.operations.meta_tools as meta_tools
-import meho_backplane.operations.operation_run_service as service_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
@@ -531,7 +530,9 @@ async def test_wait_returns_when_the_run_ends_and_holds_no_session(
     No database session is open while the wait pauses.
     """
     counter = _SessionCounter()
-    monkeypatch.setattr(service_module, "get_sessionmaker", lambda: counter)
+    monkeypatch.setattr(
+        "meho_backplane.operations.operation_run_service.get_sessionmaker", lambda: counter
+    )
     operator, run_id = await _running_run()
     service = OperationRunService()
     open_during_pause: list[int] = []
@@ -605,5 +606,5 @@ async def test_pause_that_times_out_does_not_stop_the_run() -> None:
     await service._pause(run_id, 0.05)
     assert not task.done()
     gate.set()
-    await task
+    assert await task is True
     assert not task.cancelled()

@@ -38,6 +38,7 @@ import httpx
 
 from meho_backplane.connectors.vmware_shared.vcfa_yaml_secrets import (
     MARKER_PREFIX,
+    scrub_inputs_schema,
     scrub_template_yaml,
 )
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
@@ -238,10 +239,11 @@ async def blueprint_get(
     replaced = 0
     if isinstance(content, str):
         content, replaced = scrub_template_yaml(content)
+    schema, schema_replaced = scrub_inputs_schema(inputs if isinstance(inputs, dict) else {})
     return {
         "blueprint": {**summary(row), "content": content},
-        "inputs_schema": inputs if isinstance(inputs, dict) else {},
-        "secrets_replaced": replaced,
+        "inputs_schema": schema,
+        "secrets_replaced": replaced + schema_replaced,
     }
 
 

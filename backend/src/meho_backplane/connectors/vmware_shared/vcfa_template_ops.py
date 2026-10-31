@@ -119,7 +119,10 @@ _BLUEPRINT_GET = ContentOpSpec(
                 {
                     "properties": {
                         "type": "object",
-                        "description": "One schema per input, by input name.",
+                        "description": (
+                            "One schema per input, by input name. The default, const, "
+                            "enum and example values of a secret input are a marker."
+                        ),
                     },
                     "required": {
                         "type": "array",
@@ -129,7 +132,9 @@ _BLUEPRINT_GET = ContentOpSpec(
                 },
             ),
             "secrets_replaced": field(
-                "integer", "How many secret values in the YAML were replaced by a marker."
+                "integer",
+                "How many secret values in the YAML and in inputs_schema were replaced "
+                "by a marker.",
             ),
         },
     ),
@@ -143,9 +148,11 @@ _BLUEPRINT_GET = ContentOpSpec(
             "{blueprint: {id, name, projectId, status, valid, totalVersions, "
             "totalReleasedVersions, content (YAML), validationMessages}, inputs_schema: "
             "{properties, required}, secrets_replaced}. In content, the value of each "
-            "secret-named key (password, privateKey, token, ...) and each private key "
-            "block is a [REDACTED:...] marker; secrets_replaced counts them. References "
-            "such as ${secret.<name>} or ${input.<name>} stay."
+            "secret-named key (password, privateKey, token, chpasswd, ...) and each "
+            "private key block is a [REDACTED:...] marker. For each secret input (a "
+            "secret name or encrypted: true), default, const, enum, example and examples "
+            "are a marker, in content and in inputs_schema. secrets_replaced counts all "
+            "markers. References such as ${secret.<name>} or ${input.<name>} stay."
         ),
         next_step=(
             "To change the YAML call {ns}.blueprint.update; to see the versions call "

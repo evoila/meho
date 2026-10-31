@@ -21,7 +21,10 @@ import pytest
 import respx
 
 from meho_backplane.connectors.vcf_automation import VcfAutomationConnector
-from meho_backplane.connectors.vmware_shared.vcfa_yaml_secrets import scrub_template_yaml
+from meho_backplane.connectors.vmware_shared.vcfa_yaml_secrets import (
+    scrub_inputs_schema,
+    scrub_template_yaml,
+)
 from meho_backplane.operations import (
     PassThroughReducer,
     reset_dispatcher_caches,
@@ -41,6 +44,9 @@ _BP_1 = f"{_BP}/bp-1"
 _PASSWORD = "planted-Pa55-value-1"
 _PASSWD = "planted-cloud-config-2"
 _DEFAULT = "planted-default-3"
+_CLOUD_INIT = "planted-cloud-init-4"
+_ENCRYPTED = "planted-encrypted-5"
+_MARKER = "[REDACTED:param_name]"
 
 
 def _key_body() -> list[str]:
@@ -136,6 +142,150 @@ def test_scrub_hides_a_nested_secret_value() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "chpasswd",
+    [
+        ["chpasswd:", "  list: |", f"    root:{_CLOUD_INIT}", "    <user>:x", "  expire: false"],
+        [f"chpasswd: {{list: 'root:{_CLOUD_INIT}', expire: false}}"],
+        ["chpasswd:", "  expire: false", "  list:", f"    - root:{_CLOUD_INIT}"],
+        ["chpasswd:", "  users:", "    - name: root", f"      password: {_CLOUD_INIT}"],
+        ["Chpasswd:", "  list: |", f"    root:{_CLOUD_INIT}"],
+    ],
+    ids=["list-block", "flow", "list-items", "users", "upper-case"],
+)
+def test_scrub_hides_cloud_init_chpasswd(chpasswd: list[str]) -> None:
+    lines = [
+        "resources:",
+        "  vm:",
+        "    properties:",
+        "      cloudConfig: |",
+        "        #cloud-config",
+        "        ssh_authorized_keys:",
+        "          - ssh-ed25519 AAAAexample <user>",
+        *("        " + line for line in chpasswd),
+        "        ssh_pwauth: true",
+        "",
+    ]
+    text, count = scrub_template_yaml("\n".join(lines))
+    assert _CLOUD_INIT not in text
+    assert count == 1
+    out = text.split("\n")
+    assert f"        {chpasswd[0].split(':')[0]}: '{_MARKER}'" in out
+    assert "          - ssh-ed25519 AAAAexample <user>" in out
+    assert "        ssh_pwauth: true" in out
+
+
+def test_scrub_hides_the_values_of_an_encrypted_input() -> None:
+    source = "\n".join(
+        [
+            "inputs:",
+            "  vmPass:",
+            "    type: string",
+            "    encrypted: true",
+            f"    default: {_ENCRYPTED}",
+            "    enum:",
+            f"      - {_ENCRYPTED}",
+            "  size:",
+            "    type: string",
+            "    default: small",
+            "  adminPassword:",
+            "    type: string",
+            f"    default: {_DEFAULT}",
+            "resources: {}",
+        ]
+    )
+    text, count = scrub_template_yaml(source)
+    assert _ENCRYPTED not in text
+    assert _DEFAULT not in text
+    assert count == 3
+    out = text.split("\n")
+    for kept in ("  vmPass:", "    encrypted: true", "    default: small", "  adminPassword:"):
+        assert kept in out, kept
+    assert out.count(f"    default: '{_MARKER}'") == 2
+    assert f"    enum: '{_MARKER}'" in out
+
+
+def test_scrub_hides_a_secret_map_outside_the_inputs() -> None:
+    source = f"resources:\n  vm:\n    password:\n      type: x\n      value: {_PASSWORD}\n"
+    text, count = scrub_template_yaml(source)
+    assert count == 1
+    assert text == f"resources:\n  vm:\n    password: '{_MARKER}'\n"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            f"remoteAccess: {{username: <user>, password: {_PASSWORD}}}",
+            f"remoteAccess: '{_MARKER}'",
+        ),
+        (f"x:\n  - {{name: a, apiToken: {_PASSWORD}}}", f"x:\n  - '{_MARKER}'"),
+        (f'{{"formatVersion": 1, "password": "{_PASSWORD}"}}', f"'{_MARKER}'"),
+        (
+            f"inputs:\n  password:\n    type: string\n    value: {_PASSWORD}",
+            f"inputs:\n  password:\n    type: string\n    value: '{_MARKER}'",
+        ),
+    ],
+    ids=["flow-map", "flow-list-item", "one-line-json", "input-value"],
+)
+def test_scrub_hides_flow_and_fixed_values(source: str, expected: str) -> None:
+    assert scrub_template_yaml(source) == (expected, 1)
+
+
+def test_scrub_keeps_a_flow_map_with_references() -> None:
+    source = "remoteAccess: {username: <user>, password: '${secret.vmPassword}'}"
+    assert scrub_template_yaml(source) == (source, 0)
+
+
+def test_scrub_keeps_crlf_line_ends() -> None:
+    source = f"a: 1\r\npassword:\r\n  {_PASSWORD}\r\nb: 2\r\n"
+    text, count = scrub_template_yaml(source)
+    assert count == 1
+    assert text == f"a: 1\r\npassword: '{_MARKER}'\r\nb: 2\r\n"
+
+
+def _inputs_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {
+            "adminPassword": {"type": "string", "encrypted": True, "default": _DEFAULT},
+            "vmPass": {"type": "string", "encrypted": True, "default": _ENCRYPTED},
+            "apiToken": {"type": "string", "const": _PASSWORD, "examples": [_PASSWORD]},
+            "size": {"type": "string", "default": "small", "enum": ["small", "large"]},
+            "login": {
+                "type": "object",
+                "properties": {
+                    "user": {"type": "string", "default": "<user>"},
+                    "secret": {"type": "string", "enum": [_CLOUD_INIT]},
+                },
+            },
+            "keys": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"privateKey": {"type": "string", "example": _PASSWD}},
+                },
+            },
+        },
+        "required": ["adminPassword"],
+    }
+
+
+def test_scrub_inputs_schema_hides_secret_input_values() -> None:
+    schema = _inputs_schema()
+    copy, count = scrub_inputs_schema(schema)
+    text = str(copy)
+    for planted in (_DEFAULT, _ENCRYPTED, _PASSWORD, _CLOUD_INIT, _PASSWD):
+        assert planted not in text, planted
+    assert count == 6
+    props = copy["properties"]
+    assert props["adminPassword"] == {"type": "string", "encrypted": True, "default": _MARKER}
+    assert props["size"] == {"type": "string", "default": "small", "enum": ["small", "large"]}
+    assert props["login"]["properties"]["user"]["default"] == "<user>"
+    assert copy["required"] == ["adminPassword"]
+    assert _DEFAULT in str(schema), "the input is not changed"
+
+
 def test_scrub_leaves_yaml_without_secrets_as_it_is() -> None:
     source = "formatVersion: 1\ninputs: {}\nresources: {}\n"
     assert scrub_template_yaml(source) == (source, 0)
@@ -182,11 +332,14 @@ async def test_blueprint_get_hides_secret_values(vcfa: VcfAutomationConnector) -
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         mount_logins(mock)
         mock.get(_BP_1).respond(200, json=stored)
-        mock.get(f"{_BP_1}/inputs-schema").respond(200, json={"properties": {}})
+        mock.get(f"{_BP_1}/inputs-schema").respond(200, json=_inputs_schema())
         result = await run("vcfa.tenant.blueprint.get", {"id": "bp-1"})
     out = result["result"]
     content = out["blueprint"]["content"]
-    assert out["secrets_replaced"] >= 2
+    assert out["secrets_replaced"] == 4 + 6
+    for planted in (_DEFAULT, _ENCRYPTED, _PASSWORD, _CLOUD_INIT, _PASSWD):
+        assert planted not in str(result), planted
+    assert out["inputs_schema"]["properties"]["vmPass"]["default"] == _MARKER
     assert _PASSWORD not in content
     assert all(line not in content for line in body)
     assert "PRIVATE KEY" not in content

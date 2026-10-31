@@ -451,11 +451,15 @@ registered on both connectors:
   value in the YAML. `blueprint.get` still hides any secret value it
   finds in the YAML (`vcfa_yaml_secrets.scrub_template_yaml`, line by
   line, so a `cloudConfig` block is checked too): the value of every
-  secret-named key (the rule of `is_secret_param_name`) and every PEM
-  private key block become a `[REDACTED:...]` marker, and
-  `secrets_replaced` counts them. References such as
-  `${secret.<name>}` or `${input.<name>}` stay. Every other line comes
-  back as written.
+  secret-named key (the rule of `is_secret_param_name`), the whole
+  cloud-init `chpasswd` value and every PEM private key block become a
+  `[REDACTED:...]` marker. A secret input (an input under `inputs:` with
+  a secret name or `encrypted: true`) keeps its lines; only its
+  `default`, `const`, `enum`, `example` and `examples` become a marker,
+  in the YAML and in `inputs_schema` alike
+  (`vcfa_yaml_secrets.scrub_inputs_schema`). `secrets_replaced` counts
+  all markers. References such as `${secret.<name>}` or
+  `${input.<name>}` stay. Every other line comes back as written.
 - **No markers written back.** `blueprint.create` and `blueprint.update`
   refuse `content` that holds `[REDACTED`, before any call to the
   vendor. Otherwise a read, edit and update would write the marker into

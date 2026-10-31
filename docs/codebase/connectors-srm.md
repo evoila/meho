@@ -301,7 +301,9 @@ each plan it also reads the plan's protection groups (`protection_group_ids`,
 `protection_group_names`) and its newest run: the first page of the
 plan's history, asked for newest first (`sort_by=start_time_ms`,
 `order_by=desc`), from which it takes the row with the latest start time.
-Four plans are read at a time. The `last_run_*` fields are null for a
+The query sends `start_date=0`, so SRM searches the whole history and not
+only its default of the last 7 days: a plan whose newest run is a month
+old still shows that run. Four plans are read at a time. The `last_run_*` fields are null for a
 plan that never ran. A history task that fails or takes too long does not
 stop the list; the row says why in `last_run_error`.
 

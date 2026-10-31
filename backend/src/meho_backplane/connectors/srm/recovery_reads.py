@@ -374,12 +374,15 @@ async def _plan_details(
 
     The newest run comes from the first page of the plan's history, asked
     for newest first; the read then takes the newest row of that page, so
-    it is right even when SRM does not sort. A history task that fails or
-    takes too long fills ``last_run_error`` instead of stopping the list.
+    it is right even when SRM does not sort. Without ``start_date`` SRM
+    returns only the last seven days, so the query starts at 1970 to cover
+    every run the plan ever had. A history task that fails or takes too
+    long fills ``last_run_error`` instead of stopping the list.
     """
     async with gate:
         groups = await _list_all(conn, operator, target, _path(conn, PLAN_GROUPS, **ids))
         query = {
+            "start_date": "0",
             "sort_by": "start_time_ms",
             "order_by": "desc",
             "limit": str(PAGE_SIZE),

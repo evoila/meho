@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -485,9 +486,39 @@ async def test_plan_list_returns_state_groups_and_the_newest_run_of_each_plan(
     assert "made-up task error" in rows["plan-c"]["last_run_error"]
     query = history_a.calls[0].request.url.params
     assert (query["sort_by"], query["order_by"], query["offset"]) == ("start_time_ms", "desc", "0")
+    assert query["start_date"] == "0"
     assert all(
         not isinstance(value, dict) for row in result.result["items"] for value in row.values()
     )
+
+
+@pytest.mark.asyncio
+async def test_plan_list_finds_a_newest_run_older_than_seven_days(
+    connector: SrmConnector, api: respx.MockRouter
+) -> None:
+    """SRM answers the last 7 days by default; the read asks for all of the history."""
+    plans_path = f"{_P}/recovery-management/plans"
+    api.get(plans_path).respond(200, json=_page([{"id": "plan-a", "status": "READY_STATE"}]))
+    api.get(f"{plans_path}/plan-a/protection-groups").respond(200, json=_page([]))
+    now_ms = int(time.time() * 1000)
+    a_month_ago = {**_REPORT, "run_key": 7, "start_time_ms": now_ms - 30 * 24 * 3600 * 1000}
+
+    def history(request: httpx.Request) -> httpx.Response:
+        # The vendor default: a missing start_date means "now minus 7 days".
+        start = int(request.url.params.get("start_date", now_ms - 7 * 24 * 3600 * 1000))
+        rows = [row for row in [a_month_ago] if row["start_time_ms"] >= start]
+        return httpx.Response(
+            202, json={"id": "task-a", "status": "SUCCESS", "result": {"list": rows}}
+        )
+
+    api.get(f"{plans_path}/plan-a/history-reports").mock(side_effect=history)
+    result = await _dispatch("srm.plan.list", {"pairing_id": _PAIRING})
+
+    assert result.status == "ok", result.error
+    (row,) = result.result["items"]
+    assert row["last_run_report_id"] == "7"
+    assert row["last_run_result"] == "WARNINGS"
+    assert row["last_run_error"] is None
 
 
 @pytest.mark.asyncio

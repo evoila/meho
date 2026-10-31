@@ -126,6 +126,10 @@ def _check_settings(
 ) -> tuple[dict[str, Any], tuple[str, str, list[str]] | None]:
     """The wanted values by key, or ``(status, guidance, keys)`` of the first problem."""
     wanted: dict[str, Any] = {}
+    keys = [s["key"] for s in settings]
+    repeated = sorted({key for key in keys if keys.count(key) > 1})
+    if repeated:
+        return wanted, ("invalid_value", "Give each key only once.", repeated)
     unknown = [s["key"] for s in settings if s["key"] not in definitions]
     if unknown:
         return wanted, ("unknown_setting", "The host has no setting with this key.", unknown)

@@ -118,7 +118,7 @@ async def advanced_settings_show_impl(
         definitions = option_definitions(unwrap_vim_value(supported))
     except _READ_ERRORS as exc:
         definitions = {}
-        notes.append(f"defaults: read failed with {type(exc).__name__}: {exc}")
+        notes.append(f"defaults: read failed with {type(exc).__name__}")
     rows = [_setting_row(key, values[key], definitions.get(key)) for key in sorted(values)]
     if changed_only:
         rows = [row for row in rows if row["is_default"] is False]

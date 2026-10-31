@@ -5377,7 +5377,7 @@ refuses a change it does not allow (the answer is `failed` with the fault).
   no body and the broadcast keeps no params. Answers and previews count the
   communities and never show one; a fault text that holds any community of
   the request is replaced. An advanced setting whose key names a password, secret, token or
-  community shows `<hidden>` in every answer, preview and approval request.
+  community shows `<hidden>` in every answer and preview.
 - **SNMP fields left out.** MEHO reads the current agent settings and sends
   them back with only the asked fields changed, so a call that only turns
   the agent on keeps the port, communities, trap targets and options. A new

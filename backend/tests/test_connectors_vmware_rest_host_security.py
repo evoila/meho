@@ -285,6 +285,19 @@ async def test_advanced_settings_set_checks_before_sending(
     assert vim.writes() == []
 
 
+async def test_advanced_settings_set_refuses_a_key_given_twice(gate: GateRecorder) -> None:
+    vim = HostSecurityVim()
+    key = "UserVars.SuppressShellWarning"
+    out = await _call(
+        host_advanced_settings_set_composite,
+        vim,
+        {"host": "esxi-a", "settings": [{"key": key, "value": 0}, {"key": key, "value": 1}]},
+    )
+    assert out["status"] == "invalid_value", out
+    assert out["keys"] == [key]
+    assert vim.writes() == []
+
+
 async def test_advanced_settings_set_hides_a_secret_value(gate: GateRecorder) -> None:
     vim = HostSecurityVim()
     out = await _call(

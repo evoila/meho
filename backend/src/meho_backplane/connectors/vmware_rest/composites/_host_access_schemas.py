@@ -98,7 +98,7 @@ SNMP_SET: Final[dict[str, Any]] = op_parts(
                             "minLength": 1,
                             "maxLength": 255,
                             "pattern": _HOST_NAME_PATTERN,
-                            "description": "Trap receiver: a host name or an IPv4 address.",
+                            "description": "Trap receiver: a host name or an IP address.",
                         },
                         "port": {
                             "type": "integer",

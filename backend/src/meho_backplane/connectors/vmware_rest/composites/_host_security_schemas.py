@@ -188,7 +188,8 @@ ADVANCED_SETTINGS_SET: Final[dict[str, Any]] = op_parts(
         "preconditions": (
             "Read the settings first with vmware.host.advanced_settings.show to learn each "
             "key's value_type and range. MEHO checks every key before it sends anything: an "
-            "unknown key, a read-only setting or a wrong value type stops the whole call. "
+            "unknown key, a read-only setting, a wrong value type or a key given twice stops "
+            "the whole call. "
             "Some settings need a host reboot to take effect. The change waits for approval."
         ),
         "parameter_hints": {

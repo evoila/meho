@@ -329,6 +329,13 @@ PUBLISH_SET_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     ],
 }
 
+_PUBLISH_FIELDS: Final[list[str]] = [
+    "published",
+    "publish_url",
+    "authentication_method",
+    "user_name",
+]
+
 _PUBLISH_SCHEMA: Final[dict[str, Any]] = {
     "type": ["object", "null"],
     "description": "The publish settings. No password is shown.",
@@ -389,6 +396,13 @@ PUBLISH_SET_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
         "Give publish.publish_url to the vCenter that subscribes, and create the subscribed "
         "library there with vmware.composite.content_library.subscribed.create."
     ),
+    # Keep both settings blocks in the answer when the messages list spills.
+    "result_objects": {
+        "objects": {
+            "before": _PUBLISH_FIELDS,
+            "publish": _PUBLISH_FIELDS,
+        }
+    },
 }
 
 # ---------------------------------------------------------------------------

@@ -65,7 +65,7 @@ from meho_backplane.connectors.vcf_automation._op_schemas import field, list_of
 from meho_backplane.connectors.vcf_automation.provisioning_ops import _PROJECT_CREATE
 from meho_backplane.connectors.vcf_automation.typed_ops import VcfaTypedOp, validate_typed_ops
 
-__all__ = ["INFRA_GROUP", "VCFA_INFRA_OPS", "infra_ops"]
+__all__ = ["INFRA_GROUP", "VCFA_INFRA_OPS", "VCFA_INFRA_OP_IDS", "infra_ops"]
 
 # ---------------------------------------------------------------------------
 # Projects
@@ -247,3 +247,25 @@ def infra_ops(prefix: str, *, with_vra8_only: bool) -> tuple[VcfaTypedOp, ...]:
 VCFA_INFRA_OPS: Final[tuple[VcfaTypedOp, ...]] = infra_ops("vcfa.tenant", with_vra8_only=False)
 
 validate_typed_ops(VCFA_INFRA_OPS)
+
+
+def _written_out(*, op_id: str) -> str:
+    return op_id
+
+
+#: The same nine op ids, written out in full. The CLI guard test finds every
+#: typed op by reading literal op_id keyword arguments in this package.
+VCFA_INFRA_OP_IDS: Final[tuple[str, ...]] = (
+    _written_out(op_id="vcfa.tenant.cloud_account.list"),
+    _written_out(op_id="vcfa.tenant.cloud_account.create"),
+    _written_out(op_id="vcfa.tenant.cloud_account.delete"),
+    _written_out(op_id="vcfa.tenant.zone.set"),
+    _written_out(op_id="vcfa.tenant.flavor_profile.list"),
+    _written_out(op_id="vcfa.tenant.flavor_profile.set"),
+    _written_out(op_id="vcfa.tenant.network_profile.list"),
+    _written_out(op_id="vcfa.tenant.storage_profile.list"),
+    _written_out(op_id="vcfa.tenant.project.members.set"),
+)
+
+if tuple(op.op_id for op in VCFA_INFRA_OPS) != VCFA_INFRA_OP_IDS:
+    raise AssertionError("VCFA_INFRA_OP_IDS does not match VCFA_INFRA_OPS")

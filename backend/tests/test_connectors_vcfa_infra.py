@@ -25,6 +25,7 @@ import pytest
 import respx
 from sqlalchemy import select
 
+from meho_backplane.auth.operator import PrincipalKind
 from meho_backplane.connectors.vcf_automation import (
     VCFA_CONNECTOR_ID,
     VCFA_IMPL_ID,
@@ -579,6 +580,25 @@ async def test_the_delete_is_refused_without_a_matching_preview_hash(
         )
     assert result.status == "denied", result
     assert result.extras["error_code"] == code
+    assert not delete.called
+
+
+async def test_an_agent_is_refused_for_the_delete(vcfa: VcfAutomationConnector) -> None:
+    agent = OPERATOR.model_copy(update={"sub": "agent-1", "principal_kind": PrincipalKind.AGENT})
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        _mount_delete_reads(mock)
+        delete = mock.delete(_ACCOUNT).respond(202, json={"id": "t-1"})
+        result = await dispatch(
+            operator=agent,
+            connector_id=VCFA_CONNECTOR_ID,
+            op_id="vcfa.tenant.cloud_account.delete",
+            target=await resolved_target(),
+            params={"id": "ca-1"},
+        )
+    assert result.status == "denied", result
+    # The policy refuses an agent a destructive op; the preview check never runs.
+    assert result.extras["error_code"] == "denied"
     assert not delete.called
 
 

@@ -80,6 +80,7 @@ from fastapi import HTTPException
 
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.refresh import verify_access_token_with_refresh
+from meho_backplane.ui.auth.tenant import TenantRemovedError
 
 if TYPE_CHECKING:
     from meho_backplane.ui.auth.session_store import DecryptedSession
@@ -159,6 +160,11 @@ async def revalidate_read_session(
     login is strictly safer than rendering; a systemic misconfiguration
     still surfaces loudly because the login round-trip itself validates
     the fresh token through the same chain.
+
+    One exception passes through: :class:`~meho_backplane.ui.auth.tenant.TenantRemovedError`
+    (#5240). The token no longer allows the session's tenant, the row
+    was already moved, and the middleware sends the person to the
+    tenant picker instead of to login.
     """
     settings = get_settings()
     threshold = float(settings.ui_session_read_revalidation_seconds)
@@ -176,6 +182,9 @@ async def revalidate_read_session(
             decrypted,
             expected_audience=settings.keycloak_audience,
         )
+    except TenantRemovedError:
+        _last_validated.pop(decrypted.id, None)
+        raise
     except HTTPException as exc:
         _last_validated.pop(decrypted.id, None)
         # No token material -- only the classifier's detail code.

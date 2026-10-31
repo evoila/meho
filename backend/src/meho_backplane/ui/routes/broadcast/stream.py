@@ -16,7 +16,12 @@ constructor accepts only ``withCredentials``), so it sends cookies, not
 a Bearer token. This route lives under ``/ui/`` where
 :class:`~meho_backplane.ui.auth.middleware.UISessionMiddleware` gates it
 with the BFF session cookie. The tenant comes from the validated
-session, never from a query parameter.
+session, never from a query parameter. The ``meho_tenant`` parameter the
+feed puts on the stream URL is only the page's tenant marker (#5240):
+:class:`~meho_backplane.ui.csrf.CSRFMiddleware` refuses the connection
+with ``409`` when it is not the session's tenant any more (a switch in
+another browser tab), also on an ``EventSource`` reconnect. This route
+never reads it.
 
 What it streams (#3758)
 =======================

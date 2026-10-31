@@ -172,6 +172,7 @@ async def resolve_ui_operator(
     _refreshed, operator = await verify_access_token_with_refresh(
         decrypted,
         expected_audience=settings.keycloak_audience,
+        request_tenant=session_ctx.tenant_id,
     )
     _assert_token_matches_session(operator, session_ctx)
     return operator

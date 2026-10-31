@@ -229,6 +229,7 @@ async def _require_tenant_admin(session_ctx: UISessionContext) -> None:
     _refreshed, operator = await verify_access_token_with_refresh(
         decrypted,
         expected_audience=settings.keycloak_audience,
+        request_tenant=session_ctx.tenant_id,
     )
     if operator.tenant_role != TenantRole.TENANT_ADMIN:
         raise HTTPException(status_code=403, detail="tenant_admin_required")

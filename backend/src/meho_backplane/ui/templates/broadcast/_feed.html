@@ -77,7 +77,7 @@
     aria-hidden="true"
     x-on:htmx:sse-before-message="onSseMessage($event)"
     x-on:htmx:sse-open="connected = true"
-    x-on:htmx:sse-error="connected = false"
+    x-on:htmx:sse-error="onSseError()"
   ></div>
 
   {# ---------- Status bar -- connection + visible/cap row counts ---------- #}

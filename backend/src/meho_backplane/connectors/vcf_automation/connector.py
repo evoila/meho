@@ -150,6 +150,9 @@ from meho_backplane.connectors.vcf_automation.typed_ops import (
     TENANT_PROJECTS_PATH,
     provider_regions_path,
 )
+from meho_backplane.connectors.vmware_shared.vcfa_integration_mixin import (
+    VcfaIntegrationOpsMixin,
+)
 
 __all__ = ["VcfAutomationConfigurationError", "VcfAutomationConnector"]
 
@@ -182,7 +185,7 @@ def _plane_cache_key(target: VcfAutomationTargetLike, plane: Plane) -> tuple[str
     return credential_cache_key(target, fqdn, _tenant_domain(target))
 
 
-class VcfAutomationConnector(HttpConnector):
+class VcfAutomationConnector(VcfaIntegrationOpsMixin, HttpConnector):
     """VCF Automation 9.x REST connector with dual-plane Bearer-token auth.
 
     Two independent per-target token caches:
@@ -208,6 +211,8 @@ class VcfAutomationConnector(HttpConnector):
     impl_id = "vcfa-rest"
     supported_version_range = ">=9.0,<10.0"
     priority = 1
+    #: The op id prefix of the integration ops (``vmware_shared``).
+    integration_ns = "vcfa.tenant"
 
     def __init__(
         self,
@@ -606,6 +611,7 @@ class VcfAutomationConnector(HttpConnector):
         data: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
         timeout: Any = httpx.USE_CLIENT_DEFAULT,
+        content: bytes | None = None,
     ) -> httpx.Response:
         """Send one request with the per-plane 401 retry-once; return the response.
 
@@ -618,6 +624,7 @@ class VcfAutomationConnector(HttpConnector):
         per-request timeout, defaulting to :data:`httpx.USE_CLIENT_DEFAULT`
         so reads keep the client default unchanged (#3076). Callers that
         need a response header (the feature-flag ``ETag``) use this directly.
+        ``content`` is a raw body (the IPAM package upload chunks).
         """
 
         # vhost routing is applied per-request (never baked into the pooled
@@ -636,6 +643,7 @@ class VcfAutomationConnector(HttpConnector):
                 params=params_dict,
                 json=json_dict,
                 data=data,
+                content=content,
                 headers={**dict(headers), **vhost},
                 extensions=extensions,
                 timeout=timeout,
@@ -660,6 +668,30 @@ class VcfAutomationConnector(HttpConnector):
                 )
         resp.raise_for_status()
         return resp
+
+    async def _integration_send(
+        self,
+        target: VcfAutomationTargetLike,
+        operator: Operator,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        json: Any = None,
+        content: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> httpx.Response:
+        """One request of the integration ops (``vmware_shared``), with the 401 retry-once."""
+        return await self._send_with_retry(
+            target,
+            method.upper(),
+            path,
+            operator=operator,
+            params=params,
+            json=json,
+            content=content,
+            extra_headers=dict(headers) if headers else None,
+        )
 
     # ------------------------------------------------------------------
     # fingerprint / probe -- unauthenticated per-plane version endpoints

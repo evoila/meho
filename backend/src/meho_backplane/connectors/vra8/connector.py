@@ -94,6 +94,7 @@ pinned with their size, SHA-256 and the build the Orchestrator reports
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -111,6 +112,9 @@ from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
     ProbeResult,
+)
+from meho_backplane.connectors.vmware_shared.vcfa_integration_mixin import (
+    VcfaIntegrationOpsMixin,
 )
 from meho_backplane.connectors.vra8._paths import _ABOUT_PATH
 from meho_backplane.connectors.vra8.session import (
@@ -144,7 +148,7 @@ def _session_cache_key(target: Any) -> tuple[str, ...]:
     return credential_cache_key(target, domain)
 
 
-class Vra8Connector(HttpConnector):
+class Vra8Connector(VcfaIntegrationOpsMixin, HttpConnector):
     """vRealize Automation 8.x REST connector — two-step bearer session mint.
 
     Minted bearers cached in :attr:`_session_tokens` per credential
@@ -171,6 +175,8 @@ class Vra8Connector(HttpConnector):
     impl_id = "vcfa-vra8"
     supported_version_range = ">=8.0,<9.0"
     priority = 1
+    #: The op id prefix of the integration ops (``vmware_shared``).
+    integration_ns = "vcfa.vra8"
 
     def __init__(
         self,
@@ -277,6 +283,48 @@ class Vra8Connector(HttpConnector):
             params=params,
             extra_headers={"Accept": _JSON_ACCEPT},
         )
+
+    async def _integration_send(
+        self,
+        target: Vra8TargetLike,
+        operator: Operator,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        json: Any = None,
+        content: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> httpx.Response:
+        """One request of the integration ops (``vmware_shared``), any method.
+
+        Sends the bearer and ``Accept: application/json`` plus *headers*. On a
+        ``401`` it drops the token, logs in again and sends once more, so a
+        login that expired between two calls of a long op does not stop it.
+        Any other error answer raises :class:`httpx.HTTPStatusError`.
+        """
+        for attempt in (1, 2):
+            sent_headers = {
+                **await self.auth_headers(target, operator),
+                "Accept": _JSON_ACCEPT,
+                **(headers or {}),
+            }
+            client = await self._http_client(target)
+            resp = await client.request(
+                method.upper(),
+                path,
+                params=dict(params) if params is not None else None,
+                json=json,
+                content=content,
+                headers=sent_headers,
+                extensions=self._request_extensions(target),
+            )
+            if resp.status_code == 401 and attempt == 1:
+                await self._evict_session_token(target, rejected=resp.request)
+                continue
+            resp.raise_for_status()
+            return resp
+        raise AssertionError("unreachable")  # pragma: no cover
 
     # ------------------------------------------------------------------
     # fingerprint / probe — unauthenticated GET /iaas/api/about

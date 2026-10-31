@@ -98,6 +98,14 @@ var typedOpCLICoverage = map[string]string{
 	// `meho operation call` / MCP call_operation.
 	"vcfa.provider.feature_flag.list": "",
 	"vcfa.provider.feature_flag.set":  "",
+	// Integrations, IPAM provider packages and Git content sources:
+	// agent-surface-only, reached through `meho operation call` / MCP
+	// call_operation.
+	"vcfa.tenant.integration.list":    "",
+	"vcfa.tenant.integration.set":     "",
+	"vcfa.tenant.integration.delete":  "",
+	"vcfa.tenant.ipam_package.import": "",
+	"vcfa.tenant.git_repo.set":        "",
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed VCFA

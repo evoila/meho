@@ -279,8 +279,9 @@ again) never sees a setup `401`.
 
 `srm.appliance.register` and `srm.appliance.certificate.set` also need
 the vCenter SSO admin user: `sso_secret_ref`, read the same way. It goes
-to the appliance in the request body. The flight recorder gets the body
-with secret-named fields replaced.
+to the appliance in the request body. The flight recorder records no
+request body of a setup API call, only the method, path, status and
+answer.
 
 ### Vendor jobs: `register` and the server certificate
 

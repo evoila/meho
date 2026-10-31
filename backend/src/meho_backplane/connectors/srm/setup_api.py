@@ -319,13 +319,10 @@ class SetupApi:
                 raise SetupApiUnreachableError(
                     f"{method} {path}: the appliance did not answer ({type(exc).__name__})"
                 ) from None
+            # No request body in the trace: register and the server certificate
+            # send the SSO admin password in it.
             flight_recorder_capture.record_vendor_call(
-                span,
-                method=method,
-                request_headers=headers,
-                response=resp,
-                request_body=None if json is None else scrub_secret_named_values(json)[0],
-                request_content_type="application/json" if json is not None else None,
+                span, method=method, request_headers=headers, response=resp
             )
             if resp.status_code != httpx.codes.UNAUTHORIZED:
                 break

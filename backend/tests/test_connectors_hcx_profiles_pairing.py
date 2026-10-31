@@ -44,7 +44,10 @@ from meho_backplane.connectors.hcx import (
     site_pairing_writes,
 )
 from meho_backplane.connectors.hcx.profile_ops import HCX_PROFILE_OPS
-from meho_backplane.connectors.hcx.site_pairing_ops import HCX_SITE_PAIRING_OPS
+from meho_backplane.connectors.hcx.site_pairing_ops import (
+    HCX_SITE_PAIRING_OPS,
+    site_pairing_preview,
+)
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
@@ -54,6 +57,7 @@ from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
     reset_handler_cache,
 )
+from meho_backplane.operations._preview import PreviewContext
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
@@ -258,6 +262,28 @@ async def test_each_operation_has_the_table_risk_and_approval(hcx: HcxConnector)
 
 def test_the_pairing_is_pinned_as_a_credential_write() -> None:
     assert classify_op("hcx.site_pairing.set") == "credential_write"
+
+
+async def test_the_pairing_preview_names_the_change_and_no_secret(
+    hcx: HcxConnector, vault_reads: list[str]
+) -> None:
+    card = await site_pairing_preview(
+        PreviewContext(
+            descriptor=None,  # type: ignore[arg-type]
+            connector_instance=hcx,
+            operator=_operator(),
+            target=await _target(),
+            params={"action": "pair", "url": _REMOTE_URL, "remote_secret_ref": _SECRET_REF},
+            connector_id=HCX_CONNECTOR_ID,
+        )
+    )
+    assert card == {
+        "change": "pair this HCX Manager with a remote HCX site",
+        "remote_url": _REMOTE_URL,
+        "credentials_source": "vault",
+        "remote_secret_ref": _SECRET_REF,
+    }
+    assert vault_reads == []
 
 
 @pytest.mark.parametrize(

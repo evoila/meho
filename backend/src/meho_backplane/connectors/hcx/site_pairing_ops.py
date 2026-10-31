@@ -6,6 +6,11 @@
 Both are ``dangerous`` and wait for a person's approval. They are in the
 group ``hcx-manager``, next to ``hcx.site_pairing.list``. The bodies live
 in :mod:`meho_backplane.connectors.hcx.site_pairing_writes`.
+
+The pairing is pinned ``credential_write``, so a waiting approval shows no
+copy of its params. :func:`site_pairing_preview` (registered here) shows
+the approver what changes: the action, the remote address or site id and
+the Vault path. It never reads the secret.
 """
 
 from __future__ import annotations
@@ -13,8 +18,11 @@ from __future__ import annotations
 from typing import Any, Final
 
 from meho_backplane.connectors.hcx.op_types import GROUP_MANAGER, HcxTypedOp, string_schema
+from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
-__all__ = ["HCX_SITE_PAIRING_OPS"]
+__all__ = ["HCX_SITE_PAIRING_OPS", "site_pairing_preview"]
+
+_SITE_PAIRING_SET_OP_ID: Final = "hcx.site_pairing.set"
 
 _CERT_FIELDS: Final[dict[str, Any]] = {
     "certificate": string_schema("The certificate in PEM form."),
@@ -25,7 +33,7 @@ _CERT_FIELDS: Final[dict[str, Any]] = {
 }
 
 _SITE_PAIRING_SET = HcxTypedOp(
-    op_id="hcx.site_pairing.set",
+    op_id=_SITE_PAIRING_SET_OP_ID,
     handler_attr="site_pairing_set",
     summary="Pair this HCX Manager with a remote HCX site, or remove a site pairing.",
     description=(
@@ -231,3 +239,26 @@ _CERTIFICATE_TRUST = HcxTypedOp(
 )
 
 HCX_SITE_PAIRING_OPS: Final[tuple[HcxTypedOp, ...]] = (_SITE_PAIRING_SET, _CERTIFICATE_TRUST)
+
+
+def _text(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+async def site_pairing_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """What the approver sees for a pairing change. Reads nothing; holds no secret."""
+    if ctx.params.get("action") == "unpair":
+        return {
+            "change": "remove the HCX site pairing of one remote site",
+            "endpoint_id": _text(ctx.params.get("endpoint_id")),
+            "note": "Nothing is removed while a service mesh uses the site.",
+        }
+    return {
+        "change": "pair this HCX Manager with a remote HCX site",
+        "remote_url": _text(ctx.params.get("url")),
+        "credentials_source": "vault",
+        "remote_secret_ref": _text(ctx.params.get("remote_secret_ref")),
+    }
+
+
+register_preview_builder(_SITE_PAIRING_SET_OP_ID, site_pairing_preview)

@@ -351,7 +351,11 @@ bodies in `profile_writes.py` and `site_pairing_writes.py`. The three
 changes are `dangerous` with `requires_approval: true`: a person's call
 waits until a second person approves it; an agent's call is refused
 unless the agent holds a grant, and with a grant it waits for approval.
-None is `destructive`, so none needs a preview.
+None is `destructive`, so none needs a preview first. Because the pairing
+is a credential write, a waiting approval shows no copy of its inputs, so
+`site_pairing_preview` (`site_pairing_ops.py`) shows the approver what
+changes: the action, the remote address or site id, and the Vault path.
+It never reads the secret.
 
 `hcx.profile.list` takes an optional `kind` (`compute` or `network`).
 It reads `GET .../interconnect/computeProfiles` (`{"items": [...]}`) and

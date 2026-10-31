@@ -735,8 +735,9 @@ async def register_vcf_operations_typed_operations(
     *,
     embedding_service: EmbeddingService | None = None,
 ) -> None:
-    """Upsert every op in :data:`VROPS_TYPED_OPS`, :data:`VROPS_9_ONLY_TYPED_OPS`
-    and the licence ops into ``endpoint_descriptor``.
+    """Upsert every op in :data:`VROPS_TYPED_OPS`, :data:`VROPS_9_ONLY_TYPED_OPS`,
+    the licence ops and the fleet certificate and password ops into
+    ``endpoint_descriptor``.
 
     Queued onto the lifespan-driven registrar list via
     :func:`~meho_backplane.operations.typed_register.register_typed_op_registrar`
@@ -761,18 +762,28 @@ async def register_vcf_operations_typed_operations(
     # (ONNX runtime + model), which pure connector/handler unit tests
     # should not pay. Lifespan callers have it warmed by the time this runs.
     from meho_backplane.connectors.vcf_operations.connector import VcfOperationsConnector
+    from meho_backplane.connectors.vcf_operations.fleet_secrets_ops import (
+        VROPS_FLEET_SECRETS_OPS,
+        VROPS_FLEET_SECRETS_WHEN_TO_USE_BY_GROUP,
+    )
     from meho_backplane.connectors.vcf_operations.licensing_ops import (
         VROPS_LICENSING_OPS,
         VROPS_LICENSING_WHEN_TO_USE_BY_GROUP,
     )
     from meho_backplane.operations.typed_register import register_typed_operation
 
-    # The licence ops are 9.x only, so they join here and not in
+    # The licence and fleet ops are 9.x only, so they join here and not in
     # VROPS_TYPED_OPS (which the 8.x connector reuses).
-    ops = (*VROPS_TYPED_OPS, *VROPS_9_ONLY_TYPED_OPS, *VROPS_LICENSING_OPS)
+    ops = (
+        *VROPS_TYPED_OPS,
+        *VROPS_9_ONLY_TYPED_OPS,
+        *VROPS_LICENSING_OPS,
+        *VROPS_FLEET_SECRETS_OPS,
+    )
     when_to_use_by_group = {
         **VROPS_TYPED_WHEN_TO_USE_BY_GROUP,
         **VROPS_LICENSING_WHEN_TO_USE_BY_GROUP,
+        **VROPS_FLEET_SECRETS_WHEN_TO_USE_BY_GROUP,
     }
     for op in ops:
         handler = getattr(VcfOperationsConnector, op.handler_attr, None)

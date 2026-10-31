@@ -29,9 +29,9 @@ from meho_backplane.connectors.hcx.op_types import (
 
 __all__ = ["HCX_READ_OPS", "HCX_READ_WHEN_TO_USE_BY_GROUP"]
 
-#: Group texts: which reads each group holds, in plain words. The service
-#: mesh and inventory groups also hold the reads of ``diagnostics_ops`` and
-#: ``inventory_ops``.
+#: Group texts: which operations each group holds, in plain words. The
+#: service mesh, jobs and inventory groups also hold the operations of
+#: ``diagnostics_ops``, ``inventory_ops`` and ``service_mesh_ops``.
 HCX_READ_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
     GROUP_MANAGER: (
         "Use to read the HCX Manager itself and its partner sites: the Manager "
@@ -45,12 +45,19 @@ HCX_READ_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "state and tunnel state (hcx.appliance.list), and the diagnostics of one "
         "service mesh: start a run (hcx.service_mesh.diagnose), list the runs "
         "with their status (hcx.service_mesh.diagnostics.list) and read the "
-        "findings of one run (hcx.service_mesh.diagnostics.get)."
+        "findings of one run (hcx.service_mesh.diagnostics.get). It also holds "
+        "the changes, each of which waits for a person's approval: create a "
+        "service mesh (hcx.service_mesh.create), change its services, uplinks, "
+        "profiles or settings (hcx.service_mesh.update), resync it with its "
+        "compute profiles (hcx.service_mesh.resync) and delete it "
+        "(hcx.service_mesh.delete)."
     ),
     GROUP_JOBS_ALERTS: (
         "Use to follow HCX work and problems: one job with its state, progress "
-        "and failure flag (hcx.job.get), and the HCX alerts, with an optional "
-        "filter by severity, state, module, category or object (hcx.alert.list)."
+        "and failure flag (hcx.job.get), one interconnect task, the kind a "
+        "service mesh change starts, with its state, progress and error "
+        "(hcx.task.get), and the HCX alerts, with an optional filter by "
+        "severity, state, module, category or object (hcx.alert.list)."
     ),
     GROUP_INVENTORY: (
         "Use to plan a migration: the resource containers (vCenter instances) "

@@ -8,8 +8,10 @@
 site pairings, service mesh, jobs, alerts and inventory are defined in
 :mod:`meho_backplane.connectors.hcx.read_ops`,
 :mod:`meho_backplane.connectors.hcx.diagnostics_ops` and
-:mod:`meho_backplane.connectors.hcx.inventory_ops`; the network extension
-operations in :mod:`meho_backplane.connectors.hcx.network_extension_ops`. The dataclass +
+:mod:`meho_backplane.connectors.hcx.inventory_ops`; the service mesh changes
+and the task read in :mod:`meho_backplane.connectors.hcx.service_mesh_ops`; the
+network extension operations in
+:mod:`meho_backplane.connectors.hcx.network_extension_ops`. The dataclass +
 tuple + registrar shape mirrors :mod:`meho_backplane.connectors.nsx.typed_ops`.
 """
 
@@ -25,6 +27,7 @@ from meho_backplane.connectors.hcx.network_extension_ops import (
 )
 from meho_backplane.connectors.hcx.op_types import HcxTypedOp
 from meho_backplane.connectors.hcx.read_ops import HCX_READ_OPS, HCX_READ_WHEN_TO_USE_BY_GROUP
+from meho_backplane.connectors.hcx.service_mesh_ops import HCX_SERVICE_MESH_OPS
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -188,6 +191,7 @@ HCX_TYPED_OPS: tuple[HcxTypedOp, ...] = (
     *HCX_READ_OPS,
     *HCX_DIAGNOSTICS_OPS,
     *HCX_INVENTORY_OPS,
+    *HCX_SERVICE_MESH_OPS,
     *HCX_NETWORK_EXTENSION_OPS,
 )
 

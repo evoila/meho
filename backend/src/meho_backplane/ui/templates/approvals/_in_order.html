@@ -1,0 +1,187 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  "Approve group in order" modal (#3597).
+
+  Swapped into ``#meho-approvals-modal-container``. Lists the requests of one
+  change ticket oldest first. Before the run (``started`` false) it shows a
+  Start button. After a POST it shows what happened to each step, and one of:
+    * the step the run waits at (dangerous / destructive) with an
+      "Approve step k and go on" button that posts ``confirm_id`` = that
+      request's id, so the yes covers only that step;
+    * the step the run stopped at, why, and the steps it did not run;
+    * a done banner.
+  Every form here carries the CSRF token minted for this render; the route
+  re-sets the cookie on the same response.
+
+  Context:
+    work_ref, steps (list of {step, request, safety_level, outcome, detail}),
+    total, pending, started, warnings, waiting, waiting_context, stopped,
+    approved_now, reason, csrf_token, status_pill_class, result_state_pill
+-#}
+{% from "_icons.html" import icon %}
+{%- set outcome_badge = {
+  "skipped": ("ran OK before, skipped", "badge-ghost"),
+  "approved": ("approved now", "badge-success"),
+  "waiting": ("waits for your yes", "badge-warning"),
+  "stopped": ("stopped here", "badge-error"),
+  "not_run": ("not run", "badge-ghost"),
+} -%}
+<dialog id="meho-approvals-modal" class="modal" aria-label="Approve change ticket in order">
+  <div class="modal-box max-w-2xl" data-approval-in-order="{{ work_ref }}">
+    <div class="flex items-start justify-between gap-4">
+      <h3 class="text-lg font-semibold">
+        Approve in order: <span class="font-mono text-base">{{ work_ref }}</span>
+      </h3>
+      <button
+        type="button"
+        class="btn btn-sm btn-ghost btn-square"
+        aria-label="Close"
+        onclick="document.getElementById('meho-approvals-modal').close()"
+      >
+        {{ icon("x", class="size-4") }}
+      </button>
+    </div>
+
+    {% if not started %}
+      <p class="mt-2 text-sm text-base-content/70">
+        MEHO approves the pending steps one by one, oldest first. Each approval
+        runs the operation at once. MEHO goes on only when the run was OK. It
+        stops at the first step that fails or is refused. At a dangerous or
+        destructive step it waits and asks you first.
+      </p>
+    {% endif %}
+
+    {% for warning in warnings %}
+      <div role="alert" class="alert alert-warning mt-3 text-sm" data-approval-in-order-warning>
+        {{ warning }}
+      </div>
+    {% endfor %}
+
+    {% if stopped %}
+      <div role="alert" class="alert alert-error mt-3 items-start text-sm" data-approval-in-order-stopped="{{ stopped.step }}">
+        <div>
+          <p class="font-semibold">Stopped at step {{ stopped.step }} of {{ total }} ({{ stopped.request.op_id }}).</p>
+          <p class="[overflow-wrap:anywhere]">{{ stopped.detail }}</p>
+          {% set not_run = steps | selectattr("outcome", "equalto", "not_run") | list %}
+          {% if not_run %}
+            <p class="mt-1">Not run: step{{ "s" if not_run | length > 1 else "" }}
+              {{ not_run | map(attribute="step") | join(", ") }}. They still wait for a decision.</p>
+          {% endif %}
+        </div>
+      </div>
+    {% elif started and not waiting %}
+      <div role="status" class="alert alert-success mt-3 text-sm" data-approval-in-order-done>
+        {% if approved_now %}
+          Done. Approved {{ approved_now }} step{{ "s" if approved_now > 1 else "" }} in order.
+        {% else %}
+          Nothing to approve. Every step already ran OK.
+        {% endif %}
+      </div>
+    {% endif %}
+
+    <ol class="divide-base-content/8 mt-4 divide-y rounded-box border border-base-300" aria-label="Steps, oldest first">
+      {% for s in steps %}
+        <li class="flex items-start justify-between gap-3 px-3 py-2" data-approval-in-order-step="{{ s.step }}" data-outcome="{{ s.outcome }}">
+          <div class="min-w-0 space-y-1">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="text-xs font-semibold">Step {{ s.step }}</span>
+              <span class="truncate font-mono text-sm">{{ s.request.op_id }}</span>
+              {% if s.safety_level %}
+                <span class="badge badge-sm {{ 'badge-error' if s.safety_level in ('dangerous', 'destructive') else 'badge-ghost' }}">{{ s.safety_level }}</span>
+              {% endif %}
+            </div>
+            {% if s.detail %}
+              <p class="text-xs text-base-content/60 [overflow-wrap:anywhere]">{{ s.detail }}</p>
+            {% endif %}
+          </div>
+          {% if s.outcome in outcome_badge %}
+            {% set label, cls = outcome_badge[s.outcome] %}
+            <span class="badge badge-sm shrink-0 {{ cls }}">{{ label }}</span>
+          {% else %}
+            <span class="badge badge-sm shrink-0 {{ status_pill_class.get(s.request.status, 'badge-ghost') }}">{{ s.request.status }}</span>
+            {% if s.request.result_state %}
+              {% set run_label, run_class = result_state_pill.get(s.request.result_state, (s.request.result_state, "badge-ghost")) %}
+              <span class="badge badge-sm shrink-0 {{ run_class }}">{{ run_label }}</span>
+            {% endif %}
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ol>
+
+    {% if waiting %}
+      {#- The run waits at a dangerous / destructive step: show what it does,
+          then one button that approves only this step and goes on. -#}
+      <div role="alert" class="alert alert-error mt-4 items-start text-sm" data-approval-in-order-waiting="{{ waiting.step }}">
+        <div class="min-w-0">
+          <p class="font-semibold">
+            Step {{ waiting.step }} of {{ total }} is {{ waiting.safety_level }}. Approving it runs it at once.
+          </p>
+          {% if waiting_context.summary %}
+            <p class="[overflow-wrap:anywhere]">{{ waiting_context.summary }}</p>
+          {% endif %}
+          <p class="font-mono text-xs [overflow-wrap:anywhere]">
+            {{ waiting.request.op_id }} via {{ waiting.request.connector_id }}
+            {% if waiting_context.subject %}&middot; {{ waiting_context.subject }}{% endif %}
+            {% if waiting_context.target_name %}&middot; {{ waiting_context.target_name }}{% endif %}
+          </p>
+          {% if waiting_context.blast_radius %}
+            <p class="mt-1 font-semibold">What else is affected</p>
+            <pre class="whitespace-pre-wrap text-xs">{{ waiting_context.blast_radius | tojson(indent=2) }}</pre>
+          {% endif %}
+          <button
+            type="button"
+            class="link mt-1 text-xs"
+            hx-get="/ui/approvals/{{ waiting.request.id }}"
+            hx-target="#meho-approvals-modal-container"
+            hx-swap="innerHTML"
+          >See all details of this step</button>
+        </div>
+      </div>
+    {% endif %}
+
+    {% if (not started and pending) or waiting %}
+      <form
+        class="modal-action mt-4 flex-col items-stretch gap-3"
+        hx-post="/ui/approvals/in-order"
+        hx-target="#meho-approvals-modal-container"
+        hx-swap="innerHTML"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+        hx-disabled-elt="find button"
+      >
+        <input type="hidden" name="work_ref" value="{{ work_ref }}" />
+        {% if waiting %}
+          <input type="hidden" name="confirm_id" value="{{ waiting.request.id }}" />
+          <input type="hidden" name="reason" value="{{ reason }}" />
+        {% else %}
+          <label class="form-control w-full">
+            <span class="label-text text-xs">Reason <span class="opacity-60">(optional, recorded on every step)</span></span>
+            <textarea name="reason" rows="2" maxlength="2000" class="textarea textarea-bordered textarea-sm" aria-label="Decision reason"></textarea>
+          </label>
+        {% endif %}
+        <div class="flex items-center justify-end gap-2">
+          <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('meho-approvals-modal').close()">
+            {{ "Stop here" if waiting else "Cancel" }}
+          </button>
+          {% if waiting %}
+            <button type="submit" class="btn btn-sm btn-error" data-confirm="in-order-step">
+              Approve step {{ waiting.step }} and go on
+            </button>
+          {% else %}
+            <button type="submit" class="btn btn-sm btn-primary" data-confirm="in-order-start">
+              Start: approve in order
+            </button>
+          {% endif %}
+        </div>
+      </form>
+    {% else %}
+      <div class="modal-action">
+        <button type="button" class="btn btn-sm" onclick="document.getElementById('meho-approvals-modal').close()">Close</button>
+      </div>
+    {% endif %}
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="button" onclick="document.getElementById('meho-approvals-modal').close()">close</button>
+  </form>
+</dialog>

@@ -150,7 +150,10 @@ _REMOTE_LOGIN = SrmTypedOp(
                 "description": (
                     "Vault path (KV version 2, mount 'secret') of the remote site's "
                     "vCenter single sign-on account, with the keys 'username' and "
-                    "'password'. A path, never the password itself."
+                    "'password'. A path, never the password itself. It must sit under "
+                    "the same Vault folder as this target's own secret_ref, or under "
+                    "the folder an operator set in the target's extras key "
+                    "'remote_secret_prefix'. Any other path is refused before Vault is read."
                 ),
             },
         },

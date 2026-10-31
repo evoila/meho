@@ -68,6 +68,7 @@ _P = f"{_API}/pairings/{_PAIRING}"
 _PLAN = f"{_P}/recovery-management/plans/plan-0001"
 _PASSWORD = "local-password-value"
 _REMOTE_PASSWORD = "remote-password-value"
+_REMOTE_REF = "targets/recovery-reads/remote-site"
 _PEM = "-----BEGIN CERTIFICATE-----\nMIIBmadeup\n-----END CERTIFICATE-----"
 
 
@@ -140,6 +141,7 @@ class _Target:
         self.fqdn = None
         self.secret_ref = "targets/recovery-reads/srm"
         self.auth_model = "shared_service_account"
+        self.extras: dict[str, Any] = {}
 
 
 def _operator() -> Operator:
@@ -173,12 +175,12 @@ def api() -> Iterator[respx.MockRouter]:
         yield mock
 
 
-async def _dispatch(op_id: str, params: dict[str, Any]) -> Any:
+async def _dispatch(op_id: str, params: dict[str, Any], target: _Target | None = None) -> Any:
     return await dispatch(
         operator=_operator(),
         connector_id=SRM_CONNECTOR_ID,
         op_id=op_id,
-        target=_Target(),
+        target=target or _Target(),
         params=params,
     )
 
@@ -262,7 +264,7 @@ async def test_remote_login_sends_the_vault_account_and_never_returns_it(
     post = api.post(f"{_P}/remote-session").respond(204)
     api.get(f"{_P}/remote-session").respond(200, json={"username": "remote-svc"})
     result = await _dispatch(
-        "srm.remote_login", {"pairing_id": _PAIRING, "secret_ref": "targets/remote-site"}
+        "srm.remote_login", {"pairing_id": _PAIRING, "secret_ref": _REMOTE_REF}
     )
 
     assert result.status == "ok", result.error
@@ -276,7 +278,7 @@ async def test_remote_login_sends_the_vault_account_and_never_returns_it(
     expected = base64.b64encode(f"remote-svc:{_REMOTE_PASSWORD}".encode()).decode()
     assert request.headers["authorization"] == f"Basic {expected}"
     assert _remote_secret.await_args.kwargs["param"] == "secret_ref"
-    assert _remote_secret.await_args.args[0].secret_ref == "targets/remote-site"
+    assert _remote_secret.await_args.args[0].secret_ref == _REMOTE_REF
     rendered = json.dumps(result.result) + json.dumps(result.extras, default=str)
     assert _REMOTE_PASSWORD not in rendered
     assert _PASSWORD not in rendered
@@ -288,7 +290,7 @@ async def test_remote_login_refused_twice_names_the_remote_account(
 ) -> None:
     post = api.post(f"{_P}/remote-session").respond(401)
     result = await _dispatch(
-        "srm.remote_login", {"pairing_id": _PAIRING, "secret_ref": "targets/remote-site"}
+        "srm.remote_login", {"pairing_id": _PAIRING, "secret_ref": _REMOTE_REF}
     )
 
     assert result.status == "error"
@@ -308,12 +310,64 @@ async def test_remote_login_without_a_password_sends_nothing(
     )
     post = api.post(f"{_P}/remote-session").respond(204)
     result = await _dispatch(
-        "srm.remote_login", {"pairing_id": _PAIRING, "secret_ref": "targets/remote-site"}
+        "srm.remote_login", {"pairing_id": _PAIRING, "secret_ref": _REMOTE_REF}
     )
 
     assert result.status == "error"
     assert post.call_count == 0
     assert "Nothing was sent" in (result.error or "") + json.dumps(result.extras, default=str)
+
+
+@pytest.mark.parametrize(
+    "secret_ref",
+    [
+        "targets/other-site/login",
+        "other/recovery-reads/remote-site",
+        "targets/recovery-reads/../remote-site",
+        "gsm:proj/recovery-reads/remote-site",
+    ],
+)
+@pytest.mark.asyncio
+async def test_remote_login_refuses_a_secret_ref_outside_the_allowed_prefix(
+    connector: SrmConnector, api: respx.MockRouter, _remote_secret: AsyncMock, secret_ref: str
+) -> None:
+    route = api.route(url__regex=r".*").respond(204)
+    result = await _dispatch("srm.remote_login", {"pairing_id": _PAIRING, "secret_ref": secret_ref})
+
+    assert result.status == "error"
+    rendered = (result.error or "") + json.dumps(result.extras, default=str)
+    assert "outside the allowed secret prefix" in rendered
+    assert _remote_secret.await_count == 0
+    assert route.call_count == 0
+    assert api.routes[0].call_count == 0  # not even the SRM login
+
+
+@pytest.mark.asyncio
+async def test_remote_login_uses_the_prefix_an_operator_set_in_extras(
+    connector: SrmConnector, api: respx.MockRouter, _remote_secret: AsyncMock
+) -> None:
+    post = api.post(f"{_P}/remote-session").respond(204)
+    api.get(f"{_P}/remote-session").respond(200, json={"username": "remote-svc"})
+    target = _Target()
+    target.extras = {"remote_secret_prefix": "remote-sites/site-b"}
+
+    allowed = await _dispatch(
+        "srm.remote_login",
+        {"pairing_id": _PAIRING, "secret_ref": "remote-sites/site-b/login"},
+        target,
+    )
+    assert allowed.status == "ok", allowed.error
+    assert post.call_count == 1
+    assert _remote_secret.await_args.args[0].secret_ref == "remote-sites/site-b/login"
+
+    refused = await _dispatch(
+        "srm.remote_login",
+        {"pairing_id": _PAIRING, "secret_ref": _REMOTE_REF},
+        target,
+    )
+    assert refused.status == "error"
+    assert _remote_secret.await_count == 1
+    assert post.call_count == 1
 
 
 # ---------------------------------------------------------------------------

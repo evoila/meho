@@ -40,7 +40,7 @@ lives in `connectors/vmware_shared/dr_rest.py` (the base class
 | `srm.about` | SRM server name, status, version, build and the paired vCenter, plus a short view of the certificates. MEHO uses the same call to detect the version. | `GET /api/rest/srm/v2/server/info` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
 | `srm.api_file.get` | Read one API description file the appliance serves (the SRM API or the appliance setup API). Returns a checked copy (secret values replaced) with its size, SHA-256 and the SRM version; the text is in parts behind a result handle. | `GET /api/rest/srm/v2/open-api.yaml`, `GET /api/rest/configure/v2/open-api.yaml` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
 | `srm.pairing.list` | The site pairings. One row per pairing: the pairing id and, for both sites, the SRM server and the vCenter with id, name, address, status (OK, WARNING, ERROR), version and build. | `GET /pairings` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
-| `srm.remote_login` | Log in to the remote site of a pairing. The account comes from the Vault path in `secret_ref`; the answer names the remote user, never the password. | `POST /pairings/{pairing_id}/remote-session`, then `GET /pairings/{pairing_id}/remote-session` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
+| `srm.remote_login` | Log in to the remote site of a pairing. The account comes from the Vault path in `secret_ref`, which must sit under an allowed folder (see below); the answer names the remote user, never the password. | `POST /pairings/{pairing_id}/remote-session`, then `GET /pairings/{pairing_id}/remote-session` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
 | `srm.plan.list` | The recovery plans. One row per plan: id, name, status, `needs_cleanup`, `is_running`, progress, site names, folder, description. | `GET /pairings/{pairing_id}/recovery-management/plans` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
 | `srm.plan.get` | One plan with its protection groups, its recovery steps in one view mode (test, recovery, cleanup or reprotect), its VMs with priority and start action, and with `vm_id` that VM's full recovery settings. | `GET .../plans/{plan_id}`, `GET .../plans/{plan_id}/protection-groups`, `GET .../plans/{plan_id}/recovery-steps/{view_mode}`, `GET .../plans/{plan_id}/vms`, `GET .../plans/{plan_id}/vms/{vm_id}/recovery-settings` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
 | `srm.group.list` | The protection groups with replication type (HBR is vSphere Replication, ABR is array based), VM count and state; with `group_id` the VMs of that group with their protection state and errors. | `GET /pairings/{pairing_id}/protection-management/groups`, `GET .../groups/{group_id}/vms` | read (`safe`, no approval) | 8.8, 9.0, 9.1 |
@@ -263,9 +263,22 @@ rows. A long list is stored behind a result handle; read it with
 (`local_srm`, `remote_srm`, `local_vc`, `remote_vc`) into columns such
 as `remote_srm_status`. Certificates are left out.
 
-**`srm.remote_login`** reads the Vault path in `secret_ref` (KV version 2,
-mount `secret`, keys `username` and `password`) under the caller's
-identity, then sends `POST /pairings/{pairing_id}/remote-session` with
+**`srm.remote_login`** first checks the Vault path in `secret_ref`. The
+path must sit under an allowed folder (prefix):
+
+- by default, the folder of the target's own `secret_ref` (a target with
+  `targets/srm-a` allows `targets/<anything>`);
+- or the folder an operator sets in the target's `extras` key
+  `remote_secret_prefix`, which replaces the default.
+
+Any other path, or a target where no folder can be found, is refused
+before Vault is read and before any request. The check is the same one
+the VMware guest operations use for `guest_secret_ref`
+(`check_guest_secret_ref` in `vmware_rest/composites/_guest_secret_ref.py`).
+Errors show only the first part of the path.
+
+The read then gets the secret (KV version 2, mount `secret`, keys
+`username` and `password`) under the caller's identity, and sends `POST /pairings/{pairing_id}/remote-session` with
 the SRM session header and HTTP Basic of that account. It then reads the
 remote user back. The password is never in the answer, a log line or
 the stored vendor call (the flight recorder hides the `Authorization`

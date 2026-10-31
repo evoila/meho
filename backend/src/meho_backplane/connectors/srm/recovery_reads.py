@@ -39,6 +39,7 @@ import httpx
 
 from meho_backplane.connectors._shared.vault_creds import (
     load_param_secret_data,
+    secret_ref_prefix,
     strip_credential_value,
 )
 from meho_backplane.connectors._shared.vcf_auth import basic_auth_header
@@ -61,6 +62,9 @@ from meho_backplane.connectors.srm.recovery_paths import (
     SRM_ISSUES,
     TASK,
 )
+from meho_backplane.connectors.vmware_rest.composites._guest_secret_ref import (
+    check_guest_secret_ref,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -71,6 +75,7 @@ __all__ = [
     "HISTORY_POLL_SECONDS",
     "HISTORY_WAIT_SECONDS",
     "NEEDS_CLEANUP_STATUSES",
+    "REMOTE_SECRET_PREFIX_EXTRA",
     "group_list",
     "history_list",
     "issue_list",
@@ -79,6 +84,11 @@ __all__ = [
     "plan_list",
     "remote_login",
 ]
+
+#: Per-target ``extras`` key that replaces the default allowed prefix of the
+#: ``secret_ref`` that ``srm.remote_login`` takes. The default is the
+#: namespace of the target's own ``secret_ref``.
+REMOTE_SECRET_PREFIX_EXTRA: Final = "remote_secret_prefix"
 
 #: Rows asked for per page, and the most pages one read fetches.
 PAGE_SIZE: Final = 100
@@ -218,6 +228,16 @@ class _SecretRefTarget:
 async def _remote_credentials(
     operator: Operator, target: DrTargetLike, secret_ref: str
 ) -> tuple[str, str]:
+    """Read the remote site's account from *secret_ref*.
+
+    The reference must fall under the target's allowed prefix: the
+    namespace of the target's own ``secret_ref``, or
+    ``extras["remote_secret_prefix"]`` when an operator set it. Any other
+    reference is refused here, before any Vault read or request.
+    """
+    check_guest_secret_ref(
+        secret_ref, target, param="secret_ref", extra_key=REMOTE_SECRET_PREFIX_EXTRA
+    )
     data = await load_param_secret_data(
         _SecretRefTarget(name=target.name, host=target.host, secret_ref=secret_ref),
         operator,
@@ -227,8 +247,8 @@ async def _remote_credentials(
     password = strip_credential_value(data.get("password") or "")
     if not username or not password:
         raise ValueError(
-            f"the Vault secret at secret_ref={secret_ref!r} needs the keys 'username' and "
-            "'password' with text. Nothing was sent."
+            f"the Vault secret at secret_ref={secret_ref_prefix(secret_ref)!r} needs the "
+            "keys 'username' and 'password' with text. Nothing was sent."
         )
     return username, password
 
@@ -369,6 +389,7 @@ async def plan_get(
             _path(conn, PLAN_VM_SETTINGS, **ids, vm_id=vm_id),
             operator=operator,
         )
+        settings = settings if isinstance(settings, dict) else {}
         result["vm_recovery_settings"] = {"vm_id": vm_id, **settings}
         result["vm_recovery_settings"].pop("_meta", None)
     return result
@@ -518,7 +539,7 @@ async def _wait_for_task(
     conn: SrmConnector, operator: Operator, target: DrTargetLike, task: dict[str, Any]
 ) -> dict[str, Any]:
     """Check ``GET /tasks/{id}`` until the task ends; raise when it fails or takes too long."""
-    task_id = task.get("id")
+    task_id = task.get("id") if isinstance(task, dict) else None
     if not task_id:
         raise RuntimeError("SRM answered the history read with no task id")
     waited = 0.0

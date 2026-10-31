@@ -65,6 +65,13 @@ def _object(description: str, properties: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
+    """The same schema, with ``null`` allowed as well."""
+    type_ = schema["type"]
+    types = type_ if isinstance(type_, list) else [type_]
+    return {**schema, "type": [*types, "null"]}
+
+
 def _list_of(description: str, item_properties: dict[str, Any]) -> dict[str, Any]:
     """An array of open objects that name their main fields."""
     return {
@@ -623,10 +630,13 @@ _PROXY_FIELDS: dict[str, Any] = {
 PROXY_GET_RESPONSE: dict[str, Any] = _object(
     "The installer proxy settings (vendor ProxyConfiguration, password removed).",
     {
-        "proxy": _object(
-            "The proxy settings; null when the appliance did not answer.", _PROXY_FIELDS
+        "proxy": _nullable(
+            _object("The proxy settings; null when the appliance did not answer.", _PROXY_FIELDS)
         ),
         "task": _TASK_STATE,
+        "message": _field(
+            "string", "Set when the settings could not be read after the job: why proxy is null."
+        ),
     },
 )
 
@@ -653,27 +663,36 @@ PROXY_SET_RESPONSE: dict[str, Any] = _object(
 SETTINGS_GET_RESPONSE: dict[str, Any] = _object(
     "The CEIP state and the system settings.",
     {
-        "ceip": _object(
-            "Vendor Ceip; null when the appliance did not answer.",
-            {
-                "status": _field(
-                    "string",
-                    "ENABLED, DISABLED, ENABLING, DISABLING, ENABLING_FAILED or DISABLING_FAILED.",
-                ),
-                "instanceId": _field("string", "The VCF instance id."),
-            },
+        "ceip": _nullable(
+            _object(
+                "Vendor Ceip; null when the appliance did not answer.",
+                {
+                    "status": _field(
+                        "string",
+                        "ENABLED, DISABLED, ENABLING, DISABLING, ENABLING_FAILED or "
+                        "DISABLING_FAILED.",
+                    ),
+                    "instanceId": _field("string", "The VCF instance id."),
+                },
+            )
         ),
-        "system": _object(
-            "Vendor System; null when the appliance did not answer.",
-            {
-                "id": _field("string", "The system id."),
-                "maxAllowedDomainsInSubscription": _field(
-                    "integer", "The most domains allowed in subscription mode."
-                ),
-                "vcfInstanceName": _field("string", "The instance name (9.1 and newer)."),
-            },
+        "system": _nullable(
+            _object(
+                "Vendor System; null when the appliance did not answer.",
+                {
+                    "id": _field("string", "The system id."),
+                    "maxAllowedDomainsInSubscription": _field(
+                        "integer", "The most domains allowed in subscription mode."
+                    ),
+                    "vcfInstanceName": _field("string", "The instance name (9.1 and newer)."),
+                },
+            )
         ),
         "task": _TASK_STATE,
+        "message": _field(
+            "string",
+            "Set when a setting could not be read after the job: why ceip or system is null.",
+        ),
     },
 )
 
@@ -694,7 +713,7 @@ SETTINGS_SET_RESPONSE: dict[str, Any] = _object(
             {
                 "step": _field("string", "ceip or system."),
                 "result": _field("string", "accepted, done, failed, unknown or not_run."),
-                "task_id": _field("string", "On accepted: the vendor job id."),
+                "task_id": _field(["string", "null"], "On accepted: the vendor job id."),
                 "error": _object("On failed or unknown: the vendor error.", _REJECTION_FIELDS),
             },
         ),
@@ -750,12 +769,16 @@ RESOURCES_CALCULATE_RESPONSE: dict[str, Any] = _object(
                 ("esx_hosts", ["integer", "null"], "ESX hosts"),
             )
         },
-        "required": _object("What the spec needs.", _CAPACITY_FIELDS),
-        "available": _object("What the hosts have.", _CAPACITY_FIELDS),
+        "required": _nullable(
+            _object("What the spec needs; null until the calculation ended.", _CAPACITY_FIELDS)
+        ),
+        "available": _nullable(
+            _object("What the hosts have; null until the calculation ended.", _CAPACITY_FIELDS)
+        ),
         "checks": _list_of(
             "One row per check, nested checks included.",
             {
-                "description": _field("string", "What the check tests."),
+                "description": _field(["string", "null"], "What the check tests."),
                 "severity": _field(["string", "null"], "WARNING, ERROR or INFO."),
                 "result_status": _field(["string", "null"], "The result of the check."),
                 "error": _field(["string", "null"], "The vendor error text of the check."),

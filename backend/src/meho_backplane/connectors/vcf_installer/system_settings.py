@@ -129,6 +129,29 @@ def _not_reachable_error(exc: httpx.TransportError) -> str:
     return f"no answer from the appliance ({type(exc).__name__}); the change may or may not be done"
 
 
+async def _read_after_job(
+    connector: InstallerConnector,
+    operator: Operator,
+    target: InstallerTargetLike,
+    path: str,
+    *,
+    after_job: bool,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """A settings read: ``(payload, None)``, or ``(None, why)`` when the appliance went quiet.
+
+    The lost answer is kept out of the dispatcher only *after_job*: the job
+    state was read a moment ago, and the caller must not lose it. Without a
+    job, the error goes on, and the dispatcher reports it.
+    """
+    try:
+        return await connector._get_json_with_session_retry(target, path, operator=operator), None
+    except httpx.TransportError as exc:
+        if not after_job or not is_not_reachable(exc):
+            raise
+        _log.info("installer_settings_not_reachable", target=target.name, path=path)
+        return None, f"no answer from the appliance ({type(exc).__name__}) while reading {path}"
+
+
 async def _status_block(
     connector: InstallerConnector,
     operator: Operator,
@@ -154,7 +177,9 @@ async def installer_proxy_get_impl(
 
     The ``password`` key is removed at every depth. With ``task_id``, the
     job is read first; when the appliance does not answer, the answer is
-    ``{"proxy": None, "task": {"outcome": "not_reachable", ...}}``.
+    ``{"proxy": None, "task": {"outcome": "not_reachable", ...}}``. When it
+    stops answering after the job was read, the job state is kept, ``proxy``
+    is ``None`` and ``message`` says why.
     """
     task = await _status_block(connector, operator, target, params)
     result: dict[str, Any] = {}
@@ -163,8 +188,12 @@ async def installer_proxy_get_impl(
         if task["outcome"] == "not_reachable":
             result["proxy"] = None
             return result
-    payload = await connector._get_json_with_session_retry(target, _PROXY_PATH, operator=operator)
-    result["proxy"] = scrub_password_keys(payload)
+    payload, message = await _read_after_job(
+        connector, operator, target, _PROXY_PATH, after_job=task is not None
+    )
+    result["proxy"] = None if payload is None else scrub_password_keys(payload)
+    if message is not None:
+        result["message"] = message
     return result
 
 
@@ -254,7 +283,9 @@ async def installer_settings_get_impl(
 ) -> dict[str, Any]:
     """``installer.system.settings.get`` — CEIP state and system settings, plus the job state.
 
-    Same ``task_id`` rule as :func:`installer_proxy_get_impl`.
+    Same ``task_id`` rule as :func:`installer_proxy_get_impl`: a lost answer
+    after the job was read keeps the job state, and the setting that could
+    not be read is ``None`` with a ``message``.
     """
     task = await _status_block(connector, operator, target, params)
     result: dict[str, Any] = {}
@@ -263,12 +294,18 @@ async def installer_settings_get_impl(
         if task["outcome"] == "not_reachable":
             result.update(ceip=None, system=None)
             return result
-    result["ceip"] = await connector._get_json_with_session_retry(
-        target, _CEIP_PATH, operator=operator
+    after_job = task is not None
+    result["ceip"], message = await _read_after_job(
+        connector, operator, target, _CEIP_PATH, after_job=after_job
     )
-    result["system"] = await connector._get_json_with_session_retry(
-        target, _SYSTEM_PATH, operator=operator
-    )
+    if message is None:
+        result["system"], message = await _read_after_job(
+            connector, operator, target, _SYSTEM_PATH, after_job=after_job
+        )
+    else:
+        result["system"] = None
+    if message is not None:
+        result["message"] = message
     return result
 
 
@@ -422,6 +459,18 @@ def _names_in_certificate(pem: Any) -> set[str]:
     return names
 
 
+def _certificate_covers(names: set[str], host: str) -> bool:
+    """True when one of *names* is *host*, or a wildcard name that covers it.
+
+    A wildcard covers one label, as in RFC 6125: ``*.example.test`` covers
+    ``depot.example.test``, not ``example.test`` or ``a.depot.example.test``.
+    """
+    if host in names:
+        return True
+    _, dot, parent = host.partition(".")
+    return bool(dot) and f"*.{parent}" in names
+
+
 async def _depot_host(
     connector: InstallerConnector, operator: Operator, target: InstallerTargetLike
 ) -> str | None:
@@ -462,7 +511,8 @@ async def installer_trusted_certificate_remove_impl(
     """``installer.system.trusted-certificates.remove`` — remove one certificate by alias.
 
     Before the delete, reads the depot host and the certificate, so the
-    answer can warn when the certificate names the depot that is set. An
+    answer can warn when the certificate names the depot that is set (by its
+    name, or by a wildcard name that covers it). An
     unknown alias (vendor ``404``) raises
     :class:`~meho_backplane.connectors.base.ConnectorResourceNotFoundError`.
     """
@@ -485,7 +535,9 @@ async def installer_trusted_certificate_remove_impl(
             ) from exc
         raise
     result: dict[str, Any] = {"status": "removed", "alias": alias}
-    if depot_host and (depot_host in _names_in_certificate(pem) or depot_host in alias.lower()):
+    if depot_host and (
+        _certificate_covers(_names_in_certificate(pem), depot_host) or depot_host in alias.lower()
+    ):
         result["warning"] = (
             f"This certificate belongs to the depot that is set ({depot_host}). The installer "
             "can no longer reach that depot over HTTPS until the certificate is added again "

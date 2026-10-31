@@ -303,7 +303,7 @@ same registrar upserts them. The shared metadata type and the group keys live in
 | `installer.system.proxy.set` | Set the proxy, or turn it off. The password comes from a Vault path. | `PATCH /v1/system/proxy-configuration` (vendor job) | `dangerous` + approval | 9.0, 9.1 |
 | `installer.system.settings.get` | CEIP state and the most domains allowed in subscription mode. With `task_id`, also the state of a CEIP job. | `GET /v1/system/ceip`, `GET /v1/system`, `GET /v1/tasks/{id}` | `safe` | 9.0, 9.1 |
 | `installer.system.settings.set` | Turn CEIP on or off; change the domain limit (1 or more). | `PATCH /v1/system/ceip` (vendor job), `PATCH /v1/system` | `caution` + approval | 9.0, 9.1 |
-| `installer.system.trusted-certificates.remove` | Remove a certificate from the trust store by alias. Warns when it belongs to the depot that is set. | `DELETE /v1/sddc-manager/trusted-certificates/{alias}` | `dangerous` + approval | 9.0, 9.1 |
+| `installer.system.trusted-certificates.remove` | Remove a certificate from the trust store by alias. Warns when it names the depot that is set, also by a wildcard name. | `DELETE /v1/sddc-manager/trusted-certificates/{alias}` | `dangerous` + approval | 9.0, 9.1 |
 | `installer.sddc.resources.calculate` | Calculate the CPU, memory and storage a spec needs and compare it with the hosts, check by check. Changes nothing. | `POST /v1/sddcs/resources-calculation`, then `GET /v1/sddcs/resources-calculation/{id}` | `safe` | 9.1+ |
 
 Groups: the proxy and settings operations are in the new `installer-system`
@@ -331,13 +331,15 @@ vendor `Task` and does the work after that.
   vendor `state`, a plain `outcome` (`queued`, `running`, `succeeded`,
   `failed`, `unknown`, `not_reachable`), the progress (sub-tasks done of all)
   when the vendor gives sub-tasks, and the vendor error texts.
-- Before a start, the change lists `GET /v1/tasks` and looks for a job that
-  has not ended whose type or name holds the word `PROXY` (not `CLOUD`) or
-  `CEIP`. The CEIP change also reads the CEIP state: `ENABLING` or `DISABLING`
-  means a change runs. If one runs, the answer is `already_running` with that
-  job's id, and nothing starts. The vendor does not document its task types, so
-  the match is on words. It is a help, not a lock: two callers can both check
-  before either starts, and a job that just ended is no longer in the list.
+- Before a start, the change lists `GET /v1/tasks` page by page (100 jobs a
+  page, up to 100 pages) and looks for a job that has not ended whose type or
+  name holds the word `PROXY` (not `CLOUD`) or `CEIP`. It stops at the first
+  match or at the last page. The CEIP change also reads the CEIP state:
+  `ENABLING` or `DISABLING` means a change runs. If one runs, the answer is
+  `already_running` with that job's id, and nothing starts. The vendor does
+  not document its task types, so the match is on words. It is a help, not a
+  lock: two callers can both check before either starts, and a job that just
+  ended is no longer in the list.
 - After a lost reply (`status: unknown`), do not start again blindly. Read
   the status read without `task_id` first: it shows the settings and, for
   CEIP, a changing state.
@@ -351,8 +353,10 @@ vendor `Task` and does the work after that.
   anything.
 - When the appliance does not answer (for example during its own upgrade), the
   status read returns `outcome: not_reachable` with the job id and
-  `checked_at`, never `failed`. MEHO keeps no job state between calls; the
-  caller keeps the job id (or the async run handle of the change).
+  `checked_at`, never `failed`. When it stops answering right after the job
+  was read, the answer keeps the job state, the setting that could not be
+  read is `null`, and `message` says why. MEHO keeps no job state between
+  calls; the caller keeps the job id (or the async run handle of the change).
 - `installer.system.settings.set` runs up to two steps: CEIP, then the system
   setting. Each step reports `accepted`, `done`, `failed`, `unknown` or
   `not_run`. A failed step stops the rest, and the steps that ran are not
@@ -383,7 +387,9 @@ as flat keys (`required_cores`, `required_memory`, `required_storage`,
 `required_esx_hosts` and the same four `available_*` keys). The operation is
 pinned as a credential write (its request holds the spec passwords), so a long
 answer keeps only these flat keys inline (`result_scalars`) and drops the
-`required` / `available` objects.
+`required` / `available` objects. Every text of the answer that holds a
+password from Vault is replaced, at any depth, because the vendor may echo
+the spec in a check's description or error.
 
 - The spec must hold no password value. A secret-named field with a value is
   refused before any call, with the field's JSON pointer in the message (never

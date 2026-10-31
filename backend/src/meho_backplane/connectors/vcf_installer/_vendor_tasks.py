@@ -12,11 +12,12 @@ does the work after the call returns. Two helpers serve those changes:
   expired. When the appliance does not answer, it returns
   ``outcome: not_reachable`` with the job id and the time, never ``failed``.
 * :func:`find_running_task` is the check before a start. It lists
-  ``GET /v1/tasks`` and returns a job of the same kind that has not ended.
-  The vendor does not document its task types, so the match is on whole
-  words of the task ``type`` and ``name`` (for example ``PROXY`` or
-  ``CEIP``). It is a help, not a lock: two callers can both check before
-  either starts. When the list cannot be read, the check finds nothing.
+  ``GET /v1/tasks`` page by page and returns a job of the same kind that has
+  not ended, or ``None`` when the list ends without one. The vendor does
+  not document its task types, so the match is on whole words of the task
+  ``type`` and ``name`` (for example ``PROXY`` or ``CEIP``). It is a help,
+  not a lock: two callers can both check before either starts. When a page
+  cannot be read, the check finds nothing.
 
 MEHO keeps no job state between calls; the caller keeps the job id.
 """
@@ -82,6 +83,12 @@ OUTCOMES: Final[tuple[str, ...]] = (
 
 _NOT_ENDED: Final = frozenset({"queued", "running"})
 _WORD: Final = re.compile(r"[A-Z0-9]+")
+
+#: The most tasks one page of ``GET /v1/tasks`` may hold (the vendor's limit).
+_PAGE_SIZE: Final = 100
+#: The most pages the running-job check reads. 10,000 jobs is far more than an
+#: appliance keeps; the cap only stops an endless loop on a broken page count.
+_MAX_PAGES: Final = 100
 
 
 def _state_key(state: Any) -> str:
@@ -191,26 +198,53 @@ async def find_running_task(
 ) -> dict[str, Any] | None:
     """A vendor job that has not ended and whose type or name holds *word*.
 
-    Tasks whose words include any of *exclude* do not count. A ``401`` goes
-    on to the dispatcher (nothing was started yet, so a new attempt is
-    safe). Any other error of the list read means "nothing found".
+    Reads the list page by page (``pageNumber`` from 0, ``pageSize`` 100)
+    until a match is found or the last page was read. Tasks whose words
+    include any of *exclude* do not count. A ``401`` goes on to the
+    dispatcher (nothing was started yet, so a new attempt is safe). Any
+    other error of a page read means "nothing found".
     """
-    try:
-        page = await connector._get_json(target, TASKS_PATH, operator=operator)
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == httpx.codes.UNAUTHORIZED:
-            raise
-        _log.info(
-            "installer_task_list_unreadable", target=target.name, status=exc.response.status_code
+    for page_number in range(_MAX_PAGES):
+        try:
+            page = await connector._get_json(
+                target,
+                TASKS_PATH,
+                operator=operator,
+                params={"pageNumber": page_number, "pageSize": _PAGE_SIZE},
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == httpx.codes.UNAUTHORIZED:
+                raise
+            _log.info(
+                "installer_task_list_unreadable",
+                target=target.name,
+                status=exc.response.status_code,
+                page=page_number,
+            )
+            return None
+        except httpx.TransportError:
+            return None
+        elements = page.get("elements") if isinstance(page, dict) else None
+        tasks = (
+            [task for task in elements if isinstance(task, dict)]
+            if isinstance(elements, list)
+            else []
         )
-        return None
-    except httpx.TransportError:
-        return None
-    elements = page.get("elements") if isinstance(page, dict) else None
-    for task in elements if isinstance(elements, list) else []:
-        if not isinstance(task, dict) or _outcome(task.get("status")) not in _NOT_ENDED:
-            continue
-        words = _words(task)
-        if word in words and not words.intersection(exclude):
-            return task
+        for task in tasks:
+            if _outcome(task.get("status")) not in _NOT_ENDED:
+                continue
+            words = _words(task)
+            if word in words and not words.intersection(exclude):
+                return task
+        if not tasks or _is_last_page(page, page_number):
+            return None
     return None
+
+
+def _is_last_page(page: Any, page_number: int) -> bool:
+    """True when the vendor's page data says no page follows, or gives none."""
+    metadata = page.get("pageMetadata") if isinstance(page, dict) else None
+    total_pages = metadata.get("totalPages") if isinstance(metadata, dict) else None
+    if not isinstance(total_pages, int):
+        return True
+    return page_number + 1 >= total_pages

@@ -31,12 +31,15 @@ from __future__ import annotations
 import asyncio
 import copy
 import time
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import httpx
 
 from meho_backplane.broadcast.events import is_secret_param_name
-from meho_backplane.connectors.vcf_installer._secret_refs import hide_secret, read_secret_ref
+from meho_backplane.connectors.vcf_installer._secret_refs import (
+    hide_secrets_everywhere,
+    read_secret_ref,
+)
 from meho_backplane.connectors.vcf_installer._version_gate import require_installer_version
 
 if TYPE_CHECKING:
@@ -172,10 +175,13 @@ def _totals(capacity: Any, prefix: str) -> dict[str, Any]:
 
 
 def _answer(calculation: dict[str, Any], status: str, secrets: tuple[str, ...]) -> dict[str, Any]:
-    checks = _flat_checks(calculation.get("validationChecks"))
-    for row in checks:
-        row["error"] = hide_secret(row["error"], secrets)
-    return {
+    """The answer for one vendor ``CapacityValidation``.
+
+    Every text of the answer that holds a password from Vault is replaced, at
+    any depth: the vendor may echo the spec in a check's description or
+    error, not only in a known field.
+    """
+    answer = {
         "status": status,
         "id": calculation.get("id"),
         "execution_status": calculation.get("executionStatus"),
@@ -184,8 +190,9 @@ def _answer(calculation: dict[str, Any], status: str, secrets: tuple[str, ...]) 
         **_totals(calculation.get("availableCapacity"), "available"),
         "required": calculation.get("requiredCapacity"),
         "available": calculation.get("availableCapacity"),
-        "checks": checks,
+        "checks": _flat_checks(calculation.get("validationChecks")),
     }
+    return cast("dict[str, Any]", hide_secrets_everywhere(answer, secrets))
 
 
 async def installer_resources_calculate_impl(
@@ -220,12 +227,13 @@ async def installer_resources_calculate_impl(
         except ValueError:
             body = {}
         body = body if isinstance(body, dict) else {}
-        return {
+        rejected = {
             "status": "rejected",
             "http_status": exc.response.status_code,
             "error_code": body.get("errorCode"),
-            "message": hide_secret(body.get("message") or exc.response.reason_phrase, secrets),
+            "message": body.get("message") or exc.response.reason_phrase,
         }
+        return cast("dict[str, Any]", hide_secrets_everywhere(rejected, secrets))
     calc_id = str(calculation.get("id") or "")
     deadline = time.monotonic() + float(params.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS)
     while calc_id and calculation.get("executionStatus") == "IN_PROGRESS":
@@ -237,9 +245,7 @@ async def installer_resources_calculate_impl(
                 target, _CALCULATION_STATUS_PATH.replace("{id}", calc_id), operator=operator
             )
         except (httpx.HTTPStatusError, httpx.TransportError) as exc:
-            answer = _answer(calculation, "read_failed", secrets)
-            answer["error"] = _read_error(exc)
-            return answer
+            return {**_answer(calculation, "read_failed", secrets), "error": _read_error(exc)}
     return _answer(calculation, "done", secrets)
 
 

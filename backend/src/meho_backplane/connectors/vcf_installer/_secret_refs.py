@@ -13,6 +13,8 @@ text under the key raises :class:`SecretValueError`. No message holds a value.
 
 :func:`hide_secret` replaces a vendor text that holds one of the passwords,
 so a vendor error that echoes the request cannot leak it.
+:func:`hide_secrets_everywhere` does the same for every text in a whole
+answer, at any depth.
 """
 
 from __future__ import annotations
@@ -31,7 +33,13 @@ if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.vcf_installer.session import InstallerTargetLike
 
-__all__ = ["DEFAULT_SECRET_KEY", "SecretValueError", "hide_secret", "read_secret_ref"]
+__all__ = [
+    "DEFAULT_SECRET_KEY",
+    "SecretValueError",
+    "hide_secret",
+    "hide_secrets_everywhere",
+    "read_secret_ref",
+]
 
 #: The key in a Vault secret that holds the password, unless the call names another.
 DEFAULT_SECRET_KEY: Final = "password"
@@ -92,3 +100,21 @@ def hide_secret(text: Any, secrets: Iterable[str]) -> Any:
     if any(secret and secret in text for secret in secrets):
         return _HIDDEN
     return text
+
+
+def hide_secrets_everywhere(value: Any, secrets: Iterable[str]) -> Any:
+    """A copy of *value* with every text that holds one of *secrets* replaced, at any depth."""
+    found = [secret for secret in secrets if secret]
+    if not found:
+        return value
+    return _hide_everywhere(value, found)
+
+
+def _hide_everywhere(value: Any, secrets: list[str]) -> Any:
+    if isinstance(value, str):
+        return hide_secret(value, secrets)
+    if isinstance(value, dict):
+        return {key: _hide_everywhere(item, secrets) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_hide_everywhere(item, secrets) for item in value]
+    return value

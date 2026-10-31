@@ -5,8 +5,10 @@
 
 Each operation is called through its bound-method shim on
 :class:`InstallerConnector`, with every vendor call mocked by ``respx``.
-The Vault read of a password is replaced by a fake. All names and ids are
-made up.
+The ``connector`` fixture checks every answer against the operation's
+published response schema (``jsonschema``, Draft 2020-12), so an answer
+shape the schema does not allow fails the test that produced it. The Vault
+read of a password is replaced by a fake. All names and ids are made up.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
+from jsonschema import Draft202012Validator
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
@@ -106,9 +109,33 @@ def _fake_vault(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, str]]:
     return store
 
 
+def _check_answers_against_schemas(conn: InstallerConnector) -> None:
+    """Wrap each operation shim so its answer must fit the operation's response schema."""
+    for op in INSTALLER_SYSTEM_TYPED_OPS:
+        assert op.response_schema is not None, op.op_id
+        Draft202012Validator.check_schema(op.response_schema)
+        validator = Draft202012Validator(op.response_schema)
+        handler = getattr(conn, op.handler_attr)
+
+        async def checked(
+            *args: Any,
+            _handler: Any = handler,
+            _validator: Draft202012Validator = validator,
+            _op_id: str = op.op_id,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            result: dict[str, Any] = await _handler(*args, **kwargs)
+            problems = [f"{list(e.path)}: {e.message}" for e in _validator.iter_errors(result)]
+            assert problems == [], (_op_id, problems)
+            return result
+
+        setattr(conn, op.handler_attr, checked)
+
+
 @pytest.fixture
 async def connector() -> Any:
     conn = InstallerConnector(credentials_loader=_stub_loader)
+    _check_answers_against_schemas(conn)
     yield conn
     await conn.aclose()
 
@@ -285,6 +312,59 @@ async def test_proxy_set_starts_nothing_while_a_proxy_job_runs(
     assert result["task_id"] == "task-run"
 
 
+def _task_page(mock: respx.MockRouter, number: int, total: int, *tasks: dict[str, Any]) -> None:
+    mock.get("/v1/tasks", params={"pageNumber": str(number), "pageSize": "100"}).respond(
+        200,
+        json={
+            "elements": list(tasks),
+            "pageMetadata": {
+                "pageNumber": number,
+                "pageSize": len(tasks),
+                "totalElements": 3,
+                "totalPages": total,
+            },
+        },
+    )
+
+
+async def test_proxy_set_finds_a_running_job_on_a_later_page(
+    connector: InstallerConnector,
+) -> None:
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _login(mock)
+        _task_page(
+            mock, 0, 3, {"id": "task-old", "type": "PROXY_CONFIGURATION", "status": "SUCCESSFUL"}
+        )
+        _task_page(
+            mock, 1, 3, {"id": "task-run", "type": "PROXY_CONFIGURATION", "status": "IN_PROGRESS"}
+        )
+        third = mock.get("/v1/tasks", params={"pageNumber": "2"})
+        patch = mock.patch("/v1/system/proxy-configuration")
+        result = await connector.system_proxy_set(_operator(), _TARGET_91, {"enabled": False})
+    assert patch.call_count == 0
+    assert third.call_count == 0
+    assert result["status"] == "already_running"
+    assert result["task_id"] == "task-run"
+
+
+async def test_proxy_set_starts_when_no_page_holds_a_running_job(
+    connector: InstallerConnector,
+) -> None:
+    async with respx.mock(base_url=_BASE) as mock:
+        _login(mock)
+        _task_page(
+            mock, 0, 2, {"id": "task-old", "type": "PROXY_CONFIGURATION", "status": "SUCCESSFUL"}
+        )
+        _task_page(mock, 1, 2, {"id": "task-ceip", "type": "CEIP_UPDATE", "status": "IN_PROGRESS"})
+        patch = mock.patch("/v1/system/proxy-configuration").respond(
+            202, json={"id": "task-new", "status": "PENDING"}
+        )
+        result = await connector.system_proxy_set(_operator(), _TARGET_91, {"enabled": False})
+    assert patch.call_count == 1
+    assert result["status"] == "accepted"
+    assert result["task_id"] == "task-new"
+
+
 async def test_status_read_logs_in_again_when_the_login_expired(
     connector: InstallerConnector,
 ) -> None:
@@ -317,6 +397,49 @@ async def test_status_read_says_not_reachable_with_the_job_id_and_time(
     assert result["task"]["id"] == "task-5"
     assert result["task"]["checked_at"]
     assert result["task"]["outcome"] != "failed"
+
+
+async def test_proxy_read_keeps_the_job_when_the_appliance_stops_answering_after_it(
+    connector: InstallerConnector,
+) -> None:
+    async with respx.mock(base_url=_BASE) as mock:
+        _login(mock)
+        mock.get("/v1/tasks/task-6").respond(200, json={"id": "task-6", "status": "IN_PROGRESS"})
+        mock.get("/v1/system/proxy-configuration").mock(
+            side_effect=httpx.ConnectError("made-up refusal")
+        )
+        result = await connector.system_proxy_get(_operator(), _TARGET_91, {"task_id": "task-6"})
+    assert result["task"]["id"] == "task-6"
+    assert result["task"]["outcome"] == "running"
+    assert result["task"]["checked_at"]
+    assert result["proxy"] is None
+    assert "no answer from the appliance" in result["message"]
+
+
+async def test_settings_read_keeps_the_job_and_ceip_when_the_system_read_gets_no_answer(
+    connector: InstallerConnector,
+) -> None:
+    async with respx.mock(base_url=_BASE) as mock:
+        _login(mock)
+        mock.get("/v1/tasks/task-7").respond(200, json={"id": "task-7", "status": "SUCCESSFUL"})
+        mock.get("/v1/system/ceip").respond(200, json={"status": "ENABLED"})
+        mock.get("/v1/system").mock(side_effect=httpx.ConnectError("made-up refusal"))
+        result = await connector.system_settings_get(_operator(), _TARGET_91, {"task_id": "task-7"})
+    assert result["task"]["id"] == "task-7"
+    assert result["task"]["outcome"] == "succeeded"
+    assert result["ceip"] == {"status": "ENABLED"}
+    assert result["system"] is None
+    assert "no answer from the appliance" in result["message"]
+
+
+async def test_settings_read_without_a_job_reports_a_lost_answer_as_an_error(
+    connector: InstallerConnector,
+) -> None:
+    async with respx.mock(base_url=_BASE) as mock:
+        _login(mock)
+        mock.get("/v1/system/ceip").mock(side_effect=httpx.ConnectError("made-up refusal"))
+        with pytest.raises(httpx.ConnectError):
+            await connector.system_settings_get(_operator(), _TARGET_91, {})
 
 
 # ------------------------------------------------------- CEIP and system
@@ -494,6 +617,29 @@ async def test_remove_warns_when_the_certificate_belongs_to_the_depot(
     assert "depot.test.invalid" in result["warning"]
 
 
+@pytest.mark.parametrize(
+    ("name", "warns"),
+    [("*.test.invalid", True), ("*.invalid", False), ("*.depot.test.invalid", False)],
+)
+async def test_remove_warns_when_a_wildcard_certificate_covers_the_depot(
+    connector: InstallerConnector, name: str, warns: bool
+) -> None:
+    async with respx.mock(base_url=_BASE) as mock:
+        _login(mock)
+        mock.get("/v1/system/settings/depot").respond(
+            200, json={"depotConfiguration": {"hostname": "depot.test.invalid", "port": 443}}
+        )
+        mock.get("/v1/sddc-manager/trusted-certificates").respond(
+            200, json={"elements": [{"alias": "wild-1", "certificate": _pem(name)}]}
+        )
+        mock.delete("/v1/sddc-manager/trusted-certificates/wild-1").respond(204)
+        result = await connector.system_trusted_certificate_remove(
+            _operator(), _TARGET_91, {"alias": "wild-1"}
+        )
+    assert result["status"] == "removed"
+    assert ("warning" in result) is warns
+
+
 async def test_remove_of_another_certificate_has_no_warning(
     connector: InstallerConnector,
 ) -> None:
@@ -606,6 +752,41 @@ async def test_resource_calculation_runs_to_the_end_and_flattens_the_checks(
         },
     ]
     assert _SPEC_PASSWORD not in json.dumps(result)
+
+
+async def test_resource_calculation_hides_the_password_in_every_text_of_the_answer(
+    connector: InstallerConnector,
+) -> None:
+    done = {
+        "id": "calc-4",
+        "executionStatus": "COMPLETED",
+        "resultStatus": "FAILED",
+        "requiredCapacity": {"numberOfCores": 8, "note": f"spec sent {_SPEC_PASSWORD}"},
+        "validationChecks": [
+            {
+                "description": f"vCenter login with {_SPEC_PASSWORD}",
+                "resultStatus": "FAILED",
+                "nestedValidationChecks": [
+                    {
+                        "description": "Host 1",
+                        "resultStatus": "FAILED",
+                        "errorResponse": {"message": f"{_SPEC_PASSWORD} was refused"},
+                    }
+                ],
+            }
+        ],
+    }
+    async with respx.mock(base_url=_BASE) as mock:
+        _login(mock)
+        mock.post("/v1/sddcs/resources-calculation").respond(202, json=done)
+        result = await connector.sddc_resources_calculate(_operator(), _TARGET_91, _calc_params())
+    assert result["status"] == "done"
+    assert _SPEC_PASSWORD not in json.dumps(result)
+    assert result["checks"][0]["description"] == _secret_refs._HIDDEN
+    assert result["checks"][1]["parent"] == _secret_refs._HIDDEN
+    assert result["checks"][1]["error"] == _secret_refs._HIDDEN
+    assert result["required"]["note"] == _secret_refs._HIDDEN
+    assert result["required_cores"] == 8
 
 
 async def test_resource_calculation_with_a_spec_that_is_not_valid(

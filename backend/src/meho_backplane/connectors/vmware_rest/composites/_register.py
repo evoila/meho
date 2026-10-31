@@ -153,6 +153,9 @@ from meho_backplane.connectors.vmware_rest.composites._host import (
 from meho_backplane.connectors.vmware_rest.composites._host_cluster_llm_instructions import (
     HOST_CLUSTER_LLM_INSTRUCTIONS,
 )
+from meho_backplane.connectors.vmware_rest.composites._host_membership_ops import (
+    HOST_MEMBERSHIP_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._library import (
     content_library_subscribed_create_composite,
     content_library_subscribed_items_list_composite,
@@ -577,6 +580,11 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     ),
     "host": (
         "Use for ESXi hosts. Reads: list hosts (GET:/api/vcenter/host). Changes: "
+        "add a host to a cluster or alone to a host folder (host.add, dangerous; "
+        "follow its task with vmware.task.info); move a host into a cluster "
+        "(host.move, dangerous); reconnect a host (host.connect, caution) or "
+        "disconnect it (host.disconnect, dangerous); remove a host from vCenter "
+        "(host.remove, destructive); "
         "move every running VM off a host, then put it into maintenance mode "
         "(host.evacuate, dangerous); take a host out of maintenance mode "
         "(host.maintenance.exit, dangerous); move a host's VM NICs to a "
@@ -2141,6 +2149,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # Install a new vCenter (#4394), dangerous / approval; the rows live in
     # their own module.
     *(_CompositeSpec(**row) for row in VCENTER_INSTALL_COMPOSITES),
+    # Host membership (#4349): add (a vendor job), move, connect, disconnect,
+    # remove; the rows live in their own module.
+    *(_CompositeSpec(**row) for row in HOST_MEMBERSHIP_COMPOSITES),
 )
 
 

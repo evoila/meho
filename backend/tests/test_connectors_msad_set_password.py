@@ -19,7 +19,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import meho_backplane.connectors.msad  # noqa: F401 -- registers connector at import
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors._shared.pwsh import pwsh_run

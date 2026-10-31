@@ -3,10 +3,11 @@
 
 """vro spec-reconcile lane -- hand-coded paths vs the pinned Orchestrator reference lists.
 
-Every vendor call of the Orchestrator reads (``typed_reads.VENDOR_CALLS``)
-is checked against the reference list of each pinned version on the spec
-shelf. The vendor publishes no API file for the Orchestrator REST API, so
-the shelf pins a reference list made from the vendor's reference pages:
+Every vendor call of the Orchestrator operations (``VENDOR_CALLS`` of
+``typed_reads``, ``library_reads`` and ``run_writes``) is checked
+against the reference list of each pinned version on the spec shelf.
+The vendor publishes no API file for the Orchestrator REST API, so the
+shelf pins a reference list made from the vendor's reference pages:
 one line per operation, ``method<TAB>path<TAB>...``.
 
 Two differences between the lists and MEHO's paths are normalised:
@@ -29,7 +30,9 @@ from pathlib import Path
 
 import pytest
 
-from meho_backplane.connectors.vro import typed_reads as _typed_reads_module
+from meho_backplane.connectors.vro.library_reads import LIBRARY_VENDOR_CALLS
+from meho_backplane.connectors.vro.run_writes import WRITE_VENDOR_CALLS
+from meho_backplane.connectors.vro.typed_reads import VENDOR_CALLS
 from tests._spec_shelf import assert_op_ids_served, require_shelf_spec
 
 #: (shelf directory, reference list, prefix the list leaves out).
@@ -54,7 +57,8 @@ def _normalise(op_id: str) -> str:
 
 
 def _declared_op_ids() -> set[str]:
-    return {f"{method}:{path}" for method, path in _typed_reads_module.VENDOR_CALLS}
+    calls = VENDOR_CALLS | LIBRARY_VENDOR_CALLS | WRITE_VENDOR_CALLS
+    return {f"{method}:{path}" for method, path in calls}
 
 
 def _reference_op_ids(list_path: Path, label: str, prefix: str) -> set[str]:
@@ -83,6 +87,13 @@ def test_vro_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/vco/api/workflows/{workflowId}/executions",
         "GET:/vco/api/workflows/{workflowId}/executions/{executionId}",
         "GET:/vco/api/workflows/{workflowId}/executions/{executionId}/syslogs",
+        "GET:/vco/api/actions",
+        "GET:/vco/api/configurations",
+        "GET:/vco/api/configurations/{id}",
+        "GET:/vco/api/packages",
+        "POST:/vco/api/workflows/{workflowId}/executions",
+        "GET:/vco/api/workflows/{workflowId}/executions/{executionId}/state",
+        "DELETE:/vco/api/workflows/{workflowId}/executions/{executionId}/state",
     }
 
 

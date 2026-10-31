@@ -86,6 +86,9 @@ __all__ = [
     "VENDOR_CALLS",
     "content_sha256",
     "flat_rows",
+    "is_secret_name",
+    "is_secret_parameter",
+    "path_segment",
     "redact_secrets",
     "vro_about_impl",
     "vro_execution_get_impl",
@@ -185,7 +188,7 @@ _SECRET_SUFFIXES: Final[tuple[str, ...]] = (
 )
 
 
-def _is_secret_name(key: object) -> bool:
+def is_secret_name(key: object) -> bool:
     """True when *key* names a secret: by the shared rule or by the lists above."""
     if not isinstance(key, str):
         return False
@@ -195,14 +198,16 @@ def _is_secret_name(key: object) -> bool:
     return name in _SECRET_KEYS or name.endswith(_SECRET_SUFFIXES)
 
 
-def _is_secret_parameter(param: dict[str, Any]) -> bool:
+def is_secret_parameter(param: dict[str, Any]) -> bool:
     """A workflow parameter whose value must not come back."""
     kind = param.get("type")
-    if isinstance(kind, str) and "securestring" in kind.lower():
+    if isinstance(kind, str) and any(
+        word in kind.lower() for word in ("securestring", "encryptedstring")
+    ):
         return True
     if param.get("encrypt-value") is True:
         return True
-    return _is_secret_name(param.get("name"))
+    return is_secret_name(param.get("name"))
 
 
 def _redact_object(value: dict[str, Any]) -> dict[str, Any]:
@@ -219,19 +224,19 @@ def redact_secrets(value: Any) -> Any:
         return value
     # Parameters are ``{name, type, value}``; Properties entries are ``{key, value}``.
     secret_param = "value" in value and (
-        ("name" in value and _is_secret_parameter(value)) or _is_secret_name(value.get("key"))
+        ("name" in value and is_secret_parameter(value)) or is_secret_name(value.get("key"))
     )
     return {
         key: (
             REDACTED
-            if _is_secret_name(key) or (secret_param and key == "value")
+            if is_secret_name(key) or (secret_param and key == "value")
             else redact_secrets(item)
         )
         for key, item in value.items()
     }
 
 
-def _segment(kind: str, value: Any) -> str:
+def path_segment(kind: str, value: Any) -> str:
     """Return *value* as one URL path segment, or raise ``ValueError``."""
     if not isinstance(value, str) or not value:
         raise ValueError(f"the {kind} id must be a non-empty string, got {value!r}")
@@ -425,7 +430,7 @@ async def vro_workflow_get_impl(
     Default values are not returned: they can hold secrets and are not
     needed to call the workflow.
     """
-    workflow_id = _segment("workflow", params.get("workflow_id"))
+    workflow_id = path_segment("workflow", params.get("workflow_id"))
     workflow = await connector._vro_get(
         target, _WORKFLOW_PATH.format(workflowId=workflow_id), operator=operator
     )
@@ -456,7 +461,7 @@ async def vro_execution_list_impl(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     """``vro.execution.list`` -- ``GET .../executions``, one flat row per run."""
-    workflow_id = _segment("workflow", params.get("workflow_id"))
+    workflow_id = path_segment("workflow", params.get("workflow_id"))
     payload = await connector._vro_get(
         target,
         _EXECUTIONS_PATH.format(workflowId=workflow_id),
@@ -474,7 +479,7 @@ def _run_parameters(params: Any) -> list[dict[str, Any]]:
         {
             "name": p.get("name"),
             "type": p.get("type"),
-            "value": REDACTED if _is_secret_parameter(p) else p.get("value"),
+            "value": REDACTED if is_secret_parameter(p) else p.get("value"),
         }
         for p in params
         if isinstance(p, dict)
@@ -530,8 +535,8 @@ async def vro_execution_get_impl(
     private address (the dispatcher returns ``connector_error`` with the
     guard's message).
     """
-    workflow_id = _segment("workflow", params.get("workflow_id"))
-    execution_id = _segment("execution", params.get("execution_id"))
+    workflow_id = path_segment("workflow", params.get("workflow_id"))
+    execution_id = path_segment("execution", params.get("execution_id"))
     checked_at = datetime.now(UTC).isoformat()
     try:
         payload = await connector._vro_get(
@@ -610,8 +615,8 @@ async def vro_execution_logs_impl(
     Each text is cut at :data:`LOG_TEXT_MAX` characters, after the shared
     secret rules ran on the whole text; a cut row has ``cut: true``.
     """
-    workflow_id = _segment("workflow", params.get("workflow_id"))
-    execution_id = _segment("execution", params.get("execution_id"))
+    workflow_id = path_segment("workflow", params.get("workflow_id"))
+    execution_id = path_segment("execution", params.get("execution_id"))
     max_lines = int(params.get("max_lines", _DEFAULT_LOG_LINES))
     payload = await connector._vro_get(
         target,

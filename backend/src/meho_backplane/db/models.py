@@ -7045,6 +7045,16 @@ class ApprovalRequest(Base):
     # The MEHO release the request was made under (#5030). See the class
     # docstring. Added by migration ``0120``.
     release_id: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # How many times the requester ran this approved request again after
+    # its run failed (#5417). ``0`` until the first re-run. The re-run claim
+    # adds one in the same conditional UPDATE that clears ``resume_result``,
+    # so two re-runs sent at the same time cannot both run, and the audit
+    # row names the attempt (``rerun_count + 1``; the first run is attempt
+    # 1). ``resumed_at`` stays a one-way latch for the first run. Added by
+    # migration ``0129``.
+    rerun_count: Mapped[int] = mapped_column(
+        sa.Integer(), nullable=False, default=0, server_default=sa.text("0")
+    )
 
     __table_args__ = (
         Index(

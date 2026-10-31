@@ -73,6 +73,7 @@ where a malicious approver swaps the params between the "request" and the
 
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
 from collections.abc import Iterator
@@ -85,12 +86,14 @@ from enum import StrEnum
 from typing import Any, Final, Literal, NamedTuple, cast
 
 import structlog
-from sqlalchemy import CursorResult, and_, or_, select, update
+from sqlalchemy import CursorResult, and_, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.approval_sign_in import ApprovalAuth
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
+from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors.schemas import OperationResult
@@ -143,6 +146,7 @@ __all__ = [
     "ApprovalRequestAlreadyDecidedError",
     "ApprovalRequestExpiredError",
     "ApprovalResultState",
+    "ApprovalSignInReusedError",
     "ChainPosition",
     "DelegatedDecisionForbiddenError",
     "DelegatedReasonInvalidError",
@@ -316,6 +320,24 @@ class PreviewBindingMissingError(ApprovalError):
             f"approval_request {request_id} is destructive-tier but carries no "
             "preview_hash binding; approval refused (the preview-result-hash "
             "binding is mandatory for the destructive tier, #3197)"
+        )
+
+
+class ApprovalSignInReusedError(ApprovalError):
+    """This sign-in already gave an approval (#3979).
+
+    One fresh sign-in or one-time code allows exactly one approval. Raised
+    by :func:`approve_request` when an earlier ``approval.decision`` audit
+    row of the same person carries the same ``sign_in_key``. The REST layer
+    answers ``401`` with the same fresh sign-in challenge as a too-old
+    sign-in, so the command line asks for a new sign-in.
+    """
+
+    def __init__(self, request_id: uuid.UUID) -> None:
+        self.request_id = request_id
+        super().__init__(
+            f"approval_request {request_id}: this sign-in was already used for "
+            "an approval; one sign-in allows one approval"
         )
 
 
@@ -1403,6 +1425,70 @@ async def create_pending_request(
     return request
 
 
+def _sign_in_lock_key(sign_in_key: str) -> int:
+    """Map a sign-in key to a stable, non-negative 63-bit advisory-lock key.
+
+    A blake2b digest under its own prefix, masked to 63 bits so it fits the
+    ``bigint`` that ``pg_advisory_xact_lock`` takes. The same shape as the
+    other advisory-lock keys in the code base.
+    """
+    label = f"meho:approval-sign-in\0{sign_in_key}"
+    digest = hashlib.blake2b(label.encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
+
+
+async def _refuse_reused_sign_in(
+    session: AsyncSession,
+    request_id: uuid.UUID,
+    operator: Operator,
+    approval_auth: ApprovalAuth,
+) -> None:
+    """Raise :class:`ApprovalSignInReusedError` when this sign-in already approved.
+
+    Looks at the person's ``approval.decision`` audit rows written since
+    the sign-in. The sign-in is at most a few minutes old, so the scan is
+    short. A web click is not single-use and is never checked.
+
+    Two approves with the same sign-in can run at the same moment, for two
+    different requests and on two replicas. So the check first takes a
+    transaction-level PostgreSQL advisory lock on the sign-in key. The
+    second approve waits until the first commits or rolls back, and then
+    its scan sees the first audit row. PostgreSQL releases the lock with
+    the transaction. On other databases (the single-writer SQLite test
+    path) there is no lock.
+
+    The scan starts :data:`~meho_backplane.auth.fresh_sign_in.CLOCK_SKEW_SECONDS`
+    before ``auth_time``: the fresh sign-in check accepts an ``auth_time``
+    that far in the future, so an earlier approve of the same sign-in can
+    have an audit time before ``auth_time``.
+    """
+    key = approval_auth.sign_in_key(operator.sub)
+    if key is None or approval_auth.auth_time is None:
+        return
+    conn = await session.connection()
+    if conn.dialect.name == "postgresql":
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:k)"), {"k": _sign_in_lock_key(key)}
+        )
+    since = datetime.fromtimestamp(approval_auth.auth_time - CLOCK_SKEW_SECONDS - 1, UTC)
+    rows = await session.execute(
+        select(AuditLog.payload).where(
+            AuditLog.operator_sub == operator.sub,
+            AuditLog.path == "approval.decision",
+            AuditLog.occurred_at >= since,
+        )
+    )
+    for (payload,) in rows:
+        earlier = payload.get("approval_auth") if isinstance(payload, dict) else None
+        if isinstance(earlier, dict) and earlier.get("sign_in_key") == key:
+            _log().warning(
+                "approval_sign_in_reused",
+                approval_request_id=str(request_id),
+                operator_sub=operator.sub,
+            )
+            raise ApprovalSignInReusedError(request_id)
+
+
 # code-quality-allow: 101 lines but ~70 are the Args/Raises docstring documenting
 # the four preconditions + the params/reason contract; the executable body is ~15
 # lines. Splitting it would scatter one linear approve flow for a line-count win.
@@ -1413,6 +1499,7 @@ async def approve_request(
     operator: Operator,
     params: dict[str, Any] | None = None,
     reason: str = "",
+    approval_auth: ApprovalAuth | None = None,
 ) -> ApprovalRequest:
     """Approve a pending request.
 
@@ -1465,6 +1552,10 @@ async def approve_request(
             MCP/CLI operator-decision path.
         reason: Optional human-readable approval reason (recorded in the
             audit payload). Mirrors :func:`reject_request`.
+        approval_auth: How the person proved they were present (#3979): a
+            web click, a fresh sign-in or a one-time code. Recorded in the
+            audit payload as ``approval_auth``. A token proof allows one
+            approval only. Every production approve path passes it.
 
     Returns:
         The updated, flushed :class:`ApprovalRequest`.
@@ -1484,6 +1575,8 @@ async def approve_request(
             (``Instructed-by:``) but its trailer block is incomplete (#3692).
         DelegatedDecisionForbiddenError: *reason* is a valid delegated
             decision but the deployment is not lab-class (#3693).
+        ApprovalSignInReusedError: *approval_auth* names a sign-in that
+            already gave an approval (#3979).
     """
     request = await _load_pending_for_approval(
         session, request_id, operator=operator, params=params
@@ -1492,6 +1585,8 @@ async def approve_request(
     # reason leaves the row pending (#3692, #3693).
     delegation = parse_delegation(reason)
     _check_delegated_allowed(delegation, request=request, operator=operator, decision="approved")
+    if approval_auth is not None:
+        await _refuse_reused_sign_in(session, request_id, operator, approval_auth)
 
     now = _now()
     request.status = ApprovalRequestStatus.APPROVED.value
@@ -1506,6 +1601,8 @@ async def approve_request(
     extra: dict[str, Any] = {"decision": "approved", "reviewed_by": operator.sub}
     if reason:
         extra["reason"] = reason
+    if approval_auth is not None:
+        extra["approval_auth"] = approval_auth.audit_payload(operator.sub)
     _record_delegation(extra, delegation, request=request, operator=operator, decision="approved")
 
     approve_audit_id = uuid.uuid4()
@@ -2301,7 +2398,9 @@ def _composite_parent_binding(
         composite_resume_var.reset(resume_token)
 
 
-def _run_audit_context(request: ApprovalRequest) -> dict[str, Any]:
+def _run_audit_context(
+    request: ApprovalRequest, rerun_attempt: int | None = None
+) -> dict[str, Any]:
     """The ``audit_*`` log context to bind while an approved op runs (#3864).
 
     The REST approve routes bind ``audit_op_id="approval.decide"`` (and its
@@ -2312,11 +2411,16 @@ def _run_audit_context(request: ApprovalRequest) -> dict[str, Any]:
     ``None``), and only ``approval_request_id`` is kept, so the run row names
     its own op and the request it ran for. ``bound_contextvars`` puts the
     route keys back when the run ends.
+
+    A re-run of a failed request (#5417) passes *rerun_attempt*, so the
+    run row also says which attempt it is.
     """
     context: dict[str, Any] = {
         key: None for key in structlog.contextvars.get_contextvars() if key.startswith("audit_")
     }
     context["audit_approval_request_id"] = str(request.id)
+    if rerun_attempt is not None:
+        context["audit_approval_rerun_attempt"] = rerun_attempt
     return context
 
 
@@ -2327,6 +2431,7 @@ async def _dispatch_resume_with_bound_context(
     resolved_target: Any,
     effective_params: dict[str, Any],
     resume_parent_override: dict[str, Any] | None = None,
+    rerun_attempt: int | None = None,
 ) -> Any:
     """Re-bind the parked row's stored context, then dispatch ``_approved=True``.
 
@@ -2384,7 +2489,7 @@ async def _dispatch_resume_with_bound_context(
     owner_token = handle_owner_sub_var.set(request.principal_sub)
     try:
         with (
-            structlog.contextvars.bound_contextvars(**_run_audit_context(request)),
+            structlog.contextvars.bound_contextvars(**_run_audit_context(request, rerun_attempt)),
             bind_approved_requester(request),
             composite_resume_binding(
                 subop_op_id=request.op_id,

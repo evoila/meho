@@ -87,7 +87,7 @@ guest OS.
 
 The multi-step read `hyperv.migration.inventory` (group `migration`, `safe`)
 collects every VM in the common migration inventory shape. It lives in
-`connectors/migration/source_hyperv.py`; see `connectors-migration.md`.
+`connectors/inventory/source_hyperv.py`; see `connectors-inventory.md`.
 
 ### Explicit non-goals (this increment)
 

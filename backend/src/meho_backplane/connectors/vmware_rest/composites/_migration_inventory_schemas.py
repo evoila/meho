@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Final
 
-from meho_backplane.connectors.migration.contracts import inventory_json_schema
+from meho_backplane.connectors.inventory.contracts import inventory_json_schema
 
 __all__ = [
     "MIGRATION_GROUP_WHEN_TO_USE",
@@ -78,7 +78,7 @@ MIGRATION_GROUP_WHEN_TO_USE: Final = (
     "Use to collect a vCenter's VMs for a migration assessment, in MEHO's common "
     "inventory shape (vmware.migration.inventory, safe). The result is always "
     "stored, and its handle feeds the migration operations (for example "
-    "migration.inventory.csv)."
+    "inventory.export)."
 )
 
 MIGRATION_INVENTORY_LLM_INSTRUCTIONS: dict[str, Any] = {
@@ -103,7 +103,8 @@ MIGRATION_INVENTORY_LLM_INSTRUCTIONS: dict[str, Any] = {
         "is a short summary with the handle. Both handles feed the migration operations."
     ),
     "next_step": (
-        "Pass the handle to migration.inventory.csv for an Azure Migrate file. Read a "
+        "Pass the handle to inventory.export for an import file, for example format "
+        "'azure-migrate-csv'. Read a "
         "stored inventory with result_query and a path, for example '/counts' or "
         "'/duplicates'. "
         "Check counts.reconciliation (matches true, else name the difference; empty "

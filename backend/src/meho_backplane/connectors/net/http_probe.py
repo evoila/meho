@@ -494,15 +494,19 @@ _MAX_ERROR_DETAIL_MESSAGE_CHARS: Final[int] = 200
 def _iter_exception_tree(exc: BaseException) -> Iterator[BaseException]:
     """Yield *exc* and every exception reachable from it, each once.
 
-    Follows two edges: the ``__cause__`` chain (``raise X from Y`` — how
-    httpcore/httpx re-wrap the underlying OS/TLS error) and, for an
-    :class:`ExceptionGroup` / :class:`BaseExceptionGroup`, its
-    ``.exceptions`` children (PEP 654). anyio raises
-    ``OSError("All connection attempts failed") from ExceptionGroup(...)``
-    on a multi-address (happy-eyeballs) connect, so the real per-attempt
-    errors live in the group's children, not on ``__cause__`` — walking
-    both edges is what stops them collapsing to ``unreachable``. An
-    ``id``-based seen-set guards against ``__cause__`` cycles.
+    Follows three edges: the ``__cause__`` chain (``raise X from Y`` — how
+    httpcore/httpx re-wrap the underlying OS/TLS error), the
+    ``__context__`` chain, and, for an :class:`ExceptionGroup` /
+    :class:`BaseExceptionGroup`, its ``.exceptions`` children (PEP 654).
+    ``__context__`` matters because httpcore's connection pool re-raises
+    with ``raise exc from None``, which clears ``__cause__`` of the
+    ``httpcore.ConnectError``; the ``ssl.SSLCertVerificationError`` of an
+    untrusted certificate is then reachable only as ``__context__``.
+    anyio raises ``OSError("All connection attempts failed") from
+    ExceptionGroup(...)`` on a multi-address (happy-eyeballs) connect, so
+    the real per-attempt errors live in the group's children, not on
+    ``__cause__``. Walking all edges is what stops them collapsing to
+    ``unreachable``. An ``id``-based seen-set guards against cycles.
     """
     stack: list[BaseException] = [exc]
     seen: set[int] = set()
@@ -514,6 +518,8 @@ def _iter_exception_tree(exc: BaseException) -> Iterator[BaseException]:
         yield node
         if node.__cause__ is not None:
             stack.append(node.__cause__)
+        if node.__context__ is not None:
+            stack.append(node.__context__)
         if isinstance(node, BaseExceptionGroup):
             stack.extend(node.exceptions)
 
@@ -521,7 +527,7 @@ def _iter_exception_tree(exc: BaseException) -> Iterator[BaseException]:
 def _reason_for_transport_error(exc: httpx.TransportError, *, tls: bool) -> str:
     """Map an httpx transport error to a probe reason code.
 
-    Walks the whole exception tree (``__cause__`` **and**
+    Walks the whole exception tree (``__cause__``, ``__context__`` **and**
     ``ExceptionGroup`` children — see :func:`_iter_exception_tree`) and
     classifies each node by type, so DNS, TLS, and connection-refused
     failures each get a distinct code instead of collapsing to

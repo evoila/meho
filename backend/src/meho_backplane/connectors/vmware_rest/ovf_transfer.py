@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
@@ -248,8 +249,11 @@ async def _upload_one(
     entry: TransferEntry,
     source: OvfSource,
     tracker: ProgressTracker,
-) -> int:
-    """Upload one disk only after its connection authenticates the device host."""
+) -> tuple[int, str]:
+    """Upload one disk only after its connection authenticates the device host.
+
+    Returns the bytes sent and the SHA-256 (hex) of those bytes.
+    """
     parts = urlsplit(entry.url)
     if parts.scheme != "https" or not parts.hostname:
         raise DeviceThumbprintError("lease device URL must use HTTPS and include a host")
@@ -263,15 +267,20 @@ async def _put_disk(
     entry: TransferEntry,
     source: OvfSource,
     tracker: ProgressTracker,
-) -> int:
-    """Stream the disk; do not replay the lease token or disk across redirects."""
+) -> tuple[int, str]:
+    """Stream the disk; do not replay the lease token or disk across redirects.
+
+    Returns the size and the SHA-256 (hex) of the bytes that were streamed.
+    """
     content_type = _STREAM_VMDK_CONTENT_TYPE if entry.is_disk else _OCTET_STREAM_CONTENT_TYPE
+    digest = hashlib.sha256()
     async with source.open_disk(entry.path) as handle:
         size = handle.size
 
         async def _counted() -> AsyncIterator[bytes]:
             async for chunk in handle.aiter_bytes():
                 tracker.add(len(chunk))
+                digest.update(chunk)
                 yield chunk
 
         headers = {"Content-Type": content_type, "Content-Length": str(size)}
@@ -283,7 +292,7 @@ async def _put_disk(
             follow_redirects=False,
         )
         resp.raise_for_status()
-    return size
+    return size, digest.hexdigest()
 
 
 async def transfer_all(
@@ -299,7 +308,8 @@ async def transfer_all(
     """Upload every planned disk with a concurrent progress heartbeat.
 
     Files upload **in order** (a later file may patch an earlier one per the
-    OVF spec). Returns the per-disk manifest. Any upload failure propagates to
+    OVF spec). Returns the per-disk manifest ``{path, device_id, size_bytes,
+    sha256}``. Any upload failure propagates to
     the caller, which aborts the lease so vCenter tears down the half-import.
     The heartbeat task is always cancelled + awaited on exit.
     """
@@ -319,8 +329,17 @@ async def transfer_all(
     )
     try:
         for entry in plan:
-            sent = await _upload_one(connector, target, entry=entry, source=source, tracker=tracker)
-            manifest.append({"path": entry.path, "device_id": entry.device_id, "size_bytes": sent})
+            sent, sha256 = await _upload_one(
+                connector, target, entry=entry, source=source, tracker=tracker
+            )
+            manifest.append(
+                {
+                    "path": entry.path,
+                    "device_id": entry.device_id,
+                    "size_bytes": sent,
+                    "sha256": sha256,
+                }
+            )
         # Final 100% progress so the server records completion before Complete.
         await lease_progress(connector, target, operator, lease_moid=lease_moid, percent=100)
     finally:

@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "MEHO — governance backplane for infrastructure operations. Claude Code onramp.",
-    "version": "0.30.5"
+    "version": "0.31.0"
   },
   "plugins": [
     {
       "name": "meho",
       "source": "./clients/claude-code-plugin",
       "description": "Connect Claude Code to a MEHO backplane over the mcp-remote stdio shim and load the MEHO-first operating discipline as skills.",
-      "version": "0.30.5"
+      "version": "0.31.0"
     }
   ]
 }

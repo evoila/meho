@@ -44,7 +44,7 @@ keep the old rule: no part is copied or stored without their hint. The
 
 An operation may declare `result_handle: {"always": true}` (#5143) when other
 operations take its result by its handle (an inventory read, whose result
-`migration.inventory.csv` reads back). A result under the limits (50 rows,
+`inventory.export` reads back). A result under the limits (50 rows,
 4,096 bytes) then comes back **whole**, and the reducer also stores it as a
 document record and returns a handle next to it. `result_query` with
 `query={"path": ""}` returns the same answer. Over the limits nothing changes.

@@ -88,6 +88,10 @@ Scope:
   ``govc library.deploy``) (#2909).
 * the destructive DRS rule delete ``cluster.drs_rule.delete``
   (``_drs_rule_delete``): removes one DRS rule from a cluster, by name.
+* the DRS group writes: ``cluster.drs_group.members.set`` (caution, waits for
+  approval; ``_drs_group``) changes the members of a VM group or host group,
+  and the destructive ``cluster.drs_group.delete`` (``_drs_group_delete``)
+  removes a group no rule uses.
 * the VM snapshot writes (``_snapshot``): ``vm.snapshot.create`` (caution,
   waits for approval) and the destructive ``vm.snapshot.delete``. The list is
   the typed read ``vmware.snapshot.list``; the revert lives in ``_write``.
@@ -106,8 +110,17 @@ from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
 from meho_backplane.connectors.vmware_rest.composites._datastore_list import (
     datastore_file_list_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._datastore_orphans import (
+    datastore_orphan_dirs_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._datastore_vsan import (
     datastore_vsan_folder_list_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_group import (
+    cluster_drs_group_members_set_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_group_delete import (
+    cluster_drs_group_delete_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
     cluster_drs_rule_delete_composite,
@@ -229,6 +242,8 @@ from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402,F40
 __all__ = [
     "alarm_acknowledge_composite",
     "alarm_reset_composite",
+    "cluster_drs_group_delete_composite",
+    "cluster_drs_group_members_set_composite",
     "cluster_drs_recommendations_composite",
     "cluster_drs_rule_create_composite",
     "cluster_drs_rule_delete_composite",
@@ -243,6 +258,7 @@ __all__ = [
     "datastore_file_delete_composite",
     "datastore_file_list_composite",
     "datastore_mount_nfs_composite",
+    "datastore_orphan_dirs_composite",
     "datastore_refresh_composite",
     "datastore_usage_composite",
     "datastore_vsan_folder_list_composite",

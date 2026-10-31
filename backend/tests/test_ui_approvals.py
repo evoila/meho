@@ -56,6 +56,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -63,6 +64,7 @@ from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import (
     ApprovalRequest,
     ApprovalRequestStatus,
+    AuditLog,
     Target,
     Tenant,
 )
@@ -760,6 +762,59 @@ def test_approve_through_bff_decides_and_redispatches() -> None:
     assert _request_status(rid) == ApprovalRequestStatus.APPROVED.value
     # The parked op was re-dispatched via the shared resume helper.
     resume_mock.assert_awaited_once()
+
+
+def _decision_approval_auth(request_id: uuid.UUID) -> object:
+    """Read ``payload["approval_auth"]`` off the request's decision audit row."""
+
+    async def _do() -> object:
+        async with get_sessionmaker()() as session:
+            rows = (
+                await session.execute(
+                    select(AuditLog.payload).where(AuditLog.path == "approval.decision")
+                )
+            ).scalars()
+            for payload in rows:
+                if payload.get("approval_request_id") == str(request_id):
+                    return payload.get("approval_auth")
+        raise AssertionError("no approval.decision audit row")
+
+    return asyncio.run(_do())
+
+
+def test_approve_through_bff_needs_no_fresh_sign_in_and_records_the_click() -> None:
+    """A web approve needs no fresh sign-in; the audit row says "web" (#3979).
+
+    The reviewer's session token has no ``auth_time`` at all. The REST
+    routes would refuse that token; the console accepts the click.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    assert operator.auth_time is None
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, AsyncMock(return_value=_dispatch_result())),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                data={"reason": "looks safe"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    assert _request_status(rid) == ApprovalRequestStatus.APPROVED.value
+    assert _decision_approval_auth(rid) == {
+        "channel": "web",
+        "method": "web_click",
+        "auth_time": None,
+    }
 
 
 def test_reject_through_bff_decides_without_redispatch() -> None:

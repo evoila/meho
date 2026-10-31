@@ -202,7 +202,6 @@ def test_human_clients_default_scopes(realm: dict[str, Any], client_id: str) -> 
 def test_cli_client_uses_device_flow(realm: dict[str, Any]) -> None:
     client = _client(realm, "meho-cli")
     assert client["publicClient"] is True
-    assert client["standardFlowEnabled"] is False
     assert client["directAccessGrantsEnabled"] is False
     assert client["attributes"]["oauth2.device.authorization.grant.enabled"] == "true"
     assert client["optionalClientScopes"] == []
@@ -288,3 +287,17 @@ def test_no_secret_or_host_written_in_the_file(realm: dict[str, Any]) -> None:
     # public-URL placeholder.
     for url in re.findall(r"https?://[^\"\s]+", _REALM_FILE.read_text()):
         assert url.startswith(("http://localhost:", "http://127.0.0.1:")), url
+
+
+def test_cli_client_allows_the_fresh_sign_in_for_an_approval(realm: dict[str, Any]) -> None:
+    """``meho approvals approve`` signs in again in the browser (#3979).
+
+    The browser flow is on with PKCE and a 127.0.0.1 loopback redirect only;
+    ``meho login`` keeps the device flow. Same as the bootstrap recipe.
+    """
+    client = _client(realm, "meho-cli")
+    assert client["standardFlowEnabled"] is True
+    assert client["attributes"]["pkce.code.challenge.method"] == "S256"
+    assert client["attributes"]["oauth2.device.authorization.grant.enabled"] == "true"
+    assert client["redirectUris"] == ["http://127.0.0.1:*"]
+    assert client["webOrigins"] == []

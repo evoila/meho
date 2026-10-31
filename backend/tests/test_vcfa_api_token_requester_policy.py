@@ -117,7 +117,11 @@ def _decide(request_id: UUID, mock: respx.MockRouter) -> dict[str, Any]:
     key = make_rsa_keypair("kid-decider")
     mock_discovery_and_jwks(mock, public_jwks(key))
     token = mint_token(
-        key, sub=_APPROVER, tenant_role=TenantRole.OPERATOR.value, tenant_id=str(TENANT_ID)
+        key,
+        fresh_sign_in=True,
+        sub=_APPROVER,
+        tenant_role=TenantRole.OPERATOR.value,
+        tenant_id=str(TENANT_ID),
     )
     with TestClient(app) as client:
         response = client.post(

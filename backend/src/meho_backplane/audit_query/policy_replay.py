@@ -309,13 +309,17 @@ def _comparable_recorded_manifest(row: AuditLog) -> tuple[RedactionManifestEntry
 
     A value the redaction hid is stored as a keyed fingerprint, not as the
     raw value, so the replay cannot fire on it again. Entries at those
-    paths are left out of the comparison.
+    paths, and at paths inside them (a whole subtree can be stored as one
+    fingerprint), are left out of the comparison.
     """
     stored_as_fingerprint = fingerprinted_paths(row.raw_payload)
+    if "" in stored_as_fingerprint:
+        return ()
+    inside = tuple(f"{path}." for path in stored_as_fingerprint)
     return tuple(
         entry
         for entry in _coerce_recorded_manifest(row.redaction_manifest)
-        if entry.path not in stored_as_fingerprint
+        if entry.path not in stored_as_fingerprint and not entry.path.startswith(inside)
     )
 
 

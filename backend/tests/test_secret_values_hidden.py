@@ -25,6 +25,7 @@ import pytest
 from sqlalchemy import select
 
 import meho_backplane.operations._audit as audit_module
+from meho_backplane.audit_query.policy_replay import _comparable_recorded_manifest
 from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast.events import scrub_secret_named_values
@@ -265,6 +266,26 @@ def test_fingerprint_replaces_hidden_values_and_keeps_the_rest() -> None:
     # A list of another length is stored as one fingerprint.
     assert stored["items"].startswith(_FINGERPRINT)
     assert fingerprinted_paths(stored) == {"data.a", "data.b", "data.c", "items"}
+
+
+def test_policy_replay_leaves_out_entries_inside_a_fingerprinted_subtree() -> None:
+    def _entry(path: str) -> dict[str, Any]:
+        return {
+            "rule": "api_key",
+            "pattern": "x",
+            "action": "redact",
+            "count": 1,
+            "span": [0, 1],
+            "reason": "r",
+            "path": path,
+        }
+
+    row = AuditLog(
+        raw_payload={"items": _FINGERPRINT + "abc]", "itemsx": "plain", "data": {"a": "x"}},
+        redaction_manifest=[_entry("items"), _entry("items.0.token"), _entry("itemsx")],
+    )
+    kept = _comparable_recorded_manifest(row)
+    assert [entry.path for entry in kept] == ["itemsx"]
 
 
 def test_fingerprint_of_a_key_the_view_does_not_have() -> None:

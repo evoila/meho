@@ -150,6 +150,7 @@ from meho_backplane.connectors.vcf_automation.typed_ops import (
     TENANT_PROJECTS_PATH,
     provider_regions_path,
 )
+from meho_backplane.connectors.vmware_shared.vcfa_content import VcfaContentOpsMixin
 
 __all__ = ["VcfAutomationConfigurationError", "VcfAutomationConnector"]
 
@@ -182,7 +183,7 @@ def _plane_cache_key(target: VcfAutomationTargetLike, plane: Plane) -> tuple[str
     return credential_cache_key(target, fqdn, _tenant_domain(target))
 
 
-class VcfAutomationConnector(HttpConnector):
+class VcfAutomationConnector(VcfaContentOpsMixin, HttpConnector):
     """VCF Automation 9.x REST connector with dual-plane Bearer-token auth.
 
     Two independent per-target token caches:
@@ -554,6 +555,23 @@ class VcfAutomationConnector(HttpConnector):
             extra_headers=extra_headers,
             timeout=timeout,
         )
+
+    async def _content_get(
+        self,
+        target: VcfAutomationTargetLike,
+        path: str,
+        *,
+        operator: Operator,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        """A ``GET`` whose JSON answer may be a list (the catalog share list is one).
+
+        :meth:`_request_json` refuses a list; the template and catalog ops
+        (:class:`~meho_backplane.connectors.vmware_shared.vcfa_content.VcfaContentOpsMixin`)
+        read through this method instead.
+        """
+        resp = await self._send_with_retry(target, "GET", path, operator=operator, params=params)
+        return json_payload_or_empty(resp)
 
     async def _do_request_with_retry(
         self,
@@ -1275,8 +1293,9 @@ class VcfAutomationConnector(HttpConnector):
         :data:`~meho_backplane.connectors.vcf_automation.provisioning_ops.VCFA_PROVISIONING_OPS`,
         :data:`~meho_backplane.connectors.vcf_automation.image_ops.VCFA_IMAGE_OPS`,
         :data:`~meho_backplane.connectors.vcf_automation.network_ops.VCFA_NETWORK_OPS`,
-        :data:`~meho_backplane.connectors.vcf_automation.deploy_ops.VCFA_DEPLOY_OPS` and
-        :data:`~meho_backplane.connectors.vcf_automation.feature_flag_ops.VCFA_FEATURE_FLAG_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.deploy_ops.VCFA_DEPLOY_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.feature_flag_ops.VCFA_FEATURE_FLAG_OPS` and
+        :data:`~meho_backplane.connectors.vcf_automation.content_ops.VCFA_CONTENT_OPS`,
         resolves each op's ``handler_attr`` to the bound method, looks the
         group's curated ``when_to_use`` up in
         :data:`~meho_backplane.connectors.vcf_automation.typed_ops.VCFA_TYPED_WHEN_TO_USE_BY_GROUP`,
@@ -1290,6 +1309,7 @@ class VcfAutomationConnector(HttpConnector):
         # Lazy import: the operations package pulls in the embedding
         # pipeline (ONNX runtime + model) which pure fingerprint/probe unit
         # tests should not pay. Lifespan callers have it warmed by now.
+        from meho_backplane.connectors.vcf_automation.content_ops import VCFA_CONTENT_OPS
         from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
         from meho_backplane.connectors.vcf_automation.feature_flag_ops import (
             VCFA_FEATURE_FLAG_OPS,
@@ -1312,6 +1332,7 @@ class VcfAutomationConnector(HttpConnector):
             *VCFA_NETWORK_OPS,
             *VCFA_DEPLOY_OPS,
             *VCFA_FEATURE_FLAG_OPS,
+            *VCFA_CONTENT_OPS,
         )
         for op in all_ops:
             handler = getattr(cls, op.handler_attr, None)

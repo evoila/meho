@@ -78,6 +78,8 @@ _EXPECTED_OP_IDS = {
 }
 
 _EXPECTED_GROUPS = {"vcfa-vra8-inventory", "vcfa-vra8-content", "vcfa-vra8-api-files"}
+#: The groups of the cloud template and catalog ops (``VRA8_CONTENT_OPS``).
+_CONTENT_GROUPS = {"vcfa-vra8-templates", "vcfa-vra8-catalog"}
 
 #: The reads that declare one required parameter.
 _REQUIRED_PARAMS = {
@@ -489,7 +491,7 @@ async def test_registered_groups_are_enabled(
         .scalars()
         .all()
     )
-    assert {g.group_key for g in rows} == _EXPECTED_GROUPS
+    assert {g.group_key for g in rows} == _EXPECTED_GROUPS | _CONTENT_GROUPS
     assert all(g.review_status == "enabled" for g in rows)
     assert all(g.when_to_use.strip() for g in rows)
 
@@ -525,7 +527,7 @@ def test_typed_ops_table_is_exactly_the_read_core() -> None:
 
 
 def test_every_group_key_has_a_when_to_use() -> None:
-    assert set(VRA8_TYPED_WHEN_TO_USE_BY_GROUP) == _EXPECTED_GROUPS
+    assert set(VRA8_TYPED_WHEN_TO_USE_BY_GROUP) == _EXPECTED_GROUPS | _CONTENT_GROUPS
     used_groups = {op.group_key for op in VRA8_TYPED_OPS}
     assert used_groups == _EXPECTED_GROUPS
 

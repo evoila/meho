@@ -23,6 +23,11 @@ harness's uniform reason (the waiting lane of
 test below runs always, so the enumeration stays proven. When the lab
 pins the files, rename :data:`_SPEC_FILE` to the pinned file name and the
 lane arms itself.
+
+The HCX Manager setup calls the appliance management API (port 9443), a
+second API with its own file. Its lane at the end of this module checks
+``manager_setup.APPLIANCE_VENDOR_CALLS`` the same way; the main-API call of
+the restart (the migration query) is pinned there too.
 """
 
 from __future__ import annotations
@@ -31,6 +36,8 @@ import pytest
 
 from meho_backplane.connectors.hcx import api_file as _api_file_module
 from meho_backplane.connectors.hcx import connector as _connector_module
+from meho_backplane.connectors.hcx import manager_restart as _manager_restart_module
+from meho_backplane.connectors.hcx import manager_setup as _manager_setup_module
 from meho_backplane.connectors.hcx import typed_reads as _typed_reads_module
 from tests._spec_shelf import (
     assert_op_ids_served,
@@ -91,3 +98,53 @@ def test_hcx_hand_coded_api_paths_are_served_by_the_pinned_file(spec_dir: str) -
     spec_path = require_shelf_spec(spec_dir, _SPEC_FILE)
     served = openapi_served_op_ids(spec_path)
     assert_op_ids_served(_declared_api_op_ids(), served, spec_label=f"{spec_dir}/{_SPEC_FILE}")
+
+
+# ---------------------------------------------------------------------------
+# The appliance management API (port 9443) of the HCX Manager setup
+# ---------------------------------------------------------------------------
+
+#: Expected pinned file name of the appliance management API. Broadcom
+#: publishes a reference of it for HCX 9.1, but no file.
+_APPLIANCE_SPEC_FILE = "appliance_management_api.openapi3.json"
+
+
+def _appliance_op_ids(spec_dir: str) -> set[str]:
+    """The setup's appliance calls; the 4.x key activation only for the 4.x shelf."""
+    calls = set(_manager_setup_module.APPLIANCE_VENDOR_CALLS)
+    if spec_dir != "hcx-4.11":
+        calls -= _manager_setup_module.LEGACY_4X_CALLS
+    return {f"{method}:{path}" for method, path in calls}
+
+
+def test_hcx_appliance_op_id_manifest_is_pinned() -> None:
+    """Pin the setup's calls so drift cannot silently shrink the reconcile."""
+    assert _appliance_op_ids("hcx-4.11") == {
+        "GET:/api/admin/global/config/vcenter",
+        "POST:/api/admin/global/config/vcenter",
+        "GET:/api/admin/global/config/lookupservice",
+        "POST:/api/admin/global/config/lookupservice",
+        "GET:/api/admin/global/config/nsx",
+        "POST:/api/admin/global/config/nsx",
+        "GET:/api/admin/global/config/location",
+        "PUT:/api/admin/global/config/location",
+        "GET:/api/admin/global/config/searchCities",
+        "GET:/api/admin/global/config/roleMappings",
+        "PUT:/api/admin/global/config/roleMappings",
+        "GET:/api/admin/global/config/hcx",
+        "POST:/api/admin/global/config/hcx",
+        "GET:/license/hcx/activationStatus",
+        "POST:/components/appengine",
+        "GET:/components/appengine/status",
+    }
+    assert _manager_restart_module.MIGRATION_QUERY_CALL == ("POST", "/hybridity/api/migrations")
+
+
+@pytest.mark.parametrize("spec_dir", _SPEC_DIRS)
+def test_hcx_appliance_paths_are_served_by_the_pinned_file(spec_dir: str) -> None:
+    """Every setup call is served by the pinned appliance API file (skips until pinned)."""
+    spec_path = require_shelf_spec(spec_dir, _APPLIANCE_SPEC_FILE)
+    served = openapi_served_op_ids(spec_path)
+    assert_op_ids_served(
+        _appliance_op_ids(spec_dir), served, spec_label=f"{spec_dir}/{_APPLIANCE_SPEC_FILE}"
+    )

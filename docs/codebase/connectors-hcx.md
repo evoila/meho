@@ -14,6 +14,10 @@ Today the connector ships:
 - a **version helper** that reads the Manager version,
 - the **read** `hcx.api_file.get`, which fetches the API documentation
   that a running HCX Manager serves, and
+- the **HCX Manager setup** (`hcx.manager.*`): connect vCenter, SSO and
+  NSX, set the location and role mapping, activate, and restart the
+  application service, through the appliance management API on port 9443,
+  and
 - **thirteen reads** of the usual work: the Manager version and role, site
   pairings, service meshes, appliances and their tunnels, the service
   mesh diagnostics (start a run, list the runs, read the findings), jobs,
@@ -51,9 +55,18 @@ Package: `backend/src/meho_backplane/connectors/hcx/`.
 | `hcx.inventory.compute.list` | The vCenter instances HCX knows with their datacenters and clusters, as a flat list with parent ids. | `POST /hybridity/api/service/inventory/vc/list` | read (`safe`, no approval) | 4.11, 9.x |
 | `hcx.inventory.datastore.list` | The datastores of one or more clusters of a vCenter instance. | `POST /hybridity/api/service/inventory/vc/datastores/query` | read (`safe`, no approval) | 4.11, 9.x |
 | `hcx.inventory.network.list` | The networks (port groups, segments) of one site. | `POST /hybridity/api/service/inventory/networks` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.manager.config.show` | How the HCX Manager is set up: vCenter, SSO lookup service, NSX, location, role mapping and activation state. Never a password or key. | port 9443: `GET /api/admin/global/config/vcenter`, `.../lookupservice`, `.../nsx`, `.../location`, `.../roleMappings`, then `GET /api/admin/global/config/hcx` (4.x) or `GET /license/hcx/activationStatus` (9.x) | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.manager.vcenter.set` | Connect the HCX Manager to its vCenter (user and password from a Vault reference) and to the SSO lookup service. A restart makes it take effect. | port 9443: `POST /api/admin/global/config/vcenter`, then `POST /api/admin/global/config/lookupservice` | change (`dangerous`, waits for approval) | 4.11, 9.x |
+| `hcx.manager.nsx.set` | Connect the HCX Manager to NSX (user and password from a Vault reference). | port 9443: `POST /api/admin/global/config/nsx` | change (`dangerous`, waits for approval) | 4.11, 9.x |
+| `hcx.manager.location.set` | Set the site location: the one city of HCX's own list that matches. Refuses when none or several match. | port 9443: `GET /api/admin/global/config/searchCities?searchString={city}`, then `PUT /api/admin/global/config/location` | change (`caution`, waits for approval) | 4.11, 9.x |
+| `hcx.manager.role_mapping.set` | Set which SSO groups get the HCX roles System Administrator and Enterprise Administrator (Migration Admin and Migration User on 9.1). Other roles stay. | port 9443: `GET`, then `PUT /api/admin/global/config/roleMappings` | change (`dangerous`, waits for approval) | 4.11, 9.x |
+| `hcx.manager.activate` | 4.x: activate HCX with a key from a Vault reference. An active HCX (for example with VCF licensing from vCenter) answers `already_active`. 9.x has no key call and only reports the state. | port 9443: `GET` and `POST /api/admin/global/config/hcx` (4.x), `GET /license/hcx/activationStatus` (9.x) | change (`dangerous`, waits for approval) | 4.11 (with a key), 9.x (state only) |
+| `hcx.manager.restart` | Restart the HCX application service so the setup takes effect. HCX is not usable for several minutes. Refuses while migrations run. | port 9443: `GET /components/appengine/status`, `POST /components/appengine?action=stop`, then `?action=start`; port 443: `POST /hybridity/api/migrations?action=query` | change (`dangerous`, waits for approval) | 4.11, 9.x |
+| `hcx.manager.service.status` | The state of the HCX application service (RUNNING, STOPPED, STARTING), or `not_reachable` with the time. The status read of a restart. | port 9443: `GET /components/appengine/status` | read (`safe`, no approval) | 4.11, 9.x |
 
 Every operation in the table exists on every version the connector
-covers, so none stops early with a version message.
+covers, so none stops early with a version message. `hcx.manager.activate`
+sends a key only on 4.x; on 9.x it reports the state.
 
 ## Key types
 
@@ -84,6 +97,15 @@ covers, so none stops early with a version message.
   (every `(method, path)` they send; the reconcile lane checks them),
   `rows_of` (takes the rows out of `items` or `data.items`),
   `flatten_inventory_tree` and `redact_secrets`.
+
+- `HcxManagerSetupOps` (`manager_setup_handlers.py`) -- a mixin of
+  `HcxConnector` with the handler methods of the `hcx.manager.*`
+  operations, so `connector.py` stays small. The bodies are in
+  `manager_setup.py` and `manager_restart.py`, the metadata in
+  `manager_setup_ops.py` and `manager_setup_change_ops.py`.
+- `appliance_session`, `ApplianceApi`, `HcxApplianceError`,
+  `HcxManagerSetupError` (`appliance_api.py`) -- the access to the
+  appliance management API (port 9443) and its two error types.
 
 ## Control flow
 
@@ -331,6 +353,99 @@ hook is `HttpConnector.trace_response_body`, see
 `docs/codebase/redaction.md`). A test dispatches `hcx.site_pairing.list`
 with capture on and checks the stored span.
 
+### The HCX Manager setup
+
+The setup operations use the HCX Manager **appliance management API** on
+port 9443 of the target's host, not the main API on port 443. Group:
+`hcx-manager-setup`.
+
+| Group | Reads | Changes |
+|---|---|---|
+| `hcx-manager-setup` | `hcx.manager.config.show`, `hcx.manager.service.status` | `hcx.manager.vcenter.set`, `hcx.manager.nsx.set`, `hcx.manager.location.set`, `hcx.manager.role_mapping.set`, `hcx.manager.activate`, `hcx.manager.restart` |
+
+Login (`appliance_api.py`): HTTP basic with the HCX appliance account (the
+`admin` user set at deployment) on every call. There is no session, so a
+login cannot expire between a start and a status read: each operation
+reads the account again. The account comes from the target:
+
+- `extras.appliance_secret_ref`: a Vault reference to a secret with
+  `username` and `password`, when the target sets it;
+- else the target's own secret (`secret_ref`). On a new HCX Manager the
+  appliance account is the only account, so this is the usual case.
+
+Each operation opens one short-lived HTTP client to `https://<host>:9443`
+with the target's TLS settings and the same address check as the main
+client, and closes it at the end.
+
+Secrets: a change never takes a password or key as input. It takes a
+Vault reference (`vcenter_secret_ref`, `nsx_secret_ref`: fields `username`
+and `password`; `activation_key_secret_ref`: field `activation_key`). MEHO
+reads it under the caller's identity just before the call. HCX takes the
+vCenter and NSX passwords as base64 text. Before a vendor error reaches
+the answer, MEHO cuts every secret it sent (the value and its base64 form)
+out of the vendor text. The flight recorder gets the request body with the
+password and the key replaced. No answer holds a password or key.
+
+What each change does:
+
+- `hcx.manager.vcenter.set` -- two steps: register vCenter, then the SSO
+  lookup service (`{"lookupServiceUrl", "providerType": "PSC"}`). A failure
+  at step one raises: nothing changed. A failure at step two answers
+  `status: failed` with `steps` (the step that ran, the step that failed
+  with the vendor's error); vCenter stays registered, nothing is undone.
+- `hcx.manager.nsx.set` -- one call.
+- `hcx.manager.location.set` -- searches HCX's city list for `city`, keeps
+  the rows whose `city` or `cityAscii` match (and `country`, `province`
+  when given) and sends the one match with `PUT`. No match, or more than
+  one, is refused with the names the search found.
+- `hcx.manager.role_mapping.set` -- the vendor `PUT` replaces the whole
+  mapping. So the change reads the mapping, replaces the groups of the
+  roles it was given (`system_admin_groups`, `enterprise_admin_groups`) and
+  sends all roles back. It keeps the role names the Manager uses: HCX 9.1
+  renamed them to Migration Admin and Migration User. A group SSO does not
+  know: HCX answers `isSuccess: false`, and that becomes an error.
+- `hcx.manager.activate` -- reads the state first: `GET
+  /api/admin/global/config/hcx` (4.x; active when it holds a key), else
+  `GET /license/hcx/activationStatus` (9.x; `activationDone`). Active:
+  `already_active`, no key is read. 4.x and not active: reads the key and
+  sends `POST /api/admin/global/config/hcx` with the activation server
+  (default `https://connect.hcx.vmware.com`). 9.x and not active: refused,
+  because HCX 9 takes its licence from vCenter (VCF licensing).
+
+The restart (`manager_restart.py`) is a vendor job with no job id:
+
+1. `GET /components/appengine/status`. `STARTING` or `STOPPING` means a
+   restart already runs: the answer is `already_running` and nothing
+   starts. This check is a help, not a lock.
+2. The migration check: skipped when no vCenter is registered (then no
+   migration can run) or when `skip_migration_check` is true; else
+   `POST /hybridity/api/migrations?action=query` with
+   `{"filter": {"skipDrafts": true}}` on the main API. A row with
+   `progress.isDone: false` (and not failed or cancelled) refuses the
+   restart. If the check cannot run (for example because the SSO login does
+   not work yet on a new Manager), the restart is refused and names
+   `skip_migration_check`.
+3. `POST /components/appengine?action=stop` (skipped when the service is
+   `STOPPED`), then `?action=start`. Each call waits until HCX is done, up
+   to 300 seconds.
+
+The answer: `status` (`accepted`, `already_running`, `failed`, `no_answer`),
+`job_id: null`, `service_state`, `migration_check`, `steps` and
+`status_read: hcx.manager.service.status`. `accepted` never means HCX is
+ready: follow `hcx.manager.service.status` until `running` is true, then
+`hcx.about` until it answers. A failure after the stop leaves the service
+stopped; a new `hcx.manager.restart` then only starts it.
+
+After a lost reply, do not start again blindly: read
+`hcx.manager.service.status` (and `hcx.manager.config.show` for the other
+changes) and decide from what it shows. Run the restart in MEHO's async
+mode (`async: true`, `docs/codebase/async-governed-dispatch.md`), so MEHO
+stores the answer under a run handle and a lost reply does not lose it.
+
+`hcx.manager.service.status` answers `state: not_reachable`,
+`reachable: false` and `checked_at` when the Manager does not answer; it
+never says the service failed.
+
 ### Shutdown
 
 `aclose()` clears the token cache and closes the HTTP pool. No logout call
@@ -355,6 +470,13 @@ is sent.
   https://github.com/vmware/terraform-provider-hcx): the inventory calls
   `cloud/list`, `vc/list`, `vc/datastores/query` and `networks`.
 - `settings.py`: the result-handle limits the read checks against.
+- Broadcom's "HCX Manager Appliance Management APIs" reference for HCX
+  9.1 (https://developer.broadcom.com/xapis/hcx-manager-appliance-management-apis/9.1/):
+  the paths and fields of the setup calls.
+- VMware's Terraform provider for HCX (`hcx/activation.go`, `vcenter.go`,
+  `sso.go`, `location.go`, `role_mapping.go`, `jobs.go`) and VMware's
+  PowerCLI example module for HCX (`VMware.HCX.psm1`): the 4.x key
+  activation, the base64 passwords and the basic login on port 9443.
 
 ## Known issues
 
@@ -386,12 +508,22 @@ is sent.
   No vendor page names its path, so this read does not cover it yet.
 - `build` is derived from the version string when the appliance row has no
   `buildNumber`; the live pin confirms the row's field names.
+- The setup calls are checked against Broadcom's 9.1 reference only; no
+  appliance management API file is pinned, so their reconcile lane
+  (`appliance_management_api.openapi3.json`) skips. The 4.x key activation
+  call is not in the 9.1 reference; it comes from the Terraform provider
+  and the PowerCLI module. The 9.1 reference marks the location calls as
+  deprecated but names no new call.
+- The 9.1 reference also has a role mapping for VCF SSO groups
+  (`/api/admin/global/config/roleMappings/idp/groups`). The setup maps
+  vSphere SSO groups only.
 
 ## References
 
 - Task #4608 (this connector, login, version helper and the read);
   #4545 (the reads that build on it); #4395 (the same read for NSX);
-  #4505 (the same shape for Site Recovery Manager).
+  #4505 (the same shape for Site Recovery Manager); #4550 (the HCX Manager
+  setup).
 - `docs/decisions/spec-reconcile-guards-standard.md` -- the waiting lane.
 - `docs/codebase/connectors-nsx.md` -- the sibling connector this one
   mirrors.

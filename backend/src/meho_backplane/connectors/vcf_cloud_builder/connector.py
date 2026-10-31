@@ -29,11 +29,20 @@ Version detection
 
 ``GET /v1/sddcs/about`` returns the bring-up service with its ``version``.
 The same call is the ``installer.cb.about`` operation.
+
+Secrets in later reads
+----------------------
+
+A start sends the spec's passwords and licence keys; a vendor error text of
+a later status read can echo one. The connector remembers the values each
+start read, by the target's host, and hides them in the status reads and in
+the flight-recorder body of every answer from that host.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -56,6 +65,10 @@ from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
     ProbeResult,
+)
+from meho_backplane.connectors.vcf_cloud_builder._jobs import (
+    SecretMemory,
+    hide_secrets_everywhere,
 )
 from meho_backplane.connectors.vcf_cloud_builder.typed_reads import ABOUT_PATH
 from meho_backplane.connectors.vcf_installer.session import (
@@ -89,6 +102,32 @@ class CloudBuilderConnector(HttpConnector):
         self._credentials_loader: InstallerCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
         )
+        self._secret_memory = SecretMemory()
+
+    def remember_secrets(self, target: InstallerTargetLike, values: Iterable[str]) -> None:
+        """Keep the secret values a start sent to *target*, to hide them in later reads."""
+        self._secret_memory.remember(target.host, values)
+
+    def known_secrets(self, target: InstallerTargetLike) -> tuple[str, ...]:
+        """The secret values the starts sent to *target* since MEHO started."""
+        return self._secret_memory.known(target.host)
+
+    def trace_response_body(self, response: httpx.Response) -> Any:
+        """Hide the remembered secrets and every licence key before the trace records a body.
+
+        The flight recorder's own rules know secrets by shape (a token, a
+        key file) and by op family (a login). A spec password that a
+        validation check echoes is neither, so the connector hides it here
+        with the same rule the status reads use. A body that is not JSON is
+        recorded as the shared engine sees fit.
+        """
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        url = getattr(getattr(response, "request", None), "url", None)
+        secrets = self._secret_memory.known(getattr(url, "host", ""))
+        return hide_secrets_everywhere(payload, secrets)
 
     async def auth_headers(self, target: InstallerTargetLike, operator: Operator) -> dict[str, str]:
         """Return ``{"Authorization": "Basic <b64>"}`` for the Cloud Builder ``admin`` account."""
@@ -333,7 +372,8 @@ class CloudBuilderConnector(HttpConnector):
         return await sddc_report_impl(self, operator, target, params)
 
     async def aclose(self) -> None:
-        """Forget cached accounts, then close the HTTP pool."""
+        """Forget cached accounts and remembered secrets, then close the HTTP pool."""
         async with self._creds_lock:
             self._creds_cache.clear()
+        self._secret_memory.clear()
         await super().aclose()

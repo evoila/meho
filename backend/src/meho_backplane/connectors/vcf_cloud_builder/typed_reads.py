@@ -17,6 +17,11 @@
 
 A status read that gets no answer returns ``state: not_reachable`` with the id
 and the time, never ``failed``. MEHO keeps no job state between calls.
+
+A vendor error text of a check or a task can echo a value of the spec an
+earlier start sent. The status reads hide the secret values the connector
+remembers for the target, and every licence key by its shape (see
+:class:`~meho_backplane.connectors.vcf_cloud_builder._jobs.SecretMemory`).
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ import httpx
 
 from meho_backplane.connectors.vcf_cloud_builder._jobs import (
     error_list_text,
+    hide_secrets_everywhere,
     not_reachable,
     now_iso,
     sddc_state,
@@ -168,15 +174,18 @@ async def validation_status_impl(
 ) -> dict[str, Any]:
     """``installer.cb.validation.status`` — one validation, or all when no id is given."""
     validation_id = params.get("id")
+    secrets = connector.known_secrets(target)
     try:
         if not validation_id:
             payload = await connector.send(target, "GET", VALIDATIONS_PATH, operator=operator)
-            return {"checked_at": now_iso(), "validations": validation_rows(payload)}
+            rows = validation_rows(payload)
+            return {"checked_at": now_iso(), "validations": hide_secrets_everywhere(rows, secrets)}
         path = VALIDATION_PATH.replace("{id}", str(validation_id))
         payload = await connector.send(target, "GET", path, operator=operator)
     except httpx.TransportError as exc:
         return not_reachable(exc, id_key="id", job_id=validation_id, target=target)
-    return {**validation_view(payload), "checked_at": now_iso()}
+    view = hide_secrets_everywhere(validation_view(payload), secrets)
+    return {**view, "checked_at": now_iso()}
 
 
 def _task_row(task: dict[str, Any]) -> dict[str, Any]:
@@ -231,15 +240,18 @@ async def sddc_status_impl(
 ) -> dict[str, Any]:
     """``installer.cb.sddc.status`` — one bring-up, or all when no id is given."""
     sddc_id = params.get("id")
+    secrets = connector.known_secrets(target)
     try:
         if not sddc_id:
             payload = await connector.send(target, "GET", SDDC_LIST_PATH, operator=operator)
-            return {"checked_at": now_iso(), "bringups": sddc_rows(payload)}
+            rows = sddc_rows(payload)
+            return {"checked_at": now_iso(), "bringups": hide_secrets_everywhere(rows, secrets)}
         path = SDDC_PATH.replace("{id}", str(sddc_id))
         payload = await connector.send(target, "GET", path, operator=operator)
     except httpx.TransportError as exc:
         return not_reachable(exc, id_key="id", job_id=sddc_id, target=target)
-    return {**sddc_view(payload), "checked_at": now_iso()}
+    view = hide_secrets_everywhere(sddc_view(payload), secrets)
+    return {**view, "checked_at": now_iso()}
 
 
 async def sddc_report_impl(

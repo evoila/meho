@@ -17,13 +17,17 @@ returns. The operations in this package follow the vendor job rules:
 This module also holds :func:`fill_secrets`, which reads the passwords a call
 names by Vault reference and puts them into a copy of the spec. The values
 never go into a result: :func:`hide_secrets` replaces a vendor text that holds
-one.
+one, and :class:`SecretMemory` keeps the values a start read, so a status read
+made later (which has no spec) can hide them too. A text shaped like a VMware
+licence key is hidden by its shape, also after a restart of MEHO.
 """
 
 from __future__ import annotations
 
 import copy
+import re
 import ssl
+from collections import deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -41,14 +45,17 @@ if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
 
 __all__ = [
+    "ACTIVE_VALIDATION_VENDOR_STATES",
     "DEFAULT_SECRET_KEY",
     "SDDC_STATES",
     "VALIDATION_STATES",
     "SecretInputError",
+    "SecretMemory",
     "StepLog",
     "error_list_text",
     "fill_secrets",
     "hide_secrets",
+    "hide_secrets_everywhere",
     "not_reachable",
     "now_iso",
     "sddc_state",
@@ -62,6 +69,23 @@ DEFAULT_SECRET_KEY: Final = "password"
 
 #: The text put in place of a vendor text that holds a secret value.
 _HIDDEN_TEXT: Final = "[MEHO hid this text: it held a secret from Vault]"
+
+#: A VMware licence key: five groups of five letters or digits. A vendor text
+#: that names a rejected key is hidden by this shape, so MEHO needs no memory
+#: of the value.
+_LICENCE_KEY_SHAPE: Final = re.compile(r"\b[A-Z0-9]{5}(?:-[A-Z0-9]{5}){4}\b")
+_HIDDEN_KEY_TEXT: Final = "[MEHO hid a licence key]"
+
+#: How many secret values :class:`SecretMemory` keeps per target (the newest).
+_SECRET_MEMORY_SIZE: Final = 64
+
+#: ``executionStatus`` values of a validation that is still active on Cloud
+#: Builder. ``CANCELLATION_IN_PROGRESS`` counts: the validation still runs
+#: until the cancel is done, so a caller must keep polling and no second
+#: validation may start.
+ACTIVE_VALIDATION_VENDOR_STATES: Final[frozenset[str]] = frozenset(
+    {"IN_PROGRESS", "CANCELLATION_IN_PROGRESS"}
+)
 
 #: ``SddcTask.status`` (bring-up) and MEHO's state word.
 _SDDC_STATE_WORDS: Final[dict[str, str]] = {
@@ -105,9 +129,9 @@ def sddc_state(vendor_state: object) -> str:
 
 def validation_state(execution_status: object, result_status: object) -> str:
     """MEHO's state word for a validation (``executionStatus`` + ``resultStatus``)."""
-    if execution_status == "IN_PROGRESS":
+    if execution_status in ACTIVE_VALIDATION_VENDOR_STATES:
         return "running"
-    if execution_status in ("CANCELLED", "CANCELLATION_IN_PROGRESS"):
+    if execution_status == "CANCELLED":
         return "cancelled"
     if execution_status == "FAILED" or result_status == "FAILED":
         return "failed"
@@ -147,12 +171,59 @@ def not_reachable(
 
 
 def hide_secrets(text: str | None, secrets: Iterable[str]) -> str | None:
-    """*text*, or a fixed note when it holds one of *secrets*."""
+    """*text*, or a fixed note when it holds one of *secrets*.
+
+    A licence key in *text* is replaced by a note, whether or not its value
+    is in *secrets*.
+    """
     if text is None:
         return None
     if any(secret and secret in text for secret in secrets):
         return _HIDDEN_TEXT
-    return text
+    return _LICENCE_KEY_SHAPE.sub(_HIDDEN_KEY_TEXT, text)
+
+
+def hide_secrets_everywhere(value: Any, secrets: Iterable[str]) -> Any:
+    """A copy of *value* with :func:`hide_secrets` applied to every text, at any depth."""
+    found = tuple(secret for secret in secrets if secret)
+    if isinstance(value, str):
+        return hide_secrets(value, found)
+    if isinstance(value, dict):
+        return {key: hide_secrets_everywhere(item, found) for key, item in value.items()}
+    if isinstance(value, list):
+        return [hide_secrets_everywhere(item, found) for item in value]
+    return value
+
+
+class SecretMemory:
+    """The secret values the starts sent to each Cloud Builder, kept in memory.
+
+    A status read runs in a later call and has no spec, so it cannot read the
+    secrets from Vault again. The connector remembers the values a start read,
+    by the host of the target, and hides them in the vendor texts of later
+    reads and in their flight-recorder bodies. Only the newest values are
+    kept, and they are gone after a restart of MEHO (licence keys stay hidden
+    by their shape).
+    """
+
+    def __init__(self) -> None:
+        self._values: dict[str, deque[str]] = {}
+
+    @staticmethod
+    def key(host: object) -> str:
+        return str(host or "").strip().lower()
+
+    def remember(self, host: object, values: Iterable[str]) -> None:
+        known = self._values.setdefault(self.key(host), deque(maxlen=_SECRET_MEMORY_SIZE))
+        for value in values:
+            if value and value not in known:
+                known.append(value)
+
+    def known(self, host: object) -> tuple[str, ...]:
+        return tuple(self._values.get(self.key(host), ()))
+
+    def clear(self) -> None:
+        self._values.clear()
 
 
 def _error_texts(error: Mapping[str, Any]) -> list[str]:

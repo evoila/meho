@@ -16,8 +16,9 @@ Each change runs three steps and returns all of them:
    :func:`~meho_backplane.connectors.vcf_cloud_builder._jobs.fill_secrets`).
 2. ``check_running`` — look for a job of the same kind that runs now
    (``GET /v1/sddcs/validations``, ``GET /v1/sddcs``, or the bring-up itself
-   for a retry). When one runs, return its id and start nothing. This check
-   is a help, not a lock: two callers can both check before either starts.
+   for a retry). When one runs, return its id and start nothing. A validation
+   whose cancel is still in progress counts as running. This check is a help,
+   not a lock: two callers can both check before either starts.
 3. ``start`` — send the start. Cloud Builder accepts the job and runs it by
    itself, so the answer says ``accepted`` with the vendor's id and the
    status read that follows it. It never says the job is done.
@@ -36,6 +37,7 @@ from typing import TYPE_CHECKING, Any, Final
 import httpx
 
 from meho_backplane.connectors.vcf_cloud_builder._jobs import (
+    ACTIVE_VALIDATION_VENDOR_STATES,
     SecretInputError,
     StepLog,
     fill_secrets,
@@ -84,7 +86,7 @@ STEPS: Final[tuple[str, ...]] = ("read_secrets", "check_running", "start")
 
 def _running_validation(payload: Any) -> dict[str, Any] | None:
     for item in page_elements(payload):
-        if item.get("executionStatus") == "IN_PROGRESS":
+        if item.get("executionStatus") in ACTIVE_VALIDATION_VENDOR_STATES:
             return {"id": item.get("id"), "vendor_state": item.get("executionStatus")}
     return None
 
@@ -255,6 +257,7 @@ async def _run_change(
     spec, stop = await _read_secrets(operator, run, params)
     if stop is not None:
         return stop
+    connector.remember_secrets(target, run.secrets)
     stop = await _check_running(connector, operator, run)
     if stop is not None:
         return stop

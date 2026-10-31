@@ -594,6 +594,13 @@ values:
 - A vendor error text that holds one of these values is replaced with a
   note. The calls that send a spec carry the `credential` tag, so the flight
   recorder keeps no request or answer body.
+- A later status read can get a check or task error that echoes a value of
+  the spec. The connector remembers the values each start read, by the
+  target's host, and hides them in the status reads and in the
+  flight-recorder body of every answer from that host. Only the newest
+  values are kept, and they are gone after a restart of MEHO. A text shaped
+  like a VMware licence key (five groups of five letters or digits) is
+  hidden by its shape, so a rejected key stays hidden after a restart too.
 - The reports are vendor files. MEHO does not change their content.
 
 ### Vendor jobs
@@ -619,10 +626,13 @@ call returns.
   ([async-governed-dispatch.md](async-governed-dispatch.md)), so MEHO keeps
   the answer with the job id under a run handle.
 - **Status.** The status reads give MEHO's state word (`running`,
-  `succeeded`, `failed`, and for a bring-up `rolled_back`), the vendor state,
-  the progress and the vendor's error text. When Cloud Builder does not
-  answer, the state is `not_reachable`, with the id and the time; it is
-  never `failed`. MEHO keeps no job state between calls; the caller keeps
+  `succeeded`, `failed`, for a validation `cancelled`, and for a bring-up
+  `rolled_back`), the vendor state, the progress and the vendor's error
+  text. A validation whose cancel is still in progress
+  (`CANCELLATION_IN_PROGRESS`) is `running`: keep polling until it is
+  `cancelled`, and no second validation starts meanwhile. When Cloud Builder
+  does not answer, the state is `not_reachable`, with the id and the time; it
+  is never `failed`. MEHO keeps no job state between calls; the caller keeps
   the id.
 - **Login.** When the stored login no longer works between a start and a
   status read, the status read reads the account from Vault again and still

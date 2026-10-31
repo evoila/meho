@@ -171,6 +171,11 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vcenter.appliance.deploy",
     "vmware.composite.vcenter.install",
     "vmware.composite.vcenter.deployment.answer",
+    # Host certificate changes: renew and install dangerous, the signing
+    # request caution; all wait for approval.
+    "vmware.composite.host.certificate.renew",
+    "vmware.composite.host.certificate.csr",
+    "vmware.composite.host.certificate.install",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -354,6 +359,18 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
         "meho_backplane.connectors.vmware_rest.composites._vcenter_answer."
         "vcenter_deployment_answer_composite"
     ),
+    "vmware.composite.host.certificate.renew": (
+        "meho_backplane.connectors.vmware_rest.composites._host_certificate."
+        "host_certificate_renew_composite"
+    ),
+    "vmware.composite.host.certificate.csr": (
+        "meho_backplane.connectors.vmware_rest.composites._host_certificate."
+        "host_certificate_csr_composite"
+    ),
+    "vmware.composite.host.certificate.install": (
+        "meho_backplane.connectors.vmware_rest.composites._host_certificate_install."
+        "host_certificate_install_composite"
+    ),
     "vmware.composite.guest.customization_spec.create": (
         "meho_backplane.connectors.vmware_rest.composites._write."
         "guest_customization_spec_create_composite"
@@ -473,6 +490,9 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vcenter.appliance.deploy": "vcenter_install",
     "vmware.composite.vcenter.install": "vcenter_install",
     "vmware.composite.vcenter.deployment.answer": "vcenter_install",
+    "vmware.composite.host.certificate.renew": "vmware-host-certificates",
+    "vmware.composite.host.certificate.csr": "vmware-host-certificates",
+    "vmware.composite.host.certificate.install": "vmware-host-certificates",
     "vmware.composite.host.evacuate": "host",
     "vmware.composite.host.maintenance.exit": "host",
     "vmware.composite.host.detach_from_vds": "host",
@@ -691,6 +711,7 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
         "vmware.composite.vm.snapshot.create",
         "vmware.composite.content_library.create",
         "vmware.composite.content_library.item.upload",
+        "vmware.composite.host.certificate.csr",
     }
     for row in rows:
         if row.op_id in (
@@ -1190,6 +1211,15 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "answer_not_allowed",
             "answer_failed",
             "answer_unknown",
+        },
+        "vmware.composite.host.certificate.install": {
+            "installed",
+            "unchanged",
+            "not_verified",
+            "invalid_certificate",
+            "not_found",
+            "not_connected",
+            "needs_vcenter",
         },
     }
     for op_id, expected_values in expected_status_values.items():

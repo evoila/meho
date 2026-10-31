@@ -158,6 +158,9 @@ from meho_backplane.connectors.vmware_rest.composites._host import (
     disk_mark_flash_composite,
     service_control_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._host_certificate_ops import (
+    HOST_CERTIFICATE_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._host_cluster_llm_instructions import (
     HOST_CLUSTER_LLM_INSTRUCTIONS,
 )
@@ -431,6 +434,10 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
     VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vmware_rest.host_certificate import (
+    HOST_CERTIFICATES_GROUP_KEY,
+    HOST_CERTIFICATES_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.license_common import (
     LICENSE_GROUP_KEY,
     LICENSE_KEY_TAG,
@@ -639,6 +646,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     CONTENT_LIBRARY_GROUP_KEY: CONTENT_LIBRARY_WHEN_TO_USE,
     # Shared with the two typed licence reads: the same key and text.
     LICENSE_GROUP_KEY: LICENSE_WHEN_TO_USE,
+    # Shared with the typed host certificate and TPM reads: the same key and text.
+    HOST_CERTIFICATES_GROUP_KEY: HOST_CERTIFICATES_WHEN_TO_USE,
     # #4383: shared with the typed read vmware.alarm.triggered.list, which
     # registers under the same group key with the same text.
     ALARMS_GROUP_KEY: ALARMS_WHEN_TO_USE,
@@ -2186,6 +2195,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         requires_approval=True,
         llm_instructions=ALARM_RESET_LLM_INSTRUCTIONS,
     ),
+    # Host certificate changes: renew and install dangerous, the signing
+    # request caution; all wait for approval. The rows live in their own module.
+    *(_CompositeSpec(**row) for row in HOST_CERTIFICATE_COMPOSITES),
     # Install a new vCenter (#4394), dangerous / approval; the rows live in
     # their own module.
     *(_CompositeSpec(**row) for row in VCENTER_INSTALL_COMPOSITES),

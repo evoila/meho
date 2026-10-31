@@ -97,6 +97,8 @@ _VMWARE_COMPOSITE_GROUPS: Final[frozenset[str]] = frozenset(
         "migration",
         # Install a new vCenter; shared with the typed status read.
         "vcenter_install",
+        # Host certificate changes; shared with the certificate and TPM reads.
+        "vmware-host-certificates",
     }
 )
 _BIND9_GROUPS: Final[frozenset[str]] = frozenset({"identity", "zone", "record", "config"})

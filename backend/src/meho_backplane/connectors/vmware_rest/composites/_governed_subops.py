@@ -53,6 +53,9 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _vm_cdrom_tools,
     _write,
 )
+from meho_backplane.connectors.vmware_rest.composites._host_certificate_ops import (
+    HOST_CERTIFICATE_GOVERNED_SUBOPS,
+)
 from meho_backplane.connectors.vmware_rest.composites._vcenter_install_ops import (
     VCENTER_INSTALL_GOVERNED_SUBOPS,
 )
@@ -193,6 +196,8 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     # #4383 alarm changes: one AlarmManager write each, after two reads.
     "vmware.composite.alarm.acknowledge": _alarm._VIM_SUB_OPS_ALARM_ACKNOWLEDGE,
     "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,
+    # Host certificate changes: renew, signing request, install.
+    **HOST_CERTIFICATE_GOVERNED_SUBOPS,
     # #4394 vCenter install: the deploy, the setup start and the answer.
     **VCENTER_INSTALL_GOVERNED_SUBOPS,
 }

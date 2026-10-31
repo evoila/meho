@@ -418,6 +418,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_folder_list import (  # noq
     FOLDER_LIST_WHEN_TO_USE,
     VMWARE_FOLDER_LIST_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_host_certificate import (  # noqa: E402
+    HOST_CERTIFICATE_TYPED_OPS,
+    HOST_CERTIFICATES_GROUP_KEY,
+    HOST_CERTIFICATES_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_host_datastores import (  # noqa: E402
     HOST_DATASTORES_GROUP_KEY,
     HOST_DATASTORES_WHEN_TO_USE,
@@ -531,6 +536,8 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # Shared with the licence assign composite: the same key and text.
     LICENSE_GROUP_KEY: LICENSE_WHEN_TO_USE,
     APPLIANCE_LOCAL_ACCOUNTS_GROUP_KEY: APPLIANCE_LOCAL_ACCOUNTS_WHEN_TO_USE,
+    # Shared with the three host certificate composites: the same key and text.
+    HOST_CERTIFICATES_GROUP_KEY: HOST_CERTIFICATES_WHEN_TO_USE,
     ALARM_TRIGGERED_GROUP_KEY: ALARM_TRIGGERED_WHEN_TO_USE,
     CLUSTER_LIST_GROUP_KEY: CLUSTER_LIST_WHEN_TO_USE,
     RESOURCE_POOL_LIST_GROUP_KEY: RESOURCE_POOL_LIST_WHEN_TO_USE,
@@ -639,6 +646,7 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_LICENSE_LIST_OP,
     VMWARE_LICENSE_ASSIGNED_LIST_OP,
     *APPLIANCE_LOCAL_ACCOUNTS_OPS,
+    *HOST_CERTIFICATE_TYPED_OPS,
     VMWARE_ALARM_TRIGGERED_LIST_OP,
     VMWARE_VM_QUESTION_GET_OP,
     VMWARE_VM_QUESTION_ANSWER_OP,

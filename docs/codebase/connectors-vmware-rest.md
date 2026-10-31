@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 87 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 90 hand-authored composites
 that orchestrate cross-spec workflows: 20 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -22,7 +22,7 @@ read `datastore.file.list` / `#3432` + the vSAN folder list
 read `datastore.vsan.folder.list` / `#4022` + the orphan folder check
 `datastore.orphan_dirs` / `#3814` + the VM limit and
 reservation read `vm.resource_allocation.show` / `#3880` + the migration
-inventory read `vmware.migration.inventory`) and 67 write
+inventory read `vmware.migration.inventory`) and 70 write
 composites (G3.1-T6 / `#509`, incl. the three vCenter install changes
 `vcenter.appliance.deploy` / `vcenter.install` / `vcenter.deployment.answer`
 (`#4394`), the destructive-tier `vm.destroy` / `#3198`, the
@@ -391,7 +391,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   per-disk `results` array (partial failure tolerated, JSONFlux-reduced
   when large); `service_control` applies a `HostServiceSystem`
   start/stop/restart + optional `UpdateServicePolicy` **bounded to a
-  curated server-side allowlist** (`TSM-SSH` / `TSM` / `ntpd` / `ptpd`)
+  curated server-side allowlist** (`TSM-SSH` / `TSM` / `ntpd` / `ptpd` /
+  `snmpd` / `sfcbd-watchdog` / `slpd`)
   — an out-of-list service name is refused (`status='service_not_allowed'`)
   before any resolution or write, never passed through. On a **vCenter**
   target the host is selected by display name **or** moref
@@ -565,9 +566,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 87
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 90
   `_CompositeSpec` rows (20 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 50 dangerous/destructive
+  cache-refresh read `datastore.refresh` — + 53 dangerous/destructive
   writes + 17 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
@@ -981,6 +982,11 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   handler `network_portgroup_show`) — all settings of one distributed port
   group, by id or name. `safe`, in its own group `vmware-portgroup-settings`,
   on both catalogs. See **Port group settings** under Control flow.
+- **`vmware.host.config.show`** (`typed_ops_host_config.py`, handler
+  `host_config_show`) — one host's NTP, DNS and host name, syslog targets,
+  lockdown mode, SNMP and core dump partition. `safe`, in its own group
+  `vmware-host-config`, on both catalogs. See **Host time, name and
+  logging** under Control flow.
 - **`vcenter.sso_admin.api_file.get`** (`typed_ops_sso_admin_api_file.py`,
   handler `sso_admin_api_file_get`) — reads one SSO Admin API description
   file (the WSDL or one of its XSD files) that a vCenter serves. No vendor
@@ -1438,12 +1444,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 87 `vmware.composite.*` rows with
+   queued registrar and upserts: the 90 `vmware.composite.*` rows with
    `source_kind="composite"` — 20 reads (19 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 67 writes, all `requires_approval=True`
-   (38 `safety_level="dangerous"`; 17 `safety_level="caution"` —
+   service principals), and 70 writes, all `requires_approval=True`
+   (41 `safety_level="dangerous"`; 17 `safety_level="caution"` —
    `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
@@ -1840,7 +1846,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 87 composites (20 reads + 67 writes) land as `source_kind="composite"`
+The 90 composites (20 reads + 70 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1937,7 +1943,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 87 composites are hand-authored aggregators the connector ships as
+The 90 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -5310,6 +5316,95 @@ no live vCenter; mocked HTTP on the vCenter 8.0.3 and 9.0 VI-JSON paths) and
 field the read uses against the pinned 9.0 `vi-json.yaml` and the 8.0 U1,
 U2 and U3 files; the network list filters against the pinned 8.0 U3 and 9.0
 `vcenter.yaml`).
+
+### Host time, name and logging (`host.config.show`, `host.ntp.set`, `host.dns.set`, `host.syslog.set`)
+
+One read of a host's base settings, and three changes that set NTP, DNS and
+the host name, and the remote syslog targets. All are written by hand, so
+they work on a fresh install with no spec ingest. The read is in its own
+group `vmware-host-config`; the three changes are in the `host` group.
+
+| Operation | What it does | Vendor calls | Risk |
+|---|---|---|---|
+| `vmware.host.config.show` | One host's `ntp` (servers, time zone, clock protocol, ntpd start policy and whether it runs), `dns` (DHCP flag, host name, domain name, servers, search domains), `syslog` (`Syslog.global.logHost` and its targets), `lockdown_mode`, `snmp` (on or off, port, how many read-only communities, trap targets) and `core_dump` (the active partition). A part that cannot be read is `null` with a line in `read_notes`; the other parts still come back. | VIM `RetrievePropertiesEx` of `HostSystem.configManager.*`, then of `HostDateTimeSystem.dateTimeInfo`, `HostServiceSystem.serviceInfo`, `HostNetworkSystem.dnsConfig`, `HostAccessManager.lockdownMode`, `HostSnmpSystem.configuration`, `HostDiagnosticSystem.activePartition`; `OptionManager.QueryOptions` (`Syslog.global.logHost`) | `safe`; runs at once |
+| `vmware.composite.host.ntp.set` | Sets the NTP server list, sets ntpd to start `on` (or `automatic`), then restarts ntpd, or starts it when it is stopped. Returns `before` and `after`. | VIM `HostDateTimeSystem.UpdateDateTimeConfig`, `HostServiceSystem.UpdateServicePolicy` (`ntpd`), `HostServiceSystem.RestartService` or `StartService` (`ntpd`) | `dangerous`; waits for approval |
+| `vmware.composite.host.dns.set` | Sets DNS servers, search domains, host name and domain name; a field left out keeps its value. A host with DHCP DNS answers `dhcp_in_use` and nothing is sent. | VIM `HostNetworkSystem.UpdateDnsConfig` | `dangerous`; waits for approval |
+| `vmware.composite.host.syslog.set` | Sets the remote syslog targets (`Syslog.global.logHost`). An empty list removes all. | VIM `OptionManager.UpdateOptions` | `dangerous`; waits for approval |
+| `vmware.composite.host.service_control` | Now also allows `snmpd`, `sfcbd-watchdog` (CIM) and `slpd`, and reads the service back (`service_state`). | VIM `HostServiceSystem.StartService` / `StopService` / `RestartService` / `UpdateServicePolicy` | `dangerous`; waits for approval |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 U1, U2, U3 | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+All the calls exist on every version in the table, so no operation stops
+early with the version message.
+
+- **How it calls vCenter.** On the connector's own session, through
+  `_post_vmomi_json` on the VI-JSON path of the target's release
+  (`/sdk/vim25/{release}`). The host is a display name (tried first) or a
+  moid, looked up with `GET /vcenter/host`; two hosts with the same name
+  answer `ambiguous_host` with `candidate_hosts`. The settings sit on the
+  host's config managers, so each call first reads
+  `HostSystem.configManager` once. The shared helpers are in
+  `host_config.py`. These operations are through vCenter; the path for a
+  single ESXi host without vCenter comes with the single-host work (the
+  ESXi SOAP transport has no builder for these methods yet).
+- **Safe to run twice.** Each change reads the settings first. When the host
+  already has them, the answer is `unchanged` and nothing is sent. Otherwise
+  only the calls that change something are sent (for NTP: the server list
+  only when it differs, the policy only when it differs, then the restart or
+  start). After the calls, each change reads the settings back (`after`).
+  When the read-back does not show the new settings, or cannot be read, the
+  answer is `not_verified` with an `error` issue.
+- **Faults.** The calls are synchronous (no vCenter task). A vim fault (HTTP
+  500 with the fault object) gives `failed` with the fault class and text in
+  `fault`, the calls that ran before in `applied_steps`, and an `error` issue,
+  so the call is recorded as failed. Other HTTP errors (for example 401) are
+  passed on to the dispatcher unchanged.
+- **Input checks.** Each NTP server, DNS server, search domain and syslog
+  target is one plain value: the schema refuses spaces, commas and line
+  breaks, so a caller cannot add NTP options or a second target inside one
+  entry. The host name is one label without dots.
+- **Syslog reload.** The vSphere API has no call to reload syslog. The host
+  applies a new `Syslog.global.logHost` itself, as for a change in the
+  vSphere Client. For `udp` or `tcp` targets on the usual ports, the host's
+  `syslog` firewall rule set must be on (the firewall operations come with
+  the next host task).
+- **Secrets.** SNMP community strings are passwords: `host.config.show`
+  only counts them and never returns them.
+- **Core dump.** `core_dump` shows the active diagnostic partition only. A
+  core dump file on a datastore is not shown by this API, so
+  `partition_active: false` does not mean that no core dump target is set.
+- **Approval card.** Each change has a preview that shows the host, its
+  current settings and what is asked. The NTP card also shows the ntpd
+  start policy and whether ntpd runs.
+- **The generic calls wait for approval too.** The generic (ingested) rows
+  of the same vim calls — `HostDateTimeSystem.UpdateDateTimeConfig`,
+  `HostNetworkSystem.UpdateDnsConfig`, `OptionManager.UpdateOptions` (also
+  vCenter's own advanced settings) and `HostServiceSystem.UpdateServicePolicy`,
+  `StartService`, `StopService` and `RestartService` — are `dangerous` and
+  wait for approval on the 8.0 and 9.0 catalogs. `ingest_safety.py`
+  (`VMWARE_VIM_HOST_CONFIG_WRITES`) raises them. A running install gets the
+  new level on the next catalog ingest. One approval of a typed change is
+  still enough: its steps are checked against the composite's own facts, so
+  no second approval is asked for.
+- **PTP hosts.** `host.ntp.set` does not change the clock protocol. On a
+  host with protocol `ptp` it still starts ntpd, so do not use it there.
+- **Size.** One small object per call, so no result handle.
+
+Code: `host_config.py` (shared reads and parsers), `typed_ops_host_config.py`
+(the read), `composites/_host_config_writes.py` (the three changes),
+`composites/_host_config_write_schemas.py` (parameters, answers, AI
+guidance), `composites/_host_config_ops.py` (registry rows, previews, the
+vim calls for the grant set). Tests:
+`tests/test_connectors_vmware_rest_host_config.py` (a fake vCenter: bodies,
+read-back, faults, previews, schema checks),
+`tests/test_connectors_vmware_rest_host_config_flow.py` (real HTTP on the
+vCenter 8.0.3 and 9.0 VI-JSON paths; approval through the dispatcher; both
+catalogs) and `tests/test_connectors_vmware_rest_host_config_reconcile.py`
+(every vim method, property and body field against the pinned 9.0
+`vi-json.yaml` and the 8.0 U1, U2 and U3 files).
 
 ## Dependencies
 

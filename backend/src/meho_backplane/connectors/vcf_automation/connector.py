@@ -1108,6 +1108,102 @@ class VcfAutomationConnector(HttpConnector):
         return await provider_feature_flag_set(self, operator, target, params)
 
     # ------------------------------------------------------------------
+    # Provider organization settings and networking -- thin shims; metadata in
+    # :mod:`.provider_network_ops` and :mod:`.provider_org_settings_ops`.
+    # ------------------------------------------------------------------
+
+    async def provider_network_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.network.list`` — see :mod:`._provider_network`."""
+        from meho_backplane.connectors.vcf_automation._provider_network import (
+            provider_network_list,
+        )
+
+        return await provider_network_list(self, operator, target, params)
+
+    async def provider_org_update(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.org.update`` — see :mod:`._provider_org_settings`."""
+        from meho_backplane.connectors.vcf_automation._provider_org_settings import (
+            provider_org_update,
+        )
+
+        return await provider_org_update(self, operator, target, params)
+
+    async def provider_org_networking_set(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.org.networking.set`` — see :mod:`._provider_org_settings`."""
+        from meho_backplane.connectors.vcf_automation._provider_org_settings import (
+            provider_org_networking_set,
+        )
+
+        return await provider_org_networking_set(self, operator, target, params)
+
+    async def provider_ip_space_set(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.ip_space.set`` — see :mod:`._provider_ip_space`."""
+        from meho_backplane.connectors.vcf_automation._provider_ip_space import (
+            provider_ip_space_set,
+        )
+
+        return await provider_ip_space_set(self, operator, target, params)
+
+    async def provider_gateway_set(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.provider_gateway.set`` — see :mod:`._provider_gateway`."""
+        from meho_backplane.connectors.vcf_automation._provider_gateway import (
+            provider_gateway_set,
+        )
+
+        return await provider_gateway_set(self, operator, target, params)
+
+    async def provider_regional_networking_set(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.regional_networking.set`` — see :mod:`._provider_regional_networking`."""
+        from meho_backplane.connectors.vcf_automation._provider_regional_networking import (
+            provider_regional_networking_set,
+        )
+
+        return await provider_regional_networking_set(self, operator, target, params)
+
+    async def provider_network_delete(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.network.delete`` — see :mod:`._provider_network_delete`."""
+        from meho_backplane.connectors.vcf_automation._provider_network_delete import (
+            provider_network_delete,
+        )
+
+        return await provider_network_delete(self, operator, target, params)
+
+    # ------------------------------------------------------------------
     # Image ops -- thin shims over :mod:`._images`; metadata in :mod:`.image_ops`.
     # ------------------------------------------------------------------
 
@@ -1296,6 +1392,9 @@ class VcfAutomationConnector(HttpConnector):
         )
         from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
         from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
+        from meho_backplane.connectors.vcf_automation.provider_network_ops import (
+            VCFA_PROVIDER_NETWORK_OPS,
+        )
         from meho_backplane.connectors.vcf_automation.provisioning_ops import (
             VCFA_PROVISIONING_OPS,
         )
@@ -1312,6 +1411,7 @@ class VcfAutomationConnector(HttpConnector):
             *VCFA_NETWORK_OPS,
             *VCFA_DEPLOY_OPS,
             *VCFA_FEATURE_FLAG_OPS,
+            *VCFA_PROVIDER_NETWORK_OPS,
         )
         for op in all_ops:
             handler = getattr(cls, op.handler_attr, None)

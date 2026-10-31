@@ -83,12 +83,15 @@ docs/decisions/spec-reconcile-guards-standard.md.
 from __future__ import annotations
 
 import json
+import re
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
 import pytest
 
 from meho_backplane.connectors.vcf_automation import _paths as _paths_module
+from meho_backplane.connectors.vcf_automation import _provider_paths as _provider_paths_module
 from meho_backplane.connectors.vcf_automation import _routing as _routing_module
 from meho_backplane.connectors.vcf_automation import typed_ops as _typed_ops_module
 from meho_backplane.connectors.vcf_automation._routing import plane_for_path
@@ -96,6 +99,9 @@ from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
 from meho_backplane.connectors.vcf_automation.feature_flag_ops import VCFA_FEATURE_FLAG_OPS
 from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
 from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
+from meho_backplane.connectors.vcf_automation.provider_network_ops import (
+    VCFA_PROVIDER_NETWORK_OPS,
+)
 from meho_backplane.connectors.vcf_automation.provisioning_ops import VCFA_PROVISIONING_OPS
 from meho_backplane.connectors.vcf_automation.typed_ops import (
     VCFA_TYPED_OPS,
@@ -266,6 +272,7 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
         *_path_constants(_typed_ops_module).values(),
         *_path_constants(_paths_module).values(),
         *_path_constants(_routing_module).values(),
+        *_path_constants(_provider_paths_module).values(),
     }
     unswept = {
         op.op_id: op.path
@@ -276,6 +283,7 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
             *VCFA_NETWORK_OPS,
             *VCFA_DEPLOY_OPS,
             *VCFA_FEATURE_FLAG_OPS,
+            *VCFA_PROVIDER_NETWORK_OPS,
         )
         if op.path not in swept
     }
@@ -466,3 +474,92 @@ def test_region_path_is_in_the_reference_list_of_each_version(
     target = SimpleNamespace(fingerprint={"version": version}, version=None)
     declared = {f"GET:{provider_regions_path(target)}"}
     assert_op_ids_served(declared, served, spec_label=label)
+
+
+#: HTTP method(s) per ``_provider_paths`` constant: the provider organization
+#: settings and networking ops. A new constant missing here fails the sweep.
+_PROVIDER_PATHS_METHODS: dict[str, frozenset[str]] = {
+    "PROVIDER_ORG_PATH": frozenset({"GET", "PUT"}),
+    "PROVIDER_ORG_NETWORKING_PATH": frozenset({"GET", "PUT"}),
+    "PROVIDER_TIER0_ROUTERS_PATH": frozenset({"GET"}),
+    "PROVIDER_IP_SPACES_PATH": frozenset({"GET", "POST"}),
+    "PROVIDER_IP_SPACE_PATH": frozenset({"GET", "PUT", "DELETE"}),
+    "PROVIDER_GATEWAYS_PATH": frozenset({"GET", "POST"}),
+    "PROVIDER_GATEWAY_PATH": frozenset({"GET", "DELETE"}),
+    "PROVIDER_IP_SPACE_ASSOCIATIONS_PATH": frozenset({"GET", "POST"}),
+    "PROVIDER_IP_SPACE_ASSOCIATION_PATH": frozenset({"GET", "DELETE"}),
+    "PROVIDER_REGIONAL_NETWORKING_PATH": frozenset({"GET", "POST"}),
+    "PROVIDER_REGIONAL_NETWORKING_SETTING_PATH": frozenset({"GET", "DELETE"}),
+    "PROVIDER_EDGE_CLUSTERS_PATH": frozenset({"GET"}),
+    "INFRA_TASK_PATH": frozenset({"GET"}),
+}
+
+#: The legacy ``/api`` task read is an evidenced exclusion: no 9.x reference
+#: lists a legacy call, and the vendor's own SDK (``go-vcloud-director`` v3)
+#: uses it on VCF Automation 9 -- the task read behind every ``202`` task link.
+_PROVIDER_LEGACY_API_OP_IDS: frozenset[str] = frozenset({"GET:/api/task/{id}"})
+
+
+def _provider_network_op_ids(version: str) -> set[str]:
+    """Every ``METHOD:/path`` the networking ops send to a target of *version*.
+
+    Each path goes through the same
+    :func:`~meho_backplane.connectors.vcf_automation._provider_paths.provider_path`
+    the handlers use, so the ``/cloudapi/vcf/`` to ``/cloudapi/v1/`` switch is
+    checked as it runs. The ``{name}`` placeholders stay in the path.
+    """
+    target = SimpleNamespace(fingerprint={"version": version}, version=None)
+    constants = _path_constants(_provider_paths_module)
+    declared: set[str] = set()
+    for name, path in constants.items():
+        placeholders = {key: f"{{{key}}}" for key in _placeholder_names(path)}
+        resolved = _provider_paths_module.provider_path(target, path, **placeholders)
+        for marker in placeholders.values():
+            resolved = resolved.replace(quote(marker, safe=""), marker)
+        declared.update(f"{method}:{resolved}" for method in _PROVIDER_PATHS_METHODS[name])
+    return declared
+
+
+def _placeholder_names(path: str) -> list[str]:
+    return re.findall(r"\{(\w+)\}", path)
+
+
+def _without_braces(op_ids: set[str]) -> set[str]:
+    """The reference lists write a path parameter with or without braces; compare both ways."""
+    return {op_id.replace("{", "").replace("}", "") for op_id in op_ids}
+
+
+def test_provider_network_path_constants_are_pinned() -> None:
+    assert sorted(_path_constants(_provider_paths_module)) == sorted(_PROVIDER_PATHS_METHODS)
+
+
+def test_provider_network_paths_switch_to_v1_on_9_1() -> None:
+    assert "POST:/cloudapi/vcf/ipSpaces" in _provider_network_op_ids("9.0")
+    on_91 = _provider_network_op_ids("9.1")
+    assert "POST:/cloudapi/v1/ipSpaces" in on_91
+    assert "DELETE:/cloudapi/v1/providerGateways/{gatewayId}" in on_91
+    assert "PUT:/cloudapi/1.0.0/orgs/{orgUrn}" in on_91
+    assert not any("/cloudapi/vcf/" in op_id for op_id in on_91)
+
+
+@pytest.mark.parametrize(
+    ("spec_dir", "list_file", "version"),
+    _PROVIDER_REFERENCE_LISTS,
+    ids=[version for _, _, version in _PROVIDER_REFERENCE_LISTS],
+)
+def test_provider_network_paths_are_in_the_reference_list_of_each_version(
+    spec_dir: str, list_file: str, version: str
+) -> None:
+    """Every call of the organization settings and networking ops is in that version's list."""
+    list_path = require_shelf_spec(spec_dir, list_file)
+    label = f"{spec_dir}/{list_file}"
+    served = _without_braces(_reference_list_op_ids(list_path, label))
+    declared = _without_braces(_provider_network_op_ids(version) - _PROVIDER_LEGACY_API_OP_IDS)
+    assert_op_ids_served(declared, served, spec_label=label)
+
+
+def test_provider_network_legacy_task_read_is_the_only_unlisted_call() -> None:
+    """Guard: the evidenced exclusion holds exactly the legacy task read."""
+    for version in ("9.0", "9.1"):
+        legacy = {op_id for op_id in _provider_network_op_ids(version) if ":/api/" in op_id}
+        assert legacy == _PROVIDER_LEGACY_API_OP_IDS

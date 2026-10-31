@@ -38,11 +38,17 @@ from typing import Final
 from meho_backplane.connectors.registry import register_connector_v2
 
 # Imported for its side effect: registers the park-time preview builders of
-# the provisioning writes (#3890), the image name change and the feature-flag
-# change, like the keycloak / vmware-rest previews.
+# the provisioning writes (#3890), the image name change, the feature-flag
+# change and the provider networking changes, like the keycloak / vmware-rest
+# previews.
 from meho_backplane.connectors.vcf_automation import (  # noqa: F401
     _feature_flags,
     _images,
+    _provider_gateway,
+    _provider_ip_space,
+    _provider_network_delete,
+    _provider_org_settings,
+    _provider_regional_networking,
     _provisioning_preview,
 )
 from meho_backplane.connectors.vcf_automation.connector import (
@@ -53,6 +59,9 @@ from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
 from meho_backplane.connectors.vcf_automation.feature_flag_ops import VCFA_FEATURE_FLAG_OPS
 from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
 from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
+from meho_backplane.connectors.vcf_automation.provider_network_ops import (
+    VCFA_PROVIDER_NETWORK_OPS,
+)
 from meho_backplane.connectors.vcf_automation.provisioning_ops import VCFA_PROVISIONING_OPS
 from meho_backplane.connectors.vcf_automation.session import (
     SessionCredentials,
@@ -138,6 +147,7 @@ __all__ = [
     "VCFA_IMPL_ID",
     "VCFA_NETWORK_OPS",
     "VCFA_PRODUCT",
+    "VCFA_PROVIDER_NETWORK_OPS",
     "VCFA_PROVISIONING_OPS",
     "VCFA_TYPED_OPS",
     "VCFA_TYPED_WHEN_TO_USE_BY_GROUP",

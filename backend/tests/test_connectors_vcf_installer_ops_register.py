@@ -56,6 +56,13 @@ _EXPECTED_POSTURE: dict[str, tuple[str, bool]] = {
     "installer.bundles.list": ("safe", False),
     "installer.bundles.download-status": ("safe", False),
     "installer.bundles.download": ("caution", True),
+    "installer.discovery.vcenter": ("safe", False),
+    "installer.discovery.sddc_manager": ("safe", False),
+    "installer.discovery.vcf_operations": ("safe", False),
+    "installer.sddc.cancel": ("dangerous", True),
+    "installer.sddc.spec.get": ("safe", False),
+    "installer.appliance.info": ("safe", False),
+    "installer.release.list": ("safe", False),
 }
 
 

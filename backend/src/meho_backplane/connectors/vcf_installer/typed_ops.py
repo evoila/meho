@@ -33,6 +33,12 @@ explicit GA pre-download), plus ``installer.bundles.download-status`` (the
 per-bundle failure message and progress, #3410). Reads are ``safe``; the
 three writes are ``caution`` + ``requires_approval``.
 
+Plus seven ops from :mod:`.typed_ops_lifecycle` (handlers in
+:mod:`.typed_lifecycle`): the three reuse checks ``installer.discovery.*``,
+``installer.sddc.cancel`` (``dangerous`` + ``requires_approval``),
+``installer.sddc.spec.get``, ``installer.appliance.info`` and
+``installer.release.list``.
+
 The vendor bring-up API is natively asynchronous — every submit returns its
 tracking object in seconds and progress rides the status polls — so each
 primitive is a short call and the standard park → approve → resume machinery
@@ -50,11 +56,13 @@ remains the separate ``installer.composite.sddc.bringup`` composite in
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from meho_backplane.connectors.vcf_installer._op_model import EMPTY_PARAMS as _EMPTY_PARAMS
+from meho_backplane.connectors.vcf_installer._op_model import InstallerTypedOp
+from meho_backplane.connectors.vcf_installer._op_model import instructions as _instructions
 from meho_backplane.connectors.vcf_installer._response_schemas import (
     BUNDLES_DOWNLOAD_RESPONSE,
     BUNDLES_DOWNLOAD_STATUS_RESPONSE,
@@ -67,6 +75,10 @@ from meho_backplane.connectors.vcf_installer._response_schemas import (
     TRUSTED_CERTIFICATE_ADD_RESPONSE,
     TRUSTED_CERTIFICATES_LIST_RESPONSE,
     VALIDATION_RESPONSE,
+)
+from meho_backplane.connectors.vcf_installer.typed_ops_lifecycle import (
+    INSTALLER_LIFECYCLE_OPS,
+    LIFECYCLE_WHEN_TO_USE_BY_GROUP,
 )
 from meho_backplane.connectors.vcf_installer.typed_writes import (
     INSTALLER_BRINGUP_RETRY_OP_ID,
@@ -95,31 +107,6 @@ _GROUP_BRINGUP = "installer-bringup"
 _GROUP_DEPOT = "installer-depot"
 
 
-@dataclass(frozen=True)
-class InstallerTypedOp:
-    """Metadata for one Installer typed op registered at lifespan startup.
-
-    Fields mirror the keyword arguments
-    :func:`~meho_backplane.operations.typed_register.register_typed_operation`
-    accepts. ``handler_attr`` is the attribute name on
-    :class:`~meho_backplane.connectors.vcf_installer.connector.InstallerConnector`
-    exposing the async handler. Mirrors
-    :class:`~meho_backplane.connectors.sddc_manager.typed_ops.SddcTypedOp`.
-    """
-
-    op_id: str
-    handler_attr: str
-    summary: str
-    description: str
-    parameter_schema: dict[str, Any]
-    response_schema: dict[str, Any] | None
-    group_key: str | None
-    tags: tuple[str, ...]
-    safety_level: Literal["safe", "caution", "dangerous", "destructive"]
-    requires_approval: bool
-    llm_instructions: dict[str, Any] | None
-
-
 #: Curated ``when_to_use`` blurb per typed-op group.
 INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     _GROUP_BRINGUP: (
@@ -134,7 +121,10 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "lists every bring-up task with its id and status and needs no id, so "
         "use it to find a running bring-up whose id you do not have; on "
         "COMPLETED_WITH_FAILURE, installer.sddc.bringup.retry (dangerous, "
-        "approval-gated) resumes the task from its failed sub-task. The "
+        "approval-gated) resumes the task from its failed sub-task; "
+        "installer.sddc.cancel (dangerous, approval-gated) cancels a task that "
+        "is still IN_PROGRESS; installer.sddc.spec.get reads the spec a "
+        "bring-up used, with passwords removed. The "
         "one-shot governed validate-then-deploy unit is "
         "installer.composite.sddc.bringup."
     ),
@@ -166,42 +156,8 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "so a FAILED bundle can be told apart as retry-worthy or not "
         "downloadable from this depot."
     ),
+    **LIFECYCLE_WHEN_TO_USE_BY_GROUP,
 }
-
-
-def _instructions(
-    *,
-    when_to_call: str,
-    output_shape: str,
-    next_step: str,
-    parameter_hints: dict[str, str],
-    preconditions: str | None = None,
-    result_scalars: tuple[str, ...] | None = None,
-    result_digest: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    instructions: dict[str, Any] = {
-        "when_to_call": when_to_call,
-        "output_shape": output_shape,
-        "next_step": next_step,
-        "parameter_hints": parameter_hints,
-    }
-    if preconditions is not None:
-        instructions["preconditions"] = preconditions
-    if result_scalars is not None:
-        # #3084: the JSONFlux reduction hint — when the vendor object's
-        # set-shaped field (validationChecks[] / sddcSubTasks[]) rides the
-        # reduction, the listed scalar siblings survive on the inline
-        # summary so the submit → poll loop stays drivable through the
-        # governed surface (the reducer's ``_preserved_scalars`` contract).
-        instructions["result_scalars"] = {"keys": list(result_scalars)}
-    if result_digest is not None:
-        # #3122: the row-digest hint — names the collection to reduce (so a
-        # two-list SddcTask reduces sddcSubTasks[] instead of passing through
-        # the reducer's multi-list detail-object exemption) and drives the
-        # inline per-state counts / IN_PROGRESS names / FAILED-rows-with-errors
-        # digest (the reducer's ``_row_digest`` contract).
-        instructions["result_digest"] = dict(result_digest)
-    return instructions
 
 
 #: ``Validation`` scalars that must survive a ``validationChecks[]``
@@ -587,13 +543,6 @@ _BRINGUP_STATUS = InstallerTypedOp(
     ),
 )
 
-
-_EMPTY_PARAMS: dict[str, Any] = {
-    "type": "object",
-    "properties": {},
-    "additionalProperties": False,
-    "examples": [{}],
-}
 
 _SDDC_LIST = InstallerTypedOp(
     op_id="installer.sddc.list",
@@ -1032,7 +981,8 @@ _BUNDLES_DOWNLOAD = InstallerTypedOp(
 #: list after its poll; the depot family runs
 #: in its air-gapped lifecycle order: settings read/write → catalog sync
 #: read → trust store read/write → bundle inventory read / download-detail
-#: read / download).
+#: read / download), then the reuse checks, cancel and appliance reads of
+#: :mod:`.typed_ops_lifecycle`.
 INSTALLER_TYPED_OPS: tuple[InstallerTypedOp, ...] = (
     _SPEC_VALIDATE,
     _VALIDATION_STATUS,
@@ -1048,6 +998,7 @@ INSTALLER_TYPED_OPS: tuple[InstallerTypedOp, ...] = (
     _BUNDLES_LIST,
     _BUNDLES_DOWNLOAD_STATUS,
     _BUNDLES_DOWNLOAD,
+    *INSTALLER_LIFECYCLE_OPS,
 )
 
 

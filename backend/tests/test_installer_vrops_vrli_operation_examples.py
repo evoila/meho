@@ -6,7 +6,7 @@
 Every operation ships one example call, and the example is a valid call
 (``jsonschema``, Draft 2020-12). Every response schema names its fields, and
 the AI guidance has the keys the operation contract check asks for. The
-operations are the 14 typed Installer operations, the Installer bring-up
+operations are the 21 typed Installer operations, the Installer bring-up
 multi-step operation, the 4 vROps reads (shared by the 8.x connector) and the
 vRLI event query (shared by the 8.x connector).
 """
@@ -41,9 +41,9 @@ _CONTRACTS = [_contract(op) for op in _TYPED_OPS] + [
 _IDS = [contract[0] for contract in _CONTRACTS]
 
 
-def test_the_scope_has_twenty_operations() -> None:
-    assert len(_CONTRACTS) == 20
-    assert len(set(_IDS)) == 20
+def test_the_scope_has_twenty_seven_operations() -> None:
+    assert len(_CONTRACTS) == 27
+    assert len(set(_IDS)) == 27
 
 
 @pytest.mark.parametrize("contract", _CONTRACTS, ids=_IDS)

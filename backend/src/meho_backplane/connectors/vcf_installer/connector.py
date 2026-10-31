@@ -75,6 +75,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.vcf_installer import typed_lifecycle as _lifecycle
 from meho_backplane.connectors.vcf_installer.profile import INSTALLER_EXECUTION_PROFILE
 from meho_backplane.connectors.vcf_installer.session import (
     InstallerCredentialsLoader,
@@ -544,6 +545,48 @@ class InstallerConnector(HttpConnector):
         )
 
         return await installer_bundles_download_impl(self, operator, target, params)
+
+    async def discovery_vcenter(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.discovery.vcenter`` shim — reuse check of a running vCenter."""
+        return await _lifecycle.installer_discovery_vcenter_impl(self, operator, target, params)
+
+    async def discovery_sddc_manager(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.discovery.sddc_manager`` shim — reuse check of an SDDC Manager."""
+        return await _lifecycle.installer_discovery_sddcm_impl(self, operator, target, params)
+
+    async def discovery_vcf_operations(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.discovery.vcf_operations`` shim — reuse check of VCF Operations."""
+        return await _lifecycle.installer_discovery_vcfops_impl(self, operator, target, params)
+
+    async def sddc_cancel(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.sddc.cancel`` shim — cancel a running bring-up task."""
+        return await _lifecycle.installer_sddc_cancel_impl(self, operator, target, params)
+
+    async def sddc_spec_get(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.sddc.spec.get`` shim — bring-up spec read, secrets replaced."""
+        return await _lifecycle.installer_sddc_spec_get_impl(self, operator, target, params)
+
+    async def appliance_info(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.appliance.info`` shim — appliance info read."""
+        return await _lifecycle.installer_appliance_info_impl(self, operator, target, params)
+
+    async def release_list(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.release.list`` shim — release list read."""
+        return await _lifecycle.installer_release_list_impl(self, operator, target, params)
 
     async def aclose(self) -> None:
         """Clear cached session tokens + credentials, then tear down the httpx pool."""

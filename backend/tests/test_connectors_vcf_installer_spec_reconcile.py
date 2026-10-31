@@ -31,6 +31,12 @@ path:
   ``session_login_token`` scheme spec).
 * :mod:`~meho_backplane.connectors.vcf_installer.profile` — the declarative
   fingerprint recipe's ``GET /v1/system/appliance-info``.
+* :mod:`~meho_backplane.connectors.vcf_installer.typed_lifecycle` — the reuse
+  checks, the cancel and the appliance reads
+  (``LIFECYCLE_DECLARED_OP_IDS``). The one path only 9.1 has
+  (``POST /v1/sddcs/sddcm-discovery``, in ``LIFECYCLE_9_1_ONLY_OP_IDS``) is
+  left out of the 9.0 case; its op stops on a 9.0 target before the call.
+  A separate test checks that the 9.0 file really lacks it.
 * :mod:`~meho_backplane.connectors.vcf_installer.bringup` — the governed
   composite's ``BRINGUP_DECLARED_OP_IDS`` (``POST /v1/sddcs/validations``,
   ``POST /v1/sddcs``, ``GET /v1/sddcs/validations/{id}``), which likewise
@@ -43,6 +49,7 @@ import pytest
 
 from meho_backplane.connectors.vcf_installer import bringup as _bringup
 from meho_backplane.connectors.vcf_installer import connector as _connector
+from meho_backplane.connectors.vcf_installer import typed_lifecycle as _lifecycle
 from meho_backplane.connectors.vcf_installer import typed_reads as _typed_reads
 from meho_backplane.connectors.vcf_installer import typed_writes as _typed_writes
 from meho_backplane.connectors.vcf_installer.profile import INSTALLER_EXECUTION_PROFILE
@@ -72,6 +79,15 @@ def _declared_op_ids() -> set[str]:
     declared.add(f"GET:{INSTALLER_EXECUTION_PROFILE.fingerprint.path}")
     declared |= set(_typed_writes.TYPED_WRITE_DECLARED_OP_IDS)
     declared |= set(_bringup.BRINGUP_DECLARED_OP_IDS)
+    declared |= set(_lifecycle.LIFECYCLE_DECLARED_OP_IDS)
+    return declared
+
+
+def _declared_op_ids_for(spec_dir: str) -> set[str]:
+    """The declared set one pinned file must serve: 9.0 skips the 9.1-only calls."""
+    declared = _declared_op_ids()
+    if spec_dir == "vcf-installer-9.0":
+        declared -= _lifecycle.LIFECYCLE_9_1_ONLY_OP_IDS
     return declared
 
 
@@ -133,9 +149,37 @@ def test_bringup_declared_op_ids_are_pinned() -> None:
     )
 
 
+def test_lifecycle_declared_op_ids_are_pinned() -> None:
+    """Guard: the reuse checks, cancel and appliance reads can't go vacuous."""
+    assert (
+        frozenset(
+            {
+                "POST:/v1/sddcs/vcenter-discovery",
+                "POST:/v1/sddcs/sddcm-discovery",
+                "POST:/v1/sddcs/vcfops-discovery",
+                "DELETE:/v1/tasks/{id}",
+                "GET:/v1/system/appliance-info",
+                "GET:/v1/releases",
+                "GET:/v1/sddcs/{id}/spec",
+            }
+        )
+        == _lifecycle.LIFECYCLE_DECLARED_OP_IDS
+    )
+    assert frozenset({"POST:/v1/sddcs/sddcm-discovery"}) == _lifecycle.LIFECYCLE_9_1_ONLY_OP_IDS
+
+
 @pytest.mark.parametrize("spec_dir", _SPEC_DIRS)
 def test_declared_op_ids_are_served_by_the_pinned_spec(spec_dir: str) -> None:
     """Every hand-coded op_id is served by the pinned 9.0 and 9.1 installer specs."""
     spec_path = require_shelf_spec(spec_dir, _SPEC_FILE)
     served = openapi_served_op_ids(spec_path)
-    assert_op_ids_served(_declared_op_ids(), served, spec_label=f"{spec_dir}/{_SPEC_FILE}")
+    assert_op_ids_served(
+        _declared_op_ids_for(spec_dir), served, spec_label=f"{spec_dir}/{_SPEC_FILE}"
+    )
+
+
+def test_9_1_only_calls_are_missing_from_the_9_0_spec() -> None:
+    """The 9.1-only list is true: the 9.0 file lacks each call, so the version check is needed."""
+    spec_path = require_shelf_spec("vcf-installer-9.0", _SPEC_FILE)
+    served = openapi_served_op_ids(spec_path)
+    assert not (_lifecycle.LIFECYCLE_9_1_ONLY_OP_IDS & served)

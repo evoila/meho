@@ -223,8 +223,18 @@ ENUMERATE_IMAGES_RESPONSE: Final[dict[str, Any]] = {
 }
 
 
-def mapping_update_params(prefix: str) -> dict[str, Any]:
-    """The parameters of ``<prefix>.image_profile.mapping.update``."""
+def mapping_update_params(prefix: str, *, require_expected: bool = False) -> dict[str, Any]:
+    """The parameters of ``<prefix>.image_profile.mapping.update``.
+
+    With ``require_expected`` the caller must pass
+    ``expected_old_fabric_image_id`` (``null`` is allowed for a new name).
+    Then every run checks the template the approver saw, so an approved
+    change never overwrites a newer one.
+    """
+    required = ["profile_id", "image_name"]
+    if require_expected:
+        required.append("expected_old_fabric_image_id")
+    first_word = "Required" if require_expected else "Optional"
     return {
         "type": "object",
         "properties": {
@@ -251,13 +261,13 @@ def mapping_update_params(prefix: str) -> dict[str, Any]:
                 "type": ["string", "null"],
                 "maxLength": 256,
                 "description": (
-                    "Optional. The fabric image id the name gives now, from "
+                    f"{first_word}. The fabric image id the name gives now, from "
                     f"{prefix}.image_profile.list; null when the name does not exist yet. "
                     "When the name gives something else at run time, nothing is written."
                 ),
             },
         },
-        "required": ["profile_id", "image_name"],
+        "required": required,
         "additionalProperties": False,
         "examples": [
             {
@@ -266,7 +276,12 @@ def mapping_update_params(prefix: str) -> dict[str, Any]:
                 "fabric_image_id": "<fabric-image-id>",
                 "expected_old_fabric_image_id": "<old-fabric-image-id>",
             },
-            {"profile_id": "<image-profile-id>", "image_name": "<image-name>", "remove": True},
+            {
+                "profile_id": "<image-profile-id>",
+                "image_name": "<image-name>",
+                "remove": True,
+                "expected_old_fabric_image_id": "<old-fabric-image-id>",
+            },
         ],
     }
 

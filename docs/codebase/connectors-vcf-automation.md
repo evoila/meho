@@ -267,13 +267,14 @@ approval preview in `_images.py`, all on the tenant plane, in the group
   then is the result `in_progress`; a `FAILED` request is the result
   `failed`. Both are results, not op errors.
 - **The name change** takes `profile_id`, `image_name` and either
-  `fabric_image_id` (add or re-point) or `remove: true`. An optional
+  `fabric_image_id` (add or re-point) or `remove: true`.
   `expected_old_fabric_image_id` is the template the name gives now
   (`null`: the name does not exist yet). When the name gives something
   else at run time, the answer is `precondition_failed` and nothing is
-  written, so an approved change never overwrites a newer one. The
-  `PATCH`
-  replaces the whole mapping, so the handler reads the profile first and
+  written. On the vRA 8 op (`vcfa.vra8.image_profile.mapping.update`)
+  the field is required, so an approved change never overwrites a newer
+  one. On the 9 op it is optional; a call without it skips this check.
+  The `PATCH` replaces the whole mapping, so the handler reads the profile first and
   sends every other name back as `{id, constraints?, cloudConfig?}` (the
   shape the vendor's Terraform provider sends). A re-pointed name keeps
   its constraints and cloud config. The region is the profile's own,

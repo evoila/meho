@@ -382,12 +382,36 @@ async def test_mapping_update_waits_for_approval(vra8: Vra8Connector) -> None:
         patch = _mount_change(mock, _profile(**_THREE), patched={})
         result = await _run(
             _MAPPING_OP,
-            {"profile_id": "ip-1", "image_name": "RHEL 9", "fabric_image_id": "fi-rhel"},
+            {
+                "profile_id": "ip-1",
+                "image_name": "RHEL 9",
+                "fabric_image_id": "fi-rhel",
+                "expected_old_fabric_image_id": "fi-ubuntu",
+            },
             approved=False,
         )
     assert result["status"] != "ok"
     assert "approval" in json.dumps(result).lower()
     assert not patch.called
+
+
+async def test_mapping_update_refuses_a_call_without_the_expected_old_id(
+    vra8: Vra8Connector,
+) -> None:
+    # The approver sees the old template. Without it in the call, the run
+    # could not check it, so the call is refused before any vendor call.
+    with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        catch_all = mock.route().respond(200, json={})
+        for approved in (False, True):
+            for change in (
+                {"profile_id": "ip-1", "image_name": "RHEL 9", "fabric_image_id": "fi-rhel"},
+                {"profile_id": "ip-1", "image_name": "RHEL 9", "remove": True},
+            ):
+                result = await _run(_MAPPING_OP, change, approved=approved)
+                assert result["status"] == "error", result
+                assert result["extras"]["error_code"] == "invalid_params", result
+                assert "expected_old_fabric_image_id" in json.dumps(result)
+    assert not catch_all.called
 
 
 async def test_mapping_update_keeps_the_other_names_of_three(vra8: Vra8Connector) -> None:
@@ -478,7 +502,12 @@ async def test_mapping_update_unchanged_writes_nothing(vra8: Vra8Connector) -> N
         patch = _mount_change(mock, _profile(**{**_THREE, "RHEL 9": _RHEL}), patched={})
         result = await _run(
             _MAPPING_OP,
-            {"profile_id": "ip-1", "image_name": "RHEL 9", "fabric_image_id": "fi-rhel"},
+            {
+                "profile_id": "ip-1",
+                "image_name": "RHEL 9",
+                "fabric_image_id": "fi-rhel",
+                "expected_old_fabric_image_id": "fi-rhel",
+            },
         )
     assert result["result"]["status"] == "unchanged"
     assert not patch.called
@@ -490,7 +519,12 @@ async def test_mapping_update_vendor_error_reaches_the_answer(vra8: Vra8Connecto
         mock.patch(_PROFILE).respond(400, json={"message": "imageMapping is not valid"})
         result = await _run(
             _MAPPING_OP,
-            {"profile_id": "ip-1", "image_name": "RHEL 9", "fabric_image_id": "fi-rhel"},
+            {
+                "profile_id": "ip-1",
+                "image_name": "RHEL 9",
+                "fabric_image_id": "fi-rhel",
+                "expected_old_fabric_image_id": "fi-ubuntu",
+            },
         )
     assert result["status"] == "error"
     assert result["extras"]["http_status"] == 400
@@ -503,7 +537,12 @@ async def test_mapping_update_result_meets_its_response_schema(vra8: Vra8Connect
         _mount_change(mock, _profile(**_THREE), patched=_profile(**{**_THREE, "RHEL 9": _RHEL}))
         result = await _run(
             _MAPPING_OP,
-            {"profile_id": "ip-1", "image_name": "RHEL 9", "fabric_image_id": "fi-rhel"},
+            {
+                "profile_id": "ip-1",
+                "image_name": "RHEL 9",
+                "fabric_image_id": "fi-rhel",
+                "expected_old_fabric_image_id": "fi-ubuntu",
+            },
         )
     assert not list(Draft202012Validator(op.response_schema).iter_errors(result["result"]))
 

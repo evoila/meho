@@ -180,7 +180,7 @@ _MAPPING_UPDATE = Vra8TypedOp(
         "PATCH /iaas/api/image-profiles/{id} and the profile's own region. All other "
         "names stay as they are."
     ),
-    parameter_schema=mapping_update_params(VRA8_IMAGE_PREFIX),
+    parameter_schema=mapping_update_params(VRA8_IMAGE_PREFIX, require_expected=True),
     response_schema=MAPPING_UPDATE_RESPONSE,
     group_key=_GROUP,
     tags=_WRITE_TAGS,
@@ -193,9 +193,9 @@ _MAPPING_UPDATE = Vra8TypedOp(
         ),
         preconditions=(
             "Read the profile id with vcfa.vra8.image_profile.list and the fabric image "
-            "id with vcfa.vra8.fabric_image.list. Pass the name's current fabric image "
-            "id as expected_old_fabric_image_id. A person must approve the call; the "
-            "approval card shows the old and the new template."
+            "id with vcfa.vra8.fabric_image.list. Always pass the name's current fabric "
+            "image id as expected_old_fabric_image_id (null for a new name). A person "
+            "must approve the call; the approval card shows the old and the new template."
         ),
         output_shape=(
             "{status: updated | unchanged | invalid_request | precondition_failed, "

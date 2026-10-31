@@ -13,7 +13,10 @@ change has a preview builder. It reads the object first, fills the
 ``blast_radius`` block, and refuses (raises) when the object does not
 exist. When the approved call runs, the handler reads the object again and
 stops with ``precondition_failed`` when it is no longer what the approver
-saw.
+saw. The card holds a SHA-256 over every field that decides what runs (for
+an action: its code and settings; for a subscription: its topic, runnable,
+filters and flags), so any change after the approval stops the call. The
+card holds only the hash, never the code.
 
 Secrets:
 
@@ -31,6 +34,8 @@ references. No pinned API file holds them; the reconcile lane pins the calls.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
 from typing import Any, Final
 
@@ -170,6 +175,47 @@ async def _read_action(
         raise
 
 
+#: The action fields that decide what a run does. The approval card pins a
+#: hash over them (never the values: ``source`` is code, ``configuration``
+#: and the input defaults can hold secrets).
+_ACTION_PINNED_FIELDS: Final[tuple[str, ...]] = (
+    "source",
+    "compressedContent",
+    "contentId",
+    "entrypoint",
+    "dependencies",
+    "runtime",
+    "runtimeVersion",
+    "actionType",
+    "provider",
+    "configuration",
+    "inputs",
+    "timeoutSeconds",
+    "memoryInMB",
+)
+
+#: The subscription fields that decide when it fires and what it runs.
+_SUBSCRIPTION_PINNED_FIELDS: Final[tuple[str, ...]] = (
+    "name",
+    "eventTopicId",
+    "runnableType",
+    "runnableId",
+    "blocking",
+    "criteria",
+    "constraints",
+    "disabled",
+    "priority",
+    "timeout",
+)
+
+
+def _pinned_sha256(source: Mapping[str, Any], fields: tuple[str, ...]) -> str:
+    """SHA-256 over the canonical JSON of *fields* of *source*."""
+    picked = {field: source.get(field) for field in fields}
+    canonical = json.dumps(picked, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _action_card(action: Mapping[str, Any], params: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "blast_radius": {
@@ -183,6 +229,7 @@ def _action_card(action: Mapping[str, Any], params: Mapping[str, Any]) -> dict[s
                 "project_id": params.get("project_id") or action.get("projectId"),
                 "content_id": action.get("contentId"),
                 "input_names": _input_names(params.get("inputs") or {}),
+                "code_sha256": _pinned_sha256(action, _ACTION_PINNED_FIELDS),
             },
             "children": [
                 {
@@ -207,19 +254,38 @@ _ACTION_SEEN_FIELDS: Final[tuple[tuple[str, str], ...]] = (
 
 
 def _changed_since_approval(
-    seen: Mapping[str, Any] | None, current: Mapping[str, Any], fields: tuple[tuple[str, str], ...]
+    seen: Mapping[str, Any] | None,
+    current: Mapping[str, Any],
+    fields: tuple[tuple[str, str], ...],
+    pin: tuple[str, tuple[str, ...]],
 ) -> str | None:
-    """Which field differs from the approved card, or ``None``."""
+    """Why *current* is not what the approver saw, or ``None`` when it is.
+
+    *seen* is ``None`` on an ordinary dispatch (no approval to compare
+    with). An approved card without the object block or without the pinned
+    hash (*pin*: card key and the vendor fields it covers) fails closed.
+    """
+    if seen is None:
+        return None
     block = seen.get("blast_radius") if isinstance(seen, Mapping) else None
     obj = block.get("object") if isinstance(block, Mapping) else None
-    if not isinstance(obj, Mapping):
-        return None
+    pin_key, pin_fields = pin
+    if not isinstance(obj, Mapping) or not obj.get(pin_key):
+        return (
+            "the approval card does not hold what the approver saw; nothing was changed. "
+            "Preview and ask again."
+        )
     for card_key, vendor_key in fields:
         if obj.get(card_key) != current.get(vendor_key):
             return (
                 f"{card_key} was {obj.get(card_key)!r} when the call was approved and is "
                 f"{current.get(vendor_key)!r} now; nothing was changed. Preview and ask again."
             )
+    if obj.get(pin_key) != _pinned_sha256(current, pin_fields):
+        return (
+            f"{pin_key} differs: the code or settings changed after the call was approved; "
+            "nothing was changed. Preview and ask again."
+        )
     return None
 
 
@@ -232,7 +298,10 @@ async def abx_action_run(calls: VraGovCalls, params: Mapping[str, Any]) -> dict[
     action_id = str(params["id"])
     action = await _read_action(calls, action_id, params.get("project_id"))
     changed = _changed_since_approval(
-        approved_preview(f"{calls.prefix}.abx.action.run"), action, _ACTION_SEEN_FIELDS
+        approved_preview(f"{calls.prefix}.abx.action.run"),
+        action,
+        _ACTION_SEEN_FIELDS,
+        ("code_sha256", _ACTION_PINNED_FIELDS),
     )
     if changed is not None:
         return {"status": "precondition_failed", "run": None, "guidance": changed}
@@ -440,7 +509,10 @@ async def subscription_set(calls: VraGovCalls, params: Mapping[str, Any]) -> dic
     if current.get("system") is True:
         return _set_answer("invalid_request", current, "a system subscription is not changed")
     changed = _changed_since_approval(
-        approved_preview(f"{calls.prefix}.subscription.set"), current, _SUBSCRIPTION_SEEN_FIELDS
+        approved_preview(f"{calls.prefix}.subscription.set"),
+        current,
+        _SUBSCRIPTION_SEEN_FIELDS,
+        ("body_sha256", _SUBSCRIPTION_PINNED_FIELDS),
     )
     if changed is not None:
         return _set_answer("precondition_failed", current, changed)
@@ -545,6 +617,7 @@ async def _subscription_preview(ctx: PreviewContext) -> dict[str, Any] | None:
             **row,
             "event_topic_id": current.get("eventTopicId"),
             "runnable_id": current.get("runnableId"),
+            "body_sha256": _pinned_sha256(current, _SUBSCRIPTION_PINNED_FIELDS),
         }
         if action == "update":
             obj["requested_change"] = _differs(current, _wanted_fields(params))

@@ -44,6 +44,7 @@ __all__ = [
     "GOVERNANCE_GROUP_KEYS",
     "GOVERNANCE_PREFIX",
     "VCFA_GOVERNANCE_OPS",
+    "VCFA_GOVERNANCE_OP_IDS",
     "VCFA_GOVERNANCE_WHEN_TO_USE_BY_GROUP",
     "register_vcfa_governance_operations",
 ]
@@ -69,6 +70,28 @@ VCFA_GOVERNANCE_OPS: Final[tuple[VraOpSpec, ...]] = (
     *governance_op_specs(GOVERNANCE_PREFIX),
     *extensibility_op_specs(GOVERNANCE_PREFIX),
 )
+
+
+def _written_out(*, op_id: str) -> str:
+    return op_id
+
+
+#: The same nine op ids, written out in full. The CLI guard test finds every
+#: typed op by reading literal op_id keyword arguments in this package.
+VCFA_GOVERNANCE_OP_IDS: Final[tuple[str, ...]] = (
+    _written_out(op_id="vcfa.tenant.approval.list"),
+    _written_out(op_id="vcfa.tenant.approval.decide"),
+    _written_out(op_id="vcfa.tenant.policy.list"),
+    _written_out(op_id="vcfa.tenant.policy.set"),
+    _written_out(op_id="vcfa.tenant.abx.action.list"),
+    _written_out(op_id="vcfa.tenant.abx.action.run"),
+    _written_out(op_id="vcfa.tenant.abx.run.get"),
+    _written_out(op_id="vcfa.tenant.subscription.list"),
+    _written_out(op_id="vcfa.tenant.subscription.set"),
+)
+
+if tuple(spec.op_id for spec in VCFA_GOVERNANCE_OPS) != VCFA_GOVERNANCE_OP_IDS:
+    raise AssertionError("VCFA_GOVERNANCE_OP_IDS does not match VCFA_GOVERNANCE_OPS")
 
 for _spec in VCFA_GOVERNANCE_OPS:
     if plane_for_path(_spec.path) != "tenant":

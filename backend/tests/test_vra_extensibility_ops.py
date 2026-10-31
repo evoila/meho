@@ -41,6 +41,7 @@ from meho_backplane.connectors.vcf_automation import (
     VcfAutomationConnector,
     register_vcfa_governance_operations,
 )
+from meho_backplane.connectors.vmware_shared import vra_extensibility
 from meho_backplane.connectors.vra8 import Vra8Connector, register_vra8_governance_operations
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
@@ -358,6 +359,53 @@ async def test_run_stops_when_the_action_changed_after_approval(
     assert not start.called
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"source": "def handler(context, inputs):\n    return {}"},
+        {"entrypoint": "other.handler"},
+        {"configuration": {"const_password": "<other-value>"}},
+    ],
+    ids=["source", "entrypoint", "configuration"],
+)
+async def test_run_stops_when_the_code_changed_after_approval(
+    vcfa: VcfAutomationConnector, change: dict[str, Any]
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        read = mock.get(f"{_ACTIONS}/act-1").respond(200, json=_action())
+        start = mock.post(f"{_ACTIONS}/act-1/action-runs").respond(200, json={"id": "run-1"})
+        row = await _park_and_approve("vcfa.tenant.abx.action.run", _RUN_PARAMS)
+        card = row.proposed_effect["blast_radius"]["object"]
+        assert len(card["code_sha256"]) == 64
+        assert "def handler" not in json.dumps(row.proposed_effect)
+        read.respond(200, json=_action(**change))
+        resumed = await _resume(row)
+    assert resumed.status == "ok", resumed
+    assert resumed.result["status"] == "precondition_failed"
+    assert "code_sha256" in resumed.result["guidance"]
+    assert not start.called
+
+
+@pytest.mark.parametrize(
+    "seen",
+    [
+        {},
+        {"blast_radius": {"object": {"name": "<action-name>", "runtime": "python"}}},
+    ],
+    ids=["no-card", "no-hash"],
+)
+def test_approved_card_without_the_hash_stops_the_run(seen: dict[str, Any]) -> None:
+    reason = vra_extensibility._changed_since_approval(
+        seen,
+        _action(),
+        vra_extensibility._ACTION_SEEN_FIELDS,
+        ("code_sha256", vra_extensibility._ACTION_PINNED_FIELDS),
+    )
+    assert reason is not None
+    assert "Preview and ask again" in reason
+
+
 async def test_run_vendor_error_reaches_the_answer(vcfa: VcfAutomationConnector) -> None:
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         mount_logins(mock)
@@ -481,6 +529,29 @@ async def test_subscription_disable_waits_then_runs(vcfa: VcfAutomationConnector
     assert resumed.status == "ok", resumed
     assert resumed.result["status"] == "disabled"
     assert _body(patch) == {"disabled": True}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"criteria": "event.data.projectId == 'p-2'"}, {"blocking": True}, {"timeout": 30}],
+    ids=["criteria", "blocking", "timeout"],
+)
+async def test_subscription_change_stops_when_it_changed_after_approval(
+    vcfa: VcfAutomationConnector, change: dict[str, Any]
+) -> None:
+    params = {"action": "enable", "id": "sub-1"}
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        read = mock.get(f"{_SUBS}/sub-1").respond(200, json=_sub(disabled=True))
+        patch = mock.patch(f"{_SUBS}/sub-1").respond(200, json=_sub())
+        row = await _park_and_approve("vcfa.tenant.subscription.set", params)
+        assert len(row.proposed_effect["blast_radius"]["object"]["body_sha256"]) == 64
+        read.respond(200, json=_sub(disabled=True, **change))
+        resumed = await _resume(row)
+    assert resumed.status == "ok", resumed
+    assert resumed.result["status"] == "precondition_failed"
+    assert "body_sha256" in resumed.result["guidance"]
+    assert not patch.called
 
 
 async def test_subscription_create_sends_the_subscription(vcfa: VcfAutomationConnector) -> None:

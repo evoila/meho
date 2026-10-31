@@ -455,9 +455,15 @@ ride the tenant login.
   runs, and that no subscription has the name), fills `blast_radius`
   (`object`, `children`, `irreversibility`) and refuses when the object does
   not exist or is a system subscription. When the approved call runs, the
-  handler reads the object again. When the action's name, runtime or content
-  id, or the subscription's name, topic or runnable, differ from the approval
-  card, nothing changes (`precondition_failed`).
+  handler reads the object again. The approval card holds a SHA-256 over all
+  fields that decide what runs: for an action `code_sha256` (source,
+  compressed content, content id, entrypoint, dependencies, runtime and its
+  version, action type, provider, configuration, inputs, timeout, memory); for
+  a subscription change `body_sha256` (name, topic, runnable type and id,
+  blocking, criteria, project constraints, disabled, priority, timeout). The
+  card holds only the hash, never the code. When the name, runtime, content
+  id, topic, runnable or the hash differ from the approval card, or the card
+  has no hash, nothing changes (`precondition_failed`).
 - **Safe to run twice.** `policy.set` without `id` changes the policy with
   the same name, type and project; when nothing differs it sends nothing.
   A subscription create finds an existing one by name and answers

@@ -161,6 +161,9 @@ from meho_backplane.connectors.vmware_rest.composites._host import (
 from meho_backplane.connectors.vmware_rest.composites._host_cluster_llm_instructions import (
     HOST_CLUSTER_LLM_INSTRUCTIONS,
 )
+from meho_backplane.connectors.vmware_rest.composites._host_security_ops import (
+    HOST_SECURITY_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._library import (
     content_library_subscribed_create_composite,
     content_library_subscribed_items_list_composite,
@@ -431,6 +434,10 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
     VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vmware_rest.host_security import (
+    HOST_SECURITY_GROUP_KEY,
+    HOST_SECURITY_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.license_common import (
     LICENSE_GROUP_KEY,
     LICENSE_KEY_TAG,
@@ -643,6 +650,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # registers under the same group key with the same text.
     ALARMS_GROUP_KEY: ALARMS_WHEN_TO_USE,
     "migration": MIGRATION_GROUP_WHEN_TO_USE,
+    # Shared with the typed reads of host advanced settings and firewall.
+    HOST_SECURITY_GROUP_KEY: HOST_SECURITY_WHEN_TO_USE,
     # #4394: shared with the typed read vmware.vcenter.deployment.status.
     INSTALL_GROUP_KEY: INSTALL_WHEN_TO_USE,
 }
@@ -2125,6 +2134,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # Mount and unmount a content-library ISO on a VM; the rows live in their
     # own module.
     *(_CompositeSpec(**row) for row in VM_CDROM_LIBRARY_ISO_COMPOSITES),
+    # The six host security changes (advanced settings, firewall, lockdown,
+    # SNMP, core dump), dangerous / approval; the rows live in their own module.
+    *(_CompositeSpec(**row) for row in HOST_SECURITY_COMPOSITES),
     # ----------------------------------------------------------------
     # Licence write -- dangerous / approval. The full key never leaves
     # the handler; the license-key tag keeps the vCenter bodies out of

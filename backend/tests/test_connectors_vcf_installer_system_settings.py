@@ -871,4 +871,5 @@ async def test_proxy_set_preview_shows_the_change_and_never_the_password() -> No
     assert preview["password_from_vault"] is True
     assert "kv/proxy" not in json.dumps(preview)
     remove = _PREVIEW_BUILDERS["installer.system.trusted-certificates.remove"]
-    assert (await remove(SimpleNamespace(params={"alias": "cert-a"})))["alias"] == "cert-a"
+    removed = await remove(SimpleNamespace(params={"alias": "cert-a"}))
+    assert removed["alias"] == "cert-a"

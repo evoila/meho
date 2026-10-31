@@ -38,8 +38,11 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _drs_rule_delete,
     _host,
     _library,
+    _library_capture,
     _library_delete,
+    _library_export,
     _library_local,
+    _library_publish,
     _library_upload,
     _license,
     _namespace,
@@ -195,6 +198,16 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,
     # #4394 vCenter install: the deploy, the setup start and the answer.
     **VCENTER_INSTALL_GOVERNED_SUBOPS,
+    # --- Content library reads, capture, OVF export (#4342) ------------
+    "vmware.composite.vm.capture_to_library": _library_capture._SUB_OPS_VM_CAPTURE_TO_LIBRARY,
+    "vmware.composite.content_library.publish.set": (
+        _library_publish._SUB_OPS_CONTENT_LIBRARY_PUBLISH_SET
+    ),
+    "vmware.composite.content_library.item.export": (
+        _library_export._SUB_OPS_CONTENT_LIBRARY_ITEM_EXPORT
+    ),
+    "vmware.composite.vm.export_ovf": _library_export._SUB_OPS_VM_EXPORT_OVF,
+    # --- end #4342 -----------------------------------------------------
 }
 
 

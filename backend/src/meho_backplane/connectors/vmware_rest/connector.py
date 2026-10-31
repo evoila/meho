@@ -3721,6 +3721,35 @@ class VmwareRestConnector(HttpConnector):
 
         return await content_library_item_find_impl(self, operator, target, params)
 
+    # The content library list and item list (#4342), in
+    # :mod:`.typed_ops_content_library_list` (imported lazily).
+
+    async def content_library_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.content_library.list`` -- every content library, one row each."""
+        from meho_backplane.connectors.vmware_rest.typed_ops_content_library_list import (
+            content_library_list_impl,
+        )
+
+        return await content_library_list_impl(self, operator, target, params)
+
+    async def content_library_item_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.content_library.item.list`` -- the items of one library."""
+        from meho_backplane.connectors.vmware_rest.typed_ops_content_library_list import (
+            content_library_item_list_impl,
+        )
+
+        return await content_library_item_list_impl(self, operator, target, params)
+
     # The four ``vmware.appliance.local_account.*`` typed ops. Each delegates to
     # :mod:`.appliance_local_accounts` (imported lazily, like the other typed ops).
 

@@ -407,6 +407,12 @@ The dispatcher adds a second, structured-dict layer for
   scrub, is untouched, so the audit `raw_payload` keeps the raw secret.
   This mirrors the #2172 secret-handler posture: the ledger keeps the
   raw result, the transport response does not.
+- An op that makes a new credential (`classify_op(op_id) ==
+  "credential_mint"`, for example `vault.auth.approle.generate_secret_id`
+  or `harbor.robot.create`) is the other way round. The caller gets the
+  new secret, but `dispatcher._apply_redaction_middleware` runs the same
+  key-name walk over `redaction.raw`, so the audit `raw_payload` keeps
+  only the other fields (`[REDACTED:param_name]` in place of the secret).
 - The reveal choice is stamped on the audit row via
   `reveal_secret_var` (a ContextVar bound with the same token/finally
   discipline as `policy_decision_var`), read in `_build_audit_payload`

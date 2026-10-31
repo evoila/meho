@@ -1408,8 +1408,9 @@ async def test_auth_approle_generate_secret_id_redacts_against_dev_vault(
     The minted SecretID lands in the *response*, so the op classifies
     ``credential_mint``. The caller's OperationResult carries the SecretID
     (the point of minting), but the test checks that exact value is absent
-    from the stored audit row. Non-idempotent: a second call mints
-    a distinct SecretID.
+    from the stored audit row, its ``payload`` and its raw copy
+    (``raw_payload``). Non-idempotent: a second call mints a distinct
+    SecretID.
     """
     target, addr = vault_e2e
     _root_client(addr).auth.approle.create_or_update_approle(
@@ -1433,9 +1434,10 @@ async def test_auth_approle_generate_secret_id_redacts_against_dev_vault(
         operator_sub="op-ar-sid",
         expected_op_class="credential_mint",
     )
-    # The secret must not reach the stored audit row.
-    assert minted_secret_id not in json.dumps(row.payload, default=str), (
-        "secret leaked into the audit row for vault.auth.approle.generate_secret_id"
+    # The secret is in neither copy of the stored audit row.
+    assert row.raw_payload is not None
+    assert minted_secret_id not in json.dumps([row.payload, row.raw_payload], default=str), (
+        "secret found in the audit row for vault.auth.approle.generate_secret_id"
     )
     # Non-idempotent: a second mint yields a distinct SecretID.
     second = await dispatch(
@@ -1456,8 +1458,8 @@ async def test_auth_approle_generate_secret_id_redacts_against_dev_vault(
 # The writes (identity entity/alias/group + token create/revoke_accessor)
 # register requires_approval=True, so these tests pass ``_approved=True``
 # (the approvals-API resume flag) to drive the authorized execution path.
-# token.create's minted client token is response-side secret material;
-# the test checks that exact value is absent from the stored audit row.
+# token.create returns only the accessor of the new token; the test checks
+# that no token is in the result or the stored audit row.
 # The identity/token core backends are always mounted on a dev Vault.
 # ---------------------------------------------------------------------------
 
@@ -1608,16 +1610,14 @@ async def test_identity_entity_alias_write_against_dev_vault(
 
 
 @pytest.mark.asyncio
-async def test_token_create_redacts_token_against_dev_vault(
+async def test_token_create_returns_no_token_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
 ) -> None:
-    """token.create mints a token in the response; absent from the audit row.
+    """token.create returns the accessor of a real token, never the token.
 
-    The minted client_token lands in the *response*, so the op classifies
-    ``credential_mint``. The caller's OperationResult carries the token
-    (the point of minting), but the test checks that exact value is absent
-    from the stored audit row. Non-idempotent: a second call mints a
-    distinct token.
+    The token is in neither copy of the audit row (``payload`` and
+    ``raw_payload``). Vault knows the token by its accessor. Non-idempotent:
+    a second call makes a token with another accessor.
     """
     target, addr = vault_e2e
     result = await dispatch(
@@ -1629,21 +1629,19 @@ async def test_token_create_redacts_token_against_dev_vault(
         _approved=True,
     )
     assert result.status == "ok", result.error
-    minted_token = result.result["client_token"]
-    assert minted_token, "the minted token must reach the caller's OperationResult"
-    assert result.result["accessor"]
-    # The minted token actually works against the live Vault.
-    assert _root_client(addr).sys.read_health_status(method="GET") is not None
+    assert "client_token" not in result.result
+    accessor = result.result["accessor"]
+    assert accessor
+    looked_up = _root_client(addr).auth.token.lookup_accessor(accessor)["data"]
+    assert looked_up["accessor"] == accessor
     row = await _assert_audited(
         "vault.token.create",
         operator_sub="op-token-create",
         expected_op_class="credential_mint",
     )
-    # The secret must not reach the stored audit row.
-    assert minted_token not in json.dumps(row.payload, default=str), (
-        "secret leaked into the audit row for vault.token.create"
-    )
-    # Non-idempotent: a second create yields a distinct token.
+    assert row.raw_payload is not None
+    assert "client_token" not in json.dumps([row.payload, row.raw_payload], default=str)
+    # Non-idempotent: a second create makes another token.
     second = await dispatch(
         operator=_make_operator(sub="op-token-create-2"),
         connector_id="vault-1.x",
@@ -1653,7 +1651,7 @@ async def test_token_create_redacts_token_against_dev_vault(
         _approved=True,
     )
     assert second.status == "ok", second.error
-    assert second.result["client_token"] != minted_token
+    assert second.result["accessor"] != accessor
 
 
 @pytest.mark.asyncio

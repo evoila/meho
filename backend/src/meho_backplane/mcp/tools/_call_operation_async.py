@@ -35,7 +35,10 @@ from meho_backplane.db.models import OperationRun, OperationRunStatus
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.delivery_budget import bound_complete_response
 from meho_backplane.operations.operation_run import OperationRunNotFoundError
-from meho_backplane.operations.operation_run_service import get_operation_run_service
+from meho_backplane.operations.operation_run_service import (
+    get_operation_run_service,
+    run_result_visible_to,
+)
 from meho_backplane.settings import get_settings
 
 __all__ = ["poll_call", "submit_async_call"]
@@ -144,9 +147,10 @@ async def poll_call(
     """Read an async run started by :func:`submit_async_call`.
 
     Tenant-scoped like ``GET /api/v1/operations/runs/{handle}``. The run must
-    also match the ``connector_id`` and ``op_id`` of this call; an unknown,
-    other-tenant or mismatched run gives the same ``unknown_run`` error, so
-    nothing about other runs leaks. With ``wait_seconds`` above 0 the check
+    also match the ``connector_id`` and ``op_id`` of this call, and must have
+    been started by the caller; an unknown, other-tenant, mismatched or
+    other-person run gives the same ``unknown_run`` error, so the answer
+    tells nothing about other runs. With ``wait_seconds`` above 0 the check
     waits up to that long for the run to end; the run is checked against the
     call first, so a wrong ``run_id`` is refused at once. The tool's
     ``inputSchema`` keeps ``wait_seconds`` between 0 and the limit.
@@ -161,7 +165,11 @@ async def poll_call(
     except OperationRunNotFoundError as exc:
         raise _unknown_run(raw_run_id) from exc
     op_id = str(arguments["op_id"])
-    if row.connector_id != arguments["connector_id"] or row.op_id != op_id:
+    if (
+        row.connector_id != arguments["connector_id"]
+        or row.op_id != op_id
+        or not run_result_visible_to(row, operator)
+    ):
         raise _unknown_run(raw_run_id)
     if wait_seconds > 0:
         try:

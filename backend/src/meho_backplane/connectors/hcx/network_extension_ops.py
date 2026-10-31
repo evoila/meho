@@ -463,7 +463,12 @@ _MON_SET = HcxTypedOp(
                 "description": "The step that failed, with the vendor's error; null when none.",
                 "properties": {
                     "step": {"type": "string", "description": "Name of the step."},
-                    "error": {"type": "string", "description": "The vendor's error text."},
+                    "error": {
+                        "type": "string",
+                        "description": (
+                            "The vendor's error text; after a 401, the error of the new login."
+                        ),
+                    },
                     "outcome": {
                         "type": "string",
                         "enum": ["rejected", "unknown"],

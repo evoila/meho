@@ -14,7 +14,8 @@
 * Mobility Optimized Networking runs its steps in order and, when a step
   fails, lists what ran, what failed and what did not run; a lost
   connection keeps the steps that ran; a `401` at step two logs in again
-  and repeats only that step; a vendor error text holds no secret;
+  and repeats only that step, and a new login that fails keeps the step
+  that ran; a vendor error text holds no secret;
 * the status read ``hcx.job.get``: a failed job, a login that expired
   between the start and the read, and a Manager that does not answer.
 
@@ -743,6 +744,88 @@ async def test_mon_set_logs_in_again_at_step_two_and_repeats_only_that_step() ->
     assert mon.call_count == 1
     assert routes.call_count == 2
     assert routes.calls[1].request.headers["x-hm-authorization"] == "netext-hm-token-2"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_registered")
+@pytest.mark.parametrize(
+    ("login_answer", "error_name"),
+    [
+        pytest.param(httpx.Response(401), "ConnectorAuthError", id="login-rejected"),
+        pytest.param(httpx.Response(500), "RuntimeError", id="login-server-fault"),
+        pytest.param(httpx.ConnectError("connection refused"), "ConnectError", id="login-lost"),
+    ],
+)
+async def test_mon_set_keeps_the_step_that_ran_when_the_new_login_fails(
+    login_answer: Any, error_name: str
+) -> None:
+    """After a 401 at step two, a new login that fails keeps step one in the answer."""
+    params = {
+        "stretch_id": _STRETCH_ID,
+        "mobility_optimized_networking": True,
+        "policy_routes": {"allow": ["<subnet-a>/<prefix>"]},
+    }
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = mock.post(_SESSIONS)
+        login.side_effect = [
+            httpx.Response(200, headers={"x-hm-authorization": "netext-hm-token-1"}),
+            login_answer,
+        ]
+        mock.get(_LIST).respond(200, json={"items": [_extension()]})
+        mon = mock.put(f"/hybridity/api/networkExtensions/{_STRETCH_ID}").respond(202, json={})
+        routes = mock.put(_POLICY_ROUTES).respond(401)
+        result = await _dispatch("hcx.network_extension.mon.set", params, approved=True)
+
+    assert result.status == "ok", result.error
+    assert login.call_count == 2
+    assert mon.call_count == 1
+    assert routes.call_count == 1
+    assert result.result["status"] == "partial"
+    assert result.result["steps_ran"] == ["mobility_optimized_networking"]
+    assert result.result["step_failed"]["step"] == "policy_routes"
+    assert result.result["step_failed"]["outcome"] == "rejected"
+    assert result.result["step_failed"]["error"].startswith("HTTP 401: ")
+    assert error_name in result.result["step_failed"]["error"]
+    assert result.result["steps_not_run"] == []
+    rendered = json.dumps(result.result) + json.dumps(result.extras, default=str)
+    assert _PASSWORD not in rendered
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_registered")
+@pytest.mark.parametrize(
+    ("login_answer", "error_prefix"),
+    [
+        pytest.param(httpx.Response(401), "connector_auth_failed", id="login-rejected"),
+        pytest.param(httpx.Response(500), "connector_error", id="login-server-fault"),
+    ],
+)
+async def test_mon_set_raises_a_failed_new_login_when_no_step_ran(
+    login_answer: httpx.Response, error_prefix: str
+) -> None:
+    params = {
+        "stretch_id": _STRETCH_ID,
+        "mobility_optimized_networking": True,
+        "policy_routes": {"allow": ["<subnet-a>/<prefix>"]},
+    }
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = mock.post(_SESSIONS)
+        login.side_effect = [
+            httpx.Response(200, headers={"x-hm-authorization": "netext-hm-token-1"}),
+            login_answer,
+        ]
+        mock.get(_LIST).respond(200, json={"items": [_extension()]})
+        mon = mock.put(f"/hybridity/api/networkExtensions/{_STRETCH_ID}").respond(401)
+        routes = mock.put(_POLICY_ROUTES).respond(200, json={})
+        result = await _dispatch("hcx.network_extension.mon.set", params, approved=True)
+
+    assert result.status == "error"
+    assert result.error is not None and result.error.startswith(error_prefix)
+    assert login.call_count == 2
+    assert mon.call_count == 1
+    assert routes.call_count == 0
+    rendered = json.dumps(result.result, default=str) + json.dumps(result.extras, default=str)
+    assert _PASSWORD not in rendered
 
 
 @pytest.mark.asyncio

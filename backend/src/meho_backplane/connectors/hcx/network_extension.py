@@ -28,9 +28,11 @@ later step, the answer still names it, and the failed step says
 ``outcome: unknown``, because the Manager may have taken the request
 before the connection broke. A ``401`` at a step means the Manager did
 nothing with it: the operation logs in again and sends that step once
-more; the steps before it are not repeated. A second ``401`` on the same
-step is raised when no step ran yet, so the dispatcher reports the login
-failure; after a step ran, it is the failed step of the answer.
+more; the steps before it are not repeated. When the new login fails (the
+Manager rejects it, answers it with a fault, or does not answer), or the
+step gets a second ``401``, the error is raised when no step ran yet, so
+the dispatcher reports the login failure; after a step ran, it is the
+failed step of the answer, with the login error as its text.
 
 Every vendor text in an answer (an error body, an ``errors`` or
 ``warnings`` message) goes through the secret filter first: a secret-named
@@ -365,18 +367,36 @@ def _never_sent(exc: httpx.TransportError) -> bool:
     return isinstance(exc, SsrfBlockedError) or _is_tls_verify_failure(exc)
 
 
+class _LoginError(Exception):
+    """The new login after a ``401`` failed; ``reason`` is the cleaned error text."""
+
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.reason = _clean_text(
+            f"HTTP 401: the step was not taken, and the new login failed: "
+            f"{type(cause).__name__}: {cause}"
+        )
+
+
 async def _put_step(
     connector: HcxConnector,
     operator: Operator,
     target: HcxTargetLike,
     path: str,
     body: dict[str, Any],
+    *,
+    raise_login_failure: bool,
 ) -> dict[str, Any]:
     """``PUT`` one step. On a ``401``, log in again and send the same step once more.
 
     A ``401`` means the Manager did nothing with the request, so one more
     send of this step is safe, and the steps before it stay as they are. A
-    second ``401`` is raised to the caller.
+    second ``401`` is raised to the caller. The new login runs on its own,
+    before the second send: when it fails, the error is raised as it is
+    with *raise_login_failure* (no step ran yet, the dispatcher reports
+    it), else as :class:`_LoginError`, so the caller keeps the steps that
+    ran. Any error counts: a rejected login, a Manager fault, a lost
+    connection, a credential that cannot be read.
     """
     try:
         return await connector._post_json(target, path, operator=operator, verb="PUT", json=body)
@@ -384,6 +404,12 @@ async def _put_step(
         if exc.response.status_code != httpx.codes.UNAUTHORIZED:
             raise
         await connector.invalidate_session(target, rejected=exc.request)
+    try:
+        await connector.auth_headers(target, operator)
+    except Exception as exc:
+        if raise_login_failure:
+            raise
+        raise _LoginError(exc) from exc
     return await connector._post_json(target, path, operator=operator, verb="PUT", json=body)
 
 
@@ -431,8 +457,9 @@ async def hcx_network_extension_mon_set_impl(
     Manager may have taken the step). A ``401`` makes a new login and one
     more send of that step only. A lost connection at the first step is
     raised when the request never left MEHO (a blocked destination, an
-    untrusted certificate); a ``401`` that survives the new login is
-    raised when no step ran yet.
+    untrusted certificate); a failed new login, or a ``401`` that survives
+    it, is raised when no step ran yet, and is the failed step
+    (``rejected``, the Manager did nothing with it) after a step ran.
     """
     stretch_id = params["stretch_id"]
     path = _NETWORK_EXTENSION_PATH.format(extensionId=_segment("extension", stretch_id))
@@ -448,7 +475,12 @@ async def hcx_network_extension_mon_set_impl(
     warnings: list[str] = []
     for name, step_path, body in steps:
         try:
-            answer = await _put_step(connector, operator, target, step_path, body)
+            answer = await _put_step(
+                connector, operator, target, step_path, body, raise_login_failure=not ran
+            )
+        except _LoginError as exc:
+            failed = {"step": name, "error": exc.reason, "outcome": "rejected"}
+            break
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == httpx.codes.UNAUTHORIZED and not ran:
                 raise

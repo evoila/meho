@@ -406,8 +406,12 @@ waits for approval too.
   {step, error, outcome}|null, steps_not_run, warnings}`. Nothing is
   undone, and a step that ran is never lost from the answer. A `401` at a
   step makes a new login and one more send of that step only; the steps
-  before it are not repeated. A second `401` on the same step is raised
-  when no step ran yet, so the dispatcher reports the login failure. A
+  before it are not repeated. When the new login fails (the Manager
+  rejects it, answers it with a fault, or does not answer), or the step
+  gets a second `401`, the error is raised when no step ran yet, so the
+  dispatcher reports the login failure; after a step ran, it is the
+  failed step of the answer (`outcome: rejected`, the Manager did nothing
+  with the step), with the login error as its text. A
   lost connection at the first step is raised when the request never
   left MEHO (a blocked destination, an untrusted certificate). Every
   vendor text in the answer (an error body, an `errors` or `warnings`

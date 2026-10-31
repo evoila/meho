@@ -125,9 +125,12 @@ async def catalog_source_create(
 ) -> dict[str, Any]:
     """``*.catalog.source.create``: a source for the cloud templates of a project.
 
-    Safe to run twice: a source with exactly this name answers ``unchanged``.
+    Safe to run twice: a cloud template source with exactly this name for
+    the same project answers ``unchanged``. A source with this name of
+    another type or for another project raises :exc:`ValueError`.
     """
     name = str(params["name"])
+    project_id = str(params["source_project_id"])
     payload = await get_json(
         connector,
         operator,
@@ -137,6 +140,7 @@ async def catalog_source_create(
     )
     existing = next((row for row in page_rows(payload) if row.get("name") == name), None)
     if existing is not None:
+        _check_same_source(existing, name, project_id)
         return {
             "status": "unchanged",
             "source": source_row(existing),
@@ -145,7 +149,7 @@ async def catalog_source_create(
     body: dict[str, Any] = {
         "name": name,
         "typeId": BLUEPRINT_SOURCE_TYPE,
-        "config": {"sourceProjectId": params["source_project_id"]},
+        "config": {"sourceProjectId": project_id},
     }
     if params.get("description") is not None:
         body["description"] = params["description"]
@@ -158,6 +162,19 @@ async def catalog_source_create(
             "project so its members can request the items"
         ),
     }
+
+
+def _check_same_source(existing: Mapping[str, Any], name: str, project_id: str) -> None:
+    """Raise when the source named *name* is not the one the call asks for."""
+    row = source_row(existing)
+    if row["typeId"] == BLUEPRINT_SOURCE_TYPE and row["sourceProjectId"] == project_id:
+        return
+    raise ValueError(
+        f"a content source named {name!r} already exists (id {row['id']!r}, type "
+        f"{row['typeId']!r}, project {row['sourceProjectId']!r}), but the call asks for a "
+        f"cloud template source for project {project_id!r}; nothing was created. Pick "
+        "another name"
+    )
 
 
 # ---------------------------------------------------------------------------

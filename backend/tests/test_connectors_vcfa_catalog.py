@@ -184,6 +184,28 @@ async def test_source_create_twice_is_unchanged(vcfa: VcfAutomationConnector) ->
     assert not post.called
 
 
+@pytest.mark.parametrize(
+    "other",
+    [
+        {"config": {"sourceProjectId": "p-9"}},
+        {"typeId": "com.vmw.abx.actions"},
+    ],
+    ids=["other-project", "other-type"],
+)
+async def test_source_create_refuses_a_name_of_another_source(
+    vcfa: VcfAutomationConnector, other: dict[str, Any]
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(_SOURCES).respond(200, json={"content": [{**_SOURCE, **other}]})
+        post = mock.post(_SOURCES).respond(201, json=_SOURCE)
+        result = await run("vcfa.tenant.catalog.source.create", _CREATE)
+    assert result["status"] == "error", result
+    assert "src-1" in str(result)
+    assert "Pick another name" in str(result)
+    assert not post.called
+
+
 async def test_source_create_vendor_error_reaches_the_answer(
     vcfa: VcfAutomationConnector,
 ) -> None:

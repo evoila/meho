@@ -115,7 +115,8 @@ _SOURCE_CREATE = ContentOpSpec(
     description=(
         "Sends POST /catalog/api/admin/sources with type com.vmw.blueprint. The "
         "catalog then imports the released templates of the project. A source with "
-        "this name answers 'unchanged'."
+        "this name for the same project answers 'unchanged'; one of another type or "
+        "project is refused."
     ),
     parameter_schema={
         "type": "object",
@@ -151,8 +152,9 @@ _SOURCE_CREATE = ContentOpSpec(
     llm_instructions=guidance(
         when_to_call="Call once per project, so its released templates reach the catalog.",
         preconditions=(
-            "The project has a released template ({ns}.blueprint.version.list). A person "
-            "must approve the call."
+            "The project has a released template ({ns}.blueprint.version.list). The name "
+            "is free, or it names a cloud template source for the same project "
+            "({ns}.catalog.source.list). A person must approve the call."
         ),
         output_shape="{status: created | unchanged, source: {id, name, itemsFound, "
         "itemsImported}, guidance}.",

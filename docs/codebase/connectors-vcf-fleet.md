@@ -417,8 +417,11 @@ The two ops that send a secret (`fleet.locker.password.add` and
 recorder keeps no body, and the dispatcher withholds the vendor's error
 text. To still say why the appliance refused, these ops raise
 `FleetLockerVendorError`: its `remediation` holds the vendor's
-`errorCode`, `message` and `recommendations`, unless that text holds the
-secret or a line of it; then it says so instead. Each of the two has an
+`errorCode`, `message` and `recommendations` (cut to 2000 characters),
+unless the vendor's full answer holds the secret or a long line of it. The
+check (`connectors/_shared/secret_echo.py`) runs on the whole answer before
+the cut and looks for the value as is, JSON-escaped, URL-encoded and
+HTML-escaped. When it finds one, the text says so instead. Each of the two has an
 approval preview (in `locker.py`) that shows the alias, the user or the
 certificate fields and the Vault references, never a value.
 

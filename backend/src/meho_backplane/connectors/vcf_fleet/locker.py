@@ -28,6 +28,7 @@ from urllib.parse import quote
 
 import httpx
 
+from meho_backplane.connectors._shared.secret_echo import mentions_secret
 from meho_backplane.connectors._shared.vault_creds import load_param_secret_data
 from meho_backplane.connectors.base import ConnectorUpstreamError
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
@@ -106,6 +107,7 @@ _GENERATE_FIELDS: Final = (
 )
 
 _HIDDEN_TEXT: Final = "[MEHO hid this text: it held a secret from Vault]"
+_MAX_VENDOR_TEXT: Final = 2000
 
 
 @dataclass(slots=True)
@@ -194,29 +196,41 @@ async def _read_secret(
     return value.strip()
 
 
-def _holds_secret(text: str, secrets: Iterable[str]) -> bool:
-    """True when *text* holds a secret, a line of one, or its JSON-escaped form."""
+def _holds_secret(texts: Iterable[str], secrets: Iterable[str]) -> bool:
+    """True when a text holds a secret or a long line of one, in any form a vendor may echo."""
+    texts = list(texts)
     for secret in secrets:
-        pieces = {secret, json.dumps(secret)[1:-1]}
-        pieces |= {line.strip() for line in secret.splitlines() if len(line.strip()) >= 16}
-        if any(piece and piece in text for piece in pieces):
+        lines = {line.strip() for line in secret.splitlines()}
+        pieces = {secret} | {line for line in lines if len(line) >= 16}
+        if any(mentions_secret(texts, piece) for piece in pieces if piece):
             return True
     return False
 
 
-def vendor_error_text(response: httpx.Response) -> str:
-    """The vendor's ``errorCode``, ``message`` and ``recommendations``, or the raw body."""
+def _response_text(response: httpx.Response) -> str:
+    try:
+        return response.text or ""
+    except (UnicodeDecodeError, httpx.StreamError):
+        return ""
+
+
+def _full_vendor_text(response: httpx.Response) -> str:
     try:
         body = response.json()
-    except ValueError:
-        return (response.text or "").strip()[:2000]
+    except (ValueError, httpx.StreamError):
+        return _response_text(response).strip()
     if not isinstance(body, dict):
-        return json.dumps(body)[:2000]
+        return json.dumps(body)
     parts = [str(body[key]) for key in ("errorCode", "errorLabel", "message") if body.get(key)]
     recommendations = body.get("recommendations")
     if isinstance(recommendations, list) and recommendations:
         parts.append("recommendations: " + "; ".join(str(item) for item in recommendations))
-    return (" | ".join(parts) or json.dumps(body))[:2000]
+    return " | ".join(parts) or json.dumps(body)
+
+
+def vendor_error_text(response: httpx.Response) -> str:
+    """The vendor's ``errorCode``, ``message`` and ``recommendations``, or the raw body."""
+    return _full_vendor_text(response)[:_MAX_VENDOR_TEXT]
 
 
 async def _send_secret_body(
@@ -232,9 +246,11 @@ async def _send_secret_body(
         return await connector._post_json(target, path, operator=operator, json=body)
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code
-        detail = vendor_error_text(exc.response)
-        if _holds_secret(detail, secrets):
+        full = _full_vendor_text(exc.response)
+        if _holds_secret((_response_text(exc.response), full), secrets):
             detail = _HIDDEN_TEXT
+        else:
+            detail = full[:_MAX_VENDOR_TEXT]
         raise FleetLockerVendorError(
             f"the appliance answered HTTP {status} to POST {path}",
             http_status=status,

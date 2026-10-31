@@ -25,11 +25,13 @@ What is checked:
 
 from __future__ import annotations
 
+import html
 import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest.mock import AsyncMock, patch
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
@@ -261,6 +263,50 @@ async def test_password_add_vendor_error_that_repeats_the_password_is_hidden(
     assert _PASSWORD not in caught.value.remediation
     assert _PASSWORD not in str(caught.value.upstream_message)
     assert "MEHO hid this text" in caught.value.remediation
+
+
+async def test_password_add_hides_a_password_cut_by_the_length_limit(
+    connector: VcfFleetConnector,
+) -> None:
+    message = "x" * 1980 + f"bad password {_PASSWORD}"
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        mock.post("/lcm/locker/api/v2/passwords").respond(400, json={"message": message})
+        with _vault({"password": _PASSWORD}), pytest.raises(FleetLockerVendorError) as caught:
+            await connector.locker_password_add(_OPERATOR, _Target(), _ADD)
+    assert _PASSWORD[:7] not in caught.value.remediation
+    assert "MEHO hid this text" in caught.value.remediation
+
+
+@pytest.mark.parametrize("encode", [html.escape, lambda text: quote(text, safe="")])
+@pytest.mark.parametrize("as_json", [True, False])
+async def test_password_add_hides_an_escaped_password(
+    connector: VcfFleetConnector, encode: Any, as_json: bool
+) -> None:
+    password = 'Pa<55>&w0rd "for" the test'  # NOSONAR -- made-up test value
+    echo = f"bad password {encode(password)}"
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        route = mock.post("/lcm/locker/api/v2/passwords")
+        if as_json:
+            route.respond(400, json={"message": echo})
+        else:
+            route.respond(400, text=echo)
+        with _vault({"password": password}), pytest.raises(FleetLockerVendorError) as caught:
+            await connector.locker_password_add(_OPERATOR, _Target(), _ADD)
+    assert encode(password) not in caught.value.remediation
+    assert "MEHO hid this text" in caught.value.remediation
+
+
+async def test_password_add_long_vendor_text_without_a_secret_is_kept_and_cut(
+    connector: VcfFleetConnector,
+) -> None:
+    message = "The alias is in use. " * 200
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        mock.post("/lcm/locker/api/v2/passwords").respond(400, json={"message": message})
+        with _vault({"password": _PASSWORD}), pytest.raises(FleetLockerVendorError) as caught:
+            await connector.locker_password_add(_OPERATOR, _Target(), _ADD)
+    assert "The alias is in use." in caught.value.remediation
+    assert "MEHO hid this text" not in caught.value.remediation
+    assert caught.value.remediation.endswith(message[:2000])
 
 
 @pytest.mark.parametrize("ref", [None, "", "no-field", "a#b#c", "#field", "path#", "pa\nth#f"])

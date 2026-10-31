@@ -419,7 +419,10 @@ pre-check or an environment create, the op reads
 same object, the op returns `status: "already_running"` with that request's
 id and starts nothing. "Same kind" means `upgrade` (or `create environment`)
 in the request type, name or reason; "same object" means the environment
-and product ids (or the environment name) appear in the request. This is a
+and product ids (or the environment name) are whole values in the request's
+`inputMap`. Part of a value does not count: a running create of
+`Production-DR` does not stop a create of `Production`. An empty name never
+matches. This is a
 help, not a lock: two callers can both check before either starts. When the
 request list cannot be read, the start does not run.
 

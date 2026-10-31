@@ -354,6 +354,19 @@ async def test_upgrade_ignores_a_running_request_on_another_environment() -> Non
 
 
 @pytest.mark.asyncio
+async def test_upgrade_ignores_a_running_request_on_a_longer_product_id() -> None:
+    connector = _connector()
+    input_map = {"environmentId": _ENV, "productId": f"{_PRODUCT}-2"}
+    rows = [_request_row("INPROGRESS", "PRODUCT_UPGRADE", input_map)]
+    async with respx.mock(base_url=_BASE) as mock:
+        mock.get(_REQUESTS_URL).respond(200, json=rows)
+        mock.post(_UPGRADE_URL).respond(200, json={"requestId": _REQ})
+        result = await connector.product_upgrade(_operator(), _target(), dict(_UPGRADE_PARAMS))
+    assert result["status"] == "accepted"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
 async def test_upgrade_vendor_error_text_reaches_the_answer() -> None:
     connector = _connector()
     async with respx.mock(base_url=_BASE) as mock:
@@ -480,6 +493,33 @@ async def test_environment_create_returns_the_running_create() -> None:
     assert result["status"] == "already_running"
     assert result["request_id"] == _RUNNING_REQ
     assert not create.called
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_environment_create_ignores_a_running_create_of_a_longer_name() -> None:
+    connector = _connector()
+    rows = [_request_row("INPROGRESS", "CREATE_ENVIRONMENT", {"environmentName": "env-new-2"})]
+    async with respx.mock(base_url=_BASE) as mock:
+        mock.get(_REQUESTS_URL).respond(200, json=rows)
+        create = mock.post("/lcm/lcops/api/v2/environments").respond(200, json={"requestId": _REQ})
+        result = await connector.environment_create(_operator(), _target(), {"spec": _SPEC})
+    assert result["status"] == "accepted"
+    assert create.called
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_environment_create_without_a_name_ignores_running_creates() -> None:
+    connector = _connector()
+    rows = [_request_row("INPROGRESS", "CREATE_ENVIRONMENT", {"environmentName": "env-new"})]
+    spec = {key: value for key, value in _SPEC.items() if key != "environmentName"}
+    async with respx.mock(base_url=_BASE) as mock:
+        mock.get(_REQUESTS_URL).respond(200, json=rows)
+        create = mock.post("/lcm/lcops/api/v2/environments").respond(200, json={"requestId": _REQ})
+        result = await connector.environment_create(_operator(), _target(), {"spec": spec})
+    assert result["status"] == "accepted"
+    assert create.called
     await connector.aclose()
 
 

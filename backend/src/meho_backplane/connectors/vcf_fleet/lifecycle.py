@@ -35,7 +35,6 @@ community scripts that map binaries and create environments.
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
@@ -147,8 +146,23 @@ def _request_rows(payload: Any) -> list[dict[str, Any]]:
     return [row for row in payload if isinstance(row, dict)]
 
 
+def _input_values(value: Any) -> set[str]:
+    """Every text and number value in a request's ``inputMap``, at any depth."""
+    if isinstance(value, dict):
+        return {text for item in value.values() for text in _input_values(item)}
+    if isinstance(value, list):
+        return {text for item in value for text in _input_values(item)}
+    if isinstance(value, str | int) and not isinstance(value, bool):
+        return {str(value)}
+    return set()
+
+
 def _matches(request: dict[str, Any], kind: tuple[str, ...], words: tuple[str, ...]) -> bool:
-    """True when *request* runs, is of *kind*, and names every one of *words*."""
+    """True when *request* runs, is of *kind*, and its ``inputMap`` holds every one of *words*.
+
+    Each word must equal a whole value in the ``inputMap``: a request for
+    ``Production-DR`` does not match ``Production``. An empty word never matches.
+    """
     if str(request.get("state") or "").upper() not in _RUNNING_STATES:
         return False
     label = " ".join(
@@ -156,8 +170,10 @@ def _matches(request: dict[str, Any], kind: tuple[str, ...], words: tuple[str, .
     ).lower()
     if not any(word in label for word in kind):
         return False
-    text = f"{label} {json.dumps(request.get('inputMap') or {}, default=str).lower()}"
-    return all(word.lower() in text for word in words if word)
+    if not words or not all(words):
+        return False
+    values = _input_values(request.get("inputMap"))
+    return all(word in values for word in words)
 
 
 def spec_secret_problem(value: Any, path: str = "spec") -> str | None:

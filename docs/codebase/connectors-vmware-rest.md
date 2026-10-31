@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 85 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 89 hand-authored composites
 that orchestrate cross-spec workflows: 20 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -22,7 +22,7 @@ read `datastore.file.list` / `#3432` + the vSAN folder list
 read `datastore.vsan.folder.list` / `#4022` + the orphan folder check
 `datastore.orphan_dirs` / `#3814` + the VM limit and
 reservation read `vm.resource_allocation.show` / `#3880` + the migration
-inventory read `vmware.migration.inventory`) and 65 write
+inventory read `vmware.migration.inventory`) and 69 write
 composites (G3.1-T6 / `#509`, incl. the three vCenter install changes
 `vcenter.appliance.deploy` / `vcenter.install` / `vcenter.deployment.answer`
 (`#4394`), the destructive-tier `vm.destroy` / `#3198`, the
@@ -72,7 +72,10 @@ CD drive add `vm.cdrom.add` (`dangerous`) and the VMware Tools installer unmount
 `vm.tools.installer.unmount` (`caution`) (see **VM hardware read, CD drive add and
 Tools installer unmount**), the content-library ISO mount and unmount
 `vm.cdrom.mount_library_iso` + `vm.cdrom.unmount_library_iso` (both `caution`)
-(see **Content-library ISO mount and unmount**), the VM snapshot writes `vm.snapshot.create` (caution)
+(see **Content-library ISO mount and unmount**), the four VM settings changes
+`vm.boot.set`, `vm.hardware.upgrade`, `vm.tools.upgrade` and
+`vm.advanced_settings.set` (all `dangerous`) (see **VM boot settings, hardware
+and Tools upgrades, advanced settings**), the VM snapshot writes `vm.snapshot.create` (caution)
 + `vm.snapshot.delete` (destructive) (see **VM snapshot operations**), the licence
 assign `license.assign` (see **vSphere licences**), and the two caution alarm changes
 `alarm.acknowledge` + `alarm.reset` / `#4383` (see **Alarms**)). The
@@ -563,9 +566,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 85
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 89
   `_CompositeSpec` rows (20 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 49 dangerous/destructive
+  cache-refresh read `datastore.refresh` — + 53 dangerous/destructive
   writes + 16 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
@@ -1436,12 +1439,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 85 `vmware.composite.*` rows with
+   queued registrar and upserts: the 89 `vmware.composite.*` rows with
    `source_kind="composite"` — 20 reads (19 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 65 writes, all `requires_approval=True`
-   (38 `safety_level="dangerous"`; 16 `safety_level="caution"` —
+   service principals), and 69 writes, all `requires_approval=True`
+   (42 `safety_level="dangerous"`; 16 `safety_level="caution"` —
    `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
@@ -1836,7 +1839,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 85 composites (20 reads + 65 writes) land as `source_kind="composite"`
+The 89 composites (20 reads + 69 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1933,7 +1936,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 85 composites are hand-authored aggregators the connector ships as
+The 89 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -2416,6 +2419,74 @@ installer is mounted now. The `vm` id goes into the URL path, so it must match
 of the three operations against the pinned `vcenter.yaml` of 8.0 and 9.0 (it
 skips without the vendor spec files). Tests use saved responses
 (`test_connectors_vmware_rest_typed_vm_hardware.py`).
+
+### VM boot settings, hardware and Tools upgrades, advanced settings
+
+Six typed operations for everyday VM settings. They need no catalog ingest and
+are on both catalogs (`vmware-rest-8.0` and `vmware-rest-9.0`). The two reads
+take the VM id (`vm`) or `name`. The four changes take the VM id only, wait
+for approval and are `dangerous`. Each change reads the current state first,
+sends only what differs (so it is safe to run twice) and reads the object back
+after the vendor call.
+
+| Operation | What it does | Returns | Vendor calls | Versions |
+|---|---|---|---|---|
+| `vmware.vm.boot.show` (`safe`) | Boot settings of one VM. | `firmware`, `efi_secure_boot`, `efi_legacy_boot`, `network_protocol`, `delay_ms`, `retry`, `retry_delay_ms`, `enter_setup_mode`, `boot_order` rows (`type`, `nic`, `disks`), `read_notes` | REST `GET .../hardware/boot` and `.../hardware/boot/device`; VIM `RetrievePropertiesEx` of `config.bootOptions` | 8.0, 9.x |
+| `vmware.composite.vm.boot.set` | Boot delay, enter setup, boot retry, boot order; with the VM off, firmware and EFI secure boot. | `status` (`set`, `unchanged`, `partial`, `refused`, `invalid_request`, `timeout`), `applied` steps, `before`, `after` | REST `PATCH .../hardware/boot`, `PUT .../hardware/boot/device`; VIM `ReconfigVM_Task` (`bootOptions.efiSecureBootEnabled`) | 8.0, 9.x |
+| `vmware.composite.vm.hardware.upgrade` | Upgrade a powered-off VM's hardware version to a given or the newest version. | `status` (`upgraded`, `unchanged`, `partial`, `refused`, `invalid_request`), `before` / `after` version | REST `GET .../hardware`, `POST .../hardware?action=upgrade` | 8.0, 9.x |
+| `vmware.composite.vm.tools.upgrade` | Upgrade VMware Tools in a running guest (`mode=upgrade`), or mount the Tools installer (`mode=mount_installer`). | `status` (`upgraded`, `upgrade_started`, `installer_mounted`, `unchanged`, `refused`), `before` / `after` Tools state | REST `GET .../tools`, `POST .../tools?action=upgrade`, `GET .../tools/installer`, `POST .../tools/installer?action=connect` | 8.0, 9.x |
+| `vmware.vm.advanced_settings.show` (`safe`) | The VM advanced settings (`extraConfig`), filter by `key_prefix`. | `settings` rows (`key`, `value`, `masked`), sorted by key; a long list goes behind a result handle | VIM `RetrievePropertiesEx` of `config.extraConfig` | 8.0, 9.x |
+| `vmware.composite.vm.advanced_settings.set` | Set or remove `extraConfig` keys. | `status` (`set`, `unchanged`, `partial`, `invalid_request`, `timeout`), `changes` rows (`key`, `action`, `before`, `after`, `masked`) | VIM `RetrievePropertiesEx`, `ReconfigVM_Task` (`extraConfig`) | 8.0, 9.x |
+
+Modules: `typed_ops_vm_boot.py`, `typed_ops_vm_advanced_settings.py` (schemas
+in `_vm_settings_schemas.py`, the VIM read in `vim_vm_props.py`), and
+`composites/_vm_boot.py`, `composites/_vm_upgrade.py`,
+`composites/_vm_advanced_settings.py` (shared helpers in
+`composites/_vm_change_common.py`). Both reads are in the
+`vmware-vm-hardware` group; the changes are in the `vm` group.
+
+Details:
+
+- **Boot change order.** Secure boot off runs first (so a switch to BIOS
+  works), then the REST `PATCH`, then the boot order `PUT`, then secure boot
+  on (after a switch to EFI). Secure boot on a VM that stays on BIOS is
+  `invalid_request`; nothing is sent. A REST HTTP 400 (for example a firmware
+  change on a running VM) gives `refused` with vCenter's error type and text,
+  and `applied` lists the steps that already ran.
+- **Hardware upgrade.** A VM already at the asked version gets nothing
+  (`unchanged`); a version older than now is `invalid_request`. vCenter's
+  `ALREADY_IN_DESIRED_STATE` also maps to `unchanged`. The upgrade cannot be
+  undone; the preview says so.
+- **Tools upgrade.** Tools with `version_status=CURRENT` gets nothing. vCenter
+  starts the upgrade in the guest, so the answer is `upgrade_started` until the
+  read-back shows `CURRENT`. The installer mount uses the REST form of the VIM
+  `MountToolsInstaller` call; an already mounted installer gets nothing. Both
+  upgrade calls use a long read timeout (900 s), because vCenter can answer
+  late.
+- **Secrets in advanced settings.** Keys that may hold a secret (the
+  `guestinfo.userdata`, `guestinfo.vendordata` and `guestinfo.ovfEnv` blobs,
+  and any key whose name says password, secret, token, private key, API key,
+  credential or licence key) are never returned: `value` is `null` and
+  `masked` is true. The change refuses to set such a key (MEHO takes no
+  secret as a plain value) but can remove it. A removal sends the empty value;
+  vSphere removes a key whose value is empty. The `OptionValue.value` field is
+  an `Any` field in VI-JSON, so the string is boxed
+  (`{"_typeName": "string", "_value": ...}`).
+- **Faults.** A `ReconfigVM_Task` fault raises with the vim fault type and
+  text, so the dispatcher records a failed call. A task that does not finish
+  in 600 s gives `timeout` with an error issue.
+- **Previews.** Each change has an approval preview: the current boot settings
+  and the planned steps, the current hardware version, the current Tools
+  state, or the keys that change with their current values (masked where
+  needed).
+
+`test_connectors_vmware_rest_vm_settings_reconcile.py` checks every REST call
+against the pinned `vcenter.yaml` of 8.0 and 9.0, the REST body fields against
+the pinned 9.0 `vcenter.yaml` (`Vcenter.Vm.Hardware.Boot.UpdateSpec` and the
+other bodies), and every VIM method against the pinned 9.0 `vi-json.yaml` (it skips without the vendor spec files). The 8.0 U1 to U3
+VI-JSON files are checked by the source scan of
+`test_connectors_vmware_rest_8_0_spec_reconcile.py`. Tests use saved responses
+(`test_connectors_vmware_rest_vm_settings.py`).
 
 ### Content-library ISO mount and unmount
 

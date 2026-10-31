@@ -229,10 +229,14 @@ from meho_backplane.connectors.vmware_rest.composites._teardown_network import (
 from meho_backplane.connectors.vmware_rest.composites._vcenter_install_ops import (
     VCENTER_INSTALL_COMPOSITES,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_advanced_settings import (
+    VM_ADVANCED_SETTINGS_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._vm_allocation import (
     vm_resource_allocation_set_composite,
     vm_resource_allocation_show_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_boot import VM_BOOT_COMPOSITES
 from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_library_iso import (
     VM_CDROM_LIBRARY_ISO_COMPOSITES,
 )
@@ -242,6 +246,7 @@ from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_tools import (
 from meho_backplane.connectors.vmware_rest.composites._vm_llm_instructions import (
     VM_LLM_INSTRUCTIONS,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_upgrade import VM_UPGRADE_COMPOSITES
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
     cluster_drs_vm_host_rule_create_composite,
@@ -565,8 +570,11 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "vm.import_from_library, dangerous); change CPU, memory, disks, NICs or "
         "CD drives (vm.resize, vm.disk.grow, vm.disk.attach, vm.nic.repoint, "
         "vm.cdrom.add, vm.device.cdrom, dangerous); set CPU and memory limits "
-        "(vm.resource_allocation.set, caution); unmount the VMware Tools "
-        "installer (vm.tools.installer.unmount, caution); move a VM to another "
+        "(vm.resource_allocation.set, caution); change boot settings and boot "
+        "order (vm.boot.set, dangerous); upgrade the hardware version or VMware "
+        "Tools (vm.hardware.upgrade, vm.tools.upgrade, dangerous); set or remove "
+        "advanced settings (vm.advanced_settings.set, dangerous); unmount the "
+        "VMware Tools installer (vm.tools.installer.unmount, caution); move a VM to another "
         "host (vm.migrate, dangerous); take a snapshot (vm.snapshot.create, "
         "caution), revert to one (vm.snapshot.revert, dangerous) or delete one "
         "(vm.snapshot.delete, destructive); delete a powered-off VM and its "
@@ -2077,6 +2085,11 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # Mount and unmount a content-library ISO on a VM; the rows live in their
     # own module.
     *(_CompositeSpec(**row) for row in VM_CDROM_LIBRARY_ISO_COMPOSITES),
+    # Boot settings, hardware and Tools upgrades, and advanced settings; the rows
+    # live in their own modules.
+    *(_CompositeSpec(**row) for row in VM_BOOT_COMPOSITES),
+    *(_CompositeSpec(**row) for row in VM_UPGRADE_COMPOSITES),
+    *(_CompositeSpec(**row) for row in VM_ADVANCED_SETTINGS_COMPOSITES),
     # ----------------------------------------------------------------
     # Licence write -- dangerous / approval. The full key never leaves
     # the handler; the license-key tag keeps the vCenter bodies out of

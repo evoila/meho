@@ -128,6 +128,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.vcf_fleet.lifecycle import FleetLifecycleHandlers
 from meho_backplane.connectors.vcf_fleet.session import (
     VcfFleetCredentialsLoader,
     VcfFleetTargetLike,
@@ -176,7 +177,7 @@ _FLEET_ABOUT_PATH = "/lcm/lcops/api/v2/about"
 _FLEET_ENVIRONMENTS_PATH = "/lcm/lcops/api/v2/environments"
 
 
-class VcfFleetConnector(HttpConnector):
+class VcfFleetConnector(FleetLifecycleHandlers, HttpConnector):
     """VCF Fleet 9.0 REST connector with HTTP Basic auth.
 
     Per-target credentials cached in :attr:`_creds` via the shared
@@ -406,8 +407,9 @@ class VcfFleetConnector(HttpConnector):
     # bound methods to the per-process connector instance and threads
     # ``operator`` by name (see ``dispatch_typed``); ``operator`` is
     # forwarded to ``_get_json`` so the credential loader reads the
-    # per-target Basic credentials under the operator's identity. All are
-    # read-only — no write op ships here (writes are out of #2266 scope).
+    # per-target Basic credentials under the operator's identity. The
+    # upgrade, binary and environment changes come from the
+    # ``FleetLifecycleHandlers`` mixin (``lifecycle.py``).
     # ``fleet.api_file.get`` (``api_file_get`` below, body in ``api_file.py``)
     # reads the API descriptions the appliance serves so the vendor's
     # ``/lcm`` files can be pinned.

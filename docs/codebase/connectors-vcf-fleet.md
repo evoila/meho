@@ -382,6 +382,75 @@ the record's size. The read never returns a cut file.
 
 Tests: `backend/tests/test_connectors_vcf_fleet_api_file.py`.
 
+### Upgrades, binaries and new environments
+
+Seven typed ops in `typed_ops_lifecycle.py`. Their handlers are on the
+`FleetLifecycleHandlers` mixin in `lifecycle.py`; `VcfFleetConnector`
+inherits it. They exist on Aria Suite Lifecycle 8.18 and VCF 9.0 fleet
+management (the whole `fleet-rest-9.0` range, `>=8.0,<9.1`), so no op has
+its own version check.
+
+| Operation | What it does | Vendor call | Risk | Returns | Versions |
+|---|---|---|---|---|---|
+| `fleet.binary.list` | Lists the install and upgrade files the appliance has. | `GET /lcm/lcops/api/v2/settings/product-binaries` | safe (read) | `{binaries: [{filePath, name, type}]}` | 8.18, 9.0 |
+| `fleet.binary.map` | Finds the files at a local or NFS path, then maps them. | `POST .../settings/product-binaries`, then `POST .../settings/product-binaries/download` | caution | `{status, request_id, status_read, binaries, steps}` | 8.18, 9.0 |
+| `fleet.product.upgrade.precheck` | Starts the pre-check of a product upgrade. | `POST .../environments/{environmentId}/products/{productId}/upgrade/pre-validate` | caution | `{status, request_id, status_read, environment_id, product_id}` | 8.18, 9.0 |
+| `fleet.product.upgrade` | Starts the upgrade of a product. Sends `preValidate: true` unless `skip_precheck` is set. | `POST .../environments/{environmentId}/products/{productId}/upgrade` | dangerous | same as the pre-check | 8.18, 9.0 |
+| `fleet.environment.precheck` | Starts the check of a new environment spec. | `POST /lcm/lcops/api/v2/environments/pre-validate` | caution | `{status, request_id, status_read, environment_name}` | 8.18, 9.0 |
+| `fleet.environment.create` | Starts creating an environment: deploys or imports its products. | `POST /lcm/lcops/api/v2/environments` | dangerous | same as the pre-check | 8.18, 9.0 |
+| `fleet.environment.delete` | Starts deleting an environment; with `delete_vms` also its VMs in vCenter. | `DELETE /lcm/lcops/api/v2/environments/{environmentId}` with a `DeleteEnvironmentRequestDTO` body | destructive | `{status, request_id, status_read, environment_id, delete_vms}` | 8.18, 9.0 |
+
+Every change has `requires_approval: true`. A person's call waits until a
+second person approves it. An agent needs a grant for a `dangerous` change
+and is always refused for the delete.
+
+**Vendor jobs.** Each change answers with the vendor's `requestId` at once.
+The op returns `status: "accepted"`, the `request_id`, and `status_read`
+(`fleet.request.get` with that id). `accepted` means started, not done.
+The caller reads `fleet.request.get` until the request ends. MEHO keeps no
+job state between calls. Use MEHO's async mode (`async: true`, see
+[`async-governed-dispatch.md`](async-governed-dispatch.md)) for a start, so
+the request id is kept under a run handle even when the reply is lost.
+
+**A running request stops a second start.** Before an upgrade, an upgrade
+pre-check or an environment create, the op reads
+`GET /lcm/request/api/v2/requests`. When a request that has not ended
+(`CREATED`, `SUBMITTED`, `INPROGRESS`) is of the same kind and names the
+same object, the op returns `status: "already_running"` with that request's
+id and starts nothing. "Same kind" means `upgrade` (or `create environment`)
+in the request type, name or reason; "same object" means the environment
+and product ids (or the environment name) appear in the request. This is a
+help, not a lock: two callers can both check before either starts. When the
+request list cannot be read, the start does not run.
+
+**After a lost reply.** Do not start again blindly. Read `fleet.request.get`
+with the request id you have. Without one, call the start again: it returns
+the running request. For a create or delete, read `fleet.environment.list`
+first; for a binary map, read `fleet.binary.list`.
+
+**Two steps in `fleet.binary.map`.** The `find` step answers at once with
+the files it found; the `map` step is a vendor job. When a step fails, the
+answer has `status: "failed"` and `steps`: the steps that ran, the step that
+failed with the vendor's error text, and the steps that did not run. Nothing
+is undone.
+
+**No secret in clear text.** An environment spec must name every password,
+certificate and licence by its locker reference (`locker:password:...`,
+`locker:license:...`): the appliance resolves it from its own secret store.
+A field named like a password or secret, or a licence field, with any other
+value is refused, and so is a private key anywhere in the spec. The upgrade
+`license_ref` must be a locker reference too. Store a password in the
+locker first, from a Vault reference. The environment ops carry the tag
+`credential`, so the flight recorder keeps no request or answer body.
+
+**The delete preview.** `environment_delete_preview` reads
+`GET /lcm/lcops/api/v2/environments/{environmentId}` and fills the
+`blast_radius` block: the environment (`object`), its products with version
+and node count (`children`), and what cannot be undone (`irreversibility`;
+with `delete_vms` the VMs are gone for good). A missing environment (HTTP
+400 or 404, or an empty answer) makes the builder raise, so the delete is
+refused before it waits for approval.
+
 ### Remaining ingested breadth (enabled generically)
 
 The reads outside the audited typed set — datacenters, vcenters, the
@@ -433,6 +502,12 @@ The runbook for end-to-end ingest + enable + verify is
   always; it lists the documentation pages and folders of
   `fleet.api_file.get` as `GET`, marked "documentation path, not in the API
   file", and keeps them out of the served check.
+- **The upgrade pre-check path is not in the published API reference.**
+  `POST .../products/{productId}/upgrade/pre-validate` follows the vendor's
+  pattern for the other pre-checks (patches, certificates, scale-up), but the
+  published reference (up to 8.16) does not list it. The live test on 8.18
+  and 9.0 decides it. The upgrade itself is safe either way: it sends
+  `preValidate: true`, so the appliance checks before it changes anything.
 - **The documentation paths come from the vendor's guides.** Their first
   live use is the pinning of the Aria Suite Lifecycle 8.18 files. If a page
   loads its file from a path the rule refuses, file a bug for this read

@@ -8,10 +8,11 @@ with a running and a stopped VM, a nested sub-folder with a running VM and a
 template, and an empty sub-sub-folder. Covers the happy path on both destroy
 arms, every refusal before any write (and that the step check never sees it),
 the ``expected_*`` fence when the folder changes after the preview (a VM, a
-sub-folder or a disk added), a plan too large for the preview, an object moved
-out of the folder while the call runs, a VM that fails to delete, a second
-run, the guest shutdown, a parked step, and the park-time blast radius (the
-same plan the handler uses).
+sub-folder or a disk added), a plan too large for the preview, an object or a
+populated sub-folder moved out of the folder while the call runs (during the
+guest wait, during an earlier power off, during an earlier delete), a VM that
+fails to delete, a second run, the guest shutdown, a parked step, and the
+park-time blast radius (the same plan the handler uses).
 """
 
 from __future__ import annotations
@@ -500,6 +501,55 @@ async def test_objects_moved_out_during_the_run_are_untouched(
     assert out["counts"]["deleted"] == 5 and out["counts"]["unchanged"] == 2
 
 
+async def test_populated_sub_folder_moved_out_during_the_guest_wait_is_untouched(
+    gate: GateRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sub-folder moved out with its VMs and its own sub-folder: nothing in it is touched.
+
+    The VMs' parent is still the planned sub-folder, so only the live parent
+    chain up to the selected folder tells that they left it.
+    """
+    monkeypatch.setattr(_folder_teardown, "_GUEST_POLL_INTERVAL_SECONDS", 0.0)
+    conn = _system()
+    conn.ignore_shutdown.add("vm-103")
+    wait = _folder_teardown._wait_powered_off
+
+    async def move_then_wait(*args: Any, **kwargs: Any) -> list[str]:
+        _move(conn, "Folder", "group-v101", "group-v100", "group-v4")
+        return await wait(*args, **kwargs)
+
+    monkeypatch.setattr(_folder_teardown, "_wait_powered_off", move_then_wait)
+    out = await _call(conn, power_off="guest", guest_timeout_s=0)
+    assert out["status"] == "deleted"
+    _validate(out)
+    steps = _steps(gate)
+    # vm-103 was asked to shut down before the move and still runs after the
+    # guest wait, but its folder left: no hard power off and no delete.
+    # vm-104 and group-v102 went with it.
+    later = [s for s in steps if s[0] != _GUEST_OFF]
+    assert (_GUEST_OFF, "vm-103") in steps
+    assert all(moid not in ("vm-103", "vm-104", "group-v101", "group-v102") for _, moid in later)
+    assert conn.objects[("VirtualMachine", "vm-103")]["runtime.powerState"] == "poweredOn"
+    assert ("VirtualMachine", "vm-104") in conn.objects
+    assert ("Folder", "group-v101") in conn.objects
+    assert ("Folder", "group-v102") in conn.objects
+    assert conn.objects[("Folder", "group-v101")]["childEntity"] == [
+        moref("VirtualMachine", "vm-103"),
+        moref("VirtualMachine", "vm-104"),
+        moref("Folder", "group-v102"),
+    ]
+    rows = {r["moid"]: r for r in out["rows"]}
+    moved = {"vm-103", "vm-104", "group-v101", "group-v102"}
+    assert {m for m, r in rows.items() if r["status"] == "unchanged"} == moved
+    assert all("moved out of the folder" in rows[m]["detail"] for m in moved)
+    assert {m for m, r in rows.items() if r["status"] == "deleted"} == {
+        "vm-101",
+        "vm-102",
+        "group-v100",
+    }
+    assert out["counts"]["deleted"] == 3 and out["counts"]["unchanged"] == 4
+
+
 async def test_vm_moved_out_before_its_delete_is_untouched(
     gate: GateRecorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -521,6 +571,43 @@ async def test_vm_moved_out_before_its_delete_is_untouched(
     rows = {r["moid"]: r for r in out["rows"]}
     assert rows["vm-102"]["status"] == "unchanged"
     assert rows["group-v100"]["status"] == "deleted"
+
+
+@pytest.mark.parametrize("power_off", ["hard", "guest"])
+async def test_vm_moved_out_during_an_earlier_power_off_is_untouched(
+    gate: GateRecorder, monkeypatch: pytest.MonkeyPatch, power_off: str
+) -> None:
+    """A VM that leaves the folder while an earlier VM powers off is not powered off or deleted."""
+    monkeypatch.setattr(_folder_teardown, "_GUEST_POLL_INTERVAL_SECONDS", 0.0)
+    conn = _system()
+    rest = conn._post_json
+
+    async def power_off_then_move(target: Any, path: str, **kwargs: Any) -> dict[str, Any]:
+        result = await rest(target, path, **kwargs)
+        if "/vm-101/" in path and "power?action=" in path:
+            _move(conn, "VirtualMachine", "vm-103", "group-v101", "group-v4")
+        return result
+
+    monkeypatch.setattr(conn, "_post_json", power_off_then_move)
+    out = await _call(conn, power_off=power_off, guest_timeout_s=0)
+    assert out["status"] == "deleted"
+    _validate(out)
+    steps = _steps(gate)
+    assert [m for op, m in steps if op in (_GUEST_OFF, _HARD_OFF)] == ["vm-101"]
+    assert (_REST_DELETE, "vm-103") not in steps
+    assert conn.objects[("VirtualMachine", "vm-103")]["runtime.powerState"] == "poweredOn"
+    assert conn.objects[("VirtualMachine", "vm-103")]["parent"] == moref("Folder", "group-v4")
+    rows = {r["moid"]: r for r in out["rows"]}
+    assert rows["vm-103"]["status"] == "unchanged"
+    assert "moved out of the folder" in rows["vm-103"]["detail"]
+    assert {m for m, r in rows.items() if r["status"] == "deleted"} == {
+        "vm-101",
+        "vm-102",
+        "vm-104",
+        "group-v102",
+        "group-v101",
+        "group-v100",
+    }
 
 
 async def test_one_vm_fails_to_delete(gate: GateRecorder) -> None:

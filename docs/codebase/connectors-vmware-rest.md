@@ -2794,12 +2794,15 @@ sub-folder that is no longer under the folder is reported `unchanged` and not
 touched, so a second run is safe.
 
 **The folder boundary during the run.** The plan is read before the first
-write, but the guest shutdown wait and the deletes take time. So right before
-each VM delete, and before a hard power off that follows the guest wait, the
-handler reads the VM's `parent` again; before each sub-folder delete it reads
-the sub-folder's `parent`. An object whose parent is no longer the folder or
-one of its sub-folders is skipped and reported `unchanged` ("moved out of the
-folder while the call ran"). A folder is only deleted when it reads empty.
+write, but the power-offs, the guest shutdown wait and the deletes take time.
+So right before each guest shutdown, each hard power off and each delete the
+handler reads the object's `parent` again and follows the chain of parents,
+folder by folder, up to the selected folder. Each folder on the way must be
+one of the planned sub-folders (read live, so a sub-folder moved out takes its
+content with it). An object whose chain no longer ends at the folder is
+skipped, not touched again in this run, and reported `unchanged` ("moved out
+of the folder while the call ran"). A folder is only deleted when it reads
+empty.
 
 **The steps.** The same vendor calls as the single-object ops, each through
 the same step check (`_write._write_sub_op` / `_write_vmomi_sub_op`):

@@ -23,12 +23,13 @@ request is ever deleted. An expected VM or sub-folder that is no longer under
 the folder is reported ``unchanged`` and not touched, so a second run is safe.
 
 **The boundary during the run.** The plan is read once, before the first
-write. The guest shutdown wait and the deletes take time, and an object may be
-moved out of the folder meanwhile. So right before each delete (and before a
-hard power off that follows the guest wait) the handler reads the object's
-parent again and skips an object that is no longer under the folder; its row
-says ``unchanged`` with the reason. A folder is only deleted when it reads
-empty.
+write. The power-offs, the guest shutdown wait and the deletes take time, and
+an object (or a whole sub-folder with its content) may be moved out of the
+folder meanwhile. So right before each guest shutdown, each hard power off and
+each delete the handler reads the object's parent chain again, folder by
+folder up to the selected folder, and skips an object whose chain no longer
+ends there; its row says ``unchanged`` with the reason, and the object is not
+touched again in this run. A folder is only deleted when it reads empty.
 
 Refused before any write (``precondition_failed``, with ``blockers``): a root
 or datacenter top folder, a folder that cannot hold VMs, a vApp or another
@@ -133,7 +134,8 @@ class _Run:
 
     def __init__(self, plan: TeardownPlan) -> None:
         self.top: str = plan.object["moid"]
-        #: The folder and its sub-folders: an object's parent must be one of them.
+        #: The folder and its planned sub-folders: a live parent chain may only
+        #: run through these on its way up to the folder.
         self.inside: set[str] = {self.top, *(f["moid"] for f in plan.context["folders"])}
         #: Objects that left the folder while the call ran, so they were skipped.
         self.moved: set[str] = set()
@@ -141,20 +143,46 @@ class _Run:
         self.done: list[str] = []
 
 
-async def _vm_still_inside(
+async def _chain_ends_at_top(
+    connector: VmwareRestConnector, target: Any, operator: Operator, run: _Run, parent: str | None
+) -> bool:
+    """Follow the live parent chain from folder *parent* up; ``True`` when it reaches the top.
+
+    Each folder on the way must be one the plan knows (a sub-folder moved out
+    and its content with it, or a folder that is gone, ends the chain early).
+    """
+    seen: set[str] = set()
+    while parent != run.top:
+        if parent is None or parent not in run.inside or parent in seen:
+            return False
+        seen.add(parent)
+        props = await read_object(
+            connector, target, operator, mo_type=_FOLDER_MO_TYPE, moid=parent, props=["parent"]
+        )
+        if props is None:
+            return False
+        parent = _moref_value(unwrap_vim_value(props.get("parent")))
+    return True
+
+
+async def _still_inside(
     connector: VmwareRestConnector, target: Any, operator: Operator, run: _Run, moid: str
 ) -> bool:
-    """Read the parent of VM *moid* again; ``False`` (and noted) when it left the folder.
+    """Read the parent chain of VM *moid* again; ``False`` (and noted) when it left the folder.
 
-    A VM that is gone also gives ``False`` without a note: the read-back
-    reports it ``deleted``.
+    A VM noted as moved earlier stays skipped without another read. A VM that
+    is gone also gives ``False`` without a note: the read-back reports it
+    ``deleted``.
     """
+    if moid in run.moved:
+        return False
     props = await read_object(
         connector, target, operator, mo_type=_VIRTUAL_MACHINE_MO_TYPE, moid=moid, props=["parent"]
     )
     if props is None:
         return False
-    if _moref_value(unwrap_vim_value(props.get("parent"))) in run.inside:
+    parent = _moref_value(unwrap_vim_value(props.get("parent")))
+    if await _chain_ends_at_top(connector, target, operator, run, parent):
         return True
     run.moved.add(moid)
     return False
@@ -192,8 +220,9 @@ async def _power_off(
 ) -> OperationResult | None:
     """Power off every VM that is not off; a parked / denied step is returned.
 
-    After a guest shutdown wait the VMs that still run are checked to be
-    under the folder before the hard power off.
+    Right before each guest shutdown and each hard power off the VM is checked
+    to be still under the folder, so a VM moved out while an earlier step ran
+    is left alone.
     """
     running = [vm for vm in vms if vm["power_state"] != POWERED_OFF]
     hard = [vm["moid"] for vm in running]
@@ -201,6 +230,8 @@ async def _power_off(
         asked: list[str] = []
         for vm in running:
             if vm["power_state"] != _POWERED_ON:
+                continue
+            if not await _still_inside(connector, target, operator, run, vm["moid"]):
                 continue
             try:
                 gate, _ = await _write_sub_op(
@@ -213,13 +244,10 @@ async def _power_off(
             asked.append(vm["moid"])
         timeout_s = float(params.get("guest_timeout_s", 120))
         still = await _wait_powered_off(connector, target, operator, asked, timeout_s)
-        hard = [
-            m
-            for m in hard
-            if (m not in asked or m in still)
-            and await _vm_still_inside(connector, target, operator, run, m)
-        ]
+        hard = [m for m in hard if m not in asked or m in still]
     for moid in hard:
+        if not await _still_inside(connector, target, operator, run, moid):
+            continue
         gate, _ = await _write_sub_op(connector, target, operator, _OP_HARD_POWER_OFF, {"vm": moid})
         if gate is not None:
             return gate
@@ -256,7 +284,8 @@ async def _destroy_folder(
 ) -> OperationResult | None:
     """Delete one folder that must be empty now; anything left in it stops the run.
 
-    A sub-folder that was moved out of the folder meanwhile is skipped.
+    A sub-folder whose live parent chain no longer ends at the folder (it was
+    moved out, alone or with a parent) is skipped.
     """
     props = await read_object(
         connector, target, operator, mo_type=_FOLDER_MO_TYPE, moid=moid,
@@ -265,7 +294,7 @@ async def _destroy_folder(
     if props is None:
         return None
     parent = _moref_value(unwrap_vim_value(props.get("parent")))
-    if moid != run.top and parent not in run.inside:
+    if moid != run.top and not await _chain_ends_at_top(connector, target, operator, run, parent):
         run.moved.add(moid)
         return None
     left = moref_values(props.get("childEntity"))
@@ -306,7 +335,8 @@ async def _run_steps(
 ) -> OperationResult | None:
     """Power off, delete the VMs, the sub-folders bottom up, then the folder.
 
-    Each delete first checks that the object is still under the folder.
+    Each power off and each delete first checks that the object is still
+    under the folder.
     """
     vms = plan.context["vms"]
     gate = await _power_off(connector, target, operator, run, vms, params)
@@ -315,7 +345,7 @@ async def _run_steps(
     vim = _vim_destroy_required(await connector._about_version(target, operator))
     for vm in vms:
         moid = vm["moid"]
-        if not await _vm_still_inside(connector, target, operator, run, moid):
+        if not await _still_inside(connector, target, operator, run, moid):
             continue
         gate = await _destroy_vm(connector, target, operator, vm, vim=vim)
         if gate is not None:

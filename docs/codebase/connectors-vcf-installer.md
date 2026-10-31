@@ -298,7 +298,8 @@ optional `password_secret_mount` and `password_secret_key`) and reads the
 password from Vault under the caller's identity (`_secret_refs.py`). Answers
 never hold it: the proxy read and echo drop every `password` key, and a vendor
 text that holds the password is replaced. The operation carries the
-`credential` tag, so a trace keeps no body.
+`credential` tag and is pinned in `broadcast/events.py` as a credential
+write, so a trace keeps no body and the broadcast holds only a summary.
 
 **The resource calculation is work MEHO does inside its own call.** The
 handler starts the calculation, reads it every 5 seconds until
@@ -307,7 +308,12 @@ Other answers: `timed_out` after `timeout_seconds` (default 600) with the id
 and the last state, `read_failed` when a read failed part-way (with the id,
 the last state and the error), and `rejected` when the appliance refused the
 spec (for example `400`). The checks come back as one flat row each, nested
-checks included, with the vendor error text.
+checks included, with the vendor error text. The main numbers also come back
+as flat keys (`required_cores`, `required_memory`, `required_storage`,
+`required_esx_hosts` and the same four `available_*` keys). The operation is
+pinned as a credential write (its request holds the spec passwords), so a long
+answer keeps only these flat keys inline (`result_scalars`) and drops the
+`required` / `available` objects.
 
 - The spec must hold no password value. A secret-named field with a value is
   refused before any call, with the field's JSON pointer in the message (never

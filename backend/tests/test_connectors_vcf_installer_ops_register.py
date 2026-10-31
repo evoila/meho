@@ -183,6 +183,6 @@ async def test_rows_persist_the_result_scalars_reduction_hint(
         assert isinstance(hint, dict), f"{op.op_id} must persist a result_scalars hint"
         assert hint == declared, op.op_id
         assert "id" in hint["keys"], f"{op.op_id}: the poll id must be a preserved scalar"
-    # The five submit/poll primitives all declare the hint — the loop must
-    # never go vacuous.
-    assert hinted == 5
+    # The five submit/poll primitives and the resource calculation declare
+    # the hint — the loop must never go vacuous.
+    assert hinted == 6

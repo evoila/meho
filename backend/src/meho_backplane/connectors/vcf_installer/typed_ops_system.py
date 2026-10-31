@@ -482,7 +482,9 @@ _RESOURCES_CALCULATE = InstallerTypedOp(
         ),
         output_shape=(
             "{status: done|timed_out|read_failed|rejected, id, execution_status, "
-            "result_status, required: {numberOfCores, memory, storage, "
+            "result_status, required_cores, required_memory, required_storage, "
+            "required_esx_hosts, available_cores, ... (the same four), "
+            "required: {numberOfCores, memory, storage, "
             "numberOfEsxiHosts, componentsVmRequirements}, available: {...}, checks: "
             "[{description, severity, result_status, error, parent}]}; on rejected "
             "{http_status, error_code, message}."
@@ -497,6 +499,22 @@ _RESOURCES_CALCULATE = InstallerTypedOp(
             "spec": "The SddcSpec with no password values.",
             "password_refs": "One row per password field of the spec.",
         },
+        # A long checks list goes behind a result handle; these keys stay inline.
+        result_scalars=(
+            "status",
+            "id",
+            "execution_status",
+            "result_status",
+            *(
+                f"{side}_{name}"
+                for side in ("required", "available")
+                for name in ("cores", "memory", "storage", "esx_hosts")
+            ),
+            "error",
+            "http_status",
+            "error_code",
+            "message",
+        ),
     ),
 )
 

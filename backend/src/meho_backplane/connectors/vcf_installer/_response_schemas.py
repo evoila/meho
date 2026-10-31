@@ -556,6 +556,18 @@ RESOURCES_CALCULATE_RESPONSE: dict[str, Any] = _object(
         "id": _field(["string", "null"], "The vendor calculation id."),
         "execution_status": _field(["string", "null"], "For example COMPLETED or FAILED."),
         "result_status": _field(["string", "null"], "SUCCEEDED, WARNING or FAILED."),
+        **{
+            f"{side}_{name}": _field(
+                kind, f"{text} ({'needed' if side == 'required' else 'on the hosts'})."
+            )
+            for side in ("required", "available")
+            for name, kind, text in (
+                ("cores", ["integer", "null"], "CPU cores"),
+                ("memory", ["string", "null"], "Memory, for example '512.0 GB'"),
+                ("storage", ["string", "null"], "Storage, for example '8.0 TB'"),
+                ("esx_hosts", ["integer", "null"], "ESX hosts"),
+            )
+        },
         "required": _object("What the spec needs.", _CAPACITY_FIELDS),
         "available": _object("What the hosts have.", _CAPACITY_FIELDS),
         "checks": _list_of(

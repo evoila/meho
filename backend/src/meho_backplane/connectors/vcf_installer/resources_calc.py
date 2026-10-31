@@ -150,6 +150,27 @@ def _flat_checks(checks: Any, parent: str | None = None) -> list[dict[str, Any]]
     return rows
 
 
+def _metric(value: Any) -> str | None:
+    """A vendor ``DataMetric`` (``{value, unit}``) as one text, for example ``"512.0 GB"``."""
+    if not isinstance(value, dict) or value.get("value") is None:
+        return None
+    return f"{value['value']} {value.get('unit') or ''}".strip()
+
+
+def _totals(capacity: Any, prefix: str) -> dict[str, Any]:
+    """The main numbers of a vendor ``CapacityInfo`` as flat keys.
+
+    Flat keys stay in the answer when a long list of checks is cut down.
+    """
+    info = capacity if isinstance(capacity, dict) else {}
+    return {
+        f"{prefix}_cores": info.get("numberOfCores"),
+        f"{prefix}_memory": _metric(info.get("memory")),
+        f"{prefix}_storage": _metric(info.get("storage")),
+        f"{prefix}_esx_hosts": info.get("numberOfEsxiHosts"),
+    }
+
+
 def _answer(calculation: dict[str, Any], status: str, secrets: tuple[str, ...]) -> dict[str, Any]:
     checks = _flat_checks(calculation.get("validationChecks"))
     for row in checks:
@@ -159,6 +180,8 @@ def _answer(calculation: dict[str, Any], status: str, secrets: tuple[str, ...]) 
         "id": calculation.get("id"),
         "execution_status": calculation.get("executionStatus"),
         "result_status": calculation.get("resultStatus"),
+        **_totals(calculation.get("requiredCapacity"), "required"),
+        **_totals(calculation.get("availableCapacity"), "available"),
         "required": calculation.get("requiredCapacity"),
         "available": calculation.get("availableCapacity"),
         "checks": checks,

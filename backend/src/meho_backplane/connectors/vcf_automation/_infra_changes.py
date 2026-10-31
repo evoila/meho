@@ -31,6 +31,7 @@ from meho_backplane.connectors.vcf_automation._infra import (
     zone_row,
 )
 from meho_backplane.connectors.vcf_automation._infra_paths import (
+    CLOUD_ACCOUNTS_PATH,
     FLAVOR_PROFILE_PATH,
     FLAVOR_PROFILES_PATH,
     PROJECT_PATH,
@@ -38,11 +39,14 @@ from meho_backplane.connectors.vcf_automation._infra_paths import (
     ZONE_PATH,
     ZONES_PATH,
 )
-from meho_backplane.connectors.vcf_automation._lookups import find_by_odata_name
+from meho_backplane.connectors.vcf_automation._lookups import find_by_odata_name, password_ref
 from meho_backplane.connectors.vcf_automation._provisioning import project_create_body
+from meho_backplane.connectors.vcf_automation._provisioning_preview import _existence
+from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 __all__ = [
     "MEMBER_ROLES",
+    "cloud_account_create_preview",
     "flavor_profile_set",
     "project_create",
     "project_members_set",
@@ -405,3 +409,40 @@ async def project_create(
         "project": {key: created.get(key) for key in ("id", "name", "orgId")},
         "guidance": None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Preview of the cloud account add (it sends a secret, so it has no generic preview)
+# ---------------------------------------------------------------------------
+
+
+async def cloud_account_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """What the add would do: the account, the system, the user and where the password is.
+
+    Shows the Vault place of the password, never the password. Reads the
+    account list once (by name) to say ``create`` or ``unchanged``.
+    """
+    p = ctx.params
+    name = p.get("name")
+    if not isinstance(name, str):
+        return None
+    secret_ref, mount, key = password_ref(p)
+    return {
+        "action": "add_cloud_account",
+        "type": p.get("type"),
+        "name": name,
+        "host_name": p.get("host_name"),
+        "username": p.get("username"),
+        "regions": p.get("regions") or [],
+        "password_source": {"secret_ref": secret_ref, "mount": mount, "key": key},
+        **await _existence(
+            ctx,
+            lambda connector: find_by_odata_name(
+                connector, ctx.target, ctx.operator, CLOUD_ACCOUNTS_PATH, name, params=API_VERSION
+            ),
+        ),
+    }
+
+
+register_preview_builder("vcfa.tenant.cloud_account.create", cloud_account_create_preview)
+register_preview_builder("vcfa.vra8.cloud_account.create", cloud_account_create_preview)

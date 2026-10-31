@@ -34,6 +34,7 @@ from meho_backplane.connectors.vcf_automation import (
     VCFA_VERSION,
     VcfAutomationConnector,
     _infra,
+    _infra_changes,
 )
 from meho_backplane.connectors.vcf_automation import _lookups as lookups_module
 from meho_backplane.db.engine import get_sessionmaker
@@ -448,6 +449,33 @@ async def test_cloud_account_create_waits_for_approval(
         result = await run("vcfa.tenant.cloud_account.create", _CREATE_PARAMS, approved=False)
     assert result["status"] == "awaiting_approval", result
     assert not post.called
+
+
+async def test_the_add_preview_shows_the_vault_place_not_the_password(
+    vcfa: VcfAutomationConnector, vault_secret: dict[str, Any]
+) -> None:
+    assert _PREVIEW_BUILDERS["vcfa.tenant.cloud_account.create"] is (
+        _infra_changes.cloud_account_create_preview
+    )
+    ctx: Any = SimpleNamespace(
+        connector_instance=vcfa,
+        operator=OPERATOR,
+        target=await resolved_target(),
+        params=_CREATE_PARAMS,
+    )
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(_ACCOUNTS).respond(200, json=_page([]))
+        preview = await _infra_changes.cloud_account_create_preview(ctx)
+    assert preview is not None
+    assert preview["would"] == "create"
+    assert preview["host_name"] == "<vcenter-host>"
+    assert preview["password_source"] == {
+        "secret_ref": "example/vcenter-account",
+        "mount": "secret",
+        "key": "password",
+    }
+    assert PASSWORD not in json.dumps(preview)
 
 
 # ---------------------------------------------------------------------------

@@ -444,7 +444,10 @@ connector covers, so no op needs a version check.
   the credential list of `broadcast/events.py`: the flight recorder keeps no
   bodies, the broadcast shows no params, and MEHO keeps the vendor error text
   out of the answer (only the HTTP status shows). The handler also replaces the
-  password in a vendor error text with a marker. The cloud account list returns
+  password in a vendor error text with a marker. Because it sends a secret, it has its own
+  approval preview (`cloud_account_create_preview` in `_infra_changes.py`):
+  type, name, host, user, regions, the Vault place of the password (never the
+  password) and `would: create | unchanged`. The cloud account list returns
   only the host name of the account properties.
 - **Ids in URL paths** are checked (not empty, not `.` or `..`, also in the
   schema) and percent-encoded.

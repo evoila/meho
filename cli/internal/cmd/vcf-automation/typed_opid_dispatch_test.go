@@ -98,6 +98,12 @@ var typedOpCLICoverage = map[string]string{
 	// `meho operation call` / MCP call_operation.
 	"vcfa.provider.feature_flag.list": "",
 	"vcfa.provider.feature_flag.set":  "",
+	// Sign-in settings (LDAP, OIDC): agent-surface-only, reached through
+	// `meho operation call` / MCP call_operation.
+	"vcfa.provider.identity.show": "",
+	"vcfa.provider.ldap.set":      "",
+	"vcfa.provider.org.ldap.set":  "",
+	"vcfa.provider.org.oidc.set":  "",
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed VCFA

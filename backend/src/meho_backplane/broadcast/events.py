@@ -412,6 +412,16 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # would otherwise fall through to ``other`` and broadcast in full).
         # Same posture as its ``vcfa.provider.api_token.create`` sibling.
         "vcfa.provider.api_token.revoke",
+        # The VCF Automation sign-in changes. Their params carry only a Vault
+        # *path* (``password_secret_ref`` for the LDAP bind password,
+        # ``client_secret_ref`` for the OIDC client secret); the value is read
+        # in-process and sent only in the classic ``/api`` settings ``PUT``
+        # body. The pin keeps those bodies out of the flight recorder, the
+        # params out of the broadcast and the vendor error text out of the
+        # error result.
+        "vcfa.provider.ldap.set",
+        "vcfa.provider.org.ldap.set",
+        "vcfa.provider.org.oidc.set",
         # The vCenter appliance local-account password change. Like
         # ``keycloak.user.reset_password``, its params carry only a Vault
         # *path* (``password_secret_ref``); the new password is read

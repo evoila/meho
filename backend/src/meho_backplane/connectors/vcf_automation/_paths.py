@@ -37,10 +37,17 @@ __all__ = [
     "PROVIDER_GLOBAL_ROLE_PUBLISH_PATH",
     "PROVIDER_GLOBAL_ROLE_RIGHTS_PATH",
     "PROVIDER_GLOBAL_ROLE_TENANTS_PATH",
+    "PROVIDER_LDAP_SETTINGS_PATH",
+    "PROVIDER_ORG_LDAP_SETTINGS_PATH",
+    "PROVIDER_ORG_OAUTH_SETTINGS_PATH",
+    "PROVIDER_ORG_OIDC_PROVIDER_CONFIG_PATH",
     "PROVIDER_RIGHTS_PATH",
     "PROVIDER_ROLES_PATH",
+    "PROVIDER_TEST_CONNECTION_PATH",
     "PROVIDER_TOKENS_PATH",
     "PROVIDER_TOKEN_PATH",
+    "PROVIDER_TRUSTED_CERTIFICATES_PATH",
+    "PROVIDER_TRUSTED_CERTIFICATE_PATH",
     "PROVIDER_USERS_PATH",
     "TENANT_BLUEPRINT_REQUESTS_PATH",
     "TENANT_BLUEPRINT_REQUEST_PATH",
@@ -103,6 +110,31 @@ ORG_SESSION_CURRENT_PATH: Final[str] = "/cloudapi/1.0.0/sessions/current"
 OAUTH_REGISTER_PATH: Final[str] = "/oauth/{context}/register"
 #: OAuth token grant (form-encoded ``jwt-bearer`` → ``refresh_token``).
 OAUTH_TOKEN_PATH: Final[str] = "/oauth/{context}/token"
+
+# Sign-in settings (provider plane). The classic ``/api`` calls need
+# ``Accept: application/*+json;version=40.0`` (``._routing``). Wire facts follow
+# ``go-vcloud-director`` v3 (``govcd/tm_ldap.go``, ``govcd/org_oidc.go``,
+# ``govcd/trusted_certificates.go``) and the VMware Cloud Director API 39.1
+# reference, which lists the same classic calls. The 9.x VCF Automation
+# references list no classic ``/api`` call; a live check is a separate task.
+
+#: The provider's own LDAP (``GET`` read, ``PUT`` set).
+PROVIDER_LDAP_SETTINGS_PATH: Final[str] = "/api/admin/extension/settings/ldapSettings"
+#: One org's LDAP (``GET`` read, ``PUT`` set); ``{id}`` is the org uuid.
+PROVIDER_ORG_LDAP_SETTINGS_PATH: Final[str] = "/api/admin/org/{id}/settings/ldap"
+#: One org's OIDC sign-in (``GET`` read, ``PUT`` set, ``DELETE`` remove).
+PROVIDER_ORG_OAUTH_SETTINGS_PATH: Final[str] = "/api/admin/org/{id}/settings/oauth"
+#: Read an identity provider's well-known address into OIDC settings (``POST``).
+PROVIDER_ORG_OIDC_PROVIDER_CONFIG_PATH: Final[str] = (
+    "/api/admin/org/{id}/settings/oauth/openIdProviderConfig"
+)
+#: Test a connection from the appliance to a host and port (``POST``); the
+#: answer carries the server's certificate chain.
+PROVIDER_TEST_CONNECTION_PATH: Final[str] = "/cloudapi/1.0.0/testConnection"
+#: Trust a server certificate (``POST`` ``{alias, certificate}``).
+PROVIDER_TRUSTED_CERTIFICATES_PATH: Final[str] = "/cloudapi/1.0.0/ssl/trustedCertificates"
+#: One trusted certificate (``DELETE`` -- undo a trust when the LDAP set failed).
+PROVIDER_TRUSTED_CERTIFICATE_PATH: Final[str] = "/cloudapi/1.0.0/ssl/trustedCertificates/{id}"
 
 # Tenant plane: a project's own network and its first deployment. The
 # ``/iaas/api`` paths are in the pinned ``vra-iaas.json``; the blueprint and

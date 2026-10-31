@@ -94,6 +94,7 @@ from meho_backplane.connectors.vcf_automation import typed_ops as _typed_ops_mod
 from meho_backplane.connectors.vcf_automation._routing import plane_for_path
 from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
 from meho_backplane.connectors.vcf_automation.feature_flag_ops import VCFA_FEATURE_FLAG_OPS
+from meho_backplane.connectors.vcf_automation.identity_ops import VCFA_IDENTITY_OPS
 from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
 from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
 from meho_backplane.connectors.vcf_automation.provisioning_ops import VCFA_PROVISIONING_OPS
@@ -150,6 +151,14 @@ _PATHS_METHODS: dict[str, frozenset[str]] = {
     "PROVIDER_GLOBAL_ROLE_PUBLISH_PATH": frozenset({"POST"}),
     "PROVIDER_GLOBAL_ROLE_RIGHTS_PATH": frozenset({"GET", "PUT"}),
     "PROVIDER_GLOBAL_ROLE_TENANTS_PATH": frozenset({"GET"}),
+    # Sign-in settings (provider plane).
+    "PROVIDER_LDAP_SETTINGS_PATH": frozenset({"GET", "PUT"}),
+    "PROVIDER_ORG_LDAP_SETTINGS_PATH": frozenset({"GET", "PUT"}),
+    "PROVIDER_ORG_OAUTH_SETTINGS_PATH": frozenset({"GET", "PUT", "DELETE"}),
+    "PROVIDER_ORG_OIDC_PROVIDER_CONFIG_PATH": frozenset({"POST"}),
+    "PROVIDER_TEST_CONNECTION_PATH": frozenset({"POST"}),
+    "PROVIDER_TRUSTED_CERTIFICATES_PATH": frozenset({"POST"}),
+    "PROVIDER_TRUSTED_CERTIFICATE_PATH": frozenset({"DELETE"}),
     "PROVIDER_RIGHTS_PATH": frozenset({"GET"}),
     "PROVIDER_ROLES_PATH": frozenset({"GET"}),
     "PROVIDER_TOKENS_PATH": frozenset({"GET"}),
@@ -276,6 +285,7 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
             *VCFA_NETWORK_OPS,
             *VCFA_DEPLOY_OPS,
             *VCFA_FEATURE_FLAG_OPS,
+            *VCFA_IDENTITY_OPS,
         )
         if op.path not in swept
     }
@@ -352,6 +362,18 @@ def test_vcfa_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/cloudapi/1.0.0/featureFlags",
         "GET:/cloudapi/1.0.0/featureFlags/{id}",
         "PUT:/cloudapi/1.0.0/featureFlags/{id}",
+        # Sign-in settings (provider plane).
+        "GET:/api/admin/extension/settings/ldapSettings",
+        "PUT:/api/admin/extension/settings/ldapSettings",
+        "GET:/api/admin/org/{id}/settings/ldap",
+        "PUT:/api/admin/org/{id}/settings/ldap",
+        "GET:/api/admin/org/{id}/settings/oauth",
+        "PUT:/api/admin/org/{id}/settings/oauth",
+        "DELETE:/api/admin/org/{id}/settings/oauth",
+        "POST:/api/admin/org/{id}/settings/oauth/openIdProviderConfig",
+        "POST:/cloudapi/1.0.0/testConnection",
+        "POST:/cloudapi/1.0.0/ssl/trustedCertificates",
+        "DELETE:/cloudapi/1.0.0/ssl/trustedCertificates/{id}",
     }
 
 

@@ -8,7 +8,8 @@
 site pairings, service mesh, jobs, alerts and inventory are defined in
 :mod:`meho_backplane.connectors.hcx.read_ops`,
 :mod:`meho_backplane.connectors.hcx.diagnostics_ops` and
-:mod:`meho_backplane.connectors.hcx.inventory_ops`. The dataclass +
+:mod:`meho_backplane.connectors.hcx.inventory_ops`; the Network Extension
+HA operations in :mod:`meho_backplane.connectors.hcx.ha_group_ops`. The dataclass +
 tuple + registrar shape mirrors :mod:`meho_backplane.connectors.nsx.typed_ops`.
 """
 
@@ -17,6 +18,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.hcx.diagnostics_ops import HCX_DIAGNOSTICS_OPS
+from meho_backplane.connectors.hcx.ha_group_ops import (
+    HCX_HA_GROUP_OPS,
+    HCX_HA_GROUP_WHEN_TO_USE_BY_GROUP,
+)
 from meho_backplane.connectors.hcx.inventory_ops import HCX_INVENTORY_OPS
 from meho_backplane.connectors.hcx.op_types import HcxTypedOp
 from meho_backplane.connectors.hcx.read_ops import HCX_READ_OPS, HCX_READ_WHEN_TO_USE_BY_GROUP
@@ -46,6 +51,7 @@ HCX_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "compared. It refuses every other path."
     ),
     **HCX_READ_WHEN_TO_USE_BY_GROUP,
+    **HCX_HA_GROUP_WHEN_TO_USE_BY_GROUP,
 }
 
 _PART_ITEM_SCHEMA: dict[str, Any] = {
@@ -182,6 +188,7 @@ HCX_TYPED_OPS: tuple[HcxTypedOp, ...] = (
     *HCX_READ_OPS,
     *HCX_DIAGNOSTICS_OPS,
     *HCX_INVENTORY_OPS,
+    *HCX_HA_GROUP_OPS,
 )
 
 

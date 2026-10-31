@@ -18,7 +18,9 @@ Today the connector ships:
   pairings, service meshes, appliances and their tunnels, the service
   mesh diagnostics (start a run, list the runs, read the findings), jobs,
   alerts and the inventory for a migration (resource containers, the
-  compute tree, datastores and networks).
+  compute tree, datastores and networks), and
+- the **Network Extension HA groups**: one read and one change that
+  builds or dissolves a group (see "Network Extension HA groups" below).
 
 Why `hcx.api_file.get` came first: Broadcom publishes no file and no
 versioned reference of the main HCX API (`/hybridity/api/...`). Only a
@@ -51,6 +53,8 @@ Package: `backend/src/meho_backplane/connectors/hcx/`.
 | `hcx.inventory.compute.list` | The vCenter instances HCX knows with their datacenters and clusters, as a flat list with parent ids. | `POST /hybridity/api/service/inventory/vc/list` | read (`safe`, no approval) | 4.11, 9.x |
 | `hcx.inventory.datastore.list` | The datastores of one or more clusters of a vCenter instance. | `POST /hybridity/api/service/inventory/vc/datastores/query` | read (`safe`, no approval) | 4.11, 9.x |
 | `hcx.inventory.network.list` | The networks (port groups, segments) of one site. | `POST /hybridity/api/service/inventory/networks` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.network_extension.ha.list` | Network Extension HA groups: the member appliances with their partner and role (active or standby), and the group state (healthy, degraded, failing over, failed, maintenance). | `GET /hybridity/api/interconnect/appliances/ha/groups` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.network_extension.ha.set` | Build an HA group from a free Network Extension appliance at the source site (HCX picks the standby pair), or dissolve a group; the appliances become standalone again. Returns the task. | `POST /hybridity/api/interconnect/appliances/ha/groups`, `DELETE /hybridity/api/interconnect/appliances/ha/groups/{groupId}` | change (`dangerous`, approval) | 4.11, 9.x |
 
 Every operation in the table exists on every version the connector
 covers, so none stops early with a version message.
@@ -331,6 +335,84 @@ hook is `HttpConnector.trace_response_body`, see
 `docs/codebase/redaction.md`). A test dispatches `hcx.site_pairing.list`
 with capture on and checks the stored span.
 
+### Network Extension HA groups
+
+An HA group joins four Network Extension appliances, two at each site: an
+active pair carries the extended networks, a standby pair takes over when
+an appliance fails. The bodies are in `ha_groups.py`, the op metadata in
+`ha_group_ops.py`. Group `hcx-network-extension-ha`.
+
+`hcx.network_extension.ha.list` takes an optional `service_mesh_id` and
+`all_group_members` (default `false`: only the members at this site; each
+member still names its partner at the other site). It returns one row per
+group: `group_id`, `name`, `service_mesh_id`, `group_state` (`HEALTHY`,
+`DEGRADED`, `FAILINGOVER`, `FAILED`, `MAINTENANCE`), `status_message`,
+`availability_state`, `policy`, `network_extension_count` and `members`
+(`appliance_id`, `appliance_name`, `peer_appliance_id`,
+`peer_appliance_name`, `role`: `ACTIVE`, `STANDBY`, `UNDECIDED` or
+`UNINIT`). The vendor fields stay. A long list is behind a result handle.
+
+`hcx.network_extension.ha.set` takes `action`:
+
+- `build` with `appliance_ids` (one free appliance at the source site, or
+  two). It sends `POST .../ha/groups` with `{"appliances": [...]}`.
+- `dissolve` with `group_id`. It sends
+  `DELETE .../ha/groups/{groupId}?force=false`. A forced dissolve is not
+  offered: it can leave extensions on the standby appliances.
+
+Both are `dangerous` with `requires_approval`, so a person's call waits
+until a second person approves it, and an agent needs a grant for it.
+
+The vendor does the work after the start call returns. The Manager answers
+`202` with `data.interconnectTaskId` and `data.groupId`. The answer is
+`{status, action, group_id, interconnect_task_id, status_read:
+"hcx.task.get", group_state, warnings, errors}`. `accepted` means HCX took
+the task; it never means the work is done. A `202` without a task id is
+an error that carries the Manager's `errors` text.
+
+Before a start the operation checks, and starts nothing when a check
+finds something:
+
+- build: every appliance is in `GET /hybridity/api/interconnect/appliances`,
+  is a Network Extension appliance (`HCX-NET-EXT`) and runs HCX 4.3 or
+  newer. Otherwise the call fails with a message and sends no change.
+  An appliance that is already in a group (as a member or a partner)
+  returns `already_grouped` with the group id and state.
+- dissolve: the group is in the HA group list; else `not_found`.
+- both: `POST /hybridity/api/interconnect/tasks/query` with
+  `{"filter": {"status": ["QUEUED", "RUNNING"], "entityIds": [...]}}`.
+  A task on the same appliance or group returns `already_running` with
+  its task id. This check helps; it is not a lock: two callers can both
+  check before either starts.
+
+HCX itself refuses an appliance that already extends a network, too few
+free appliances for the second pair, or a missing licence. The vendor's
+error text reaches the answer (`upstream_message`).
+
+After a start:
+
+- Use MEHO's async mode (`async: true`,
+  `docs/codebase/async-governed-dispatch.md`), so MEHO keeps the answer
+  with the task id under a run handle even if the reply is lost.
+- Follow the task with `hcx.task.get` until it ends. A failed task step
+  names a job id; `hcx.job.get` shows that job's error.
+- After a lost reply, do not start again blindly. Read
+  `hcx.network_extension.ha.list` first: after a build, a group with the
+  appliance means the task was started; after a dissolve, a missing group
+  means the same. Or ask `hcx.task.get` about the task id kept under the
+  async run handle.
+- A status read logs in again when the login expired after the start: the
+  dispatcher drops the token on `401` and runs the read once more.
+
+The preview of a dissolve (`preview_operation`, and the approval card)
+reads the group and `GET /hybridity/api/l2Extensions`, and fills the
+`blast_radius` block: the group with its members and state, and as
+`children` the network extensions whose source appliance is a member of
+the group. These networks keep running on the pair that was active; only
+the HA protection ends. The preview refuses a group that does not exist,
+so the request fails before it waits for approval. A build has no
+preview of its own (the approval card shows the inputs).
+
 ### Shutdown
 
 `aclose()` clears the token cache and closes the HTTP pool. No logout call
@@ -386,12 +468,25 @@ is sent.
   No vendor page names its path, so this read does not cover it yet.
 - `build` is derived from the version string when the appliance row has no
   `buildNumber`; the live pin confirms the row's field names.
+- The HA group calls come from the vendor reference, which names no
+  version and shows only placeholder values. It does not say whether
+  `appliances` in the build body takes one appliance (as the HCX user guide
+  does: HCX picks the second pair) or both of the source pair, so the
+  build takes one or two ids. It lists no values for `groupState` and
+  `role`; the values in the docs come from the HCX 4.11 user guide. The
+  HA group of an extension is found by its source appliance, because the
+  extension rows name no group. The live proof confirms all three.
+- The HA build and dissolve answer with an interconnect task id, not a
+  job id. The status read of an interconnect task is `hcx.task.get`, which
+  ships with the service mesh changes. Until it is merged, follow the work
+  with `hcx.network_extension.ha.list`.
 
 ## References
 
 - Task #4608 (this connector, login, version helper and the read);
   #4545 (the reads that build on it); #4395 (the same read for NSX);
-  #4505 (the same shape for Site Recovery Manager).
+  #4505 (the same shape for Site Recovery Manager); #4551 (the Network
+  Extension HA groups).
 - `docs/decisions/spec-reconcile-guards-standard.md` -- the waiting lane.
 - `docs/codebase/connectors-nsx.md` -- the sibling connector this one
   mirrors.

@@ -735,6 +735,36 @@ extension mechanics. **Sequencing:** the files land through a pull request
 in the shelf repo, which must merge before this repo's widened verify step
 can pass.
 
+### Extension: vmware-cloud-director-10.6 (#4519)
+
+This change checks out one more shelf folder, `vmware-cloud-director-10.6`.
+The Cloud Director reconcile lane now checks every `/cloudapi` path MEHO calls
+against the CloudAPI file of Cloud Director 10.6. The verify step requires that
+file, so the check cannot skip in CI.
+
+| Shelf folder | File the verify step requires | Lane that reads it |
+|---|---|---|
+| `vmware-cloud-director-10.6` | `vmware-cloud-director-10.6/cloudapi-39.2.json` | `backend/tests/test_connectors_vcd_spec_reconcile.py` (`test_cloudapi_paths_are_in_the_cell_served_cloudapi_file`) |
+
+- **Size:** about 6 MB for the folder (the 2.9 MB CloudAPI file, its sidecars,
+  and the `/api` reference lists and schema zips for API 39.0 and 39.1).
+- **What the file is:** the Swagger 2.0 file a Cloud Director 10.6.2 cell
+  serves at `GET /api-explorer/provider/cloudapi.json` (API 39.2). It names no
+  host, so it is the same for every cell. Provenance note of record: the
+  folder's `MANIFEST.md` on the shelf.
+- **Licence:** the file is served by the product and states no licence. So
+  this extension records a reference to the **wave-3 blanket determination**
+  in the NSX section above
+  (<https://github.com/evoila/meho/issues/2981#issuecomment-5329188426>), the
+  same way the `vks-9.0` and `vcf-automation-9.1` entries do. No new
+  attestation is needed.
+- The same rules apply: read-only checkout, the runner is deleted when the
+  job ends, never committed, never in artifacts or logs, no secret for fork
+  PRs or Dependabot.
+
+The lane passed against the pinned file before this change was opened (4
+tests, none skipped).
+
 ## Consequences
 
 - The five real-spec lanes light up together the moment the secret exists;

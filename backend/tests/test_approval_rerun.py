@@ -30,6 +30,7 @@ import structlog
 from httpx import ASGITransport
 from sqlalchemy import select
 
+import meho_backplane.operations.approval_rerun as rerun_module
 import meho_backplane.operations.dispatcher as dispatcher_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -289,8 +290,6 @@ async def test_rerun_that_read_the_old_failure_is_refused_after_a_failed_rerun(
     Its claim must not match, although the stored result is a failure again,
     or both callers would run the operation.
     """
-    import meho_backplane.operations.approval_rerun as rerun_module
-
     failing = _FakeDispatch(status="error")
     monkeypatch.setattr(dispatcher_module, "dispatch", failing)
     request_id = await _park_failed()

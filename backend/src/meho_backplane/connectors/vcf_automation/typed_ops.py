@@ -269,6 +269,17 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "(vcfa.tenant.cloud_account.enumerate_images), and add, re-point or remove one "
         "name (vcfa.tenant.image_profile.mapping.update; a person must approve it)."
     ),
+    "vcfa-provider-networking": (
+        "Organization settings and networking on the VCF Automation provider plane, for the "
+        "set-up done once per site. One read: provider networking per region and the state "
+        "of a networking job (vcfa.provider.network.list). Changes: an organization's display "
+        "name, description, on/off state and publish rights (vcfa.provider.org.update); its "
+        "networking and short log name (vcfa.provider.org.networking.set); IP spaces "
+        "(vcfa.provider.ip_space.set); provider gateways and their IP space links "
+        "(vcfa.provider.provider_gateway.set); an organization's networking in a region "
+        "(vcfa.provider.regional_networking.set); and removing these objects "
+        "(vcfa.provider.network.delete)."
+    ),
 }
 
 

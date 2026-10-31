@@ -98,6 +98,15 @@ var typedOpCLICoverage = map[string]string{
 	// `meho operation call` / MCP call_operation.
 	"vcfa.provider.feature_flag.list": "",
 	"vcfa.provider.feature_flag.set":  "",
+	// Organization settings and networking (provider plane): agent-surface-only,
+	// reached through `meho operation call` / MCP call_operation.
+	"vcfa.provider.network.list":            "",
+	"vcfa.provider.org.update":              "",
+	"vcfa.provider.org.networking.set":      "",
+	"vcfa.provider.ip_space.set":            "",
+	"vcfa.provider.provider_gateway.set":    "",
+	"vcfa.provider.regional_networking.set": "",
+	"vcfa.provider.network.delete":          "",
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed VCFA

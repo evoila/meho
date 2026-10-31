@@ -290,6 +290,16 @@ async def test_delete_waits_for_a_second_person_then_runs(vcfa: VcfAutomationCon
     }
     assert delete.call_count == 1
 
+    # The delete's own status read ends with not_found once the object is gone.
+    follow = resumed.result["status_read"]
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(_SETTING).respond(404, json={"message": "not found"})
+        mock.get(f"/api/task/{TASK_ID}").respond(200, json={"status": "success", "progress": 100})
+        read = await run(follow["op_id"], follow["params"])
+    assert read["result"]["state"] == "not_found"
+    assert read["result"]["job_state"] == "succeeded"
+
 
 async def test_approved_run_stops_when_the_object_changed(vcfa: VcfAutomationConnector) -> None:
     token = approved_preview_var.set((_OP, {"state_hash": "seen-before-a-change"}))

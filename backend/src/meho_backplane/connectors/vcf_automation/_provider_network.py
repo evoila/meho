@@ -39,6 +39,7 @@ import httpx
 from meho_backplane.connectors.vcf_automation._lookups import find_org, fiql_safe, list_all
 from meho_backplane.connectors.vcf_automation._provider_job import (
     job_id_problem,
+    not_reachable,
     read_job,
     with_job,
 )
@@ -93,8 +94,6 @@ _JOB_STATES: Final = {
     "REALIZATION_FAILED": "failed",
     "UNKNOWN": "unknown",
 }
-#: HTTP answers that mean "the appliance does not answer now", not "the job failed".
-_NOT_REACHABLE_STATUS: Final = frozenset({502, 503, 504})
 _ORG_URN_PREFIX: Final = "urn:vcloud:org:"
 #: Fields that change without anyone changing the object; a state hash skips them.
 _UNBOUND_FIELDS: Final = frozenset(
@@ -430,12 +429,6 @@ def status_read(kind: str, **filters: Any) -> dict[str, Any]:
     return {"op_id": STATUS_READ_OP, "params": {"kind": kind, **filters}}
 
 
-def _is_not_reachable(exc: Exception) -> bool:
-    if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code in _NOT_REACHABLE_STATUS
-    return isinstance(exc, httpx.TransportError)
-
-
 async def _tier0_rows(
     connector: VcfAutomationConnector,
     target: VcfAutomationTargetLike,
@@ -549,22 +542,15 @@ async def provider_network_list(
             rows = await _org_networking_rows(connector, target, operator, params)
         else:
             rows = await _object_rows(connector, target, operator, kind, params)
-        job = None if job_id is None else await read_job(connector, target, operator, job_id)
     except VcfaProviderNetworkError as exc:
         return {**base, "state": "invalid_request", "guidance": str(exc)}
     except (httpx.HTTPError, RuntimeError) as exc:
-        if not _is_not_reachable(exc):
-            raise
-        return {
-            **base,
-            "reachable": False,
-            "state": "not_reachable",
-            "error": f"{type(exc).__name__}: {exc}",
-            "guidance": (
-                "VCF Automation did not answer, for example during its own upgrade. This "
-                "says nothing about the job; keep the job id and read again later."
-            ),
-        }
+        return not_reachable(base, exc)
+    try:
+        job = None if job_id is None else await read_job(connector, target, operator, job_id)
+    except (httpx.HTTPError, RuntimeError) as exc:
+        # Keep the object rows already read; only the job read got no answer.
+        return not_reachable({**base, "count": len(rows), "items": rows}, exc)
     one_object = kind in KINDS and (params.get("id") is not None or params.get("name") is not None)
     state, vendor_status = _single_state(rows, one_object)
     guidance = None

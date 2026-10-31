@@ -177,8 +177,8 @@ _NETWORK_LIST = VcfaTypedOp(
             "not_reachable: the appliance did not answer; this is not a failure."
         ),
         next_step=(
-            "Read again until state is succeeded or failed. If the login expired, MEHO logs "
-            "in again by itself."
+            "Read again until state is succeeded or failed (after a delete: not_found or "
+            "failed). If the login expired, MEHO logs in again by itself."
         ),
         result_scalars={
             "keys": [

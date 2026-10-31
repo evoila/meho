@@ -13,7 +13,9 @@ SDK (``go-vcloud-director`` v3) follows these ``202`` starts the same way.
 :func:`with_job` adds the task to the answer of the status read: the job
 state, the progress, and the vendor's error text when the job failed. The
 error text goes through MEHO's default redaction policy and is cut to
-:data:`ERROR_TEXT_MAX` characters.
+:data:`ERROR_TEXT_MAX` characters. When the object is gone (``not_found``) and
+the job succeeded, ``state`` stays ``not_found``: that is how a finished delete
+ends.
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vcf_automation.connector import VcfAutomationConnector
     from meho_backplane.connectors.vcf_automation.session import VcfAutomationTargetLike
 
-__all__ = ["ERROR_TEXT_MAX", "job_id_problem", "read_job", "with_job"]
+__all__ = ["ERROR_TEXT_MAX", "job_id_problem", "not_reachable", "read_job", "with_job"]
 
 #: Vendor task state -> the job state MEHO reports.
 _JOB_STATE: Final[dict[str, str]] = {
@@ -47,23 +49,33 @@ _JOB_STATE: Final[dict[str, str]] = {
     "aborted": "failed",
     "canceled": "canceled",
 }
+#: HTTP answers that mean "the appliance does not answer now", not "the job failed".
+_NOT_REACHABLE_STATUS: Final = frozenset({502, 503, 504})
 #: Longest vendor error text kept in an answer.
 ERROR_TEXT_MAX: Final = 500
 _TEXT_WITHHELD: Final = "<vendor text withheld: redaction unavailable>"
 _UNREAD_GUIDANCE: Final = (
     "MEHO could not read the vendor job with this id ({why}). The object state above still holds."
 )
+#: The URN form of a vendor task id; the plain id follows it.
+_TASK_URN: Final = "urn:vcloud:task:"
 
 
 def _uuid_of(job_id: str) -> str:
-    """``urn:vcloud:task:<uuid>`` -> ``<uuid>``; a bare id passes through."""
-    return job_id.rsplit(":", 1)[-1]
+    """``urn:vcloud:task:<uuid>`` -> ``<uuid>``; a plain id passes through."""
+    return job_id.removeprefix(_TASK_URN)
 
 
 def job_id_problem(job_id: object) -> str | None:
-    """Why *job_id* cannot go into the task path, or ``None`` when it can."""
+    """Why *job_id* cannot go into the task path, or ``None`` when it can.
+
+    A job id is a plain id or ``urn:vcloud:task:<id>``. Any other id with a
+    colon is refused, so the task MEHO reads is always the id the answer shows.
+    """
     problem = bad_id_reason(job_id, "job")
     if problem is None and isinstance(job_id, str):
+        if ":" in _uuid_of(job_id):
+            return f"job id {job_id!r} is neither a plain id nor of the form {_TASK_URN}<id>"
         problem = bad_id_reason(_uuid_of(job_id), "job")
     return problem
 
@@ -96,6 +108,28 @@ def _unread(job_id: str, why: str) -> dict[str, Any]:
     }
 
 
+def not_reachable(base: dict[str, Any], exc: Exception) -> dict[str, Any]:
+    """The answer when VCF Automation did not answer; re-raises any other error."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        silent = exc.response.status_code in _NOT_REACHABLE_STATUS
+    else:
+        silent = isinstance(exc, httpx.TransportError)
+    if not silent:
+        raise exc
+    guidance = (
+        "VCF Automation did not answer, for example during its own upgrade. This "
+        "says nothing about the job; keep the job id and read again later."
+    )
+    error = f"{type(exc).__name__}: {exc}"
+    return {
+        **base,
+        "reachable": False,
+        "state": "not_reachable",
+        "error": error,
+        "guidance": guidance,
+    }
+
+
 async def read_job(
     connector: VcfAutomationConnector,
     target: VcfAutomationTargetLike,
@@ -105,17 +139,23 @@ async def read_job(
     """Read one vendor job: state, progress and the vendor's error text.
 
     Check *job_id* with :func:`job_id_problem` first. A job the vendor no
-    longer knows (``404``) or a body that is not a task answers
-    ``read: false``. A system that does not answer raises, so the caller can
-    say ``not_reachable``.
+    longer knows (``404``), any other ``4xx`` answer, or a body that is not a
+    task answers ``read: false``; ``why_not_read`` names the HTTP status. A
+    system that does not answer (also ``5xx``) raises, so the caller can say
+    ``not_reachable``.
     """
     path = provider_path(target, INFRA_TASK_PATH, id=_uuid_of(job_id))
     try:
         task = await connector._request_json(target, "GET", path, operator=operator)
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code != 404:
-            raise
-        return _unread(job_id, "the vendor has no job with this id; it may have ended long ago")
+        code = exc.response.status_code
+        if code == 404:
+            return _unread(
+                job_id, "HTTP 404: the vendor has no job with this id; it may have ended long ago"
+            )
+        if 400 <= code < 500:
+            return _unread(job_id, f"HTTP {code}: the vendor refused the job read")
+        raise
     except ValueError:
         return _unread(job_id, "the vendor's answer was not a task")
     if not isinstance(task, dict) or not isinstance(task.get("status"), str):
@@ -141,8 +181,10 @@ def with_job(answer: dict[str, Any], job: dict[str, Any] | None) -> dict[str, An
     """*answer* of the status read with the vendor job *job* added.
 
     A job that was read sets ``state``: the job tells how far the change
-    got, also while the object still shows its old state. A failed job puts
-    the vendor's error text in ``error``.
+    got, also while the object still shows its old state. One exception: when
+    the object is gone (``not_found``) and the job succeeded, ``state`` stays
+    ``not_found``, so a finished delete ends as its guidance says. A failed
+    job puts the vendor's error text in ``error``.
     """
     if job is None:
         return answer
@@ -150,7 +192,8 @@ def with_job(answer: dict[str, Any], job: dict[str, Any] | None) -> dict[str, An
     if not job["read"]:
         out["guidance"] = _UNREAD_GUIDANCE.format(why=job["why_not_read"])
         return out
-    if job["state"] != "unknown":
+    deleted = answer.get("state") == "not_found" and job["state"] == "succeeded"
+    if job["state"] != "unknown" and not deleted:
         out["state"] = job["state"]
     if job["state"] == "failed":
         out["error"] = job["error"] or "the vendor job failed and gave no error text"

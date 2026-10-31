@@ -27,7 +27,10 @@ from meho_backplane.connectors.vcf_automation import (
     VCFA_PROVIDER_NETWORK_OPS,
     VcfAutomationConnector,
 )
-from meho_backplane.connectors.vcf_automation._provider_network import provider_network_list
+from meho_backplane.connectors.vcf_automation._provider_network import (
+    provider_network_list,
+    status_read,
+)
 from meho_backplane.connectors.vcf_automation.typed_ops import VCFA_TYPED_WHEN_TO_USE_BY_GROUP
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
@@ -370,6 +373,61 @@ async def test_status_read_when_the_task_read_gets_503_is_not_reachable(
     assert out["state"] == "not_reachable"
     assert out["job_id"] == TASK_ID
     assert out["checked_at"].endswith("Z")
+    # The object rows read before the task read stay in the answer.
+    assert out["count"] == 1
+    assert [row["id"] for row in out["items"]] == [GATEWAY_ID]
+
+
+async def test_status_read_after_a_finished_delete_is_not_found(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    """The object is gone and the task succeeded: the delete's status read ends."""
+    params = status_read("ip_spaces", id=IP_SPACE_ID, job_id=TASK_ID)["params"]
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(item(V90, "ipSpaces", IP_SPACE_ID)).respond(404, json={"message": "gone"})
+        mock.get(TASK).respond(200, json=_task("success", progress=100))
+        result = await run("vcfa.provider.network.list", params)
+    out = result["result"]
+    assert out["state"] == "not_found"
+    assert out["job_state"] == "succeeded"
+    assert out["job"]["read"] is True
+
+
+@pytest.mark.parametrize("task_status", ["running", "error"])
+async def test_status_read_of_a_missing_object_keeps_a_running_or_failed_job_state(
+    vcfa: VcfAutomationConnector, task_status: str
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(item(V90, "ipSpaces", IP_SPACE_ID)).respond(404, json={"message": "gone"})
+        mock.get(TASK).respond(200, json=_task(task_status))
+        result = await run(
+            "vcfa.provider.network.list",
+            {"kind": "ip_spaces", "id": IP_SPACE_ID, "job_id": TASK_ID},
+        )
+    expected = {"running": "running", "error": "failed"}[task_status]
+    assert result["result"]["state"] == expected
+
+
+@pytest.mark.parametrize("code", [400, 403, 406])
+async def test_status_read_when_the_task_read_is_refused_keeps_the_object_state(
+    vcfa: VcfAutomationConnector, code: int
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(item(V90, "providerGateways", GATEWAY_ID)).respond(200, json=gateway())
+        mock.get(TASK).respond(code, json={"message": "no"})
+        result = await run(
+            "vcfa.provider.network.list",
+            {"kind": "provider_gateways", "id": GATEWAY_ID, "job_id": TASK_ID},
+        )
+    out = result["result"]
+    assert out["reachable"] is True
+    assert out["state"] == "succeeded"
+    assert out["job"]["read"] is False
+    assert f"HTTP {code}" in out["job"]["why_not_read"]
+    assert out["count"] == 1
 
 
 async def test_status_read_of_a_job_the_vendor_no_longer_has(
@@ -390,7 +448,9 @@ async def test_status_read_of_a_job_the_vendor_no_longer_has(
     assert "could not read the vendor job" in out["guidance"]
 
 
-@pytest.mark.parametrize("job_id", ["..", ".", "urn:vcloud:task:", "a/b"])
+@pytest.mark.parametrize(
+    "job_id", ["..", ".", "urn:vcloud:task:", "a/b", "foo:bar", f"urn:vcloud:task:x:{TASK_ID}"]
+)
 async def test_status_read_refuses_a_bad_job_id(vcfa: VcfAutomationConnector, job_id: str) -> None:
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         mount_logins(mock)

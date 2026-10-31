@@ -450,10 +450,15 @@ calls follow the vendor's "Provider Infrastructure APIs" reference lists of
   in percent, and a `job` block. When the job failed, `error` has the
   vendor's error text (secrets filtered out, at most 500 characters). The
   job state then sets `state`, also while the object still shows its old
-  status. A job the vendor no longer knows (HTTP 404) gives `job.read:
-  false` and keeps the object's state. A bad `job_id` (empty, `.`, `..`, a
-  slash) is refused with `invalid_request` before any call. MEHO keeps no
-  job state between calls.
+  status. One exception: when the object is gone and the job succeeded,
+  `state` stays `not_found`. So a delete's status read ends with
+  `not_found` (gone) or `failed` (it stays), as the delete's guidance says.
+  A job the vendor no longer knows (HTTP 404) or any other HTTP 4xx answer
+  on the task read gives `job.read: false` with the HTTP status in
+  `job.why_not_read`, and keeps the object's state. A bad `job_id` (empty,
+  `.`, `..`, a slash, or a colon form other than `urn:vcloud:task:<id>`) is
+  refused with `invalid_request` before any call. MEHO keeps no job state
+  between calls.
 - **A job that already runs.** Before a start, the op reads the object. When
   it reads `PENDING` or `CONFIGURING`, the op answers `already_running` and
   starts nothing. This helps but is not a lock: two callers can both check
@@ -465,7 +470,8 @@ calls follow the vendor's "Provider Infrastructure APIs" reference lists of
 - **Not reachable.** When the appliance does not answer (a connection error,
   a time-out, HTTP 502, 503 or 504), the status read answers
   `reachable: false`, `state: not_reachable`, the job id it was given and
-  `checked_at`, also when only the task read gets no answer. It never says
+  `checked_at`, also when only the task read gets no answer (the object
+  rows already read then stay in `items`). It never says
   `failed` then. An expired login is handled by
   the connector's usual 401 re-login.
 - **Part-way failure.** Linking IP spaces to an existing gateway sends one

@@ -70,7 +70,8 @@ _TASK_QUERY_PATH: Final = "/hybridity/api/interconnect/tasks/query"
 #: Rows per page of the running check, the vendor default of the task list.
 _TASK_PAGE_SIZE: Final = 100
 #: Upper bound of pages the running check reads, so a Manager that pages
-#: wrongly cannot keep the check busy for ever.
+#: wrongly cannot keep the check busy for ever. Reaching it is an error:
+#: the check is then incomplete, and the change must not start.
 _MAX_TASK_PAGES: Final = 50
 
 #: Every vendor call of this module, as ``(method, path template)``.
@@ -238,7 +239,9 @@ async def _running_task(
 
     Reads the task query page by page (``offset`` counts rows) until a task
     matches or the rows end. Create filters by state only, so its match can
-    sit on a later page.
+    sit on a later page. Raises ``ValueError`` when the rows do not end
+    within ``_MAX_TASK_PAGES`` pages: the check is then incomplete, and the
+    caller must not start the change.
     """
     task_filter: dict[str, Any] = {"status": list(_ACTIVE_STATES)}
     if mesh_id is not None:
@@ -257,7 +260,11 @@ async def _running_task(
         rows_read += len(rows)
         if not rows or _is_last_page(payload, len(rows), rows_read):
             return None
-    return None
+    raise ValueError(
+        f"the check for a running task read {_MAX_TASK_PAGES} pages ({rows_read} tasks) of "
+        "the task query without reaching the end; the change does not start, because a "
+        "task on a later page could still be running"
+    )
 
 
 def _already_running(task: dict[str, Any], mesh_id: str | None) -> dict[str, Any]:

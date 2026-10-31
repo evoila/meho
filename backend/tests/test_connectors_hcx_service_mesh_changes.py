@@ -448,6 +448,36 @@ async def test_create_reads_every_page_before_it_starts(hcx: HcxConnector) -> No
     assert result.result["status"] == "accepted"
 
 
+async def test_create_fails_and_starts_nothing_when_the_page_limit_is_reached(
+    hcx: HcxConnector,
+) -> None:
+    """A Manager with more rows than 50 pages hold makes the check fail, not the create start."""
+    others = [
+        {"interconnectTaskId": f"task-{index}", "status": "RUNNING", "entityDetails": {"id": "x"}}
+        for index in range(100)
+    ]
+
+    def page(request: httpx.Request) -> httpx.Response:
+        offset = json.loads(request.content)["paging"]["offset"]
+        paging = {"offset": offset, "pageSize": 100, "totalSize": 5001}
+        return httpx.Response(200, json={"items": others, "paging": paging})
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        query = mock.post(_TASKS_QUERY).mock(side_effect=page)
+        create = mock.post(_MESH_PATH).respond(202, json=_accepted_body())
+        result = await _run(
+            "hcx.service_mesh.create",
+            {"name": "<mesh-name>", "compute_profiles": _COMPUTE_PROFILES, "services": ["RAV"]},
+        )
+
+    assert result.status == "error"
+    assert not create.called
+    assert query.call_count == 50
+    assert _body(query, 49)["paging"] == {"offset": 4900, "pageSize": 100}
+    assert "50 pages" in json.dumps(result.model_dump(mode="json"))
+
+
 async def test_running_check_stops_on_a_short_page_without_a_total(hcx: HcxConnector) -> None:
     """An answer without ``paging.totalSize`` ends after a page shorter than the page size."""
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:

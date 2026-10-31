@@ -400,8 +400,10 @@ These are vendor jobs: the Manager does the work after the call returns.
    and starts nothing. The query is paged: the body carries
    `paging: {offset, pageSize}` (100 rows a page, `offset` counts rows)
    and the answer `paging.totalSize`. The check reads page after page
-   until a task matches or the rows end, at most 50 pages. This is a
-   help, not a lock: two callers can both check before either starts.
+   until a task matches or the rows end, at most 50 pages. When the rows
+   do not end within 50 pages, the check is incomplete: the change fails
+   with an error and starts nothing. This is a help, not a lock: two
+   callers can both check before either starts.
 3. **Status.** `hcx.task.get` reads
    `GET /hybridity/api/interconnect/tasks/{interconnectTaskId}` and returns
    `status` (the vendor state), `done`, `progress`, `message`, `error`

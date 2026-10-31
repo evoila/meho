@@ -94,6 +94,7 @@ pinned with their size, SHA-256 and the build the Orchestrator reports
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -112,6 +113,8 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.vmware_shared.vra_governance import VraGovCalls
+from meho_backplane.connectors.vmware_shared.vra_handlers import VraSharedHandlers
 from meho_backplane.connectors.vra8._paths import _ABOUT_PATH
 from meho_backplane.connectors.vra8.session import (
     Vra8CredentialsLoader,
@@ -144,7 +147,7 @@ def _session_cache_key(target: Any) -> tuple[str, ...]:
     return credential_cache_key(target, domain)
 
 
-class Vra8Connector(HttpConnector):
+class Vra8Connector(HttpConnector, VraSharedHandlers):
     """vRealize Automation 8.x REST connector — two-step bearer session mint.
 
     Minted bearers cached in :attr:`_session_tokens` per credential
@@ -456,6 +459,36 @@ class Vra8Connector(HttpConnector):
         from meho_backplane.connectors.vra8.typed_reads import vra8_about_impl
 
         return await vra8_about_impl(self, operator, target, params)
+
+    def vra_gov_calls(self, operator: Operator, target: Any) -> VraGovCalls:
+        """The bearer GET and send of the shared governance ops.
+
+        The approval, policy, ABX and subscription handlers are inherited from
+        :class:`~meho_backplane.connectors.vmware_shared.vra_handlers.VraSharedHandlers`;
+        the metadata is in :mod:`.governance_ops`.
+        """
+
+        async def get(path: str, query: Mapping[str, Any] | None) -> dict[str, Any]:
+            params = dict(query) if query is not None else None
+            return await self._vra_get(target, path, operator=operator, params=params)
+
+        async def send(
+            method: str,
+            path: str,
+            query: Mapping[str, Any] | None,
+            body: Mapping[str, Any] | None,
+        ) -> Any:
+            return await self._post_json(
+                target,
+                path,
+                operator=operator,
+                verb=method,
+                params=dict(query) if query is not None else None,
+                json=dict(body) if body is not None else None,
+                extra_headers={"Accept": _JSON_ACCEPT},
+            )
+
+        return VraGovCalls(get=get, send=send, prefix="vcfa.vra8")
 
     async def api_file_get(
         self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]

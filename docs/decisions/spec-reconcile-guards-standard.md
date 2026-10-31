@@ -377,7 +377,31 @@ split.
   instead of skipping. The other provider op_ids stay in the exclusion
   above; this change checks only the region path.
 
-### vcd — fully excluded, all-typed (no pinnable spec) (#3057)
+### vcd — CloudAPI paths ARMED 2026-10-31 (#4519); `/api` paths pinned only
+
+**Update 2026-10-31 (#4519).** A running Cloud Director cell serves its own
+`/cloudapi` file: `GET /api-explorer/provider/cloudapi.json`, Swagger 2.0, no
+session needed. The spec shelf pins it as
+`vmware-cloud-director-10.6/cloudapi-39.2.json` (API 39.2, from a 10.6.2
+cell, 646 paths, `basePath` `/cloudapi`; provenance in the shelf's
+`MANIFEST.md`). This replaces the `/cloudapi` half of the exclusion below.
+
+- **Armed (every `/cloudapi` op_id):** `GET` and `POST /cloudapi/1.0.0/orgs`,
+  `GET`, `PUT` and `DELETE /cloudapi/1.0.0/orgs/{orgUrn}`, and
+  `POST /cloudapi/1.0.0/sessions/provider`. The lane
+  (`backend/tests/test_connectors_vcd_spec_reconcile.py`) reads the Swagger
+  2.0 file itself (MEHO's spec ingest reads OpenAPI 3 only), adds the
+  `basePath`, and ignores path parameter names. CI checks the folder out and
+  requires the file, so the check fails instead of skipping when it is
+  missing.
+- **Still pinned only (2 op_ids: `GET:/api/query`, `GET:/api/versions`).** The
+  vendor publishes no API file for the older `/api` surface. Both paths are in
+  the vendor's API 39.0 reference
+  (<https://developer.broadcom.com/xapis/vmware-cloud-director-api/39.0/>,
+  operations `GET-ExecuteQuery` and `GET-SupportedVersions`); the lane names
+  that link and keeps them in the manifest pin.
+
+The original exclusion (#3057) is kept below as history.
 
 The `vcd` (VMware Cloud Director) connector is a **net-new typed**
 connector for the legacy standalone product (initiative

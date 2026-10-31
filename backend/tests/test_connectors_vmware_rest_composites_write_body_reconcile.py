@@ -214,6 +214,7 @@ from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
     _read,
     _snapshot,
     _teardown_network,
+    _vm_devices,
 )
 from meho_backplane.connectors.vmware_rest.vim_body import (  # noqa: E402
     MOREF_TYPE_NAME,
@@ -281,6 +282,8 @@ _EMITTED_VIM_TYPE_NAMES: set[str] = {
     _read._EVENT_FILTER_SPEC_BY_ENTITY_TYPE,
     # #4383 alarm.reset ClearTriggeredAlarms filter.
     _alarm._ALARM_FILTER_SPEC_TYPE,
+    # The USB 3 controller the VM controller add puts on a VM.
+    _vm_devices._VIRTUAL_USB_XHCI_CONTROLLER_TYPE,
 }
 
 

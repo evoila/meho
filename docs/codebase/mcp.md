@@ -867,6 +867,13 @@ request header (a tenant name or UUID). To switch, the client changes the
 setting and starts a new session. There is no tool to switch tenants, so
 the working surface stays at its size.
 
+The two connection helpers send the header (#5242): the Claude Code plugin
+shim from `MEHO_TENANT` (`clients/claude-code-plugin/bin/meho-mcp-remote`),
+and the Claude Desktop bundle from its optional `tenant` setting
+(`clients/claude-desktop-mcpb/`, see `claude-desktop-mcpb.md`). Both pass it
+to `mcp-remote` as `--header "Meho-Tenant: <value>"` and send nothing when it
+is not set.
+
 - `verify_mcp_jwt` (`mcp/auth.py`) reads the header and calls
   `verify_jwt_for_audience(..., requested_tenant=..., allow_unchosen=True)`.
   The rules are the ones of REST (`auth/current_tenant.py`): a header for a

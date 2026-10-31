@@ -11,15 +11,17 @@ What is covered, with a respx-mocked Orchestrator and no ingested catalog:
 * input values wrapped the way the vendor expects, and refused when they
   do not fit;
 * the ``vro.workflow.run`` preview: the card with ``blast_radius``, secret
-  inputs as Vault references only, refused for a missing workflow or a
-  secret given as a value;
+  inputs as Vault references only, refused for a missing workflow, a
+  secret given as a value, or a list of secrets;
 * the governed flow: a run without a matching ``preview_hash`` is refused;
   preview, wait, a second person approves, the run starts once; no secret
   value in the approval row, the audit rows, the answer or the trace;
 * the approved run: ``precondition_failed`` when the card does not match
   or no card is bound, ``already_running`` when a run still goes, the run
   id from the body or the ``Location`` header, a vendor error with its
-  text (withheld when it holds a secret);
+  text (withheld when it holds a secret); through the whole flow the
+  vendor text reaches the answer and no secret reaches the approval row,
+  the audit rows, the trace or the broadcast feed;
 * the status read after a lost login: a new login, then the state;
 * ``vro.execution.cancel``: waits for approval, cancels a running run, a
   run that ended is ``unchanged``, a vendor error comes back.
@@ -29,6 +31,7 @@ Fixture values are made up; no real host, user or id appears here.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -42,6 +45,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.broadcast import publisher
 from meho_backplane.connectors.base import ConnectorUpstreamError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vro import (
@@ -60,6 +64,7 @@ from meho_backplane.connectors.vro.run_writes import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, AuditLog
 from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.flight_recorder import capture
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
@@ -104,6 +109,8 @@ _CONTENT_PAYLOAD: dict[str, Any] = {
             {"name": "count", "type": "number"},
             {"name": "vm", "type": "VC:VirtualMachine"},
             {"name": "tags", "type": "Array/string"},
+            {"name": "hostList", "type": "Array/SecureString"},
+            {"name": "note", "type": "EncryptedString"},
         ]
     },
     "output": {"param": []},
@@ -321,6 +328,7 @@ async def test_config_element_attributes_hide_secret_values(session: AsyncSessio
             {"name": "key", "type": "string", "encrypt-value": True, "value": "s-2"},
             {"name": "apiToken", "type": "string", "value": {"string": {"value": "s-3"}}},
             {"name": "blob", "type": "EncryptedString", "value": "s-4"},
+            {"name": "other", "type": "Any", "value": {"secure-string": {"value": "s-5"}}},
         ],
     }
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
@@ -338,11 +346,11 @@ async def test_config_element_attributes_hide_secret_values(session: AsyncSessio
     rows = {row["name"]: row for row in result.result["items"]}
     assert rows["host"]["value"] == {"string": {"value": "<host>"}}
     assert rows["host"]["masked"] is False
-    for name in ("pw", "key", "apiToken", "blob"):
+    for name in ("pw", "key", "apiToken", "blob", "other"):
         assert rows[name]["masked"] is True
         assert rows[name]["value"] == "***REDACTED***"
     rendered = json.dumps(result.result)
-    for secret in ("s-1", "s-2", "s-3", "s-4"):
+    for secret in ("s-1", "s-2", "s-3", "s-4", "s-5"):
         assert secret not in rendered
 
 
@@ -485,6 +493,9 @@ async def test_preview_refuses_a_missing_workflow(session: AsyncSession) -> None
     ("inputs", "match"),
     [
         ([{"name": "adminPassword", "value": "x"}], "secret"),
+        ([{"name": "note", "value": "x"}], "is a secret"),
+        ([{"name": "hostList", "value": ["x", "y"]}], "a list of secrets"),
+        ([{"name": "hostList", "secret_ref": "<vault-path>#f"}], "a list of secrets"),
         ([{"name": "unknown", "value": "x"}], "no input named"),
         ([{"name": "count", "secret_ref": "<vault-path>#f"}], "only a SecureString"),
         ([{"name": "vmName", "value": "a"}, {"name": "vmName", "value": "b"}], "twice"),
@@ -724,6 +735,73 @@ async def test_run_vendor_error_text_reaches_the_answer(session: AsyncSession) -
             await _approved_run(connector, params, card)
     assert raised.value.http_status == 400
     assert "<vendor validation error>" in str(raised.value.upstream_message)
+
+
+@pytest.mark.asyncio
+async def test_vendor_error_text_reaches_the_answer_through_the_whole_flow(
+    _stub_embedding: AsyncMock,
+    _vault: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preview, approval, then a vendor 400: the person reads why; no secret is kept."""
+    spans: list[Any] = []
+
+    async def _record_trace(**kwargs: Any) -> None:
+        spans.extend(kwargs["spans"])
+
+    monkeypatch.setattr(capture, "should_capture", AsyncMock(return_value=True))
+    monkeypatch.setattr(capture, "record_trace", _record_trace)
+    feed = AsyncMock(return_value=(True, "0-1"))
+    monkeypatch.setattr(publisher, "_write_stream_entry_once", feed)
+    await _register()
+    await _seed_target()
+    requester = _operator("op-run-requester")
+    args = {
+        "connector_id": VRO_CONNECTOR_ID,
+        "op_id": RUN_OP_ID,
+        "target": "vro-run-target",
+        "params": {"workflow_id": _WF, "inputs": _INPUTS},
+    }
+    vendor_text = "<input vmName: the value is not valid>"
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mock_workflow(mock)
+        _mock_runs(mock)
+        post = mock.post(_EXECUTIONS).respond(400, json={"message": vendor_text})
+        preview = await preview_operation(requester, args)
+        assert preview["status"] == "ok", preview
+        call = await call_operation(requester, {**args, "preview_hash": preview["preview_hash"]})
+        assert call["status"] == "awaiting_approval", call
+        request_id = UUID(call["extras"]["approval_request_id"])
+        approver = _operator("op-run-approver")
+        async with get_sessionmaker()() as s:
+            await approve_request(s, request_id, operator=approver, params=None)
+            await s.commit()
+        async with get_sessionmaker()() as s:
+            row = await s.get(ApprovalRequest, request_id)
+            assert row is not None
+            stored = [json.dumps(row.proposed_effect, default=str), repr(row.params)]
+            result = await resume_dispatch_after_approval(
+                operator=approver, request=row, params=None
+            )
+
+    assert post.call_count == 1
+    assert _SECRET.encode() in post.calls[0].request.content
+    assert result.status == "error", result
+    assert result.extras["error_code"] == "connector_error"
+    assert vendor_text in str(result.extras["upstream_message"])
+
+    async with get_sessionmaker()() as s:
+        audits = (await s.execute(select(AuditLog))).scalars().all()
+    post_spans = [x for x in spans if x.name.startswith("POST ")]
+    assert post_spans
+    assert all(x.attributes["body_recorded"] is False for x in post_spans)
+    kept = [*stored, json.dumps(result.result, default=str), str(result.extras)]
+    kept += [json.dumps(a.__dict__, default=str) for a in audits]
+    kept += [json.dumps(dataclasses.asdict(x), default=str) for x in spans]
+    kept += [repr(c) for c in feed.call_args_list]
+    for text in kept:
+        assert _SECRET not in text
 
 
 @pytest.mark.asyncio

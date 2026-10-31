@@ -30,10 +30,13 @@ a second person's approval. The flow:
 4. It reads each secret input from Vault (``secret_ref``,
    ``"<vault-path>#<field>"``) under the caller's identity, and sends
    ``POST /vco/api/workflows/{workflowId}/executions`` once (no retry).
-   The flight recorder keeps no body of this call, and the op is pinned
-   ``credential_write``, so the broadcast and the approval row never hold
-   a secret value. A vendor error whose text holds a secret value comes
-   back without that text.
+   The params hold only Vault references for secret inputs, never a value,
+   so the approval row and the broadcast hold no secret value. The flight
+   recorder keeps no request body of this call, and the op's
+   ``destructive`` tag makes it keep no body of any call of the run. A
+   vendor error comes back with the vendor's text, so a person learns why
+   the run was refused; when that text holds a secret input value, the
+   answer comes back without the text.
 5. The answer says ``accepted`` with the run id (from the answer body, or
    the end of the ``Location`` header). The run is not done: the caller
    reads ``vro.execution.get`` until it ends.
@@ -51,6 +54,11 @@ the vendor expects: ``{"string": {"value": ...}}``, ``number``,
 ``boolean``, ``date``, ``secure-string``, ``array`` (``Array/<type>``) and
 ``sdk-object`` (a plug-in type such as ``VC:VirtualMachine``; the value is
 the object id). Other types are refused with a clear message.
+
+A secret input (type ``SecureString`` or ``EncryptedString``, or a secret
+name) takes only a ``secret_ref``, never a value. A list of secrets
+(``Array/SecureString``, ``Array/EncryptedString``) is refused: one
+``secret_ref`` cannot fill it, and a list of values would show on the card.
 
 Cancel a run (``vro.execution.cancel``, ``dangerous``)
 ------------------------------------------------------
@@ -137,7 +145,8 @@ _SCALAR_KEYS: Final[dict[str, str]] = {
     "Date": "date",
     "SecureString": "secure-string",
 }
-_SECRET_TYPES: Final[frozenset[str]] = frozenset({"SecureString"})
+#: Element types whose value is a secret, also inside ``Array/<type>``.
+_SECRET_TYPES: Final[frozenset[str]] = frozenset({"securestring", "encryptedstring"})
 #: Declared types an input may fill from a Vault reference.
 _SECRET_REF_TYPES: Final[frozenset[str]] = frozenset({"SecureString", "string"})
 _ARRAY_PREFIX: Final = "Array/"
@@ -147,6 +156,11 @@ _WITHHELD: Final = "the vendor error text was withheld because it held a secret 
 
 class VroRunRefusedError(ValueError):
     """The run cannot start as asked; the message says why. Nothing was sent."""
+
+
+def _is_secret_type(type_name: str) -> bool:
+    """True for a secret type, also as the element type of an ``Array/<type>``."""
+    return type_name.removeprefix(_ARRAY_PREFIX).lower() in _SECRET_TYPES
 
 
 def wrap_value(type_name: str, value: Any, *, name: str) -> dict[str, Any]:
@@ -228,6 +242,13 @@ def _check_inputs(raw_inputs: Any, declared: list[dict[str, Any]]) -> list[_RunI
             raise VroRunRefusedError(f"input {name!r} is given twice")
         seen.add(name)
         type_name = str(types[name])
+        secret_type = _is_secret_type(type_name)
+        if secret_type and type_name.startswith(_ARRAY_PREFIX):
+            raise VroRunRefusedError(
+                f"input {name!r} has type {type_name}, a list of secrets. MEHO cannot send "
+                "it: a secret input takes one secret_ref, and a list of secret values "
+                "would show on the approval card."
+            )
         if "secret_ref" in raw:
             if type_name not in _SECRET_REF_TYPES:
                 raise VroRunRefusedError(
@@ -237,7 +258,7 @@ def _check_inputs(raw_inputs: Any, declared: list[dict[str, Any]]) -> list[_RunI
             path, field = _parse_secret_ref(raw["secret_ref"], name=name)
             checked.append(_RunInput(name=name, type=type_name, secret_ref=f"{path}#{field}"))
             continue
-        if type_name in _SECRET_TYPES or is_secret_name(name):
+        if secret_type or is_secret_name(name):
             raise VroRunRefusedError(
                 f"input {name!r} is a secret: give secret_ref, the Vault place of the "
                 "value, not the value"
@@ -532,7 +553,10 @@ async def vro_workflow_run_impl(
         error = _safe_error(exc, secrets)
     if error is not None:
         raise error
-    body = response.json() if response.content else {}
+    try:
+        body = response.json() if response.content else {}
+    except ValueError:
+        body = {}
     body = body if isinstance(body, dict) else {}
     run_id = _execution_id(response, body)
     return _answer(

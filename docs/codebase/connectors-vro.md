@@ -223,7 +223,9 @@ server does not answer.
 
 The run is one vendor call, so there is no part-way failure to report. A
 vendor error comes back as `connector_error` with the HTTP status and the
-vendor text.
+vendor text (`extras.upstream_message`), so a person learns why
+Orchestrator refused the run. A test runs this through the whole flow:
+preview, approval, then a vendor `400`.
 
 **Lost reply.** Call the run with `async: true`
 (`docs/codebase/async-governed-dispatch.md`): MEHO keeps the answer, with
@@ -266,18 +268,24 @@ for approval like every change.
   value uses: when the key is a secret name, the value is replaced, at
   any depth. Entries shaped `{name, value}` are handled the same way.
 - `vro.config_element.list` replaces the value of an attribute whose type
-  is `SecureString` or `EncryptedString`, whose `encrypt-value` flag is
-  set, or whose name is a secret name, and marks the row `masked: true`.
+  is `SecureString` or `EncryptedString`, whose value sits in a
+  `secure-string` or `encrypted-string` wrapper, whose `encrypt-value`
+  flag is set, or whose name is a secret name, and marks the row
+  `masked: true`.
 - `vro.workflow.run` takes a secret input only as `secret_ref`
-  (`<vault-path>#<field>`), never as a value: a `SecureString` input, or
-  an input with a secret name, given as a value is refused. MEHO reads the
-  value from Vault under the caller's identity (after an approval: the
-  approver) when the approved run starts. The op is pinned
-  `credential_write` in `broadcast/events.py`: the broadcast carries no
-  params, the waiting approval keeps its input encrypted, and the flight
-  recorder keeps no body. The run's own send (`_vro_send`) also records
-  no request body. A vendor error whose text holds a secret value comes
-  back without that text.
+  (`<vault-path>#<field>`), never as a value: a `SecureString` or
+  `EncryptedString` input, or an input with a secret name, given as a
+  value is refused. A list of secrets (`Array/SecureString`,
+  `Array/EncryptedString`) is refused too. MEHO reads the value from Vault
+  under the caller's identity (after an approval: the approver) when the
+  approved run starts. So the params, the approval row and the broadcast
+  hold Vault references only, never a secret value. The op is not pinned
+  `credential_write`: that pin would hide every vendor error text, and a
+  person must learn why a run was refused. Instead the op carries the
+  `destructive` tag, so the flight recorder keeps no body of any call of
+  the run, and the run's own send (`_vro_send`) records no request body.
+  A vendor error whose text holds a secret value comes back without that
+  text.
 - `vro.execution.logs` cuts a text at 2000 characters. The shared secret
   rules (the ones the dispatcher runs on every answer) run on the whole
   text first. They need the label and the whole value; a cut could leave
@@ -321,7 +329,9 @@ for approval like every change.
   approval row, the audit rows, the answer or the trace),
   `precondition_failed` on drift or without a card, `already_running`,
   the run id from the body or the `Location` header, vendor errors (a
-  secret in the text is withheld), a status read after an expired login,
+  secret in the text is withheld; through the whole flow the vendor text
+  reaches the answer and no secret reaches the trace, the audit rows or
+  the broadcast), a status read after an expired login,
   and the cancel (waits for approval, running, ended, vendor error, ids
   that must stay one path segment).
 - `backend/tests/test_connectors_vro_spec_reconcile.py` -- every path in

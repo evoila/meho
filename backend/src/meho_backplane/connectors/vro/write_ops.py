@@ -146,7 +146,7 @@ _WORKFLOW_RUN = VroTypedOp(
         },
     },
     group_key=GROUP_WORKFLOWS,
-    tags=("write", "vro", "orchestrator", "workflow", "workflow-run"),
+    tags=("write", "destructive", "vro", "orchestrator", "workflow", "workflow-run"),
     safety_level="destructive",
     requires_approval=True,
     llm_instructions={

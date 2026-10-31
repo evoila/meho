@@ -270,12 +270,6 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # stores the approval input encrypted, and the flight recorder keeps
         # no body for it.
         "msad.user.set-password",
-        # The Orchestrator workflow run. Its params carry only Vault references
-        # for secret inputs, but the request body it sends holds the secret
-        # values it read from Vault. The pin makes the flight recorder keep no
-        # body for it, keeps the inputs off the feed, and stores the approval
-        # input encrypted. The bespoke preview shows the references only.
-        "vro.workflow.run",
         # G-Node/RKE2-T3 #2430 — the RKE2 node-config write op. Its ``patch``
         # param carries key -> value edits, and an RKE2 ``config.yaml`` body
         # holds ``token:`` / ``agent-token:`` join credentials, so a plain

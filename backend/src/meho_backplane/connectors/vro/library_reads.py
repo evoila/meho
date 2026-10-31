@@ -109,14 +109,21 @@ async def vro_package_list_impl(
     return _whole_list_answer(payload, params)
 
 
+#: Value wrapper keys that hold a secret, whatever type the attribute declares.
+_SECRET_WRAPPERS: Final[frozenset[str]] = frozenset({"secure-string", "encrypted-string"})
+
+
 def _attribute_row(attribute: dict[str, Any]) -> dict[str, Any]:
-    masked = is_secret_parameter(attribute)
+    value = attribute.get("value")
+    masked = is_secret_parameter(attribute) or (
+        isinstance(value, dict) and not _SECRET_WRAPPERS.isdisjoint(value)
+    )
     return {
         "name": attribute.get("name"),
         "type": attribute.get("type"),
         "description": attribute.get("description"),
         "masked": masked,
-        "value": REDACTED if masked else attribute.get("value"),
+        "value": REDACTED if masked else value,
     }
 
 

@@ -11565,6 +11565,8 @@ type ListOperationRunsApiV1OperationsRunsGetParams struct {
 
 // GetOperationRunStatusApiV1OperationsRunsHandleGetParams defines parameters for GetOperationRunStatusApiV1OperationsRunsHandleGet.
 type GetOperationRunStatusApiV1OperationsRunsHandleGetParams struct {
+	// WaitSeconds Wait up to this many seconds for the run to end, then answer. 0 (the default) answers at once. At most 50.
+	WaitSeconds   *int    `form:"wait_seconds,omitempty" json:"wait_seconds,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -30930,6 +30932,28 @@ func NewGetOperationRunStatusApiV1OperationsRunsHandleGetRequest(server string, 
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.WaitSeconds != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "wait_seconds", runtime.ParamLocationQuery, *params.WaitSeconds); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)

@@ -145,6 +145,27 @@ finished call answers with its stored envelope. This is the route for long
 multi-step calls made by an agent over MCP. Details:
 [`mcp.md`](mcp.md#long-calls-call_operation-async-mode-3695).
 
+## Waiting for a run to end (#5264)
+
+A run check can wait for the run to end. `GET /operations/runs/{handle}`
+takes `?wait_seconds=N` and the MCP check takes `wait_seconds`. Both call
+`OperationRunService.wait_until_done` after the first read (the MCP check
+first makes sure the run matches its `connector_id` / `op_id`). The answer
+comes as soon as the run ends, or after N seconds with the run still
+`pending` / `running`. `0` (the default) answers at once, as before.
+
+- **Limit.** `MAX_RUN_WAIT_SECONDS` = 50, below the usual 60-second read
+  limit of HTTP proxies. REST answers `422` above it; MCP answers `-32602`.
+- **No connection or lock while waiting.** Each read opens and closes its
+  own short session (`poll`). Between reads the wait only sleeps.
+- **Fast wake on the same replica.** When this process runs the task, the
+  wait uses `asyncio.wait({task}, timeout=...)`, so it wakes the moment the
+  task ends. `asyncio.wait` never cancels the task, also not when the
+  waiting request is cancelled, so a check that gives up never stops the
+  run.
+- **Other replicas.** When another process runs the task, the wait reads
+  the row again every `wait_recheck_seconds` (2 seconds).
+
 ## Synchronous path: caller gone (#3696)
 
 Without `async: true`, the REST `/call` route and the MCP `POST /mcp` route

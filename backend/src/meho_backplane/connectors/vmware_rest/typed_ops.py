@@ -86,6 +86,7 @@ __all__ = [
     "VMWARE_HOST_VSAN_HEALTH_OP",
     "VMWARE_LICENSE_ASSIGNED_LIST_OP",
     "VMWARE_LICENSE_LIST_OP",
+    "VMWARE_NETWORK_PORTGROUP_SHOW_OP",
     "VMWARE_OBJECT_COLLECT_OP",
     "VMWARE_RESOURCE_POOL_LIST_OP",
     "VMWARE_SNAPSHOT_LIST_OP",
@@ -448,6 +449,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_object_collect import (  # 
     OBJECT_COLLECT_WHEN_TO_USE,
     VMWARE_OBJECT_COLLECT_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_portgroup_show import (  # noqa: E402
+    PORTGROUP_SHOW_GROUP_KEY,
+    PORTGROUP_SHOW_WHEN_TO_USE,
+    VMWARE_NETWORK_PORTGROUP_SHOW_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_resource_pool_list import (  # noqa: E402
     RESOURCE_POOL_LIST_GROUP_KEY,
     RESOURCE_POOL_LIST_WHEN_TO_USE,
@@ -527,6 +533,7 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # Shared with the content-library composites: the same key and text.
     CONTENT_LIBRARY_GROUP_KEY: CONTENT_LIBRARY_WHEN_TO_USE,
     DATACENTER_LIST_GROUP_KEY: DATACENTER_LIST_WHEN_TO_USE,
+    PORTGROUP_SHOW_GROUP_KEY: PORTGROUP_SHOW_WHEN_TO_USE,
 }
 
 VMWARE_HOST_USAGE_OP = VmwareTypedOp(
@@ -602,11 +609,12 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: approval); the cluster list ``cluster.list``; the resource pool list
 #: ``resource_pool.list``; the two content-library finds ``content_library.find``
 #: + ``content_library.item.find`` (#3550); the datacenter list
-#: ``datacenter.list``; the inventory folder list ``folder.list``; and the
+#: ``datacenter.list``; the inventory folder list ``folder.list``; the
 #: six content-library reads (one library, one item, the files of an item,
 #: the OVF options of an item, the subscription URL check and the
-#: Supervisor library list). The tuple shape lets future typed ops join
-#: without touching the registrar.
+#: Supervisor library list); and the settings of one distributed port
+#: group ``network.portgroup.show``. The tuple shape lets future typed ops
+#: join without touching the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
@@ -633,6 +641,7 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_DATACENTER_LIST_OP,
     VMWARE_FOLDER_LIST_OP,
     *CONTENT_LIBRARY_OPS,
+    VMWARE_NETWORK_PORTGROUP_SHOW_OP,
 )
 
 

@@ -42,6 +42,7 @@ from meho_backplane.connectors.hcx import (
     HcxConnector,
     register_hcx_typed_operations,
 )
+from meho_backplane.connectors.hcx.ha_group_ops import HCX_HA_GROUP_OPS
 from meho_backplane.connectors.hcx.read_ops import HCX_READ_OPS
 from meho_backplane.connectors.hcx.typed_ops import HCX_TYPED_OPS, HCX_TYPED_WHEN_TO_USE_BY_GROUP
 from meho_backplane.connectors.hcx.typed_reads import (
@@ -976,7 +977,9 @@ async def test_reads_are_registered_typed_safe_and_grouped(
         "hcx.inventory.datastore.list",
         "hcx.inventory.network.list",
     }
-    reads = [op for op in HCX_TYPED_OPS if op.op_id != "hcx.api_file.get"]
+    reads = [
+        op for op in HCX_TYPED_OPS if op.op_id != "hcx.api_file.get" and op not in HCX_HA_GROUP_OPS
+    ]
     assert {op.op_id for op in HCX_READ_OPS} == first_eight
     assert {op.op_id for op in reads} == expected
     assert expected <= set(rows)

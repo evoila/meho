@@ -42,6 +42,8 @@ documentation that a running HCX Manager serves, so the vendor API files
 can be pinned. The other reads (``hcx.about``, site pairings, service
 meshes, appliances, the service mesh diagnostics, jobs, alerts and the
 inventory) live in :mod:`meho_backplane.connectors.hcx.typed_reads`.
+The Network Extension HA group operations live in
+:mod:`meho_backplane.connectors.hcx.ha_groups`.
 
 Traces
 ------
@@ -435,6 +437,22 @@ class HcxConnector(HttpConnector):
         from meho_backplane.connectors.hcx.typed_reads import hcx_inventory_network_list_impl
 
         return await hcx_inventory_network_list_impl(self, operator, target, params)
+
+    async def network_extension_ha_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.network_extension.ha.list`` shim."""
+        from meho_backplane.connectors.hcx.ha_groups import hcx_network_extension_ha_list_impl
+
+        return await hcx_network_extension_ha_list_impl(self, operator, target, params)
+
+    async def network_extension_ha_set(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.network_extension.ha.set`` shim."""
+        from meho_backplane.connectors.hcx.ha_groups import hcx_network_extension_ha_set_impl
+
+        return await hcx_network_extension_ha_set_impl(self, operator, target, params)
 
     def trace_response_body(self, response: httpx.Response) -> Any:
         """Mask the secret-named fields of a vendor answer before the trace records it.

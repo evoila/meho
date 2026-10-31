@@ -11,6 +11,9 @@ here with its method, introspected from the live module constants:
 * the calls of the eight reads (``typed_reads.VENDOR_CALLS``): the local
   site list, site pairings, service meshes, appliances, the service mesh
   diagnostics, one job, alerts and the resource containers;
+* the calls of the Network Extension HA operations
+  (``ha_groups.VENDOR_CALLS``): list, build and dissolve an HA group, and
+  the appliance, task and extension reads they check first;
 * the documentation path, ``GET /hybridity/docs`` -- marked
   "documentation path, not in the API file" and left out of the served
   check, because the Manager serves it as a web page, not as an API call.
@@ -31,6 +34,7 @@ import pytest
 
 from meho_backplane.connectors.hcx import api_file as _api_file_module
 from meho_backplane.connectors.hcx import connector as _connector_module
+from meho_backplane.connectors.hcx import ha_groups as _ha_groups_module
 from meho_backplane.connectors.hcx import typed_reads as _typed_reads_module
 from tests._spec_shelf import (
     assert_op_ids_served,
@@ -52,7 +56,8 @@ def _declared_api_op_ids() -> set[str]:
     """The hand-coded API calls.
 
     Every ``*_PATH`` constant of the connector module (``POST``), plus every
-    ``(method, path)`` pair of ``typed_reads.VENDOR_CALLS``.
+    ``(method, path)`` pair of ``typed_reads.VENDOR_CALLS`` and
+    ``ha_groups.VENDOR_CALLS``.
     """
     connector_calls = {
         f"POST:{value}"
@@ -60,7 +65,8 @@ def _declared_api_op_ids() -> set[str]:
         if name.endswith("_PATH") and isinstance(value, str) and value.startswith("/")
     }
     read_calls = {f"{method}:{path}" for method, path in _typed_reads_module.VENDOR_CALLS}
-    return connector_calls | read_calls
+    ha_calls = {f"{method}:{path}" for method, path in _ha_groups_module.VENDOR_CALLS}
+    return connector_calls | read_calls | ha_calls
 
 
 def test_hcx_hand_coded_op_id_manifest_is_pinned() -> None:
@@ -81,6 +87,11 @@ def test_hcx_hand_coded_op_id_manifest_is_pinned() -> None:
         "POST:/hybridity/api/service/inventory/vc/list",
         "POST:/hybridity/api/service/inventory/vc/datastores/query",
         "POST:/hybridity/api/service/inventory/networks",
+        "GET:/hybridity/api/interconnect/appliances/ha/groups",
+        "POST:/hybridity/api/interconnect/appliances/ha/groups",
+        "DELETE:/hybridity/api/interconnect/appliances/ha/groups/{groupId}",
+        "POST:/hybridity/api/interconnect/tasks/query",
+        "GET:/hybridity/api/l2Extensions",
     }
     assert {"GET:/hybridity/docs"} == _DOCUMENTATION_OP_IDS
 

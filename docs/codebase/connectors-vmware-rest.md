@@ -953,6 +953,11 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `snapshot_list`) — the snapshots of one VM (by `vm` moid) as a flat list in
   tree order. `safe`, in its own group `vmware-snapshot-list`, on both
   catalogs. See **VM snapshot operations** under Control flow.
+- **`vmware.cluster.list`** (`typed_ops_cluster_list.py`, handler
+  `cluster_list`) — the clusters of a vCenter, with the datacenter, the
+  number of hosts, and whether HA, DRS and vSAN are on. `safe`, in its own
+  group `vmware-clusters`, on both catalogs. See **Cluster list** under
+  Control flow.
 - **`vmware.resource_pool.list`** (`typed_ops_resource_pool_list.py`,
   handler `resource_pool_list`) — the resource pools of a vCenter, with the
   parent of each pool and its CPU and memory settings. `safe`, in its own
@@ -1409,9 +1414,20 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    - VI-JSON needs vCenter 8.0 U1 or later, so the VI-JSON composites do
      not work on an 8.0 GA target.
    - When the 9.0 catalog refuses an ingested op for an 8.0.x target
-     (`unqualified_target_version`), the reason now names the catalog to
+     (`unqualified_target_version`), the reason names the catalog to
      use: `...; use connector vmware-rest-8.0 for this target`. The 8.0
      catalog does the same for a 9.x target.
+   - That hint is left out when the other catalog serves the target but
+     does not have the op turned on (#5069). This is true for all the
+     generic VIM calls (paths like `/PerformanceManager/{moId}/perfCounter`):
+     only the 9.0 catalog has them. On an 8.0.3 target the reason is then:
+     `this operation is not available for vmware 8.0.3: connector
+     vmware-rest-8.0 serves this target and does not have this operation;
+     use search_operations on connector vmware-rest-8.0 to find a typed
+     operation for this target`. The same call on `vmware-rest-8.0`
+     answers `unknown_op` and does not name `vmware-rest-9.0`, because the
+     9.0 catalog refuses the 8.0.x target. So the two connectors no longer
+     send the caller to each other. The preview gives the same answers.
 4. The registry's v2 table now resolves `(vmware, 9.0, vmware-rest)`
    to `VmwareRestConnector`. The G0.7 auto-shim's idempotency check
    (in `ensure_connector_class_registered`, once #408's pipeline lands
@@ -3552,6 +3568,27 @@ read (which surfaces the DVS / portgroup moids these writes take — there is
 no portgroup/switch REST list to resolve a display name against, so the moid
 is passed directly, the `host.detach_from_vds` `dvs`-moid convention).
 
+**The switch and portgroup fields must be moids, not names (#5073).** These
+fields declare a `pattern`:
+
+| Op | Field | Pattern (`schemas.py`) |
+|---|---|---|
+| `network.portgroup.create` | `vds` | `^dvs-[0-9]+$` (`DVS_MOID_PATTERN`) |
+| `network.portgroup.security.set` | `portgroup` | `^dvportgroup-[0-9]+$` (`PORTGROUP_MOID_PATTERN`) |
+| `network.portgroup.vlan.set` | `portgroup` | `^dvportgroup-[0-9]+$` (`PORTGROUP_MOID_PATTERN`) |
+| `host.detach_from_vds` | `dvs` | `^dvs-[0-9]+$` (`DVS_MOID_PATTERN`) |
+
+A name fails schema validation, so `preview_operation` and `call_operation`
+return `invalid_params` with a `validation_errors` entry at that field
+(`validator: "pattern"`). No approval request is made and vCenter is not
+contacted. The entry's `remediation` adds the field's description, which
+names `vmware.composite.network.portgroup.audit` as the op that reads the
+id. Before the pattern, a name passed the preview, waited for approval, and
+failed only when it ran, because the handlers use the value as a moid
+directly. The ops do not look a name up: two portgroups can share a name,
+and a write must not guess. `network.portgroup.delete` already had the
+portgroup pattern.
+
 **`network.portgroup.create`** creates a portgroup on an existing DVS through
 vim `DistributedVirtualSwitch.CreateDVPortgroup_Task` with one
 `DVPortgroupConfigSpec` — `name`, binding `type` (default `earlyBinding`, a
@@ -4804,6 +4841,50 @@ a key; flight-recorder spans, with a control case without the tag),
 `tests/test_connectors_vmware_rest_license_reconcile.py` (the pinned 9.0
 `vi-json.yaml`) and the source scan in
 `tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` (8.0 U1, U2, U3).
+
+### Cluster list (`vmware.cluster.list`)
+
+A typed read that lists the clusters of a vCenter. It is written by hand, so
+it has a clear summary, field descriptions and a risk level. It replaces the
+raw ingested `GET:/vcenter/cluster` operation for this common task.
+
+| Operation | What it does | Vendor calls | Risk |
+|---|---|---|---|
+| `vmware.cluster.list` | One row per cluster: `id` (moid), `name`, `datacenter_id`, `datacenter_name`, `host_count`, `ha_enabled`, `drs_enabled`, `vsan_enabled`, `read_note`. Optional filters: `datacenter` (moid), `folder` (moid), `name` pattern (`*` and `?`, letter case does not matter). | `GET /vcenter/datacenter`; per datacenter `GET /vcenter/cluster` with the `datacenters` filter (and `folders`); one `PropertyCollector.RetrievePropertiesEx` of `ClusterComputeResource` `summary.numHosts` and `configurationEx` for all clusters | `safe`; runs at once |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 and its updates (the host count and vSAN state need VI-JSON, so 8.0 U1 or newer; on older builds they are `null` with a `read_note`) | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+- **How it calls vCenter.** The two lists go through the REST mount
+  (`mount_op_path`, `/api` or the legacy `/rest`) on the connector's own
+  session, so it needs no spec ingest. The filters are written as
+  `filter.datacenters` and `filter.folders`; `adapt_op_query` sends the bare
+  names on `/api`. The REST cluster summary has no datacenter, so the clusters
+  are listed once per datacenter. HA and DRS come from that summary.
+- **Host count and vSAN.** One VI-JSON property read for all listed clusters,
+  through `retrieve_all_pages` (every page). `configurationEx` is read whole
+  because vCenter 8.0 refuses a path inside it; the operation takes
+  `vsanConfigInfo.enabled` from it. A cluster config with no vSAN part counts
+  as vSAN off.
+- **Errors.** A failed datacenter or cluster list fails the operation, so a
+  datacenter's clusters are never missing without an error. The property read
+  is best-effort: when it fails, `host_count` and `vsan_enabled` are `null` and
+  `read_note` names the call and the error. A property that vCenter could not
+  read (a `missingSet` entry) is named in `read_note` too.
+- **Cost.** One call, plus one call per datacenter, plus one property read
+  (more pages only for very many clusters).
+- **Large lists.** The rows are flat, so a long list comes back as a link to
+  the stored result (a result handle) that the caller reads with
+  `result_query`.
+
+Code: `typed_ops_cluster_list.py`. Tests:
+`tests/test_connectors_vmware_rest_typed_cluster_list.py` (saved answers, no
+live vCenter) and `tests/test_connectors_vmware_rest_cluster_list_reconcile.py`
+(the REST paths, filters and summary fields against the pinned vCenter 8.0 U3
+and 9.0 `vcenter.yaml`; the VI-JSON types against the pinned 9.0 and 8.0 U1,
+U2, U3 VI-JSON files; the two properties against the 9.0 file).
 
 ### Resource pool list (`vmware.resource_pool.list`)
 

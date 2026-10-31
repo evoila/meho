@@ -31,10 +31,11 @@ shown to the people and agents that read the target (#5075). Every
 through `resolve_target` (`targets/resolver.py`). Destination checks
 are covered in [`target-ssrf-guard.md`](target-ssrf-guard.md).
 
-This document covers the two **list** paths and how `list_targets`
+This document covers the two **list** paths, how `list_targets`
 bounds its response (#3858), how the single-target REST routes find a
-target, the per-target **secret field map** (#3711), and how a target
-is removed.
+target, the per-target **secret field map** (#3711), how a target is
+removed, and what a target change does to the logins connectors keep
+(#3879).
 
 ## Finding one target: describe, update, probe, delete
 
@@ -80,6 +81,67 @@ a name or an alias only. Tests: `tests/test_api_v1_targets_by_id.py`.
 | `_reduce_target_page` | `mcp/tools/topology.py` | runs the page through JSONFlux |
 | `JsonFluxReducer` | `operations/jsonflux_reducer.py` | the reducer `call_operation` results go through; thresholds and handle shape |
 | `ResultHandleStore` | `connectors/result_handle_store.py` | Valkey-backed spill that `result_query` reads back |
+
+## Control flow — changing a target
+
+`PATCH /api/v1/targets/{name}` (`update_target`) changes only the sent
+fields. Connectors keep logins and credentials per target, keyed on
+`(tenant_id, id)`, and a change does not alter that key. So when the
+PATCH sends a field that changes how MEHO reaches or logs in to the
+target (`_CONNECTION_FIELDS`: `product`, `version`, `preferred_impl_id`, `host`,
+`port`, `fqdn`, `secret_ref`, `auth_model`, `verify_tls`, `tls_ca_pin`,
+`tls_server_name`, `extras`), the route calls `forget_target_in_connectors(target)`
+(`operations/_handler_resolve.py`, through
+`_drop_kept_logins_on_connection_change`).
+
+That helper asks every cached connector instance to run its
+`invalidate_session` and `invalidate_credentials` hooks for the
+target, when it has them. The next dispatch logs in with the new
+values (#3879). A hook that fails is logged and skipped.
+
+The check is "field sent", not "value changed". After a secret changes
+only in Vault, re-send the same `secret_ref`
+(`meho targets update <name> --secret-ref <same path>`) to make MEHO
+read it again.
+
+Limits:
+
+- The kept logins live in each backplane process. The drop above runs
+  only in the process that served the PATCH. Every other process (a
+  second backplane server, a satellite runner) notices the change on
+  its next call: the dispatcher and the runner executor call
+  `forget_target_if_changed` with the target they just read. It keeps,
+  per process, the `updated_at` it saw last for each target. The update
+  route always refreshes `updated_at`, also when the same `secret_ref`
+  is sent again. A new value drops the kept logins once, then the next
+  login uses the new values. The runner gets `updated_at` in its target
+  descriptor from the gateway. The check and the drop run under a lock
+  per target, and the new `updated_at` is recorded only when every hook
+  is done. So a call that arrives while a hook still runs waits for the
+  drop, instead of treating the version as handled and reusing the old
+  login. Paths that call a connector without the dispatcher (topology
+  refresh, scope repair) do not run this check.
+- The handler does not commit on its own: the request's session
+  commits after the response is sent, and the UI import calls it for
+  many targets in one transaction. So the drop runs twice: once in the
+  handler, and once more after the commit, from a one-time SQLAlchemy
+  `after_commit` listener on `session.sync_session`
+  (`_drop_again_after_commit`). The second drop catches a login kept by
+  a dispatch that read the old row before the commit. A login that
+  started before the change and finishes after the second drop can
+  still be kept, except for SSH: `SshConnector` counts drops per
+  target. A call reads the count when it starts, checks it again once
+  it holds the connect lock, and once more after the handshake. When
+  the count moved, the call raises `SshTargetChangedError`: a call that
+  was waiting for the lock does not log in with its old target values,
+  and a login that finished after the drop is closed instead of landing
+  in the pool.
+- The Proxmox hook drops both the credential and the login ticket
+  minted from it; dropping only the credential would still send the
+  old ticket.
+- A connector with no hook keeps its login until it expires. The
+  pooled HTTP client is not affected: its key already includes the
+  host, port, scheme and TLS settings.
 
 ## Control flow — listing targets
 

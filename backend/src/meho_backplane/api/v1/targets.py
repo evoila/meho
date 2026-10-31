@@ -131,6 +131,7 @@ available is the strongest answer.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from datetime import UTC, datetime
@@ -139,7 +140,7 @@ from typing import Any, Final, NoReturn
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -160,7 +161,10 @@ from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.flight_recorder.config import invalidate_target_override_cache
-from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._handler_resolve import (
+    forget_target_in_connectors,
+    get_or_create_connector_instance,
+)
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import (
     TargetNotFoundError,
@@ -1442,6 +1446,71 @@ async def create_target(
     return _to_full(t)
 
 
+#: PATCH fields that change how MEHO reaches or logs in to a target. Sending
+#: any of them makes connectors drop what they keep for the target (#3879).
+#: The check is "field sent", not "value changed": re-sending the same
+#: ``secret_ref`` is how an operator makes MEHO read a secret again after it
+#: was changed only in Vault.
+_CONNECTION_FIELDS = frozenset(
+    {
+        "product",
+        "version",
+        "preferred_impl_id",
+        "host",
+        "port",
+        "fqdn",
+        "secret_ref",
+        "auth_model",
+        "verify_tls",
+        "tls_ca_pin",
+        "tls_server_name",
+        "extras",
+    }
+)
+
+
+#: Post-commit drop tasks, kept here so the event loop does not lose them
+#: before they finish (``asyncio`` holds only weak references to tasks).
+_AFTER_COMMIT_DROP_TASKS: set[asyncio.Task[None]] = set()
+
+
+def _drop_again_after_commit(session: AsyncSession, t: TargetORM) -> None:
+    """Run :func:`forget_target_in_connectors` once more after *session* commits.
+
+    #3879. The handler does not commit on its own: the request's session
+    commits after the response is sent, and the UI import updates many
+    targets in one transaction. A dispatch that reads the target before that
+    commit still sees the old row and can keep a new login made with the old
+    values. A one-time ``after_commit`` listener drops the kept login again
+    once the new row is saved. SQLAlchemy session events are sync, so the
+    listener starts the drop as a task on the running event loop. A rollback
+    never fires the listener, and the session is closed at the end of the
+    request, so nothing is left behind.
+    """
+
+    @event.listens_for(session.sync_session, "after_commit", once=True)
+    def _schedule_drop(_session: Any) -> None:
+        task = asyncio.get_running_loop().create_task(forget_target_in_connectors(t))
+        _AFTER_COMMIT_DROP_TASKS.add(task)
+        task.add_done_callback(_AFTER_COMMIT_DROP_TASKS.discard)
+
+
+async def _drop_kept_logins_on_connection_change(
+    session: AsyncSession, t: TargetORM, updates: dict[str, Any]
+) -> None:
+    """Make connectors drop the login they keep for *t* after a connection change.
+
+    #3879. Runs only when the PATCH sent a field in :data:`_CONNECTION_FIELDS`.
+    Every connector drops the login and credentials it keeps for the target,
+    so the next dispatch logs in with the new values. The drop runs now, and
+    once more after the transaction commits (see
+    :func:`_drop_again_after_commit`).
+    """
+    if _CONNECTION_FIELDS.intersection(updates):
+        await forget_target_in_connectors(t)
+        _drop_again_after_commit(session, t)
+
+
 def _validate_update_body_fields(
     updates: dict[str, Any],
     t: TargetORM,
@@ -1582,6 +1651,7 @@ async def update_target(
         _audit_flight_recorder_capture_write(
             t, tenant_id=operator.tenant_id, before=fr_capture_before
         )
+    await _drop_kept_logins_on_connection_change(session, t, updates)
     return _to_full(t)
 
 

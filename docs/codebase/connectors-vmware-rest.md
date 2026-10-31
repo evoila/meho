@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 87 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 92 hand-authored composites
 that orchestrate cross-spec workflows: 20 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -22,7 +22,7 @@ read `datastore.file.list` / `#3432` + the vSAN folder list
 read `datastore.vsan.folder.list` / `#4022` + the orphan folder check
 `datastore.orphan_dirs` / `#3814` + the VM limit and
 reservation read `vm.resource_allocation.show` / `#3880` + the migration
-inventory read `vmware.migration.inventory`) and 67 write
+inventory read `vmware.migration.inventory`) and 72 write
 composites (G3.1-T6 / `#509`, incl. the three vCenter install changes
 `vcenter.appliance.deploy` / `vcenter.install` / `vcenter.deployment.answer`
 (`#4394`), the destructive-tier `vm.destroy` / `#3198`, the
@@ -76,8 +76,12 @@ Tools installer unmount**), the content-library ISO mount and unmount
 `vm.cdrom.mount_library_iso` + `vm.cdrom.unmount_library_iso` (both `caution`)
 (see **Content-library ISO mount and unmount**), the VM snapshot writes `vm.snapshot.create` (caution)
 + `vm.snapshot.delete` (destructive) (see **VM snapshot operations**), the licence
-assign `license.assign` (see **vSphere licences**), and the two caution alarm changes
-`alarm.acknowledge` + `alarm.reset` / `#4383` (see **Alarms**)). The
+assign `license.assign` (see **vSphere licences**), the two caution alarm changes
+`alarm.acknowledge` + `alarm.reset` / `#4383` (see **Alarms**), and the
+inventory-tree changes `datacenter.create` (`caution`), `datacenter.delete`
+(`destructive`), `object.rename` (`caution`) and `object.move` (`dangerous`) with
+the resource pool change `resource_pool.update` (`dangerous`) (see
+**Inventory tree changes and resource pool update**)). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
 govc-wrapper retirement.
@@ -565,10 +569,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 87
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 92
   `_CompositeSpec` rows (20 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 50 dangerous/destructive
-  writes + 17 caution writes); each row carries its
+  cache-refresh read `datastore.refresh` — + 53 dangerous/destructive
+  writes + 19 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
   (`llm_instructions`) of the VM and folder writes and the VM allocation
@@ -1438,12 +1442,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 87 `vmware.composite.*` rows with
+   queued registrar and upserts: the 92 `vmware.composite.*` rows with
    `source_kind="composite"` — 20 reads (19 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 67 writes, all `requires_approval=True`
-   (38 `safety_level="dangerous"`; 17 `safety_level="caution"` —
+   service principals), and 72 writes, all `requires_approval=True`
+   (40 `safety_level="dangerous"`; 19 `safety_level="caution"` —
    `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
@@ -1451,10 +1455,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    `vm.tools.installer.unmount`, `vm.cdrom.mount_library_iso` +
    `vm.cdrom.unmount_library_iso`, `vm.snapshot.create`,
    `content_library.create` + `content_library.item.upload`,
-   `cluster.drs_group.members.set`;
-   and 12 `safety_level="destructive"` — `vm.destroy` / `#3198`,
+   `cluster.drs_group.members.set`, `datacenter.create` + `object.rename`;
+   and 13 `safety_level="destructive"` — `vm.destroy` / `#3198`,
    `namespace.delete`, `storage_policy.delete`, `cluster.drs_rule.delete`,
-   `cluster.drs_group.delete`,
+   `cluster.drs_group.delete`, `datacenter.delete`,
    `vm.snapshot.delete`, and the six `#3339` teardown deletes) —
    plus the `vmware.host.usage` row with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
@@ -1840,7 +1844,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 87 composites (20 reads + 67 writes) land as `source_kind="composite"`
+The 92 composites (20 reads + 72 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1937,7 +1941,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 87 composites are hand-authored aggregators the connector ships as
+The 92 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -2070,7 +2074,12 @@ enum) are:
 | `cluster.drs_group.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present`, `timeout` (removes one group by name; `precondition_failed` while a rule uses the group, the rules listed in `blockers`; `deleted` only after a new read no longer shows the group) |
 | `resource_pool.create` | `created`, `cluster_root_pool_unresolved`, `no_parent` (#3505; the REST `POST:/vcenter/resource-pool` create — `cluster_root_pool_unresolved` when the `cluster` convenience cannot read the cluster's root pool, `no_parent` when neither `parent` nor `cluster` is given, both before any write; read-back confirms the pool under the resolved parent) |
 | `resource_pool.delete` | `deleted`, `not_empty`, `delete_unverified` (#3505; `not_empty` refuses a pool with child pools / VMs unless `force=true` — the REST `DELETE` reparents children up to the parent; `delete_unverified` when the read-back still lists the pool) |
-| `folder.create` | `created`, `parent_not_found`, `ambiguous_parent` (synchronous `CreateFolder`; both resolution refusals happen before any write and carry an `error` issue, so the operation fails and the audit row reads `error`, #3588; `ambiguous_parent` lists `candidate_folders`, behind a result handle when oversized, #4223) |
+| `folder.create` | `created`, `parent_not_found`, `ambiguous_parent` (synchronous `CreateFolder`, then a read-back into `folder_info`; both resolution refusals happen before any write and carry an `error` issue, so the operation fails and the audit row reads `error`, #3588; `ambiguous_parent` lists `candidate_folders`, behind a result handle when oversized, #4223) |
+| `datacenter.create` | `created` (synchronous `CreateDatacenter`, then a read-back into `datacenter_info`; a vim fault such as `DuplicateName` raises `connector_error` with the fault type and text) |
+| `datacenter.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present`, `timeout` (the teardown envelope; `precondition_failed` while the datacenter holds anything, listed in `blockers`) |
+| `object.rename` | `renamed`, `unchanged`, `invalid_request`, `not_found`, `timeout` (refusals happen before any write and carry an `error` issue; a vim fault raises `connector_error`) |
+| `object.move` | `moved`, `partial`, `unchanged`, `invalid_request`, `not_found`, `precondition_failed`, `timeout` (`partial` when some objects do not read back in the folder) |
+| `resource_pool.update` | `updated`, `unchanged`, `not_found`, `refused` (`refused` when vCenter answers 400; nothing changed) |
 | `network.portgroup.create` | `created`, `invalid_vlan_spec`, `timeout` (vim `CreateDVPortgroup_Task` polled, #3091; `invalid_vlan_spec` refuses a trunk+access clash before any write; `timeout` when the poll gives up; a task *fault* — e.g. `DuplicateName` — raises `connector_error`. The `created` envelope carries a read-back `observed` = `{name, vlan}` off the new portgroup's `config`. The trunk / access VLAN specs are `InheritablePolicy` subtypes, so each wire body carries `inherited: false` — without it vCenter defaults `inherited: true` and drops the `vlanId`, silently creating an untagged (VLAN 0) portgroup, #3356) |
 | `network.portgroup.security.set` | `updated`, `no_change_requested`, `timeout` (vim `ReconfigureDVPortgroup_Task` polled, #3091; `no_change_requested` refuses when none of the three booleans is supplied, before any read/write; `timeout` when the poll gives up; a task *fault* raises `connector_error`. Carries `previous` (pre-write security triple) + `observed` (post-write triple) read-backs) |
 | `network.portgroup.vlan.set` | `set`, `unchanged`, `invalid_vlan_spec`, `timeout` (vim `ReconfigureDVPortgroup_Task` polled; reconfigures an **existing** portgroup's `defaultPortConfig.vlan` to a trunk `NumericRange[]` or a single access VLAN — the given spec **replaces** the current config, there is no merge. Idempotent: the current VLAN is read + normalised (ranges sorted + merged-adjacent) first and a request that already matches returns `unchanged` with no write / no task; `invalid_vlan_spec` refuses both/neither VLAN mode (or `replace=false`) before any write; `timeout` when the poll gives up; a task *fault* raises `connector_error`. Carries normalised `before` / `after` VLAN views) |
@@ -2873,6 +2882,76 @@ Code: `composites/_drs_group.py` (shared group reads + `members.set`),
 manifests are in `_governed_subops.py`. All three are on `vmware-rest-8.0` and
 `vmware-rest-9.0`.
 
+### Inventory tree changes and resource pool update
+
+Five changes for the usual inventory work. Each waits for approval
+(`requires_approval=True`). Each is on `vmware-rest-8.0` and `vmware-rest-9.0`:
+every vendor call exists on vCenter 8.0 U1, U2 and U3 and on 9.0, so no
+version check stops them. The four inventory-tree changes form the `inventory`
+group.
+
+| Operation | What it does | Vendor call | Risk | Returns |
+|---|---|---|---|---|
+| `datacenter.create` | Create a new, empty datacenter in the root folder or in a datacenter folder. | VIM `Folder.CreateDatacenter` | caution | the new datacenter id and `datacenter_info` (name, parent, its four root folders) |
+| `datacenter.delete` | Delete an empty datacenter. | VIM `Datacenter.Destroy_Task` | destructive | the teardown envelope: `object`, `blockers`, `task`, `task_state` |
+| `object.rename` | Rename one VM, folder, datacenter, cluster, datastore, datastore cluster, network, distributed switch or port group, or resource pool. | VIM `ManagedEntity.Rename_Task` | caution | `old_name`, `name_after` (read back) |
+| `object.move` | Move up to 50 objects into one folder; the folder's permissions then apply to them. | VIM `Folder.MoveIntoFolder_Task` | dangerous | one row per object: `parent_before`, `parent` (read back), `moved` |
+| `resource_pool.update` | Change the CPU and memory shares, limits and reservations of a resource pool. | REST `PATCH /api/vcenter/resource-pool/{resourcePool}` | dangerous | `before`, `sent`, `after` (read back) |
+
+Versions: 8.0 and 9.x for all five (the connector generations that register
+them).
+
+- **`datacenter.create`**: without `parent_folder_id` the parent is the root
+  folder from `ServiceContent`. `CreateDatacenter` is synchronous (no task).
+  The read-back is best effort, like `folder.create`'s.
+- **`datacenter.delete`**: `Destroy_Task` deletes everything in a datacenter,
+  so the plan reads the four root folders (`vmFolder`, `hostFolder`,
+  `datastoreFolder`, `networkFolder`) and refuses with `precondition_failed`
+  while any of them holds an object; each object is named in `blockers`. A
+  partial answer from vCenter refuses too. It uses the shared teardown plan
+  (`_teardown.py`), so the approval card and the run after approval read the
+  same plan. The preview builder refuses a datacenter that does not exist (it
+  raises), so such a call cannot wait for approval. As a `destructive`
+  operation it needs `preview_operation` first and the `preview_hash` on the
+  call. Accepted gap: vSphere has no "delete only if empty" call; an object
+  added between the check and the task is deleted with it.
+- **`object.rename`**: the object is named by `object_type` and `moid`, never
+  by name, so the change runs on the object the approver saw. Each kind has
+  its own vim path (`POST:/<Type>/{moId}/Rename_Task`), written out in
+  `_RENAME_OPS`, so the reconcile lanes check each one. MEHO reads the name
+  first: the same name gives `unchanged` and sends nothing. A standalone host
+  is not renamed (its name comes from the host).
+- **`object.move`**: MEHO reads the folder (`name`, `childType`) and each
+  object (one read each: vCenter fails a property read as a whole when one
+  object in it does not exist). It refuses before any write when an object
+  is missing, when the folder's `childType` does not name the object's kind,
+  or when a folder would move into a folder of another kind (the letter after
+  `group-` differs). Objects already in the folder are skipped; all of them
+  in it gives `unchanged`. A resource pool (it moves with
+  `MoveIntoResourcePool`) and a distributed port group (it stays on its
+  switch) are not taken. The move is `dangerous` because the folder's
+  permissions then apply to the objects.
+- **`resource_pool.update`**: vCenter resets every field of an allocation
+  that the PATCH leaves out (no reservation means 0, no limit means -1, no
+  shares means NORMAL). So MEHO reads the pool, puts the asked changes on top
+  of the current CPU or memory allocation, and sends the whole allocation. An
+  allocation the agent does not name is not sent. The shares number goes out
+  only with level `CUSTOM` (the schema requires it there). The same values as
+  now give `unchanged`. A 400 from vCenter gives `refused` with the vendor
+  message in `guidance`.
+- **Faults**: a vim fault, at once (HTTP 500 with the fault) or at the end of
+  the task, raises with the fault type and text, so the dispatcher records
+  `connector_error`. A task that does not end in 600 s gives `timeout` with an
+  `error` issue.
+
+Code: `composites/_inventory_tree.py` (datacenter create and delete),
+`composites/_object_rename_move.py` (rename and move),
+`composites/_resource_pool_update.py` (the update, with its schemas and
+registration row), `composites/_inventory_schemas.py` (schemas, AI guidance,
+the `inventory` group text and the registration rows of the four
+inventory-tree changes). The governed sub-op lists are in
+`_governed_subops.py`. Tests: `tests/test_connectors_vmware_rest_composites_inventory.py`.
+
 ### VM snapshot operations (`vmware.snapshot.list`, `vm.snapshot.create` / `.delete` / `.revert`)
 
 Four operations cover the snapshot work on one VM. vCenter's REST API has no
@@ -3591,19 +3670,28 @@ fan-out blast-radius pattern (like `vm.power.bulk`): `{cluster,
 cluster_name, rule_type, rule_name, enabled, resolved, total_resolved}`,
 `resolved` capped at 20.
 
-**`folder.create`** creates a VM folder under a parent through vim
+**`folder.create`** creates a VM, host, datastore or network folder under a
+parent folder of the same kind through vim
 `Folder.CreateFolder` — which is **synchronous**: it returns the new Folder
 `ManagedObjectReference` directly, **not** a `*_Task`, so (unlike
 disk-grow / drs_rule) the returned MoRef is unwrapped into the result and
-**never polled** (`poll_vim_task` is not called). The parent is given in one
-of two ways (#3588, the `vm.create` `folder_name` / `folder` shape from #3115):
+**never polled** (`poll_vim_task` is not called). Then one
+`RetrievePropertiesEx` reads the new folder back (`folder_info`: name, parent,
+`childType`). The read-back is best effort: the folder exists already, so a
+failed read gives `folder_info=null` and a `guidance` line, not an error. The
+parent is given in one of two ways (#3588, the `vm.create` `folder_name` /
+`folder` shape from #3115):
 
 - `parent_folder` — a display name, resolved to a moid with
-  `GET:/vcenter/folder?filter.names&filter.type=VIRTUAL_MACHINE` (un-gated).
-  An optional `datacenter` moid adds `filter.datacenters`. Every datacenter
-  has a root VM folder named `vm`, so on a multi-datacenter vCenter the bare
-  name `vm` is ambiguous without `datacenter`.
-- `parent_folder_id` — a `group-v…` folder ID (moid). The lookup is skipped.
+  `GET:/vcenter/folder?filter.names&filter.type=<folder_type>` (un-gated).
+  `folder_type` is `VIRTUAL_MACHINE` (the default), `HOST`, `DATASTORE` or
+  `NETWORK`. An optional `datacenter` moid adds `filter.datacenters`. Every
+  datacenter has root folders named `vm`, `host`, `datastore` and `network`,
+  so on a multi-datacenter vCenter the bare name is ambiguous without
+  `datacenter`.
+- `parent_folder_id` — a `group-v…`, `group-h…`, `group-s…` or `group-n…`
+  folder ID (moid). The lookup is skipped, and the ID's letter sets the
+  `folder_type` in the answer.
 
 No match → `status='parent_not_found'`, more than one → `ambiguous_parent`
 with `candidate_folders`. Both happen before any write and carry an
@@ -3614,7 +3702,7 @@ the ids ride `candidate_folders`, which the dispatcher's reducer puts behind
 a result handle when the envelope is oversized (#4223), so a vCenter with
 hundreds of same-named folders never ships the whole list inline. Then the single `CreateFolder` goes through
 `_write_vmomi_sub_op`. The preview is a param echo `{parent_folder |
-parent_folder_id, datacenter?, new_folder_name}` (no I/O — the params fully
+parent_folder_id, datacenter?, folder_type?, new_folder_name}` (no I/O — the params fully
 name the blast radius). Both
 mutating writes flow through the same `enforce_subop_policy` gate the REST
 and disk-grow writes do, so an agent principal without a grant is denied and
@@ -4297,7 +4385,12 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.migrate` | `{vm, cluster, target_host, target_host_source}` | param echo, no I/O |
 | `vm.power` | `{vm, name, power_state, verb, power_kind}` (`power_kind` = `hard` vs Tools-soft `guest`); a failed read keeps the moid, sets `name` / `power_state` to `null` and adds an `unavailable` note -- the request is still created (#3942) | live read, best-effort (`GET:/vcenter/vm/{vm}`) |
 | `cluster.drs_rule.create` | `{cluster, cluster_name, rule_type, rule_name, enabled, resolved, total_resolved}` | live read (`GET:/vcenter/vm` + `GET:/vcenter/cluster/{cluster}`) |
-| `folder.create` | `{parent_folder` / `parent_folder_id, datacenter?, new_folder_name}` echo | param echo, no I/O |
+| `folder.create` | `{parent_folder` / `parent_folder_id, datacenter?, folder_type?, new_folder_name}` echo | param echo, no I/O |
+| `datacenter.create` | `{summary, name, parent_folder_id}` echo | param echo, no I/O |
+| `datacenter.delete` | mandatory `blast_radius` from the handler's own plan: the datacenter, its four root folders as `children`, and the blockers; refuses a datacenter that does not exist | live read (vim `RetrievePropertiesEx`) |
+| `object.rename` | `{object_type, moid, new_name, current_name, summary}` | live read, best-effort |
+| `object.move` | `{summary, folder, folder_name, objects}` (each object with its current parent), or the refusal the handler will apply | live read, best-effort |
+| `resource_pool.update` | `{summary, current, will_send}` | live read, best-effort (`GET:/vcenter/resource-pool/{id}`) |
 
 The `#2891` hardware previews are a live-read **from->to diff**: the
 delta between the VM's current sizing / NIC backing / CD-ROM backing

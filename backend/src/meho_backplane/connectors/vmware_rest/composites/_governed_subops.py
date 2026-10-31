@@ -37,12 +37,15 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _drs_group_delete,
     _drs_rule_delete,
     _host,
+    _inventory_tree,
     _library,
     _library_delete,
     _library_local,
     _library_upload,
     _license,
     _namespace,
+    _object_rename_move,
+    _resource_pool_update,
     _snapshot,
     _storage_policy,
     _supervisor,
@@ -195,6 +198,15 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,
     # #4394 vCenter install: the deploy, the setup start and the answer.
     **VCENTER_INSTALL_GOVERNED_SUBOPS,
+    # --- Inventory tree changes and resource pool update: start ---
+    # The Destroy_Task child is delete-shaped, so a datacenter delete always
+    # needs a human.
+    "vmware.composite.datacenter.create": _inventory_tree._VIM_SUB_OPS_DATACENTER_CREATE,
+    "vmware.composite.datacenter.delete": _inventory_tree._VIM_SUB_OPS_DATACENTER_DELETE,
+    "vmware.composite.object.rename": _object_rename_move._VIM_SUB_OPS_OBJECT_RENAME,
+    "vmware.composite.object.move": _object_rename_move._VIM_SUB_OPS_OBJECT_MOVE,
+    "vmware.composite.resource_pool.update": (_resource_pool_update._SUB_OPS_RESOURCE_POOL_UPDATE),
+    # --- Inventory tree changes and resource pool update: end ---
 }
 
 

@@ -1066,8 +1066,11 @@ class _FolderRecordingConnector:
         return {"value": [{"folder": "group-v1", "name": "prod"}]}
 
     async def _post_vmomi_json(
-        self, target: Any, path: str, *, operator: Operator, json: Any = None
+        self, target: Any, path: str, *, operator: Operator, json: Any = None, **_kw: Any
     ) -> Any:
+        if path.endswith("/RetrievePropertiesEx"):
+            # The read-back of the new folder: an empty answer reads as "absent".
+            return {"objects": []}
         self.create_writes.append(json)
         return {"type": "Folder", "value": "group-v42"}
 

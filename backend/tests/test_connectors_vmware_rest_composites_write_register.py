@@ -171,6 +171,15 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vcenter.appliance.deploy",
     "vmware.composite.vcenter.install",
     "vmware.composite.vcenter.deployment.answer",
+    # --- Inventory tree changes and resource pool update: start ---
+    # Datacenter create (caution) / delete (destructive), object rename
+    # (caution) / move (dangerous), resource pool update (dangerous).
+    "vmware.composite.datacenter.create",
+    "vmware.composite.datacenter.delete",
+    "vmware.composite.object.rename",
+    "vmware.composite.object.move",
+    "vmware.composite.resource_pool.update",
+    # --- Inventory tree changes and resource pool update: end ---
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -443,6 +452,27 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
         "meho_backplane.connectors.vmware_rest.composites."
         "_drs_group_delete.cluster_drs_group_delete_composite"
     ),
+    # --- Inventory tree changes and resource pool update: start ---
+    "vmware.composite.datacenter.create": (
+        "meho_backplane.connectors.vmware_rest.composites."
+        "_inventory_tree.datacenter_create_composite"
+    ),
+    "vmware.composite.datacenter.delete": (
+        "meho_backplane.connectors.vmware_rest.composites."
+        "_inventory_tree.datacenter_delete_composite"
+    ),
+    "vmware.composite.object.rename": (
+        "meho_backplane.connectors.vmware_rest.composites."
+        "_object_rename_move.object_rename_composite"
+    ),
+    "vmware.composite.object.move": (
+        "meho_backplane.connectors.vmware_rest.composites._object_rename_move.object_move_composite"
+    ),
+    "vmware.composite.resource_pool.update": (
+        "meho_backplane.connectors.vmware_rest.composites."
+        "_resource_pool_update.resource_pool_update_composite"
+    ),
+    # --- Inventory tree changes and resource pool update: end ---
 }
 
 
@@ -485,6 +515,13 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.resource_pool.create": "cluster",
     "vmware.composite.resource_pool.delete": "cluster",
     "vmware.composite.folder.create": "vm",
+    # --- Inventory tree changes and resource pool update: start ---
+    "vmware.composite.datacenter.create": "inventory",
+    "vmware.composite.datacenter.delete": "inventory",
+    "vmware.composite.object.rename": "inventory",
+    "vmware.composite.object.move": "inventory",
+    "vmware.composite.resource_pool.update": "cluster",
+    # --- Inventory tree changes and resource pool update: end ---
     "vmware.composite.guest.customization_spec.create": "guest",
     "vmware.composite.vm.customize": "guest",
     "vmware.composite.host.datastore_mount_nfs": "host",
@@ -691,6 +728,8 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
         "vmware.composite.vm.snapshot.create",
         "vmware.composite.content_library.create",
         "vmware.composite.content_library.item.upload",
+        "vmware.composite.datacenter.create",
+        "vmware.composite.object.rename",
     }
     for row in rows:
         if row.op_id in (
@@ -709,6 +748,8 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
             "vmware.composite.cluster.drs_group.delete",
             # The VM snapshot delete.
             "vmware.composite.vm.snapshot.delete",
+            # The datacenter delete.
+            "vmware.composite.datacenter.delete",
         ):
             expected_level = "destructive"
         elif row.op_id in caution_ops:
@@ -1191,6 +1232,39 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "answer_failed",
             "answer_unknown",
         },
+        # --- Inventory tree changes and resource pool update: start ---
+        "vmware.composite.datacenter.create": {"created"},
+        "vmware.composite.datacenter.delete": {
+            "deleted",
+            "unchanged",
+            "invalid_request",
+            "precondition_failed",
+            "still_present",
+            "timeout",
+        },
+        "vmware.composite.object.rename": {
+            "renamed",
+            "unchanged",
+            "invalid_request",
+            "not_found",
+            "timeout",
+        },
+        "vmware.composite.object.move": {
+            "moved",
+            "partial",
+            "unchanged",
+            "invalid_request",
+            "not_found",
+            "precondition_failed",
+            "timeout",
+        },
+        "vmware.composite.resource_pool.update": {
+            "updated",
+            "unchanged",
+            "not_found",
+            "refused",
+        },
+        # --- Inventory tree changes and resource pool update: end ---
     }
     for op_id, expected_values in expected_status_values.items():
         schema: dict[str, Any] = dict(by_op[op_id].response_schema)

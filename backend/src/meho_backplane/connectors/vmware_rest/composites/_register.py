@@ -161,6 +161,11 @@ from meho_backplane.connectors.vmware_rest.composites._host import (
 from meho_backplane.connectors.vmware_rest.composites._host_cluster_llm_instructions import (
     HOST_CLUSTER_LLM_INSTRUCTIONS,
 )
+from meho_backplane.connectors.vmware_rest.composites._inventory_schemas import (
+    INVENTORY_COMPOSITES,
+    INVENTORY_GROUP_KEY,
+    INVENTORY_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.composites._library import (
     content_library_subscribed_create_composite,
     content_library_subscribed_items_list_composite,
@@ -208,6 +213,9 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     event_tail_composite,
     network_portgroup_audit_composite,
     performance_summary_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._resource_pool_update import (
+    RESOURCE_POOL_UPDATE_COMPOSITE,
 )
 from meho_backplane.connectors.vmware_rest.composites._snapshot import (
     vm_snapshot_create_composite,
@@ -505,9 +513,10 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "dangerous) or runs a VM group on a host group "
         "(cluster.drs_vm_host_rule.create, caution); delete a DRS rule "
         "(cluster.drs_rule.delete, destructive); create a resource pool "
-        "(resource_pool.create, caution) or delete one (resource_pool.delete, "
-        "dangerous). Pair with 'host' for one host's maintenance and with 'vm' "
-        "to move VMs."
+        "(resource_pool.create, caution), change its CPU and memory shares, limits "
+        "and reservations (resource_pool.update, dangerous) or delete one "
+        "(resource_pool.delete, dangerous). Pair with 'host' for one host's "
+        "maintenance and with 'vm' to move VMs."
     ),
     "events": (
         "Use for vCenter events: what changed, and when. Reads: the latest "
@@ -582,8 +591,9 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "host (vm.migrate, dangerous); take a snapshot (vm.snapshot.create, "
         "caution), revert to one (vm.snapshot.revert, dangerous) or delete one "
         "(vm.snapshot.delete, destructive); delete a powered-off VM and its "
-        "disks (vm.destroy, destructive); create a VM folder (folder.create, "
-        "dangerous) or delete an empty one (folder.delete, destructive). Pair "
+        "disks (vm.destroy, destructive); create a VM, host, datastore or network "
+        "folder (folder.create, dangerous) or delete an empty one (folder.delete, "
+        "destructive). Pair "
         "with 'storage', 'networking' or 'cluster' for the reads a create or a "
         "move needs."
     ),
@@ -645,6 +655,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "migration": MIGRATION_GROUP_WHEN_TO_USE,
     # #4394: shared with the typed read vmware.vcenter.deployment.status.
     INSTALL_GROUP_KEY: INSTALL_WHEN_TO_USE,
+    # Datacenter create / delete, object rename / move.
+    INVENTORY_GROUP_KEY: INVENTORY_WHEN_TO_USE,
 }
 
 
@@ -1367,11 +1379,12 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.folder.create",
         handler=folder_create_composite,
-        summary="Create a VM folder under a parent folder (synchronous vim CreateFolder).",
+        summary="Create a VM, host, datastore or network folder under a parent folder.",
         description=(
-            "Creates a VM folder under a parent VM folder, given by name or by "
-            "moid. A parent name that matches no folder or several is refused "
-            "before anything changes. Like 'govc folder.create'."
+            "Creates a folder under a parent folder of the same kind, given by name "
+            "or by moid (vim CreateFolder), then reads it back. A parent name that "
+            "matches no folder or several is refused before anything changes. Like "
+            "'govc folder.create'."
         ),
         parameter_schema=FOLDER_CREATE_PARAMETER_SCHEMA,
         response_schema=FOLDER_CREATE_RESPONSE_SCHEMA,
@@ -2189,6 +2202,13 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # Install a new vCenter (#4394), dangerous / approval; the rows live in
     # their own module.
     *(_CompositeSpec(**row) for row in VCENTER_INSTALL_COMPOSITES),
+    # --- Inventory tree changes and resource pool update: start ---
+    # Datacenter create (caution) / delete (destructive), object rename
+    # (caution) / move (dangerous), resource pool update (dangerous); the rows
+    # live in their own modules.
+    *(_CompositeSpec(**row) for row in INVENTORY_COMPOSITES),
+    _CompositeSpec(**RESOURCE_POOL_UPDATE_COMPOSITE),
+    # --- Inventory tree changes and resource pool update: end ---
 )
 
 

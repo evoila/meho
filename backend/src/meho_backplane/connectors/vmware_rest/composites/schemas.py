@@ -2558,17 +2558,23 @@ VM_FOLDER_MOID_PATTERN: str = r"^group-v[0-9]+$"
 DATACENTER_MOID_PATTERN: str = r"^datacenter-[0-9]+$"
 
 
+#: Parent folder moids of ``folder.create``: a VM (``group-v``), host
+#: (``group-h``), datastore (``group-s``) or network (``group-n``) folder.
+CREATE_FOLDER_PARENT_MOID_PATTERN: str = r"^group-[vhsn][0-9]+$"
+
+
 #: ``vmware.composite.folder.create`` parameter schema.
 #:
-#: Create a VM folder under a parent via the **synchronous** vim
-#: ``Folder.CreateFolder`` (``/vcenter/folder`` is GET-only, so vim is the
-#: sole write path). The parent is either a display name (``parent_folder``,
-#: resolved among the ``VIRTUAL_MACHINE`` folders, optionally scoped to one
-#: ``datacenter``) or an explicit folder ID (``parent_folder_id``) that skips
-#: the lookup — the ``vm.create`` ``folder_name`` / ``folder`` shape (#3115).
-#: Every datacenter ships a root VM folder named ``vm``, so on a
-#: multi-datacenter vCenter the bare name ``vm`` needs one of the two (#3588).
-#: An unresolved parent fails the operation (``parent_not_found`` /
+#: Create a VM, host, datastore or network folder under a parent via the
+#: **synchronous** vim ``Folder.CreateFolder`` (``/vcenter/folder`` is
+#: GET-only, so vim is the sole write path). The parent is either a display
+#: name (``parent_folder``, resolved among the folders of ``folder_type``,
+#: optionally scoped to one ``datacenter``) or an explicit folder ID
+#: (``parent_folder_id``) that skips the lookup — the ``vm.create``
+#: ``folder_name`` / ``folder`` shape (#3115). Every datacenter ships root
+#: folders named ``vm``, ``host``, ``datastore`` and ``network``, so on a
+#: multi-datacenter vCenter the bare name needs one of the two (#3588). An
+#: unresolved parent fails the operation (``parent_not_found`` /
 #: ``ambiguous_parent`` with an ``error`` issue), it is never a silent no-op.
 FOLDER_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -2577,25 +2583,34 @@ FOLDER_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Display name of the parent VM folder the new folder is created "
-                "under. Resolved to its moid via ``GET:/vcenter/folder`` filtered "
-                "to VIRTUAL_MACHINE folders (and to ``datacenter`` when given). "
-                "Every datacenter has a root VM folder named ``vm``, so on a "
-                "multi-datacenter vCenter pass ``datacenter`` or "
-                "``parent_folder_id`` too. An unknown or ambiguous name fails the "
-                "operation before any write. Ignored when ``parent_folder_id`` "
-                "is supplied."
+                "Display name of the parent folder the new folder is created under. "
+                "Resolved among the folders of ``folder_type`` (and of ``datacenter`` "
+                "when given). Each datacenter has root folders named ``vm``, ``host``, "
+                "``datastore`` and ``network``, so on a multi-datacenter vCenter pass "
+                "``datacenter`` or ``parent_folder_id`` too. An unknown or ambiguous "
+                "name fails the operation before any write. Ignored when "
+                "``parent_folder_id`` is supplied."
             ),
         },
         "parent_folder_id": {
             "type": "string",
-            "pattern": VM_FOLDER_MOID_PATTERN,
+            "pattern": CREATE_FOLDER_PARENT_MOID_PATTERN,
             "description": (
-                "Optional folder ID (moid, ``group-v...``) of the parent VM "
-                "folder, like the ``vm.create`` ``folder`` field. When "
-                "present the name lookup is skipped and the folder is created "
-                "under this ID. One of ``parent_folder`` / ``parent_folder_id`` "
-                "is required."
+                "Optional folder ID of the parent: a VM (``group-v...``), host "
+                "(``group-h...``), datastore (``group-s...``) or network "
+                "(``group-n...``) folder. When present the name lookup is skipped, and "
+                "the ID sets the folder kind. One of ``parent_folder`` / "
+                "``parent_folder_id`` is required."
+            ),
+        },
+        "folder_type": {
+            "type": "string",
+            "enum": ["VIRTUAL_MACHINE", "HOST", "DATASTORE", "NETWORK"],
+            "default": "VIRTUAL_MACHINE",
+            "description": (
+                "Kind of folder to make, for the ``parent_folder`` name lookup: VM "
+                "(default), HOST (hosts and clusters), DATASTORE or NETWORK. Ignored "
+                "when ``parent_folder_id`` is supplied."
             ),
         },
         "datacenter": {
@@ -2604,13 +2619,14 @@ FOLDER_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Optional datacenter moid (``datacenter-...``) that scopes the "
                 "``parent_folder`` name lookup via ``filter.datacenters``. Use "
-                "it to pick one datacenter's root ``vm`` folder. Ignored when "
+                "it to pick one datacenter's root folder. Ignored when "
                 "``parent_folder_id`` is supplied."
             ),
         },
         "folder_name": {
             "type": "string",
             "minLength": 1,
+            "maxLength": 79,
             "description": "Name of the new sub-folder to create under the parent.",
         },
     },
@@ -2620,7 +2636,15 @@ FOLDER_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
         {"required": ["parent_folder_id"]},
     ],
     "additionalProperties": False,
-    "examples": [{"parent_folder_id": "group-v42", "folder_name": "<new-folder-name>"}],
+    "examples": [
+        {"parent_folder_id": "group-v42", "folder_name": "<new-folder-name>"},
+        {
+            "parent_folder": "host",
+            "datacenter": "datacenter-3",
+            "folder_type": "HOST",
+            "folder_name": "<new-folder-name>",
+        },
+    ],
 }
 
 
@@ -3955,7 +3979,7 @@ FOLDER_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "``'created'`` — the synchronous CreateFolder returned the new "
                 "folder MoRef; ``'parent_not_found'`` — the parent name matched no "
-                "VM folder; ``'ambiguous_parent'`` — it matched more than one. "
+                "folder of ``folder_type``; ``'ambiguous_parent'`` — it matched more than one. "
                 "Both refusals happen before any write and fail the operation "
                 "(an ``error`` issue, so the audit row reads ``error``)."
             ),
@@ -3975,6 +3999,12 @@ FOLDER_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "The datacenter moid that scoped the name lookup, if any.",
         },
+        "folder_type": {
+            "type": "string",
+            "description": (
+                "Kind of the parent and new folder: VIRTUAL_MACHINE, HOST, DATASTORE or NETWORK."
+            ),
+        },
         "new_folder_name": {"type": "string", "description": "The requested new folder name."},
         "folder": {
             "type": ["string", "null"],
@@ -3982,6 +4012,26 @@ FOLDER_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "The new folder's moid — CreateFolder is synchronous and returns "
                 "the MoRef directly (no task poll). ``null`` on a resolution refusal."
             ),
+        },
+        "folder_info": {
+            "type": ["object", "null"],
+            "description": (
+                "The new folder as read back after the create; ``null`` on a refusal or "
+                "when it did not read back (then ``guidance`` says so)."
+            ),
+            "properties": {
+                "folder": {"type": "string", "description": "Folder moid."},
+                "name": {"type": ["string", "null"], "description": "Folder name."},
+                "parent_folder_id": {
+                    "type": ["string", "null"],
+                    "description": "Parent folder moid.",
+                },
+                "child_type": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Object types the folder can hold (vim ``childType``).",
+                },
+            },
         },
         "candidate_folders": {
             "type": "array",

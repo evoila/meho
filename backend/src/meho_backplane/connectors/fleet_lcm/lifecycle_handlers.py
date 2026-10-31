@@ -300,9 +300,7 @@ async def _plan_action(
     if running is not None:
         return _job_answer(running, action=action, started=False)
     template = (
-        _UPGRADE_PLAN_PRECHECK_POST_PATH
-        if action == "precheck"
-        else (_UPGRADE_PLAN_APPLY_POST_PATH)
+        _UPGRADE_PLAN_PRECHECK_POST_PATH if action == "precheck" else _UPGRADE_PLAN_APPLY_POST_PATH
     )
     body: dict[str, Any] = {}
     if params.get("componentsFilter"):

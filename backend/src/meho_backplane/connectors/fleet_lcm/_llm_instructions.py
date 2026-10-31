@@ -221,6 +221,12 @@ _TASK_INFO_INSTRUCTIONS: dict[str, object] = {
         "stage. not_reachable: the service may be upgrading itself; this is not a "
         "failure, read again in a few minutes with the same taskId."
     ),
+    # The answer has lists (stages, subTasks, messages, errors) next to the
+    # verdict fields. Keep the verdict fields visible when the answer is
+    # stored behind a result link.
+    "result_scalars": {
+        "keys": ["task_id", "state", "status", "reachable", "unreachable_reason", "checked_at"],
+    },
 }
 
 _UPGRADE_PLAN_LIST_INSTRUCTIONS: dict[str, object] = {

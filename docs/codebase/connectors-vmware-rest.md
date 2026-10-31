@@ -2434,7 +2434,7 @@ after the vendor call.
 | `vmware.vm.boot.show` (`safe`) | Boot settings of one VM. | `firmware`, `efi_secure_boot`, `efi_legacy_boot`, `network_protocol`, `delay_ms`, `retry`, `retry_delay_ms`, `enter_setup_mode`, `boot_order` rows (`type`, `nic`, `disks`), `read_notes` | REST `GET .../hardware/boot` and `.../hardware/boot/device`; VIM `RetrievePropertiesEx` of `config.bootOptions` | 8.0, 9.x |
 | `vmware.composite.vm.boot.set` | Boot delay, enter setup, boot retry, boot order; with the VM off, firmware and EFI secure boot. | `status` (`set`, `unchanged`, `partial`, `refused`, `invalid_request`, `timeout`), `applied` steps, `before`, `after` | REST `PATCH .../hardware/boot`, `PUT .../hardware/boot/device`; VIM `ReconfigVM_Task` (`bootOptions.efiSecureBootEnabled`) | 8.0, 9.x |
 | `vmware.composite.vm.hardware.upgrade` | Upgrade a powered-off VM's hardware version to a given or the newest version. | `status` (`upgraded`, `unchanged`, `partial`, `refused`, `invalid_request`), `before` / `after` version | REST `GET .../hardware`, `POST .../hardware?action=upgrade` | 8.0, 9.x |
-| `vmware.composite.vm.tools.upgrade` | Upgrade VMware Tools in a running guest (`mode=upgrade`), or mount the Tools installer (`mode=mount_installer`). | `status` (`upgraded`, `upgrade_started`, `installer_mounted`, `unchanged`, `refused`), `before` / `after` Tools state | REST `GET .../tools`, `POST .../tools?action=upgrade`, `GET .../tools/installer`, `POST .../tools/installer?action=connect` | 8.0, 9.x |
+| `vmware.composite.vm.tools.upgrade` | Upgrade VMware Tools in a running guest (`mode=upgrade`), or mount the Tools installer (`mode=mount_installer`). | `status` (`upgraded`, `upgrade_started`, `installer_mounted`, `unchanged`, `refused`, `invalid_request`), `before` / `after` Tools state | REST `GET .../tools`, `POST .../tools?action=upgrade`, `GET .../tools/installer`, `POST .../tools/installer?action=connect` | 8.0, 9.x |
 | `vmware.vm.advanced_settings.show` (`safe`) | The VM advanced settings (`extraConfig`), filter by `key_prefix`. | `settings` rows (`key`, `value`, `masked`), sorted by key; a long list goes behind a result handle | VIM `RetrievePropertiesEx` of `config.extraConfig` | 8.0, 9.x |
 | `vmware.composite.vm.advanced_settings.set` | Set or remove `extraConfig` keys. | `status` (`set`, `unchanged`, `partial`, `invalid_request`, `timeout`), `changes` rows (`key`, `action`, `before`, `after`, `masked`) | VIM `RetrievePropertiesEx`, `ReconfigVM_Task` (`extraConfig`) | 8.0, 9.x |
 
@@ -2450,14 +2450,18 @@ Details:
 - **Boot change order.** Secure boot off runs first (so a switch to BIOS
   works), then the REST `PATCH`, then the boot order `PUT`, then secure boot
   on (after a switch to EFI). Secure boot on a VM that stays on BIOS is
-  `invalid_request`; nothing is sent. A REST HTTP 400 (for example a firmware
+  `invalid_request`; nothing is sent. So is a switch to BIOS while secure
+  boot is on, unless the call also passes `efi_secure_boot: false`. A `DISK`
+  boot order entry without `disks` matches any disks vCenter reads back, so
+  a second run sends nothing. A REST HTTP 400 (for example a firmware
   change on a running VM) gives `refused` with vCenter's error type and text,
   and `applied` lists the steps that already ran.
 - **Hardware upgrade.** A VM already at the asked version gets nothing
   (`unchanged`); a version older than now is `invalid_request`. vCenter's
   `ALREADY_IN_DESIRED_STATE` also maps to `unchanged`. The upgrade cannot be
   undone; the preview says so.
-- **Tools upgrade.** Tools with `version_status=CURRENT` gets nothing. vCenter
+- **Tools upgrade.** Tools with `version_status=CURRENT` gets nothing.
+  `command_line_options` with `mode=mount_installer` is `invalid_request`. vCenter
   starts the upgrade in the guest, so the answer is `upgrade_started` until the
   read-back shows `CURRENT`. The installer mount uses the REST form of the VIM
   `MountToolsInstaller` call; an already mounted installer gets nothing. Both
@@ -2465,7 +2469,8 @@ Details:
   late.
 - **Secrets in advanced settings.** Keys that may hold a secret (the
   `guestinfo.userdata`, `guestinfo.vendordata` and `guestinfo.ovfEnv` blobs,
-  and any key whose name says password, secret, token, private key, API key,
+  the Ignition and Talos guest config keys (`guestinfo.ignition.*`,
+  `guestinfo.talos.*`), and any key whose name says password, secret, token, private key, API key,
   credential or licence key) are never returned: `value` is `null` and
   `masked` is true. The change refuses to set such a key (MEHO takes no
   secret as a plain value) but can remove it. A removal sends the empty value;

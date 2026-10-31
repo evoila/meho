@@ -472,6 +472,27 @@ async def test_boot_set_turns_secure_boot_off_before_the_switch_to_bios(gate: _G
     assert out["applied"] == ["efi_secure_boot", "boot_settings"]
 
 
+async def test_boot_set_bios_with_secure_boot_still_on_sends_nothing(gate: _Gate) -> None:
+    conn = _Fake()
+    conn.boot["type"] = "EFI"
+    conn.secure_boot = True
+    out = await _run(_BOOT_SET, conn, vm=_VM, firmware="BIOS")
+    assert out["status"] == "invalid_request"
+    assert "efi_secure_boot false" in out["guidance"]
+    assert conn.writes == [] and conn.reconfigs == []
+
+
+async def test_boot_set_disk_entry_without_disks_matches_any_disks(gate: _Gate) -> None:
+    conn = _Fake()
+    first = await _run(_BOOT_SET, conn, vm=_VM, boot_order=[{"type": "CDROM"}, {"type": "DISK"}])
+    assert first["status"] == "set"
+    conn.boot_devices = [{"type": "CDROM"}, {"type": "DISK", "disks": ["2000"]}]
+    conn.writes.clear()
+    again = await _run(_BOOT_SET, conn, vm=_VM, boot_order=[{"type": "CDROM"}, {"type": "DISK"}])
+    assert again["status"] == "unchanged"
+    assert conn.writes == []
+
+
 async def test_boot_set_secure_boot_on_bios_sends_nothing(gate: _Gate) -> None:
     conn = _Fake()
     out = await _run(_BOOT_SET, conn, vm=_VM, efi_secure_boot=True)
@@ -663,6 +684,16 @@ async def test_tools_mount_installer(gate: _Gate) -> None:
     assert out["after"] == {"installer_mounted": True}
 
 
+async def test_tools_mount_installer_with_command_line_options_is_refused(gate: _Gate) -> None:
+    conn = _Fake()
+    out = await _run(
+        _TOOLS_UPGRADE, conn, vm=_VM, mode="mount_installer", command_line_options="/S"
+    )
+    _check(_spec(_TOOLS_UPGRADE).response_schema, out)
+    assert out["status"] == "invalid_request"
+    assert conn.writes == [] and gate.calls == []
+
+
 async def test_tools_mount_installer_already_mounted_sends_nothing(gate: _Gate) -> None:
     conn = _Fake()
     conn.installer["is_connected"] = True
@@ -704,13 +735,16 @@ async def test_tools_upgrade_preview_shows_the_tools_state() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_advanced_settings_show_masks_secret_values() -> None:
-    out = await adv.vm_advanced_settings_show_impl(_Fake(), _operator(), _Target(), {"vm": _VM})  # type: ignore[arg-type]
+@pytest.mark.parametrize("secret_key", ["guestinfo.userdata", "guestinfo.ignition.config.data"])
+async def test_advanced_settings_show_masks_secret_values(secret_key: str) -> None:
+    conn = _Fake()
+    conn.extra_config[secret_key] = conn.extra_config.pop("guestinfo.userdata")
+    out = await adv.vm_advanced_settings_show_impl(conn, _operator(), _Target(), {"vm": _VM})  # type: ignore[arg-type]
     _check(adv.VMWARE_VM_ADVANCED_SETTINGS_SHOW_OP.response_schema, out)
     assert out["vm_name"] == "app-01"
     assert out["setting_count"] == 4
     assert out["masked_count"] == 1
-    assert out["settings"][1] == {"key": "guestinfo.userdata", "value": None, "masked": True}
+    assert out["settings"][1] == {"key": secret_key, "value": None, "masked": True}
     assert "<base64-user-data>" not in json.dumps(out)
     assert [row["key"] for row in out["settings"]] == sorted(row["key"] for row in out["settings"])
 
@@ -746,6 +780,14 @@ async def test_advanced_settings_show_unknown_vm_is_not_found() -> None:
         ("guestinfo.admin_password", True),
         ("guestinfo.api-token", True),
         ("guestinfo.ssh.privateKey", True),
+        ("guestinfo.ignition.config.data", True),
+        ("guestinfo.Ignition.Config.Data", True),
+        ("guestinfo.ignition.config.data.encoding", True),
+        ("guestinfo.ignition.config.url", True),
+        ("guestinfo.talos.config", True),
+        ("GUESTINFO.TALOS.CONFIG", True),
+        ("guestinfo.talos.platform", True),
+        ("guestinfo.ignitionfoo", False),
         ("disk.EnableUUID", False),
         ("guestinfo.metadata.encoding", False),
         ("keyboard.typematicMinDelay", False),
@@ -828,11 +870,14 @@ async def test_advanced_settings_set_sends_only_changed_keys_and_reads_back(gate
     assert "guestinfo.userdata" not in conn.extra_config
 
 
-async def test_advanced_settings_set_refuses_to_set_a_secret_key(gate: _Gate) -> None:
+@pytest.mark.parametrize(
+    "secret_key", ["guestinfo.root_password", "guestinfo.ignition.config.data"]
+)
+async def test_advanced_settings_set_refuses_to_set_a_secret_key(
+    gate: _Gate, secret_key: str
+) -> None:
     conn = _Fake()
-    out = await _run(
-        _ADV_SET, conn, vm=_VM, settings=[{"key": "guestinfo.root_password", "value": "x"}]
-    )
+    out = await _run(_ADV_SET, conn, vm=_VM, settings=[{"key": secret_key, "value": "x"}])
     assert out["status"] == "invalid_request"
     assert conn.reconfigs == [] and gate.calls == []
 

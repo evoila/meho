@@ -13,10 +13,11 @@ The answer is a flat list of ``{key, value, masked}`` rows, sorted by key, so
 a long list goes behind a result handle like any other list.
 
 Some keys can hold a secret: a cloud-init user-data blob, an OVF environment
-with passwords, or any key whose name says password, secret, token, key
-material or licence. MEHO never returns those values: the row keeps its key,
-``value`` is ``null`` and ``masked`` is true. :func:`is_secret_key` is shared
-with the change ``vmware.composite.vm.advanced_settings.set``.
+with passwords, an Ignition or Talos guest config, or any key whose name says
+password, secret, token, key material or licence. MEHO never returns those
+values: the row keeps its key, ``value`` is ``null`` and ``masked`` is true.
+:func:`is_secret_key` is shared with the change
+``vmware.composite.vm.advanced_settings.set``.
 """
 
 from __future__ import annotations
@@ -69,7 +70,17 @@ _PROP_NAME: Final = "name"
 _PROP_EXTRA_CONFIG: Final = "config.extraConfig"
 
 #: Keys that carry whole guest data blobs, which often hold passwords.
-_SECRET_KEYS: Final = frozenset({"guestinfo.userdata", "guestinfo.vendordata", "guestinfo.ovfenv"})
+_SECRET_KEYS: Final = frozenset(
+    {
+        "guestinfo.userdata",
+        "guestinfo.vendordata",
+        "guestinfo.ovfenv",
+        "guestinfo.ignition.config.data",
+        "guestinfo.talos.config",
+    }
+)
+#: Key prefixes of guest config families whose values may hold a secret.
+_SECRET_PREFIXES: Final[tuple[str, ...]] = ("guestinfo.ignition.", "guestinfo.talos.")
 #: Words that mark a key as secret, in the lower-case key with ``_`` and ``-`` removed.
 _SECRET_WORDS: Final[tuple[str, ...]] = (
     "password",
@@ -87,7 +98,7 @@ _SECRET_WORDS: Final[tuple[str, ...]] = (
 def is_secret_key(key: str) -> bool:
     """Whether the value of the advanced setting *key* may hold a secret."""
     lowered = key.lower()
-    if lowered in _SECRET_KEYS:
+    if lowered in _SECRET_KEYS or lowered.startswith(_SECRET_PREFIXES):
         return True
     squashed = lowered.replace("_", "").replace("-", "")
     return any(word in squashed for word in _SECRET_WORDS)

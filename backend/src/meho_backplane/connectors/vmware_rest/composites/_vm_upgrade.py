@@ -346,6 +346,13 @@ async def vm_tools_upgrade_composite(
         "guidance": None,
     }
     if mode == "mount_installer":
+        if params.get("command_line_options") is not None:
+            return {
+                **envelope,
+                "status": "invalid_request",
+                "guidance": "command_line_options works only with mode upgrade; "
+                "nothing was sent. Leave it out to mount the installer.",
+            }
         return await _tools_mount_installer(connector, target, operator, envelope)
     return await _tools_upgrade(connector, target, operator, envelope, params)
 
@@ -470,11 +477,13 @@ VM_TOOLS_UPGRADE_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
                 "installer_mounted",
                 "unchanged",
                 "refused",
+                "invalid_request",
             ],
             "description": (
                 "upgraded: Tools reads as current; upgrade_started: vCenter started it in the "
                 "guest; installer_mounted: the installer is in the CD drive; unchanged: "
-                "nothing to do, nothing sent; refused: vCenter said no."
+                "nothing to do, nothing sent; refused: vCenter said no; invalid_request: "
+                "MEHO sent nothing."
             ),
         },
         "vm": {"type": "string", "description": "VM id."},
@@ -531,7 +540,8 @@ VM_TOOLS_UPGRADE_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
         "waits for approval."
     ),
     "output_shape": (
-        "{status: upgraded|upgrade_started|installer_mounted|unchanged|refused, vm, mode, "
+        "{status: upgraded|upgrade_started|installer_mounted|unchanged|refused|"
+        "invalid_request, vm, mode, "
         "before, after, error_type, guidance}."
     ),
     "next_step": (

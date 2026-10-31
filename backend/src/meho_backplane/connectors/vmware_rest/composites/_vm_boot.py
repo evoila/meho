@@ -99,6 +99,17 @@ def _order_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in row.items() if v is not None}
 
 
+def _same_entry(wanted: dict[str, Any], have: dict[str, Any]) -> bool:
+    """Whether a boot order entry reads back as asked.
+
+    A DISK entry asked without disks matches a DISK entry with any disks,
+    because vCenter may fill in the disk ids itself.
+    """
+    if wanted.get("type") == "DISK" and "disks" not in wanted:
+        have = {k: v for k, v in have.items() if k != "disks"}
+    return wanted == have
+
+
 def _plan(params: dict[str, Any], before: dict[str, Any]) -> dict[str, Any]:
     """What to send: ``{patch, order, secure_boot}``, each ``None`` when it already matches."""
     patch = {
@@ -111,7 +122,12 @@ def _plan(params: dict[str, Any], before: dict[str, Any]) -> dict[str, Any]:
         wanted = [_order_entry(e) for e in params["boot_order"]]
         current = before.get("boot_order")
         have = None if current is None else [_order_entry(e) for e in current]
-        order = None if wanted == have else wanted
+        same = (
+            have is not None
+            and len(wanted) == len(have)
+            and all(_same_entry(w, h) for w, h in zip(wanted, have, strict=True))
+        )
+        order = None if same else wanted
     secure = params.get("efi_secure_boot")
     if secure is not None and secure == before.get("efi_secure_boot"):
         secure = None
@@ -123,6 +139,12 @@ def _problem(params: dict[str, Any], before: dict[str, Any]) -> str | None:
     firmware = params.get("firmware") or before.get("firmware")
     if params.get("efi_secure_boot") is True and firmware != "EFI":
         return "EFI secure boot needs EFI firmware; pass firmware EFI too"
+    if (
+        params.get("firmware") == "BIOS"
+        and before.get("efi_secure_boot") is True
+        and params.get("efi_secure_boot") is not False
+    ):
+        return "BIOS firmware needs EFI secure boot off; pass efi_secure_boot false too"
     return None
 
 

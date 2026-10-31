@@ -58,6 +58,13 @@ var typedOpCLICoverage = map[string]string{
 	"fleet.about":            "about",
 	"fleet.environment.list": "environment list",
 	"fleet.api_file.get":     "", // agent surface only: the lab pins the vendor API files through MCP, no CLI verb
+	// Locker and product-certificate ops: no CLI verb yet. They run through
+	// `meho operation call` and MCP call_operation like any other op.
+	"fleet.locker.password.list":        "",
+	"fleet.locker.password.add":         "",
+	"fleet.locker.certificate.list":     "",
+	"fleet.locker.certificate.import":   "",
+	"fleet.product.certificate.replace": "",
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed Fleet

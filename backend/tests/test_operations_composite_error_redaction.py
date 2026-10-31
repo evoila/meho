@@ -238,9 +238,14 @@ async def test_envelope_is_clean_in_result_handle_samples_and_stored_rows() -> N
     row = await _audit_row()
     assert row.payload["result_status"] == "error"
     assert _leaks(json.dumps(row.payload, default=str)) == []
-    # The raw payload keeps the handler's answer for replay, as for a normal
-    # row (``docs/codebase/redaction.md``); the shadow policy left it as is.
-    assert _leaks(json.dumps(row.raw_payload, default=str)) == [_TOKEN, _PASSWORD]
+    # The raw payload stores a fingerprint for the secret-named value. The
+    # shadow policy hid nothing in the text, so the token stays as it is.
+    stored = json.dumps(row.raw_payload, default=str)
+    assert _TOKEN in stored
+    assert _PASSWORD not in stored
+    assert row.raw_payload["issues"][-1]["rejected"]["password"].startswith(
+        "[FINGERPRINT:hmac-sha256:"
+    )
 
 
 @pytest.mark.asyncio

@@ -122,7 +122,8 @@ production traffic cannot reach that branch.
 | `authorization_header` | `Authorization: Bearer ...` / `Basic ...` header lines |
 | `bearer_token` | Bare `Bearer <opaque>` outside an Authorization header |
 | `jwt` | `ey<base64url>.<base64url>.<base64url>` three-segment tokens |
-| `api_key` | Labelled credential pairs: `api_key`, `access_token`, `refresh_token`, `auth_token`, `session_token`, `token` (bare), `secret` / `secret_key` / `secret_id`, `private_key`, `password`, `passwd`, `pwd`, `client_secret` — each followed by `=` or `:` and an 8+ char value |
+| `api_key` | Labelled credential pairs: `api_key`, `access_token`, `refresh_token`, `auth_token`, `session_token`, `token` (bare), `secret` / `secret_key` / `secret_id`, `private_key`, `password`, `passwd`, `pwd`, `client_secret` — each followed by `=` or `:` and an 8+ char value. The label may follow `_` or `-` (`DB_PASSWORD=...`, `GITHUB_TOKEN=...`); a label glued to letters (`mypassword=`) does not match |
+| `pem_private_key` | A PEM private key block, from the `BEGIN ... PRIVATE KEY` line to the matching `END` line (or to the end of the text when the `END` line is missing). Public keys and certificates do not match. Runs before `api_key` in the default policy, so a `private_key=-----BEGIN ...` pair loses the whole block |
 | `kubeconfig` | YAML kubeconfig blobs (`apiVersion: v1` + `kind: Config`) |
 | `bind_key_secret` | The value after the `secret` keyword in a BIND `key` block (`secret "<base64>";`, TSIG and rndc keys) and after `cookie-secret` in the `options` block, with or without quotes, also when BIND comments (`/* */`, `//`, `#`) sit between the keyword and the value; the keyword and the comments stay so the file stays readable. Not a regex: `bind_secret.py` first splits the text into comments, quoted strings and code the way BIND's lexer does, then reads the value only inside the same scope. So a `secret` word in a comment can never reach past that comment, a commented-out key block is still hidden, an old secret in a comment between the keyword and its value is hidden together with the value, a key *name* like `"transfer-secret"` or `"my secret"` is never the keyword, and a `#` or `//` inside a quoted string does not start a comment (#4617, #5342 review). A quoted value must be base64 or hex. A value without quotes must be followed by `;` or a comment |
 | `uuid` | RFC 4122 canonical 8-4-4-4-12 hex |
@@ -227,10 +228,10 @@ Numbers, booleans and `null` stay. A value an earlier step already masked
 | Trace bodies and header values (`flight_recorder/_content.py::scrub_content`) | the walk, then the trace's credential-shape policy, for every recorded request and answer body |
 
 **What does not change.** The normal result path: a secret-named field in a
-normal answer is removed only for a credential read (see "credential_read
-response scrub" above), and the audit row's `raw_payload` keeps the raw
-answer for replay. The row of a multi-step error envelope keeps its
-`raw_payload` for the same reason: the handler returned the envelope like a
+normal answer is removed only for a secret read (see "Secret reads" below).
+The audit row's `raw_payload` keeps the answer for replay, with a keyed
+fingerprint in place of each hidden value. The row of a multi-step error
+envelope is stored the same way: the handler returned the envelope like a
 normal answer. A connector's own trace mask
 (`HttpConnector.trace_response_body`) still runs first.
 
@@ -377,57 +378,61 @@ crash) are caught and converted to a structured `connector_error`
 preserved — a redactor failure must not leak raw payloads through a
 500 with no audit record.
 
-### credential_read response scrub + `reveal_secret` opt-in (#2467)
+### Secret reads: names without values, `reveal_secret` for people only
 
-The Tier-1 engine matches only **labelled** secret shapes inside
-string leaves (`password=…`, `Bearer …`); a structured `{"password":
-"<value>"}` dict carries no label in the leaf, so the engine passes it
-through verbatim. That is the correct behaviour for most responses, but
-a `credential_read` op — `vault.kv.read` and its allowlist siblings
-(`broadcast/events.py:_CREDENTIAL_READ_OPS`) — returns exactly this
-shape: its documented contract is *to return the secret value*. Before
-#2467 that raw value reached the `call_operation` caller, and for an
-agent caller it landed in the model-API transcript.
+The Tier-1 engine matches only **labelled** secret shapes inside string
+leaves (`password=…`, `Bearer …`); a structured `{"password": "<value>"}`
+dict carries no label in the leaf, so the engine passes it through
+verbatim. A secret read returns exactly this shape. The dispatcher adds a
+second layer, `operations/_secret_values.py`, right after the
+connector-boundary redaction (`dispatcher._protect_secret_values`):
 
-The dispatcher adds a second, structured-dict layer for
-`credential_read`-classified ops only:
+- **Which ops.** A secret read is a `credential_read` op
+  (`broadcast/events.py:_CREDENTIAL_READ_OPS`) or an op of
+  `_secret_values._VALUE_HIDING_OPS`.
+- **Default view** (`hide_secret_values`):
+  - `vault.kv.read` keeps the key names under `data` and hides every value
+    (`[REDACTED:secret_value]`), whatever the key name is (`ssh_key`,
+    `value`, `pin`, a number). `version` stays. An answer of another shape
+    is hidden whole.
+  - `vmware.composite.vm.guest.env.read` keeps each variable name and hides
+    the value (`NAME=[REDACTED:secret_value]`).
+  - Every other secret read: values under secret-shaped key names are
+    replaced with `[REDACTED:param_name]`
+    (`broadcast.events.scrub_secret_named_values(..., hide_numbers=True)`),
+    numbers included; booleans and `None` stay.
+- **`reveal_secret: true`.** `dispatch()` strips this reserved control
+  flag **before** hashing / schema validation / handler forwarding (the op
+  schemas are `additionalProperties: false`). With the flag, a person gets
+  the redacted answer without the default view. An agent principal, or a
+  person's hosted agent run (an RFC 8693 actor is bound), is refused before
+  the policy gate: `status="denied"`, a synchronous `POLICY_DECISION` audit
+  row, and no value. The people's call sites are the `/ui` Vault console
+  (`ui/routes/vault/routes.py`, reveal-on-click) and CLI `meho secret
+  read` (`cli/internal/cmd/secret/read.go`). Service principals may still
+  reveal.
+- **Audit stamp.** `reveal_secret_var` (bound with the same token/finally
+  discipline as `policy_decision_var`) lands as `payload['reveal_secret']`
+  on the audit row of a secret read (`True` = raw asked for, `False` =
+  default view). Other dispatches leave it `None`, so the key is absent.
+- **Fail closed.** The success-path audit row is required
+  (`require_audit=True`): when it does not commit, the caller gets
+  `audit_commit_failed` and no value, also for a reveal.
+- **Stored audit copy** (`fingerprint_hidden_values`). For **every** op,
+  the dispatcher walks the raw answer and the default view side by side.
+  Each leaf or subtree that the view hides (Tier-1 redaction, the name
+  scrub, or the value hiding above) is stored in `raw_payload` as
+  `[FINGERPRINT:hmac-sha256:<hex>]`: HMAC-SHA256 under the server key of
+  the audit params hash (`_validate.compute_audit_digest_hash`) over the
+  value's canonical JSON. Equal values give equal fingerprints inside one
+  install, so an auditor can tell that two rows held the same value
+  without seeing it. This holds also when a person revealed the value. A
+  shadow-mode policy hides nothing, so its matches stay in the stored
+  copy. Rows written before this change are not rewritten; they age off
+  with the 90-day `raw_payload` retention.
 
-- `dispatch()` strips a reserved `params.reveal_secret` control flag
-  **before** hashing / schema validation / handler forwarding (the op
-  schemas are `additionalProperties: false`, so the flag would
-  otherwise 422). It then classifies the op (`classify_op(op_id) ==
-  "credential_read"`) and, unless the caller opted in, passes
-  `scrub_response=True` down to `_reduce_and_audit_success`.
-- `_reduce_and_audit_success` runs
-  `broadcast.events.scrub_secret_named_values` (the public entry to the
-  same key-name walk the broadcast params scrub uses) over
-  **`redaction.redacted` only** — the caller-bound copy. Secret-named
-  values become `[REDACTED:param_name]`; non-secret siblings
-  (`username`, `version`) survive. `redaction.raw`, captured before the
-  scrub, is untouched, so the audit `raw_payload` keeps the raw secret.
-  This mirrors the #2172 secret-handler posture: the ledger keeps the
-  raw result, the transport response does not.
-- The reveal choice is stamped on the audit row via
-  `reveal_secret_var` (a ContextVar bound with the same token/finally
-  discipline as `policy_decision_var`), read in `_build_audit_payload`
-  as `payload['reveal_secret']` (`True` = raw returned, `False` = the
-  default scrubbed response). Non-`credential_read` dispatches leave the
-  var `None`, so the key is absent — "which credential reads returned a
-  raw value" is queryable without a new column.
-
-The scrub keys on the **op class, not the caller kind**: the reported
-incident's caller was a backplane service-account token driven by an
-agent, so principal-kind gating would have missed it (and no
-`human_agent` principal kind exists). Approved human flows keep working
-by opting in at their two known call sites — the `/ui` Vault console BFF
-(`ui/routes/vault/routes.py`, reveal-on-click) and CLI `meho secret
-read` (`cli/internal/cmd/secret/read.go`, the pipe-only raw path) both
-pass `reveal_secret: true`, so their audit rows honestly record the
-reveal. `secret.move` remains the recommended no-transit path for piping
-a credential onward; `vault.kv.versions` is the metadata-only browse.
-`meho vault kv read` is deliberately **not** an opt-in site — its
-browse envelope now shows the scrubbed value; use `meho secret read` for
-the raw bytes.
+`secret.move` remains the recommended no-transit path for piping a
+credential onward; `vault.kv.versions` is the metadata-only browse.
 
 ### Audit columns
 
@@ -814,6 +819,11 @@ audit_log row (raw_payload, redaction_manifest, payload.redaction_policy_id)
                     ▼
        PolicyReplayResult(status, missing, extra, replayed_redacted)
 ```
+
+A value the redaction hid is stored as a fingerprint (see "Secret
+reads"), so the replay cannot fire on it again. Recorded manifest entries
+whose path holds a fingerprint (`_secret_values.fingerprinted_paths`) are
+left out of the comparison.
 
 Verdict statuses:
 

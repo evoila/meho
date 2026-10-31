@@ -1600,9 +1600,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         handler=guest_env_read_composite,
         summary="Read environment variables from a VM's guest OS (needs VMware Tools).",
         description=(
-            "Reads the guest user's environment variables as NAME=value strings "
-            "(ReadEnvironmentVariableInGuest). Omit names to read all of them. Uses the guest "
-            "login from the target's secret. Read-only."
+            "Reads the guest user's environment variables (ReadEnvironmentVariableInGuest). "
+            "Omit names to read all of them. Uses the guest login from the target's secret. "
+            "Returns the names; the values are hidden unless a person passes reveal_secret. "
+            "Read-only."
         ),
         parameter_schema=GUEST_ENV_READ_PARAMETER_SCHEMA,
         response_schema=GUEST_ENV_READ_RESPONSE_SCHEMA,

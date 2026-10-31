@@ -75,7 +75,11 @@ CD drive add `vm.cdrom.add` (`dangerous`) and the VMware Tools installer unmount
 Tools installer unmount**), the content-library ISO mount and unmount
 `vm.cdrom.mount_library_iso` + `vm.cdrom.unmount_library_iso` (both `caution`)
 (see **Content-library ISO mount and unmount**), the VM snapshot writes `vm.snapshot.create` (caution)
-+ `vm.snapshot.delete` (destructive) (see **VM snapshot operations**), the licence
++ `vm.snapshot.delete` (destructive) (see **VM snapshot operations**), the PCI
+passthrough add and remove `vm.pci_device.add` + `vm.pci_device.remove` (both
+`dangerous`), the console screenshot `vm.screenshot` (`caution`) and the key send
+`vm.keys.send` (`dangerous`) (see **PCI passthrough devices, console screenshot and
+key send**), the licence
 assign `license.assign` (see **vSphere licences**), and the two caution alarm changes
 `alarm.acknowledge` + `alarm.reset` / `#4383` (see **Alarms**)). The
 write composites cover every state-mutating operator workflow named
@@ -2050,6 +2054,10 @@ enum) are:
 | `vm.clone` | `completed` (the pinned deploy operation is synchronous — its 200 body is the new VM id, #2970; deploy failures raise `connector_error`) |
 | `vm.deploy_from_library` | `deployed`, `deploy_failed`, `deploy_error`, `invalid_reference`, `library_not_found`, `ambiguous_library`, `item_not_found`, `ambiguous_item`, `resolve_error` (OVF/OVA deploy, #2909; the synchronous deploy's 200 body is a `DeploymentResult` — `succeeded=false` → `deploy_failed` with the report's per-issue messages, an HTTP 400/404 for an invalid/missing placement resource → `deploy_error`, and a faulted content-library `find` during name resolution → `resolve_error` (#3071), both with a structured message carrying the vCenter status — so a placement/mapping/resolution error is a structured status, never a raw vendor fault; the VM is deployed under a unique deploy name and renamed on success, and a failed deploy deletes the partial VM it left and adds a `cleanup` issue, #3697) |
 | `vm.import_from_library` | `deployed`, `deploy_failed`, `deploy_error`, plus the same resolution statuses as `vm.deploy_from_library` (typed HttpNfcLease OVF import, #3229; the deploy-envelope family is reused — `CreateImportSpec` descriptor rejection → `deploy_failed`, a vim control-plane / lease / disk-upload fault → `deploy_error` — plus a per-disk `transfer` manifest; see the dedicated section) |
+| `vm.pci_device.add` | `added`, `unchanged`, `refused`, `not_found`, `invalid_request`, `timeout` (vim `ReconfigVM_Task` polled; a task fault raises `connector_error`) |
+| `vm.pci_device.remove` | `removed`, `unchanged`, `still_present`, `refused`, `not_found`, `invalid_request`, `timeout` (same task path as the add) |
+| `vm.screenshot` | `taken`, `refused`, `not_found`, `invalid_request`, `timeout` (vim `CreateScreenshot_Task` polled, then the PNG file read; a task fault, a failed file read or a file over `max_bytes` raises `connector_error`) |
+| `vm.keys.send` | `sent`, `refused`, `not_found`, `invalid_request` (synchronous `PutUsbScanCodes`; a vim fault raises `connector_error`) |
 | `vm.snapshot.revert` | `reverted`, `ambiguous`, `not_found`, `timeout` (vim `RevertToSnapshot_Task` polled; a task fault raises `connector_error`, #2970; by `snapshot_name` or `snapshot_id`, an id not in the VM's tree is `not_found`) |
 | `vm.snapshot.create` | `created`, `unchanged` (a snapshot with the name exists; nothing written), `not_found`, `invalid_request`, `timeout` (vim `CreateSnapshotEx_Task` polled; a task fault raises `connector_error`) |
 | `vm.snapshot.delete` | `deleted`, `unchanged` (no snapshot with the id), `invalid_request`, `still_present`, `timeout` (vim `RemoveSnapshot_Task` polled; the teardown envelope) |
@@ -2934,6 +2942,73 @@ Every vendor call is in the pinned 8.0 U1, 9.0 and 9.1.1 `vi-json.yaml`.
 Code: `typed_ops_snapshot_list.py`, `snapshot_tree.py`, `composites/_snapshot.py`
 (create and delete) and `composites/_write.py` (revert). The governed sub-op
 manifests are in `_governed_subops.py`.
+
+### PCI passthrough devices, console screenshot and key send
+
+Four VM changes that exist only in the VIM API, so all four use VI-JSON on
+vCenter. Every one waits for approval.
+
+| Operation | What it does | Returns | Risk |
+|---|---|---|---|
+| `vmware.composite.vm.pci_device.add` | Adds one PCI passthrough device to a powered-off VM: `pci_id` (DirectPath I/O, one host device by its PCI address) or `dynamic_device` (`vendor_id`, `device_id`, optional `custom_label`; vCenter picks a free device at power-on). Reserves all VM memory unless `reserve_all_memory` is false. `EnvironmentBrowser.QueryConfigTarget`, then `VirtualMachine.ReconfigVM_Task` | `{status, vm, vm_name, requested, device, pci_devices, task, task_state, guidance}` | `dangerous` |
+| `vmware.composite.vm.pci_device.remove` | Removes one PCI passthrough device, by `device_key`, from a powered-off VM. `VirtualMachine.ReconfigVM_Task` | `{status, vm, vm_name, device_key, device, pci_devices, task, task_state, guidance}` | `dangerous` |
+| `vmware.composite.vm.screenshot` | Takes a console screenshot of a running VM. `VirtualMachine.CreateScreenshot_Task`, then `GET /folder/{path}?dcPath=...&dsName=...` (vCenter datastore file access) | `{status, vm, vm_name, file, size_bytes, media_type, encoding, content_lines, task, task_state, guidance}` | `caution` |
+| `vmware.composite.vm.keys.send` | Presses keys from a fixed list on a running VM's console: Ctrl+Alt+Del, Enter, Esc, Tab, Backspace, F1 to F12 and the arrow keys. `VirtualMachine.PutUsbScanCodes` | `{status, vm, vm_name, keys, keys_sent, power_state, guidance}` | `dangerous` |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 U1, 8.0 U2, 8.0 U3 | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+Every VI-JSON call is in the pinned 8.0 U1, U2, U3 and 9.0 `vi-json.yaml`, so
+no version stops early.
+
+- **PCI rows.** `pci_devices` is a flat list, one row per
+  `VirtualPCIPassthrough`: `device_key`, `label`, `kind` (`directpath` or
+  `dynamic`), `pci_id`, `vendor_id`, `device_id`, `device_name`,
+  `custom_label`. vCenter sends some PCI ids as signed 16-bit numbers; the rows
+  show them unsigned.
+- **PCI add.** The VM must be powered off (`refused` otherwise, nothing sent).
+  The add asks the VM's environment browser which devices its host offers
+  (`ConfigTarget.pciPassthrough` and `.dynamicPassthrough`). A device the host
+  does not offer gives `invalid_request` with the devices it does offer. The
+  DirectPath I/O backing copies `id`, `systemId`, `vendorId` and `deviceName`
+  from the host device and sends `deviceId` as hex text, like the vendor
+  samples. A VM that already has the same `pci_id` gets `unchanged`. After the
+  task it reads the devices again and returns the new one.
+- **PCI remove.** Sends the device as it was read. A key the VM does not have
+  gives `unchanged`. `removed` only when a new read no longer shows it.
+- **Screenshot.** The VM must be powered on. The task result is the datastore
+  path of the PNG (`[datastore] folder/file.png`); vCenter keeps the file in
+  the VM's folder. vCenter's datastore file access takes a vim SOAP session
+  cookie, not the REST token, so the read logs in over SOAP first
+  (`_vcenter_soap_login`, the same login the vSAN and storage-policy calls
+  use). The `dcPath` is the datacenter's folder path. The read is streamed
+  with a byte cap (`max_bytes`, default 2 MiB, at most 8 MiB): a larger file
+  is refused, not cut. A file with a `Content-Encoding` is refused too. The
+  PNG comes back as base64 rows (`content_lines`), so a long image becomes a
+  result handle.
+- **Key send.** The keys are names from an `enum`; a value that is not on the
+  list gives `invalid_request` before any vendor call. There are no letters or
+  digits, so the call cannot type a command. Each key is one
+  `UsbScanCodeSpecKeyEvent` with `usbHidCode = (HID usage id << 16) | 7`, as
+  govc sends it; Ctrl+Alt+Del sets the `leftControl` and `leftAlt` modifiers.
+  Not safe to run twice: each call presses the keys again.
+- **Approval.** All four have `requires_approval=True`. A person's call waits
+  until a second person approves. An agent's `caution` screenshot waits for
+  approval; an agent's `dangerous` call is refused without a grant, and with a
+  grant it waits for approval. The approval previews show the VM, its power
+  state and the device or keys.
+- **Not here:** console tickets for a browser, vGPU devices, and answering a
+  VM question.
+
+Code: `composites/_vm_pci_device.py` and `composites/_vm_pci_backing.py` (PCI),
+`composites/_vm_console.py` (screenshot and keys), schemas and AI guidance in
+`composites/_vm_console_pci_schemas.py`. Tests:
+`test_connectors_vmware_rest_composites_vm_pci_console.py` and
+`test_connectors_vmware_rest_vm_pci_console_reconcile.py` (checks the calls and
+the data objects against the pinned VI-JSON files; skips without the spec
+shelf).
 
 ### AI guidance of the host and cluster operations
 

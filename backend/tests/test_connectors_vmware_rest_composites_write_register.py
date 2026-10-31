@@ -110,6 +110,12 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     # Add a CD drive (dangerous) and unmount the Tools installer (caution).
     "vmware.composite.vm.cdrom.add",
     "vmware.composite.vm.tools.installer.unmount",
+    # PCI passthrough add and remove, key send (dangerous) and the console
+    # screenshot (caution).
+    "vmware.composite.vm.pci_device.add",
+    "vmware.composite.vm.pci_device.remove",
+    "vmware.composite.vm.screenshot",
+    "vmware.composite.vm.keys.send",
     # Mount and unmount a content-library ISO (both caution).
     "vmware.composite.vm.cdrom.mount_library_iso",
     "vmware.composite.vm.cdrom.unmount_library_iso",
@@ -466,6 +472,10 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.device.cdrom": "vm",
     "vmware.composite.vm.cdrom.add": "vm",
     "vmware.composite.vm.tools.installer.unmount": "vm",
+    "vmware.composite.vm.pci_device.add": "vm",
+    "vmware.composite.vm.pci_device.remove": "vm",
+    "vmware.composite.vm.screenshot": "vm",
+    "vmware.composite.vm.keys.send": "vm",
     "vmware.composite.vm.cdrom.mount_library_iso": "vm",
     "vmware.composite.vm.cdrom.unmount_library_iso": "vm",
     "vmware.composite.vm.resource_allocation.set": "vm",
@@ -689,6 +699,7 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
         "vmware.composite.vm.cdrom.mount_library_iso",
         "vmware.composite.vm.cdrom.unmount_library_iso",
         "vmware.composite.vm.snapshot.create",
+        "vmware.composite.vm.screenshot",
         "vmware.composite.content_library.create",
         "vmware.composite.content_library.item.upload",
     }

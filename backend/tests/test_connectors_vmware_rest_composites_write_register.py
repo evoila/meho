@@ -165,6 +165,9 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.content_library.item.upload",
     # The destructive DRS rule delete; special-cased in the tier assertion below.
     "vmware.composite.cluster.drs_rule.delete",
+    # The DRS group ops: caution member change, destructive delete.
+    "vmware.composite.cluster.drs_group.members.set",
+    "vmware.composite.cluster.drs_group.delete",
     # Licence assign: dangerous + approval (the default tier).
     "vmware.composite.license.assign",
     # Install a new vCenter (#4394): dangerous + approval.
@@ -443,6 +446,14 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
         "meho_backplane.connectors.vmware_rest.composites."
         "_drs_rule_delete.cluster_drs_rule_delete_composite"
     ),
+    "vmware.composite.cluster.drs_group.members.set": (
+        "meho_backplane.connectors.vmware_rest.composites."
+        "_drs_group.cluster_drs_group_members_set_composite"
+    ),
+    "vmware.composite.cluster.drs_group.delete": (
+        "meho_backplane.connectors.vmware_rest.composites."
+        "_drs_group_delete.cluster_drs_group_delete_composite"
+    ),
 }
 
 
@@ -510,6 +521,8 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.content_library.create": "content_library",
     "vmware.composite.content_library.item.upload": "content_library",
     "vmware.composite.cluster.drs_rule.delete": "cluster",
+    "vmware.composite.cluster.drs_group.members.set": "cluster",
+    "vmware.composite.cluster.drs_group.delete": "cluster",
 }
 
 
@@ -681,6 +694,7 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
         "vmware.composite.vm.resource_allocation.set",
         "vmware.composite.resource_pool.create",
         "vmware.composite.cluster.drs_vm_host_rule.create",
+        "vmware.composite.cluster.drs_group.members.set",
         "vmware.composite.storage_policy.create",
         "vmware.composite.namespace.create",
         "vmware.composite.datastore.dir.create",
@@ -704,8 +718,9 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
             "vmware.composite.datastore.file.delete",
             "vmware.composite.content_library.delete",
             "vmware.composite.content_library.item.delete",
-            # The DRS rule delete.
+            # The DRS rule delete and the DRS group delete.
             "vmware.composite.cluster.drs_rule.delete",
+            "vmware.composite.cluster.drs_group.delete",
             # The VM snapshot deletes.
             "vmware.composite.vm.snapshot.delete",
             "vmware.composite.vm.snapshot.delete_all",
@@ -1135,6 +1150,24 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "invalid_request",
             "precondition_failed",
             "still_present",
+            "timeout",
+        },
+        # DRS group delete: the same statuses as the rule delete.
+        "vmware.composite.cluster.drs_group.delete": {
+            "deleted",
+            "unchanged",
+            "invalid_request",
+            "precondition_failed",
+            "still_present",
+            "timeout",
+        },
+        "vmware.composite.cluster.drs_group.members.set": {
+            "updated",
+            "unchanged",
+            "invalid_request",
+            "group_not_found",
+            "names_not_found",
+            "mismatch",
             "timeout",
         },
         # Local content-library create + add a file from a URL.

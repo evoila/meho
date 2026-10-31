@@ -64,6 +64,7 @@ from meho_backplane.operations import operation_run as run_lifecycle
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "MAX_RUN_WAIT_SECONDS",
     "OperationRunService",
     "get_operation_run_service",
 ]
@@ -73,6 +74,11 @@ _log = structlog.get_logger(__name__)
 #: A zero-arg coroutine that runs the governed dispatch and returns its
 #: envelope (either an ``OperationResult`` or its ``model_dump`` dict).
 _DispatchCoro = Callable[[], Awaitable[Any]]
+
+#: Upper limit for a run check that waits (#5264). It stays below the
+#: usual 60-second read limit of HTTP proxies, so a waiting check is not
+#: cut off on its way back to the caller.
+MAX_RUN_WAIT_SECONDS = 50
 
 
 @dataclass(slots=True)
@@ -133,6 +139,11 @@ class OperationRunService:
     truth -- :meth:`poll` reads it, so it works after the in-memory task is
     gone (a different pod, a restarted process).
     """
+
+    #: How often a waiting check reads the run row again. A run that this
+    #: process runs wakes the check at once when it ends; this interval
+    #: only matters for a run that another process runs.
+    wait_recheck_seconds: float = 2.0
 
     def __init__(self) -> None:
         self._store: dict[uuid.UUID, _RunState] = {}
@@ -454,6 +465,42 @@ class OperationRunService:
             if row is None or row.tenant_id != operator.tenant_id:
                 raise run_lifecycle.OperationRunNotFoundError(run_id)
             return row
+
+    async def wait_until_done(
+        self, operator: Operator, row: OperationRun, *, wait_seconds: float
+    ) -> OperationRun:
+        """Wait up to *wait_seconds* for the run in *row* to end (#5264).
+
+        *row* is the result of an earlier :meth:`poll`, so the tenant check
+        has already passed. Returns the newest row: as soon as the run ends,
+        or when the time is up. Each read opens and closes its own short
+        session, so no database connection or lock is held while it waits.
+        A run that this process runs wakes the wait at once when its task
+        ends; a run on another process is read again every
+        :attr:`wait_recheck_seconds`.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + wait_seconds
+        while OperationRunStatus(row.status) not in run_lifecycle.TERMINAL_STATUSES:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await self._pause(row.id, min(remaining, self.wait_recheck_seconds))
+            row = await self.poll(operator, row.id)
+        return row
+
+    async def _pause(self, run_id: uuid.UUID, seconds: float) -> None:
+        """Sleep *seconds*, or less when this process's task for *run_id* ends.
+
+        ``asyncio.wait`` does not cancel the task on timeout, and a cancelled
+        wait does not cancel it either, so a check that gives up never stops
+        the run.
+        """
+        state = self._store.get(run_id)
+        if state is None:
+            await asyncio.sleep(seconds)
+            return
+        await asyncio.wait({state.task}, timeout=seconds)
 
     async def list(
         self,

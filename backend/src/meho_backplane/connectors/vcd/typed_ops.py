@@ -20,19 +20,24 @@ each callable from its persisted ``module.ClassName.method`` path.
 The dataclass + tuple + module-level registrar shape mirrors
 :mod:`meho_backplane.connectors.fleet_lcm.typed_ops` (#3047) and
 :mod:`meho_backplane.connectors.harbor.typed_ops` (#2856) — the Task #2358
-convention: typed ops own the curated read core. A write surface (create org /
-vApp / deploy) is deliberately out of scope — this is a read core for
-inventorying a migration source.
+convention: typed ops own the curated read core. The organisation ops (read one
+org, create, change and delete it) are defined in :mod:`.org_ops` and appended to
+:data:`VCD_TYPED_OPS`, so this one registrar covers them too.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from meho_backplane.connectors.vcd._llm_instructions import VCD_READ_LLM_INSTRUCTIONS
+from meho_backplane.connectors.vcd.op_types import VcloudDirectorTypedOp
+from meho_backplane.connectors.vcd.org_ops import (
+    VCD_ORG_GROUP_KEY,
+    VCD_ORG_OPS,
+    VCD_ORG_WHEN_TO_USE,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -52,32 +57,6 @@ _log = structlog.get_logger(__name__)
 _GROUP_INVENTORY = "vcd-inventory"
 _GROUP_NETWORKING = "vcd-networking"
 _GROUP_TASKS = "vcd-tasks"
-
-
-@dataclass(frozen=True)
-class VcloudDirectorTypedOp:
-    """Metadata for one vCD typed op registered at lifespan startup.
-
-    Fields mirror the keyword arguments
-    :func:`~meho_backplane.operations.typed_register.register_typed_operation`
-    accepts so :func:`register_vcd_typed_operations` can splat the dataclass into
-    the helper without per-op boilerplate. ``handler_attr`` is the attribute name
-    on :class:`VcloudDirectorConnector` exposing the async handler; the registrar
-    resolves the bound method against the class at registration time. Mirrors
-    :class:`~meho_backplane.connectors.fleet_lcm.typed_ops.FleetLcmTypedOp`.
-    """
-
-    op_id: str
-    handler_attr: str
-    summary: str
-    description: str
-    parameter_schema: dict[str, Any]
-    response_schema: dict[str, Any] | None
-    group_key: str
-    tags: tuple[str, ...]
-    safety_level: Literal["safe", "caution", "dangerous", "destructive"]
-    requires_approval: bool
-    llm_instructions: dict[str, Any] | None
 
 
 #: Curated ``when_to_use`` blurb per typed-op group. Every entry is a complete
@@ -104,6 +83,7 @@ VCD_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "before a migration cutover, or to find the task behind a resource in an "
         "unexpected state."
     ),
+    VCD_ORG_GROUP_KEY: VCD_ORG_WHEN_TO_USE,
 }
 
 
@@ -160,10 +140,11 @@ _READ_TAGS = ("read-only", "vcd", "vcloud-director")
 
 
 #: The typed ops :class:`VcloudDirectorConnector` registers at lifespan startup —
-#: the 7-op migration-inventory read core (#3057). Every op is safe, read-only,
-#: and ungated; the wire path/type lives in the handler (see ``.typed_reads`` /
-#: ``._paths``), so the descriptor rows carry ``method=None`` / ``path=None``
-#: (typed convention).
+#: the 7-op migration-inventory read core (#3057), then the organisation ops of
+#: :mod:`.org_ops`. The reads are safe and ungated; each organisation change
+#: needs approval. The wire path/type lives in the handler (see ``.typed_reads``
+#: / ``.org_handlers`` / ``._paths``), so the descriptor rows carry
+#: ``method=None`` / ``path=None`` (typed convention).
 VCD_TYPED_OPS: tuple[VcloudDirectorTypedOp, ...] = (
     # ---- Inventory ----
     VcloudDirectorTypedOp(
@@ -376,6 +357,7 @@ VCD_TYPED_OPS: tuple[VcloudDirectorTypedOp, ...] = (
         requires_approval=False,
         llm_instructions=VCD_READ_LLM_INSTRUCTIONS["vcd.task.list"],
     ),
+    *VCD_ORG_OPS,
 )
 
 

@@ -153,6 +153,7 @@ func NewAuthedClient(_ context.Context, backplaneURL string, opts AuthedClientOp
 		}
 		req.Header.Set("Authorization", authorizationHeader(bearer))
 		SetWorkRefHeader(req)
+		SetTenantHeader(req)
 		return nil
 	}
 
@@ -212,6 +213,25 @@ func (c *AuthedClient) GetHealth(ctx context.Context) (*AuthenticatedHealthApiV1
 		return resp, rerr
 	}
 	return c.AuthenticatedHealthApiV1HealthGetWithResponse(ctx, nil)
+}
+
+// GetLiveness calls GET /api/v1/health/live, the cheap health answer
+// every tenant role may read (no operator role needed, no credential
+// check), with the same one-shot refresh on a 401 as GetHealth. It
+// carries the operator identity with the person's tenants, so the CLI
+// uses it where a read_only login must still see who it is (#5241).
+func (c *AuthedClient) GetLiveness(ctx context.Context) (*LivenessApiV1HealthLiveGetResponse, error) {
+	resp, err := c.LivenessApiV1HealthLiveGetWithResponse(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode() != http.StatusUnauthorized {
+		return resp, nil
+	}
+	if rerr := c.box.refresh(ctx); rerr != nil {
+		return resp, rerr
+	}
+	return c.LivenessApiV1HealthLiveGetWithResponse(ctx, nil)
 }
 
 // IsTokenNotFound reports whether err is the "operator never ran

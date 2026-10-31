@@ -14,7 +14,7 @@ Structurally it is a copy of the ``winsrv`` estate mold (#3261): identity canary
 JSONFlux envelope for list reads, and the ``rke2`` approval-parked-write mold
 for its destructive ops.
 
-Op surface (34 ops across six groups; safety tier per the Initiative #3259
+Op surface (35 ops across six groups; safety tier per the Initiative #3259
 satellite table — reads ``safe``, recoverable writes ``caution``, destructive
 ``dangerous`` + ``requires_approval``):
 
@@ -30,6 +30,7 @@ satellite table — reads ``safe``, recoverable writes ``caution``, destructive
 * ``msad.user.get``               [safe]      Get-ADUser -Identity.
 * ``msad.user.search``            [safe]      Get-ADUser -Filter {name/sam -like} (list).
 * ``msad.user.password-expiry``   [safe]      Get-ADUser -Identity (password age / expiry).
+* ``msad.user.set-password``      [caution+approval]  Set-ADAccountPassword -Reset (from Vault).
 * ``msad.user.create``            [caution]   New-ADUser (created disabled, no password).
 * ``msad.user.set``               [caution]   Set-ADUser (attributes; never a password).
 * ``msad.user.enable``            [caution]   Enable-ADAccount.
@@ -53,13 +54,13 @@ satellite table — reads ``safe``, recoverable writes ``caution``, destructive
 * ``msad.ou.grant-create-child``  [caution+approval]  allow a group to create objects in an OU.
 * ``msad.ou.revoke-create-child`` [caution+approval]  remove that access rule again.
 
-**Password-reset is deferred, not shipped** (in-task decision; see
-``docs/codebase/connectors-msad.md``): a plaintext AD password cannot ride the
-``-EncodedCommand`` argv (the shared transport's secret-hygiene contract), so —
-mirroring winsrv's passwordless-create — ``user.create`` creates a **disabled,
-passwordless** account and no op carries a secret-value parameter. Provisioning
-/ resetting a password is a Vault-brokered follow-up (the rke2 ``token.rotate``
-mold).
+**No password ever rides a script.** A plaintext AD password cannot ride the
+``-EncodedCommand`` argv (the shared transport's secret-hygiene contract), so
+``user.create`` creates a **disabled, passwordless** account and no op carries
+a secret-value parameter. ``msad.user.set-password`` takes a secret-store
+reference (``password_ref``); the handler reads the value at run time and
+sends it on standard input (``pwsh_run(stdin=...)``), see
+:mod:`~meho_backplane.connectors.msad.ops_password`.
 
 The dataclass + tuple shape mirrors
 :mod:`~meho_backplane.connectors.winsrv.ops`; the composition pattern
@@ -119,9 +120,10 @@ MSAD_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "whole days left for a sensor); create / set-attributes / enable / disable "
         "(``caution`` — recoverable); delete (``dangerous`` + "
         "``requires_approval`` — parks for a human). ``create`` makes a "
-        "**disabled, passwordless** account — a plaintext password cannot ride "
-        "the pwsh transport, so provision it out of band (password-reset is a "
-        "Vault-brokered follow-up)."
+        "**disabled, passwordless** account; give it a password and enable it "
+        "with ``set-password`` (``caution``, waits for a person to approve it), "
+        "which reads the password from the secret store and never takes it as "
+        "a parameter."
     ),
     "groups": (
         "Use to inventory and manage AD groups and their membership: list / "

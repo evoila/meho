@@ -357,12 +357,34 @@ async def test_shutdown_sends_its_method(gate: _Gate) -> None:
     assert conn.writes == [("/HostSystem/host-21/ShutdownHost_Task", {"force": False})]
 
 
-async def test_a_faulted_task_fails_the_call_with_fault_type_and_text(gate: _Gate) -> None:
-    conn = _Conn([_host_props()], tasks={"task-91": _task_info("error", fault="InvalidState")})
+@pytest.mark.parametrize(
+    ("handler", "label", "props"),
+    [
+        (host_reboot_composite, "host.reboot: RebootHost_Task", {}),
+        (host_shutdown_composite, "host.shutdown: ShutdownHost_Task", {}),
+        (
+            host_standby_enter_composite,
+            "host.standby.enter: PowerDownHostToStandBy_Task",
+            {"maintenance": False},
+        ),
+        (
+            host_standby_exit_composite,
+            "host.standby.exit: PowerUpHostFromStandBy_Task",
+            {"power": "standBy", "standby": "in"},
+        ),
+    ],
+    ids=["reboot", "shutdown", "standby.enter", "standby.exit"],
+)
+async def test_a_faulted_task_fails_the_call_with_fault_type_and_text(
+    gate: _Gate, handler: Any, label: str, props: dict[str, Any]
+) -> None:
+    conn = _Conn(
+        [_host_props(**props)], tasks={"task-91": _task_info("error", fault="InvalidState")}
+    )
     with pytest.raises(RuntimeError) as excinfo:
-        await _call(host_shutdown_composite, conn, {"host": "host-21"})
+        await _call(handler, conn, {"host": "host-21"})
     message = str(excinfo.value)
-    assert message.startswith("host.shutdown: ShutdownHost_Task task task-91 on host 'host-21'")
+    assert message.startswith(f"{label} task task-91 on host 'host-21'")
     assert "(InvalidState)" in message
     assert "not allowed in the current state" in message
 

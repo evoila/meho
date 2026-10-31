@@ -113,7 +113,10 @@ TRACKER = obj(
     "The vendor's request tracker of a step.",
     {
         "id": field(["string", "null"], "The tracker id; read it with request_tracker_id."),
-        "status": field(["string", "null"], "FINISHED, INPROGRESS or FAILED."),
+        "status": field(
+            ["string", "null"],
+            "FINISHED, INPROGRESS or FAILED; not_reachable when the system stopped answering.",
+        ),
         "progress": field(["integer", "null"], "Percent done."),
         "message": field(
             ["string", "null"], "The vendor's message (the error text when it failed)."

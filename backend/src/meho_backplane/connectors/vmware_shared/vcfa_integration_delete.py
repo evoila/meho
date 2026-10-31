@@ -158,8 +158,8 @@ async def integration_delete(calls: Calls, params: Mapping[str, Any]) -> dict[st
             "failed": "The vendor's remove failed; see the step error.",
         }.get(
             status,
-            f"The remove did not end in time. Read it with {calls.op('integration.list')} "
-            "request_tracker_id.",
+            "The remove did not end in time, or the system stopped answering. Read it with "
+            f"{calls.op('integration.list')} request_tracker_id.",
         ),
     }
 

@@ -107,6 +107,26 @@ async def test_remove_after_the_person_confirmed(vcfa: VcfAutomationConnector) -
     assert delete.calls.last.request.url.params["apiVersion"] == "2021-07-15"
 
 
+async def test_remove_whose_tracker_stops_answering_lists_the_step(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    """The remove was sent; the system then stops answering at the tracker read."""
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        _mount_users(mock)
+        mock.delete(f"{INTEGRATIONS}/int-ipam").respond(202, json=tracker("t-del", "INPROGRESS"))
+        mock.get(f"{TRACKER}/t-del").mock(side_effect=httpx.ConnectError("no route"))
+        result = await run(
+            "vcfa.tenant.integration.delete", {"id": "int-ipam", "confirm_in_use": True}
+        )
+    data = result["result"]
+    assert data["status"] == "unfinished", result
+    assert data["steps"][0]["result"] == "unknown"
+    assert "did not answer" in data["steps"][0]["error"]
+    assert data["tracker"]["id"] == "t-del"
+    assert data["tracker"]["status"] == "not_reachable"
+
+
 async def test_remove_error_text_reaches_the_answer(vcfa: VcfAutomationConnector) -> None:
     with respx.mock(assert_all_called=False) as mock:
         mount_logins_full(mock)

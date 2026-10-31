@@ -446,7 +446,11 @@ and is not covered.
 - **Work MEHO does inside its call** (`integration.set`, `integration.delete`,
   `ipam_package.import`). The handler runs until every step is done and
   answers with the steps that ran, the failed step with the vendor's error,
-  and the steps that did not run. It undoes nothing. Call these ops with
+  and the steps that did not run. It undoes nothing. When the system stops
+  answering while MEHO reads the vendor's request tracker (no connection, or
+  `502`/`503`/`504`), the step is `unknown`, the tracker comes back with
+  `status: not_reachable` and its id, and the answer is `unfinished` with
+  the steps. Call these ops with
   `async: true` ([async-governed-dispatch.md](async-governed-dispatch.md)):
   MEHO answers `202` with a run handle and stores the final answer. MEHO's
   async mode does not resume: if MEHO restarts during the call, the run ends

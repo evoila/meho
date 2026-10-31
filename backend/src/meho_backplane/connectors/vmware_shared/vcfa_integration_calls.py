@@ -57,6 +57,7 @@ __all__ = [
     "SYNC_HISTORY_PATH",
     "SYNC_REQUESTS_PATH",
     "SYNC_REQUEST_PATH",
+    "UNREACHABLE_STATUS",
     "Calls",
     "IaasNotServedError",
     "IntegrationTransport",
@@ -97,6 +98,8 @@ POLL_SECONDS: float = 2.0
 
 #: The states of a request tracker that end it.
 TRACKER_END_STATES: Final[frozenset[str]] = frozenset({"FINISHED", "FAILED"})
+#: HTTP answers that mean the system did not answer (a gateway or proxy said so).
+UNREACHABLE_STATUS: Final[frozenset[int]] = frozenset({502, 503, 504})
 
 #: A row list read asks for at most this many rows (``$top``).
 LIST_TOP: Final[int] = 500
@@ -330,8 +333,28 @@ async def wait_for_tracker(
 async def follow_tracker(
     calls: Calls, steps: Steps, step: str, sent: Any, wait: float, secrets: tuple[str | None, ...]
 ) -> dict[str, Any]:
-    """Wait for the tracker a sent *step* answered with; mark the step; return the tracker."""
-    tracker = await wait_for_tracker(calls, sent if isinstance(sent, Mapping) else {}, wait)
+    """Wait for the tracker a sent *step* answered with; mark the step; return the tracker.
+
+    The step was sent already. So when the system stops answering while MEHO
+    reads the tracker (no connection, or HTTP 502/503/504), the step is
+    ``unknown`` and the tracker comes back with ``status: not_reachable`` and
+    its id: the caller still answers with every step.
+    """
+    first = sent if isinstance(sent, Mapping) else {}
+    try:
+        tracker = await wait_for_tracker(calls, first, wait)
+    except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+        if isinstance(exc, httpx.HTTPStatusError):
+            if exc.response.status_code not in UNREACHABLE_STATUS:
+                raise
+            why = f"HTTP {exc.response.status_code}"
+        else:
+            why = type(exc).__name__
+        tracker = tracker_row(first)
+        tracker["status"] = "not_reachable"
+        tracker["message"] = None
+        steps.unknown(step, f"the system did not answer ({why}); tracker {tracker['id']}")
+        return tracker
     if tracker["message"]:
         tracker["message"] = hide_secrets(str(tracker["message"]), secrets)
     if tracker["status"] == "FINISHED":

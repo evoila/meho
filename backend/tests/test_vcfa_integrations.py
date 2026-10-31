@@ -468,6 +468,36 @@ async def test_a_save_that_fails_lists_the_steps(vcfa: VcfAutomationConnector, v
     assert "Internal error" in data["steps"][1]["error"]
 
 
+@pytest.mark.parametrize(
+    "lost",
+    [httpx.ConnectError("no route"), httpx.Response(503)],
+    ids=["no-connection", "http-503"],
+)
+async def test_a_save_whose_tracker_stops_answering_lists_the_steps(
+    vcfa: VcfAutomationConnector, vault: Any, lost: Any
+) -> None:
+    """The save was sent; the system then stops answering at the tracker read."""
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        mock.get(INTEGRATIONS).respond(200, json={"content": []})
+        mock.post(INTEGRATIONS).mock(
+            side_effect=[
+                httpx.Response(202, json=tracker("t-test", "FINISHED")),
+                httpx.Response(202, json=tracker("t-save", "INPROGRESS")),
+            ]
+        )
+        mock.get(f"{TRACKER}/t-save").mock(side_effect=[lost] * 5)
+        result = await run("vcfa.tenant.integration.set", _VRO_CALL)
+    data = result["result"]
+    assert data["status"] == "unfinished", result
+    assert [s["result"] for s in data["steps"]] == ["done", "unknown", "not_run"]
+    assert "did not answer" in data["steps"][1]["error"]
+    assert "t-save" in data["steps"][1]["error"]
+    assert data["save"]["id"] == "t-save"
+    assert data["save"]["status"] == "not_reachable"
+    assert no_secret(result)
+
+
 def test_secret_is_only_a_vault_reference() -> None:
     schema = next(s for s in INTEGRATION_OPS if s.name == "integration.set").parameter_schema
     names = set(schema["properties"])

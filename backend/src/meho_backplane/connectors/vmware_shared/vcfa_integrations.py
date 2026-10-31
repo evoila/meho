@@ -26,6 +26,7 @@ from meho_backplane.connectors.vmware_shared.vcfa_integration_calls import (
     REQUEST_TRACKER_PATH,
     SYNC_HISTORY_PATH,
     SYNC_REQUEST_PATH,
+    UNREACHABLE_STATUS,
     Calls,
     IaasNotServedError,
     content_rows,
@@ -62,7 +63,6 @@ GIT_SOURCE_TYPES: Final[frozenset[str]] = frozenset(
 _SYNC_END_STATES: Final[frozenset[str]] = frozenset({"COMPLETED", "FAILED", "SKIPPED"})
 #: The states of a Git sync that has not ended yet.
 SYNC_RUNNING_STATES: Final[frozenset[str]] = frozenset({"REQUESTED", "STARTED", "PROCESSING"})
-_UNREACHABLE_STATUS: Final[frozenset[int]] = frozenset({502, 503, 504})
 
 _IAAS_404_TEXT: Final[str] = (
     "this organization answers 404 on /iaas/api/integrations. On VCF Automation 9 the "
@@ -221,7 +221,7 @@ async def read_job(calls: Calls, kind: str, job_id: str) -> dict[str, Any]:
     except httpx.TransportError as exc:
         return _unreachable(kind, job_id, type(exc).__name__)
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in _UNREACHABLE_STATUS:
+        if exc.response.status_code in UNREACHABLE_STATUS:
             return _unreachable(kind, job_id, f"HTTP {exc.response.status_code}")
         if exc.response.status_code == 404:
             return {

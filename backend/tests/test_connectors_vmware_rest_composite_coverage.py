@@ -103,6 +103,10 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.vcenter.deployment.answer",
         # ``.inventory`` is not a classifier suffix -> ``other``; a read.
         "vmware.migration.inventory",
+        # --- vApps (#4341): ``.power`` / ``.set`` are not classifier suffixes.
+        "vmware.composite.vapp.power",
+        "vmware.composite.vapp.start_order.set",
+        # --- end vApps (#4341)
     }
 )
 

@@ -171,6 +171,13 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vcenter.appliance.deploy",
     "vmware.composite.vcenter.install",
     "vmware.composite.vcenter.deployment.answer",
+    # --- vApps (#4341): create and start-order set (caution), power
+    # (dangerous), delete (destructive).
+    "vmware.composite.vapp.create",
+    "vmware.composite.vapp.power",
+    "vmware.composite.vapp.start_order.set",
+    "vmware.composite.vapp.delete",
+    # --- end vApps (#4341)
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -510,6 +517,11 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.cluster.drs_rule.delete": "cluster",
     "vmware.composite.cluster.drs_group.members.set": "cluster",
     "vmware.composite.cluster.drs_group.delete": "cluster",
+    # vApps (#4341).
+    "vmware.composite.vapp.create": "cluster",
+    "vmware.composite.vapp.power": "cluster",
+    "vmware.composite.vapp.start_order.set": "cluster",
+    "vmware.composite.vapp.delete": "cluster",
 }
 
 
@@ -691,6 +703,9 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
         "vmware.composite.vm.snapshot.create",
         "vmware.composite.content_library.create",
         "vmware.composite.content_library.item.upload",
+        # vApps (#4341).
+        "vmware.composite.vapp.create",
+        "vmware.composite.vapp.start_order.set",
     }
     for row in rows:
         if row.op_id in (
@@ -709,6 +724,8 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
             "vmware.composite.cluster.drs_group.delete",
             # The VM snapshot delete.
             "vmware.composite.vm.snapshot.delete",
+            # The vApp delete (#4341).
+            "vmware.composite.vapp.delete",
         ):
             expected_level = "destructive"
         elif row.op_id in caution_ops:

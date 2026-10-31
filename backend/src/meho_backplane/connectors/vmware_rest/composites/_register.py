@@ -234,6 +234,19 @@ from meho_backplane.connectors.vmware_rest.composites._teardown_network import (
     host_standard_portgroup_delete_composite,
     network_portgroup_delete_composite,
 )
+
+# --- vApps (#4341)
+from meho_backplane.connectors.vmware_rest.composites._vapp_change import (
+    VAPP_CHANGE_COMPOSITES,
+)
+from meho_backplane.connectors.vmware_rest.composites._vapp_delete import (
+    VAPP_DELETE_COMPOSITES,
+)
+from meho_backplane.connectors.vmware_rest.composites._vapp_start_order import (
+    VAPP_START_ORDER_COMPOSITES,
+)
+
+# --- end vApps (#4341)
 from meho_backplane.connectors.vmware_rest.composites._vcenter_install_ops import (
     VCENTER_INSTALL_COMPOSITES,
 )
@@ -497,7 +510,7 @@ COMPOSITES_NOT_ON_8_0: dict[str, str] = {
 #: ``tests/test_operation_group_texts.py`` checks it).
 _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "cluster": (
-        "Use for clusters, DRS and resource pools. Read: a cluster's DRS "
+        "Use for clusters, DRS, resource pools and vApps. Read: a cluster's DRS "
         "settings and the moves DRS recommends now "
         "(cluster.drs_recommendations, safe). Changes: "
         "update every host of a cluster in turn (cluster.patch, dangerous); add a "
@@ -506,8 +519,12 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "(cluster.drs_vm_host_rule.create, caution); delete a DRS rule "
         "(cluster.drs_rule.delete, destructive); create a resource pool "
         "(resource_pool.create, caution) or delete one (resource_pool.delete, "
-        "dangerous). Pair with 'host' for one host's maintenance and with 'vm' "
-        "to move VMs."
+        "dangerous); create a vApp, a group of VMs that start in a set order "
+        "(vapp.create, caution); power a vApp on or off in that order "
+        "(vapp.power, dangerous); set the order (vapp.start_order.set, "
+        "caution); delete a powered-off vApp with its VMs (vapp.delete, "
+        "destructive). Pair with 'host' for one host's maintenance and with "
+        "'vm' to move VMs."
     ),
     "events": (
         "Use for vCenter events: what changed, and when. Reads: the latest "
@@ -1364,6 +1381,12 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.resource_pool.delete"],
     ),
+    # --- vApps (#4341): create, power in start order, set the start order,
+    # delete. The rows live in their own modules.
+    *(_CompositeSpec(**row) for row in VAPP_CHANGE_COMPOSITES),
+    *(_CompositeSpec(**row) for row in VAPP_START_ORDER_COMPOSITES),
+    *(_CompositeSpec(**row) for row in VAPP_DELETE_COMPOSITES),
+    # --- end vApps (#4341)
     _CompositeSpec(
         op_id="vmware.composite.folder.create",
         handler=folder_create_composite,

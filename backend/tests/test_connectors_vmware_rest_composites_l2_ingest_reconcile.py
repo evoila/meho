@@ -1335,6 +1335,7 @@ from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
     _snapshot,
     _teardown,
     _teardown_network,
+    _vapp,
 )
 
 _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
@@ -1429,6 +1430,38 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
             "POST:/VirtualMachineSnapshot/{moId}/RemoveSnapshot_Task",
         },
     ),
+    # --- vApps (#4341): the vApp read (also the task poll) and one write each.
+    "_VIM_SUB_OPS_VAPP_CREATE": (
+        _vapp,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+            "POST:/ResourcePool/{moId}/CreateVApp",
+        },
+    ),
+    "_VIM_SUB_OPS_VAPP_POWER": (
+        _vapp,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualApp/{moId}/PowerOnVApp_Task",
+            "POST:/VirtualApp/{moId}/PowerOffVApp_Task",
+        },
+    ),
+    "_VIM_SUB_OPS_VAPP_START_ORDER": (
+        _vapp,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualApp/{moId}/UpdateVAppConfig",
+        },
+    ),
+    "_VIM_SUB_OPS_VAPP_DELETE": (
+        _vapp,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualApp/{moId}/Destroy_Task",
+        },
+    ),
+    # --- end vApps (#4341)
 }
 
 

@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 87 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 92 hand-authored composites
 that orchestrate cross-spec workflows: 20 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -22,8 +22,10 @@ read `datastore.file.list` / `#3432` + the vSAN folder list
 read `datastore.vsan.folder.list` / `#4022` + the orphan folder check
 `datastore.orphan_dirs` / `#3814` + the VM limit and
 reservation read `vm.resource_allocation.show` / `#3880` + the migration
-inventory read `vmware.migration.inventory`) and 67 write
-composites (G3.1-T6 / `#509`, incl. the three vCenter install changes
+inventory read `vmware.migration.inventory`) and 72 write
+composites (G3.1-T6 / `#509`, incl. the five host membership changes
+`host.add` / `host.move` / `host.connect` / `host.disconnect` /
+`host.remove` (`#4349`, see **Host membership**), the three vCenter install changes
 `vcenter.appliance.deploy` / `vcenter.install` / `vcenter.deployment.answer`
 (`#4394`), the destructive-tier `vm.destroy` / `#3198`, the
 governed vSphere Namespace `namespace.create` (caution) +
@@ -565,10 +567,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 87
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 92
   `_CompositeSpec` rows (20 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 50 dangerous/destructive
-  writes + 17 caution writes); each row carries its
+  cache-refresh read `datastore.refresh` — + 54 dangerous/destructive
+  writes + 18 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
   (`llm_instructions`) of the VM and folder writes and the VM allocation
@@ -1438,13 +1440,13 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 87 `vmware.composite.*` rows with
+   queued registrar and upserts: the 92 `vmware.composite.*` rows with
    `source_kind="composite"` — 20 reads (19 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 67 writes, all `requires_approval=True`
-   (38 `safety_level="dangerous"`; 17 `safety_level="caution"` —
-   `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
+   service principals), and 72 writes, all `requires_approval=True`
+   (41 `safety_level="dangerous"`; 18 `safety_level="caution"` —
+   `host.connect` / `#4349`, `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
    `vm.resource_allocation.set` / `#3880`, `datastore.dir.create` / `#3339`,
@@ -1452,8 +1454,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    `vm.cdrom.unmount_library_iso`, `vm.snapshot.create`,
    `content_library.create` + `content_library.item.upload`,
    `cluster.drs_group.members.set`;
-   and 12 `safety_level="destructive"` — `vm.destroy` / `#3198`,
-   `namespace.delete`, `storage_policy.delete`, `cluster.drs_rule.delete`,
+   and 13 `safety_level="destructive"` — `vm.destroy` / `#3198`,
+   `host.remove` / `#4349`, `namespace.delete`, `storage_policy.delete`, `cluster.drs_rule.delete`,
    `cluster.drs_group.delete`,
    `vm.snapshot.delete`, and the six `#3339` teardown deletes) —
    plus the `vmware.host.usage` row with
@@ -1840,7 +1842,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 87 composites (20 reads + 67 writes) land as `source_kind="composite"`
+The 92 composites (20 reads + 72 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1937,7 +1939,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 87 composites are hand-authored aggregators the connector ships as
+The 92 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -4280,6 +4282,9 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.power.bulk` | `{action, filter, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `host.evacuate` | `{host, tolerate_partial_failure, vsan_mode, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `host.maintenance.exit` | `{host, name, connection_state, in_maintenance_mode, ha_state, resolved, total_resolved, what_happens_next, unavailable?}` | live read (vim `RetrievePropertiesEx` on the host + `GET:/vcenter/vm`); a failed read is listed under `unavailable`, never blocks the park |
+| `host.add` | `{action, parent, parent_type, host_name, port, user_name, ssl_thumbprint, password_source, password_secret_ref, what_happens_next}` | params-only (`composites/_host_add.py`); never the password |
+| `host.move` / `host.connect` / `host.disconnect` | `{host, cluster?, name, connection_state, in_maintenance_mode, parent, parent_type, vm_count, what_happens_next, unavailable?}` | live read (vim `RetrievePropertiesEx` on the host, `composites/_host_membership.py`); a failed read is listed under `unavailable`, never blocks the park |
+| `host.remove` | `{blast_radius: {object, children, irreversibility, blockers?, refusal?, what_happens_next}}` | the handler's own plan (`composites/_host_remove.py`); a host that does not exist is refused before the park |
 | `host.detach_from_vds` | `{host, dvs, fallback_network, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `cluster.patch` | `{cluster, resolved, total_resolved}` | live read (`GET:/vcenter/host?clusters=...`) |
 | `vm.resize` | `{vm, name, power_state, current, requested}` sizing from->to | live read (`GET:/vcenter/vm/{vm}`) |
@@ -4957,6 +4962,111 @@ powered-off VM with the given name; a new run with the same name then fails
 in `ImportVApp`, so check the inventory first and delete or rename that VM.
 A power-on that waits for approval saves the import's answer: approving it
 only powers on the VM and does not import again.
+
+### Host membership: add, move, connect, disconnect and remove a host (`#4349`)
+
+An agent or an operator can add an ESXi host to vCenter, move it into a
+cluster, reconnect or disconnect it, and remove it. Every change waits for
+approval. All six operations are typed (hand-written) and need no spec ingest.
+The five changes are in the group `host` on both catalogs, `vmware-rest-8.0`
+and `vmware-rest-9.0`. The status read `vmware.task.info` is a typed read in
+the tasks group (`vmware-tasks-recent`), shared with `vmware.tasks.recent`.
+
+| Operation | What it does | What it returns | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.composite.host.add` | Starts adding an ESXi host to a cluster (`AddHost_Task`) or alone to a host folder (`AddStandaloneHost_Task`). vCenter checks the host certificate against `ssl_thumbprint`. The password comes from Vault. | `status` (`accepted`, `already_added`, `already_running`, `parent_not_found`, `needs_vcenter`, `start_failed`, `start_unknown`), `task`, `status_read`, `host` | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.task.info` | One vCenter task by id: the status read of `host.add`. | `state` (`queued`, `running`, `success`, `error`, `not_found`, `not_reachable`), `progress`, `error_message`, `error_type`, `result` (the new host or its compute resource), `checked_at` | `safe` | 8.0, 9.x |
+| `vmware.composite.host.move` | Moves a host in maintenance mode into a cluster of the same datacenter (`MoveHostInto_Task`), with its VMs. | `status` (`moved`, `unchanged`, `not_found`, `cluster_not_found`, `not_in_maintenance_mode`, `needs_vcenter`, `not_verified`, `timeout`), the host read back | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.composite.host.connect` | Reconnects a disconnected or not responding host with the login vCenter has (`ReconnectHost_Task`). | `status` (`connected`, `unchanged`, ...), the host read back | `caution`, waits for approval | 8.0, 9.x |
+| `vmware.composite.host.disconnect` | Disconnects a host from vCenter (`DisconnectHost_Task`). Its VMs keep running. | `status` (`disconnected`, `unchanged`, ...), the host read back | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.composite.host.remove` | Removes a host from the vCenter inventory: `HostSystem.Destroy_Task` for a host in a cluster, `ComputeResource.Destroy_Task` on the host's own compute resource for a host alone. | `status` (`removed`, `unchanged`, `precondition_failed`, `needs_vcenter`, `still_present`, `timeout`), `object`, `blockers`, `task` | `destructive`, preview first, waits for approval | 8.0, 9.x |
+
+Code: `composites/_host_add.py`, `composites/_host_membership.py` (move,
+connect, disconnect and the shared host read), `composites/_host_remove.py`,
+the schemas and AI guidance in `composites/_host_membership_schemas.py`, and
+the registry rows and vendor-call lists in `composites/_host_membership_ops.py`
+(`_register.py` and `_governed_subops.py` read them in one place each). The
+status read is `typed_ops_task_info.py`.
+
+Vendor calls: all are VIM methods sent as VI-JSON (`/sdk/vim25/<release>/...`)
+through the governed write seam `_write_vmomi_sub_op`; the reads are
+`PropertyCollector.RetrievePropertiesEx`, and `host.add` also lists hosts by
+name with `GET /api/vcenter/host`. vCenter 8.0 U1 to U3 and 9.0 serve every
+method; `tests/test_connectors_vmware_rest_host_membership_reconcile.py`
+checks them and the request body fields against the pinned `vi-json.yaml` of
+9.0 and the three 8.0 files. No method is missing on a version, so no
+operation needs the version check. A single ESXi host target is refused
+with `needs_vcenter`: these changes run on the vCenter that manages the host.
+
+**Move, connect and disconnect** read the host first (name, parent,
+connection state, maintenance mode, VMs). When the host already is where the
+call wants it, the answer is `unchanged` and nothing is sent, so a second call
+is safe. `host.move` also refuses a host that is not in maintenance mode
+(`not_in_maintenance_mode`; use `host.evacuate` first). Then the method is
+sent, its task is polled (600 s), and the host is read again: the answer gives
+the new state. A task fault fails the call with the vendor's fault type and
+text (`connector_error`). A poll timeout answers `timeout` with the task id
+and an `error` issue, so the call is not recorded as done.
+
+**`host.remove`** uses the plan-then-act seam of the teardown deletes
+(`TeardownPlan`, `blast_radius`, `destroy_task`). The plan reads the host and
+lists the VMs registered on it as `children` (and, for a host alone, its
+compute resource); they leave vCenter with the host, their files stay on the
+datastores. A connected host that is not in maintenance mode is refused
+before any write; a host that is disconnected or not responding may be
+removed. The preview builder raises when the host does not exist, so the call
+is refused (`blast_radius_required`) before it waits for approval. A person
+calls `preview_operation`, then `call_operation` with the `preview_hash`; an
+agent is always refused.
+
+**`host.add` is a vendor job.** The start call returns as soon as vCenter has
+accepted the job: `status: accepted`, the vCenter `task` id and
+`status_read: {op_id: vmware.task.info, params: {task}}`. It never says the
+host is added.
+
+- Before a start it reads the cluster or host folder, then looks for a host
+  with the same name in vCenter (`already_added`, with the host id) and for an
+  add task (`ClusterComputeResource.addHost` or `Folder.addStandaloneHost`)
+  that is queued or runs on the same cluster or folder (`already_running`,
+  with that task's id). Both start nothing. This check is a help, not a lock:
+  two callers can both check before either starts, and a task that just ended
+  is no longer running.
+- After a lost reply (`start_unknown`), do not start again blindly: call
+  `host.add` again, which answers `already_added` or `already_running` when
+  the first call worked, or read the task list (`vmware.tasks.recent`).
+- Use MEHO's async mode (`async: true`, `docs/codebase/async-governed-dispatch.md`)
+  for the start: MEHO keeps the answer with the task id under a run handle, so
+  a lost reply does not lose the task id.
+- `vmware.task.info` reads `Task.info` of one task. It gives the vendor's
+  state, the progress, the vendor's error text and fault type, and on success
+  the object the task made (`result`). When the login expired between the
+  start and the read, the connector logs in again on `NotAuthenticated` and
+  reads once more. When vCenter does not answer, the state is `not_reachable`
+  with the task id, the reason and the time of the read, never `error`. A task
+  vCenter forgot gives `not_found`. MEHO keeps no job state between calls; the
+  caller keeps the task id.
+- A refused start (`start_failed`) gives the vendor's fault type and text, for
+  example `InvalidLogin` or `AlreadyBeingManaged` (`force` is always false, so
+  MEHO never takes a host away from another vCenter). A wrong thumbprint shows
+  as an `SSLVerifyFault` in the task error.
+
+**The password.** The host password comes from Vault
+(`password_secret_ref`, optional `password_secret_mount` and
+`password_secret_key`), read when the call runs, under the identity of the
+person who runs it (after an approval: the approver). It is only in the
+`HostConnectSpec` of the vCenter request body. A vendor text that holds it is
+replaced. `host.add` is pinned as `credential_write` (`broadcast/events.py`),
+so the flight recorder keeps no request body and the broadcast carries no
+params. The approval request and its preview show the Vault path and the
+thumbprint, never the password.
+
+Tests: `test_connectors_vmware_rest_host_membership.py` (the handlers against
+a vim fake), `test_connectors_vmware_rest_host_membership_http.py` (the real
+connector against `respx` on the 8.0.3 and 9.0 paths, and the status read:
+re-login, `not_reachable`, `not_found`),
+`test_connectors_vmware_rest_host_membership_approval.py` (the dispatcher:
+each change waits for approval; the remove needs a matching `preview_hash`)
+and the reconcile test above.
 
 ### Reads of many objects read every page (`vim_retrieve.py`, #4862)
 

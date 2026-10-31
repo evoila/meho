@@ -469,6 +469,9 @@ from meho_backplane.connectors.vmware_rest.typed_ops_sso_admin_api_file import (
     SSO_ADMIN_API_FILE_WHEN_TO_USE,
     VCENTER_SSO_ADMIN_API_FILE_GET_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_task_info import (  # noqa: E402
+    VMWARE_TASK_INFO_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_tasks_history import (  # noqa: E402
     TASKS_HISTORY_GROUP_KEY,
     TASKS_HISTORY_WHEN_TO_USE,
@@ -620,8 +623,9 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: six content-library reads (one library, one item, the files of an item,
 #: the OVF options of an item, the subscription URL check and the
 #: Supervisor library list); the install state of a new vCenter
-#: appliance, ``vcenter.deployment.status`` (#4394); and the settings of
-#: one distributed port group ``network.portgroup.show``. The tuple shape
+#: appliance, ``vcenter.deployment.status`` (#4394); the settings of
+#: one distributed port group ``network.portgroup.show``; and one task by
+#: id, ``task.info`` (#4349, the status read of ``host.add``). The tuple shape
 #: lets future typed ops join without touching the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
@@ -651,6 +655,7 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     *CONTENT_LIBRARY_OPS,
     VMWARE_VCENTER_DEPLOYMENT_STATUS_OP,
     VMWARE_NETWORK_PORTGROUP_SHOW_OP,
+    VMWARE_TASK_INFO_OP,
 )
 
 

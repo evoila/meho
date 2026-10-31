@@ -166,14 +166,28 @@ async def test_bad_reference_runs_nothing(ref: Any) -> None:
     run_mock.assert_not_awaited()
 
 
-@pytest.mark.parametrize("secret", [{"other": "x"}, {"password": ""}])
-async def test_missing_or_empty_field_runs_nothing(secret: dict[str, Any]) -> None:
+@pytest.mark.parametrize(
+    ("secret", "message"),
+    [
+        ({"other": "x"}, "has no field"),
+        ({"password": ""}, "is empty"),
+        ({"password": "   \n"}, "is empty"),
+        ({"password": None}, "is not a string"),
+        ({"password": {"value": "x"}}, "is not a string"),
+        ({"password": ["x"]}, "is not a string"),
+        ({"password": 12345}, "is not a string"),
+        ({"password": True}, "is not a string"),
+    ],
+)
+async def test_missing_empty_or_non_string_field_runs_nothing(
+    secret: dict[str, Any], message: str
+) -> None:
     connector = MsadConnector()
     run_mock = AsyncMock()
     with (
         patch.object(connector, "_resolve_secret", AsyncMock(return_value=secret)),
         patch.object(connector, "_run_command", run_mock),
-        pytest.raises(ValueError, match="password_ref"),
+        pytest.raises(ValueError, match=f"password_ref.*{message}"),
     ):
         await msad_user_set_password(
             connector, _TARGET, {"identity": "jdoe", "password_ref": "lab/ad/jdoe#password"}

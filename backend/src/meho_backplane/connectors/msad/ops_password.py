@@ -224,7 +224,9 @@ async def _read_password(
     """Read the password at *ref* from the secret store, under *operator*.
 
     Errors name the reference, never a value, and stop the op before anything
-    runs on the server.
+    runs on the server. The field must hold a non-empty string: the type is
+    checked on the raw value, because ``strip_credential_value`` turns any
+    value into text (``None`` would become ``"None"``).
     """
     path, field = ref
     host = getattr(target, "host", None)
@@ -239,8 +241,11 @@ async def _read_password(
         raise ValueError(f"could not read password_ref {path}#{field}: {exc}") from exc
     if not isinstance(data, dict) or field not in data:
         raise ValueError(f"password_ref: the secret at {path!r} has no field {field!r}")
-    value = strip_credential_value(data[field])
-    if not isinstance(value, str) or not value:
+    raw = data[field]
+    if not isinstance(raw, str):
+        raise ValueError(f"password_ref: the field {field!r} at {path!r} is not a string")
+    value = strip_credential_value(raw)
+    if not value:
         raise ValueError(f"password_ref: the field {field!r} at {path!r} is empty")
     return value
 

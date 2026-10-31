@@ -595,17 +595,20 @@ values:
   note. The calls that send a spec carry the `credential` tag, so the flight
   recorder keeps no request or answer body.
 - A later status read can get a check or task error that echoes a value of
-  the spec. The connector remembers, by the target's host, the values each
-  start read and the ids of the jobs it started. A status read of a job it
-  started, and the flight-recorder body of that answer, hide the remembered
-  values. A text shaped like a VMware licence key (five groups of five
-  letters or digits) is hidden by its shape in every case.
-- For a job this MEHO did not start (one started before a restart of MEHO,
-  or by someone else), the status read and the flight-recorder body show no
-  vendor error text at all. MEHO cannot know which values such a text may
-  echo. The state, the failed check or task and the counts stay visible,
-  and each hidden text says why and what to do: read the report, or start
-  the job again. Only the newest values and ids are kept.
+  the spec. The connector remembers, by the target's host, each start that
+  sent a spec: the values it read and the id of the job it created. A status
+  read of such a job, and the flight-recorder body of that answer, hide the
+  remembered values. A text shaped like a VMware licence key (five groups of
+  five letters or digits) is hidden by its shape in every case.
+- For a job this MEHO did not start with a spec it holds (one started before
+  a restart of MEHO, started by someone else, or retried without a spec after
+  a restart), the status read and the flight-recorder body show no vendor
+  error text at all. MEHO cannot know which values such a text may echo. The
+  state, the failed check or task and the counts stay visible, and each
+  hidden text says why and what to do: read the report, or start the job
+  again. Only the newest 64 starts per target are kept. A job's id and its
+  values share one entry, so when a job leaves the memory its vendor texts
+  are hidden again.
 - The reports are vendor files. MEHO does not change their content.
 
 ### Vendor jobs

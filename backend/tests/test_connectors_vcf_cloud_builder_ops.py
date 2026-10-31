@@ -689,7 +689,7 @@ async def test_sddc_status_gives_progress_and_the_failed_task(
         ),
         _subtask("Deploy SDDC Manager", "INITIALIZED"),
     )
-    connector.remember_job(TARGET, "bringup-1")
+    connector.remember_job(TARGET, "bringup-1", ())
     async with respx.mock(base_url=BASE) as mock:
         mock.get("/v1/sddcs/bringup-1").respond(200, json=task)
         result = await connector.sddc_status(_operator(), TARGET, {"id": "bringup-1"})
@@ -824,7 +824,7 @@ async def test_validation_status_lists_each_check(connector: CloudBuilderConnect
             },
         ],
     }
-    connector.remember_job(TARGET, "val-1")
+    connector.remember_job(TARGET, "val-1", ())
     async with respx.mock(base_url=BASE) as mock:
         mock.get("/v1/sddcs/validations/val-1").respond(200, json=validation)
         result = await connector.validation_status(_operator(), TARGET, {"id": "val-1"})
@@ -946,7 +946,7 @@ async def test_validation_status_hides_a_licence_key_of_a_job_meho_started(
 ) -> None:
     """A licence key is hidden by its shape, also when it was not read from Vault."""
     rejected = _validation_with_error(f"licence key {LICENCE_KEY} is not valid for ESXi")
-    connector.remember_job(TARGET, "val-1")
+    connector.remember_job(TARGET, "val-1", ())
     async with respx.mock(base_url=BASE) as mock:
         mock.get("/v1/sddcs/validations/val-1").respond(200, json=rejected)
         result = await connector.validation_status(_operator(), TARGET, {"id": "val-1"})
@@ -1044,13 +1044,149 @@ async def test_sddc_status_after_a_restart_hides_the_echoed_password(loader: _Lo
     assert "did not start this job" in error["nestedErrors"][0]["message"]
 
 
+def _echoed_bringup() -> dict[str, Any]:
+    return _sddc_task(
+        "COMPLETED_WITH_FAILURE",
+        _subtask(
+            "Deploy SDDC Manager",
+            "COMPLETED_WITH_FAILURE",
+            [{"message": f"root password {VAULT_PASSWORD} was refused"}],
+        ),
+    )
+
+
+def _trace(connector: CloudBuilderConnector, path: str, body: dict[str, Any]) -> Any:
+    return connector.trace_response_body(
+        httpx.Response(200, json=body, request=httpx.Request("GET", f"{BASE}{path}"))
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_retry_without_a_spec_after_a_restart_keeps_the_vendor_texts_hidden(
+    loader: _Loader,
+) -> None:
+    """The retried job runs with a spec this MEHO never saw, so its texts stay hidden."""
+    task = _echoed_bringup()
+    before = CloudBuilderConnector(credentials_loader=loader)
+    async with respx.mock(base_url=BASE) as mock:
+        mock.get("/v1/sddcs").respond(200, json=_page())
+        mock.post("/v1/sddcs").respond(202, json={"id": "bringup-1", "status": "IN_PROGRESS"})
+        start = await before.sddc_start(
+            _operator(), TARGET, {"spec": _spec(), "secrets": _secrets()}
+        )
+        assert start["status"] == "accepted"
+        await before.aclose()
+
+        after = CloudBuilderConnector(credentials_loader=loader)
+        mock.get("/v1/sddcs/bringup-1").respond(200, json=task)
+        mock.patch("/v1/sddcs/bringup-1").respond(
+            202, json={"id": "bringup-1", "status": "IN_PROGRESS"}
+        )
+        retry = await after.sddc_retry(_operator(), TARGET, {"id": "bringup-1"})
+        assert retry["status"] == "accepted"
+        assert not after.knows_job(TARGET, "bringup-1")
+
+        result = await after.sddc_status(_operator(), TARGET, {"id": "bringup-1"})
+        traced = _trace(after, "/v1/sddcs/bringup-1", task)
+    await after.aclose()
+
+    assert VAULT_PASSWORD not in json.dumps(result)
+    assert VAULT_PASSWORD not in json.dumps(traced)
+    assert result["state"] == "failed"
+    assert result["failed_task"] == "Deploy SDDC Manager"
+    assert "did not start this job" in result["error"]
+    assert "did not start this job" in result["tasks"][0]["error"]
+    assert "did not start this job" in traced["sddcSubTasks"][0]["errors"][0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_a_retry_with_a_spec_after_a_restart_hides_the_secrets_it_sent(
+    connector: CloudBuilderConnector,
+) -> None:
+    """A retry that sends a spec is a start this MEHO knows: its values are hidden by value."""
+    task = _echoed_bringup()
+    async with respx.mock(base_url=BASE) as mock:
+        mock.get("/v1/sddcs/bringup-1").respond(200, json=task)
+        mock.patch("/v1/sddcs/bringup-1").respond(
+            202, json={"id": "bringup-1", "status": "IN_PROGRESS"}
+        )
+        retry = await connector.sddc_retry(
+            _operator(), TARGET, {"id": "bringup-1", "spec": _spec(), "secrets": _secrets()}
+        )
+        assert retry["status"] == "accepted"
+        assert connector.knows_job(TARGET, "bringup-1")
+
+        result = await connector.sddc_status(_operator(), TARGET, {"id": "bringup-1"})
+        traced = _trace(connector, "/v1/sddcs/bringup-1", task)
+    await connector.aclose()
+
+    assert VAULT_PASSWORD not in json.dumps(result)
+    assert VAULT_PASSWORD not in json.dumps(traced)
+    assert result["tasks"][0]["error"] == "[MEHO hid this text: it held a secret from Vault]"
+    assert traced["sddcSubTasks"][0]["errors"][0]["message"] == (
+        "[MEHO hid this text: it held a secret from Vault]"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_job_leaves_the_memory_together_with_its_secrets(
+    connector: CloudBuilderConnector,
+) -> None:
+    """When newer starts push a job out of the memory, its vendor texts are hidden again."""
+    echoed = _validation_with_error(f"the password {VAULT_PASSWORD} is too weak")
+    connector.remember_job(TARGET, "val-1", (VAULT_PASSWORD,))
+    for n in range(_jobs._SECRET_MEMORY_SIZE - 1):
+        connector.remember_job(TARGET, f"val-later-{n}", (f"later-value-{n}",))
+    assert connector.knows_job(TARGET, "val-1")
+    assert VAULT_PASSWORD in connector.known_secrets(TARGET)
+
+    connector.remember_job(TARGET, "val-newest", ("newest-value",))
+    assert not connector.knows_job(TARGET, "val-1")
+    assert VAULT_PASSWORD not in connector.known_secrets(TARGET)
+    assert connector.knows_job(TARGET, "val-later-0")
+
+    async with respx.mock(base_url=BASE) as mock:
+        mock.get("/v1/sddcs/validations/val-1").respond(200, json=echoed)
+        result = await connector.validation_status(_operator(), TARGET, {"id": "val-1"})
+    traced = _trace(connector, "/v1/sddcs/validations/val-1", echoed)
+    await connector.aclose()
+
+    assert VAULT_PASSWORD not in json.dumps(result)
+    assert VAULT_PASSWORD not in json.dumps(traced)
+    assert result["state"] == "failed"
+    assert "did not start this job" in result["checks"][0]["error"]
+    assert "did not start this job" in result["error"]
+    assert "did not start this job" in traced["validationChecks"][0]["errorResponse"]["message"]
+
+
+def test_secret_memory_keeps_a_start_in_one_entry() -> None:
+    """The values a start remembers before it sends join the job id it gets after."""
+    memory = _jobs.SecretMemory()
+    memory.remember("CB-A.test.invalid ", ("one", "two", ""))
+    memory.remember_job("cb-a.test.invalid", "job-1", ("one", "two"))
+    assert memory.knows_job("cb-a.test.invalid", "job-1")
+    assert memory.known("cb-a.test.invalid") == ("one", "two")
+    assert len(memory._starts["cb-a.test.invalid"]) == 1
+
+    memory.remember("cb-a.test.invalid", ("three",))
+    memory.remember_job("cb-a.test.invalid", "job-2", ("four",))
+    assert memory.knows_job("cb-a.test.invalid", "job-2")
+    assert memory.known("cb-a.test.invalid") == ("one", "two", "three", "four")
+    assert len(memory._starts["cb-a.test.invalid"]) == 3
+
+    assert not memory.knows_job("cb-a.test.invalid", "")
+    assert not memory.knows_job("cb-b.test.invalid", "job-1")
+    memory.clear()
+    assert memory.known("cb-a.test.invalid") == ()
+    assert not memory.knows_job("cb-a.test.invalid", "job-1")
+
+
 @pytest.mark.asyncio
 async def test_status_trace_body_hides_the_secret_the_start_sent(
     connector: CloudBuilderConnector,
 ) -> None:
     """The flight recorder gets the vendor answer without the echoed password or key."""
-    connector.remember_secrets(TARGET, (VAULT_PASSWORD,))
-    connector.remember_job(TARGET, "val-1")
+    connector.remember_job(TARGET, "val-1", (VAULT_PASSWORD,))
     echoed = _validation_with_error(f"{VAULT_PASSWORD} is too weak; key {LICENCE_KEY} is bad")
     request = httpx.Request("GET", f"{BASE}/v1/sddcs/validations/val-1")
     traced = connector.trace_response_body(httpx.Response(200, json=echoed, request=request))

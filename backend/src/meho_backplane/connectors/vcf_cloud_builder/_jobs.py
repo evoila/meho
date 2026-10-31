@@ -17,12 +17,13 @@ returns. The operations in this package follow the vendor job rules:
 This module also holds :func:`fill_secrets`, which reads the passwords a call
 names by Vault reference and puts them into a copy of the spec. The values
 never go into a result: :func:`hide_secrets` replaces a vendor text that holds
-one, and :class:`SecretMemory` keeps the values a start read and the ids of
-the jobs it started, so a status read made later (which has no spec) can hide
-them too. For a job this MEHO did not start (for example one started before
-a restart), :func:`hide_vendor_texts` hides every vendor error text, because
-MEHO cannot know which values it may echo. A text shaped like a VMware
-licence key is hidden by its shape in every case.
+one, and :class:`SecretMemory` keeps, per start, the values it read and the
+id of the job it created, so a status read made later (which has no spec) can
+hide them too. For a job this MEHO did not start with a spec it holds (for
+example one started before a restart, or retried without a spec after one),
+:func:`hide_vendor_texts` hides every vendor error text, because MEHO cannot
+know which values it may echo. A text shaped like a VMware licence key is
+hidden by its shape in every case.
 """
 
 from __future__ import annotations
@@ -88,8 +89,8 @@ _UNKNOWN_JOB_TEXT: Final = (
     "or start the job again]"
 )
 
-#: How many secret values and job ids :class:`SecretMemory` keeps per target
-#: (the newest).
+#: How many starts :class:`SecretMemory` keeps per target (the newest). Each
+#: start is one entry: the id of its job and the values it sent.
 _SECRET_MEMORY_SIZE: Final = 64
 
 #: ``executionStatus`` values of a validation that is still active on Cloud
@@ -228,51 +229,80 @@ def hide_vendor_texts(value: Any, keys: Iterable[str]) -> Any:
     return value
 
 
+@dataclass(slots=True)
+class _Start:
+    """One start this MEHO sent: the id of its job (once known) and the values it sent."""
+
+    job_id: str | None
+    values: tuple[str, ...]
+
+
 class SecretMemory:
     """What the starts sent to each Cloud Builder, kept in memory.
 
     A status read runs in a later call and has no spec, so it cannot read the
     secrets from Vault again. The connector remembers, by the host of the
-    target, the values a start read and the ids of the jobs it started. A
-    later read of a job it started hides the values in the vendor texts and
-    in the flight-recorder body. A read of a job it did not start (one from
-    before a restart of MEHO, or started by someone else) shows no vendor
-    error text at all: MEHO cannot know which values such a text may echo.
-    Only the newest values and ids are kept.
+    target, each start: the values it read and the id of the job it created.
+    A later read of such a job hides the values in the vendor texts and in
+    the flight-recorder body. A read of a job it did not start (one from
+    before a restart of MEHO, started by someone else, or retried without a
+    spec) shows no vendor error text at all: MEHO cannot know which values
+    such a text may echo. Only the newest starts are kept. A job's id and its
+    values share one entry, so when the entry leaves the memory the job is
+    no longer trusted either.
     """
 
     def __init__(self) -> None:
-        self._values: dict[str, deque[str]] = {}
-        self._jobs: dict[str, deque[str]] = {}
+        self._starts: dict[str, deque[_Start]] = {}
 
     @staticmethod
     def key(host: object) -> str:
         return str(host or "").strip().lower()
 
+    def _starts_of(self, host: object) -> deque[_Start]:
+        return self._starts.setdefault(self.key(host), deque(maxlen=_SECRET_MEMORY_SIZE))
+
+    @staticmethod
+    def _values(values: Iterable[str]) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(value for value in values if value))
+
     def remember(self, host: object, values: Iterable[str]) -> None:
-        known = self._values.setdefault(self.key(host), deque(maxlen=_SECRET_MEMORY_SIZE))
-        for value in values:
-            if value and value not in known:
-                known.append(value)
+        """Keep the values a start sends, before the id of its job is known."""
+        found = self._values(values)
+        if found:
+            self._starts_of(host).append(_Start(None, found))
 
     def known(self, host: object) -> tuple[str, ...]:
-        return tuple(self._values.get(self.key(host), ()))
+        seen: dict[str, None] = {}
+        for start in self._starts.get(self.key(host), ()):
+            seen.update(dict.fromkeys(start.values))
+        return tuple(seen)
 
-    def remember_job(self, host: object, job_id: object) -> None:
-        """Note that this MEHO started the job *job_id* on *host*."""
+    def remember_job(self, host: object, job_id: object, values: Iterable[str]) -> None:
+        """Note that this MEHO started the job *job_id* on *host* with *values* in its spec.
+
+        When the newest entry holds the same values and no job id yet (the
+        start remembered them before it sent), the id goes into that entry.
+        """
         if not job_id:
             return
-        jobs = self._jobs.setdefault(self.key(host), deque(maxlen=_SECRET_MEMORY_SIZE))
-        if str(job_id) not in jobs:
-            jobs.append(str(job_id))
+        found = self._values(values)
+        starts = self._starts_of(host)
+        newest = starts[-1] if starts else None
+        if newest is not None and newest.job_id is None and newest.values == found:
+            newest.job_id = str(job_id)
+        else:
+            starts.append(_Start(str(job_id), found))
 
     def knows_job(self, host: object, job_id: object) -> bool:
-        """``True`` when this MEHO started the job *job_id* on *host*."""
-        return bool(job_id) and str(job_id) in self._jobs.get(self.key(host), ())
+        """``True`` when this MEHO started the job *job_id* on *host* and still holds its values."""
+        if not job_id:
+            return False
+        wanted = str(job_id)
+        return any(start.job_id == wanted for start in self._starts.get(self.key(host), ()))
 
     def clear(self) -> None:
-        self._values.clear()
-        self._jobs.clear()
+        self._starts.clear()
 
 
 def _error_texts(error: Mapping[str, Any]) -> list[str]:

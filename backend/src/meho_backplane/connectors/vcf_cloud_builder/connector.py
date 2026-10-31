@@ -35,11 +35,13 @@ Secrets in later reads
 
 A start sends the spec's passwords and licence keys; a vendor error text of
 a later status read can echo one. The connector remembers, by the target's
-host, the values each start read and the ids of the jobs it started. A status
-read of a job it started, and the flight-recorder body of that answer, hide
-the remembered values. A status read of a job it did not start (one from
-before a restart of MEHO, or started by someone else) shows no vendor error
-text at all, because MEHO cannot know which values such a text may echo.
+host, each start: the values it read and the id of the job it created. A
+status read of such a job, and the flight-recorder body of that answer, hide
+the remembered values. A status read of a job it did not start with a spec
+it holds (one from before a restart of MEHO, started by someone else, or
+retried without a spec after a restart) shows no vendor error text at all,
+because MEHO cannot know which values such a text may echo. Only the newest
+starts are kept; a job leaves the memory together with its values.
 """
 
 from __future__ import annotations
@@ -123,12 +125,18 @@ class CloudBuilderConnector(HttpConnector):
         """The secret values the starts sent to *target* since MEHO started."""
         return self._secret_memory.known(target.host)
 
-    def remember_job(self, target: InstallerTargetLike, job_id: object) -> None:
-        """Note that a start of this MEHO created the job *job_id* on *target*."""
-        self._secret_memory.remember_job(target.host, job_id)
+    def remember_job(
+        self, target: InstallerTargetLike, job_id: object, values: Iterable[str]
+    ) -> None:
+        """Note that a start of this MEHO created the job *job_id* on *target*.
+
+        *values* are the secrets of the spec it sent. They stay in memory
+        together with the id, so the job is trusted only while they are known.
+        """
+        self._secret_memory.remember_job(target.host, job_id, values)
 
     def knows_job(self, target: InstallerTargetLike, job_id: object) -> bool:
-        """``True`` when a start of this MEHO created the job *job_id* on *target*."""
+        """``True`` when this MEHO started *job_id* on *target* and still holds its secrets."""
         return self._secret_memory.knows_job(target.host, job_id)
 
     def trace_response_body(self, response: httpx.Response) -> Any:

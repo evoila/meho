@@ -26,6 +26,12 @@ Each change runs three steps and returns all of them:
 A vendor error comes back in the answer (``start_failed`` with the vendor's
 text); a lost reply comes back as ``start_unknown``: the caller must read the
 status before it tries again. Steps that ran are not undone.
+
+An accepted start that sent a spec is remembered with the secrets of that
+spec, so later status reads can hide them. A retry without a spec is not: the
+job keeps the spec of its first start, and when this MEHO did not send it
+(for example before a restart), the status reads keep hiding every vendor
+error text.
 """
 
 from __future__ import annotations
@@ -262,8 +268,8 @@ async def _run_change(
     if stop is not None:
         return stop
     answer = await _start(connector, operator, run, plan.path, spec)
-    if answer["status"] == "accepted":
-        connector.remember_job(target, answer["job"]["id"])
+    if answer["status"] == "accepted" and spec is not None:
+        connector.remember_job(target, answer["job"]["id"], run.secrets)
     return answer
 
 

@@ -21,9 +21,10 @@ and the time, never ``failed``. MEHO keeps no job state between calls.
 A vendor error text of a check or a task can echo a value of the spec an
 earlier start sent. The status reads hide the secret values the connector
 remembers for the target, and every licence key by its shape. For a job this
-MEHO did not start (for example one started before a restart of MEHO) they
-hide every vendor error text, because MEHO cannot know which values it may
-echo (see :class:`~meho_backplane.connectors.vcf_cloud_builder._jobs.SecretMemory`).
+MEHO did not start with a spec it still holds (for example one started before
+a restart of MEHO, or retried without a spec after one) they hide every vendor
+error text, because MEHO cannot know which values it may echo (see
+:class:`~meho_backplane.connectors.vcf_cloud_builder._jobs.SecretMemory`).
 """
 
 from __future__ import annotations

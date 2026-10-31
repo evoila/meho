@@ -80,8 +80,10 @@ destructive op -- the governed-delete tier, decision
 ``storage_policy.delete``, the six #3339 teardown deletes
 (``network.portgroup.delete``, ``host.standard_portgroup.delete``,
 ``folder.delete``, ``datastore.file.delete``, ``content_library.delete``,
-``content_library.item.delete``), ``cluster.drs_rule.delete`` and the VM
-snapshot delete ``vm.snapshot.delete``. (The
+``content_library.item.delete``), ``cluster.drs_rule.delete``, the DRS group
+delete ``cluster.drs_group.delete`` and the VM snapshot delete
+``vm.snapshot.delete``. The DRS group member change
+``cluster.drs_group.members.set`` is ``caution``. (The
 ``caution`` tier is not writes-only:
 ``vm.guest.file.read`` above is a ``caution`` read / #3720.)
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
@@ -127,6 +129,12 @@ from meho_backplane.connectors.vmware_rest.composites._datastore_orphans import 
 )
 from meho_backplane.connectors.vmware_rest.composites._datastore_vsan import (
     datastore_vsan_folder_list_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_group import (
+    cluster_drs_group_members_set_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_group_delete import (
+    cluster_drs_group_delete_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
     cluster_drs_rule_delete_composite,
@@ -277,6 +285,10 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_snapshot_revert_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites.schemas import (
+    CLUSTER_DRS_GROUP_DELETE_PARAMETER_SCHEMA,
+    CLUSTER_DRS_GROUP_DELETE_RESPONSE_SCHEMA,
+    CLUSTER_DRS_GROUP_MEMBERS_SET_PARAMETER_SCHEMA,
+    CLUSTER_DRS_GROUP_MEMBERS_SET_RESPONSE_SCHEMA,
     CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA,
     CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA,
     CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA,
@@ -1260,8 +1272,8 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         summary="Add a DRS rule that runs a VM group on, or away from, a host group.",
         description=(
             "Creates a VM group, a host group and a DRS rule that keeps those VMs on those hosts, "
-            "or away from them, in one cluster change. A rule or group name that already exists "
-            "changes nothing. mandatory makes it a 'must' rule instead of a 'should' rule."
+            "or away from them, in one cluster change. With use_existing_groups it uses two "
+            "groups that exist and creates only the rule. A name already taken changes nothing."
         ),
         parameter_schema=CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA,
         response_schema=CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA,
@@ -1289,6 +1301,42 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="destructive",
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.cluster.drs_rule.delete"],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.cluster.drs_group.members.set",
+        handler=cluster_drs_group_members_set_composite,
+        summary="Add VMs or hosts to, or remove them from, an existing DRS group.",
+        description=(
+            "Adds VMs to, or removes VMs from, an existing DRS VM group, by name. Does the same "
+            "for hosts in a host group. The approval card shows what changes and which rules use "
+            "the group. Like 'govc cluster.group.change'."
+        ),
+        parameter_schema=CLUSTER_DRS_GROUP_MEMBERS_SET_PARAMETER_SCHEMA,
+        response_schema=CLUSTER_DRS_GROUP_MEMBERS_SET_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "write", "cluster", "drs", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS[
+            "vmware.composite.cluster.drs_group.members.set"
+        ],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.cluster.drs_group.delete",
+        handler=cluster_drs_group_delete_composite,
+        summary="Delete one DRS VM group or host group from a cluster, by name.",
+        description=(
+            "Deletes one DRS VM group or host group, found by name. The VMs and hosts stay. "
+            "Refused while a rule still uses the group. Destructive: a second person must always "
+            "approve it. Like 'govc cluster.group.remove'."
+        ),
+        parameter_schema=CLUSTER_DRS_GROUP_DELETE_PARAMETER_SCHEMA,
+        response_schema=CLUSTER_DRS_GROUP_DELETE_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "write", "cluster", "drs", "vi-json", "teardown", "destructive"],
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.cluster.drs_group.delete"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.resource_pool.create",

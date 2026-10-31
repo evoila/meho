@@ -33,7 +33,8 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `mongodb-wire-7` | `mongodb` | >=5,<9 | — |
 | `msad-ssh-2022.x` | `msad` | — | — |
 | `mssql-tds-2022.x` | `mssql` | >=13,<17 | — |
-| `nsx-rest-9.0` | `nsx` | >=4.0,<10.0 | generic |
+| `nsx-rest-4.2` | `nsx` | >=4.0,<9.0 | — |
+| `nsx-rest-9.0` | `nsx` | >=9.0,<10.0 | generic |
 | `pfsense-ssh-2.7` | `pfsense` | — | — |
 | `phpipam-rest-1.x` | `phpipam` | — | — |
 | `postgres-wire-16` | `postgres` | >=13,<18 | — |

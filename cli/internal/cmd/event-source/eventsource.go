@@ -213,6 +213,7 @@ func sendRequest(
 	}
 	req.Header.Set("Authorization", "Bearer "+bearer)
 	api.SetWorkRefHeader(req)
+	api.SetTenantHeader(req)
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")

@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 90 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 92 hand-authored composites
 that orchestrate cross-spec workflows: 20 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -22,7 +22,7 @@ read `datastore.file.list` / `#3432` + the vSAN folder list
 read `datastore.vsan.folder.list` / `#4022` + the orphan folder check
 `datastore.orphan_dirs` / `#3814` + the VM limit and
 reservation read `vm.resource_allocation.show` / `#3880` + the migration
-inventory read `vmware.migration.inventory`) and 70 write
+inventory read `vmware.migration.inventory`) and 72 write
 composites (G3.1-T6 / `#509`, incl. the five host membership changes
 `host.add` / `host.move` / `host.connect` / `host.disconnect` /
 `host.remove` (`#4349`, see **Host membership**), the three vCenter install changes
@@ -70,6 +70,8 @@ writes `content_library.create` + `content_library.item.upload` (see the
 `content_library.delete`, `content_library.item.delete`, plus the caution
 `datastore.dir.create` (see **Governed teardown deletes**), the destructive
 DRS rule delete `cluster.drs_rule.delete` (see **Governed DRS rule delete**), the
+DRS group writes `cluster.drs_group.members.set` (`caution`) and
+`cluster.drs_group.delete` (`destructive`) (see **Governed DRS group changes**), the
 CD drive add `vm.cdrom.add` (`dangerous`) and the VMware Tools installer unmount
 `vm.tools.installer.unmount` (`caution`) (see **VM hardware read, CD drive add and
 Tools installer unmount**), the content-library ISO mount and unmount
@@ -565,10 +567,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 90
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 92
   `_CompositeSpec` rows (20 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 53 dangerous/destructive
-  writes + 17 caution writes); each row carries its
+  cache-refresh read `datastore.refresh` — + 54 dangerous/destructive
+  writes + 18 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
   (`llm_instructions`) of the VM and folder writes and the VM allocation
@@ -1438,21 +1440,23 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 90 `vmware.composite.*` rows with
+   queued registrar and upserts: the 92 `vmware.composite.*` rows with
    `source_kind="composite"` — 20 reads (19 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 70 writes, all `requires_approval=True`
-   (41 `safety_level="dangerous"`; 17 `safety_level="caution"` —
+   service principals), and 72 writes, all `requires_approval=True`
+   (41 `safety_level="dangerous"`; 18 `safety_level="caution"` —
    `host.connect` / `#4349`, `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
    `vm.resource_allocation.set` / `#3880`, `datastore.dir.create` / `#3339`,
    `vm.tools.installer.unmount`, `vm.cdrom.mount_library_iso` +
    `vm.cdrom.unmount_library_iso`, `vm.snapshot.create`,
-   `content_library.create` + `content_library.item.upload`;
-   and 12 `safety_level="destructive"` — `vm.destroy` / `#3198`,
+   `content_library.create` + `content_library.item.upload`,
+   `cluster.drs_group.members.set`;
+   and 13 `safety_level="destructive"` — `vm.destroy` / `#3198`,
    `host.remove` / `#4349`, `namespace.delete`, `storage_policy.delete`, `cluster.drs_rule.delete`,
+   `cluster.drs_group.delete`,
    `vm.snapshot.delete`, and the six `#3339` teardown deletes) —
    plus the `vmware.host.usage` row with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
@@ -1838,7 +1842,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 90 composites (20 reads + 70 writes) land as `source_kind="composite"`
+The 92 composites (20 reads + 72 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1935,7 +1939,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 90 composites are hand-authored aggregators the connector ships as
+The 92 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -2063,7 +2067,9 @@ enum) are:
 | `cluster.patch` | `completed`, `stopped` (per-host vim maintenance `*_Task`s + the vLCM `software?action=apply&vmw-task=true` cis task, every task polled before the next step, #2970) |
 | `cluster.drs_rule.create` | `created`, `rule_exists`, `insufficient_vms`, `timeout` (idempotent on rule name — a duplicate `rule_exists` is refused before any write; `insufficient_vms` when fewer than two named VMs resolve to the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
 | `cluster.drs_rule.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present`, `timeout` (removes one rule of any type by name; `unchanged` when no rule has the name; `precondition_failed` when two or more rules share it, listed in `blockers`; `invalid_request` for an unknown cluster; `deleted` only after a new read of the rules misses the rule's key; a task *fault* raises `connector_error`) |
-| `cluster.drs_vm_host_rule.create` | `created`, `rule_exists`, `group_exists`, `insufficient_vms`, `insufficient_hosts`, `timeout` (#3505 VM-Host rule; rule + group names are idempotence keys refused before any write; `insufficient_*` when no VM / host name resolves in the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
+| `cluster.drs_vm_host_rule.create` | `created`, `rule_exists`, `group_exists`, `group_not_found`, `insufficient_vms`, `insufficient_hosts`, `timeout` (#3505 VM-Host rule; rule + group names are idempotence keys refused before any write; `insufficient_*` when no VM / host name resolves in the cluster; `group_not_found` when `use_existing_groups=true` and a group is missing; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
+| `cluster.drs_group.members.set` | `updated`, `unchanged`, `invalid_request`, `group_not_found`, `names_not_found`, `mismatch`, `timeout` (changes the members of one existing VM or host group; `names_not_found` when a name to add is not in the cluster, before any write; `updated` only after the group reads back with the planned members, else `mismatch`) |
+| `cluster.drs_group.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present`, `timeout` (removes one group by name; `precondition_failed` while a rule uses the group, the rules listed in `blockers`; `deleted` only after a new read no longer shows the group) |
 | `resource_pool.create` | `created`, `cluster_root_pool_unresolved`, `no_parent` (#3505; the REST `POST:/vcenter/resource-pool` create — `cluster_root_pool_unresolved` when the `cluster` convenience cannot read the cluster's root pool, `no_parent` when neither `parent` nor `cluster` is given, both before any write; read-back confirms the pool under the resolved parent) |
 | `resource_pool.delete` | `deleted`, `not_empty`, `delete_unverified` (#3505; `not_empty` refuses a pool with child pools / VMs unless `force=true` — the REST `DELETE` reparents children up to the parent; `delete_unverified` when the read-back still lists the pool) |
 | `folder.create` | `created`, `parent_not_found`, `ambiguous_parent` (synchronous `CreateFolder`; both resolution refusals happen before any write and carry an `error` issue, so the operation fails and the audit row reads `error`, #3588; `ambiguous_parent` lists `candidate_folders`, behind a result handle when oversized, #4223) |
@@ -2812,6 +2818,62 @@ hosts.
 Code: `composites/_drs_rule_delete.py`. The governed sub-op manifest
 (`RetrievePropertiesEx` + `ReconfigureComputeResource_Task`) is in
 `_governed_subops.py`.
+
+### Governed DRS group changes (`cluster.drs_group.members.set`, `cluster.drs_group.delete`)
+
+A DRS group is a named list of VMs (a VM group) or hosts (a host group) on one
+cluster. `cluster.drs_vm_host_rule.create` makes groups, and
+`cluster.drs_rule.delete` leaves them behind on purpose. These two ops change a
+group after that. Both use the same vim call as the DRS rule ops:
+`ReconfigureComputeResource_Task` with one `groupSpec` entry and
+`modify=true`. Both read the whole `configurationEx`, never a path into it.
+
+- **`cluster.drs_group.members.set`** (`caution` + `requires_approval=True`):
+  `add` and `remove` take VM names for a VM group, host names for a host
+  group. Names are looked up in the cluster (`GET /vcenter/vm` or
+  `/vcenter/host`, filtered by name and cluster). A name to add that is not in
+  the cluster refuses the whole call (`names_not_found`, nothing written). A
+  name to remove that is not in the group is skipped (`not_members`), so the
+  op is safe to run twice. vim `edit` replaces the whole member list, so the
+  handler sends the full new list (the same as `govc cluster.group.change`).
+  After the task it reads the group back: `updated` only when the members
+  match the plan, else `mismatch`.
+- **`cluster.drs_group.delete`** (`destructive` + `requires_approval=True`):
+  removes one group by name. `removeKey` is the group name, boxed as
+  `{"_typeName": "string", "_value": <name>}` (the `Any` discriminator maps
+  `string` to `PrimitiveString`; the body-shape reconcile lane checks it).
+  While a rule uses the group (a VM-Host rule's `vmGroupName` /
+  `affineHostGroupName` / `antiAffineHostGroupName`, or a dependency rule's
+  `vmGroup` / `dependsOnVmGroup`), it refuses before any write with
+  `precondition_failed`, and the rules are named in `blockers` and
+  `guidance`. No group with the name gives `unchanged`. The VMs and hosts stay.
+- **Member lists:** every result carries the whole member list
+  (`members_before` / `members` on `members.set`, `object.members` on the
+  delete, `resolved_vms` / `resolved_hosts` on the rule create), however
+  long; `read_names` reads every page. A result with a long list goes
+  through JSONFlux like any other: the reducer keeps it whole as a document
+  under a result handle, and `result_query` with `path` (for example
+  `/members`) pages the list. Only the approval cards cut a list to the
+  first 50 rows (`LIST_CAP`), with the full count next to it
+  (`member_count_before` / `added_count` / `removed_count`, `member_count`,
+  `total_vms` / `total_hosts`).
+- **Approval card:** both use the handler's own plan. `members.set` shows the
+  members before (names), what is added and removed (names), and the rules
+  that use the group. The delete shows the group, its members and the
+  blocking rules as its `blast_radius`.
+- **`drs_vm_host_rule.create` with `use_existing_groups=true`** makes no group:
+  it adds only the rule, on a VM group and a host group that already exist
+  (leave out `vms` and `hosts`; the schema `oneOf` enforces this). A missing
+  group, or a group of the other kind, gives `group_not_found` before any
+  write. `resolved_vms` / `resolved_hosts` list the groups' members by name
+  (the approval card cuts them to 50, with `total_vms` / `total_hosts`).
+  Making new groups stays the default.
+
+Code: `composites/_drs_group.py` (shared group reads + `members.set`),
+`composites/_drs_group_delete.py`, `composites/_drs_vm_host_rule_existing.py`
+(called from the create handler in `_write.py`). The governed sub-op
+manifests are in `_governed_subops.py`. All three are on `vmware-rest-8.0` and
+`vmware-rest-9.0`.
 
 ### VM snapshot operations (`vmware.snapshot.list`, `vm.snapshot.create` / `.delete` / `.revert`)
 
@@ -4532,6 +4594,55 @@ waits for approval; the shelf-gated lane checks every rule against the
 pinned `vcenter.yaml` and `vi-json.yaml` files) and `test_delete_names.py`
 (the vSAN prefixes and the `action=delete` query).
 
+### Stop, restart, disconnect, remediate and access calls wait for approval (#4328)
+
+These generic (ingested) vCenter calls now wait until a second person
+approves. Before, each was a `POST` or `PUT` at `caution` without approval,
+so a person's call ran at once (for example a guest reboot).
+
+`ingest_safety.py` (`VMWARE_STOP_RESTART_AND_REMEDIATE_WRITES`, checked by
+`is_vmware_stop_restart_or_remediate_write`) puts these in the `dangerous`
+risk level with `requires_approval: true` on the 8.0 and 9.0 catalogs. Every
+one is in both pinned `vcenter.yaml` files.
+
+| What it does | Operation id |
+|---|---|
+| Shut down, restart or put the guest on standby | `POST:/vcenter/vm/{vm}/guest/power?action=shutdown`, `?action=reboot`, `?action=standby` |
+| Power off or restart the vCenter appliance | `POST:/appliance/shutdown?action=poweroff`, `?action=reboot` |
+| Stop or restart a service | `POST:/appliance/services/{service}?action=stop`, `?action=restart`; `POST:/vcenter/services/{service}?action=stop`, `?action=restart` |
+| Turn SSH, the shell, the console or the DCUI on or off | `PUT:/appliance/access/ssh`, `/shell`, `/consolecli`, `/dcui` |
+| Disconnect a host | `POST:/vcenter/host/{host}?action=disconnect` |
+| Turn off a Supervisor | `POST:/vcenter/namespace-management/clusters/{cluster}?action=disable` |
+| Stage or apply a software image to a cluster or a host | `POST:/esx/settings/clusters/{cluster}/software?action=apply&vmw-task=true`, `?action=stage&vmw-task=true`; the same two for `/esx/settings/hosts/{host}/software` |
+| Install an appliance update | `POST:/appliance/update/pending/{version}?action=install` |
+
+The rule works like the one of #4973: with or without the `/api` mount, with
+any spelling of a path parameter, and the query must match exactly. So the
+shutdown `?action=cancel`, the service `?action=start`, the host
+`?action=connect`, the Supervisor `?action=enable`, the image
+`?action=check`, `?action=scan` and `?action=export`, and the update
+`?action=stage` and `?action=precheck` keep their level. A rule only raises a
+level; a row that is already `destructive` stays `destructive`.
+
+The rules are in the VMware floor, not in `safety_overlay` rules of
+`catalog.yaml`, like the other VMware rules (#3869, #4973). The floor runs on
+every ingest of the `vmware-rest` connector, also on a `--spec` ingest of the
+full vendor files.
+
+Typed operations that send these calls as sub-steps (for example `vm.power`
+with a `guest_*` action, the host software apply and the Supervisor
+disable) keep their own risk level and still wait for one approval only.
+
+**Running installs.** Rows already in the database change only on the next
+ingest. To get the new levels, run the catalog ingest again for `vmware/9.0`
+and `vmware/8.0` (the same `--spec` ingest of `vcenter.yaml` the install used
+before).
+
+Tests: `test_connectors_vmware_rest_stop_restart_approval.py` (a hand-made
+spec for 8.0 and 9.0, the other actions and reads that keep their level, no
+rule lowers a level; the shelf-gated lane checks every rule against the
+pinned 9.0 and 8.0 `vcenter.yaml` files).
+
 ### Folder list (`vmware.folder.list`)
 
 What an operator or agent can do now: list the folders of a vCenter with one
@@ -5606,8 +5717,9 @@ U2 and U3 files; the network list filters against the pinned 8.0 U3 and 9.0
   the vim API declares the property as the base type
   `ComputeResourceConfigInfo`, and `rule` / `group` / `drsConfig` exist only
   on the cluster type `ClusterConfigInfoEx`. So `cluster.drs_recommendations`,
-  `cluster.drs_rule.create`, `cluster.drs_vm_host_rule.create` and
-  `cluster.drs_rule.delete` read the whole object and pick the member in code
+  `cluster.drs_rule.create`, `cluster.drs_vm_host_rule.create`,
+  `cluster.drs_rule.delete` and the two `cluster.drs_group.*` ops read the
+  whole object and pick the member in code
   (`_write._cluster_config_items`; an absent `rule` / `group` array is an
   empty list, because vim leaves empty arrays out). The unit-test fakes
   (`tests/_vmware_cluster_config_fake.py`) answer a dotted

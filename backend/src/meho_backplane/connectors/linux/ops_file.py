@@ -15,11 +15,16 @@ Two ``safe`` reads over an operator-named, allow-list-confined path:
   allow-listed log file. Returns ``{rows, total, path}``; the row list
   spills to a ``result_query`` handle above threshold.
 
-Both confine the operator-named path with :func:`confine_read_path` (the
+Both check the operator-named path with :func:`confine_read_path` (the
 bind9 ``ensure_path_under_root`` mold) *before* constructing any command,
 and ``shlex.quote`` the confined path into a fixed command shape. No
 operator value reaches the shell unquoted; a traversal attempt is
 rejected before the host is touched.
+
+Then both ask the host for the real path (``realpath``, which follows
+every symlink), run :func:`confine_read_path` again on that real path,
+and read only the real path. So a symlink under an allowed root cannot
+point the read at a file outside the allowed roots or at a key file.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ from meho_backplane.connectors.linux.ops import (
     MAX_TAIL_LINES,
     SSH_TRANSPORT_NOTE,
     LinuxOp,
+    PathConfinementError,
     confine_read_path,
     normalise_json_rows,
 )
@@ -48,6 +54,7 @@ __all__ = [
     "MISSING_MARKER",
     "build_file_read_command",
     "build_log_tail_command",
+    "build_real_path_command",
     "linux_file_read",
     "linux_log_tail",
     "parse_file_read_output",
@@ -83,13 +90,54 @@ def _bounded_lines(raw: Any) -> int:
     return min(value, MAX_TAIL_LINES)
 
 
+def build_real_path_command(confined_path: str) -> str:
+    """Build the command that prints the real path of *confined_path*.
+
+    Prints the ``MISSING_MARKER`` when nothing exists at the path (also for
+    a symlink whose target is gone), otherwise the output of ``realpath``,
+    which follows every symlink. *confined_path* is already checked by
+    :func:`confine_read_path`; it is ``shlex.quote``d here too.
+    """
+    quoted = shlex.quote(confined_path)
+    return (
+        f"if [ -e {quoted} ]; then realpath -- {quoted}; "
+        f"else printf '%s\\n' {shlex.quote(MISSING_MARKER)}; fi"
+    )
+
+
+async def _real_read_path(
+    connector: LinuxSshConnector,
+    target: Target,
+    confined_path: str,
+    operator: Operator | None,
+) -> str | None:
+    """Return the checked real path of *confined_path*, or ``None`` when it is missing.
+
+    Asks the host for the real path and runs :func:`confine_read_path` on
+    it, so the file that is read is the file that was checked. Any doubt
+    (an error exit, no line, more than one line) raises
+    :class:`PathConfinementError`.
+    """
+    proc = await connector._run_command(
+        target, build_real_path_command(confined_path), operator=operator
+    )
+    stdout = getattr(proc, "stdout", None)
+    lines = stdout.splitlines() if isinstance(stdout, str) else []
+    if lines == [MISSING_MARKER]:
+        return None
+    if getattr(proc, "exit_status", None) != 0 or len(lines) != 1:
+        raise PathConfinementError(f"could not resolve the real path of {confined_path!r}")
+    return confine_read_path(lines[0])
+
+
 def build_file_read_command(confined_path: str, max_bytes: int) -> str:
     """Build the fixed single-round-trip ``file.read`` command.
 
     Emits the ``MISSING_MARKER`` when the path is absent, otherwise the
     file size (``stat -c %s``) then the ``CONTENT_MARKER`` then the first
-    *max_bytes* bytes (``head -c``). *confined_path* is already confined by
-    :func:`confine_read_path`; it is ``shlex.quote``d here defensively.
+    *max_bytes* bytes (``head -c``). *confined_path* is the real path,
+    already checked by :func:`confine_read_path`; it is ``shlex.quote``d
+    here defensively.
     *max_bytes* is an ``int`` (bounded by :func:`_bounded_max_bytes`), so
     it is interpolated as a number -- no operator string reaches the shell.
     """
@@ -172,14 +220,18 @@ async def linux_file_read(
     """Handler for ``linux.file.read`` -- read an allow-listed file's content.
 
     Confines the operator-named ``path`` under the read-root allow-list
-    (traversal rejected before any SSH), then ``head -c``-caps the content
-    at ``max_bytes`` (default 64 KiB, hard cap 1 MiB). Returns a scalar
-    dict; a missing file is reported with ``exists=False`` rather than an
-    error, so a missing first-boot sentinel is a legible day-0 signal.
+    (traversal rejected before any SSH), checks the real path the host
+    reports, then ``head -c``-caps the content of the real path at
+    ``max_bytes`` (default 64 KiB, hard cap 1 MiB). Returns a scalar dict;
+    a missing file is reported with ``exists=False`` rather than an error,
+    so a missing first-boot sentinel is a legible day-0 signal.
     """
     confined = confine_read_path(params["path"])
     max_bytes = _bounded_max_bytes(params.get("max_bytes"))
-    cmd = build_file_read_command(confined, max_bytes)
+    real_path = await _real_read_path(connector, target, confined, operator)
+    if real_path is None:
+        return parse_file_read_output(MISSING_MARKER, confined, max_bytes)
+    cmd = build_file_read_command(real_path, max_bytes)
     proc = await connector._run_command(target, cmd, operator=operator)
     raw = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     stdout = raw if isinstance(raw, str) else ""
@@ -195,13 +247,17 @@ async def linux_log_tail(
     """Handler for ``linux.log.tail`` -- tail an allow-listed log file.
 
     Confines the operator-named ``path`` under the read-root allow-list,
-    then runs ``tail -n <lines>`` (default 200, hard cap 10000). Returns
-    ``{rows, total, path}``; the row list spills to a ``result_query``
-    handle above the JSONFlux threshold.
+    checks the real path the host reports, then runs ``tail -n <lines>``
+    (default 200, hard cap 10000) on the real path. Returns
+    ``{rows, total, path}``; a missing file gives no rows. The row list
+    spills to a ``result_query`` handle above the JSONFlux threshold.
     """
     confined = confine_read_path(params["path"])
     lines = _bounded_lines(params.get("lines"))
-    cmd = build_log_tail_command(confined, lines)
+    real_path = await _real_read_path(connector, target, confined, operator)
+    if real_path is None:
+        return {**normalise_json_rows([]), "path": confined}
+    cmd = build_log_tail_command(real_path, lines)
     proc = await connector._run_command(target, cmd, operator=operator)
     raw = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     stdout = raw if isinstance(raw, str) else ""
@@ -216,8 +272,11 @@ _FILE_READ_OP = LinuxOp(
     description=(
         "Reads the content of a single file whose path is confined under "
         "the read-root allow-list (``/etc``, ``/var/log``, ``/var/lib``, "
-        "``/run``, ``/proc``, ``/sys``); a path outside every root, or one "
-        "using ``..`` traversal, is rejected before any SSH command runs. "
+        "``/run``, plus a few named ``/proc`` and ``/sys`` files such as "
+        "``/proc/meminfo``); a path outside every root, or one using ``..`` "
+        "traversal, is rejected before any SSH command runs. The real path "
+        "the host reports (symlinks followed) must pass the same check, and "
+        "files that hold keys, tokens or password hashes are refused. "
         "Content is capped at ``max_bytes`` (default 65536, hard cap "
         "1048576) via ``head -c``. Returns ``{path, content, truncated, "
         "size_bytes, exists}``; a missing file reports ``exists=false`` "
@@ -289,7 +348,9 @@ _LOG_TAIL_OP = LinuxOp(
         "Runs ``tail -n <lines>`` (default 200, hard cap 10000) over a log "
         "file whose path is confined under the read-root allow-list; a path "
         "outside every root, or using ``..`` traversal, is rejected before "
-        "any SSH command runs. Returns ``{rows, total, path}`` where each "
+        "any SSH command runs. The real path the host reports (symlinks "
+        "followed) must pass the same check, and files that hold keys, "
+        "tokens or password hashes are refused. Returns ``{rows, total, path}`` where each "
         "row is one log line. Above the JSONFlux threshold (50 rows / 4 KB) "
         "the rows spill to a handle paged with "
         "``result_query(handle_id, offset, limit)``."

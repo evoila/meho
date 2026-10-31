@@ -23,10 +23,13 @@ This module ships the shared scaffolding every op module reuses:
   return so the shared :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
   detects the single-real-list collection and spills over threshold.
 * Path confinement (:func:`ensure_path_under_root` / :func:`confine_read_path`
-  / :data:`LINUX_READ_ROOTS` / :class:`PathConfinementError`) -- the bind9
-  ``ensure_path_under_root`` lexical-confinement mold, generalised to an
-  allow-list of read roots for the operator-named paths ``file.read`` and
-  ``log.tail`` accept.
+  / :data:`LINUX_READ_ROOTS` / :data:`LINUX_READ_FILES` /
+  :data:`LINUX_READ_DENY` / :class:`PathConfinementError`) -- the bind9
+  ``ensure_path_under_root`` mold, generalised to an allow-list of read
+  roots plus named files, and a list of key and password files that are
+  never read, for the operator-named paths ``file.read`` and ``log.tail``
+  accept. The read handlers run the same check again on the real path
+  the host reports.
 * :data:`LINUX_WHEN_TO_USE_BY_GROUP` -- the curated per-group blurbs;
   :meth:`LinuxSshConnector.register_operations` fails closed
   (:class:`ValueError`) if a declared ``group_key`` lacks an entry here.
@@ -40,6 +43,7 @@ their handlers live in the per-domain op modules composed onto
 
 from __future__ import annotations
 
+import fnmatch
 import posixpath
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -48,6 +52,8 @@ __all__ = [
     "DEFAULT_FILE_READ_BYTES",
     "DEFAULT_TAIL_LINES",
     "LINUX_OPS",
+    "LINUX_READ_DENY",
+    "LINUX_READ_FILES",
     "LINUX_READ_ROOTS",
     "LINUX_WHEN_TO_USE_BY_GROUP",
     "MAX_FILE_READ_BYTES",
@@ -88,15 +94,84 @@ MAX_TAIL_LINES: int = 10000
 #: (``file.read`` / ``log.tail``) are confined under. These are the
 #: config / log / runtime-state trees a day-0 verification recipe reads --
 #: the first-boot completion sentinel, the first-boot log, a declared
-#: unit's drop-in -- never an arbitrary path. Confinement is lexical (the
-#: bind9 mold): a resolved path must equal or descend one of these roots.
+#: unit's drop-in -- never an arbitrary path. A path must equal or descend
+#: one of these roots, both as typed and as the real path the host reports
+#: after it follows every symlink.
 LINUX_READ_ROOTS: tuple[str, ...] = (
     "/etc",
     "/var/log",
     "/var/lib",
     "/run",
-    "/proc",
-    "/sys",
+)
+
+#: Single files outside :data:`LINUX_READ_ROOTS` the read ops may also
+#: read, mostly under ``/proc`` and ``/sys``. Only these files: the rest of
+#: ``/proc`` and ``/sys`` holds per-process state (environment, memory,
+#: open files) that is not a host check. ``/sys/class/dmi/id`` is a symlink
+#: to ``/sys/devices/virtual/dmi/id``, so both forms are listed, and
+#: ``/etc/os-release`` is a symlink to ``/usr/lib/os-release`` on most
+#: systemd hosts. Kernel parameters have their own op,
+#: ``linux.sysctl.read``.
+LINUX_READ_FILES: frozenset[str] = frozenset(
+    {
+        "/usr/lib/os-release",
+        "/proc/cmdline",
+        "/proc/cpuinfo",
+        "/proc/loadavg",
+        "/proc/meminfo",
+        "/proc/partitions",
+        "/proc/uptime",
+        "/proc/version",
+        "/sys/devices/system/cpu/online",
+        "/sys/firmware/efi",
+        "/sys/class/dmi/id/product_name",
+        "/sys/class/dmi/id/product_uuid",
+        "/sys/class/dmi/id/sys_vendor",
+        "/sys/devices/virtual/dmi/id/product_name",
+        "/sys/devices/virtual/dmi/id/product_uuid",
+        "/sys/devices/virtual/dmi/id/sys_vendor",
+    }
+)
+
+#: Files the read ops never return, even under an allowed root: password
+#: hashes, private keys, cluster tokens and kubeconfigs with client keys.
+#: Each entry is an :func:`fnmatch.fnmatchcase` pattern on the full path
+#: (``*`` also matches ``/``). The check runs on the typed path and on the
+#: real path.
+LINUX_READ_DENY: tuple[str, ...] = (
+    "/etc/shadow",
+    "/etc/shadow-",
+    "/etc/gshadow",
+    "/etc/gshadow-",
+    "/etc/security/opasswd",
+    "/etc/krb5.keytab",
+    "/etc/ssh/ssh_host_*_key",
+    "/etc/ssl/private/*",
+    "/etc/pki/tls/private/*",
+    "/etc/letsencrypt/*",
+    "/etc/kubernetes/*.conf",
+    "/etc/kubernetes/pki/*",
+    "/etc/rancher/*",
+    "/etc/NetworkManager/system-connections/*",
+    "/var/lib/kubelet/pki/*",
+    "/var/lib/rancher/*/server/token",
+    "/var/lib/rancher/*/server/node-token",
+    "/var/lib/rancher/*/server/agent-token",
+    "/var/lib/rancher/*/server/cred/*",
+    "/var/lib/rancher/*/server/tls/*",
+    "/var/lib/rancher/*/server/db/*",
+    "/var/lib/rancher/*/agent/*.kubeconfig",
+    "/var/lib/rancher/*/agent/*.key",
+    "/run/secrets/*",
+    # Key files by name, wherever they are.
+    "*.key",
+    "*.keytab",
+    "*.p12",
+    "*.pfx",
+    "*/id_rsa",
+    "*/id_dsa",
+    "*/id_ecdsa",
+    "*/id_ed25519",
 )
 
 
@@ -146,28 +221,52 @@ def ensure_path_under_root(requested: str, allowed_root: str) -> str:
     return candidate
 
 
-def confine_read_path(requested: str, roots: tuple[str, ...] = LINUX_READ_ROOTS) -> str:
-    """Return *requested* confined under the first matching root in *roots*, or raise.
+def _is_denied(path: str) -> bool:
+    """Return ``True`` when *path* matches an entry of :data:`LINUX_READ_DENY`."""
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in LINUX_READ_DENY)
 
-    Tries :func:`ensure_path_under_root` against each allowed root in
-    order and returns the first canonical path that lands inside one. An
-    operator-typed path must be absolute (a relative path would resolve
-    under whichever root happened to be tried first, which is
-    ambiguous) -- a non-absolute path is rejected. Raises
-    :class:`PathConfinementError` when the path lands outside every root.
+
+def confine_read_path(requested: str, roots: tuple[str, ...] = LINUX_READ_ROOTS) -> str:
+    """Return the canonical form of *requested* when the read ops may read it, or raise.
+
+    The path must be absolute (a relative path would resolve under
+    whichever root happened to be tried first, which is ambiguous). Its
+    canonical form must land under one of *roots* (see
+    :func:`ensure_path_under_root`) or be one of :data:`LINUX_READ_FILES`,
+    and must not match :data:`LINUX_READ_DENY`. Raises
+    :class:`PathConfinementError` otherwise.
+
+    The check is lexical. The read handlers call it once on the typed path
+    (before any SSH command) and once more on the real path the host
+    reports, so a symlink cannot point the read somewhere else.
     """
     if not isinstance(requested, str) or not requested.startswith("/"):
         raise PathConfinementError(
             f"read path {requested!r} must be an absolute POSIX path (starting with '/')"
         )
+    confined: str | None = None
     for root in roots:
         try:
-            return ensure_path_under_root(requested, root)
+            confined = ensure_path_under_root(requested, root)
+            break
         except PathConfinementError:
             continue
-    raise PathConfinementError(
-        f"path {requested!r} is outside every allowed read root {list(roots)!r}"
-    )
+    if confined is None:
+        if any(ch in requested for ch in ("\x00", "\n", "\r")):
+            raise PathConfinementError("requested path contains a control character; refusing")
+        canonical = posixpath.normpath(requested)
+        if canonical not in LINUX_READ_FILES:
+            raise PathConfinementError(
+                f"path {requested!r} is outside every allowed read root {list(roots)!r} "
+                "and is not one of the named single files"
+            )
+        confined = canonical
+    if _is_denied(confined):
+        raise PathConfinementError(
+            f"path {confined!r} holds keys, tokens or password hashes; "
+            "linux.file.read and linux.log.tail do not return it"
+        )
+    return confined
 
 
 def normalise_json_rows(rows: list[Any]) -> dict[str, Any]:
@@ -323,7 +422,8 @@ LINUX_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Use to read or write the CONTENT of an allow-listed config / log / "
         "sentinel file: ``linux.file.read`` ``head -c``-caps and returns the "
         "bytes of a path confined under the read-root allow-list (``/etc``, "
-        "``/var/log``, ``/var/lib``, ``/run``, ``/proc``, ``/sys``) -- the "
+        "``/var/log``, ``/var/lib``, ``/run``, plus a few named ``/proc`` and "
+        "``/sys`` files; key and password files are refused) -- the "
         "decisive day-0 signal is the first-boot completion sentinel a "
         "Tools-less appliance writes -- and ``linux.file.write`` atomically "
         "writes an allow-listed config file with a backup and an optional "

@@ -56,6 +56,16 @@ rules:
     action: redact
     reason: "kubeconfig blob in payload"
 
+  - name: strip-private-key-block
+    pattern: private_key_block
+    action: redact
+    reason: "PEM private key block"
+
+  - name: strip-password-hash
+    pattern: password_hash
+    action: redact
+    reason: "crypt(3) password hash, as in /etc/shadow"
+
   - name: mask-uuids
     pattern: uuid
     action: mask

@@ -201,6 +201,32 @@ _KUBECONFIG = re.compile(
     re.IGNORECASE,
 )
 
+# PEM private keys: from the ``-----BEGIN ... PRIVATE KEY-----`` line to
+# the matching ``END`` line (RSA, EC, OpenSSH, PKCS 8, encrypted, PGP
+# ``PRIVATE KEY BLOCK``). A key cut off before its ``END`` line (a read
+# with a byte cap) is redacted to the end of the text. Certificates and
+# public keys (``BEGIN CERTIFICATE`` / ``BEGIN PUBLIC KEY``) stay. The
+# lazy body stops at the first ``END`` line, and the ``BEGIN`` anchor is
+# rare, so the scan stays linear.
+_PRIVATE_KEY_BLOCK = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"
+    r"[\s\S]*?"
+    r"(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\Z)",
+)
+
+# crypt(3) password hashes as in ``/etc/shadow``: ``$<id>$`` then one to
+# four ``$``-ended fields (salt, cost, parameters) then the hash itself.
+# Covers MD5 (``$1$``), bcrypt (``$2a$`` / ``$2b$`` / ``$2x$`` / ``$2y$``),
+# SHA-256 / SHA-512 (``$5$`` / ``$6$``), scrypt (``$7$``), yescrypt
+# (``$y$``), gost-yescrypt (``$gy$``), SHA-1 (``$sha1$``) and Argon2.
+# Fields stop at ``:`` so the other ``/etc/shadow`` columns stay readable.
+# The look-behind keeps ``a$1$b`` style text in the middle of a word out.
+_PASSWORD_HASH = re.compile(
+    r"(?<![A-Za-z0-9$])\$(?:1|2[abxy]|5|6|7|y|gy|sha1|argon2(?:id|i|d))\$"
+    r"(?:[^\s$:'\"]{1,256}\$){1,4}"
+    r"[./A-Za-z0-9+=]{8,4096}",
+)
+
 # BIND key secrets (#4617) are not a regex. A ``secret`` word inside a
 # comment or a quoted key name looks like the keyword, and a regex
 # cannot tell the two apart; one review found a comment that let the
@@ -271,6 +297,8 @@ NAMED_PATTERNS: Final[dict[str, re.Pattern[str] | SecretFinder]] = {
     "jwt": _JWT,
     "api_key": _API_KEY,
     "kubeconfig": _KUBECONFIG,
+    "private_key_block": _PRIVATE_KEY_BLOCK,
+    "password_hash": _PASSWORD_HASH,
     "bind_key_secret": BIND_KEY_SECRET,
     "uuid": _UUID,
     "ipv4": _IPV4,

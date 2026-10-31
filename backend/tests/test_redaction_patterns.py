@@ -44,6 +44,8 @@ _EXPECTED_NAMES = {
     "jwt",
     "api_key",
     "kubeconfig",
+    "private_key_block",
+    "password_hash",
     "bind_key_secret",
     "uuid",
     "ipv4",
@@ -80,6 +82,39 @@ _PUNCT_DOLLAR_HASH_FIXTURE = "password" + ": " + "hunter2" + "$plus#tail"
 # BIND key block (#4617): ``secret "<base64>";`` inside a ``key`` statement.
 _BIND_KEY_SECRET_FIXTURE_POS = 'secret "' + "exampleTsig" + 'Value==";'
 _BIND_KEY_SECRET_FIXTURE_NEG = 'the secret is in the vault; key "rndc-key" { algorithm hmac-md5; };'
+# PEM blocks and crypt(3) hashes, built from fragments so secret scanners
+# do not flag this file.
+_PEM_DASHES = "-" * 5
+_PRIVATE_KEY_BLOCK_FIXTURE = (
+    _PEM_DASHES
+    + "BEGIN OPENSSH "
+    + "PRIVATE KEY"
+    + _PEM_DASHES
+    + "\nb3BlbnNzaC1rZXktdjEAAAAA\nZmFrZWtleWJvZHk=\n"
+    + _PEM_DASHES
+    + "END OPENSSH "
+    + "PRIVATE KEY"
+    + _PEM_DASHES
+)
+_PRIVATE_KEY_CUT_FIXTURE = (
+    _PEM_DASHES + "BEGIN " + "PRIVATE KEY" + _PEM_DASHES + "\nMIIEvQIBADANBgkqhkiG9w0B"
+)
+_CERTIFICATE_FIXTURE = (
+    _PEM_DASHES
+    + "BEGIN CERTIFICATE"
+    + _PEM_DASHES
+    + "\nMIIBszCCAVmgAwIBAgIU\n"
+    + _PEM_DASHES
+    + "END CERTIFICATE"
+    + _PEM_DASHES
+)
+_SHA512_HASH_FIXTURE = "$" + "6$" + "saltsalt$" + "abcdefghijklmnopqrstuvwxyz0123456789./ABCD"
+_SHADOW_LINE_FIXTURE = "root:" + _SHA512_HASH_FIXTURE + ":19000:0:99999:7:::"
+_BCRYPT_HASH_FIXTURE = "$" + "2b$" + "12$" + "abcdefghijklmnopqrstuvABCDEFGHIJKLMNOPQRSTUVWXYZ01234"
+_YESCRYPT_HASH_FIXTURE = "$" + "y$" + "j9T$" + "saltsaltsalt$" + "abcdefghijklmnopqrstuvwxyz012345"
+_ARGON2_HASH_FIXTURE = (
+    "$" + "argon2id$" + "v=19$" + "m=65536,t=3,p=4$" + "bXlzYWx0eHk$" + "aGFzaGhhc2hoYXNoaGFzaA"
+)
 
 
 def test_catalog_lists_expected_patterns() -> None:
@@ -688,6 +723,17 @@ def test_get_pattern_unknown_raises() -> None:
             "build_hash=abcdef0123456789 (16 hex, not uuid-shaped)",
             False,
         ),
+        # private_key_block: PEM private keys, also when cut off
+        ("private_key_block", _PRIVATE_KEY_BLOCK_FIXTURE, True),
+        ("private_key_block", _PRIVATE_KEY_CUT_FIXTURE, True),
+        ("private_key_block", _CERTIFICATE_FIXTURE, False),
+        # password_hash: crypt(3) hashes as in /etc/shadow
+        ("password_hash", _SHADOW_LINE_FIXTURE, True),
+        ("password_hash", _BCRYPT_HASH_FIXTURE, True),
+        ("password_hash", _YESCRYPT_HASH_FIXTURE, True),
+        ("password_hash", _ARGON2_HASH_FIXTURE, True),
+        ("password_hash", "daemon:*:19000:0:99999:7:::", False),
+        ("password_hash", 'echo "$1$2" costs $6 per month', False),
         # ipv4: dotted quad with valid 0-255 octets
         (
             "ipv4",
@@ -794,6 +840,10 @@ _PATTERN_TEST_ROWS: list[tuple[str, str, bool]] = [
     ("kubeconfig", "apiVersion: v1\nkind: Pod\n", False),
     ("bind_key_secret", _BIND_KEY_SECRET_FIXTURE_POS, True),
     ("bind_key_secret", _BIND_KEY_SECRET_FIXTURE_NEG, False),
+    ("private_key_block", _PRIVATE_KEY_BLOCK_FIXTURE, True),
+    ("private_key_block", _CERTIFICATE_FIXTURE, False),
+    ("password_hash", _SHADOW_LINE_FIXTURE, True),
+    ("password_hash", "daemon:*:19000:0:99999:7:::", False),
     ("uuid", "tenant_id=12345678-1234-1234-1234-123456789abc", True),
     ("uuid", "build_hash=abcdef0123456789", False),
     ("ipv4", "192.168.1.42", True),
@@ -889,3 +939,20 @@ def test_complete_placeholder_keeps_its_label() -> None:
     result = redact(payload, _API_KEY_ONLY_POLICY)
     assert result.redacted == payload
     assert not result.manifest
+
+
+def test_default_policy_redacts_shadow_hash_and_keeps_the_other_columns() -> None:
+    """The default policy hides the hash; the user name and dates stay readable."""
+    policy = load_policy_yaml(DEFAULT_POLICY_PACKAGE, DEFAULT_POLICY_RESOURCE)
+    result = redact(_SHADOW_LINE_FIXTURE + "\ndaemon:*:19000:0:99999:7:::", policy)
+    assert result.redacted == (
+        "root:[REDACTED:password_hash]:19000:0:99999:7:::\ndaemon:*:19000:0:99999:7:::"
+    )
+
+
+def test_default_policy_redacts_private_key_block_and_keeps_certificates() -> None:
+    """A private key block is hidden whole; a certificate next to it stays."""
+    policy = load_policy_yaml(DEFAULT_POLICY_PACKAGE, DEFAULT_POLICY_RESOURCE)
+    text = _CERTIFICATE_FIXTURE + "\n" + _PRIVATE_KEY_BLOCK_FIXTURE + "\ntail"
+    result = redact(text, policy)
+    assert result.redacted == _CERTIFICATE_FIXTURE + "\n[REDACTED:private_key_block]\ntail"

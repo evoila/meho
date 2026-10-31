@@ -51,6 +51,7 @@ from meho_backplane.connectors.linux.connector import (
     parse_os_release,
 )
 from meho_backplane.connectors.linux.ops import (
+    LINUX_READ_FILES,
     LINUX_READ_ROOTS,
     LINUX_WHEN_TO_USE_BY_GROUP,
     PathConfinementError,
@@ -61,6 +62,7 @@ from meho_backplane.connectors.linux.ops import (
 from meho_backplane.connectors.linux.ops_file import (
     build_file_read_command,
     build_log_tail_command,
+    build_real_path_command,
 )
 from meho_backplane.connectors.linux.ops_firewall import parse_firewall_output
 from meho_backplane.connectors.linux.ops_host import (
@@ -413,21 +415,27 @@ async def test_about_unreachable_raises_connector_error() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _real(path: str) -> Any:
+    """The answer of the real-path command: one line with the real path."""
+    return _proc(stdout=path + "\n")
+
+
 @pytest.mark.asyncio
 async def test_file_read_returns_content_and_confines_path() -> None:
     connector = LinuxSshConnector()
     stdout = "42\n===MEHO_CONTENT===\nsentinel-ok\n"
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
-        mock_cmd.return_value = _proc(stdout=stdout)
+        mock_cmd.side_effect = [_real("/var/lib/firstboot.done"), _proc(stdout=stdout)]
         result = await connector.file_read(_TARGET, {"path": "/var/lib/firstboot.done"})
     assert result["path"] == "/var/lib/firstboot.done"
     assert result["content"] == "sentinel-ok\n"
     assert result["size_bytes"] == 42
     assert result["exists"] is True
     assert result["truncated"] is False
-    cmd = _cmd_of(mock_cmd)
-    assert shlex.quote("/var/lib/firstboot.done") in cmd
-    assert "head -c 65536" in cmd
+    first, second = (call.args[1] for call in mock_cmd.await_args_list)
+    assert first == build_real_path_command("/var/lib/firstboot.done")
+    assert shlex.quote("/var/lib/firstboot.done") in second
+    assert "head -c 65536" in second
 
 
 @pytest.mark.asyncio
@@ -439,6 +447,8 @@ async def test_file_read_missing_file_reports_absent() -> None:
     assert result["exists"] is False
     assert result["content"] == ""
     assert result["size_bytes"] is None
+    # Nothing to read: only the real-path command ran.
+    assert mock_cmd.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -446,10 +456,69 @@ async def test_file_read_truncated_when_size_exceeds_cap() -> None:
     connector = LinuxSshConnector()
     stdout = "999999\n===MEHO_CONTENT===\nfirst-chunk"
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
-        mock_cmd.return_value = _proc(stdout=stdout)
+        mock_cmd.side_effect = [_real("/var/log/syslog"), _proc(stdout=stdout)]
         result = await connector.file_read(_TARGET, {"path": "/var/log/syslog", "max_bytes": 10})
     assert result["truncated"] is True
-    assert "head -c 10" in _cmd_of(mock_cmd)
+    assert "head -c 10" in mock_cmd.await_args_list[1].args[1]
+
+
+@pytest.mark.asyncio
+async def test_file_read_reads_the_real_path_of_a_symlink() -> None:
+    # /etc/resolv.conf is often a symlink into /run; the read uses the real path.
+    connector = LinuxSshConnector()
+    stdout = "10\n===MEHO_CONTENT===\nnameserver\n"
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [
+            _real("/run/systemd/resolve/stub-resolv.conf"),
+            _proc(stdout=stdout),
+        ]
+        result = await connector.file_read(_TARGET, {"path": "/etc/resolv.conf"})
+    assert result["path"] == "/etc/resolv.conf"
+    assert result["content"] == "nameserver\n"
+    read_cmd = mock_cmd.await_args_list[1].args[1]
+    assert shlex.quote("/run/systemd/resolve/stub-resolv.conf") in read_cmd
+    assert "/etc/resolv.conf" not in read_cmd
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "real_path",
+    [
+        "/root/.ssh/authorized_keys",
+        "/home/user/notes.txt",
+        "/proc/1/environ",
+        "/etc/shadow",
+        "/etc/ssh/ssh_host_ed25519_key",
+    ],
+)
+async def test_file_read_refuses_a_real_path_that_fails_the_check(real_path: str) -> None:
+    # The typed path is allowed, but the host says it is a symlink to real_path.
+    connector = LinuxSshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _real(real_path)
+        with pytest.raises(PathConfinementError):
+            await connector.file_read(_TARGET, {"path": "/var/lib/app/link"})
+    # Only the real-path command ran; the file itself was never read.
+    assert mock_cmd.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer",
+    [
+        _proc(stdout="", exit_status=1),
+        _proc(stdout="/var/lib/a\n/var/lib/b\n"),
+        _proc(stdout="/var/lib/a\n", exit_status=1),
+    ],
+    ids=["error-exit", "two-lines", "line-with-error-exit"],
+)
+async def test_file_read_refuses_when_the_real_path_is_unclear(answer: Any) -> None:
+    connector = LinuxSshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = answer
+        with pytest.raises(PathConfinementError):
+            await connector.file_read(_TARGET, {"path": "/var/lib/app/file"})
+    assert mock_cmd.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -462,11 +531,22 @@ async def test_file_read_rejects_traversal_before_ssh() -> None:
 
 
 @pytest.mark.asyncio
-async def test_file_read_rejects_path_outside_allowlist() -> None:
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/tmp/evil",
+        "/etc/shadow",
+        "/etc/ssh/ssh_host_rsa_key",
+        "/proc/self/environ",
+        "/sys/kernel/debug/x",
+        "/var/lib/rancher/rke2/server/token",
+    ],
+)
+async def test_file_read_rejects_path_outside_allowlist(path: str) -> None:
     connector = LinuxSshConnector()
     run_mock = AsyncMock()
     with patch.object(connector, "_run_command", run_mock), pytest.raises(PathConfinementError):
-        await connector.file_read(_TARGET, {"path": "/tmp/evil"})
+        await connector.file_read(_TARGET, {"path": path})
     run_mock.assert_not_awaited()
 
 
@@ -479,12 +559,15 @@ async def test_file_read_rejects_path_outside_allowlist() -> None:
 async def test_log_tail_returns_rows_total_envelope() -> None:
     connector = LinuxSshConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
-        mock_cmd.return_value = _proc(stdout="line1\nline2\nline3\n")
+        mock_cmd.side_effect = [
+            _real("/var/log/cloud-init.log"),
+            _proc(stdout="line1\nline2\nline3\n"),
+        ]
         result = await connector.log_tail(_TARGET, {"path": "/var/log/cloud-init.log", "lines": 3})
     assert result["rows"] == ["line1", "line2", "line3"]
     assert result["total"] == 3
     assert result["path"] == "/var/log/cloud-init.log"
-    cmd = _cmd_of(mock_cmd)
+    cmd = mock_cmd.await_args_list[1].args[1]
     assert "tail -n 3" in cmd
     assert shlex.quote("/var/log/cloud-init.log") in cmd
 
@@ -493,9 +576,29 @@ async def test_log_tail_returns_rows_total_envelope() -> None:
 async def test_log_tail_default_lines_and_confinement() -> None:
     connector = LinuxSshConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
-        mock_cmd.return_value = _proc(stdout="")
+        mock_cmd.side_effect = [_real("/var/log/syslog"), _proc(stdout="")]
         await connector.log_tail(_TARGET, {"path": "/var/log/syslog"})
-    assert "tail -n 200" in _cmd_of(mock_cmd)
+    assert "tail -n 200" in mock_cmd.await_args_list[1].args[1]
+
+
+@pytest.mark.asyncio
+async def test_log_tail_missing_file_gives_no_rows() -> None:
+    connector = LinuxSshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="===MEHO_FILE_MISSING===\n")
+        result = await connector.log_tail(_TARGET, {"path": "/var/log/none.log"})
+    assert result == {"rows": [], "total": 0, "path": "/var/log/none.log"}
+    assert mock_cmd.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_log_tail_refuses_a_real_path_outside_the_roots() -> None:
+    connector = LinuxSshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _real("/root/.bash_history")
+        with pytest.raises(PathConfinementError):
+            await connector.log_tail(_TARGET, {"path": "/var/log/link.log"})
+    assert mock_cmd.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -893,7 +996,9 @@ def test_ensure_path_under_root_rejects_control_bytes() -> None:
 
 def test_confine_read_path_tries_every_root() -> None:
     assert confine_read_path("/var/log/syslog") == "/var/log/syslog"
-    assert confine_read_path("/proc/1/cmdline") == "/proc/1/cmdline"
+    assert confine_read_path("/run/systemd/resolve/resolv.conf") == (
+        "/run/systemd/resolve/resolv.conf"
+    )
     with pytest.raises(PathConfinementError):
         confine_read_path("/home/user/x")
     # A relative path is ambiguous across roots → rejected.
@@ -902,7 +1007,74 @@ def test_confine_read_path_tries_every_root() -> None:
 
 
 def test_confine_read_path_roots_are_the_documented_set() -> None:
-    assert LINUX_READ_ROOTS == ("/etc", "/var/log", "/var/lib", "/run", "/proc", "/sys")
+    assert LINUX_READ_ROOTS == ("/etc", "/var/log", "/var/lib", "/run")
+
+
+def test_confine_read_path_allows_only_named_proc_and_sys_files() -> None:
+    assert confine_read_path("/proc/meminfo") == "/proc/meminfo"
+    assert confine_read_path("/sys/class/dmi/id/product_uuid") == "/sys/class/dmi/id/product_uuid"
+    # The real path of the dmi symlink is on the list too.
+    assert confine_read_path("/sys/devices/virtual/dmi/id/product_uuid") == (
+        "/sys/devices/virtual/dmi/id/product_uuid"
+    )
+    # The real path of /etc/os-release on most systemd hosts.
+    assert confine_read_path("/usr/lib/os-release") == "/usr/lib/os-release"
+    for path in ("/proc/1/cmdline", "/proc/self/environ", "/sys/kernel/x", "/etc/../proc/1/mem"):
+        with pytest.raises(PathConfinementError):
+            confine_read_path(path)
+    with pytest.raises(PathConfinementError):
+        confine_read_path("/proc/meminfo\n")
+
+
+def test_confine_read_path_keeps_the_inventory_reads() -> None:
+    # The host inventory reads these files with linux.file.read.
+    from meho_backplane.connectors.inventory.source_hosts import LINUX_FILES
+
+    for path in LINUX_FILES.values():
+        assert confine_read_path(path) == path
+        if path.startswith(("/proc/", "/sys/")):
+            assert path in LINUX_READ_FILES
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/etc/shadow",
+        "/etc/gshadow-",
+        "/etc/ssh/ssh_host_ecdsa_key",
+        "/etc/ssl/private/server.pem",
+        "/etc/kubernetes/admin.conf",
+        "/etc/kubernetes/pki/ca.key",
+        "/etc/rancher/rke2/rke2.yaml",
+        "/var/lib/rancher/rke2/server/node-token",
+        "/var/lib/rancher/k3s/server/tls/server-ca.key",
+        "/var/lib/kubelet/pki/kubelet-client-current.pem",
+        "/var/lib/app/tls/server.key",
+        "/var/lib/app/.ssh/id_ed25519",
+        "/run/secrets/db-password",
+    ],
+)
+def test_confine_read_path_refuses_key_and_password_files(path: str) -> None:
+    with pytest.raises(PathConfinementError, match="keys, tokens or password hashes"):
+        confine_read_path(path)
+
+
+def test_confine_read_path_keeps_public_files_near_the_refused_ones() -> None:
+    for path in (
+        "/etc/passwd",
+        "/etc/group",
+        "/etc/ssh/ssh_host_ed25519_key.pub",
+        "/etc/ssh/sshd_config",
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/var/lib/rancher/rke2/agent/logs/kubelet.log",
+    ):
+        assert confine_read_path(path) == path
+
+
+def test_build_real_path_command_quotes_the_path() -> None:
+    cmd = build_real_path_command("/var/log/a b;x.log")
+    assert f"realpath -- {shlex.quote('/var/log/a b;x.log')}" in cmd
+    assert "===MEHO_FILE_MISSING===" in cmd
 
 
 # ---------------------------------------------------------------------------

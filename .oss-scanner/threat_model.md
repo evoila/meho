@@ -130,7 +130,9 @@ Kubernetes cluster.
       a character allowlist (`connectors/linux/ops_write.py`).
     - Linux file paths: reads and writes are limited to fixed root
       folders (`confine_read_path`, `confine_write_path` in
-      `connectors/linux/`).
+      `connectors/linux/`). Reads also check the real path the host
+      reports after it follows symlinks, and refuse key and password
+      files (`LINUX_READ_DENY`).
     - PowerShell runs over SSH with `-EncodedCommand`, and values are
       single-quoted (`connectors/_shared/pwsh.py`). Used by the Windows,
       Active Directory, DNS, failover cluster and Hyper-V connectors.

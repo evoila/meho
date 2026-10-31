@@ -63,6 +63,10 @@ that hand-code a path:
   :data:`_PATHS_METHODS`. The ``/oauth/*`` token endpoints are
   provider-plane by :func:`plane_for_path`, so they sit in the
   evidenced exclusion with the rest of the provider plane.
+* :mod:`~meho_backplane.connectors.vcf_automation._infra_paths` — the cloud
+  account, cloud zone, profile and project paths this connector shares with
+  vRA 8, each mapped to its method in :mod:`tests._vra_infra_paths`. They are
+  ``/iaas/api/*`` (tenant plane), so they are checked against ``vra-iaas.json``.
 * :mod:`~meho_backplane.connectors.vcf_automation._routing` — the three
   ``*_SESSION_PATH`` login endpoints (all POSTed by ``._auth``; the CSP
   token mint is the #3865 VCFA 9.1 fallback) and
@@ -95,6 +99,7 @@ from meho_backplane.connectors.vcf_automation._routing import plane_for_path
 from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
 from meho_backplane.connectors.vcf_automation.feature_flag_ops import VCFA_FEATURE_FLAG_OPS
 from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
+from meho_backplane.connectors.vcf_automation.infra_ops import VCFA_INFRA_OPS
 from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
 from meho_backplane.connectors.vcf_automation.provisioning_ops import VCFA_PROVISIONING_OPS
 from meho_backplane.connectors.vcf_automation.typed_ops import (
@@ -102,6 +107,7 @@ from meho_backplane.connectors.vcf_automation.typed_ops import (
     provider_regions_path,
 )
 from tests._spec_shelf import assert_op_ids_served, require_shelf_spec
+from tests._vra_infra_paths import EXPECTED_INFRA_OP_IDS, infra_op_ids, infra_path_constants
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -224,6 +230,7 @@ def _declared_op_ids() -> set[str]:
                 "map the new constant's HTTP method there consciously so the "
                 "reconcile keeps covering it."
             )
+    declared |= infra_op_ids()
     return declared
 
 
@@ -266,6 +273,7 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
         *_path_constants(_typed_ops_module).values(),
         *_path_constants(_paths_module).values(),
         *_path_constants(_routing_module).values(),
+        *infra_path_constants().values(),
     }
     unswept = {
         op.op_id: op.path
@@ -276,6 +284,7 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
             *VCFA_NETWORK_OPS,
             *VCFA_DEPLOY_OPS,
             *VCFA_FEATURE_FLAG_OPS,
+            *VCFA_INFRA_OPS,
         )
         if op.path not in swept
     }
@@ -352,6 +361,8 @@ def test_vcfa_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/cloudapi/1.0.0/featureFlags",
         "GET:/cloudapi/1.0.0/featureFlags/{id}",
         "PUT:/cloudapi/1.0.0/featureFlags/{id}",
+        # Cloud accounts, cloud zones, profiles and projects (shared with vRA 8).
+        *EXPECTED_INFRA_OP_IDS,
     }
 
 

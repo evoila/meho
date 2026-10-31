@@ -60,6 +60,19 @@ on a **fresh boot with zero catalog ingest**.
 | `vcfa-vra8-inventory` | `vcfa.vra8.project.list`, `.deployment.list`, `.deployment.get`, `.about` |
 | `vcfa-vra8-content` | `vcfa.vra8.blueprint.list`, `.catalog-item.list` |
 | `vcfa-vra8-api-files` | `vcfa.vra8.api_file.get` (see [API description files](#api-description-files-vcfavra8api_fileget) below) |
+| `vcfa-vra8-infra` | `vcfa.vra8.cloud_account.list`, `.cloud_account.create`, `.cloud_account.delete`, `.zone.list`, `.zone.set`, `.flavor_profile.list`, `.flavor_profile.set`, `.network_profile.list`, `.storage_profile.list`, `.project.members.set`, `.project.create` (see below) |
+
+**Infrastructure ops (group `vcfa-vra8-infra`).** Cloud accounts, cloud zones,
+flavor, network and storage profiles, project create and project members. They
+are written once for Aria Automation 8.18 and VCF Automation 9 (same IaaS API)
+in `connectors/vcf_automation/infra_ops.py`, `_infra.py` and
+`_infra_changes.py`; `connectors/vra8/infra_ops.py` registers them here with the
+`vcfa.vra8` prefix, and the connector has one shim per op. Every change waits for
+a person's approval; `cloud_account.delete` is destructive and needs a preview
+first. The cloud account password comes from Vault (`password_secret_ref`) and
+is never in a result. The table with each op, what it returns and its versions is
+in [connectors-vcf-automation.md](connectors-vcf-automation.md) ("Infrastructure").
+The reconcile lane checks the shared paths against the pinned `vra-iaas.json`.
 
 Op ids are namespaced `vcfa.vra8.*` (distinct from the modern impl's
 `vcfa.provider.*` / `vcfa.tenant.*`): the two impls publish different read surfaces

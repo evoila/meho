@@ -404,6 +404,66 @@ handlers, the org-create check and the park-time preview are in
   (`change` / `unchanged` / `invalid_request`). Without a connector it shows
   `would: set_if_different` and no current state.
 
+**Infrastructure: cloud accounts, cloud zones, profiles, project members.**
+Aria Automation 8.18 and a VM Apps org of VCF Automation 9 serve the same IaaS
+API, so these ops are written once and registered on both connectors: as
+`vcfa.tenant.*` here (group `vcfa-tenant-infra`) and as `vcfa.vra8.*` on
+`vcfa-vra8-8.0` (group `vcfa-vra8-infra`). Metadata is in `infra_ops.py`,
+`_infra_specs.py` and `_infra_op_base.py`; handlers are in `_infra.py` (reads,
+cloud accounts, the remove preview) and `_infra_changes.py` (zone, flavor
+profile, members, project create); paths are in `_infra_paths.py`. Every call
+sends `apiVersion=2021-07-15`. Each op has the call on every version its
+connector covers, so no op needs a version check.
+
+| op_id (after `vcfa.tenant.` / `vcfa.vra8.`) | what it does | returns | risk level / approval | versions | wire |
+|---|---|---|---|---|---|
+| `cloud_account.list` | Cloud accounts: type, host name, regions, state | `{items, totalElements}`; no credentials | safe | 8.18, 9.x | `GET /iaas/api/cloud-accounts` |
+| `cloud_account.create` | Add a vCenter or NSX account; password from Vault (`password_secret_ref`) | `{status, cloud_account, request, guidance}` | dangerous, approval | 8.18, 9.x | name check, then `POST /iaas/api/cloud-accounts-vsphere` or `-nsx-t` |
+| `cloud_account.delete` | Remove a cloud account | `{status, request, guidance}` | destructive, approval + preview | 8.18, 9.x | `DELETE /iaas/api/cloud-accounts/{id}` |
+| `zone.list` (vRA 8 only; 9.x has `vcfa.tenant.zone.list`) | Cloud zones: region, placement policy, compute tags, tags | `{items, totalElements}` | safe | 8.18 | `GET /iaas/api/zones` |
+| `zone.set` | Create a cloud zone, or change one | `{status, zone, changed, guidance}` | dangerous, approval | 8.18, 9.x | `POST /iaas/api/zones`; `GET` + `PATCH /iaas/api/zones/{id}` |
+| `flavor_profile.list` | Flavor profiles per region with their flavors | `{items, totalElements}` | safe | 8.18, 9.x | `GET /iaas/api/flavor-profiles` |
+| `flavor_profile.set` | Create a flavor profile, or add, change or remove flavors | `{status, flavor_profile, changed, guidance}` | dangerous, approval | 8.18, 9.x | `POST /iaas/api/flavor-profiles`; `GET` + `PATCH /iaas/api/flavor-profiles/{id}` |
+| `network_profile.list` | Network profiles, their networks and IP ranges | `{items, totalElements}` | safe | 8.18, 9.x | `GET /iaas/api/network-profiles` + `GET /iaas/api/network-ip-ranges` |
+| `storage_profile.list` | Storage profiles per region | `{items, totalElements}` | safe | 8.18, 9.x | `GET /iaas/api/storage-profiles` |
+| `project.members.set` | Add or remove project members and administrators | `{status, project, changed, guidance}` | dangerous, approval | 8.18, 9.x | `GET` + `PATCH /iaas/api/projects/{id}` |
+| `project.create` (vRA 8 only; 9.x has `vcfa.tenant.project.create`) | Create a project with users, zones and network rules | `{status, project, guidance}` | caution, approval | 8.18 | name check, then `POST /iaas/api/projects` |
+
+- **Lists.** Each list is a flat list of rows under `items`. A list that the
+  vendor pages (cloud accounts, zones, network profiles) is read page by page
+  (200 rows a page, at most 50 pages) unless the caller gives `$top` or
+  `$skip`. MEHO stores a long list behind a result handle.
+- **Safe to run twice.** A create whose name exists answers `unchanged` and
+  sends nothing. A change reads the object first and sends only what differs;
+  when nothing differs it answers `unchanged`. `compute_ids` on `zone.set` is
+  always sent, because the zone read does not show it.
+- **Secrets.** The cloud account password is never a parameter. It is read
+  from Vault at `password_secret_ref` (mount and field as in the provisioning
+  ops) under the caller's identity, only when the approved call runs, and goes
+  only into the create body. A vendor error text that repeats it gets a marker
+  in its place. The cloud account list returns only the host name of the
+  account properties.
+- **Ids in URL paths** are checked (not empty, not `.` or `..`, also in the
+  schema) and percent-encoded.
+- **Remove preview.** `cloud_account.delete` is destructive: an agent is always
+  refused, a person calls `preview_operation` first and then `call_operation`
+  with the `preview_hash`. The preview reads the account and lists, as
+  `blast_radius.children`, the cloud zones and the flavor, network and storage
+  profiles whose `cloudAccountId` is the account. A missing account (404)
+  raises, so the preview is marked unavailable. A second remove of a gone
+  account answers `unchanged`.
+- **Project members.** The Task table named
+  `PATCH /project-service/api/projects/{id}/principals`. That call is in no
+  pinned API file, so the reconcile lanes could not check it. The op uses the
+  IaaS call instead: `PATCH /iaas/api/projects/{id}` with only the role lists
+  that change (`administrators`, `members`, `viewers`, `supervisors`) and the
+  project name. A user or group holds one role: adding it with a role takes it
+  out of the other lists.
+- **Reconcile.** Both lanes (`test_connectors_vcf_automation_spec_reconcile.py`
+  and `test_connectors_vra8_spec_reconcile.py`) map each `_infra_paths`
+  constant to its methods (`tests/_vra_infra_paths.py`) and check them against
+  the pinned `vra-iaas.json`.
+
 Source: `backend/src/meho_backplane/connectors/vcf_automation/`.
 
 The connector is **dual-plane**: a single registry triple covers both the

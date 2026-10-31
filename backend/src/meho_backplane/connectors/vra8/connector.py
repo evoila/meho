@@ -83,7 +83,14 @@ surface: ``vcfa.vra8.project.list`` / ``.deployment.list`` / ``.deployment.get``
 ``source_kind="typed"`` (:mod:`.typed_ops` / :mod:`.typed_reads`, per-op
 ``llm_instructions`` in :mod:`._llm_instructions`) so they dispatch on a fresh boot
 with **zero catalog ingest**. Set-shaped results are reduced to a JSONFlux handle by
-the dispatcher. A write surface is deliberately out of scope for this read core.
+the dispatcher.
+
+The infrastructure ops (group ``vcfa-vra8-infra``: cloud accounts, cloud zones,
+flavor, network and storage profiles, project create and members) are written once
+for Aria Automation 8 and VCF Automation 9 in
+:mod:`meho_backplane.connectors.vcf_automation.infra_ops`; the shims below call
+:mod:`meho_backplane.connectors.vcf_automation._infra` and ``._infra_changes``. Every
+change waits for approval.
 
 One more read, ``vcfa.vra8.api_file.get`` (:mod:`.api_file`, group ``vcfa-vra8-api-files``),
 reads one API description page or file the appliance serves, so the 8.18 files can be
@@ -469,6 +476,106 @@ class Vra8Connector(HttpConnector):
         from meho_backplane.connectors.vra8.api_file import vra8_api_file_get_impl
 
         return await vra8_api_file_get_impl(self, operator, target, params)
+
+    # ------------------------------------------------------------------
+    # Infrastructure: cloud accounts, cloud zones, profiles, project members.
+    # Shared with VCF Automation 9; handlers in ``vcf_automation._infra``
+    # and ``vcf_automation._infra_changes``, metadata in :mod:`.infra_ops`.
+    # ------------------------------------------------------------------
+
+    async def infra_cloud_account_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.cloud_account.list`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.cloud_account_list(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def infra_cloud_account_create(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.cloud_account.create`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.cloud_account_create(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def infra_cloud_account_delete(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.cloud_account.delete`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.cloud_account_delete(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def infra_zone_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.zone.list`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.zone_list(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def infra_zone_set(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.zone.set`` -- see ``vcf_automation._infra_changes``."""
+        from meho_backplane.connectors.vcf_automation import _infra_changes
+
+        return await _infra_changes.zone_set(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def infra_flavor_profile_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.flavor_profile.list`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.flavor_profile_list(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def infra_flavor_profile_set(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.flavor_profile.set`` -- see ``vcf_automation._infra_changes``."""
+        from meho_backplane.connectors.vcf_automation import _infra_changes
+
+        return await _infra_changes.flavor_profile_set(
+            self, operator, target, params, prefix="vcfa.vra8"
+        )
+
+    async def infra_network_profile_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.network_profile.list`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.network_profile_list(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def infra_storage_profile_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.storage_profile.list`` -- see ``vcf_automation._infra``."""
+        from meho_backplane.connectors.vcf_automation import _infra
+
+        return await _infra.storage_profile_list(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def infra_project_members_set(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.project.members.set`` -- see ``vcf_automation._infra_changes``."""
+        from meho_backplane.connectors.vcf_automation import _infra_changes
+
+        return await _infra_changes.project_members_set(
+            self, operator, target, params, prefix="vcfa.vra8"
+        )
+
+    async def infra_project_create(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.project.create`` -- see ``vcf_automation._infra_changes``."""
+        from meho_backplane.connectors.vcf_automation import _infra_changes
+
+        return await _infra_changes.project_create(
+            self, operator, target, params, prefix="vcfa.vra8"
+        )
 
     # ------------------------------------------------------------------
     # Dispatch-path session-recovery hooks (#2067 / #2396)

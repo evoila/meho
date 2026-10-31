@@ -84,6 +84,7 @@ from typing import Any, Final, Literal
 from packaging.version import InvalidVersion, Version
 
 from meho_backplane.connectors.resolver import resolve_target_version
+from meho_backplane.connectors.vcf_automation._infra_text import infra_when_to_use
 from meho_backplane.connectors.vcf_automation._op_schemas import (
     ABOUT_RESPONSE,
     IAAS_DEPLOYMENT_FIELDS,
@@ -268,6 +269,9 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "(vcfa.tenant.fabric_image.list), make it read new vCenter templates now "
         "(vcfa.tenant.cloud_account.enumerate_images), and add, re-point or remove one "
         "name (vcfa.tenant.image_profile.mapping.update; a person must approve it)."
+    ),
+    "vcfa-tenant-infra": infra_when_to_use(
+        "vcfa.tenant", "a VCF Automation 9 VM Apps org, on the tenant plane", with_vra8_only=False
     ),
 }
 

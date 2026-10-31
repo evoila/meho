@@ -33,6 +33,11 @@ unconfigured (the default sweep), so the always-on manifest pin below is the tes
 guard. Full evidence + activation trigger live in the ``vcfa-vra8`` entry of the
 standard doc's Evidenced-exclusions section.
 
+**Shelf-armed: the shared infrastructure calls.** The cloud account, cloud zone,
+profile and project calls this connector shares with VCF Automation
+(:mod:`tests._vra_infra_paths`) are pinned here too, and checked against the
+pinned ``vra-iaas.json`` of the shelf when it is set up.
+
 Dispatch-fidelity of each path is proven live-mocked in
 :mod:`tests.test_connectors_vra8_typed_reads` / :mod:`tests.test_connectors_vra8_auth`.
 """
@@ -42,6 +47,14 @@ from __future__ import annotations
 from meho_backplane.connectors.vra8 import _paths as _paths_module
 from meho_backplane.connectors.vra8 import api_file as _api_file
 from meho_backplane.connectors.vra8 import connector as _connector
+from tests._spec_shelf import assert_op_ids_served
+from tests._vra_infra_paths import (
+    EXPECTED_INFRA_OP_IDS,
+    IAAS_SPEC_DIR,
+    IAAS_SPEC_FILE,
+    infra_op_ids,
+    served_iaas_op_ids,
+)
 
 #: HTTP method per hand-coded path constant. The two login endpoints are POSTed
 #: (``._auth.vra8_login``); every read path (the ``/iaas/api/about`` fingerprint
@@ -181,3 +194,18 @@ def test_probe_constant_links_to_about_path() -> None:
     """
     assert _paths_module._ABOUT_PATH == "/iaas/api/about"
     assert "/iaas/api/about" in _connector._VRA8_PROBE_METHOD
+
+
+def test_shared_infra_op_id_manifest_is_pinned() -> None:
+    """Pin the infrastructure calls this connector shares with VCF Automation."""
+    assert infra_op_ids() == EXPECTED_INFRA_OP_IDS
+
+
+def test_shared_infra_paths_are_served_by_the_pinned_iaas_spec() -> None:
+    """Every shared infrastructure call is in the pinned vRA IaaS API file.
+
+    Skips when the spec shelf is not set up (``tests/_spec_shelf.py``); CI runs it.
+    """
+    assert_op_ids_served(
+        infra_op_ids(), served_iaas_op_ids(), spec_label=f"{IAAS_SPEC_DIR}/{IAAS_SPEC_FILE}"
+    )

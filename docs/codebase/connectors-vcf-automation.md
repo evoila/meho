@@ -404,6 +404,96 @@ handlers, the org-create check and the park-time preview are in
   (`change` / `unchanged` / `invalid_request`). Without a connector it shows
   `would: set_if_different` and no current state.
 
+**Regions and organization quotas.** Seven provider-plane ops let an agent
+connect a vCenter and an NSX manager, build a region from them, and give an
+organization a quota (a "virtual datacenter" in the API) in that region. All
+seven exist on VCF Automation 9.0, 9.1 and 9.1.1 (the whole range of this
+connector), so no op needs a version check of its own. Metadata is in
+`infra_ops.py` (reads, and the full list `VCFA_INFRA_OPS`) and
+`infra_change_ops.py` (changes); shared schema parts in `_infra_schemas.py`.
+Handlers: `_infra_reads.py`, `_infra_connect.py` (vCenter),
+`_infra_nsx.py` (NSX manager), `_infra_region.py`, `_infra_quota.py`;
+shared job, step and state helpers in
+`_infra_common.py`; paths in `_infra_paths.py`. Group:
+`vcfa-provider-infra`. Wire facts follow `go-vcloud-director` v3
+(`vsphere_vcenter.go`, `nsxt_manager_openapi.go`, `trusted_certificates.go`,
+`tm_region.go`, `tm_region_quota.go`, `tm_region_quota_storage_policy.go`)
+and the provider API references of 9.0, 9.1 and 9.1.1.
+
+| op_id | risk level / approval | what it returns | versions | wire (9.0 form) |
+|---|---|---|---|---|
+| `vcfa.provider.infra.list` | safe | one flat list of vCenters (connection state), NSX managers (state) and Supervisors (region, or free); the job of `job_id` | 9.x | `GET /cloudapi/1.0.0/virtualCenters`, `GET /cloudapi/vcf/nsxManagers`, `GET /cloudapi/vcf/supervisors` |
+| `vcfa.provider.region.get` | safe | one region (state, capacity, NSX manager, Supervisors, storage policy names) with its zones, storage policies and VM classes; the job of `job_id` | 9.x | `GET /cloudapi/vcf/regions` (by name) or `GET …/regions/{regionUrn}`, `GET /cloudapi/vcf/zones`, `GET /cloudapi/vcf/regionStoragePolicies`, `GET /cloudapi/vcf/virtualMachineClasses` (each filtered by region) |
+| `vcfa.provider.org_quota.list` | safe | one row per quota: org, region, status, Supervisors, CPU and memory per zone, storage limits, VM classes, warnings; the job of `job_id` | 9.x | `GET /cloudapi/vcf/virtualDatacenters`, `GET /cloudapi/vcf/virtualDatacenterStoragePolicies`, `GET …/virtualDatacenters/{vdcUrn}/virtualMachineClasses` |
+| `vcfa.provider.vcenter.register` | dangerous, approval | `accepted` + job id; or `certificate_not_trusted` with the fingerprint, `already_running`, `unchanged`, `invalid_request`, `precondition_failed`, `failed_part_way` | 9.x | `POST /cloudapi/1.0.0/testConnection` (certificate), `POST /cloudapi/1.0.0/ssl/trustedCertificates`, `POST /cloudapi/1.0.0/virtualCenters`, `PUT …/virtualCenters/{vcUrn}`, `POST /api/admin/extension/vimServer/{id}/action/refresh` |
+| `vcfa.provider.nsx_manager.register` | dangerous, approval | `accepted` + job id; or `already_running`, `unchanged`, `invalid_request` | 9.x | `POST /cloudapi/vcf/nsxManagers` |
+| `vcfa.provider.region.set` | dangerous, approval | `accepted` + job id; or `already_running`, `unchanged`, `precondition_failed` | 9.x | `POST /cloudapi/vcf/regions`, `PUT …/regions/{regionUrn}` |
+| `vcfa.provider.org_quota.set` | dangerous, approval | `accepted` / `changed` + steps; or `already_running`, `unchanged`, `precondition_failed`, `failed_part_way`; warnings | 9.x | `POST`/`PUT /cloudapi/vcf/virtualDatacenters[/{vdcUrn}]`, `POST /cloudapi/vcf/virtualDatacenterStoragePolicies` (`values` list), `PUT …/virtualDatacenterStoragePolicies/{vdcStoragePolicyUrn}`, `PUT …/virtualDatacenters/{vdcUrn}/virtualMachineClasses` (`values` list) |
+
+- **Path per version.** On 9.1 and 9.1.1 every `/cloudapi/vcf/...` path
+  above is sent as `/cloudapi/v1/...` (`provider_vcf_path`, same version
+  rule as the region list). `/cloudapi/1.0.0/...` and `/api/...` paths do
+  not move. The reconcile lane checks each path against the reference
+  list of each version; the two legacy `/api` calls (vCenter refresh, task
+  read) are an evidenced exclusion (no 9.x reference lists a legacy call;
+  the vendor SDK uses them).
+- **Vendor jobs.** Each change returns as soon as VCF Automation accepted
+  the job: `status: accepted`, `job: {id, href, status_read}`. The id comes
+  from a task in the body (`urn:vcloud:task:` id or a `/task/` href) or
+  the `Location` header; any other body gives no job id; a `202` with an empty body
+  gives `id: null`, and the caller reads the object until it is READY. The
+  answer never says the work is done. The status reads take `job_id` and
+  then also read `GET /api/task/{id}`: state (queued, running, succeeded,
+  failed, canceled), progress and the vendor's error text. When the system
+  does not answer (no connection, time-out, `502`/`503`/`504`), a status
+  read says `state: not_reachable` with the job id and the time, never
+  `failed`. MEHO keeps no job state; the caller keeps the job id, best with
+  `async: true` (`async-governed-dispatch.md`), so a lost reply does not
+  lose it. After a lost reply the caller reads the status read first. A
+  login that expired is renewed by the connector's one new login on `401`.
+- **No second start.** VCF Automation lists no running jobs in its provider
+  API, so the changes read the object instead: a vCenter that is
+  `CONNECTING`, an NSX manager that is `PENDING`/`CONFIGURING`, a region or
+  quota that is `NOT_READY` answers `already_running` and starts nothing.
+  This is a help, not a lock.
+- **Which vCenter or NSX manager.** Both register ops match an existing
+  object by the host and port of its URL. When another object already has
+  the same name but a different URL, the call answers `invalid_request`,
+  names that URL, and writes nothing (no password read, no certificate
+  check). The preview says `would: name_taken` and shows the name, URL and
+  state of the object it matched (`current_name`, `current_url`,
+  `current_state`).
+- **vCenter steps.** One call runs the next step: trust the certificate,
+  then add (switched on), or switch on again (a half-added vCenter in
+  `INITIAL`), or refresh a `CONNECTED` vCenter so its Supervisors appear.
+  Call again with the same inputs after each job; done steps are skipped.
+  The certificate comes from `testConnection` (VCF Automation's own view);
+  the one trusted is the single certificate or the last of the chain, as
+  the vendor SDK does. So for a CA-signed vCenter the fingerprint is the
+  issuer's, not the vCenter's own. MEHO trusts it only after approval, and only when
+  its SHA-256 fingerprint equals the one in the approval preview;
+  otherwise `certificate_not_trusted` or `precondition_failed`, and
+  nothing is written.
+- **What the approver saw.** The previews of `region.set` and
+  `org_quota.set` store a hash of the object as read and what each step
+  would do; the approved run reads again and answers
+  `precondition_failed` when it changed. The vCenter preview stores the
+  next step and the fingerprint.
+- **Part-way failure.** When a step fails after an earlier step ran, the
+  answer is `failed_part_way` with every step: done or started, the one
+  that failed (HTTP status and the vendor's text), and `not_run`. Nothing
+  is undone. A failure in the first step is a normal op error.
+- **Credentials.** The vCenter and NSX passwords come from
+  `password_secret_ref` (Vault, read under the caller's identity) and go
+  only into the request body. `classify_op` pins both register ops as
+  `credential_write` and they carry the `credential` tag, so their bodies
+  stay out of traces, the broadcast is aggregate-only and the dispatcher
+  withholds the vendor's error text. In a part-way answer the password is
+  removed from the vendor's text. The reads copy named fields only, so a
+  password the vendor echoes never reaches an answer.
+- **Out of scope.** Deleting regions and quotas, VM Apps orgs on classic
+  provider VDCs, and namespace classes.
+
 Source: `backend/src/meho_backplane/connectors/vcf_automation/`.
 
 The connector is **dual-plane**: a single registry triple covers both the
@@ -468,6 +558,9 @@ domains.
   ops** above), validated by the same `validate_typed_ops()`.
 - **`VCFA_FEATURE_FLAG_OPS`** (`feature_flag_ops.py`) — the two
   feature-flag ops (see **Feature flags** above), validated by the same
+  `validate_typed_ops()`.
+- **`VCFA_INFRA_OPS`** (`infra_ops.py`) — the seven region and quota ops
+  (see **Regions and organization quotas** above), validated by the same
   `validate_typed_ops()`.
 - **`VCFA_PRODUCT` / `VCFA_VERSION` / `VCFA_IMPL_ID` /
   `VCFA_CONNECTOR_ID`** (`__init__.py`) — DB-side keys. Since #1814 the

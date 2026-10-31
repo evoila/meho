@@ -48,6 +48,17 @@ lane splits by plane:
   ``vcf-automation-9.1/`` and ``vcf-automation-9.1.1/``). The path
   :func:`~meho_backplane.connectors.vcf_automation.typed_ops.provider_regions_path`
   picks for each version must be a ``GET`` line in that version's list.
+* **Region and quota paths — armed per version.** Every
+  :mod:`~meho_backplane.connectors.vcf_automation._infra_paths` call, in the
+  path form :func:`~meho_backplane.connectors.vcf_automation._infra_paths.provider_vcf_path`
+  gives each version (``/cloudapi/vcf/`` on 9.0, ``/cloudapi/v1/`` on 9.1 and
+  9.1.1), must be a line of that version's reference list. Path parameter
+  names are compared without their braces, because the lists write some of
+  them bare (``vdcUrn``). Two legacy ``/api`` calls are an evidenced
+  exclusion: no 9.x reference lists a legacy call, and the vendor's own SDK
+  (``go-vcloud-director`` v3) uses them on VCF Automation 9 -- the vCenter
+  refresh (``govcd/vsphere_vcenter.go``: "there is no OpenAPI endpoint for
+  this operation") and the task read behind every ``202`` task link.
 
 The declared set is introspected from the connector's live constants
 (the #2944 pattern — never a hardcoded mirror), across the two modules
@@ -88,13 +99,19 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from meho_backplane.connectors.vcf_automation import _infra_paths as _infra_paths_module
 from meho_backplane.connectors.vcf_automation import _paths as _paths_module
 from meho_backplane.connectors.vcf_automation import _routing as _routing_module
 from meho_backplane.connectors.vcf_automation import typed_ops as _typed_ops_module
+from meho_backplane.connectors.vcf_automation._infra_paths import (
+    LEGACY_API_PATHS,
+    provider_vcf_path,
+)
 from meho_backplane.connectors.vcf_automation._routing import plane_for_path
 from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
 from meho_backplane.connectors.vcf_automation.feature_flag_ops import VCFA_FEATURE_FLAG_OPS
 from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
+from meho_backplane.connectors.vcf_automation.infra_ops import VCFA_INFRA_OPS
 from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
 from meho_backplane.connectors.vcf_automation.provisioning_ops import VCFA_PROVISIONING_OPS
 from meho_backplane.connectors.vcf_automation.typed_ops import (
@@ -174,6 +191,29 @@ _PATHS_METHODS: dict[str, frozenset[str]] = {
     "TENANT_ZONES_PATH": frozenset({"GET"}),
 }
 
+#: HTTP method(s) per ``_infra_paths`` constant -- the region and quota ops.
+#: Same contract as :data:`_PATHS_METHODS`: a new constant must be mapped here.
+_INFRA_PATHS_METHODS: dict[str, frozenset[str]] = {
+    "INFRA_NSX_MANAGERS_PATH": frozenset({"GET", "POST"}),
+    "INFRA_REGIONS_PATH": frozenset({"POST"}),
+    "INFRA_REGION_PATH": frozenset({"GET", "PUT"}),
+    "INFRA_REGION_STORAGE_POLICIES_PATH": frozenset({"GET"}),
+    "INFRA_SUPERVISORS_PATH": frozenset({"GET"}),
+    "INFRA_TASK_PATH": frozenset({"GET"}),
+    "INFRA_TEST_CONNECTION_PATH": frozenset({"POST"}),
+    "INFRA_TRUSTED_CERTIFICATES_PATH": frozenset({"POST"}),
+    "INFRA_VCENTERS_PATH": frozenset({"GET", "POST"}),
+    "INFRA_VCENTER_PATH": frozenset({"PUT"}),
+    "INFRA_VCENTER_REFRESH_PATH": frozenset({"POST"}),
+    "INFRA_VDCS_PATH": frozenset({"GET", "POST"}),
+    "INFRA_VDC_PATH": frozenset({"PUT"}),
+    "INFRA_VDC_STORAGE_POLICIES_PATH": frozenset({"GET", "POST"}),
+    "INFRA_VDC_STORAGE_POLICY_PATH": frozenset({"PUT"}),
+    "INFRA_VDC_VM_CLASSES_PATH": frozenset({"GET", "PUT"}),
+    "INFRA_VM_CLASSES_PATH": frozenset({"GET"}),
+    "INFRA_ZONES_PATH": frozenset({"GET"}),
+}
+
 #: ``typed_ops`` read-path constants the provisioning writes also ``POST``
 #: to (org create, project create) -- on top of the ``GET`` every
 #: ``typed_ops`` constant declares.
@@ -192,6 +232,19 @@ def _path_constants(module: object) -> dict[str, str]:
     }
 
 
+def _mapped_op_ids(module: object, methods_by_name: dict[str, frozenset[str]]) -> set[str]:
+    """``METHOD:/path`` for every ``*_PATH`` constant of *module*, by its mapped methods."""
+    declared: set[str] = set()
+    for name, path in _path_constants(module).items():
+        if name not in methods_by_name:
+            raise AssertionError(
+                f"{name} has no entry in the methods map of its module — map the new "
+                "constant's HTTP method(s) consciously so the reconcile keeps covering it."
+            )
+        declared.update(f"{method}:{path}" for method in methods_by_name[name])
+    return declared
+
+
 def _declared_op_ids() -> set[str]:
     """Every hand-coded ``METHOD:/path`` the vcf-automation connector dispatches.
 
@@ -205,14 +258,8 @@ def _declared_op_ids() -> set[str]:
     declared = {f"GET:{path}" for path in typed_paths.values()}
     for name, methods in _TYPED_OPS_EXTRA_METHODS.items():
         declared.update(f"{method}:{typed_paths[name]}" for method in methods)
-    for name, path in _path_constants(_paths_module).items():
-        if name not in _PATHS_METHODS:
-            raise AssertionError(
-                f"_paths.{name} has no entry in _PATHS_METHODS — map the new "
-                "constant's HTTP method(s) there consciously so the reconcile "
-                "keeps covering it."
-            )
-        declared.update(f"{method}:{path}" for method in _PATHS_METHODS[name])
+    declared |= _mapped_op_ids(_paths_module, _PATHS_METHODS)
+    declared |= _mapped_op_ids(_infra_paths_module, _INFRA_PATHS_METHODS)
     for name, path in _path_constants(_routing_module).items():
         for suffix, method in _ROUTING_METHOD_BY_SUFFIX.items():
             if name.endswith(suffix):
@@ -245,6 +292,7 @@ def test_path_constant_names_are_pinned() -> None:
         "TENANT_PROJECTS_PATH",
     ]
     assert sorted(_path_constants(_paths_module)) == sorted(_PATHS_METHODS)
+    assert sorted(_path_constants(_infra_paths_module)) == sorted(_INFRA_PATHS_METHODS)
     assert sorted(_path_constants(_routing_module)) == [
         "PROVIDER_SESSION_PATH",
         "PROVIDER_VERSION_PATH",
@@ -266,6 +314,7 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
         *_path_constants(_typed_ops_module).values(),
         *_path_constants(_paths_module).values(),
         *_path_constants(_routing_module).values(),
+        *_path_constants(_infra_paths_module).values(),
     }
     unswept = {
         op.op_id: op.path
@@ -276,6 +325,7 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
             *VCFA_NETWORK_OPS,
             *VCFA_DEPLOY_OPS,
             *VCFA_FEATURE_FLAG_OPS,
+            *VCFA_INFRA_OPS,
         )
         if op.path not in swept
     }
@@ -352,6 +402,31 @@ def test_vcfa_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/cloudapi/1.0.0/featureFlags",
         "GET:/cloudapi/1.0.0/featureFlags/{id}",
         "PUT:/cloudapi/1.0.0/featureFlags/{id}",
+        # Regions and organization quotas (provider plane, 9.0 path form).
+        "GET:/api/task/{id}",
+        "GET:/cloudapi/1.0.0/virtualCenters",
+        "GET:/cloudapi/vcf/nsxManagers",
+        "GET:/cloudapi/vcf/regionStoragePolicies",
+        "GET:/cloudapi/vcf/regions/{regionUrn}",
+        "GET:/cloudapi/vcf/supervisors",
+        "GET:/cloudapi/vcf/virtualDatacenterStoragePolicies",
+        "GET:/cloudapi/vcf/virtualDatacenters",
+        "GET:/cloudapi/vcf/virtualDatacenters/{vdcUrn}/virtualMachineClasses",
+        "GET:/cloudapi/vcf/virtualMachineClasses",
+        "GET:/cloudapi/vcf/zones",
+        "POST:/api/admin/extension/vimServer/{id}/action/refresh",
+        "POST:/cloudapi/1.0.0/ssl/trustedCertificates",
+        "POST:/cloudapi/1.0.0/testConnection",
+        "POST:/cloudapi/1.0.0/virtualCenters",
+        "POST:/cloudapi/vcf/nsxManagers",
+        "POST:/cloudapi/vcf/regions",
+        "POST:/cloudapi/vcf/virtualDatacenterStoragePolicies",
+        "POST:/cloudapi/vcf/virtualDatacenters",
+        "PUT:/cloudapi/1.0.0/virtualCenters/{vcUrn}",
+        "PUT:/cloudapi/vcf/regions/{regionUrn}",
+        "PUT:/cloudapi/vcf/virtualDatacenterStoragePolicies/{vdcStoragePolicyUrn}",
+        "PUT:/cloudapi/vcf/virtualDatacenters/{vdcUrn}",
+        "PUT:/cloudapi/vcf/virtualDatacenters/{vdcUrn}/virtualMachineClasses",
     }
 
 
@@ -465,4 +540,42 @@ def test_region_path_is_in_the_reference_list_of_each_version(
     served = _reference_list_op_ids(list_path, label)
     target = SimpleNamespace(fingerprint={"version": version}, version=None)
     declared = {f"GET:{provider_regions_path(target)}"}
+    assert_op_ids_served(declared, served, spec_label=label)
+
+
+def _without_braces(op_id: str) -> str:
+    """``PUT:/a/{vdcUrn}`` → ``PUT:/a/vdcUrn``: the lists write some names bare."""
+    return op_id.replace("{", "").replace("}", "")
+
+
+def test_legacy_infra_paths_are_the_only_unlisted_ones() -> None:
+    """Guard: the evidenced exclusion holds exactly the two legacy ``/api`` paths."""
+    assert set(LEGACY_API_PATHS) == {
+        "/api/admin/extension/vimServer/{id}/action/refresh",
+        "/api/task/{id}",
+    }
+    assert all(path.startswith("/api/") for path in LEGACY_API_PATHS)
+
+
+@pytest.mark.parametrize(
+    ("spec_dir", "list_file", "version"),
+    _PROVIDER_REFERENCE_LISTS,
+    ids=[version for _, _, version in _PROVIDER_REFERENCE_LISTS],
+)
+def test_infra_paths_are_in_the_reference_list_of_each_version(
+    spec_dir: str, list_file: str, version: str
+) -> None:
+    """Every region and quota call, in a version's path form, is in that version's list."""
+    list_path = require_shelf_spec(spec_dir, list_file)
+    label = f"{spec_dir}/{list_file}"
+    served = {_without_braces(op_id) for op_id in _reference_list_op_ids(list_path, label)}
+    target = SimpleNamespace(fingerprint={"version": version}, version=None)
+    declared = {
+        _without_braces(f"{method}:{provider_vcf_path(target, path)}")
+        for method, _, path in (
+            op_id.partition(":")
+            for op_id in _mapped_op_ids(_infra_paths_module, _INFRA_PATHS_METHODS)
+        )
+        if path not in LEGACY_API_PATHS
+    }
     assert_op_ids_served(declared, served, spec_label=label)

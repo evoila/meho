@@ -406,6 +406,13 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # body_recorded=false for its flight-recorder spans and collapses the
         # broadcast to aggregate-only as defence-in-depth.
         "vcfa.provider.user.create",
+        # Connecting a vCenter or an NSX manager to VCF Automation. Like
+        # ``vcfa.provider.user.create``, the params carry only a Vault path
+        # (``password_secret_ref``); the password is read in-process and sent
+        # only in the request BODY. The pin keeps the bodies out of traces and
+        # the broadcast aggregate-only.
+        "vcfa.provider.vcenter.register",
+        "vcfa.provider.nsx_manager.register",
         # #3890 — the API-token revoke logs in as the token's owner with the
         # password read from ``password_secret_ref`` (declared secret-shaped
         # params, so the classifier-coverage lint requires a pin; ``.revoke``

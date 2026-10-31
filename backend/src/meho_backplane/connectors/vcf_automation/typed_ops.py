@@ -269,6 +269,18 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "(vcfa.tenant.cloud_account.enumerate_images), and add, re-point or remove one "
         "name (vcfa.tenant.image_profile.mapping.update; a person must approve it)."
     ),
+    "vcfa-provider-infra": (
+        "Regions and organization quotas on the VCF Automation provider plane. Reads: "
+        "the vCenters, NSX managers and Supervisors it knows (vcfa.provider.infra.list), "
+        "one region with its zones, storage policies and VM classes "
+        "(vcfa.provider.region.get), and the quotas of each organization "
+        "(vcfa.provider.org_quota.list). Changes: connect a vCenter "
+        "(vcfa.provider.vcenter.register) or an NSX manager "
+        "(vcfa.provider.nsx_manager.register), create or change a region "
+        "(vcfa.provider.region.set), and give an organization a quota in a region "
+        "(vcfa.provider.org_quota.set). Each change starts a vendor job and returns its id; "
+        "the reads show the job's state."
+    ),
 }
 
 

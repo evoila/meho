@@ -24,8 +24,10 @@ How a run goes
 For each request, oldest first:
 
 * approved earlier and ran OK -- skipped;
-* approved earlier with a run that did not end OK, or rejected, expired
-  or withdrawn -- the run stops (the steps after it may need it);
+* approved earlier with a run that failed or never started, or rejected,
+  expired or withdrawn -- the run stops (the steps after it may need it);
+* approved earlier with a run that has not ended yet -- the run stops,
+  and the operator can run it again when that step has ended;
 * pending at risk level ``dangerous`` or ``destructive`` -- the run waits.
   The modal shows that step and a button "Approve step k and go on".
   That button posts ``confirm_id`` = the id of that one request, so the
@@ -33,9 +35,12 @@ For each request, oldest first:
 * any other pending request -- approved through the same
   ``_commit_decision`` + ``resume_dispatch_after_approval`` calls the
   single Approve button uses. The run goes on only when the run status is
-  ``ok`` or ``already_resumed`` (the waiting requester ran it). Any other
-  status, or a refusal (self-approval, role, already decided, expired),
-  stops it.
+  ``ok``. ``already_resumed`` means the waiting requester claimed the run,
+  not that it ended: the run then polls the row for the stored result
+  (:func:`persist_resume_result` writes it when that run ends) and goes
+  on only when that result is ``ok``. A failed result, no result within
+  ``_RESULT_WAIT_SECONDS``, any other status, or a refusal
+  (self-approval, role, already decided, expired) stops it.
 
 Why a server-side sequencer (v0.1-spec §7)
 ------------------------------------------
@@ -58,6 +63,7 @@ the steps it already approved stay approved.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Final
@@ -74,6 +80,7 @@ from meho_backplane.operations.approval_queue import (
     MAX_REASON_LENGTH,
     ApprovalResultState,
     approval_result_state,
+    get_request,
     list_pending,
     resume_dispatch_after_approval,
 )
@@ -95,14 +102,25 @@ log = structlog.get_logger(__name__)
 #: Risk levels at which the run waits for the operator's yes on that step.
 _CONFIRM_LEVELS: Final[frozenset[str]] = frozenset({"dangerous", "destructive"})
 
-#: Most requests of one change ticket the run reads (the REST list cap).
-_MAX_GROUP: Final[int] = 500
+#: Rows per page when the run reads the change ticket (the REST list cap).
+#: The run reads every page, so a group larger than this is complete.
+_PAGE: Final[int] = 500
+
+#: How long the run waits for the stored result of a step another caller
+#: claimed (``already_resumed``), and how often it looks.
+_RESULT_WAIT_SECONDS: Final[float] = 30.0
+_RESULT_POLL_SECONDS: Final[float] = 0.5
 
 _MAX_WORK_REF_LENGTH: Final[int] = 512
 
 _ONE_USE: Final[str] = (
     "An approval is used once, so this step cannot run again from here. "
     "Ask the requester to send it again."
+)
+
+_NOT_ENDED: Final[str] = (
+    "Its run has not ended yet, or no result was stored. "
+    "Check the step and run this again when it has ended."
 )
 
 _require_session = Depends(require_ui_session)
@@ -189,16 +207,26 @@ def _parse_confirm_id(raw: str) -> uuid.UUID | None:
 
 
 async def _load_steps(tenant_id: uuid.UUID, work_ref: str) -> list[_Step]:
-    """Read every request of *work_ref* in the tenant, oldest first."""
+    """Read every request of *work_ref* in the tenant, oldest first.
+
+    Reads page after page until a short page, so a change ticket with more
+    requests than one page holds is still complete.
+    """
+    rows: list[ApprovalRequest] = []
     async with get_sessionmaker()() as db_session:
-        rows = await list_pending(
-            db_session,
-            tenant_id=tenant_id,
-            status=None,
-            work_ref=work_ref,
-            limit=_MAX_GROUP,
-            order="oldest",
-        )
+        while True:
+            page = await list_pending(
+                db_session,
+                tenant_id=tenant_id,
+                status=None,
+                work_ref=work_ref,
+                limit=_PAGE,
+                offset=len(rows),
+                order="oldest",
+            )
+            rows.extend(page)
+            if len(page) < _PAGE:
+                break
     return [_Step(step=n, row=row) for n, row in enumerate(rows, start=1)]
 
 
@@ -248,8 +276,11 @@ async def _run_step(
 ) -> None:
     row = step.row
     if row.status == ApprovalRequestStatus.APPROVED.value:
-        if approval_result_state(row) == ApprovalResultState.EXECUTED:
+        state = approval_result_state(row)
+        if state == ApprovalResultState.EXECUTED:
             step.outcome, step.detail = "skipped", "Approved earlier and ran OK."
+        elif state == ApprovalResultState.STARTED:
+            step.outcome, step.detail = "stopped", f"Approved earlier. {_NOT_ENDED}"
         else:
             step.outcome = "stopped"
             step.detail = f"Approved earlier, but its run did not end OK. {_ONE_USE}"
@@ -284,13 +315,47 @@ async def _run_step(
     if status == "ok":
         step.outcome, step.detail = "approved", "Ran OK."
     elif status == "already_resumed":
-        step.outcome, step.detail = "approved", "The waiting requester ran it."
+        await _wait_for_stored_result(step)
     else:
-        error = getattr(result, "error", None)
-        ended = f"Approved, but the run ended with '{status}'"
-        if error:
-            ended += f": {error}"
-        step.outcome, step.detail = "stopped", f"{ended}. {_ONE_USE}"
+        _stop_on_run_status(step, status, getattr(result, "error", None))
+
+
+def _stop_on_run_status(step: _Step, status: object, error: object) -> None:
+    ended = f"Approved, but the run ended with '{status}'"
+    if error:
+        ended += f": {error}"
+    step.outcome, step.detail = "stopped", f"{ended}. {_ONE_USE}"
+
+
+async def _wait_for_stored_result(step: _Step) -> None:
+    """Wait for the result of a step the waiting requester is running.
+
+    ``already_resumed`` only says another caller claimed the run. The run
+    may still be going, and it may fail. So the step counts as done only
+    when the stored result on the row says ``ok``. A failed result stops
+    the run. No result within ``_RESULT_WAIT_SECONDS`` also stops it: the
+    outcome is unknown, and the steps after it may depend on it.
+    """
+    row = step.row
+    deadline = asyncio.get_running_loop().time() + _RESULT_WAIT_SECONDS
+    while True:
+        async with get_sessionmaker()() as db_session:
+            fresh = await get_request(db_session, tenant_id=row.tenant_id, request_id=row.id)
+        step.row = fresh
+        state = approval_result_state(fresh)
+        if state == ApprovalResultState.EXECUTED:
+            step.outcome, step.detail = "approved", "The waiting requester ran it. Ran OK."
+            return
+        if state == ApprovalResultState.FAILED:
+            stored = fresh.resume_result or {}
+            _stop_on_run_status(step, stored.get("status"), stored.get("error"))
+            step.detail = f"The waiting requester ran it. {step.detail}"
+            return
+        if asyncio.get_running_loop().time() >= deadline:
+            step.outcome = "stopped"
+            step.detail = f"Approved; the waiting requester is running it. {_NOT_ENDED}"
+            return
+        await asyncio.sleep(_RESULT_POLL_SECONDS)
 
 
 async def _render(

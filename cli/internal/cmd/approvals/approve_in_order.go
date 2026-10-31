@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
@@ -28,12 +29,15 @@ const inOrderHelp = "With --filter-work-ref REF --in-order, approve takes every 
 	"pending ones one by one. Each step is an ordinary single " +
 	"approval: it runs the operation at once and has its own audit " +
 	"row and its own checks. After each step it reads how the run " +
-	"ended. It goes on only when the run was OK (or the waiting " +
-	"requester ran it). It stops at the first run that failed or was " +
-	"denied, at a step that is already rejected, expired, withdrawn " +
-	"or approved with a failed run, and at any refusal (for example " +
-	"you sent the request yourself). Then it exits non-zero and names " +
-	"the step that stopped it and the steps it did not run.\n\n" +
+	"ended. It goes on only when the run was OK. When the waiting " +
+	"requester runs the step instead, it waits for that run's stored " +
+	"result (up to two minutes) and goes on only when it was OK. It " +
+	"stops at the first run that failed or was denied, at a run whose " +
+	"result is not known in time, at a step that is already rejected, " +
+	"expired, withdrawn or approved with a failed or unfinished run, " +
+	"and at any refusal (for example you sent the request yourself). " +
+	"Then it exits non-zero and names the step that stopped it and the " +
+	"steps it did not run.\n\n" +
 	"At a dangerous or destructive step it stops and shows what the " +
 	"step changes. Type yes to approve that one step and go on; " +
 	"anything else stops the run. Steps at a lower risk level go on " +
@@ -46,6 +50,17 @@ const inOrderHelp = "With --filter-work-ref REF --in-order, approve takes every 
 
 // Risk levels at which the in-order run waits for a per-step yes.
 var inOrderConfirmLevels = map[string]bool{"dangerous": true, "destructive": true}
+
+// How long the in-order run waits for the stored result of a step the
+// waiting requester runs (dispatch_status "already_resumed"), and how
+// often it reads the request. Tests shorten both.
+var (
+	inOrderResultWait = 2 * time.Minute
+	inOrderResultPoll = time.Second
+)
+
+const stepNotEnded = "its run has not ended yet, or no result was stored. Check it with " +
+	"meho approvals show %s and run this again when it has ended"
 
 // Outcomes of one step of an in-order run.
 const (
@@ -200,6 +215,9 @@ func (r *inOrderRunner) runStep(ctx context.Context, item *api.ApprovalRequestVi
 			step.Detail = "approved earlier and ran OK"
 			return nil
 		}
+		if item.ResultState != nil && *item.ResultState == api.ApprovalResultStateStarted {
+			return &stepStop{detail: "approved earlier; " + fmt.Sprintf(stepNotEnded, step.ID)}
+		}
 		return &stepStop{detail: fmt.Sprintf(
 			"approved earlier, but its run did not end OK (run: %s). An approval is used once, "+
 				"so this step cannot run again from here. Ask the requester to send it again",
@@ -229,18 +247,23 @@ func (r *inOrderRunner) runStep(ctx context.Context, item *api.ApprovalRequestVi
 	if err != nil {
 		return &stepStop{detail: "the approval was refused: " + err.Error(), err: err}
 	}
-	return checkDispatch(resp, step)
+	stop, claimedElsewhere := checkDispatch(resp, step)
+	if claimedElsewhere {
+		return r.waitForStoredResult(ctx, item.Id, step)
+	}
+	return stop
 }
 
 // checkDispatch reads how the run of a just-approved step ended. Only
-// "ok" and "already_resumed" (the waiting requester ran it) let the run
-// go on. Any other answer, including an answer that is not a finished
-// 200, stops it.
-func checkDispatch(resp *api.DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse, step *inOrderStep) *stepStop {
+// "ok" lets the run go on. "already_resumed" means the waiting
+// requester claimed the run, not that it ended; the second return value
+// is then true and the caller waits for the stored result. Any other
+// answer, including an answer that is not a finished 200, stops the run.
+func checkDispatch(resp *api.DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse, step *inOrderStep) (*stepStop, bool) {
 	if resp.StatusCode() != 200 || resp.JSON200 == nil {
 		return &stepStop{detail: fmt.Sprintf(
 			"approved, but MEHO answered HTTP %d without a finished run, so the run cannot tell "+
-				"whether the step ran. Check it with meho approvals show %s", resp.StatusCode(), step.ID)}
+				"whether the step ran. Check it with meho approvals show %s", resp.StatusCode(), step.ID)}, false
 	}
 	status := ""
 	if resp.JSON200.DispatchStatus != nil {
@@ -250,18 +273,54 @@ func checkDispatch(resp *api.DecideApprovalRequestApiV1ApprovalsRequestIdDecideP
 	case "ok":
 		step.Outcome = stepApproved
 		step.Detail = "ran OK"
-		return nil
+		return nil, false
 	case "already_resumed":
-		step.Outcome = stepApproved
-		step.Detail = "the waiting requester ran it"
-		return nil
+		return nil, true
 	}
 	detail := fmt.Sprintf("approved, but the run ended with %q", status)
 	if resp.JSON200.DispatchError != nil && *resp.JSON200.DispatchError != "" {
 		detail += ": " + *resp.JSON200.DispatchError
 	}
 	return &stepStop{detail: detail + ". An approval is used once, so this step cannot run again " +
-		"from here. Ask the requester to send it again"}
+		"from here. Ask the requester to send it again"}, false
+}
+
+// waitForStoredResult reads the request until the run the waiting
+// requester claimed has a stored result. "executed" lets the run go on;
+// "failed" stops it. No result within inOrderResultWait also stops it:
+// the outcome is unknown, and the steps after it may depend on it.
+func (r *inOrderRunner) waitForStoredResult(ctx context.Context, id uuid.UUID, step *inOrderStep) *stepStop {
+	deadline := time.Now().Add(inOrderResultWait)
+	for {
+		detail, err := fetchDetail(ctx, r.client, id)
+		if err != nil {
+			return &stepStop{detail: "approved; the waiting requester is running it, but MEHO could not " +
+				"read how the run ended", err: err}
+		}
+		if detail != nil && detail.ResultState != nil {
+			switch *detail.ResultState {
+			case api.ApprovalResultStateExecuted:
+				step.Outcome = stepApproved
+				step.Detail = "the waiting requester ran it; ran OK"
+				return nil
+			case api.ApprovalResultStateFailed:
+				return &stepStop{detail: "approved, but the run by the waiting requester failed. An approval " +
+					"is used once, so this step cannot run again from here. Ask the requester to send it again"}
+			}
+		}
+		if time.Now().After(deadline) {
+			return &stepStop{detail: "approved; the waiting requester is running it, but " +
+				fmt.Sprintf(stepNotEnded, step.ID)}
+		}
+		timer := time.NewTimer(inOrderResultPoll)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return &stepStop{detail: "approved; the waiting requester is running it, but the wait for " +
+				"its result was cancelled. Check it with meho approvals show " + step.ID, err: ctx.Err()}
+		}
+	}
 }
 
 // confirm shows a dangerous or destructive step and asks for a yes on

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -31,6 +32,10 @@ type groupRow struct {
 	created  string
 	dispatch string // dispatch_status the decide route answers
 	decideHT int    // HTTP status the decide route answers (default 200)
+	// results the detail route answers as result_state after the decide,
+	// one per read; the last one repeats. Plays the waiting requester
+	// whose run ends later (dispatch "already_resumed").
+	later []api.ApprovalResultState
 }
 
 func inOrderID(n int) string {
@@ -75,12 +80,13 @@ type inOrderServer struct {
 	mu      sync.Mutex
 	decided []string
 	listQ   string
+	reads   map[string]int // detail reads per id after its decide
 }
 
 func runInOrderWithMock(t *testing.T, rows []groupRow, stdin string, jsonOut bool) (*inOrderServer, string, string, error) {
 	t.Helper()
 	views := groupViews(t, rows)
-	rec := &inOrderServer{}
+	rec := &inOrderServer{reads: map[string]int{}}
 	routes := map[string]mockHandler{
 		"GET /api/v1/approvals": func(w http.ResponseWriter, r *http.Request) {
 			rec.listQ = r.URL.RawQuery
@@ -95,6 +101,22 @@ func runInOrderWithMock(t *testing.T, rows []groupRow, stdin string, jsonOut boo
 			summary := "writes a file on the host"
 			detail := v
 			detail.ReviewerContext = &api.ReviewerContextView{Summary: &summary}
+			rec.mu.Lock()
+			decided := false
+			for _, d := range rec.decided {
+				decided = decided || d == id
+			}
+			if decided && len(row.later) > 0 {
+				n := rec.reads[id]
+				rec.reads[id] = n + 1
+				if n >= len(row.later) {
+					n = len(row.later) - 1
+				}
+				state := row.later[n]
+				detail.Status = api.ApprovalRequestStatusApproved
+				detail.ResultState = &state
+			}
+			rec.mu.Unlock()
 			writeJSON(t, w, http.StatusOK, detail)
 		}
 		routes["POST /api/v1/approvals/"+id+"/decide"] = func(w http.ResponseWriter, _ *http.Request) {
@@ -133,6 +155,9 @@ func runInOrderWithMock(t *testing.T, rows []groupRow, stdin string, jsonOut boo
 	cmd.SetErr(&stderr)
 	cmd.SetIn(strings.NewReader(stdin))
 	cmd.SetContext(context.Background())
+	oldWait, oldPoll := inOrderResultWait, inOrderResultPoll
+	inOrderResultWait, inOrderResultPoll = 200*time.Millisecond, 5*time.Millisecond
+	t.Cleanup(func() { inOrderResultWait, inOrderResultPoll = oldWait, oldPoll })
 	err = runInOrder(cmd, inOrderOpts{WorkRef: inOrderRef, Reason: "change window", JSONOut: jsonOut, BackplaneOverride: srv.URL})
 	return rec, stdout.String(), stderr.String(), err
 }
@@ -145,7 +170,8 @@ func TestInOrderMixedGroup(t *testing.T) {
 	rows := []groupRow{
 		{status: "pending", level: "caution", dispatch: "ok"},
 		{status: "pending", level: "dangerous", dispatch: "ok"},
-		{status: "pending", level: "destructive", dispatch: "already_resumed"},
+		{status: "pending", level: "destructive", dispatch: "already_resumed",
+			later: []api.ApprovalResultState{api.ApprovalResultStateStarted, api.ApprovalResultStateExecuted}},
 		{status: "pending", level: "caution", dispatch: "error"},
 		{status: "pending", level: "caution", dispatch: "ok"},
 	}
@@ -174,6 +200,76 @@ func TestInOrderMixedGroup(t *testing.T) {
 		if !strings.Contains(stdout+stderr, s) {
 			t.Errorf("output lacks %q; stdout:\n%s\nstderr:\n%s", s, stdout, stderr)
 		}
+	}
+	if rec.reads[inOrderID(3)] < 2 {
+		t.Errorf("step 3 (already_resumed): want the run to read the request until the result is stored, got %d reads", rec.reads[inOrderID(3)])
+	}
+}
+
+// TestInOrderOtherCallerClaimsThenFails checks that "already_resumed" is
+// not taken as success: the run waits for the stored result of the run
+// the waiting requester claimed, and stops when that run fails. The
+// step after it is never decided.
+func TestInOrderOtherCallerClaimsThenFails(t *testing.T) {
+	rows := []groupRow{
+		{status: "pending", level: "caution", dispatch: "already_resumed",
+			later: []api.ApprovalResultState{api.ApprovalResultStateStarted, api.ApprovalResultStateStarted, api.ApprovalResultStateFailed}},
+		{status: "pending", level: "caution", dispatch: "ok"},
+	}
+	rec, stdout, _, err := runInOrderWithMock(t, rows, "", true)
+	assertExitCode(t, err, 4)
+	if len(rec.decided) != 1 || rec.decided[0] != inOrderID(1) {
+		t.Fatalf("decided: got %v want only step 1", rec.decided)
+	}
+	if rec.reads[inOrderID(1)] != 3 {
+		t.Errorf("want 3 reads of step 1 until the failed result, got %d", rec.reads[inOrderID(1)])
+	}
+	var res inOrderResult
+	if jerr := json.Unmarshal([]byte(stdout), &res); jerr != nil {
+		t.Fatalf("stdout is not the JSON result: %v\n%s", jerr, stdout)
+	}
+	if res.Completed || res.StoppedAt != 1 || res.Steps[1].Outcome != stepNotRun {
+		t.Errorf("result: got %+v", res)
+	}
+	if !strings.Contains(res.Steps[0].Detail, "run by the waiting requester failed") {
+		t.Errorf("stopped step does not say the other run failed: %q", res.Steps[0].Detail)
+	}
+}
+
+// TestInOrderOtherCallerResultUnknownStops checks that a run the waiting
+// requester claimed, with no stored result in time, stops the run: the
+// outcome is unknown, so the next step is not decided.
+func TestInOrderOtherCallerResultUnknownStops(t *testing.T) {
+	rows := []groupRow{
+		{status: "pending", level: "caution", dispatch: "already_resumed",
+			later: []api.ApprovalResultState{api.ApprovalResultStateStarted}},
+		{status: "pending", level: "caution", dispatch: "ok"},
+	}
+	rec, stdout, _, err := runInOrderWithMock(t, rows, "", false)
+	assertExitCode(t, err, 4)
+	if len(rec.decided) != 1 {
+		t.Fatalf("decided: got %v want only step 1", rec.decided)
+	}
+	if !strings.Contains(stdout, "has not ended yet") || !strings.Contains(stdout, "meho approvals show "+inOrderID(1)) {
+		t.Errorf("stdout does not say the outcome is unknown and how to check:\n%s", stdout)
+	}
+}
+
+// TestInOrderRerunStopsAtUnfinishedPredecessor checks that a step that
+// was approved earlier and whose run has not ended stops a rerun with a
+// "run again later" hint, not with "send it again".
+func TestInOrderRerunStopsAtUnfinishedPredecessor(t *testing.T) {
+	rows := []groupRow{
+		{status: "approved", level: "caution", result: api.ApprovalResultStateStarted},
+		{status: "pending", level: "caution", dispatch: "ok"},
+	}
+	rec, stdout, _, err := runInOrderWithMock(t, rows, "", false)
+	assertExitCode(t, err, 4)
+	if len(rec.decided) != 0 {
+		t.Fatalf("decided: got %v want none", rec.decided)
+	}
+	if !strings.Contains(stdout, "has not ended yet") || strings.Contains(stdout, "send it again") {
+		t.Errorf("stdout:\n%s", stdout)
 	}
 }
 

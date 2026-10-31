@@ -2219,17 +2219,24 @@ For each request of the `work_ref`, oldest first (`status=all`,
 | The request is | The run |
 |---|---|
 | `approved` and its run is `executed` (ran OK) | skips it; this makes a second run after a stop safe |
-| `approved` with any other run state (`failed`, `started`, `not_started`) | stops: an approval is used once, so the step cannot run again from here; the requester must send it again |
+| `approved` and its run is `started` (claimed, no stored result yet) | stops: the outcome is not known yet; run the action again when the step has ended |
+| `approved` and its run is `failed` or `not_started` | stops: an approval is used once, so the step cannot run again from here; the requester must send it again |
 | `rejected`, `expired` or `withdrawn` | stops: the steps after it may need it |
 | `pending`, risk level `dangerous` or `destructive` | waits for a yes for this one step, then approves it |
 | `pending`, any other risk level | approves it |
 
 After an approval the run reads how the run of the operation ended. It
-goes on only for `ok` and `already_resumed` (the waiting requester ran it).
-Any other status, a refusal (403 self-approval or role, 409 already
-decided or expired, 422), or an answer that is not a finished 200 stops it.
-The steps after a stop stay pending. The run is not one transaction: if it
-stops or is killed, the steps it already approved stay approved.
+goes on for `ok`. `already_resumed` means the waiting requester (the
+in-process agent waiter) won the claim, not that its run ended, so the
+action then reads the request until the stored result
+(`persist_resume_result`, read as `result_state`) is there: `executed`
+goes on, `failed` stops. No stored result within the wait (30 s in the
+console, 2 min on the CLI) stops the run too, because the outcome is not
+known and the next step may depend on it. Any other dispatch status, a
+refusal (403 self-approval or role, 409 already decided or expired, 422),
+or an answer that is not a finished 200 stops it. The steps after a stop
+stay pending. The run is not one transaction: if it stops or is killed,
+the steps it already approved stay approved.
 
 Before it starts, the run warns when the requests come from more than one
 `principal_sub`, or when two requests have the same `created_at`. Oldest
@@ -2237,9 +2244,11 @@ first is the dependency order only for one chain sent in order by one
 requester.
 
 - **CLI** (`cli/internal/cmd/approvals/approve_in_order.go`). Lists the
-  group through `GET /api/v1/approvals`, then posts `/decide` per step and
-  reads `DecideResponseBody.dispatch_status` / `dispatch_error` (the
-  single-id `approve` only checks the HTTP status). At a dangerous or
+  group through `GET /api/v1/approvals` (no `limit`, so the whole group),
+  then posts `/decide` per step and reads
+  `DecideResponseBody.dispatch_status` / `dispatch_error` (the single-id
+  `approve` only checks the HTTP status). After `already_resumed` it polls
+  `GET /api/v1/approvals/{id}` for `result_state`. At a dangerous or
   destructive step it prints what the step does (`reviewer_context` from
   `GET /api/v1/approvals/{id}`) on stderr and reads a line from stdin; only
   `yes` goes on. On a stop it exits non-zero and names the step and the
@@ -2248,9 +2257,13 @@ requester.
   stopped_at, warnings, steps[]}`.
 - **Console** (`ui/routes/approvals/in_order.py`, `_in_order.html`). The
   Pending tab shows **Approve group in order** when the `work_ref` filter
-  names a ticket with two or more pending requests. The steps run on the
-  server, through the same `_commit_decision` +
-  `resume_dispatch_after_approval` calls the single Approve button uses. A
+  names a ticket with two or more pending requests. The route reads the
+  group page by page (`list_pending`, 500 rows a page) until a short
+  page, so a ticket with more than 500 requests is complete. The steps
+  run on the server, through the same `_commit_decision` +
+  `resume_dispatch_after_approval` calls the single Approve button uses;
+  after `already_resumed` it re-reads the row until `resume_result` is
+  stored. A
   server-side loop was picked over re-opening the detail modal for each
   step: the server reads each step's run result before it goes on, with no
   round trip per step. At a dangerous or destructive step the POST returns

@@ -13,7 +13,9 @@ approved and ran OK.
 The harness (app, session, CSRF, the patched operator) is the one
 ``test_ui_approvals.py`` uses. The run of an approved op is replaced by a
 stand-in that stores a result on the row the way the real resume does, so
-a second run can read it.
+a second run can read it. A second stand-in plays the waiting requester:
+it answers ``already_resumed`` and stores the result a little later, the
+way the in-process agent waiter does.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from sqlalchemy import update
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRF_HEADER_NAME
+from meho_backplane.ui.routes.approvals import in_order
 from meho_backplane.ui.routes.approvals.in_order import group_warnings
 from tests.test_ui_approvals import (
     _RESOLVE_OPERATOR,
@@ -107,6 +110,45 @@ def _fake_resume(failing_ops: set[str]) -> AsyncMock:
             )
         error = "connector_error: file not found" if status == "error" else None
         return SimpleNamespace(status=status, op_id=request.op_id, result={}, error=error)
+
+    return AsyncMock(side_effect=_run)
+
+
+async def _store_result(request_id: uuid.UUID, status: str) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        error = "connector_error: disk full" if status != "ok" else None
+        await session.execute(
+            update(ApprovalRequest)
+            .where(ApprovalRequest.id == request_id)
+            .values(resume_result={"status": status, "error": error})
+        )
+
+
+def _fake_other_caller(results: dict[str, str | None], *, after: float = 0.2) -> AsyncMock:
+    """Stand in for a run another caller claimed (``already_resumed``).
+
+    Marks the row as claimed and answers at once. The result named in
+    *results* for the op (``None`` for none) lands on the row *after*
+    seconds later, from a background task, like the agent waiter's write.
+    """
+    tasks: list[asyncio.Task[None]] = []
+
+    async def _run(*, operator: Any, request: ApprovalRequest, params: Any) -> SimpleNamespace:
+        async with get_sessionmaker()() as session, session.begin():
+            await session.execute(
+                update(ApprovalRequest)
+                .where(ApprovalRequest.id == request.id)
+                .values(resumed_at=datetime.now(UTC))
+            )
+        status = results.get(request.op_id)
+        if status is not None:
+
+            async def _later() -> None:
+                await asyncio.sleep(after)
+                await _store_result(request.id, status)
+
+            tasks.append(asyncio.get_running_loop().create_task(_later()))
+        return SimpleNamespace(status="already_resumed", op_id=request.op_id, result={}, error=None)
 
     return AsyncMock(side_effect=_run)
 
@@ -223,6 +265,113 @@ def test_mixed_group_goes_on_waits_at_risky_steps_and_stops_at_the_failure() -> 
     assert "send it again" in again.text
     assert _request_status(s5) == "pending"
     assert resume.await_count == 4
+
+
+def test_other_caller_claims_the_run_and_it_fails_stops_the_run() -> None:
+    """``already_resumed`` is not success: the run waits for the stored result."""
+    session_id = _session()
+    s1 = _seed(1, "caution")
+    s2 = _seed(2, "caution")
+    resume = _fake_other_caller({"op.step1": "error"})
+
+    with patch.object(in_order, "_RESULT_POLL_SECONDS", 0.02):
+        response = _post(session_id, resume)
+
+    assert 'data-approval-in-order-stopped="1"' in response.text
+    assert "The waiting requester ran it" in response.text
+    assert "connector_error: disk full" in response.text
+    assert _request_status(s1) == "approved"
+    assert _request_status(s2) == "pending"
+    assert resume.await_count == 1
+
+
+def test_other_caller_claims_the_run_and_it_ends_ok_goes_on() -> None:
+    session_id = _session()
+    s1 = _seed(1, "caution")
+    s2 = _seed(2, "caution")
+    resume = _fake_other_caller({"op.step1": "ok", "op.step2": "ok"})
+
+    with patch.object(in_order, "_RESULT_POLL_SECONDS", 0.02):
+        response = _post(session_id, resume)
+
+    assert "data-approval-in-order-done" in response.text
+    assert [_request_status(r) for r in (s1, s2)] == ["approved", "approved"]
+    assert [call.kwargs["request"].op_id for call in resume.await_args_list] == [
+        "op.step1",
+        "op.step2",
+    ]
+
+
+def test_no_stored_result_in_time_stops_the_run_and_the_rerun() -> None:
+    """An unknown outcome stops the run; a rerun stops at the same step."""
+    session_id = _session()
+    s1 = _seed(1, "caution")
+    s2 = _seed(2, "caution")
+    resume = _fake_other_caller({"op.step1": None})
+
+    with (
+        patch.object(in_order, "_RESULT_POLL_SECONDS", 0.02),
+        patch.object(in_order, "_RESULT_WAIT_SECONDS", 0.1),
+    ):
+        first = _post(session_id, resume)
+        again = _post(session_id, resume)
+
+    assert 'data-approval-in-order-stopped="1"' in first.text
+    assert "has not ended yet" in first.text
+    assert 'data-approval-in-order-stopped="1"' in again.text
+    assert "has not ended yet" in again.text
+    assert "send it again" not in again.text
+    assert _request_status(s1) == "approved"
+    assert _request_status(s2) == "pending"
+    assert resume.await_count == 1
+
+
+def test_group_larger_than_one_page_is_read_completely() -> None:
+    """A change ticket with more requests than one page holds is read whole."""
+    session_id = _session()
+    page = in_order._PAGE
+    last = uuid.uuid4()
+
+    async def _seed_many() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            for n in range(1, page + 2):
+                done = n <= page
+                session.add(
+                    ApprovalRequest(
+                        id=last if n == page + 1 else uuid.uuid4(),
+                        tenant_id=_TENANT_A,
+                        run_id=None,
+                        principal_sub="agent-7",
+                        op_id=f"op.step{n}",
+                        connector_id="linux",
+                        target_id=None,
+                        params_hash="0" * 64,
+                        params={"path": "/etc/example"},
+                        proposed_effect={"op_id": f"op.step{n}", "safety_level": "caution"},
+                        status="approved" if done else "pending",
+                        work_ref=_REF,
+                        created_at=_BASE + timedelta(seconds=n),
+                        expires_at=datetime.now(UTC) + timedelta(days=1),
+                        resumed_at=_BASE if done else None,
+                        resume_result={"status": "ok"} if done else None,
+                        decided_at=_BASE if done else None,
+                        reviewed_by="op-1" if done else None,
+                    )
+                )
+
+    asyncio.run(_seed_many())
+    resume = _fake_resume(failing_ops=set())
+
+    plan = _get(session_id, f"/ui/approvals/in-order?work_ref={_REF_Q}")
+    run = _post(session_id, resume)
+
+    assert f'data-approval-in-order-step="{page + 1}"' in plan.text
+    assert "data-approval-in-order-done" in run.text
+    assert "Approved 1 step in order" in run.text
+    assert _request_status(last) == "approved"
+    assert [call.kwargs["request"].op_id for call in resume.await_args_list] == [
+        f"op.step{page + 1}"
+    ]
 
 
 def test_a_yes_for_another_request_does_not_approve_the_risky_step() -> None:

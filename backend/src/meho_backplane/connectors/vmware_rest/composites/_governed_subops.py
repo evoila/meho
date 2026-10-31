@@ -38,6 +38,8 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _host,
     _library,
     _library_delete,
+    _library_local,
+    _library_upload,
     _license,
     _namespace,
     _snapshot,
@@ -46,6 +48,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _teardown,
     _teardown_network,
     _vm_allocation,
+    _vm_cdrom_library_iso,
     _vm_cdrom_tools,
     _write,
 )
@@ -120,6 +123,12 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.vm.tools.installer.unmount": (
         _vm_cdrom_tools.SUB_OPS_VM_TOOLS_INSTALLER_UNMOUNT
     ),
+    "vmware.composite.vm.cdrom.mount_library_iso": (
+        _vm_cdrom_library_iso.SUB_OPS_MOUNT_LIBRARY_ISO
+    ),
+    "vmware.composite.vm.cdrom.unmount_library_iso": (
+        _vm_cdrom_library_iso.SUB_OPS_UNMOUNT_LIBRARY_ISO
+    ),
     "vmware.composite.guest.customization_spec.create": (
         _write._SUB_OPS_GUEST_CUSTOMIZATION_SPEC_CREATE
     ),
@@ -166,6 +175,11 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.content_library.item.delete": (
         _library_delete._SUB_OPS_CONTENT_LIBRARY_ITEM_DELETE
         + _library_delete._VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK
+    ),
+    # Local content-library create + add a file from a URL (caution writes).
+    "vmware.composite.content_library.create": _library_local._SUB_OPS_CONTENT_LIBRARY_CREATE,
+    "vmware.composite.content_library.item.upload": (
+        _library_upload._SUB_OPS_CONTENT_LIBRARY_ITEM_UPLOAD
     ),
     "vmware.composite.license.assign": _license._VIM_SUB_OPS_LICENSE_ASSIGN,
     # #4383 alarm changes: one AlarmManager write each, after two reads.

@@ -63,6 +63,13 @@ meho approvals approve <id>         # runs the parked write now
 meho approvals reject <id>          # terminal; the requester must re-file
 ```
 
+After approval, the person who sent the request reads what the operation
+printed with one command. Only that person can read it:
+
+```bash
+meho approvals result <id>          # the output of the approved run
+```
+
 The operator console exposes the same queue at **`/ui/approvals`**: a
 bell with the live pending count, a request-detail modal with the
 proposed effect, and Approve / Deny buttons.

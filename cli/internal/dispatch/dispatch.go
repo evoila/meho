@@ -176,13 +176,16 @@ func ParkedApprovalID(extras json.RawMessage) string {
 // render path shares: the ParkedHint one-liner, then — when the parked
 // envelope carried extras.approval_request_id — the approval id plus a
 // `meho approvals show <id>` inspect hint so the operator never has to
-// hunt the request via `meho approvals list`. Centralised so the
+// hunt the request via `meho approvals list`, and the
+// `meho approvals result <id>` command that prints the run's output
+// after approval (#5313). Centralised so the
 // dispatch.Render path and the parallel operation/call.go path stay
 // byte-identical.
 func WriteParkedHint(w io.Writer, extras json.RawMessage) {
 	fmt.Fprintf(w, "  %s\n", ParkedHint)
 	if id := ParkedApprovalID(extras); id != "" {
 		fmt.Fprintf(w, "  approval id: %s — inspect with: meho approvals show %s\n", id, id)
+		fmt.Fprintf(w, "  after approval, read the output with: meho approvals result %s\n", id)
 	}
 }
 

@@ -1094,6 +1094,14 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_user_logout(self, operator, target, params)
 
+    async def user_check_login(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.check_login``."""
+        from meho_backplane.connectors.keycloak.ops_login_check import keycloak_user_check_login
+
+        return await keycloak_user_check_login(self, operator, target, params)
+
     # -- typed-op registrar (G3.13-T2 #1394 fills the read-op walk) ------
 
     @classmethod
@@ -1123,12 +1131,17 @@ class KeycloakConnector(HttpConnector):
         walk — every write registers ``requires_approval=True``. #3944 adds
         the destructive ``user.delete`` / ``group.delete`` /
         ``client.delete``. #3851 adds ``user.logout``; #3886 adds ``realm.delete``.
+        ``user.check_login`` (one login test) rides the same walk.
         """
         # Lazy imports: the operations package pulls in the embedding
         # pipeline (ONNX runtime + a 100 MB+ model on first touch) that a
         # pure-fingerprint / pure-probe unit test should not pay. Lifespan
         # callers already have the embedding service warmed by the time
         # this runs.
+        from meho_backplane.connectors.keycloak.ops_login_check import (
+            LOGIN_CHECK_OPS,
+            WHEN_TO_USE_LOGIN_CHECK_BY_GROUP,
+        )
         from meho_backplane.connectors.keycloak.ops_read import (
             READ_OPS,
             WHEN_TO_USE_BY_GROUP,
@@ -1142,10 +1155,14 @@ class KeycloakConnector(HttpConnector):
         # The two when_to_use maps are disjoint by group_key suffix
         # (read groups are bare nouns; write groups carry a ``_write``
         # suffix) so a merge never clobbers a read blurb with a write one.
-        when_to_use_by_group = {**WHEN_TO_USE_BY_GROUP, **WHEN_TO_USE_WRITE_BY_GROUP}
+        when_to_use_by_group = {
+            **WHEN_TO_USE_BY_GROUP,
+            **WHEN_TO_USE_WRITE_BY_GROUP,
+            **WHEN_TO_USE_LOGIN_CHECK_BY_GROUP,
+        }
 
         bindings: list[tuple[Any, Any]] = []
-        for op in (*READ_OPS, *WRITE_OPS):
+        for op in (*READ_OPS, *WRITE_OPS, *LOGIN_CHECK_OPS):
             handler = getattr(cls, op.handler_attr, None)
             if handler is None:
                 raise AttributeError(
@@ -1238,6 +1255,15 @@ class KeycloakConnector(HttpConnector):
             target=target,
             params=params,
         )
+
+    async def invalidate_credentials(self, target: KeycloakTargetLike) -> None:
+        """Drop the kept admin token for *target* (#2396, #3879).
+
+        The next call reads the admin credential from Vault again and logs in
+        with it. Called after a failed login and after a target change.
+        """
+        async with self._token_lock:
+            self._admin_tokens.pop(target_cache_key(target), None)
 
     async def aclose(self) -> None:
         """Clear cached admin tokens then tear down the httpx pool.

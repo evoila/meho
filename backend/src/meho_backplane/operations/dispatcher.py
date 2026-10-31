@@ -338,6 +338,7 @@ from meho_backplane.operations._errors import (
     wrap_ok_result,
 )
 from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
     get_or_create_connector_instance,
     import_handler,
     is_unbound_method,
@@ -3379,6 +3380,7 @@ async def dispatch(
             op_id=op_id,
             triple=(product, version, impl_id),
             started=started,
+            target=target,
         )
     # #4139: an op that needs a target (every ingested op, or a typed op
     # bound to a connector) and got none fails here with one clear line,
@@ -3685,6 +3687,12 @@ async def dispatch(
                 exception_message or "",
                 _elapsed_ms(started),
             )
+
+        # #3879: a target changed on another server (or by this one, before
+        # this process saw it) must not be served with the login kept for its
+        # old values. One dict lookup per dispatch; a drop only on a change.
+        if target is not None:
+            await forget_target_if_changed(target)
 
         # --- Steps 6/7/8/9: branch + reduce + audit + broadcast -----------
         return await _execute_and_audit(

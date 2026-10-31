@@ -603,6 +603,38 @@ async def test_auth_config_password_auth_fallback(
 
 
 @pytest.mark.asyncio
+async def test_auth_config_accepts_private_key_alias(
+    vault_secrets: dict[str, dict[str, Any]],
+) -> None:
+    """A secret keyed ``private_key`` (no ``ssh_private_key``) picks key auth (#3711)."""
+    conn = _ConcreteSshConnector()
+    private_pem = _CLIENT_KEY.export_private_key("pkcs8-pem").decode()
+    target = _target_with_secret("alias-cfg", {"username": "alice", "private_key": private_pem})
+
+    cfg = await conn._auth_config(target)
+
+    assert cfg["username"] == "alice"
+    assert len(cfg["client_keys"]) == 1
+    assert "password" not in cfg
+
+
+@pytest.mark.asyncio
+async def test_auth_config_prefers_ssh_private_key_over_alias(
+    vault_secrets: dict[str, dict[str, Any]],
+) -> None:
+    """``ssh_private_key`` wins when both it and ``private_key`` are present (#3711)."""
+    conn = _ConcreteSshConnector()
+    wanted = _CLIENT_KEY.export_private_key("pkcs8-pem").decode()
+    target = _target_with_secret(
+        "both-cfg", {"ssh_private_key": wanted, "private_key": "not a key"}
+    )
+
+    cfg = await conn._auth_config(target)
+
+    assert cfg["client_keys"][0].export_private_key("pkcs8-pem").decode() == wanted
+
+
+@pytest.mark.asyncio
 async def test_auth_config_defaults_username_to_root(
     vault_secrets: dict[str, dict[str, Any]],
 ) -> None:

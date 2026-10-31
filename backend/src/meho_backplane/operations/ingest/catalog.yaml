@@ -88,6 +88,101 @@ entries:
     # section 9.
     spec_info_versions_compatible:
       - "9.0.x"
+    # Generic reads whose answer holds credentials get the same guards as the
+    # hand-written credential reads: caution with approval here, and the same
+    # op ids in broadcast/events.py _CREDENTIAL_READ_OPS scrub the answer.
+    # Keep both in step. Paths are from the vendor vcenter.yaml and
+    # vi-json.yaml; the 8.0 row below reuses this list.
+    safety_overlay: &vcenter_credential_reads
+      # Proxy settings carry the proxy password.
+      - method: GET
+        path: /appliance/networking/proxy
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /appliance/networking/proxy/{protocol}
+        safety_level: caution
+        requires_approval: true
+      # Content libraries carry the publish and subscription passwords.
+      - method: GET
+        path: /content/library/{libraryId}
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /content/local-library/{libraryId}
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /content/subscribed-library/{libraryId}
+        safety_level: caution
+        requires_approval: true
+      # Compatibility and update reports carry a download token.
+      - method: GET
+        path: /esx/hcl/reports/{report}
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /vcenter/lcm/reports/{report}
+        safety_level: caution
+        requires_approval: true
+      # Deployment, upgrade and migration specs carry the SSO admin, root and
+      # source system passwords.
+      - method: GET
+        path: /vcenter/deployment/install
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /vcenter/deployment/upgrade
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /vcenter/deployment/migrate
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /vcenter/lcm/deployment/migration-upgrade
+        safety_level: caution
+        requires_approval: true
+      # A guest customization spec carries the Windows admin and domain
+      # passwords.
+      - method: GET
+        path: /vcenter/guest/customization-specs/{name}
+        safety_level: caution
+        requires_approval: true
+      # Identity providers carry the LDAP password and the client secret; the
+      # identity broker clients carry an access token.
+      - method: GET
+        path: /vcenter/identity/providers/{provider}
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /vcenter/identity/broker/tenants/{tenant}/admin-client
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /vcenter/identity/broker/tenants/operator-client
+        safety_level: caution
+        requires_approval: true
+      # Supervisor container image registries carry the registry password.
+      - method: GET
+        path: /vcenter/namespace-management/supervisors/{supervisor}/container-image-registries
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /vcenter/namespace-management/supervisors/{supervisor}/container-image-registries/{containerImageRegistry}
+        safety_level: caution
+        requires_approval: true
+      # Older-API (VI-JSON) host reads: the host config carries the IPMI
+      # password, and a precheck remediation result carries the host and
+      # account passwords of the host profile.
+      - method: GET
+        path: /HostSystem/{moId}/config
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /HostSystem/{moId}/precheckRemediationResult
+        safety_level: caution
+        requires_approval: true
     sha256: null
     notes: >-
       Profile-backed shipped-spec row (#1964 T2 #1976). The shipped
@@ -135,6 +230,8 @@ entries:
     # section 9.
     spec_info_versions_compatible:
       - "8.0.x"
+    # The same generic credential reads as vmware/9.0 above.
+    safety_overlay: *vcenter_credential_reads
     sha256: null
     notes: >-
       Profile-backed shipped-spec row (#3569). The shipped spec_resource

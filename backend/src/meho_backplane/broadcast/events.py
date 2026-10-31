@@ -149,6 +149,39 @@ _CREDENTIAL_READ_OPS: Final[frozenset[str]] = frozenset(
         "GET:/v1/users/local/admin",
         "GET:/v1/identity-providers",
         "GET:/v1/identity-providers/{id}",
+        # The VCF Installer bring-up spec carries the host, NSX, vCenter and
+        # SDDC Manager passwords.
+        "GET:/v1/sddcs/{id}/spec",
+        # Generic vCenter reads whose answer holds credentials. The catalog
+        # rows ``vmware`` / ``9.0`` and ``8.0`` raise them to caution with
+        # approval; this entry scrubs the answer and collapses the broadcast.
+        # Proxy settings, content libraries, report download tokens,
+        # deployment and migration specs, guest customization specs, identity
+        # providers and broker clients, and Supervisor image registries.
+        "GET:/appliance/networking/proxy",
+        "GET:/appliance/networking/proxy/{protocol}",
+        "GET:/content/library/{libraryId}",
+        "GET:/content/local-library/{libraryId}",
+        "GET:/content/subscribed-library/{libraryId}",
+        "GET:/esx/hcl/reports/{report}",
+        "GET:/vcenter/lcm/reports/{report}",
+        "GET:/vcenter/deployment/install",
+        "GET:/vcenter/deployment/upgrade",
+        "GET:/vcenter/deployment/migrate",
+        "GET:/vcenter/lcm/deployment/migration-upgrade",
+        "GET:/vcenter/guest/customization-specs/{name}",
+        "GET:/vcenter/identity/providers/{provider}",
+        "GET:/vcenter/identity/broker/tenants/{tenant}/admin-client",
+        "GET:/vcenter/identity/broker/tenants/operator-client",
+        "GET:/vcenter/namespace-management/supervisors/{supervisor}/container-image-registries",
+        (
+            "GET:/vcenter/namespace-management/supervisors/{supervisor}"
+            "/container-image-registries/{containerImageRegistry}"
+        ),
+        # The older-API (VI-JSON) host config (IPMI password) and precheck
+        # remediation result (host profile passwords).
+        "GET:/HostSystem/{moId}/config",
+        "GET:/HostSystem/{moId}/precheckRemediationResult",
         # #4617 -- a BIND config file can hold TSIG and rndc key secrets.
         # The answer is one text field, so the Tier-1 ``bind_key_secret``
         # rule does the redaction; this entry collapses the broadcast and

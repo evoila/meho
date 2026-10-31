@@ -4527,6 +4527,55 @@ waits for approval; the shelf-gated lane checks every rule against the
 pinned `vcenter.yaml` and `vi-json.yaml` files) and `test_delete_names.py`
 (the vSAN prefixes and the `action=delete` query).
 
+### Stop, restart, disconnect, remediate and access calls wait for approval (#4328)
+
+These generic (ingested) vCenter calls now wait until a second person
+approves. Before, each was a `POST` or `PUT` at `caution` without approval,
+so a person's call ran at once (for example a guest reboot).
+
+`ingest_safety.py` (`VMWARE_STOP_RESTART_AND_REMEDIATE_WRITES`, checked by
+`is_vmware_stop_restart_or_remediate_write`) puts these in the `dangerous`
+risk level with `requires_approval: true` on the 8.0 and 9.0 catalogs. Every
+one is in both pinned `vcenter.yaml` files.
+
+| What it does | Operation id |
+|---|---|
+| Shut down, restart or put the guest on standby | `POST:/vcenter/vm/{vm}/guest/power?action=shutdown`, `?action=reboot`, `?action=standby` |
+| Power off or restart the vCenter appliance | `POST:/appliance/shutdown?action=poweroff`, `?action=reboot` |
+| Stop or restart a service | `POST:/appliance/services/{service}?action=stop`, `?action=restart`; `POST:/vcenter/services/{service}?action=stop`, `?action=restart` |
+| Turn SSH, the shell, the console or the DCUI on or off | `PUT:/appliance/access/ssh`, `/shell`, `/consolecli`, `/dcui` |
+| Disconnect a host | `POST:/vcenter/host/{host}?action=disconnect` |
+| Turn off a Supervisor | `POST:/vcenter/namespace-management/clusters/{cluster}?action=disable` |
+| Stage or apply a software image to a cluster or a host | `POST:/esx/settings/clusters/{cluster}/software?action=apply&vmw-task=true`, `?action=stage&vmw-task=true`; the same two for `/esx/settings/hosts/{host}/software` |
+| Install an appliance update | `POST:/appliance/update/pending/{version}?action=install` |
+
+The rule works like the one of #4973: with or without the `/api` mount, with
+any spelling of a path parameter, and the query must match exactly. So the
+shutdown `?action=cancel`, the service `?action=start`, the host
+`?action=connect`, the Supervisor `?action=enable`, the image
+`?action=check`, `?action=scan` and `?action=export`, and the update
+`?action=stage` and `?action=precheck` keep their level. A rule only raises a
+level; a row that is already `destructive` stays `destructive`.
+
+The rules are in the VMware floor, not in `safety_overlay` rules of
+`catalog.yaml`, like the other VMware rules (#3869, #4973). The floor runs on
+every ingest of the `vmware-rest` connector, also on a `--spec` ingest of the
+full vendor files.
+
+Typed operations that send these calls as sub-steps (for example `vm.power`
+with a `guest_*` action, the host software apply and the Supervisor
+disable) keep their own risk level and still wait for one approval only.
+
+**Running installs.** Rows already in the database change only on the next
+ingest. To get the new levels, run the catalog ingest again for `vmware/9.0`
+and `vmware/8.0` (the same `--spec` ingest of `vcenter.yaml` the install used
+before).
+
+Tests: `test_connectors_vmware_rest_stop_restart_approval.py` (a hand-made
+spec for 8.0 and 9.0, the other actions and reads that keep their level, no
+rule lowers a level; the shelf-gated lane checks every rule against the
+pinned 9.0 and 8.0 `vcenter.yaml` files).
+
 ### Folder list (`vmware.folder.list`)
 
 What an operator or agent can do now: list the folders of a vCenter with one

@@ -4441,7 +4441,8 @@ puts `POST:/HostSystem/{moId}/ExitMaintenanceMode_Task` in the `dangerous`
 risk level with `requires_approval: true` on the 8.0 and 9.0 catalogs, with
 or without the `/api` mount and with any spelling of the path parameter. A
 floor only raises a level; a row that is already `destructive` stays
-`destructive`. The generic *enter* call keeps its level.
+`destructive`. The generic *enter* call waits for approval too: see the host
+power-state section below (#4350).
 
 **Running installs.** Rows already in the database change only on the next
 ingest. To get the new level, run the catalog ingest again for `vmware/8.0`
@@ -4549,6 +4550,24 @@ shows the host state, the VMs on the host with their power state, the
 options of the call and what happens next. A failed read never blocks the
 approval.
 
+**The generic calls wait too.** `ingest_safety.py` gives the generic
+older-API calls the level of their typed op, with `requires_approval: true`,
+on the 8.0 and 9.0 catalogs, with or without the `/api` mount and with any
+spelling of the path parameter:
+
+- `VMWARE_VIM_HOST_POWER_WRITES` (`is_vmware_vim_host_power_write`):
+  `POST:/HostSystem/{moId}/EnterMaintenanceMode_Task`, `RebootHost_Task`,
+  `ShutdownHost_Task` and `PowerDownHostToStandBy_Task` are `dangerous`.
+- `VMWARE_VIM_HOST_WAKES` (`is_vmware_vim_host_wake`):
+  `PowerUpHostFromStandBy_Task` keeps `caution`, like the VI-JSON snapshot
+  create.
+
+A floor only raises a level. Rows already in the database change on the next
+catalog ingest of `vmware/8.0` and `vmware/9.0`, as for the exit above. The
+typed operations (and `host.evacuate` and `cluster.patch`) send these calls as
+governed sub-steps that do not read the generic row, so one approval is still
+enough.
+
 Tests: `test_connectors_vmware_rest_host_power.py` (each handler on a
 recording double: success, refusals, a faulted task, a poll timeout, the
 running-task check; the real connector over `respx` on the vCenter 8 and 9
@@ -4556,7 +4575,10 @@ VI-JSON paths; the rows and the preview),
 `test_connectors_vmware_rest_host_power_approval.py` (a person's call waits
 for approval and sends nothing; one approval runs the call),
 `test_connectors_vmware_rest_typed_task_info.py` (the status read: each
-state, `not_found`, `not_reachable`, a new login) and
+state, `not_found`, `not_reachable`, a new login),
+`test_connectors_vmware_rest_host_power_generic_approval.py` (the floor on the
+generic calls for 8.0 and 9.0; the shelf-gated lane checks it against the
+pinned `vi-json` files) and
 `test_connectors_vmware_rest_host_power_reconcile.py` (the methods and their
 request types against the pinned `vi-json` files).
 

@@ -50,6 +50,7 @@ from meho_backplane.connectors.vcf_installer._vendor_tasks import (
 )
 from meho_backplane.connectors.vcf_installer._version_gate import installer_version
 from meho_backplane.connectors.vcf_installer.typed_reads import scrub_password_keys
+from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -492,3 +493,37 @@ async def installer_trusted_certificate_remove_impl(
         )
     _log.info("installer_trusted_certificate_removed", target=target.name, alias=alias)
     return result
+
+
+# ------------------------------------------------------- approval previews
+
+
+async def _proxy_set_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """What the approver of ``installer.system.proxy.set`` sees. Never the password."""
+    params = ctx.params
+    if not params.get("enabled"):
+        return {"operation": "Turn off the Installer proxy", "enabled": False}
+    return {
+        "operation": "Set the Installer proxy",
+        "enabled": True,
+        "host": params.get("host"),
+        "port": params.get("port"),
+        "transfer_protocol": params.get("transfer_protocol") or "HTTP",
+        "username": params.get("username"),
+        "password_from_vault": bool(params.get("password_secret_ref")),
+    }
+
+
+async def _trusted_certificate_remove_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """What the approver of ``installer.system.trusted-certificates.remove`` sees."""
+    return {
+        "operation": "Remove a certificate from the Installer trust store",
+        "alias": ctx.params.get("alias"),
+        "cannot_be_undone": "Only by adding the certificate again.",
+    }
+
+
+register_preview_builder(INSTALLER_PROXY_SET_OP_ID, _proxy_set_preview)
+register_preview_builder(
+    INSTALLER_TRUSTED_CERTIFICATE_REMOVE_OP_ID, _trusted_certificate_remove_preview
+)

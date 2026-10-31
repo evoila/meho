@@ -667,3 +667,27 @@ async def test_resource_calculation_times_out_with_the_id(
         )
     assert result["status"] == "timed_out"
     assert result["id"] == "calc-3"
+
+
+# ------------------------------------------------------- approval previews
+
+
+async def test_proxy_set_preview_shows_the_change_and_never_the_password() -> None:
+    from types import SimpleNamespace
+
+    from meho_backplane.operations._preview import _PREVIEW_BUILDERS
+
+    params = {
+        "enabled": True,
+        "host": "proxy.test.invalid",
+        "port": 3128,
+        "username": "proxy-user",
+        "password_secret_ref": "kv/proxy",
+    }
+    builder = _PREVIEW_BUILDERS["installer.system.proxy.set"]
+    preview = await builder(SimpleNamespace(params=params, target=_TARGET_91))
+    assert preview["host"] == "proxy.test.invalid"
+    assert preview["password_from_vault"] is True
+    assert "kv/proxy" not in json.dumps(preview)
+    remove = _PREVIEW_BUILDERS["installer.system.trusted-certificates.remove"]
+    assert (await remove(SimpleNamespace(params={"alias": "cert-a"})))["alias"] == "cert-a"

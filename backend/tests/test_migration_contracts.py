@@ -25,10 +25,10 @@ from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.connectors.migration import azure_migrate_csv
-from meho_backplane.connectors.migration import ops as migration_ops
-from meho_backplane.connectors.migration.azure_migrate_csv import inventory_to_csv
-from meho_backplane.connectors.migration.contracts import (
+from meho_backplane.connectors.inventory import azure_migrate_csv
+from meho_backplane.connectors.inventory import ops as inventory_ops
+from meho_backplane.connectors.inventory.azure_migrate_csv import inventory_to_csv
+from meho_backplane.connectors.inventory.contracts import (
     AssessmentResult,
     InventoryEnvelope,
     KubernetesWorkloadRecord,
@@ -36,7 +36,12 @@ from meho_backplane.connectors.migration.contracts import (
     assessment_result_json_schema,
     inventory_json_schema,
 )
-from meho_backplane.connectors.migration.inventory_load import (
+from meho_backplane.connectors.inventory.export import ExportResult
+from meho_backplane.connectors.inventory.formats import (
+    EXPORT_FORMATS,
+    UnknownExportFormatError,
+)
+from meho_backplane.connectors.inventory.inventory_load import (
     InventoryLoadError,
     load_inventories,
     merge_inventories,
@@ -50,6 +55,8 @@ from meho_backplane.operations.result_query import (
     run_result_query,
 )
 from meho_backplane.settings import get_settings
+
+_CSV_FORMAT = {"format": "azure-migrate-csv"}
 
 GOLDEN_CSV = Path(__file__).parent / "data" / "migration_azure_migrate_golden.csv"
 
@@ -614,7 +621,7 @@ async def test_load_refuses_a_rows_handle() -> None:
 # --- Azure Migrate CSV ------------------------------------------------------
 
 
-def _golden_export() -> azure_migrate_csv.CsvExport:
+def _golden_export() -> ExportResult:
     vcenter = InventoryEnvelope.model_validate(_vcenter_inventory())
     guest = InventoryEnvelope.model_validate(_guest_inventory())
     k8s = InventoryEnvelope.model_validate(_envelope([_k8s_workload()], "k8s-1.30", "cluster-a"))
@@ -622,15 +629,15 @@ def _golden_export() -> azure_migrate_csv.CsvExport:
     return inventory_to_csv(records, duplicates)
 
 
-def _file_text(export: azure_migrate_csv.CsvExport) -> str:
-    return azure_migrate_csv.LINE_END.join([*export.csv_lines, ""])
+def _file_text(export: ExportResult) -> str:
+    return azure_migrate_csv.LINE_END.join([*export.lines, ""])
 
 
 def test_golden_csv() -> None:
     export = _golden_export()
     # The file uses CRLF line ends (RFC 4180); the golden copy is kept with LF.
-    assert len(export.csv_lines) == export.row_count + 1
-    assert not any("\n" in line or "\r" in line for line in export.csv_lines)
+    assert len(export.lines) == export.row_count + 1
+    assert not any("\n" in line or "\r" in line for line in export.lines)
     assert _file_text(export).replace("\r\n", "\n") == GOLDEN_CSV.read_text(encoding="utf-8")
     assert export.row_count == 2
     assert export.skipped_records == {"application": 1, "kubernetes_workload": 1}
@@ -662,7 +669,7 @@ def test_csv_leaves_out_servers_without_required_values() -> None:
         {"cores": "no_permission"},
         {"os.name": "powered_off"},
     ]
-    assert export.csv_lines == [",".join(export.columns)]
+    assert export.lines == [",".join(export.columns)]
 
 
 def test_csv_leaves_out_servers_with_an_empty_or_unknown_name_or_os_name() -> None:
@@ -687,7 +694,7 @@ def test_csv_leaves_out_servers_with_an_empty_or_unknown_name_or_os_name() -> No
     )
 
     assert export.row_count == 1
-    assert export.csv_lines[1].startswith("app-win-01,192.0.2.11,4,16384,Windows Server 2019,")
+    assert export.lines[1].startswith("app-win-01,192.0.2.11,4,16384,Windows Server 2019,")
     assert [(s.source_id, s.name, s.missing) for s in export.left_out] == [
         (blank_name["source_id"], " \n ", {"name": "not_reported_by_source"}),
         ("vmware:x:unnamed", None, {"name": "no_permission"}),
@@ -865,7 +872,7 @@ def test_csv_names_stay_unique_when_a_renamed_name_is_already_taken() -> None:
 
     export = inventory_to_csv(servers)
 
-    names = [line.split(",", 1)[0] for line in export.csv_lines[1:]]
+    names = [line.split(",", 1)[0] for line in export.lines[1:]]
     assert names == [
         "sample (x:1)",
         "sample (x:2)",
@@ -884,7 +891,7 @@ def test_csv_names_stay_unique_when_a_renamed_name_is_already_taken() -> None:
         ("y:a", ["repeated_name"]),
     ]
     # The same input gives the same names.
-    assert inventory_to_csv(servers).csv_lines == export.csv_lines
+    assert inventory_to_csv(servers).lines == export.lines
 
 
 def test_csv_stops_at_the_file_limit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -899,22 +906,22 @@ def test_csv_stops_at_the_file_limit(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- the operation ----------------------------------------------------------
 
 
-async def test_inventory_csv_operation(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_inventory_export_operation(monkeypatch: pytest.MonkeyPatch) -> None:
     store = ResultHandleStore(_MemoryValkey())  # type: ignore[arg-type]
     tenant = uuid4()
     handle = await _store_through_reducer(store, tenant, _vcenter_inventory())
     monkeypatch.setattr(
-        "meho_backplane.connectors.migration.inventory_load.get_result_handle_store",
+        "meho_backplane.connectors.inventory.inventory_load.get_result_handle_store",
         lambda: store,
     )
 
-    result = await migration_ops.migration_inventory_csv(
-        _operator(tenant), None, {"inventory_handles": [handle]}
+    result = await inventory_ops.inventory_export(
+        _operator(tenant), None, {**_CSV_FORMAT, "inventory_handles": [handle]}
     )
 
     assert result["row_count"] == 2
-    assert result["csv_lines"][0].startswith("*Server name,IP addresses,*Cores,")
-    assert len(result["csv_lines"]) == 3
+    assert result["lines"][0].startswith("*Server name,IP addresses,*Cores,")
+    assert len(result["lines"]) == 3
     assert result["sources"] == [
         {
             "origin": "stored",
@@ -924,21 +931,21 @@ async def test_inventory_csv_operation(monkeypatch: pytest.MonkeyPatch) -> None:
             "collected_at": "2026-10-20T08:00:00+00:00",
         }
     ]
-    assert set(migration_ops.MIGRATION_INVENTORY_CSV_RESPONSE_SCHEMA["properties"]) >= set(result)
+    assert set(inventory_ops.INVENTORY_EXPORT_RESPONSE_SCHEMA["properties"]) >= set(result)
 
 
 def _one_vm_inventory() -> dict[str, Any]:
     return _envelope([_linux_vm()], "vmware-rest-9.0", "vc-lab-a")
 
 
-async def test_inventory_csv_operation_takes_an_inline_inventory() -> None:
+async def test_inventory_export_operation_takes_an_inline_inventory() -> None:
     """A one-VM inventory given inline gives a CSV with one server (#5143)."""
-    result = await migration_ops.migration_inventory_csv(
-        _operator(uuid4()), None, {"inventories": [_one_vm_inventory()]}
+    result = await inventory_ops.inventory_export(
+        _operator(uuid4()), None, {**_CSV_FORMAT, "inventories": [_one_vm_inventory()]}
     )
 
     assert result["row_count"] == 1
-    assert len(result["csv_lines"]) == 2
+    assert len(result["lines"]) == 2
     assert result["sources"] == [
         {
             "origin": "inline",
@@ -1003,14 +1010,16 @@ async def test_load_needs_one_inventory_and_caps_both_kinds_together() -> None:
         )
 
 
-def test_inventory_csv_parameters_need_handles_or_inventories() -> None:
-    validator = Draft202012Validator(migration_ops.MIGRATION_INVENTORY_CSV_PARAMETER_SCHEMA)
+def test_inventory_export_parameters_need_handles_or_inventories() -> None:
+    validator = Draft202012Validator(inventory_ops.INVENTORY_EXPORT_PARAMETER_SCHEMA)
 
-    assert not validator.is_valid({})
-    assert validator.is_valid({"inventory_handles": [str(uuid4())]})
-    assert validator.is_valid({"inventories": [_one_vm_inventory()]})
+    fmt = {"format": "azure-migrate-csv"}
+    assert not validator.is_valid(fmt)
+    assert not validator.is_valid({"inventory_handles": [str(uuid4())]})
+    assert validator.is_valid({**fmt, "inventory_handles": [str(uuid4())]})
+    assert validator.is_valid({**fmt, "inventories": [_one_vm_inventory()]})
     assert validator.is_valid(
-        {"inventory_handles": [str(uuid4())], "inventories": [_one_vm_inventory()]}
+        {**fmt, "inventory_handles": [str(uuid4())], "inventories": [_one_vm_inventory()]}
     )
 
 
@@ -1020,7 +1029,7 @@ async def test_one_vm_inventory_read_with_the_hint_gives_a_handle_the_csv_accept
     """Default limits: a one-VM inventory is small, and the hint still gives a handle."""
     store = ResultHandleStore(_MemoryValkey())  # type: ignore[arg-type]
     monkeypatch.setattr(
-        "meho_backplane.connectors.migration.inventory_load.get_result_handle_store",
+        "meho_backplane.connectors.inventory.inventory_load.get_result_handle_store",
         lambda: store,
     )
     tenant = uuid4()
@@ -1040,8 +1049,8 @@ async def test_one_vm_inventory_read_with_the_hint_gives_a_handle_the_csv_accept
     assert (plain, no_handle) == (inventory, None)
     assert result == inventory
     assert handle is not None
-    export = await migration_ops.migration_inventory_csv(
-        _operator(tenant), None, {"inventory_handles": [str(handle.handle_id)]}
+    export = await inventory_ops.inventory_export(
+        _operator(tenant), None, {**_CSV_FORMAT, "inventory_handles": [str(handle.handle_id)]}
     )
     assert export["row_count"] == 1
     assert export["sources"][0]["origin"] == "stored"
@@ -1109,7 +1118,7 @@ async def test_large_csv_is_read_back_in_pages_through_result_query(
         context={
             "tenant_id": str(tenant),
             "operator_sub": _OPERATOR_SUB,
-            "op_id": migration_ops.MIGRATION_INVENTORY_CSV_OP_ID,
+            "op_id": inventory_ops.INVENTORY_EXPORT_OP_ID,
         },
     )
     assert handle is not None
@@ -1125,7 +1134,7 @@ async def test_large_csv_is_read_back_in_pages_through_result_query(
         page = await run_result_query(
             _operator(tenant),
             handle.handle_id,
-            ResultQuerySpec(path="/csv_lines"),
+            ResultQuerySpec(path="/lines"),
             offset=len(lines),
         )
         pages += 1
@@ -1135,9 +1144,99 @@ async def test_large_csv_is_read_back_in_pages_through_result_query(
 
     assert page["total_rows"] == 10_001
     assert pages == 201
-    assert lines == export.csv_lines
+    assert lines == export.lines
     assert _file_text(export).startswith("*Server name,")
 
 
 def test_operation_id_has_no_write_word() -> None:
-    assert write_word_in_op_id(migration_ops.MIGRATION_INVENTORY_CSV_OP_ID) is None
+    assert write_word_in_op_id(inventory_ops.INVENTORY_EXPORT_OP_ID) is None
+
+
+# --- inventory.export: formats ----------------------------------------------
+
+
+async def test_inventory_export_azure_migrate_csv_matches_the_golden_file() -> None:
+    inventories = [
+        _vcenter_inventory(),
+        _guest_inventory(),
+        _envelope([_k8s_workload()], "k8s-1.30", "cluster-a"),
+    ]
+
+    result = await inventory_ops.inventory_export(
+        _operator(uuid4()), None, {**_CSV_FORMAT, "inventories": inventories}
+    )
+
+    assert result["format"] == "azure-migrate-csv"
+    assert result["line_end"] == "\r\n"
+    text = result["line_end"].join([*result["lines"], ""])
+    assert text.replace("\r\n", "\n") == GOLDEN_CSV.read_text(encoding="utf-8")
+    assert result["row_count"] == 2
+    assert [(r["source_id"], r["reason"]) for r in result["left_out"]] == [
+        ("linux:db-lnx-01:machine-id-0f1e2d3c", "same_machine_as")
+    ]
+    assert result["renamed"] == []
+
+
+async def test_inventory_export_lists_left_out_and_renamed_records() -> None:
+    second = _windows_vm()
+    second["source_id"] = "vmware:other:w2"
+    second["identity_hints"]["bios_uuid"] = "4203A1B2-2222-4000-8000-0000000000A2"
+    no_cores = _linux_vm()
+    no_cores["cores"] = None
+    no_cores["missing"]["cores"] = "no_permission"
+    inventory = _envelope([_windows_vm(), second, no_cores], "vmware-rest-9.0", "vc-lab-a")
+    first_id = _windows_vm()["source_id"]
+
+    result = await inventory_ops.inventory_export(
+        _operator(uuid4()), None, {**_CSV_FORMAT, "inventories": [inventory]}
+    )
+
+    assert result["row_count"] == 2
+    assert [(r["source_id"], r["reason"], r["missing"]) for r in result["left_out"]] == [
+        (no_cores["source_id"], "missing_required_field", {"cores": "no_permission"})
+    ]
+    assert [(r["source_id"], r["name_in_file"], r["reasons"]) for r in result["renamed"]] == [
+        (first_id, f"app-win-01 ({first_id})", ["repeated_name"]),
+        ("vmware:other:w2", "app-win-01 (vmware:other:w2)", ["repeated_name"]),
+    ]
+
+
+async def test_inventory_export_refuses_an_unknown_format_and_lists_the_known_ones() -> None:
+    # The format is checked first: no store is set up, so a read would fail otherwise.
+    with pytest.raises(UnknownExportFormatError) as raised:
+        await inventory_ops.inventory_export(
+            _operator(uuid4()), None, {"format": "nope", "inventory_handles": [str(uuid4())]}
+        )
+    assert str(raised.value) == "unknown format 'nope'; known formats: azure-migrate-csv"
+
+    validator = Draft202012Validator(inventory_ops.INVENTORY_EXPORT_PARAMETER_SCHEMA)
+    errors = list(validator.iter_errors({"format": "nope", "inventory_handles": [str(uuid4())]}))
+    assert [e.message for e in errors] == ["'nope' is not one of ['azure-migrate-csv']"]
+
+
+def test_every_format_is_named_in_the_parameter_schema() -> None:
+    schema = inventory_ops.INVENTORY_EXPORT_PARAMETER_SCHEMA["properties"]["format"]
+    assert schema["enum"] == sorted(EXPORT_FORMATS)
+    for name, export_format in EXPORT_FORMATS.items():
+        assert export_format.name == name
+        assert f"'{name}'" in schema["description"]
+
+
+async def test_inventory_export_registration_holds_no_target_word(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The op id, group and tags are the same for every format; only formats name a tool."""
+    seen: dict[str, Any] = {}
+
+    async def _capture(**kwargs: Any) -> None:
+        seen.update(kwargs)
+
+    monkeypatch.setattr(inventory_ops, "register_typed_operation", _capture)
+    await inventory_ops.register_inventory_operations()
+
+    assert (seen["product"], seen["version"], seen["impl_id"]) == ("inventory", "1.x", "inventory")
+    assert seen["op_id"] == "inventory.export"
+    assert seen["group_key"] == "inventory"
+    assert seen["safety_level"] == "safe"
+    assert seen["requires_approval"] is False
+    assert seen["tags"] == ["inventory", "export", "read"]

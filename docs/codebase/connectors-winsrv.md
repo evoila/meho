@@ -109,8 +109,8 @@ rights and a UEFI machine) is `null`; the read still answers.
 
 The multi-step read `winsrv.migration.inventory` (group `migration`, `safe`)
 returns the host as one server record in the common migration inventory
-shape. It lives in `connectors/migration/source_hosts.py`; see
-`connectors-migration.md`.
+shape. It lives in `connectors/inventory/source_hosts.py`; see
+`connectors-inventory.md`.
 
 ## Key types
 

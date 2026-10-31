@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Turn inventory server records into an Azure Migrate CSV import file.
+"""The ``azure-migrate-csv`` format of ``inventory.export``: an Azure Migrate CSV import file.
 
 The column names are copied from Microsoft's import template
 (``AzureMigrateimporttemplate.csv``, linked from
@@ -35,7 +35,7 @@ Rules:
 * Text comes from source systems. Line breaks become spaces, and a cell
   that starts with ``=``, ``+``, ``-`` or ``@`` gets a leading ``'`` so a
   spreadsheet does not read it as a formula.
-* The file comes back as ``csv_lines``, one item per line, so a stored
+* The file comes back as ``lines``, one item per line, so a stored
   result pages it: ``result_query`` returns an array in bounded pages but
   a string only whole, and a file of 10,000 servers is over the read
   limit. The caller joins the lines with CRLF.
@@ -49,34 +49,38 @@ from collections import Counter
 from collections.abc import Iterable
 from typing import Final, Literal
 
-from pydantic import BaseModel, Field
-
-from meho_backplane.connectors.migration.contracts import (
+from meho_backplane.connectors.inventory.contracts import (
     InventoryRecord,
     ServerRecord,
     Stat,
     missing_reason,
 )
-from meho_backplane.connectors.migration.inventory_load import Duplicate
+from meho_backplane.connectors.inventory.export import (
+    ExportResult,
+    LeftOutRecord,
+    RenamedRecord,
+)
+from meho_backplane.connectors.inventory.inventory_load import Duplicate
 
 __all__ = [
     "BASE_COLUMNS",
+    "FORMAT_NAME",
     "LINE_END",
     "MAX_DISKS",
     "MAX_SERVERS_PER_FILE",
     "MIN_DISK_GROUPS",
-    "CsvExport",
-    "LeftOutServer",
-    "RenamedServer",
     "disk_columns",
     "inventory_to_csv",
 ]
+
+#: The name of this format in ``inventory.export``.
+FORMAT_NAME: Final[str] = "azure-migrate-csv"
 
 MAX_SERVERS_PER_FILE: Final[int] = 20_000
 MAX_DISKS: Final[int] = 20
 MIN_DISK_GROUPS: Final[int] = 2
 
-#: Line end of the file (RFC 4180). Join ``csv_lines`` with it.
+#: Line end of the file (RFC 4180). Join ``lines`` with it.
 LINE_END: Final[str] = "\r\n"
 
 #: Microsoft's template columns before the per-disk groups, in its order.
@@ -119,55 +123,6 @@ _HYPERVISORS: Final[dict[str, str]] = {
     "hyper-v": "Hyper-V",
     "hyperv": "Hyper-V",
 }
-
-LeftOutReason = Literal["missing_required_field", "same_machine_as", "over_file_limit"]
-
-
-class LeftOutServer(BaseModel):
-    """A server record that is not in the file, and why."""
-
-    source_id: str = Field(description="The record's source_id.")
-    name: str | None = Field(description="The record's name, when it has one.")
-    reason: LeftOutReason = Field(description="Why it is not in the file.")
-    missing: dict[str, str] = Field(
-        default_factory=dict,
-        description="For missing_required_field: the field and the reason it is unknown.",
-    )
-    same_as: str | None = Field(
-        default=None, description="For same_machine_as: the source_id already in the file."
-    )
-
-
-class RenamedServer(BaseModel):
-    """A server whose name in the file differs from its name in the inventory."""
-
-    source_id: str = Field(description="The record's source_id.")
-    original_name: str = Field(description="The name in the inventory.")
-    csv_name: str = Field(description="The name in the file.")
-    reasons: list[Literal["repeated_name", "cleaned_text"]] = Field(
-        description="repeated_name: another server has the name. cleaned_text: line breaks "
-        "or a leading formula character were changed."
-    )
-
-
-class CsvExport(BaseModel):
-    """The CSV file and what was changed or left out."""
-
-    csv_lines: list[str] = Field(
-        description=(
-            "The file in Azure Migrate's format, one item per line without the line end: "
-            "the header row first, then one line per server. Join the items with CRLF to "
-            "get the file. A stored result pages this list with result_query."
-        )
-    )
-    row_count: int = Field(description="Servers in the file (header not counted).")
-    columns: list[str] = Field(description="The header row.")
-    left_out: list[LeftOutServer] = Field(description="Servers not in the file.")
-    renamed: list[RenamedServer] = Field(description="Servers with a changed name.")
-    skipped_records: dict[str, int] = Field(
-        description="Records that are not servers, per kind. They have no place in the file."
-    )
-    notes: list[str] = Field(description="Other things to know, for example cut disk lists.")
 
 
 def disk_columns(disk_number: int) -> tuple[str, ...]:
@@ -272,18 +227,18 @@ def _row(server: ServerRecord, csv_name: str, disk_groups: int) -> list[str]:
 
 def _select(
     servers: list[ServerRecord], duplicates: Iterable[Duplicate]
-) -> tuple[list[ServerRecord], list[LeftOutServer]]:
+) -> tuple[list[ServerRecord], list[LeftOutRecord]]:
     # Every record of one machine maps to the same key: the first record's id.
     # A repeated source_id is the same record; it maps to itself by default.
     machine_of = {d.source_id: d.same_as for d in duplicates if d.match != "source_id"}
     kept: list[ServerRecord] = []
-    left_out: list[LeftOutServer] = []
+    left_out: list[LeftOutRecord] = []
     in_file: dict[str, str] = {}
     for server in servers:
         missing = _required_missing(server)
         if missing:
             left_out.append(
-                LeftOutServer(
+                LeftOutRecord(
                     source_id=server.source_id,
                     name=server.name,
                     reason="missing_required_field",
@@ -295,7 +250,7 @@ def _select(
         if machine in in_file:
             # Leave a repeat out only when the record it repeats is in the file.
             left_out.append(
-                LeftOutServer(
+                LeftOutRecord(
                     source_id=server.source_id,
                     name=server.name,
                     reason="same_machine_as",
@@ -305,7 +260,7 @@ def _select(
             continue
         if len(kept) >= MAX_SERVERS_PER_FILE:
             left_out.append(
-                LeftOutServer(
+                LeftOutRecord(
                     source_id=server.source_id, name=server.name, reason="over_file_limit"
                 )
             )
@@ -315,7 +270,7 @@ def _select(
     return kept, left_out
 
 
-def _unique_names(servers: list[ServerRecord]) -> tuple[list[str], list[RenamedServer]]:
+def _unique_names(servers: list[ServerRecord]) -> tuple[list[str], list[RenamedRecord]]:
     """One file name per kept server, unique without regard to case.
 
     A name that another server has, or that an earlier server already got
@@ -327,7 +282,7 @@ def _unique_names(servers: list[ServerRecord]) -> tuple[list[str], list[RenamedS
     counts = Counter(name.casefold() for name in cleaned)
     taken: set[str] = set()
     names: list[str] = []
-    renamed: list[RenamedServer] = []
+    renamed: list[RenamedRecord] = []
     for server, name in zip(servers, cleaned, strict=True):
         reasons: list[Literal["repeated_name", "cleaned_text"]] = []
         if name != server.name:
@@ -344,10 +299,10 @@ def _unique_names(servers: list[ServerRecord]) -> tuple[list[str], list[RenamedS
         names.append(final)
         if reasons:
             renamed.append(
-                RenamedServer(
+                RenamedRecord(
                     source_id=server.source_id,
                     original_name=server.name or name,
-                    csv_name=final,
+                    name_in_file=final,
                     reasons=reasons,
                 )
             )
@@ -362,7 +317,7 @@ def _csv_line(fields: list[str]) -> str:
 
 def inventory_to_csv(
     records: Iterable[InventoryRecord], duplicates: Iterable[Duplicate] = ()
-) -> CsvExport:
+) -> ExportResult:
     """Build the Azure Migrate CSV file from merged inventory *records*."""
     servers: list[ServerRecord] = []
     skipped: Counter[str] = Counter()
@@ -388,8 +343,10 @@ def inventory_to_csv(
     lines += [
         _csv_line(_row(server, name, disk_groups)) for server, name in zip(kept, names, strict=True)
     ]
-    return CsvExport(
-        csv_lines=lines,
+    return ExportResult(
+        format=FORMAT_NAME,
+        lines=lines,
+        line_end=LINE_END,
         row_count=len(kept),
         columns=columns,
         left_out=left_out,

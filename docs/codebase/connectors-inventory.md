@@ -1,19 +1,20 @@
-# Migration assessment package (`connectors/migration`)
+# Estate inventory package (`connectors/inventory`)
 
 ## Overview
 
-This package holds the shapes and the operations of the migration
-assessment work: MEHO reads the estate a team runs today and turns it
-into an Azure migration assessment that people can check.
+This package holds the estate inventory and its exporter: MEHO reads the
+systems a team runs today into one common inventory shape, and turns
+stored inventories into files that other tools import.
 
-The first part, in this package today:
+In this package today:
 
 - **One inventory shape** for every source platform (`contracts.py`).
 - **One assessment result shape** (`contracts.py`).
 - **A loader** that reads stored inventories back by handle id, takes
   inventories given inline, and merges them (`inventory_load.py`).
-- **The Azure Migrate CSV mapping** (`azure_migrate_csv.py`) and the
-  read `migration.inventory.csv` (`ops.py`).
+- **The exporter read** `inventory.export` (`ops.py`), its answer shape
+  (`export.py`) and its table of file formats (`formats.py`). The first
+  format is the Azure Migrate CSV import file (`azure_migrate_csv.py`).
 - **The source adapters**: one multi-step read per source connector that
   collects the estate into the inventory shape (`source_*.py`, shared parts
   in `adapter_kit.py`, registrar in `source_register.py`).
@@ -24,10 +25,10 @@ this package (see "Source adapters" below).
 
 Like `connectors/audit/`, the package has no connector class. Its
 operations are registered under the natural key
-`(product="migration", version="1.x", impl_id="migration-assess")`, so the
-connector id is `migration-assess-1.x`. The handlers are module-level
-functions; the dispatcher calls them with `target=None`. The package
-`__init__` queues `register_migration_operations` on the lifespan
+`(product="inventory", version="1.x", impl_id="inventory")`, so the
+connector id is `inventory-1.x`. No vendor is behind it. The handlers are
+module-level functions; the dispatcher calls them with `target=None`. The
+package `__init__` queues `register_inventory_operations` on the lifespan
 registrar list (`register_typed_op_registrar`).
 
 ## Key types
@@ -161,28 +162,62 @@ inventories=...)`:
    counts, so a machine whose first record had no BIOS UUID is still
    matched to a later record from another source.
 
-### `migration.inventory.csv`
+### `inventory.export`
 
 Group `inventory`, `safe`, `requires_approval: false`. It is a typed
 operation, not a multi-step one: it runs no other operation, it only reads
-stored results and the inventories given in the call. In:
-`inventory_handles` (handle ids), `inventories` (whole inventories given
-inline), or both; at least one of the two, and at most 20 together. Out:
-`csv_lines` (the
-file, one item per line without the line end, header first), `row_count`,
-`columns`, `left_out`, `renamed`, `skipped_records`, `notes`, `sources`.
-Join `csv_lines` with CRLF to get the file. Each entry of `sources` has
-`origin`: `"stored"` with its `handle_id`, or `"inline"` with no handle id,
-so a report shows which data MEHO stored itself
-(`LoadedInventory.sources()`).
+stored results and the inventories given in the call. The op id, the group
+and the tags (`inventory`, `export`, `read`) name no target tool. Only the
+format name does.
+
+In:
+
+- `format` (required): the name of a file format in `EXPORT_FORMATS`
+  (`formats.py`). The parameter schema lists the names in an `enum`, with a
+  short text per format. An unknown name fails with a message that lists
+  the known formats, before any inventory is read.
+- `inventory_handles` (handle ids), `inventories` (whole inventories given
+  inline), or both; at least one of the two, and at most 20 together.
+
+Out (`ExportResult` in `export.py`, plus `sources`):
+
+- `format`: the format name from the call.
+- `lines`: the file, one item per line without the line end, header first.
+- `line_end`: join `lines` with it to get the file (CRLF for CSV).
+- `row_count`, `columns` (the header row; empty when a format has none).
+- `left_out`: records not in the file, each with its `reason`
+  (`missing_required_field` with `missing`, `same_machine_as` with
+  `same_as`, `over_file_limit`).
+- `renamed`: records whose name in the file (`name_in_file`) differs from
+  their name in the inventory, with the `reasons`.
+- `skipped_records`: records of kinds the format has no place for, per kind.
+- `notes`, and `sources`. Each entry of `sources` has `origin`: `"stored"`
+  with its `handle_id`, or `"inline"` with no handle id, so a report shows
+  which data MEHO stored itself (`LoadedInventory.sources()`).
 
 The file is a list of lines on purpose. A large result comes back as a
 handle, and `result_query` returns an array in pages (`offset` and
 `limit`, up to 500 items a page) but a string only whole, under one output
 limit (256 KiB by default). A file of 10,000 servers is over that limit as
 one string. Read the lines in pages with `result_query`, the path
-`/csv_lines` and `offset` / `limit`; each page holds rows of
+`/lines` and `offset` / `limit`; each page holds rows of
 `{"value": <line>}`.
+
+#### File formats (`formats.py`)
+
+`EXPORT_FORMATS` maps a format name to an `ExportFormat`: the name, a
+short text for callers, and the mapping function
+`(records, duplicates) -> ExportResult`. A format is a plain mapping: the
+columns, units, name rules and size limit of one file. It holds no price,
+no sizing and no readiness check. There is no plug-in loading. A new
+format is one new mapping module, one entry in the table and one golden
+test file.
+
+| Format | Module | File |
+|---|---|---|
+| `azure-migrate-csv` | `azure_migrate_csv.py` | Azure Migrate CSV import file (golden file `backend/tests/data/migration_azure_migrate_golden.csv`) |
+
+#### Format `azure-migrate-csv`
 
 The mapping (`inventory_to_csv`):
 
@@ -218,7 +253,7 @@ The mapping (`inventory_to_csv`):
 ### Source adapters
 
 One multi-step read per source, registered on the source's own connector
-(not on `migration-assess-1.x`), group `migration`, `safe`,
+(not on `inventory-1.x`), group `migration`, `safe`,
 `requires_approval: false` on purpose:
 
 | Op | Connector | Records | Module |
@@ -252,7 +287,7 @@ How every adapter works (`adapter_kit.py`):
    is short: `inventory_handle`, `expires_at`, `connector_id`, `target`,
    `collected_at`, `record_counts`, `source_totals`, `left_out_items`,
    `counts_match`, `omission_count`, `omissions`. So every adapter answer
-   has a handle `migration.inventory.csv` can read, and `result_query`
+   has a handle `inventory.export` can read, and `result_query`
    reads the records (path `/records`). When the `omissions` list makes
    the answer larger than the inline limit (4 KB), the reducer stores the
    omissions as rows. The three count dicts are then kept by a
@@ -341,7 +376,7 @@ on both vCenter catalogs (`vmware-rest-8.0` and `vmware-rest-9.0`), group
 `migration`, `safe`, no approval. It returns one inventory envelope, always
 with a handle: the operation's `result_handle: {"always": true}` hint
 (#5143) makes the reducer store a small inventory too, so even a one-VM
-inventory has a handle for `migration.inventory.csv`. A small inventory
+inventory has a handle for `inventory.export`. A small inventory
 comes back whole next to its handle. A large one comes back as the
 reducer's document summary (`result_record`, `top_level_fields`, the small
 scalars), and the caller reads the rest with `result_query` and a path

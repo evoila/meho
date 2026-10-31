@@ -975,6 +975,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `folder_list`) — the inventory folders of a vCenter, one flat row each, with
   the datacenter and the parent. `safe`, in its own group `vmware-folders`, on
   both catalogs. See **Folder list** under Control flow.
+- **`vmware.network.portgroup.show`** (`typed_ops_portgroup_show.py`,
+  handler `network_portgroup_show`) — all settings of one distributed port
+  group, by id or name. `safe`, in its own group `vmware-portgroup-settings`,
+  on both catalogs. See **Port group settings** under Control flow.
 - **`vcenter.sso_admin.api_file.get`** (`typed_ops_sso_admin_api_file.py`,
   handler `sso_admin_api_file_get`) — reads one SSO Admin API description
   file (the WSDL or one of its XSD files) that a vCenter serves. No vendor
@@ -5140,6 +5144,60 @@ Code: `typed_ops_datacenter_list.py`. Tests:
 no live vCenter) and
 `tests/test_connectors_vmware_rest_datacenter_list_reconcile.py` (the paths,
 the filter and the summary fields against the pinned vCenter 8.0 U3 and 9.0
+`vcenter.yaml`).
+
+### Port group settings (`vmware.network.portgroup.show`)
+
+A typed read that shows all settings of one distributed port group. It is
+written by hand, so it has a clear summary, field descriptions and a risk
+level. It replaces the raw ingested `GET:/DistributedVirtualPortgroup/{moId}/config`
+operation for this common task.
+
+| Operation | What it does | Vendor calls | Risk |
+|---|---|---|---|
+| `vmware.network.portgroup.show` | One row: `portgroup` (moid), `name`, `key`, `description`, `dvs` and `dvs_name` (the switch), `port_binding`, `num_ports`, `auto_expand`, `uplink_portgroup`, `config_version`, `vlan` (`access` with `vlan_id`, `trunk` with `ranges`, or `pvlan` with `pvlan_id`), `security`, `teaming` (load balancing, active and standby uplinks, `failback`, `notify_switches`, `beacon_probing`), `traffic_shaping.ingress` / `.egress`, `blocked`. Each policy carries `inherited` (the whole policy comes from the switch) and `inherited_settings` (one flag per field); the row carries `inherited_settings` for `vlan` and `blocked`. Takes `portgroup` (moid) or `name`. | VIM `PropertyCollector.RetrievePropertiesEx` of `DistributedVirtualPortgroup.config`, then of the switch `name` and `config.defaultPortConfig`; with `name`, first `GET /vcenter/network` with the `names` and `types` filters | `safe`; runs at once |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 U1, U2, U3 | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+- **How it calls vCenter.** On the connector's own session, so it needs no
+  spec ingest. The VIM reads go through `_post_vmomi_json` on the VI-JSON
+  path of the target's release (`/sdk/vim25/{release}`). The port group's
+  whole `config` object is read: vCenter 8.0.x answers deep paths such as
+  `config.defaultPortConfig.vlan` with HTTP 500. On the switch,
+  `config.defaultPortConfig` (its default port settings) is read with the
+  `name`, the same path the port group write composites use.
+- **Values.** Each setting is the `value` of a VIM policy object. `failback`
+  is the inverse of the VIM field `rollingOrder`. Bandwidth is in bits per
+  second, burst size in bytes. A setting the switch does not report is `null`.
+- **Inherited settings.** A port group can mix local and inherited settings
+  inside one policy, for example a local load balancing with inherited
+  uplinks. A setting that is inherited, by itself or through its policy, is
+  taken from the switch defaults, so the row shows the real uplinks and not an
+  empty list. Each policy says `inherited` (the whole policy comes from the
+  switch) and `inherited_settings` (true, false or null per field). When
+  vCenter cannot read the switch defaults (for example no permission on the
+  switch) and the port group inherits at least one setting, the call fails:
+  an inherited uplink list without the switch value would show as empty.
+  When the port group inherits nothing, the read only logs a warning.
+- **Errors.** An unknown id or name is a `not_found` result. A name used by
+  two port groups (for example in two datacenters) is an error that names the
+  ids. A `config` property vCenter could not read (a `missingSet` entry, for
+  example no permission) fails the call instead of showing empty settings.
+- **Size.** One small row, so no result handle.
+- **Related.** `vmware.composite.network.portgroup.audit` lists all port
+  groups with VLAN and VMs. The VLAN and security changes are
+  `network.portgroup.vlan.set` and `network.portgroup.security.set`.
+
+Code: `typed_ops_portgroup_show.py`, response schema in
+`_portgroup_show_schemas.py`. Tests:
+`tests/test_connectors_vmware_rest_typed_portgroup_show.py` (saved answers,
+no live vCenter; mocked HTTP on the vCenter 8.0.3 and 9.0 VI-JSON paths) and
+`tests/test_connectors_vmware_rest_portgroup_show_reconcile.py` (every VIM
+field the read uses against the pinned 9.0 `vi-json.yaml` and the 8.0 U1,
+U2 and U3 files; the network list filters against the pinned 8.0 U3 and 9.0
 `vcenter.yaml`).
 
 ## Dependencies

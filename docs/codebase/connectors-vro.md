@@ -6,7 +6,8 @@ The `vro` connector is the hand-written `HttpConnector` subclass for the
 Orchestrator REST API (`/vco/api`). Orchestrator runs the workflows behind
 Aria Automation and VCF Automation and many custom runbooks. When a
 deployment fails in a workflow, the log of the failed run is in
-Orchestrator. This connector lets an agent read it.
+Orchestrator. This connector lets an agent read it, and lets a person run
+a workflow or cancel a run, each after an approval.
 
 It is registered under `(product="vro", version="9.0", impl_id="vro-rest")`
 and as the product wildcard, so a target with no version yet still
@@ -14,8 +15,8 @@ resolves to it. The `>=8.0,<10.0` range keeps Orchestrator 8.x (on its own
 or inside Aria Automation 8.x) and the VCF 9 Operations orchestrator on one
 class: both serve the same `/vco/api` paths.
 
-Today the connector ships three logins, version detection and seven reads.
-Changes (run a workflow, cancel a run, and more) come in a later Task.
+The connector ships three logins, version detection, ten reads and two
+changes: run a workflow (`destructive`) and cancel a run (`dangerous`).
 
 Package: `backend/src/meho_backplane/connectors/vro/`.
 
@@ -28,17 +29,28 @@ Package: `backend/src/meho_backplane/connectors/vro/`.
 | `vro.execution.list` | The runs (executions) of one workflow: id, state, start, end, user. One flat row per run; `more_rows` says whether more exist. | `GET /vco/api/workflows/{workflowId}/executions` | read (`safe`, no approval) | 8.18, 9.x |
 | `vro.execution.get` | One run: state, a plain `outcome`, dates, user, error text, current step, inputs and outputs. Secret values come back replaced. | `GET /vco/api/workflows/{workflowId}/executions/{executionId}` | read (`safe`, no approval) | 8.18, 9.x |
 | `vro.execution.logs` | The log lines of one run, at most `max_lines` (default 200, at most 2000); each text cut at 2000 characters. | `GET /vco/api/workflows/{workflowId}/executions/{executionId}/syslogs` | read (`safe`, no approval) | 8.18, 9.x |
+| `vro.action.list` | Actions (scripts): id, name, module, fqn, version. `module` keeps one module. | `GET /vco/api/actions` | read (`safe`, no approval) | 8.18, 9.x |
+| `vro.config_element.list` | Configuration elements; with `config_element_id`, the element and its attributes (name, type, value). Secret values are replaced. | `GET /vco/api/configurations`, `GET /vco/api/configurations/{id}` | read (`safe`, no approval) | 8.18, 9.x |
+| `vro.package.list` | Packages and their versions. | `GET /vco/api/packages` | read (`safe`, no approval) | 8.18, 9.x |
+| `vro.workflow.run` | Run a workflow with inputs. Answers `accepted` with the run id at once; the status read is `vro.execution.get`. Secret inputs come from Vault. | `POST /vco/api/workflows/{workflowId}/executions` (also reads the workflow and its runs) | change (`destructive`, waits for approval; only a person, after a preview) | 8.18, 9.x |
+| `vro.execution.cancel` | Cancel a run that has not ended. A run that ended is `unchanged`. | `GET` and `DELETE /vco/api/workflows/{workflowId}/executions/{executionId}/state` | change (`dangerous`, waits for approval) | 8.18, 9.x |
 
-All seven reads exist on every covered version, so none needs a version
-check. If a later operation exists only on some versions, the Task that
-adds it adds the check.
+All twelve operations exist on every covered version, so none needs a
+version check. If a later operation exists only on some versions, the Task
+that adds it adds the check.
 
 **Why `vro.execution.*` and not `vro.run.*`.** The Task proposed
 `vro.run.list`, `vro.run.get` and `vro.run.logs`. "run" is a write word
 for the operation-contract check (`write_name` rule), so a read named
 `vro.run.*` would fail it. The vendor calls a run an "execution", so the
 reads use that word. A change that runs a workflow can still be called
-`vro.workflow.run`.
+`vro.workflow.run`. The Task proposed `vro.run.cancel` for the cancel; it
+is `vro.execution.cancel`, so it sits next to the run reads in the
+`vro-executions` group.
+
+**Groups.** `vro-server` (about, health), `vro-workflows` (list, get, run),
+`vro-executions` (the run reads and cancel) and `vro-library` (actions,
+configuration elements, packages). The group texts live in `typed_ops.py`.
 
 ## Registering targets
 
@@ -72,9 +84,15 @@ raise `NotImplementedError`.
 - `VroServerVersion`, `parse_server_version` (`connector.py`) -- the
   version read.
 - `VroTypedOp` and the group keys (`op_types.py`), the op metadata
-  (`read_ops.py`) and the registrar (`typed_ops.py`).
-- `typed_reads.py` -- the read bodies, `flat_rows`, `redact_secrets` and
-  `VENDOR_CALLS` (every vendor call, for the reconcile lane).
+  (`read_ops.py`, `library_ops.py`, `write_ops.py`) and the registrar and
+  group texts (`typed_ops.py`).
+- `typed_reads.py` -- the first seven read bodies, `flat_rows`,
+  `redact_secrets`, `path_segment` and `VENDOR_CALLS`.
+- `library_reads.py` -- the action, configuration element and package
+  reads and `LIBRARY_VENDOR_CALLS`.
+- `run_writes.py` -- the run and the cancel, the run preview builder,
+  `wrap_value`, `run_sha256` and `WRITE_VENDOR_CALLS`. The reconcile lane
+  checks all three `*VENDOR_CALLS` sets.
 
 ## Control flow
 
@@ -166,6 +184,72 @@ MEHO stores a long list behind a result handle; the agent reads it with
   address: the read returns the normal `connector_error` with the guard's
   message, so the reason is not hidden behind a successful read.
 
+### Run a workflow (`vro.workflow.run`)
+
+A workflow can do anything, so the run is `destructive`. An agent call is
+refused. A person runs it in three steps:
+
+1. `preview_operation` runs the preview builder. It reads the workflow
+   (`vro.workflow.get`: version, `content_sha256`, declared inputs) and
+   checks the inputs. It refuses when the workflow does not exist (or the
+   login may not read it) or an input is wrong. Then the call cannot wait
+   for approval. Otherwise it returns the approval card: the workflow, the
+   inputs, `run_sha256` and the `blast_radius` block (`object`: the
+   workflow; `children`: the plug-in objects the run is given;
+   `irreversibility`: the workflow's own code decides what it changes, and
+   MEHO cannot undo it).
+2. `call_operation` with the `preview_hash` waits until a second person
+   approves.
+3. The approved run reads the workflow again and computes `run_sha256`
+   again. `run_sha256` is the SHA-256 of a fixed JSON form of the
+   workflow id, its version, its `content_sha256`, the inputs (name, type,
+   value; a secret input gives its Vault reference, never its value) and
+   `allow_parallel`. When it differs from the card, or no card is bound,
+   the answer is `precondition_failed` and nothing starts.
+
+Before the start, unless `allow_parallel` is true, the run reads up to 200
+runs of the workflow. When one is still running or waiting, the answer is
+`already_running` with that run's id, and nothing starts. This is a help,
+not a lock: two callers can both check before either starts.
+
+Then MEHO reads each secret input from Vault and sends
+`POST .../executions` once, with no retry. The answer is `accepted` with
+the run id (from the answer body, or from the end of the `Location`
+header) and `status_read: vro.execution.get`. It never says the work is
+done. The caller reads `vro.execution.get` until `outcome` is
+`completed`, `failed` or `canceled`. That read logs in again after a
+`401`, and says `not_reachable` (with the run id and the time) when the
+server does not answer.
+
+The run is one vendor call, so there is no part-way failure to report. A
+vendor error comes back as `connector_error` with the HTTP status and the
+vendor text (`extras.upstream_message`), so a person learns why
+Orchestrator refused the run. A test runs this through the whole flow:
+preview, approval, then a vendor `400`.
+
+**Lost reply.** Call the run with `async: true`
+(`docs/codebase/async-governed-dispatch.md`): MEHO keeps the answer, with
+the run id, under a run handle. If the reply is lost anyway, do not start
+again. First read `vro.execution.list` for the workflow and look for a run
+started at that time by the MEHO account.
+
+**Input values.** The caller gives `{name, value}` or `{name, secret_ref}`.
+The type comes from the workflow. `wrap_value` wraps the value the way
+the vendor expects: `string`, `number`, `boolean`, `date` (`Date`),
+`secure-string` (`SecureString`), `array` (`Array/<type>`) and
+`sdk-object` (a plug-in type such as `VC:VirtualMachine`; the value is the
+object id). Other types (for example `Properties`) are refused with a
+clear message. An input that is not declared, given twice, or whose value
+does not fit the type is refused before anything is sent.
+
+### Cancel a run (`vro.execution.cancel`)
+
+Reads the run state (`GET .../state`). A run that already ended
+(`completed`, `failed`, `canceled`) is `unchanged`, and nothing is sent.
+Otherwise MEHO sends `DELETE .../state` and answers `cancel_requested`.
+Steps that already ran are not undone. It is safe to run twice. It waits
+for approval like every change.
+
 ### Secrets
 
 - `vro.workflow.get` returns no default values and no attribute values:
@@ -183,6 +267,30 @@ MEHO stores a long list behind a result handle; the agent reads it with
 - The same goes for `{key, value}` entries, the shape a `Properties`
   value uses: when the key is a secret name, the value is replaced, at
   any depth. Entries shaped `{name, value}` are handled the same way.
+- `vro.config_element.list` replaces the value of an attribute whose type
+  is `SecureString` or `EncryptedString`, whose value sits in a
+  `secure-string` or `encrypted-string` wrapper, whose `encrypt-value`
+  flag is set, or whose name is a secret name, and marks the row
+  `masked: true`.
+- `vro.workflow.run` takes a secret input only as `secret_ref`
+  (`<vault-path>#<field>`), never as a value. Every input type that holds
+  a secret is treated as secret: a type whose name contains
+  `SecureString` or `EncryptedString` in any letter case, also inside a
+  list (`Array/...`) or a composite type (`CompositeType(...)`). This is
+  the same rule the reads use. Only an input of exactly type
+  `SecureString` (or an input with a secret name) takes a `secret_ref`.
+  Every other type that holds a secret, for example `EncryptedString`,
+  `Array/SecureString` or a composite type with a `SecureString` field,
+  is refused: MEHO cannot send it. MEHO reads the value from Vault
+  under the caller's identity (after an approval: the approver) when the
+  approved run starts. So the params, the approval row and the broadcast
+  hold Vault references only, never a secret value. The op is not pinned
+  `credential_write`: that pin would hide every vendor error text, and a
+  person must learn why a run was refused. Instead the op carries the
+  `destructive` tag, so the flight recorder keeps no body of any call of
+  the run, and the run's own send (`_vro_send`) records no request body.
+  A vendor error whose text holds a secret value comes back without that
+  text.
 - `vro.execution.logs` cuts a text at 2000 characters. The shared secret
   rules (the ones the dispatcher runs on every answer) run on the whole
   text first. They need the label and the whole value; a cut could leave
@@ -218,8 +326,21 @@ MEHO stores a long list behind a result handle; the agent reads it with
   no token in a result, log line, audit row or trace),
   `content_sha256` and `secret`, `outcome` for every run state and
   `not_reachable`, and `more_rows` on every list read.
+- `backend/tests/test_connectors_vro_run_and_library.py` -- the three
+  library reads (module filter, `more_rows`, secret attributes replaced),
+  `wrap_value`, the run preview (card, `blast_radius`, refusals), a run
+  refused without a matching `preview_hash`, the full flow (preview,
+  wait, approval by a second person, one start; no secret value in the
+  approval row, the audit rows, the answer or the trace),
+  `precondition_failed` on drift or without a card, `already_running`,
+  the run id from the body or the `Location` header, vendor errors (a
+  secret in the text is withheld; through the whole flow the vendor text
+  reaches the answer and no secret reaches the trace, the audit rows or
+  the broadcast), a status read after an expired login,
+  and the cancel (waits for approval, running, ended, vendor error, ids
+  that must stay one path segment).
 - `backend/tests/test_connectors_vro_spec_reconcile.py` -- every path in
-  `VENDOR_CALLS` against the pinned reference lists of Orchestrator 9.0
+  the three `*VENDOR_CALLS` sets against the pinned reference lists of Orchestrator 9.0
   and 9.1 (`vcf-operations-orchestrator-9.0/` and
   `vcf-operations-orchestrator-9.1/` on the spec shelf). The vendor
   publishes no API file, so the shelf pins a list made from the vendor's
@@ -229,6 +350,12 @@ MEHO stores a long list behind a result handle; the agent reads it with
 
 ## Known issues
 
+- The vendor reference does not show the value wrappers of a run input.
+  `string` and `sdk-object` are known from public examples; `date`,
+  `secure-string` and `array` follow the same form and are not proven
+  live yet. The lab proof checks them.
+- The run does not send the vendor's optional `executionId` (a caller
+  chosen run id); its behaviour on a repeated id is not documented.
 - No reference exists for Orchestrator 8.18 or 9.1.1, so the reconcile
   lane checks the paths against 9.0 and 9.1 only. No lab proof has run
   yet. Until one runs, the reads on 8.18 and 9.1.1 are checked only by

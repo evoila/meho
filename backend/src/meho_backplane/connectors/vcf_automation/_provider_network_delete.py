@@ -184,7 +184,8 @@ async def provider_network_delete(
             ),
         }
     spec = KINDS[read_kind]
-    assert spec.item is not None and spec.item_param is not None
+    if spec.item is None or spec.item_param is None:
+        raise VcfaProviderNetworkError(f"a {read_kind} object cannot be deleted by id")
     path = provider_path(target, spec.item, **{spec.item_param: obj_id})
     resp = await send(connector, target, operator, "DELETE", path)
     job_id = job_id_of(resp)
@@ -212,9 +213,8 @@ async def _delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     if connector is None or ctx.target is None or kind not in DELETE_KINDS:
         return None
     problem = bad_id_reason(obj_id, str(kind).replace("_", " "))
-    if problem is not None:
+    if problem is not None or not isinstance(obj_id, str):
         raise NetworkDeleteRefusedError(f"{problem}; nothing to delete")
-    assert isinstance(obj_id, str)
     obj = await read_one(connector, ctx.target, ctx.operator, DELETE_KINDS[kind], obj_id)
     if obj is None:
         raise NetworkDeleteRefusedError(

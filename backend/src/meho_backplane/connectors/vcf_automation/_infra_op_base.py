@@ -184,6 +184,7 @@ def change(
     shape: str,
     next_step: str,
     tag: str,
+    credential: bool = False,
 ) -> VcfaTypedOp:
     return VcfaTypedOp(
         op_id=f"{prefix}.{name}",
@@ -195,7 +196,7 @@ def change(
         parameter_schema=schema,
         response_schema=response,
         group_key=INFRA_GROUP,
-        tags=("write", "vcfa", tag),
+        tags=("write", "vcfa", tag, *(("credential",) if credential else ())),
         safety_level=safety,
         requires_approval=True,
         llm_instructions=guidance(

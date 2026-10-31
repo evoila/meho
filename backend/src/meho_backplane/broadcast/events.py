@@ -412,6 +412,13 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # would otherwise fall through to ``other`` and broadcast in full).
         # Same posture as its ``vcfa.provider.api_token.create`` sibling.
         "vcfa.provider.api_token.revoke",
+        # The cloud account add of Aria Automation 8 and VCF Automation 9. Its
+        # params carry only a Vault path (``password_secret_ref``); the
+        # password is read in-process and sent only in the ``POST
+        # /iaas/api/cloud-accounts-vsphere|-nsx-t`` request BODY. Same posture
+        # as ``vcfa.provider.user.create``.
+        "vcfa.tenant.cloud_account.create",
+        "vcfa.vra8.cloud_account.create",
         # The vCenter appliance local-account password change. Like
         # ``keycloak.user.reset_password``, its params carry only a Vault
         # *path* (``password_secret_ref``); the new password is read

@@ -209,6 +209,7 @@ def cloud_account_create_op(prefix: str) -> VcfaTypedOp:
         ),
         next_step=f"Read {prefix}.cloud_account.list until the account shows up healthy.",
         tag="cloud-account",
+        credential=True,
     )
 
 

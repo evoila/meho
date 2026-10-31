@@ -440,9 +440,12 @@ connector covers, so no op needs a version check.
 - **Secrets.** The cloud account password is never a parameter. It is read
   from Vault at `password_secret_ref` (mount and field as in the provisioning
   ops) under the caller's identity, only when the approved call runs, and goes
-  only into the create body. A vendor error text that repeats it gets a marker
-  in its place. The cloud account list returns only the host name of the
-  account properties.
+  only into the create body. The create is tagged `credential` and pinned in
+  the credential list of `broadcast/events.py`: the flight recorder keeps no
+  bodies, the broadcast shows no params, and MEHO keeps the vendor error text
+  out of the answer (only the HTTP status shows). The handler also replaces the
+  password in a vendor error text with a marker. The cloud account list returns
+  only the host name of the account properties.
 - **Ids in URL paths** are checked (not empty, not `.` or `..`, also in the
   schema) and percent-encoded.
 - **Remove preview.** `cloud_account.delete` is destructive: an agent is always

@@ -421,7 +421,7 @@ async def test_the_password_is_not_an_accepted_param(vcfa: VcfAutomationConnecto
     assert result["extras"]["error_code"] == "invalid_params", result
 
 
-async def test_a_vendor_error_reaches_the_answer_without_the_password(
+async def test_a_vendor_error_never_shows_the_password(
     vcfa: VcfAutomationConnector, vault_secret: dict[str, Any]
 ) -> None:
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
@@ -433,7 +433,8 @@ async def test_a_vendor_error_reaches_the_answer_without_the_password(
         result = await run("vcfa.tenant.cloud_account.create", _CREATE_PARAMS)
     assert result["status"] == "error"
     assert result["extras"]["http_status"] == 400
-    assert "Login failed" in json.dumps(result)
+    # The op sends a secret, so MEHO keeps the vendor text out of the answer.
+    assert "withheld" in result["extras"]["upstream_message"]
     assert PASSWORD not in json.dumps(result)
 
 

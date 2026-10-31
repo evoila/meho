@@ -158,6 +158,9 @@ from meho_backplane.connectors.vmware_rest.composites._host import (
     disk_mark_flash_composite,
     service_control_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._host_access_ops import (
+    HOST_ACCESS_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._host_cluster_llm_instructions import (
     HOST_CLUSTER_LLM_INSTRUCTIONS,
 )
@@ -431,6 +434,10 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
     VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vmware_rest.host_access import (
+    HOST_ACCESS_GROUP_KEY,
+    HOST_ACCESS_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.license_common import (
     LICENSE_GROUP_KEY,
     LICENSE_KEY_TAG,
@@ -645,6 +652,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "migration": MIGRATION_GROUP_WHEN_TO_USE,
     # #4394: shared with the typed read vmware.vcenter.deployment.status.
     INSTALL_GROUP_KEY: INSTALL_WHEN_TO_USE,
+    # Shared with the typed reads host.local_user.list and host.ad.status.
+    HOST_ACCESS_GROUP_KEY: HOST_ACCESS_WHEN_TO_USE,
 }
 
 
@@ -2189,6 +2198,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # Install a new vCenter (#4394), dangerous / approval; the rows live in
     # their own module.
     *(_CompositeSpec(**row) for row in VCENTER_INSTALL_COMPOSITES),
+    # Host local users and Active Directory join, with approval; the rows live
+    # in their own module.
+    *(_CompositeSpec(**row) for row in HOST_ACCESS_COMPOSITES),
 )
 
 

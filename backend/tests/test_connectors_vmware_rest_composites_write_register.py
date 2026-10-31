@@ -167,6 +167,13 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.cluster.drs_group.delete",
     # Licence assign: dangerous + approval (the default tier).
     "vmware.composite.license.assign",
+    # Host local users and Active Directory: dangerous + approval; the user
+    # delete is destructive.
+    "vmware.composite.host.local_user.create",
+    "vmware.composite.host.local_user.password.set",
+    "vmware.composite.host.local_user.delete",
+    "vmware.composite.host.ad.join",
+    "vmware.composite.host.ad.leave",
     # Install a new vCenter (#4394): dangerous + approval.
     "vmware.composite.vcenter.appliance.deploy",
     "vmware.composite.vcenter.install",
@@ -339,6 +346,21 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
         "meho_backplane.connectors.vmware_rest.composites._vm_allocation."
         "vm_resource_allocation_set_composite"
     ),
+    "vmware.composite.host.local_user.create": (
+        "meho_backplane.connectors.vmware_rest.composites._host_local_users.local_user_create_composite"
+    ),
+    "vmware.composite.host.local_user.password.set": (
+        "meho_backplane.connectors.vmware_rest.composites._host_local_users.local_user_password_set_composite"
+    ),
+    "vmware.composite.host.local_user.delete": (
+        "meho_backplane.connectors.vmware_rest.composites._host_local_users.local_user_delete_composite"
+    ),
+    "vmware.composite.host.ad.join": (
+        "meho_backplane.connectors.vmware_rest.composites._host_ad.ad_join_composite"
+    ),
+    "vmware.composite.host.ad.leave": (
+        "meho_backplane.connectors.vmware_rest.composites._host_ad.ad_leave_composite"
+    ),
     "vmware.composite.license.assign": (
         "meho_backplane.connectors.vmware_rest.composites._license.license_assign_composite"
     ),
@@ -470,6 +492,11 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.cdrom.unmount_library_iso": "vm",
     "vmware.composite.vm.resource_allocation.set": "vm",
     "vmware.composite.license.assign": "vmware-licensing",
+    "vmware.composite.host.local_user.create": "vmware-host-access",
+    "vmware.composite.host.local_user.password.set": "vmware-host-access",
+    "vmware.composite.host.local_user.delete": "vmware-host-access",
+    "vmware.composite.host.ad.join": "vmware-host-access",
+    "vmware.composite.host.ad.leave": "vmware-host-access",
     "vmware.composite.vcenter.appliance.deploy": "vcenter_install",
     "vmware.composite.vcenter.install": "vcenter_install",
     "vmware.composite.vcenter.deployment.answer": "vcenter_install",
@@ -709,6 +736,8 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
             "vmware.composite.cluster.drs_group.delete",
             # The VM snapshot delete.
             "vmware.composite.vm.snapshot.delete",
+            # The host local-user delete.
+            "vmware.composite.host.local_user.delete",
         ):
             expected_level = "destructive"
         elif row.op_id in caution_ops:

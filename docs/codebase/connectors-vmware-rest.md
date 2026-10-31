@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 87 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 92 hand-authored composites
 that orchestrate cross-spec workflows: 20 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -22,7 +22,7 @@ read `datastore.file.list` / `#3432` + the vSAN folder list
 read `datastore.vsan.folder.list` / `#4022` + the orphan folder check
 `datastore.orphan_dirs` / `#3814` + the VM limit and
 reservation read `vm.resource_allocation.show` / `#3880` + the migration
-inventory read `vmware.migration.inventory`) and 67 write
+inventory read `vmware.migration.inventory`) and 72 write
 composites (G3.1-T6 / `#509`, incl. the three vCenter install changes
 `vcenter.appliance.deploy` / `vcenter.install` / `vcenter.deployment.answer`
 (`#4394`), the destructive-tier `vm.destroy` / `#3198`, the
@@ -565,9 +565,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 87
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 92
   `_CompositeSpec` rows (20 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 50 dangerous/destructive
+  cache-refresh read `datastore.refresh` — + 55 dangerous/destructive
   writes + 17 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
@@ -1438,12 +1438,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 87 `vmware.composite.*` rows with
+   queued registrar and upserts: the 92 `vmware.composite.*` rows with
    `source_kind="composite"` — 20 reads (19 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 67 writes, all `requires_approval=True`
-   (38 `safety_level="dangerous"`; 17 `safety_level="caution"` —
+   service principals), and 72 writes, all `requires_approval=True`
+   (42 `safety_level="dangerous"`; 17 `safety_level="caution"` —
    `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
@@ -1452,9 +1452,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    `vm.cdrom.unmount_library_iso`, `vm.snapshot.create`,
    `content_library.create` + `content_library.item.upload`,
    `cluster.drs_group.members.set`;
-   and 12 `safety_level="destructive"` — `vm.destroy` / `#3198`,
+   and 13 `safety_level="destructive"` — `vm.destroy` / `#3198`,
    `namespace.delete`, `storage_policy.delete`, `cluster.drs_rule.delete`,
-   `cluster.drs_group.delete`,
+   `cluster.drs_group.delete`, `host.local_user.delete`,
    `vm.snapshot.delete`, and the six `#3339` teardown deletes) —
    plus the `vmware.host.usage` row with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
@@ -1840,7 +1840,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 87 composites (20 reads + 67 writes) land as `source_kind="composite"`
+The 92 composites (20 reads + 72 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1937,7 +1937,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 87 composites are hand-authored aggregators the connector ships as
+The 92 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -5124,6 +5124,99 @@ a key; flight-recorder spans, with a control case without the tag),
 `tests/test_connectors_vmware_rest_license_reconcile.py` (the pinned 9.0
 `vi-json.yaml`) and the source scan in
 `tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` (8.0 U1, U2, U3).
+
+### Host local users and Active Directory (`host.local_user.*`, `host.ad.*`)
+
+Seven operations for who can log in to an ESXi host: its local users, and
+its Active Directory domain. They share the group `vmware-host-access` (two
+typed reads and five changes, one group text). Every change waits until a
+second person approves.
+
+| Operation | What it does | Returns | Vendor call | Risk |
+|---|---|---|---|---|
+| `vmware.host.local_user.list` | The local users of the host and their access role. | `users: [{user, full_name, uid, shell_access, access_mode}]`, `read_notes` | `UserDirectory.RetrieveUserGroups`, `HostAccessManager.RetrieveHostAccessControlEntries` | `safe` |
+| `vmware.composite.host.local_user.create` | Creates a local user; the password comes from Vault. | `status` (`created`, `already_exists`, `failed`, ...), `user` | `HostLocalAccountManager.CreateUser` | `dangerous` |
+| `vmware.composite.host.local_user.password.set` | Sets a new password for a local user, from Vault. | `status` (`password_set`, `not_found`, `failed`), `user` | `HostLocalAccountManager.UpdateUser` | `dangerous` |
+| `vmware.composite.host.local_user.delete` | Deletes a local user and its access role. Never `root`. | `status` (`deleted`, `unchanged`, `protected`, ...), `user` | `HostLocalAccountManager.RemoveUser` | `destructive` |
+| `vmware.host.ad.status` | Is the host in a domain, which one, and is the membership healthy. | `joined`, `domain`, `trusted_domains`, `membership_status` | property `info` of `HostAuthenticationManager` | `safe` |
+| `vmware.composite.host.ad.join` | Joins the host to a domain; the join account's password comes from Vault. | `status` (`joined`, `unchanged`, `joined_other_domain`, `failed`, `timeout`, ...), the domain fields, `task` | `HostActiveDirectoryAuthentication.JoinDomain_Task` | `dangerous` |
+| `vmware.composite.host.ad.leave` | Takes the host out of its domain; `force` also deletes the permissions of domain users. | `status` (`left`, `unchanged`, `failed`, `timeout`, ...), the domain fields, `task` | `HostActiveDirectoryAuthentication.LeaveCurrentDomain_Task` | `dangerous` |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 U1, 8.0 U2, 8.0 U3 and ESXi 8.0 U1 to U3 | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 and ESX 9.0 to 9.1.1 | `vmware-rest-9.0` |
+
+Every vendor call exists on all these versions, so no operation needs the
+version check (`_version_gate.py`).
+
+- **Which target.** Local users live on the host, not on vCenter:
+  `HostLocalAccountManager` and the host's `UserDirectory` are on the ESXi
+  service instance. So the four local-user operations need the ESXi host
+  itself as the target (MEHO's single-host path, with the host's own
+  credentials in Vault), also when a vCenter manages the host. On a vCenter
+  target they answer `needs_esxi_target` before any call
+  (`host_access.needs_esxi_target`). The domain operations work on both: on a
+  vCenter target the `host` parameter names the host (name or moid, the
+  `_resolve_host_and_manager` ladder of `composites/_host.py`); on an ESXi
+  target the host is the target (`ha-host`).
+- **How they call the host.** Through `_post_vmomi_json`: VI-JSON on
+  vCenter, SOAP on a single host. `soap_host_access.py` builds the SOAP
+  envelopes of `RetrieveServiceContent`, `RetrieveUserGroups`,
+  `RetrieveHostAccessControlEntries`, `CreateUser`, `UpdateUser`,
+  `RemoveUser`, `JoinDomain_Task` and `LeaveCurrentDomain_Task` from the same
+  VI-JSON body, in the order of the vim25 WSDL, and turns the answers back
+  into the VI-JSON shape (a list answer is an `ArrayOf...` box that
+  `unwrap_vim_value` opens). The connector hands these methods to it in
+  `_build_esxi_soap_envelope` and `_parse_esxi_soap_response`.
+- **The ids.** The account manager and the user directory come from
+  `RetrieveServiceContent`. The access manager and the authentication manager
+  come from `HostSystem.configManager`. The Active Directory object is the
+  `HostActiveDirectoryAuthentication` entry of the authentication manager's
+  `supportedStore`; its `info.authConfig` holds the `HostActiveDirectoryInfo`.
+- **Passwords.** The create, the password change and the join read the
+  password from Vault (`password_secret_ref`, with the optional
+  `password_secret_mount` and `password_secret_key`; `read_secret_param`) when
+  the call runs, under the identity of the person who runs it. The parameter
+  schemas have `additionalProperties: false`, so a password cannot be passed
+  in. The password is only in the call to the host. The gate params (and so
+  the approval request), the previews and the answers name the Vault path. A
+  vendor fault text that holds the password is replaced (`hide_secrets`).
+  The three operations are pinned `credential_write` in
+  `broadcast/events.py`: the flight recorder keeps no request body, the
+  broadcast keeps no params and the dispatcher withholds the vendor text of
+  an error result. On a single host, the SOAP vendor-call span never has a
+  request body anyway.
+- **Each change.** It reads first and sends nothing when the host already is
+  as asked (`already_exists`, `not_found`, `unchanged`, `joined_other_domain`).
+  Then one gated call through `_write_vmomi_sub_op`. The domain changes wait
+  for their task (`poll_vim_task`, 600 s). Then it reads again and answers with
+  the new state; when the read-back does not show the change, the answer is
+  `not_verified` / `still_present` with an `error` issue, so the audit row says
+  `error`. A vendor fault (a VI-JSON fault body, a SOAP fault, or a task fault)
+  answers `failed` with `error_type` and `error_message` and an `error` issue.
+  A login problem or a lost connection is raised to the dispatcher as before.
+- **The delete.** `host.local_user.delete` is `destructive`. Its preview reads
+  the user and its access role and fills the `blast_radius` (`object` is the
+  user, `children` its access role, `irreversibility` is `permanent`). It
+  refuses a user that does not exist, so nothing waits for approval. MEHO never
+  deletes `root` (`protected`): without it, nobody may be able to log in.
+- **Not in this part.** Giving a new user an access role, local groups, and
+  the domain join through a vSphere Authentication Proxy (`JoinDomainWithCAM_Task`).
+
+Files: `host_access.py` (shared reads, group text, vendor-call ids),
+`typed_ops_host_access.py` (the two reads), `composites/_host_local_users.py`,
+`composites/_host_ad.py`, `composites/_host_access_schemas.py`,
+`composites/_host_access_ops.py` (registry rows and vendor-call lists),
+`soap_host_access.py`.
+
+Tests: `tests/test_connectors_vmware_rest_host_access.py` (the handlers on a
+fake), `tests/test_connectors_vmware_rest_host_access_http.py` (mocked HTTP on
+the vCenter 8.0.3 and 9.0 VI-JSON paths and SOAP on a single host),
+`tests/test_connectors_vmware_rest_host_access_approval.py` (the dispatcher:
+levels on both catalogs, waiting for approval, the delete preview) and
+`tests/test_connectors_vmware_rest_host_access_reconcile.py` (the pinned 9.0
+and 8.0 U1, U2, U3 `vi-json.yaml`).
 
 ### Cluster list (`vmware.cluster.list`)
 

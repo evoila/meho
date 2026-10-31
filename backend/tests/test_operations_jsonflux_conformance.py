@@ -463,6 +463,12 @@ async def test_reduced_page_is_never_labeled_source_complete() -> None:
 _PARTS_HELD_BACK: dict[str, str] = {
     "sddc.credential.list": "credential_read: the page lists stored passwords.",
     "sddc.host.commission": "credential_write: the request carries host passwords.",
+    "vmware.composite.host.local_user.create": (
+        "credential_write: the request carries the new user's password."
+    ),
+    "vmware.composite.host.local_user.password.set": (
+        "credential_write: the request carries the new password."
+    ),
     "vmware.composite.vm.guest.file.read": (
         "credential_write: it reads guest files, which can hold secrets."
     ),

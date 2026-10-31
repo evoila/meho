@@ -41,7 +41,10 @@ _REQUEST_ROW: Final[dict[str, dict[str, Any]]] = {
         enum=[*_OUTCOMES, "not_reachable"],
     ),
     "execution_status": _field(["string", "null"], "The vendor's execution status."),
-    "error_cause": _field(["string", "null"], "The vendor's error text, cut at 2000 characters."),
+    "error_cause": _field(
+        ["string", "null"],
+        "The vendor's error text, secret values replaced, cut at 2000 characters.",
+    ),
     "created_by": _field(["string", "null"], "The user who started the request."),
     "last_updated_on": _field(["integer", "null"], "Last change, epoch milliseconds."),
 }
@@ -73,7 +76,10 @@ _STEP: Final[dict[str, Any]] = {
             enum=["read_request", "read_error_causes", "retry"],
         ),
         "state": _field("string", "What happened.", enum=["done", "failed", "not_run"]),
-        "error": _field(["string", "null"], "The vendor's error text when the step failed."),
+        "error": _field(
+            ["string", "null"],
+            "The vendor's error text when the step failed; secret values replaced.",
+        ),
     },
 }
 
@@ -182,8 +188,9 @@ _REQUEST_GET = FleetTypedOp(
         ),
         "next_step": (
             "If outcome is queued or running, read again later. If not_reachable, the "
-            "appliance did not answer (for example during its upgrade): keep the request id "
-            "and read again later; the request did not fail. If failed, fix what "
+            "appliance did not answer (for example during its upgrade), on either of the two "
+            "reads: keep the request id and read again later; state keeps what the first "
+            "read said, when it worked. If failed, fix what "
             "failed_step.message says, then call fleet.request.retry."
         ),
         "result_scalars": {
@@ -232,7 +239,11 @@ _REQUEST_RETRY = FleetTypedOp(
             "reason": _field(["string", "null"], "Why nothing started, or the vendor's error."),
             "request_id": _field("string", "The request id; the retry keeps it."),
             "state": _field(["string", "null"], "The vendor state before the retry."),
-            "outcome": _field("string", "The plain outcome before the retry.", enum=_OUTCOMES),
+            "outcome": _field(
+                "string",
+                "The plain outcome before the retry; unknown when the request read failed.",
+                enum=_OUTCOMES,
+            ),
             "status_read": _STATUS_READ_FIELD,
             "retried_event_ids": {
                 "type": "array",
@@ -263,7 +274,8 @@ _REQUEST_RETRY = FleetTypedOp(
             "{status, reason, request_id, state, outcome, status_read, retried_event_ids, "
             "steps: [{step, state, error}]}. accepted means the appliance took the retry, "
             "not that it worked. not_started means nothing was sent (the request did not "
-            "fail, or has no error causes)."
+            "fail, or has no error causes). failed means a step failed: steps says which "
+            "ran, which failed and which did not run."
         ),
         "next_step": (
             "Follow the request with fleet.request.get until it ends. Use MEHO's async mode "
@@ -339,7 +351,7 @@ _ENVIRONMENT_GET = FleetTypedOp(
         "output_shape": (
             "The vendor's environment object: environmentId, environmentName, status, "
             "dataCenterName, products: [{id, version, nodes, properties}], with every "
-            "secret-named value replaced by ***REDACTED***."
+            "secret-named value replaced by [REDACTED:param_name]."
         ),
         "next_step": (
             "Use a product id with fleet.product.inventory_sync to refresh what the "

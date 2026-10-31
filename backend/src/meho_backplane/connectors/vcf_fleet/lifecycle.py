@@ -22,9 +22,11 @@ request instead: the first one names the step that failed.
 time-out error, or a 502, 503 or 504 from the proxy in front of it, for
 example during its own upgrade), ``fleet.request.get`` returns
 ``outcome: not_reachable`` with the request id and the time. It does not
-say ``failed``. Two errors are not "not reachable" and go on to the
-dispatcher: a certificate MEHO does not trust, and a destination MEHO
-refused before any request.
+say ``failed``. Both reads of the operation are covered: when the request
+read worked and the error-causes read did not, ``state`` keeps what the
+request read said and ``outcome`` is still ``not_reachable``. Two errors
+are not "not reachable" and go on to the dispatcher: a certificate MEHO
+does not trust, and a destination MEHO refused before any request.
 
 **Login again.** The connector sends the stored user and password with
 every call. When the appliance answers ``401``, the request read and the
@@ -32,16 +34,25 @@ two changes drop the cached login, read it again and repeat the call
 once. A ``401`` means the appliance refused the call before it ran, so
 the repeat cannot run a change twice.
 
-**Secrets.** Every field whose name is a secret name (MEHO's shared rule,
-:func:`~meho_backplane.broadcast.events.is_secret_param_name`) is
-replaced by :data:`REDACTED`, at any depth. The datacenter list builds
-its rows from named fields only, so the vCenter password the vendor
-sends never reaches the answer.
+**Retry steps.** ``fleet.request.retry`` runs three steps: read the
+request, read its error causes, send the retry. A vendor or transport
+error at any step ends the operation with ``status: failed``; ``steps``
+then says which steps ran, which one failed (with the vendor's error) and
+which did not run. Nothing is undone.
+
+**Secrets.** MEHO's shared secret-field scrub
+(:func:`~meho_backplane.redaction.secret_fields.scrub_secret_fields`)
+runs on every vendor object an answer carries and on every vendor text
+(error causes, request reasons and error texts). A field whose name is a
+secret name (:func:`~meho_backplane.broadcast.events.is_secret_param_name`)
+is replaced by :data:`REDACTED`, at any depth, also when it sits as a
+quoted pair inside a text such as ``"adminPassword": "..."``. The
+datacenter list builds its rows from named fields only, so the vCenter
+password the vendor sends never reaches the answer.
 """
 
 from __future__ import annotations
 
-import json
 import ssl
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -54,6 +65,11 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.connectors.adapters.http import HttpConnector, SsrfBlockedError
 from meho_backplane.connectors.vcf_fleet.session import VcfFleetTargetLike
+from meho_backplane.redaction.secret_fields import (
+    SECRET_FIELD_MARKER,
+    scrub_secret_fields,
+    scrub_secret_fields_in_text,
+)
 
 __all__ = [
     "OUTCOME_BY_STATE",
@@ -90,7 +106,8 @@ VENDOR_CALLS: Final[tuple[tuple[str, str], ...]] = (
     ("GET", _DATACENTER_VCENTERS_PATH),
 )
 
-REDACTED: Final = "***REDACTED***"
+#: The text in place of a secret value: the marker of MEHO's shared scrub.
+REDACTED: Final = SECRET_FIELD_MARKER
 
 #: The vendor request state (lower case, no ``_`` or ``-``) in plain words.
 OUTCOME_BY_STATE: Final[dict[str, str]] = {
@@ -113,7 +130,9 @@ _UNKNOWN: Final = "unknown"
 _STATUS_READ: Final = "fleet.request.get"
 _GATEWAY_STATUSES: Final = frozenset({502, 503, 504})
 _ERROR_CAUSE_MAX: Final = 2000
+_ERROR_TEXT_MAX: Final = 500
 _LIST_LIMIT_DEFAULT: Final = 100
+_VENDOR_ERRORS: Final = (httpx.HTTPStatusError, httpx.TransportError)
 
 
 def _segment(kind: str, value: Any) -> str:
@@ -125,31 +144,22 @@ def _segment(kind: str, value: Any) -> str:
     return quote(value, safe="")
 
 
+def _plain(text: str) -> str:
+    """*text* in lower case without ``_`` and ``-``, for a loose name compare."""
+    return text.strip().lower().replace("_", "").replace("-", "")
+
+
 def _outcome(state: Any) -> str:
     if not isinstance(state, str):
         return _UNKNOWN
-    key = state.strip().lower().replace("_", "").replace("-", "")
-    return OUTCOME_BY_STATE.get(key, _UNKNOWN)
+    return OUTCOME_BY_STATE.get(_plain(state), _UNKNOWN)
 
 
-def redact_secrets(value: Any) -> Any:
-    """Return *value* with every secret-named field replaced, at any depth. No mutation."""
-    if isinstance(value, dict):
-        return {
-            key: REDACTED
-            if isinstance(key, str) and is_secret_param_name(key)
-            else redact_secrets(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [redact_secrets(item) for item in value]
-    return value
-
-
-def _cut(text: Any, limit: int = _ERROR_CAUSE_MAX) -> Any:
-    if isinstance(text, str) and len(text) > limit:
-        return text[:limit]
-    return text
+def _vendor_text(text: Any, limit: int = _ERROR_CAUSE_MAX) -> Any:
+    """A vendor text for an answer: secret-named values replaced, then cut at *limit*."""
+    if not isinstance(text, str):
+        return text
+    return scrub_secret_fields_in_text(text)[:limit]
 
 
 def _is_not_reachable(exc: Exception) -> bool:
@@ -165,19 +175,20 @@ def _is_not_reachable(exc: Exception) -> bool:
 
 
 def _vendor_error(exc: Exception) -> str:
-    """The vendor's error text for a failed call, short."""
+    """The vendor's error text for a failed call, short, with secret values replaced."""
     if isinstance(exc, httpx.HTTPStatusError):
         response = exc.response
         try:
             body = response.json()
         except ValueError:
             body = None
+        text = response.text
         if isinstance(body, dict):
             parts = [str(body[key]) for key in ("errorCode", "message") if body.get(key)]
             if parts:
-                return f"HTTP {response.status_code}: {' '.join(parts)}"
-        return f"HTTP {response.status_code}: {_cut(response.text, 500)}"
-    return f"{type(exc).__name__}: {exc}"
+                text = " ".join(parts)
+        return f"HTTP {response.status_code}: {_vendor_text(text, _ERROR_TEXT_MAX)}"
+    return str(_vendor_text(f"{type(exc).__name__}: {exc}", _ERROR_TEXT_MAX))
 
 
 def _request_row(item: dict[str, Any]) -> dict[str, Any]:
@@ -185,11 +196,11 @@ def _request_row(item: dict[str, Any]) -> dict[str, Any]:
         "request_id": item.get("vmid"),
         "name": item.get("requestName"),
         "type": item.get("requestType"),
-        "reason": item.get("requestReason"),
+        "reason": _vendor_text(item.get("requestReason")),
         "state": item.get("state"),
         "outcome": _outcome(item.get("state")),
         "execution_status": item.get("executionStatus"),
-        "error_cause": _cut(item.get("errorCause")),
+        "error_cause": _vendor_text(item.get("errorCause")),
         "created_by": item.get("createdBy"),
         "last_updated_on": item.get("lastUpdatedOn"),
     }
@@ -199,10 +210,10 @@ def _error_cause_row(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "event_id": item.get("eventId"),
         "message_id": item.get("messageId"),
-        "message": _cut(item.get("message")),
-        "exception_message": _cut(item.get("exceptionMessage")),
+        "message": _vendor_text(item.get("message")),
+        "exception_message": _vendor_text(item.get("exceptionMessage")),
         "retry": item.get("retry"),
-        "properties": redact_secrets(item.get("properties") or {}),
+        "properties": scrub_secret_fields(item.get("properties") or {}),
     }
 
 
@@ -212,15 +223,40 @@ def _as_list(payload: Any) -> list[dict[str, Any]]:
     return [item for item in payload if isinstance(item, dict)]
 
 
+def _input_of(input_map: Any, name: str) -> str | None:
+    """The string value of the request input *name*; case, ``_`` and ``-`` do not matter."""
+    if not isinstance(input_map, dict):
+        return None
+    wanted = _plain(name)
+    for key, value in input_map.items():
+        if isinstance(key, str) and isinstance(value, str) and _plain(key) == wanted:
+            return value
+    return None
+
+
 def _is_inventory_sync_for(item: dict[str, Any], environment_id: str, product_id: str) -> bool:
-    """True when *item* is an active inventory sync that names the environment and product."""
+    """True for an active inventory sync whose inputs name exactly this environment and product.
+
+    The ids are compared with the ``environmentId`` and ``productId`` inputs
+    of the request, each as a whole value. A request whose inputs do not
+    carry both ids is not a match, whatever other text its inputs hold.
+    """
     if _outcome(item.get("state")) not in _ACTIVE_OUTCOMES:
         return False
     kind = f"{item.get('requestType') or ''}{item.get('requestName') or ''}"
-    if "inventorysync" not in kind.lower().replace("_", "").replace("-", ""):
+    if "inventorysync" not in _plain(kind):
         return False
-    inputs = json.dumps(item.get("inputMap") or {}, default=str)
-    return environment_id in inputs and product_id in inputs
+    inputs = item.get("inputMap")
+    return (
+        _input_of(inputs, "environmentId") == environment_id
+        and _input_of(inputs, "productId") == product_id
+    )
+
+
+def _failed_at(answer: dict[str, Any], step: dict[str, Any], exc: Exception) -> dict[str, Any]:
+    """The retry answer when *step* failed with *exc*: the steps before it stay ``done``."""
+    step.update(state="failed", error=_vendor_error(exc))
+    return {**answer, "status": "failed", "reason": step["error"]}
 
 
 class FleetLifecycleOps(HttpConnector):
@@ -241,6 +277,12 @@ class FleetLifecycleOps(HttpConnector):
                 raise
         await self.invalidate_credentials(target)
         return await call()
+
+    async def _read(self, target: VcfFleetTargetLike, operator: Operator, path: str) -> Any:
+        """``GET`` *path* as JSON, with one new login after a ``401``."""
+        return await self._with_relogin(
+            target, lambda: self._get_json(target, path, operator=operator)
+        )
 
     async def request_list(
         self, operator: Operator, target: VcfFleetTargetLike, params: dict[str, Any]
@@ -264,50 +306,37 @@ class FleetLifecycleOps(HttpConnector):
     ) -> dict[str, Any]:
         """``fleet.request.get`` -- one request, and the error causes when it failed."""
         request_id = _segment("request_id", params.get("request_id"))
-        checked_at = datetime.now(UTC).isoformat()
+        base: dict[str, Any] = {
+            "checked_at": datetime.now(UTC).isoformat(),
+            "error": None,
+            "error_causes": [],
+            "failed_step": None,
+        }
+        row = _request_row({"vmid": params.get("request_id")})
         try:
-            payload = await self._with_relogin(
-                target,
-                lambda: self._get_json(
-                    target, _REQUEST_PATH.format(requestId=request_id), operator=operator
-                ),
-            )
-        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+            payload = await self._read(target, operator, _REQUEST_PATH.format(requestId=request_id))
+        except _VENDOR_ERRORS as exc:
             if not _is_not_reachable(exc):
                 raise
-            row = _request_row({"vmid": params.get("request_id")})
-            return {
-                **row,
-                "outcome": _NOT_REACHABLE,
-                "checked_at": checked_at,
-                "error": _vendor_error(exc),
-                "error_causes": [],
-                "failed_step": None,
-            }
+            return {**row, **base, "outcome": _NOT_REACHABLE, "error": _vendor_error(exc)}
         row = _request_row(payload if isinstance(payload, dict) else {})
-        causes: list[dict[str, Any]] = []
-        if row["outcome"] == "failed":
-            raw = await self._with_relogin(
-                target,
-                lambda: self._get_json(
-                    target,
-                    _REQUEST_ERROR_CAUSES_PATH.format(requestId=request_id),
-                    operator=operator,
-                ),
+        if row["outcome"] != "failed":
+            return {**row, **base}
+        try:
+            raw = await self._read(
+                target, operator, _REQUEST_ERROR_CAUSES_PATH.format(requestId=request_id)
             )
-            causes = [_error_cause_row(item) for item in _as_list(raw)]
-        return {
-            **row,
-            "checked_at": checked_at,
-            "error": None,
-            "error_causes": causes,
-            "failed_step": causes[0] if causes else None,
-        }
+        except _VENDOR_ERRORS as exc:
+            if not _is_not_reachable(exc):
+                raise
+            return {**row, **base, "outcome": _NOT_REACHABLE, "error": _vendor_error(exc)}
+        causes = [_error_cause_row(item) for item in _as_list(raw)]
+        return {**row, **base, "error_causes": causes, "failed_step": causes[0] if causes else None}
 
     async def request_retry(
         self, operator: Operator, target: VcfFleetTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
-        """``fleet.request.retry`` -- read the error causes, then ``PATCH .../retry``."""
+        """``fleet.request.retry`` -- read the request and its causes, then ``PATCH .../retry``."""
         request_id = _segment("request_id", params.get("request_id"))
         changes = _property_changes(params.get("properties"))
         steps = [
@@ -315,30 +344,29 @@ class FleetLifecycleOps(HttpConnector):
             {"step": "read_error_causes", "state": "not_run", "error": None},
             {"step": "retry", "state": "not_run", "error": None},
         ]
-        request = await self._with_relogin(
-            target,
-            lambda: self._get_json(
-                target, _REQUEST_PATH.format(requestId=request_id), operator=operator
-            ),
-        )
-        steps[0]["state"] = "done"
-        row = _request_row(request if isinstance(request, dict) else {})
         answer: dict[str, Any] = {
             "request_id": params.get("request_id"),
-            "state": row["state"],
-            "outcome": row["outcome"],
+            "state": None,
+            "outcome": _UNKNOWN,
             "status_read": _STATUS_READ,
             "retried_event_ids": [],
             "steps": steps,
         }
+        try:
+            request = await self._read(target, operator, _REQUEST_PATH.format(requestId=request_id))
+        except _VENDOR_ERRORS as exc:
+            return _failed_at(answer, steps[0], exc)
+        steps[0]["state"] = "done"
+        row = _request_row(request if isinstance(request, dict) else {})
+        answer.update(state=row["state"], outcome=row["outcome"])
         if row["outcome"] != "failed":
             return {**answer, "status": "not_started", "reason": "only a failed request is retried"}
-        raw = await self._with_relogin(
-            target,
-            lambda: self._get_json(
-                target, _REQUEST_ERROR_CAUSES_PATH.format(requestId=request_id), operator=operator
-            ),
-        )
+        try:
+            raw = await self._read(
+                target, operator, _REQUEST_ERROR_CAUSES_PATH.format(requestId=request_id)
+            )
+        except _VENDOR_ERRORS as exc:
+            return _failed_at(answer, steps[1], exc)
         steps[1]["state"] = "done"
         causes = _as_list(raw)
         if not causes:
@@ -355,9 +383,8 @@ class FleetLifecycleOps(HttpConnector):
                     json=body,
                 ),
             )
-        except (httpx.HTTPStatusError, httpx.TransportError) as exc:
-            steps[2].update(state="failed", error=_vendor_error(exc))
-            return {**answer, "status": "failed", "reason": steps[2]["error"]}
+        except _VENDOR_ERRORS as exc:
+            return _failed_at(answer, steps[2], exc)
         steps[2]["state"] = "done"
         event_ids = [cause.get("eventId") for cause in causes]
         return {**answer, "status": "accepted", "reason": None, "retried_event_ids": event_ids}
@@ -370,7 +397,7 @@ class FleetLifecycleOps(HttpConnector):
         payload = await self._get_json(
             target, _ENVIRONMENT_PATH.format(environmentId=environment_id), operator=operator
         )
-        result = redact_secrets(payload)
+        result = scrub_secret_fields(payload)
         return result if isinstance(result, dict) else {"environment": result}
 
     async def product_inventory_sync(

@@ -410,16 +410,21 @@ programming guide ("Retry an install or import request").
   connector. When the appliance does not answer (a connection or time-out
   error, or a 502, 503 or 504, for example during its own upgrade), it
   returns `outcome: not_reachable` with the request id and `checked_at`.
-  It never says `failed` then. MEHO keeps no job state between calls; the
-  caller keeps the request id (or the async run handle of the start).
+  It never says `failed` then. Both of its reads are covered: when the
+  request read worked and the error-causes read did not, `state` keeps
+  what the request read said and `outcome` is still `not_reachable`. MEHO
+  keeps no job state between calls; the caller keeps the request id (or
+  the async run handle of the start).
 - **Login again.** Fleet sends the stored user and password with every
   call. On a `401` the request read and the two changes drop the cached
   login, read it again from Vault and repeat the call once. A `401` means
   the appliance refused the call before it ran.
 - **Inventory sync (`fleet.product.inventory_sync`).** Before the start it
   lists the requests and looks for a queued or running request whose type
-  or name says inventory sync and whose inputs name the environment and the
-  product. If one runs, it returns `already_running` with that request id
+  or name says inventory sync and whose `environmentId` and `productId`
+  inputs equal the given ids, each as a whole value. Other input text does
+  not count, so a sync of another product that only mentions these ids is
+  not a match. If one runs, it returns `already_running` with that request id
   and starts nothing. This check is a help, not a lock: two callers can
   both check before either starts. Otherwise it sends the start and returns
   `accepted` with the request id the appliance gives. It never says the
@@ -434,9 +439,10 @@ programming guide ("Retry an install or import request").
   the error causes; an unknown name is refused before the change. A secret
   input is a locker reference (`locker:password:<id>:<alias>`), never the
   value. A request that did not fail, or has no error causes, gives
-  `not_started` and nothing is sent. When the last step fails, the answer
-  is `status: failed` with the vendor's error and `steps` lists what ran,
-  what failed and what did not run; nothing is undone. After a lost reply,
+  `not_started` and nothing is sent. When any step fails with a vendor or
+  transport error, the answer is `status: failed` with the vendor's error
+  and `steps` lists what ran, what failed and what did not run; nothing is
+  undone. After a lost reply,
   read the request first: if it is running again, the retry went through.
 - **Health (`fleet.health`).** Two reads: the system details (version,
   build, disk use) and the service state (`/lcm/health/api/v2/status`:
@@ -446,11 +452,16 @@ programming guide ("Retry an install or import request").
   `/lcm/bootstrap/api/status` for the service state; the vendor API
   reference documents `/lcm/health/api/v2/status` instead, and its answer
   carries the bootstrap state, so the operation reads that.
-- **Secrets.** Every field with a secret name (MEHO's shared rule,
-  `is_secret_param_name`) is replaced by `***REDACTED***`, at any depth:
-  environment product and node properties, and error-cause inputs. The
-  datacenter list builds its rows from named fields only, so the vCenter
-  password the vendor sends (`vcPassword`) never reaches the answer.
+- **Secrets.** MEHO's shared secret-field scrub (`scrub_secret_fields` in
+  `redaction/secret_fields.py`, see [`redaction.md`](redaction.md)) runs on
+  every vendor object and every vendor text an answer carries. A field with
+  a secret name (`is_secret_param_name`) is replaced by
+  `[REDACTED:param_name]`, at any depth: environment product and node
+  properties, error-cause inputs, and a quoted pair such as
+  `"adminPassword": "..."` inside an error text, a request reason or a
+  vendor error body. The datacenter list builds its rows from named fields
+  only, so the vCenter password the vendor sends (`vcPassword`) never
+  reaches the answer.
 - **Versions.** The calls exist on every version this connector serves
   (Aria Suite Lifecycle 8.x and VCF 9.0 fleet management), so no operation
   stops early with a version message. A live proof on 8.18 and 9.0 is a

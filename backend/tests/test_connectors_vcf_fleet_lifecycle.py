@@ -16,9 +16,9 @@ made-up names and ids.
   failed request returns the vendor's error causes; a ``401`` between the
   start and the status read logs in again; an appliance that does not
   answer gives ``not_reachable`` with the request id and the time; a
-  retry that fails at its last step lists what ran, what failed and what
-  did not run.
-* No secret reaches an answer.
+  retry that fails at any step lists what ran, what failed and what did
+  not run.
+* No secret reaches an answer, also not inside the vendor's error text.
 """
 
 from __future__ import annotations
@@ -63,6 +63,7 @@ _REQUEST = f"{_REQUESTS}/{_REQUEST_ID}"
 _ENV_ID = "env-0001"
 _PRODUCT_ID = "vrops"
 _SYNC = f"/lcm/lcops/api/v2/environments/{_ENV_ID}/products/{_PRODUCT_ID}/inventory-sync"
+_SECRET = "<secret-value>"
 
 #: The risk of each op, from the table of the Task.
 _RISK: dict[str, tuple[str, bool]] = {
@@ -323,6 +324,63 @@ async def test_request_get_says_not_reachable_when_the_appliance_does_not_answer
 
 
 @pytest.mark.asyncio
+async def test_request_get_says_not_reachable_when_the_error_causes_read_fails(
+    _stub_embedding: None, session: AsyncSession
+) -> None:
+    instance = await _bind()
+    try:
+        async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+            mock.get(_REQUEST).respond(200, json=_request(_REQUEST_ID, "FAILED", 5))
+            mock.get(f"{_REQUEST}/error-causes").respond(503)
+            result = await _dispatch("fleet.request.get", {"request_id": _REQUEST_ID})
+    finally:
+        await instance.aclose()
+    assert result.status == "ok", result.error
+    answer = result.result
+    assert answer["outcome"] == "not_reachable"
+    assert answer["request_id"] == _REQUEST_ID
+    assert answer["state"] == "FAILED"
+    assert answer["checked_at"]
+    assert "HTTP 503" in answer["error"]
+    assert answer["error_causes"] == []
+    assert answer["failed_step"] is None
+
+
+@pytest.mark.asyncio
+async def test_request_get_replaces_a_secret_inside_vendor_text(
+    _stub_embedding: None, session: AsyncSession
+) -> None:
+    request = _request(
+        _REQUEST_ID,
+        "FAILED",
+        5,
+        requestReason=f'retry with {{"adminPassword": "{_SECRET}"}}',
+        errorCause=f'node refused {{"adminPassword":"{_SECRET}"}}',
+    )
+    cause = {
+        **_CAUSE,
+        "message": f'Login failed for {{"adminPassword": "{_SECRET}"}}',
+        "exceptionMessage": f'Bad input: \\"rootPassword\\": \\"{_SECRET}\\"',
+    }
+    instance = await _bind()
+    try:
+        async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+            mock.get(_REQUEST).respond(200, json=request)
+            mock.get(f"{_REQUEST}/error-causes").respond(200, json=[cause])
+            result = await _dispatch("fleet.request.get", {"request_id": _REQUEST_ID})
+    finally:
+        await instance.aclose()
+    assert result.status == "ok", result.error
+    answer = result.result
+    assert _SECRET not in json.dumps(answer)
+    assert REDACTED in answer["reason"]
+    assert REDACTED in answer["error_cause"]
+    assert REDACTED in answer["failed_step"]["message"]
+    assert REDACTED in answer["failed_step"]["exception_message"]
+    assert answer["failed_step"]["event_id"] == "evt-0001"
+
+
+@pytest.mark.asyncio
 async def test_request_retry_waits_for_approval(
     _stub_embedding: None, session: AsyncSession
 ) -> None:
@@ -387,6 +445,74 @@ async def test_request_retry_failing_at_the_last_step_lists_the_steps(
     states = {step["step"]: step["state"] for step in answer["steps"]}
     assert states == {"read_request": "done", "read_error_causes": "done", "retry": "failed"}
     assert "LCM-ERR-0042" in answer["steps"][2]["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failing_path", "expected"),
+    [
+        (_REQUEST, {"read_request": "failed", "read_error_causes": "not_run", "retry": "not_run"}),
+        (
+            f"{_REQUEST}/error-causes",
+            {"read_request": "done", "read_error_causes": "failed", "retry": "not_run"},
+        ),
+    ],
+    ids=["first-step", "second-step"],
+)
+async def test_request_retry_failing_at_an_earlier_step_lists_the_steps(
+    _stub_embedding: None, session: AsyncSession, failing_path: str, expected: dict[str, str]
+) -> None:
+    instance = await _bind()
+    try:
+        async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+            mock.get(_REQUEST).respond(200, json=_request(_REQUEST_ID, "FAILED", 5))
+            mock.get(f"{_REQUEST}/error-causes").respond(200, json=[_CAUSE])
+            mock.get(failing_path).respond(
+                500, json={"errorCode": "LCM-ERR-0500", "message": "Internal error."}
+            )
+            retry = mock.patch(f"{_REQUEST}/retry").respond(200)
+            answer = await instance.request_retry(
+                _operator(), _Target(), {"request_id": _REQUEST_ID}
+            )
+    finally:
+        await instance.aclose()
+    assert answer["status"] == "failed"
+    assert "LCM-ERR-0500" in answer["reason"]
+    assert answer["request_id"] == _REQUEST_ID
+    states = {step["step"]: step["state"] for step in answer["steps"]}
+    assert states == expected
+    failed = [step for step in answer["steps"] if step["state"] == "failed"]
+    assert "Internal error." in failed[0]["error"]
+    assert not retry.called
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_body",
+    [
+        {"errorCode": "LCM-ERR-0042", "message": f'Bad input "adminPassword":"{_SECRET}"'},
+        {"adminPassword": _SECRET, "detail": "no message field"},
+    ],
+    ids=["in-the-message", "in-the-raw-body"],
+)
+async def test_request_retry_vendor_error_text_has_secrets_replaced(
+    _stub_embedding: None, session: AsyncSession, error_body: dict[str, Any]
+) -> None:
+    instance = await _bind()
+    try:
+        async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+            mock.get(_REQUEST).respond(200, json=_request(_REQUEST_ID, "FAILED", 5))
+            mock.get(f"{_REQUEST}/error-causes").respond(200, json=[_CAUSE])
+            mock.patch(f"{_REQUEST}/retry").respond(400, json=error_body)
+            answer = await instance.request_retry(
+                _operator(), _Target(), {"request_id": _REQUEST_ID}
+            )
+    finally:
+        await instance.aclose()
+    assert answer["status"] == "failed"
+    assert _SECRET not in json.dumps(answer)
+    assert REDACTED in answer["reason"]
+    assert REDACTED in answer["steps"][2]["error"]
 
 
 @pytest.mark.asyncio
@@ -496,6 +622,42 @@ async def test_inventory_sync_does_not_start_a_second_one(
     assert answer["status"] == "already_running"
     assert answer["request_id"] == "req-running"
     assert not sync.called
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "input_map",
+    [
+        {
+            "environmentId": "env-0002",
+            "productId": "vra",
+            "note": f"copied from {_ENV_ID} {_PRODUCT_ID}",
+        },
+        {"environmentId": _ENV_ID, "productId": f"{_PRODUCT_ID}-cloud-proxy"},
+        {"environmentId": f"{_ENV_ID}-copy", "productId": _PRODUCT_ID},
+        {"description": f"{_ENV_ID} {_PRODUCT_ID}"},
+    ],
+    ids=["other-ids-text-mentions-ours", "longer-product-id", "longer-env-id", "no-id-inputs"],
+)
+async def test_inventory_sync_starts_when_no_running_sync_names_exactly_these_ids(
+    _stub_embedding: None, session: AsyncSession, input_map: dict[str, str]
+) -> None:
+    instance = await _bind()
+    running = _request(
+        "req-other", "INPROGRESS", 9, requestType="PRODUCT_INVENTORY_SYNC", inputMap=input_map
+    )
+    try:
+        async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+            mock.get(_REQUESTS).respond(200, json=[running])
+            sync = mock.post(_SYNC).respond(200, json={"requestId": "req-new"})
+            answer = await instance.product_inventory_sync(
+                _operator(), _Target(), {"environment_id": _ENV_ID, "product_id": _PRODUCT_ID}
+            )
+    finally:
+        await instance.aclose()
+    assert answer["status"] == "accepted"
+    assert answer["request_id"] == "req-new"
+    assert sync.call_count == 1
 
 
 @pytest.mark.asyncio

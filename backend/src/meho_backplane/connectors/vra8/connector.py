@@ -94,6 +94,7 @@ pinned with their size, SHA-256 and the build the Orchestrator reports
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -469,6 +470,79 @@ class Vra8Connector(HttpConnector):
         from meho_backplane.connectors.vra8.api_file import vra8_api_file_get_impl
 
         return await vra8_api_file_get_impl(self, operator, target, params)
+
+    # ------------------------------------------------------------------
+    # Catalog items and requests -- shared with the VCF Automation connector.
+    # Handlers in ``vmware_shared.vra_catalog``; metadata in :mod:`.catalog_ops`.
+    # ------------------------------------------------------------------
+
+    def _vra_calls(self, operator: Operator, target: Vra8TargetLike) -> Any:
+        """The bearer GET and POST the shared catalog handlers use."""
+        from meho_backplane.connectors.vmware_shared.vra_catalog import VraCalls
+        from meho_backplane.connectors.vra8.catalog_ops import CATALOG_PREFIX
+
+        async def get(path: str, params: Mapping[str, Any] | None) -> dict[str, Any]:
+            query = dict(params) if params is not None else None
+            return await self._vra_get(target, path, operator=operator, params=query)
+
+        async def post(path: str, body: Mapping[str, Any]) -> Any:
+            return await self._post_json(
+                target,
+                path,
+                operator=operator,
+                json=dict(body),
+                extra_headers={"Accept": _JSON_ACCEPT},
+            )
+
+        return VraCalls(get=get, post=post, prefix=CATALOG_PREFIX, operator=operator, target=target)
+
+    async def vra_catalog_item_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.catalog.item.list``."""
+        from meho_backplane.connectors.vmware_shared.vra_catalog import catalog_item_list
+
+        return await catalog_item_list(self._vra_calls(operator, target), params)
+
+    async def vra_catalog_item_get(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.catalog.item.get``."""
+        from meho_backplane.connectors.vmware_shared.vra_catalog import catalog_item_get
+
+        return await catalog_item_get(self._vra_calls(operator, target), params)
+
+    async def vra_catalog_item_request(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.catalog.item.request``."""
+        from meho_backplane.connectors.vmware_shared.vra_catalog import catalog_item_request
+
+        return await catalog_item_request(self._vra_calls(operator, target), params)
+
+    async def vra_request_get(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.request.get``."""
+        from meho_backplane.connectors.vmware_shared.vra_catalog import request_get
+
+        return await request_get(self._vra_calls(operator, target), params)
+
+    async def vra_request_events(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.request.events``."""
+        from meho_backplane.connectors.vmware_shared.vra_catalog import request_events
+
+        return await request_events(self._vra_calls(operator, target), params)
+
+    async def vra_request_logs(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.request.logs``."""
+        from meho_backplane.connectors.vmware_shared.vra_catalog import request_logs
+
+        return await request_logs(self._vra_calls(operator, target), params)
 
     # ------------------------------------------------------------------
     # Dispatch-path session-recovery hooks (#2067 / #2396)

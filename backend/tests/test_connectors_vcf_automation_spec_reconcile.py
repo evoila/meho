@@ -63,6 +63,10 @@ that hand-code a path:
   :data:`_PATHS_METHODS`. The ``/oauth/*`` token endpoints are
   provider-plane by :func:`plane_for_path`, so they sit in the
   evidenced exclusion with the rest of the provider plane.
+* :mod:`~meho_backplane.connectors.vmware_shared.vra_catalog` — the
+  catalog and request paths this connector shares with vRA 8, each mapped
+  to its method in :mod:`tests._vra_catalog_paths`. ``/catalog/api/*`` is
+  tenant plane, so these are checked against ``vra-catalog-deployment.json``.
 * :mod:`~meho_backplane.connectors.vcf_automation._routing` — the three
   ``*_SESSION_PATH`` login endpoints (all POSTed by ``._auth``; the CSP
   token mint is the #3865 VCFA 9.1 fallback) and
@@ -82,7 +86,6 @@ docs/decisions/spec-reconcile-guards-standard.md.
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -92,6 +95,7 @@ from meho_backplane.connectors.vcf_automation import _paths as _paths_module
 from meho_backplane.connectors.vcf_automation import _routing as _routing_module
 from meho_backplane.connectors.vcf_automation import typed_ops as _typed_ops_module
 from meho_backplane.connectors.vcf_automation._routing import plane_for_path
+from meho_backplane.connectors.vcf_automation.catalog_ops import VCFA_CATALOG_OPS
 from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
 from meho_backplane.connectors.vcf_automation.feature_flag_ops import VCFA_FEATURE_FLAG_OPS
 from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
@@ -102,6 +106,12 @@ from meho_backplane.connectors.vcf_automation.typed_ops import (
     provider_regions_path,
 )
 from tests._spec_shelf import assert_op_ids_served, require_shelf_spec
+from tests._vra_catalog_paths import (
+    EXPECTED_CATALOG_OP_IDS,
+    catalog_op_ids,
+    catalog_path_constants,
+    swagger2_served_op_ids,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -115,11 +125,6 @@ _TENANT_SPEC_FILES = (
     "swagger-vra-sdk-go-v0.6.5/vra-catalog-deployment.json",
 )
 _TENANT_SPEC_LABEL = f"{_SPEC_DIR} tenant specs (vra-iaas, vra-blueprint, vra-catalog-deployment)"
-
-#: The Swagger 2.0 path-item keys that are HTTP operations (its fixed
-#: verb vocabulary); everything else on a path item (``parameters``,
-#: vendor extensions) is not a served operation.
-_SWAGGER2_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch"})
 
 #: HTTP method per ``_routing`` constant-name suffix. The two
 #: ``*_SESSION_PATH`` login endpoints are POSTed (``._auth``'s
@@ -224,6 +229,7 @@ def _declared_op_ids() -> set[str]:
                 "map the new constant's HTTP method there consciously so the "
                 "reconcile keeps covering it."
             )
+    declared |= catalog_op_ids()
     return declared
 
 
@@ -266,6 +272,7 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
         *_path_constants(_typed_ops_module).values(),
         *_path_constants(_paths_module).values(),
         *_path_constants(_routing_module).values(),
+        *catalog_path_constants().values(),
     }
     unswept = {
         op.op_id: op.path
@@ -276,6 +283,7 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
             *VCFA_NETWORK_OPS,
             *VCFA_DEPLOY_OPS,
             *VCFA_FEATURE_FLAG_OPS,
+            *VCFA_CATALOG_OPS,
         )
         if op.path not in swept
     }
@@ -352,43 +360,9 @@ def test_vcfa_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/cloudapi/1.0.0/featureFlags",
         "GET:/cloudapi/1.0.0/featureFlags/{id}",
         "PUT:/cloudapi/1.0.0/featureFlags/{id}",
+        # Catalog items and requests (shared with vRA 8).
+        *EXPECTED_CATALOG_OP_IDS,
     }
-
-
-def _swagger2_served_op_ids(spec_path: Path) -> set[str]:
-    """Extract the served ``METHOD:/path`` set from a Swagger 2.0 document.
-
-    The pinned tenant spec is Swagger 2.0, which the ingest parser
-    rejects by decision (#2090) — so this lane extracts directly instead
-    of routing through :func:`tests._spec_shelf.openapi_served_op_ids`
-    (the standard's non-OpenAPI-artifact clause). Served op_ids are the
-    ``basePath``-folded path keys crossed with their operation-verb
-    keys; ``vra-iaas.json`` pins ``basePath: /``, so its paths fold
-    unchanged. Format drift on the shelf (a re-pin that is no longer
-    Swagger 2.0, or an empty path map) fails loudly rather than
-    regressing the lane to a vacuous compare.
-    """
-    document = json.loads(spec_path.read_text(encoding="utf-8"))
-    if document.get("swagger") != "2.0":
-        pytest.fail(
-            f"{spec_path.name}: expected a Swagger 2.0 document "
-            f"(got swagger={document.get('swagger')!r} / "
-            f"openapi={document.get('openapi')!r}) — the shelf artifact "
-            "format moved; update this lane's extraction."
-        )
-    base = str(document.get("basePath") or "").rstrip("/")
-    served = {
-        f"{method.upper()}:{base}{path}"
-        for path, item in document.get("paths", {}).items()
-        for method in item
-        if method.lower() in _SWAGGER2_METHODS
-    }
-    if not served:
-        pytest.fail(
-            f"{spec_path.name}: extracted zero served operations — the "
-            "shelf artifact layout moved; update this lane's extraction."
-        )
-    return served
 
 
 def test_tenant_hand_coded_paths_are_served_by_the_pinned_iaas_spec() -> None:
@@ -403,7 +377,7 @@ def test_tenant_hand_coded_paths_are_served_by_the_pinned_iaas_spec() -> None:
     """
     served: set[str] = set()
     for spec_file in _TENANT_SPEC_FILES:
-        served |= _swagger2_served_op_ids(require_shelf_spec(_SPEC_DIR, spec_file))
+        served |= swagger2_served_op_ids(require_shelf_spec(_SPEC_DIR, spec_file))
     declared = {
         op_id for op_id in _declared_op_ids() if plane_for_path(op_id.partition(":")[2]) == "tenant"
     }

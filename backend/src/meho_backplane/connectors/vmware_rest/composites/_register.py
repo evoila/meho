@@ -247,8 +247,14 @@ from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_library_iso impo
 from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_tools import (
     VM_CDROM_TOOLS_COMPOSITES,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_console import (
+    VM_CONSOLE_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._vm_llm_instructions import (
     VM_LLM_INSTRUCTIONS,
+)
+from meho_backplane.connectors.vmware_rest.composites._vm_pci_device import (
+    VM_PCI_DEVICE_COMPOSITES,
 )
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
@@ -578,7 +584,10 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "CD drives (vm.resize, vm.disk.grow, vm.disk.attach, vm.nic.repoint, "
         "vm.cdrom.add, vm.device.cdrom, dangerous); set CPU and memory limits "
         "(vm.resource_allocation.set, caution); unmount the VMware Tools "
-        "installer (vm.tools.installer.unmount, caution); move a VM to another "
+        "installer (vm.tools.installer.unmount, caution); add or remove a PCI "
+        "passthrough device (vm.pci_device.add, vm.pci_device.remove, dangerous); "
+        "take a console screenshot (vm.screenshot, caution) or press special keys "
+        "on the console (vm.keys.send, dangerous); move a VM to another "
         "host (vm.migrate, dangerous); take a snapshot (vm.snapshot.create, "
         "caution), revert to one (vm.snapshot.revert, dangerous) or delete one "
         "(vm.snapshot.delete, destructive); delete a powered-off VM and its "
@@ -2125,6 +2134,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # Mount and unmount a content-library ISO on a VM; the rows live in their
     # own module.
     *(_CompositeSpec(**row) for row in VM_CDROM_LIBRARY_ISO_COMPOSITES),
+    # PCI passthrough add and remove, console screenshot and key send; the
+    # rows live in their own modules.
+    *(_CompositeSpec(**row) for row in VM_PCI_DEVICE_COMPOSITES),
+    *(_CompositeSpec(**row) for row in VM_CONSOLE_COMPOSITES),
     # ----------------------------------------------------------------
     # Licence write -- dangerous / approval. The full key never leaves
     # the handler; the license-key tag keeps the vCenter bodies out of

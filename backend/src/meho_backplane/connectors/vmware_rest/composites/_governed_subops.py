@@ -56,6 +56,12 @@ from meho_backplane.connectors.vmware_rest.composites import (
 from meho_backplane.connectors.vmware_rest.composites._vcenter_install_ops import (
     VCENTER_INSTALL_GOVERNED_SUBOPS,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_console import (
+    VM_CONSOLE_GOVERNED_SUBOPS,
+)
+from meho_backplane.connectors.vmware_rest.composites._vm_pci_device import (
+    VM_PCI_DEVICE_GOVERNED_SUBOPS,
+)
 
 #: Default connector of the step list when the caller names none. A write
 #: step is checked under the connector the target resolves to (#4991), so the
@@ -195,6 +201,9 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,
     # #4394 vCenter install: the deploy, the setup start and the answer.
     **VCENTER_INSTALL_GOVERNED_SUBOPS,
+    # PCI passthrough add and remove, console screenshot and key send.
+    **VM_PCI_DEVICE_GOVERNED_SUBOPS,
+    **VM_CONSOLE_GOVERNED_SUBOPS,
 }
 
 

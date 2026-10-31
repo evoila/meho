@@ -23,6 +23,7 @@ import hashlib
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -56,6 +57,7 @@ from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
     reset_handler_cache,
 )
+from meho_backplane.operations._preview import _PREVIEW_BUILDERS
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.settings import get_settings
 
@@ -856,3 +858,30 @@ async def test_approved_start_runs_through_the_dispatcher(
 def test_changes_that_send_a_spec_are_credential_writes(op_id: str) -> None:
     """No flight-recorder body, no broadcast params, an encrypted approval handoff."""
     assert classify_op(op_id) == "credential_write"
+
+
+@pytest.mark.parametrize(
+    "op_id",
+    ["installer.cb.validation.start", "installer.cb.sddc.start", "installer.cb.sddc.retry"],
+)
+@pytest.mark.asyncio
+async def test_the_approver_sees_what_changes_and_no_secret(op_id: str) -> None:
+    spec = {
+        **_spec(),
+        "hostSpecs": [{"hostname": "esx-example-1", "credentials": {"username": "root"}}],
+        "networkSpecs": [{"networkType": "MANAGEMENT", "vlanId": "10", "subnet": "x/24"}],
+    }
+    params: dict[str, Any] = {"spec": spec, "secrets": _secrets()}
+    if op_id.endswith("retry"):
+        params["id"] = "bringup-1"
+    ctx = SimpleNamespace(params=params, target=TARGET)
+    preview = await _PREVIEW_BUILDERS[op_id](ctx)  # type: ignore[arg-type]
+
+    assert preview is not None
+    assert preview["target"] == "cb-a"
+    assert preview["spec"]["sddc_id"] == "sddc-example"
+    assert preview["spec"]["host_names"] == ["esx-example-1"]
+    assert preview["secrets_from_vault"] == [
+        {"path": "/sddcManagerSpec/rootUserCredentials/password", "secret_ref": "bringup/sddc-root"}
+    ]
+    assert VAULT_PASSWORD not in json.dumps(preview)

@@ -21,6 +21,9 @@ fresh install with no spec ingest.
 from typing import Final
 
 from meho_backplane.connectors.registry import register_connector_v2
+
+# Importing ``_preview`` registers what the approver sees for the three changes.
+from meho_backplane.connectors.vcf_cloud_builder import _preview  # noqa: F401
 from meho_backplane.connectors.vcf_cloud_builder.connector import CloudBuilderConnector
 from meho_backplane.connectors.vcf_cloud_builder.typed_ops import (
     CLOUD_BUILDER_TYPED_OPS,

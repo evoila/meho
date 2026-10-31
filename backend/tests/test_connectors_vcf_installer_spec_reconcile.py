@@ -31,6 +31,13 @@ path:
   ``session_login_token`` scheme spec).
 * :mod:`~meho_backplane.connectors.vcf_installer.profile` — the declarative
   fingerprint recipe's ``GET /v1/system/appliance-info``.
+* :mod:`~meho_backplane.connectors.vcf_installer.system_settings` — the
+  proxy, CEIP, system-setting, trusted-certificate-remove and vendor-job calls
+  (``SYSTEM_DECLARED_OP_IDS``), checked against both files.
+* :mod:`~meho_backplane.connectors.vcf_installer.resources_calc` — the
+  resource calculation (``RESOURCES_DECLARED_OP_IDS``). Only the 9.1 file has
+  it, so it is checked against 9.1, and a guard checks that 9.0 still lacks
+  it (the operation stops early on a 9.0 target).
 * :mod:`~meho_backplane.connectors.vcf_installer.bringup` — the governed
   composite's ``BRINGUP_DECLARED_OP_IDS`` (``POST /v1/sddcs/validations``,
   ``POST /v1/sddcs``, ``GET /v1/sddcs/validations/{id}``), which likewise
@@ -43,6 +50,8 @@ import pytest
 
 from meho_backplane.connectors.vcf_installer import bringup as _bringup
 from meho_backplane.connectors.vcf_installer import connector as _connector
+from meho_backplane.connectors.vcf_installer import resources_calc as _resources_calc
+from meho_backplane.connectors.vcf_installer import system_settings as _system_settings
 from meho_backplane.connectors.vcf_installer import typed_reads as _typed_reads
 from meho_backplane.connectors.vcf_installer import typed_writes as _typed_writes
 from meho_backplane.connectors.vcf_installer.profile import INSTALLER_EXECUTION_PROFILE
@@ -72,6 +81,7 @@ def _declared_op_ids() -> set[str]:
     declared.add(f"GET:{INSTALLER_EXECUTION_PROFILE.fingerprint.path}")
     declared |= set(_typed_writes.TYPED_WRITE_DECLARED_OP_IDS)
     declared |= set(_bringup.BRINGUP_DECLARED_OP_IDS)
+    declared |= set(_system_settings.SYSTEM_DECLARED_OP_IDS)
     return declared
 
 
@@ -139,3 +149,60 @@ def test_declared_op_ids_are_served_by_the_pinned_spec(spec_dir: str) -> None:
     spec_path = require_shelf_spec(spec_dir, _SPEC_FILE)
     served = openapi_served_op_ids(spec_path)
     assert_op_ids_served(_declared_op_ids(), served, spec_label=f"{spec_dir}/{_SPEC_FILE}")
+
+
+def test_system_declared_op_ids_are_pinned() -> None:
+    """Guard: the settings calls can't shrink to a passing subset."""
+    assert (
+        frozenset(
+            {
+                "GET:/v1/system/proxy-configuration",
+                "PATCH:/v1/system/proxy-configuration",
+                "GET:/v1/system/ceip",
+                "PATCH:/v1/system/ceip",
+                "GET:/v1/system",
+                "PATCH:/v1/system",
+                "DELETE:/v1/sddc-manager/trusted-certificates/{alias}",
+                "GET:/v1/sddc-manager/trusted-certificates",
+                "GET:/v1/system/settings/depot",
+                "GET:/v1/tasks",
+                "GET:/v1/tasks/{id}",
+            }
+        )
+        == _system_settings.SYSTEM_DECLARED_OP_IDS
+    )
+
+
+def test_resources_declared_op_ids_are_pinned() -> None:
+    """Guard: the 9.1-only resource calculation calls are pinned."""
+    assert (
+        frozenset(
+            {
+                "POST:/v1/sddcs/resources-calculation",
+                "GET:/v1/sddcs/resources-calculation/{id}",
+            }
+        )
+        == _resources_calc.RESOURCES_DECLARED_OP_IDS
+    )
+
+
+def test_resources_calculation_is_served_by_the_pinned_9_1_spec() -> None:
+    """The 9.1 file serves the resource calculation calls."""
+    spec_path = require_shelf_spec("vcf-installer-9.1", _SPEC_FILE)
+    served = openapi_served_op_ids(spec_path)
+    assert_op_ids_served(
+        set(_resources_calc.RESOURCES_DECLARED_OP_IDS),
+        served,
+        spec_label=f"vcf-installer-9.1/{_SPEC_FILE}",
+    )
+
+
+def test_resources_calculation_is_not_in_the_pinned_9_0_spec() -> None:
+    """The 9.0 file lacks the calls, so the operation's version check is needed.
+
+    When a newer 9.0 file adds them, change the operation's first version and
+    this test together.
+    """
+    spec_path = require_shelf_spec("vcf-installer-9.0", _SPEC_FILE)
+    served = openapi_served_op_ids(spec_path)
+    assert not (set(_resources_calc.RESOURCES_DECLARED_OP_IDS) & set(served))

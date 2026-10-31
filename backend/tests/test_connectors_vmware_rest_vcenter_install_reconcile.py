@@ -6,9 +6,12 @@
 * An always-on test pins the vendor-call lists of the three changes, so a
   change to them is seen.
 * The shelf tests read the pinned ``vcenter.yaml`` of vCenter 8.0 (U3) and
-  9.0: every REST call is a path there, the request bodies have the fields
-  MEHO sends at the top level (no ``spec`` wrapper), and the appliance states
-  MEHO knows are the vendor's states. The VI-JSON calls of the deploy are
+  9.0: every REST call is a path there, the specs MEHO sends have the fields
+  of the vendor's request bodies, and the appliance states MEHO knows are the
+  vendor's states. The file shows these fields at the top of the body. The
+  setup service of a new appliance wants them under ``spec`` (see
+  ``vcenter_deployment.setup_body``), so MEHO wraps them, and the tests check
+  the fields inside ``spec``. The VI-JSON calls of the deploy are
   checked against the pinned 9.0 ``vi-json.yaml``. They skip when the spec
   shelf is not configured and run in CI.
 
@@ -113,12 +116,20 @@ def test_every_rest_call_is_a_path_of_the_pinned_vcenter_file(product_dir: str) 
     )
 
 
+def test_the_setup_posts_send_the_spec_under_one_spec_key() -> None:
+    spec = _vcenter_install._install_spec({"standalone": {}}, "<password>")
+    body = vcenter_deployment.setup_body(spec)
+    assert body == {"spec": spec}
+    assert set(spec) == {"auto_answer", "vcsa_embedded"}
+
+
 @pytest.mark.parametrize("product_dir", _VCENTER_SPECS)
-def test_the_request_bodies_have_the_fields_meho_sends_at_the_top(product_dir: str) -> None:
+def test_the_specs_meho_sends_have_the_fields_of_the_vendor_bodies(product_dir: str) -> None:
     rows = _rows(require_shelf_spec(product_dir, "vcenter.yaml"))
+    spec = _vcenter_install._install_spec({"standalone": {}}, "<password>")
     for op_id in (vcenter_deployment.OP_INSTALL_CHECK, vcenter_deployment.OP_INSTALL_START):
         fields = _body_fields(rows[op_id])
-        assert {"vcsa_embedded", "auto_answer"} <= fields, op_id
+        assert set(spec) <= fields, op_id
         assert "spec" not in fields
     assert _body_fields(rows[vcenter_deployment.OP_QUESTION_ANSWER]) == {
         "question_id",

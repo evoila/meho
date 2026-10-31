@@ -454,7 +454,8 @@ _ORG_OIDC_SET = VcfaTypedOp(
     description=(
         "Reads the identity provider's well-known address through VCF Automation, adds "
         "the client id, the client secret from Vault and the claim names, and saves the "
-        "org's OIDC settings. state absent removes them. Refuses to remove the System org's."
+        "org's OIDC settings. state absent removes them. Refuses to remove or turn off the "
+        "System org's."
     ),
     parameter_schema={
         "type": "object",
@@ -555,7 +556,7 @@ _ORG_OIDC_SET = VcfaTypedOp(
         preconditions=(
             "Register VCF Automation as a client at the identity provider and store the client "
             "secret in Vault (client_secret_ref). A person must approve the call. MEHO refuses "
-            "to remove the OIDC sign-in of the provider's own org (System)."
+            "to remove or turn off the OIDC sign-in of the provider's own org (System)."
         ),
         output_shape=(
             "{status: set | removed | well_known_failed | refused | refused_by_meho | "

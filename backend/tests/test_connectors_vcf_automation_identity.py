@@ -719,6 +719,24 @@ async def test_oidc_remove_refuses_the_provider_org(vcfa: VcfAutomationConnector
     assert not delete.called
 
 
+async def test_oidc_turn_off_refuses_the_provider_org(
+    vcfa: VcfAutomationConnector, vault: list[tuple[str, str]]
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        _mount_orgs(mock, [SYSTEM_ORG])
+        post = mock.post(url__regex=r"/api/admin/org/.*").respond(200, json={})
+        put = mock.put(url__regex=r"/api/admin/org/.*").respond(200, json={})
+        result = await run(
+            "vcfa.provider.org.oidc.set", {**_OIDC_PARAMS, "org": "System", "enabled": False}
+        )
+    assert result["result"]["status"] == "refused_by_meho"
+    assert "remove or turn off" in result["result"]["guidance"]
+    assert not post.called
+    assert not put.called
+    assert vault == []
+
+
 async def test_oidc_set_preview_shows_only_the_vault_path(vcfa: VcfAutomationConnector) -> None:
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         mount_logins(mock)

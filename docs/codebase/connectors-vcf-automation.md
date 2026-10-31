@@ -454,8 +454,9 @@ in `_identity_preview.py`. Wire facts follow `go-vcloud-director` v3
   name claims are set. After the `PUT` it reads the settings again (the
   vendor SDK does the same).
 - **The provider's own org.** `org.ldap.set` refuses the org `System`, and
-  `org.oidc.set` refuses to remove its OIDC: the provider admin signs in
-  there (`refused_by_meho`).
+  `org.oidc.set` refuses to remove or turn off (`enabled: false`) its OIDC:
+  the provider admin signs in there (`refused_by_meho`, nothing is sent and
+  Vault is not read).
 - **Preview.** Each change has its own approval preview: the inputs, the
   secret only as its Vault path, the current settings, what is affected
   and, for LDAPS, the certificate fingerprint and whether it matches.

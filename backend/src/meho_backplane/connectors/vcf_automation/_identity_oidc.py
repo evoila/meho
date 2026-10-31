@@ -16,8 +16,11 @@ Follows ``go-vcloud-director`` v3 ``govcd/org_oidc.go``:
   vendor's message, with the secret replaced. On success MEHO reads the
   settings again (the vendor SDK does the same: some versions answer the
   ``PUT`` with a wrong redirect address).
-* **Remove** (``state: absent``). ``DELETE .../settings/oauth``. MEHO
-  refuses it for the provider's own org: the provider admin signs in there.
+* **Remove** (``state: absent``). ``DELETE .../settings/oauth``.
+
+For the provider's own org MEHO refuses to remove the OIDC sign-in or to
+turn it off (``enabled: false``): the provider admin signs in there. It
+answers ``refused_by_meho`` before any vendor call and before it reads Vault.
 """
 
 from __future__ import annotations
@@ -106,18 +109,20 @@ def _merged(
     return body, missing
 
 
+def _provider_org_refusal(org: Mapping[str, Any]) -> dict[str, Any]:
+    return _outcome(
+        "refused_by_meho",
+        f"org {org.get('name')!r} is the provider's own org: the provider admin signs in "
+        "there. MEHO does not remove or turn off its OIDC sign-in. Nothing was sent",
+    )
+
+
 async def _remove(
     connector: VcfAutomationConnector,
     target: VcfAutomationTargetLike,
     operator: Operator,
     org: Mapping[str, Any],
 ) -> dict[str, Any]:
-    if is_provider_org(org):
-        return _outcome(
-            "refused_by_meho",
-            f"org {org.get('name')!r} is the provider's own org: the provider admin signs in "
-            "there. MEHO does not turn off its OIDC sign-in. Nothing was sent",
-        )
     try:
         await connector._post_json(
             target,
@@ -145,6 +150,9 @@ async def provider_org_oidc_set(
     org = await find_org(connector, target, operator, name)
     if org is None:
         return _outcome("invalid_request", f"no org named {name!r}; nothing was sent")
+    turns_off = params.get("state") == "absent" or params.get("enabled") is False
+    if turns_off and is_provider_org(org):
+        return _provider_org_refusal(org)
     if params.get("state") == "absent":
         return await _remove(connector, target, operator, org)
     oauth_path = org_path(PROVIDER_ORG_OAUTH_SETTINGS_PATH, org)

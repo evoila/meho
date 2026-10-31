@@ -53,6 +53,9 @@ resolved VM + host group sets).
 ``vm.snapshot.delete``    live-read: the mandatory ``blast_radius`` from the
                           handler's plan -- the snapshot, the snapshots below
                           it when ``remove_children`` is set
+``vm.snapshot.delete_all`` live-read: the mandatory ``blast_radius`` from the
+                          handler's plan -- the VM and every snapshot it has
+``vm.disks.consolidate``  echo: vm
 ``vm.migrate``            echo: vm, cluster, target_host + resolution source
 ``vm.power``              live-read: vm, name, power_state, verb,
                           power_kind (hard vs Tools-soft); a failed read
@@ -211,6 +214,10 @@ from meho_backplane.connectors.vmware_rest.composites._namespace import (
 from meho_backplane.connectors.vmware_rest.composites._snapshot import (
     vm_snapshot_create_preview,
     vm_snapshot_delete_preview,
+)
+from meho_backplane.connectors.vmware_rest.composites._snapshot_cleanup import (
+    vm_disks_consolidate_preview,
+    vm_snapshot_delete_all_preview,
 )
 from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
     _OP_STORAGE_POLICIES_LIST,
@@ -1848,6 +1855,9 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     # The snapshot delete is destructive: its blast radius is the handler's own
     # plan (the snapshot, and the snapshots below it when they go too).
     "vmware.composite.vm.snapshot.delete": vm_snapshot_delete_preview,
+    # Destructive: the blast radius is the handler's plan (every snapshot of the VM).
+    "vmware.composite.vm.snapshot.delete_all": vm_snapshot_delete_all_preview,
+    "vmware.composite.vm.disks.consolidate": vm_disks_consolidate_preview,
     "vmware.composite.vm.migrate": _vm_migrate_preview,
     "vmware.composite.vm.power": _vm_power_preview,
     "vmware.composite.vm.power.bulk": _vm_power_bulk_preview,
@@ -1904,7 +1914,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 52 write-composite park-time preview builders. Import-time.
+    """Wire the 54 write-composite park-time preview builders. Import-time.
 
     The read composites register no builder here. The one read that can
     wait for approval, the ``caution`` ``vm.guest.file.read``, registers

@@ -98,6 +98,9 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     # VM snapshot create (caution + approval) and delete (destructive).
     "vmware.composite.vm.snapshot.create",
     "vmware.composite.vm.snapshot.delete",
+    # Delete all snapshots (destructive) and consolidate disks (caution).
+    "vmware.composite.vm.snapshot.delete_all",
+    "vmware.composite.vm.disks.consolidate",
     "vmware.composite.vm.destroy",
     "vmware.composite.vm.migrate",
     "vmware.composite.vm.power",
@@ -262,6 +265,14 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     ),
     "vmware.composite.vm.snapshot.create": (
         "meho_backplane.connectors.vmware_rest.composites._snapshot.vm_snapshot_create_composite"
+    ),
+    "vmware.composite.vm.snapshot.delete_all": (
+        "meho_backplane.connectors.vmware_rest.composites._snapshot_cleanup."
+        "vm_snapshot_delete_all_composite"
+    ),
+    "vmware.composite.vm.disks.consolidate": (
+        "meho_backplane.connectors.vmware_rest.composites._snapshot_cleanup."
+        "vm_disks_consolidate_composite"
     ),
     "vmware.composite.vm.snapshot.delete": (
         "meho_backplane.connectors.vmware_rest.composites._snapshot.vm_snapshot_delete_composite"
@@ -444,6 +455,8 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.snapshot.revert": "vm",
     "vmware.composite.vm.snapshot.create": "vm",
     "vmware.composite.vm.snapshot.delete": "vm",
+    "vmware.composite.vm.snapshot.delete_all": "vm",
+    "vmware.composite.vm.disks.consolidate": "vm",
     "vmware.composite.vm.destroy": "vm",
     "vmware.composite.vm.migrate": "vm",
     "vmware.composite.vm.power": "vm",
@@ -675,6 +688,7 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
         "vmware.composite.vm.cdrom.mount_library_iso",
         "vmware.composite.vm.cdrom.unmount_library_iso",
         "vmware.composite.vm.snapshot.create",
+        "vmware.composite.vm.disks.consolidate",
         "vmware.composite.content_library.create",
         "vmware.composite.content_library.item.upload",
     }
@@ -692,8 +706,9 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
             "vmware.composite.content_library.item.delete",
             # The DRS rule delete.
             "vmware.composite.cluster.drs_rule.delete",
-            # The VM snapshot delete.
+            # The VM snapshot deletes.
             "vmware.composite.vm.snapshot.delete",
+            "vmware.composite.vm.snapshot.delete_all",
         ):
             expected_level = "destructive"
         elif row.op_id in caution_ops:
@@ -946,6 +961,21 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "unchanged",
             "invalid_request",
             "still_present",
+            "timeout",
+        },
+        "vmware.composite.vm.snapshot.delete_all": {
+            "deleted",
+            "unchanged",
+            "invalid_request",
+            "still_present",
+            "timeout",
+        },
+        "vmware.composite.vm.disks.consolidate": {
+            "consolidated",
+            "unchanged",
+            "still_needed",
+            "not_found",
+            "invalid_request",
             "timeout",
         },
         "vmware.composite.vm.migrate": {"migrated", "no_recommendation"},

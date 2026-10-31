@@ -91,6 +91,8 @@ Scope:
 * the VM snapshot writes (``_snapshot``): ``vm.snapshot.create`` (caution,
   waits for approval) and the destructive ``vm.snapshot.delete``. The list is
   the typed read ``vmware.snapshot.list``; the revert lives in ``_write``.
+* the VM snapshot and disk clean-up (``_snapshot_cleanup``): the destructive
+  ``vm.snapshot.delete_all`` and ``vm.disks.consolidate`` (caution).
 * the two alarm changes ``alarm.acknowledge`` and ``alarm.reset``
   (``_alarm``, #4383): both ``caution`` with ``requires_approval=True``.
 """
@@ -159,6 +161,10 @@ from meho_backplane.connectors.vmware_rest.composites._register import (
 from meho_backplane.connectors.vmware_rest.composites._snapshot import (
     vm_snapshot_create_composite,
     vm_snapshot_delete_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._snapshot_cleanup import (
+    vm_disks_consolidate_composite,
+    vm_snapshot_delete_all_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
     storage_policy_create_composite,
@@ -293,6 +299,7 @@ __all__ = [
     "vm_device_cdrom_composite",
     "vm_disk_attach_composite",
     "vm_disk_grow_composite",
+    "vm_disks_consolidate_composite",
     "vm_migrate_composite",
     "vm_nic_repoint_composite",
     "vm_power_bulk_composite",
@@ -301,6 +308,7 @@ __all__ = [
     "vm_resource_allocation_set_composite",
     "vm_resource_allocation_show_composite",
     "vm_snapshot_create_composite",
+    "vm_snapshot_delete_all_composite",
     "vm_snapshot_delete_composite",
     "vm_snapshot_revert_composite",
 ]

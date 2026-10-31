@@ -209,10 +209,16 @@ control bytes are refused, and a non-absolute path is rejected.
 `/etc/pki/tls/private`, `/etc/letsencrypt`, kubeconfigs and PKI under
 `/etc/kubernetes`, `/etc/rancher`, the RKE2 / K3s server tokens,
 credentials, TLS and database under `/var/lib/rancher/*/server`,
-`/var/lib/kubelet/pki`, NetworkManager connection files, `/run/secrets`,
-and any `*.key`, `*.keytab`, `*.p12`, `*.pfx`, `id_rsa`, `id_dsa`,
+`/var/lib/kubelet/pki`, the kubelet kubeconfig, the pod volumes under
+`/var/lib/kubelet/pods` (mounted Kubernetes Secrets and service account
+tokens), the etcd data under `/var/lib/etcd`, the Docker container config
+files (`/var/lib/docker/containers/*/config.v2.json`), NetworkManager
+connection files, `/etc/wireguard`, `/etc/ipsec.secrets`,
+`/etc/ipsec.d/private`, `/etc/sssd/sssd.conf`, `/var/lib/sss/secrets`,
+`/run/secrets`, and any `*.key`, `*.keytab`, `*.p12`, `*.pfx`, `id_rsa`, `id_dsa`,
 `id_ecdsa`, `id_ed25519` file. Public files next to them (`/etc/passwd`,
-`*.pub`, `/etc/ssl/certs`, RKE2 agent logs) stay readable.
+`*.pub`, `/etc/ssl/certs`, RKE2 agent logs, pod logs under
+`/var/log/pods`, Docker container logs) stay readable.
 
 The check runs twice:
 

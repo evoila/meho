@@ -1049,6 +1049,16 @@ def test_confine_read_path_keeps_the_inventory_reads() -> None:
         "/var/lib/rancher/rke2/server/node-token",
         "/var/lib/rancher/k3s/server/tls/server-ca.key",
         "/var/lib/kubelet/pki/kubelet-client-current.pem",
+        "/var/lib/kubelet/kubeconfig",
+        "/var/lib/kubelet/pods/0a1b/volumes/kubernetes.io~secret/db/password",
+        "/var/lib/kubelet/pods/0a1b/volumes/kubernetes.io~projected/kube-api-access-x/token",
+        "/var/lib/etcd/member/snap/db",
+        "/etc/wireguard/wg0.conf",
+        "/etc/ipsec.secrets",
+        "/etc/ipsec.d/private/host.pem",
+        "/etc/sssd/sssd.conf",
+        "/var/lib/sss/secrets/secrets.ldb",
+        "/var/lib/docker/containers/0a1b/config.v2.json",
         "/var/lib/app/tls/server.key",
         "/var/lib/app/.ssh/id_ed25519",
         "/run/secrets/db-password",
@@ -1067,6 +1077,8 @@ def test_confine_read_path_keeps_public_files_near_the_refused_ones() -> None:
         "/etc/ssh/sshd_config",
         "/etc/ssl/certs/ca-certificates.crt",
         "/var/lib/rancher/rke2/agent/logs/kubelet.log",
+        "/var/log/pods/default_web-0_0a1b/web/0.log",
+        "/var/lib/docker/containers/0a1b/0a1b-json.log",
     ):
         assert confine_read_path(path) == path
 

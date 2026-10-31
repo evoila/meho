@@ -17,7 +17,7 @@ recorded-fixture E2E.
 
 Source: `backend/src/meho_backplane/connectors/vcf_fleet/`.
 
-The connector ships three typed reads. **Versions** says where the call
+The connector ships ten typed operations: eight reads and two changes. **Versions** says where the call
 exists: the product versions of the connector implementation that
 registers it (`fleet-rest`, `>=8.0,<9.1`). An 8.x or 9.0 target resolves
 here; a 9.1 or newer target resolves to `fleet-lcm` (see "Dual
@@ -28,6 +28,13 @@ implementation").
 | `fleet.about` | Read the appliance's API version, product version and build. | `GET /lcm/lcops/api/v2/about` | read (`safe`, no approval) | 8.x, 9.0 |
 | `fleet.environment.list` | List the Fleet environments with the products deployed in each. | `GET /lcm/lcops/api/v2/environments` | read (`safe`, no approval) | 8.x, 9.0 |
 | `fleet.api_file.get` | Read one documentation page or API description file the appliance serves (the Lifecycle APIs or the Content Management APIs). Returns path, HTTP status, content type, size, SHA-256 and the version and build; the text is in parts behind a result handle. | `GET {path}`; version and build from `GET /lcm/lcops/api/v2/about` | read (`safe`, no approval) | 8.x, 9.0 |
+| `fleet.health` | Read the appliance health: name, version, build, disk use, and the state of each service (`all_up` plus one row per service). A part that fails is named in its error field. | `GET /lcm/lcops/api/v2/settings/system-details`, `GET /lcm/health/api/v2/status` | read (`safe`, no approval) | 8.18, 9.0 |
+| `fleet.environment.get` | Read one environment with its products, versions and nodes. Secret values are replaced. | `GET /lcm/lcops/api/v2/environments/{environmentId}` | read (`safe`, no approval) | 8.18, 9.0 |
+| `fleet.datacenter.list` | List the datacenters and their vCenters, one row per vCenter. No password is returned. | `GET /lcm/lcops/api/v2/datacenters`, `GET /lcm/lcops/api/v2/datacenters/{dataCenterVmid}/vcenters` | read (`safe`, no approval) | 8.18, 9.0 |
+| `fleet.product.inventory_sync` | Start an inventory sync of one product in an environment, unless one already runs. Returns `accepted` (or `already_running`) with the request id. | `GET /lcm/request/api/v2/requests`, then `POST /lcm/lcops/api/v2/environments/{environmentId}/products/{productId}/inventory-sync` | change (`caution`, waits for approval) | 8.18, 9.0 |
+| `fleet.request.list` | List lifecycle requests with state, plain outcome and error text, newest first; filter by state or outcome. | `GET /lcm/request/api/v2/requests` | read (`safe`, no approval) | 8.18, 9.0 |
+| `fleet.request.get` | Read one request: state, outcome and, when it failed, its error causes (the first is the failed step). Says `not_reachable` when the appliance does not answer. | `GET /lcm/request/api/v2/requests/{requestId}`, `GET /lcm/request/api/v2/requests/{requestId}/error-causes` | read (`safe`, no approval) | 8.18, 9.0 |
+| `fleet.request.retry` | Retry a failed request, optionally with corrected inputs. Returns `accepted`, `not_started` or `failed`, with the steps. | `GET /lcm/request/api/v2/requests/{requestId}`, `GET .../error-causes`, then `PATCH /lcm/request/api/v2/requests/{requestId}/retry` | change (`dangerous`, waits for approval) | 8.18, 9.0 |
 
 VCF Fleet is the rebrand of vRealize Suite Lifecycle Manager (vRSLCM) under
 the VCF 9 umbrella; the appliance still identifies as vRSLCM in its internal
@@ -382,10 +389,79 @@ the record's size. The read never returns a cut file.
 
 Tests: `backend/tests/test_connectors_vcf_fleet_api_file.py`.
 
+### Requests, environments, inventory sync, health and datacenters
+
+Seven typed operations in `lifecycle.py` (handlers, on the
+`FleetLifecycleOps` base class of `VcfFleetConnector`) and
+`lifecycle_ops.py` (metadata). `typed_ops.py` adds them to
+`FLEET_TYPED_OPS` and holds the group texts. Groups: `fleet-about`
+(`fleet.about`, `fleet.health`), `fleet-inventory` (the environment reads,
+`fleet.datacenter.list` and the inventory sync) and `fleet-requests` (the
+three request operations). The paths come from the vendor's API reference
+for vRealize Suite Lifecycle Manager and the Aria Suite Lifecycle 8.18
+programming guide ("Retry an install or import request").
+
+- **Request state.** `state` is the vendor's state; `outcome` puts it in
+  plain words: `queued`, `running`, `succeeded`, `failed`, `cancelled`,
+  or `unknown` for a state not in `OUTCOME_BY_STATE`. The vendor gives no
+  progress number and no list of steps, so `fleet.request.get` returns the
+  error causes of a failed request; the first one is the failed step.
+- **Status read.** `fleet.request.get` follows every start of this
+  connector. When the appliance does not answer (a connection or time-out
+  error, or a 502, 503 or 504, for example during its own upgrade), it
+  returns `outcome: not_reachable` with the request id and `checked_at`.
+  It never says `failed` then. MEHO keeps no job state between calls; the
+  caller keeps the request id (or the async run handle of the start).
+- **Login again.** Fleet sends the stored user and password with every
+  call. On a `401` the request read and the two changes drop the cached
+  login, read it again from Vault and repeat the call once. A `401` means
+  the appliance refused the call before it ran.
+- **Inventory sync (`fleet.product.inventory_sync`).** Before the start it
+  lists the requests and looks for a queued or running request whose type
+  or name says inventory sync and whose inputs name the environment and the
+  product. If one runs, it returns `already_running` with that request id
+  and starts nothing. This check is a help, not a lock: two callers can
+  both check before either starts. Otherwise it sends the start and returns
+  `accepted` with the request id the appliance gives. It never says the
+  sync is done. Use MEHO's async mode (`async: true`, see
+  [`async-governed-dispatch.md`](async-governed-dispatch.md)) for the
+  start, so a lost reply keeps the request id under a run handle. After a
+  lost reply, read `fleet.request.list` (outcome `running`) before you
+  start again.
+- **Retry (`fleet.request.retry`).** Three steps: read the request, read
+  its error causes, then send the causes back with `retry: true`
+  (`PATCH .../retry`). Corrected inputs go in `properties`, by the names in
+  the error causes; an unknown name is refused before the change. A secret
+  input is a locker reference (`locker:password:<id>:<alias>`), never the
+  value. A request that did not fail, or has no error causes, gives
+  `not_started` and nothing is sent. When the last step fails, the answer
+  is `status: failed` with the vendor's error and `steps` lists what ran,
+  what failed and what did not run; nothing is undone. After a lost reply,
+  read the request first: if it is running again, the retry went through.
+- **Health (`fleet.health`).** Two reads: the system details (version,
+  build, disk use) and the service state (`/lcm/health/api/v2/status`:
+  `vrlcm-server`, `postgres`, `blackstone`, `bootstrap`). A part that fails
+  with a vendor error other than `401` is named in `system_details_error`
+  or `health_error`, and the other part still answers. The Task named
+  `/lcm/bootstrap/api/status` for the service state; the vendor API
+  reference documents `/lcm/health/api/v2/status` instead, and its answer
+  carries the bootstrap state, so the operation reads that.
+- **Secrets.** Every field with a secret name (MEHO's shared rule,
+  `is_secret_param_name`) is replaced by `***REDACTED***`, at any depth:
+  environment product and node properties, and error-cause inputs. The
+  datacenter list builds its rows from named fields only, so the vCenter
+  password the vendor sends (`vcPassword`) never reaches the answer.
+- **Versions.** The calls exist on every version this connector serves
+  (Aria Suite Lifecycle 8.x and VCF 9.0 fleet management), so no operation
+  stops early with a version message. A live proof on 8.18 and 9.0 is a
+  separate lab test.
+
+Tests: `backend/tests/test_connectors_vcf_fleet_lifecycle.py`.
+
 ### Remaining ingested breadth (enabled generically)
 
-The reads outside the audited typed set — datacenters, vcenters, the
-`fleet.environment.get` detail read, products, and LCM requests — stay as
+The reads that have no typed operation (for example the product list and
+the vCenter detail) stay as
 ordinary `source_kind="ingested"` `endpoint_descriptor` rows that land via
 G0.7 spec ingestion and stay browsable as profiled-dispatch breadth. They are
 enabled through the **generic review flow** —

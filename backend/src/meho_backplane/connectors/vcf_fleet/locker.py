@@ -30,6 +30,7 @@ import httpx
 
 from meho_backplane.connectors._shared.vault_creds import load_param_secret_data
 from meho_backplane.connectors.base import ConnectorUpstreamError
+from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -403,3 +404,60 @@ async def certificate_import(
         connector, operator, target, CERTIFICATE_IMPORT_PATH, body, secrets
     )
     return _certificate_answer(answer, alias, "import")
+
+
+# ---------------------------------------------------------------------------
+# Approval previews of the two credential writes
+# ---------------------------------------------------------------------------
+
+
+def _ref_or_none(params: dict[str, Any], name: str) -> str | None:
+    path, field = parse_secret_ref(params.get(name), name)
+    return f"{path}#{field}"
+
+
+async def _password_add_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """What ``fleet.locker.password.add`` adds: alias, user and the Vault reference.
+
+    The op is a credential write, so the default preview is suppressed. The
+    reference points into Vault; the value is read only when the approved
+    call runs. Declines (``None``) on bad input.
+    """
+    try:
+        return {
+            "target": getattr(ctx.target, "name", None),
+            "alias": _text(ctx.params, "alias"),
+            "user_name": _text(ctx.params, "user_name"),
+            "description": _text(ctx.params, "description", required=False),
+            "password_ref": _ref_or_none(ctx.params, "password_ref"),
+        }
+    except ValueError:
+        return None
+
+
+async def _certificate_import_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """What ``fleet.locker.certificate.import`` adds, never a key. Declines on bad input."""
+    params = ctx.params
+    try:
+        preview: dict[str, Any] = {
+            "target": getattr(ctx.target, "name", None),
+            "mode": params.get("mode"),
+            "alias": _text(params, "alias"),
+        }
+        if params.get("mode") == "import":
+            chain = _text(params, "certificate_chain") or ""
+            preview["certificate_chain_bytes"] = len(chain.encode())
+            preview["private_key_ref"] = _ref_or_none(params, "private_key_ref")
+            if params.get("passphrase_ref") is not None:
+                preview["passphrase_ref"] = _ref_or_none(params, "passphrase_ref")
+            return preview
+        if params.get("mode") != "generate":
+            return None
+        body = _generate_body(params, preview["alias"])
+    except (ValueError, TypeError):
+        return None
+    return {**preview, **{key: value for key, value in body.items() if key != "alias"}}
+
+
+register_preview_builder("fleet.locker.password.add", _password_add_preview)
+register_preview_builder("fleet.locker.certificate.import", _certificate_import_preview)

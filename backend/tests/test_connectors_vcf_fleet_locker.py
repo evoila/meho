@@ -663,3 +663,66 @@ async def test_each_change_waits_for_approval(
     assert dumped["status"] == "awaiting_approval", dumped
     assert dumped["extras"].get("approval_request_id")
     assert not sent.called
+
+
+# ---------------------------------------------------------------------------
+# Approval previews of the two credential writes
+# ---------------------------------------------------------------------------
+
+
+def _preview_ctx(params: dict[str, Any]) -> Any:
+    from unittest.mock import MagicMock
+
+    from meho_backplane.operations._preview import PreviewContext
+
+    ctx = MagicMock(spec=PreviewContext)
+    ctx.params = params
+    ctx.target = _Target()
+    return ctx
+
+
+async def test_password_add_preview_shows_the_reference_not_a_value() -> None:
+    from meho_backplane.operations._preview import _PREVIEW_BUILDERS
+
+    builder = _PREVIEW_BUILDERS["fleet.locker.password.add"]
+    assert await builder(_preview_ctx(_ADD)) == {
+        "target": "fleet-locker",
+        "alias": "alias-new",
+        "user_name": "admin",
+        "description": None,
+        "password_ref": "kv/fleet/new#password",
+    }
+    assert await builder(_preview_ctx({**_ADD, "password_ref": "no-field"})) is None
+
+
+async def test_certificate_import_preview_never_shows_a_key() -> None:
+    from meho_backplane.operations._preview import _PREVIEW_BUILDERS
+
+    builder = _PREVIEW_BUILDERS["fleet.locker.certificate.import"]
+    imported = await builder(
+        _preview_ctx(
+            {
+                "mode": "import",
+                "alias": "cert-new",
+                "certificate_chain": "<pem-chain>",
+                "private_key_ref": "kv/fleet/cert#key",
+            }
+        )
+    )
+    assert imported == {
+        "target": "fleet-locker",
+        "mode": "import",
+        "alias": "cert-new",
+        "certificate_chain_bytes": len("<pem-chain>"),
+        "private_key_ref": "kv/fleet/cert#key",
+    }
+    generated = await builder(
+        _preview_ctx({"mode": "generate", "alias": "cert-new", "common_name": "<fqdn>"})
+    )
+    assert generated == {
+        "target": "fleet-locker",
+        "mode": "generate",
+        "alias": "cert-new",
+        "cN": "<fqdn>",
+    }
+    assert await builder(_preview_ctx({"mode": "other", "alias": "cert-new"})) is None

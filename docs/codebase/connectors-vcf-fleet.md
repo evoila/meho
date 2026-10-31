@@ -418,7 +418,9 @@ recorder keeps no body, and the dispatcher withholds the vendor's error
 text. To still say why the appliance refused, these ops raise
 `FleetLockerVendorError`: its `remediation` holds the vendor's
 `errorCode`, `message` and `recommendations`, unless that text holds the
-secret or a line of it; then it says so instead.
+secret or a line of it; then it says so instead. Each of the two has an
+approval preview (in `locker.py`) that shows the alias, the user or the
+certificate fields and the Vault references, never a value.
 
 **The replace (a vendor job).** `fleet.product.certificate.replace` runs
 four steps and returns as soon as the appliance accepts the replace:

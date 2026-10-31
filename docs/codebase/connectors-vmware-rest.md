@@ -8,79 +8,15 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 87 hand-authored composites
-that orchestrate cross-spec workflows: 20 read composites
-(G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
-`host.vsan_health` / `#2135` reads were later re-shipped as typed ops
-in `#2258`; plus the four guest-operations reads `#3100` and the
-Supervisor status read `#3281` + the vSphere Namespace status read
-`namespace.status` / `#3502` + the storage-policy list read `#3494` +
-the two SUBSCRIBED content-library reads `content_library.subscribed.status` +
-`content_library.subscribed.items.list` / `#3495` + the datastore
-cache-refresh read `datastore.refresh` / `#3789` + the datastore file list
-read `datastore.file.list` / `#3432` + the vSAN folder list
-read `datastore.vsan.folder.list` / `#4022` + the orphan folder check
-`datastore.orphan_dirs` / `#3814` + the VM limit and
-reservation read `vm.resource_allocation.show` / `#3880` + the migration
-inventory read `vmware.migration.inventory`) and 67 write
-composites (G3.1-T6 / `#509`, incl. the three vCenter install changes
-`vcenter.appliance.deploy` / `vcenter.install` / `vcenter.deployment.answer`
-(`#4394`), the destructive-tier `vm.destroy` / `#3198`, the
-governed vSphere Namespace `namespace.create` (caution) +
-`namespace.delete` (destructive) / `#3502` (see the **Governed vSphere
-Namespace composites** subsection under Control flow), the
-governed NFS tag-based SPBM `storage_policy.create` (caution) +
-`storage_policy.delete` (destructive) / `#3494`, the
-single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`, the
-mutating VI-JSON `vm.disk.grow` / `#2893` + the WSFC/FCI shared-attach
-`vm.disk.attach` / `#3256`, the folder-template
-`vm.clone_from_template` / `#2894`, the vim cluster / inventory writes
-`cluster.drs_rule.create` + `folder.create` / `#2895`, the governed
-resource-pool allocation writes `resource_pool.create` (`caution`) +
-`resource_pool.delete` (`dangerous`) and the VM-Host affinity
-`cluster.drs_vm_host_rule.create` (`caution`) / `#3505`, the `#2891`
-post-clone hardware reconfigure trio `vm.resize` / `vm.nic.repoint` /
-`vm.device.cdrom`, the VM CPU / memory limit + reservation write
-`vm.resource_allocation.set` (`caution`, with its safe read
-`vm.resource_allocation.show`) / `#3880`, the two guest-customization (GOSC) composites
-`guest.customization_spec.create` + `vm.customize` / `#2892`, the
-OVF/OVA content-library deploy `vm.deploy_from_library` / `#2909`, and
-the three host-domain writes `host.datastore_mount_nfs` /
-`host.disk_mark_flash` / `host.service_control` / `#3182`, the three vim
-distributed-portgroup writes `network.portgroup.create` +
-`network.portgroup.security.set` / `#3091` +
-`network.portgroup.vlan.set` (VLAN reconfigure of an existing portgroup),
-the content-library import
-`vm.import_from_library` / `#3229`, the two governed
-guest-operations writes `vm.guest.file.write` / `#3100` +
-`vm.guest.program.run` / `#3255` (see
-`connectors-vmware-rest-guest-ops.md`), plus the two Supervisor (WCP)
-namespace-management writes `supervisor.enable` + `supervisor.disable`
-/ `#3281` (see the **Supervisor (WCP) namespace-management composites**
-subsection under Control flow), and the two SUBSCRIBED content-library
-caution writes `content_library.subscribed.create` +
-`content_library.subscribed.sync` / `#3495` (see the **Content-library
-SUBSCRIBED composites** subsection), the two LOCAL content-library caution
-writes `content_library.create` + `content_library.item.upload` (see the
-**Local content-library create and item upload** subsection), and the seven teardown composites /
-`#3339` -- six destructive deletes `network.portgroup.delete`,
-`host.standard_portgroup.delete`, `folder.delete`, `datastore.file.delete`,
-`content_library.delete`, `content_library.item.delete`, plus the caution
-`datastore.dir.create` (see **Governed teardown deletes**), the destructive
-DRS rule delete `cluster.drs_rule.delete` (see **Governed DRS rule delete**), the
-DRS group writes `cluster.drs_group.members.set` (`caution`) and
-`cluster.drs_group.delete` (`destructive`) (see **Governed DRS group changes**), the
-CD drive add `vm.cdrom.add` (`dangerous`) and the VMware Tools installer unmount
-`vm.tools.installer.unmount` (`caution`) (see **VM hardware read, CD drive add and
-Tools installer unmount**), the content-library ISO mount and unmount
-`vm.cdrom.mount_library_iso` + `vm.cdrom.unmount_library_iso` (both `caution`)
-(see **Content-library ISO mount and unmount**), the VM snapshot writes `vm.snapshot.create` (caution)
-+ `vm.snapshot.delete` (destructive) (see **VM snapshot operations**), the licence
-assign `license.assign` (see **vSphere licences**), and the two caution alarm changes
-`alarm.acknowledge` + `alarm.reset` / `#4383` (see **Alarms**)). The
-write composites cover every state-mutating operator workflow named
-in [#214](https://github.com/evoila/meho/issues/214) as required for
-govc-wrapper retirement.
+vSphere 8.5+ / ESXi 8.5+ targets, plus hand-authored composites
+(multi-step operations) that orchestrate cross-spec workflows: read
+composites (G3.1-T5 / `#508`) and write composites (G3.1-T6 / `#509`).
+Most composites are described in their own subsection under Control
+flow. The write composites cover every state-mutating operator
+workflow named in [#214](https://github.com/evoila/meho/issues/214) as
+required for govc-wrapper retirement. This doc does not list every
+operation and does not count them: the code and MEHO's discovery tools
+(`list_operation_groups`, `search_operations`) give the current set.
 
 Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
 
@@ -113,14 +49,11 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   absence from the status code. Promotion defaults off on the shared seam, so
   task polls and destructive-composite preflight/execute reads retain their
   existing failure semantics; #3479 owns those paths.
-- **Read composites** (`composites/_read.py`) — 6 module-level
-  `async def` handlers (`cluster_drs_recommendations_composite`,
-  `event_tail_composite`, `datastore_refresh_composite`,
-  `performance_summary_composite`, `datastore_usage_composite`,
-  `network_portgroup_audit_composite`). The other read composites live
-  next to their feature area (for example the guest reads in
-  `_guest.py`); `test_connectors_vmware_rest_doc_composite_counts.py`
-  keeps this list and the counts below in step with the registry.
+- **Read composites** (`composites/_read.py`) — module-level
+  `async def` handlers for the general reads (for example
+  `event_tail_composite` and `performance_summary_composite`). The other
+  read composites live next to their feature area (for example the guest
+  reads in `_guest.py`).
   Since `#2253` each accepts `(operator, target, params, connector)`
   and issues its 1-3 sub-ops **directly on the resolved connector
   session** — `connector._get_json` / `connector._post_json` mounted
@@ -182,22 +115,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   the explanation in `exception_message`. A timed-out `from_cache: true`
   call is not retried. The shared 30-second limit itself is unchanged.
 - **Write composites** (`composites/_write.py`) — the module-level
-  `async def` handlers (`vm_create_composite`, `vm_clone_composite`,
-  `vm_deploy_from_library_composite`, `vm_import_from_library_composite`,
-  `vm_snapshot_revert_composite`, `vm_migrate_composite`,
-  `vm_power_composite`, `vm_power_bulk_composite`,
-  `vm_resize_composite`, `vm_nic_repoint_composite`,
-  `vm_device_cdrom_composite`,
-  `host_evacuate_composite`, `host_maintenance_exit_composite`,
-  `host_detach_from_vds_composite`,
-  `network_portgroup_create_composite`,
-  `network_portgroup_security_set_composite`,
-  `network_portgroup_vlan_set_composite`,
-  `cluster_patch_composite`, `guest_customization_spec_create_composite`,
-  `vm_customize_composite`, and the `#3505` governed-allocation writes
-  `resource_pool_create_composite` / `resource_pool_delete_composite` /
-  `cluster_drs_vm_host_rule_create_composite`). The `resource_pool.create`
-  handler issues the REST `POST:/vcenter/resource-pool` through the same
+  `async def` handlers of the general writes (for example
+  `vm_create_composite`, `vm_clone_composite` and the `#3505`
+  governed-allocation writes such as `resource_pool_create_composite`).
+  The `resource_pool.create` handler issues the REST `POST:/vcenter/resource-pool` through the same
   governed `_write_sub_op` seam the other REST writes use, resolving the
   parent either from an explicit `parent` moid or (the estate convenience)
   from a `cluster` moid whose root resource pool it reads via one vim
@@ -565,10 +486,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 87
-  `_CompositeSpec` rows (20 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 50 dangerous/destructive
-  writes + 17 caution writes); each row carries its
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of
+  `_CompositeSpec` rows (reads and writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
   (`llm_instructions`) of the VM and folder writes and the VM allocation
@@ -1438,27 +1357,15 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 87 `vmware.composite.*` rows with
-   `source_kind="composite"` — 20 reads (19 with `safety_level="safe"` +
-   `requires_approval=False`, plus `vm.guest.file.read` at
-   `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 67 writes, all `requires_approval=True`
-   (38 `safety_level="dangerous"`; 17 `safety_level="caution"` —
-   `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
-   `namespace.create`, `storage_policy.create`,
-   `content_library.subscribed.create` + `content_library.subscribed.sync`,
-   `vm.resource_allocation.set` / `#3880`, `datastore.dir.create` / `#3339`,
-   `vm.tools.installer.unmount`, `vm.cdrom.mount_library_iso` +
-   `vm.cdrom.unmount_library_iso`, `vm.snapshot.create`,
-   `content_library.create` + `content_library.item.upload`,
-   `cluster.drs_group.members.set`;
-   and 12 `safety_level="destructive"` — `vm.destroy` / `#3198`,
-   `namespace.delete`, `storage_policy.delete`, `cluster.drs_rule.delete`,
-   `cluster.drs_group.delete`,
-   `vm.snapshot.delete`, and the six `#3339` teardown deletes) —
-   plus the `vmware.host.usage` row with
+   queued registrar and upserts: the `vmware.composite.*` rows with
+   `source_kind="composite"` — reads (`safety_level="safe"` +
+   `requires_approval=False`; a few reads are `caution`, for example
+   `vm.guest.file.read` since `#3720`, which auto-parks for agent /
+   service principals) and writes, all `requires_approval=True` at the
+   level `dangerous`, `caution` or `destructive` —
+   plus the typed rows such as `vmware.host.usage` with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
-   The typed row resolves and dispatches with **zero catalog ingest** —
+   A typed read row resolves and dispatches with **zero catalog ingest** —
    it depends on no ingested descriptor.
 
 ### Per-target session
@@ -1840,7 +1747,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 87 composites (20 reads + 67 writes) land as `source_kind="composite"`
+The composites (reads and writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1937,7 +1844,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 87 composites are hand-authored aggregators the connector ships as
+The composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -5493,17 +5400,8 @@ U2 and U3 files; the network list filters against the pinned 8.0 U3 and 9.0
   every `VsanMethod` constant: the read lane checks each against the
   pinned 9.0 `vi-json.yaml`, and the 8.0 lane checks each against the
   method lists of the vendor's vSAN SDK of 8.0 U1 and U2.
-- **All hand-authored composites shipped** — T5 (#508) ships 5 read;
-  #2080 + #2135 add two more reads (`host.network_uplinks` /
-  `host.vsan_health`, later re-shipped as typed ops in #2258); T6
-  (#509) ships 8 write composites, #2301 adds a 9th (single-VM
-  `vm.power`, incl. Tools soft shutdown), #2893 adds a 10th (the
-  mutating VI-JSON `vm.disk.grow`), #2894 an 11th (the folder-template
-  `vm.clone_from_template`), #2895 a 12th + 13th (the vim cluster /
-  inventory writes `cluster.drs_rule.create` + `folder.create`), and
-  #2891 a 14th / 15th / 16th (the post-clone hardware reconfigure trio
-  `vm.resize` / `vm.nic.repoint` / `vm.device.cdrom`). Later issues
-  added more; the Overview gives the current count. The
+- **All hand-authored composites shipped** — T5 (#508) ships the
+  first reads and T6 (#509) the first writes; later issues added more. The
   "All hand-authored composites land as endpoint_descriptor rows with
   source_kind='composite'" Definition-of-done line in [#227](https://github.com/evoila/meho/issues/227)
   is fully ticked.

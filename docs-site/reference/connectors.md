@@ -25,6 +25,7 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `hetzner-rest-2026.04` | `hetzner` | — | — |
 | `holodeck-ssh-9.0` | `holodeck` | — | — |
 | `hyperv-ssh-2022.x` | `hyperv` | — | — |
+| `installer-cb-5.0` | `installer` | >=5.0,<9.0 | — |
 | `installer-rest-9.1` | `installer` | >=9.0,<10.0 | — |
 | `k8s-1.x` | `k8s` | — | typed |
 | `keycloak-admin-26.x` | `keycloak` | >=26.0,<27.0 | — |

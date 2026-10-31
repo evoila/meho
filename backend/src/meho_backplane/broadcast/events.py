@@ -433,6 +433,14 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # flight-recorder spans, collapses the broadcast to aggregate-only and
         # keeps a waiting approval's params in the encrypted handoff store.
         "keycloak.user.check_login",
+        # The three Cloud Builder changes that send a bring-up spec. Their
+        # params carry only Vault paths (``secrets``); the passwords are read
+        # in-process and go only into the Cloud Builder request BODY. The pin
+        # keeps those bodies out of the flight recorder and the params out of
+        # the broadcast.
+        "installer.cb.validation.start",
+        "installer.cb.sddc.start",
+        "installer.cb.sddc.retry",
     }
 )
 

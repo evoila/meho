@@ -8,7 +8,7 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 87 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 90 hand-authored composites
 that orchestrate cross-spec workflows: 20 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
@@ -22,8 +22,10 @@ read `datastore.file.list` / `#3432` + the vSAN folder list
 read `datastore.vsan.folder.list` / `#4022` + the orphan folder check
 `datastore.orphan_dirs` / `#3814` + the VM limit and
 reservation read `vm.resource_allocation.show` / `#3880` + the migration
-inventory read `vmware.migration.inventory`) and 67 write
-composites (G3.1-T6 / `#509`, incl. the three vCenter install changes
+inventory read `vmware.migration.inventory`) and 70 write
+composites (G3.1-T6 / `#509`, incl. the three host certificate changes
+`host.certificate.renew` / `host.certificate.csr` / `host.certificate.install`
+(see **Host certificates and TPM attestation**), the three vCenter install changes
 `vcenter.appliance.deploy` / `vcenter.install` / `vcenter.deployment.answer`
 (`#4394`), the destructive-tier `vm.destroy` / `#3198`, the
 governed vSphere Namespace `namespace.create` (caution) +
@@ -565,10 +567,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 87
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 90
   `_CompositeSpec` rows (20 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 50 dangerous/destructive
-  writes + 17 caution writes); each row carries its
+  cache-refresh read `datastore.refresh` — + 52 dangerous/destructive
+  writes + 18 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The AI guidance
   (`llm_instructions`) of the VM and folder writes and the VM allocation
@@ -1438,13 +1440,13 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 87 `vmware.composite.*` rows with
+   queued registrar and upserts: the 90 `vmware.composite.*` rows with
    `source_kind="composite"` — 20 reads (19 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 67 writes, all `requires_approval=True`
-   (38 `safety_level="dangerous"`; 17 `safety_level="caution"` —
-   `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
+   service principals), and 70 writes, all `requires_approval=True`
+   (40 `safety_level="dangerous"`; 18 `safety_level="caution"` —
+   `host.certificate.csr`, `alarm.acknowledge` + `alarm.reset` / `#4383`, `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
    `content_library.subscribed.create` + `content_library.subscribed.sync`,
    `vm.resource_allocation.set` / `#3880`, `datastore.dir.create` / `#3339`,
@@ -1840,7 +1842,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 87 composites (20 reads + 67 writes) land as `source_kind="composite"`
+The 90 composites (20 reads + 70 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1937,7 +1939,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 87 composites are hand-authored aggregators the connector ships as
+The 90 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -5256,6 +5258,87 @@ no live vCenter) and
 `tests/test_connectors_vmware_rest_datacenter_list_reconcile.py` (the paths,
 the filter and the summary fields against the pinned vCenter 8.0 U3 and 9.0
 `vcenter.yaml`).
+
+### Host certificates and TPM attestation
+
+An agent or an operator can read a host certificate, renew it, make a
+certificate signing request (CSR), install a CA-signed certificate, and read
+the TPM attestation of hosts. Every change waits for a second person to
+approve it. All five operations are written by hand and need no spec ingest.
+They share one group, `vmware-host-certificates`, on both catalogs
+(`vmware-rest-8.0` and `vmware-rest-9.0`). All five need a vCenter target; a
+single ESXi host target answers `needs_vcenter` and nothing is sent.
+
+| Operation | What it does | What it returns | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.host.certificate.show` | Reads `HostCertificateManager.certificateInfo` of one host. | `status` (`ok`, `not_found`, `needs_vcenter`, `unreadable`), `certificate` (`kind`, `subject`, `issuer`, `valid_from`, `valid_to`, `days_left`, `vcenter_status`), `read_note` | `safe` | 8.0, 9.x |
+| `vmware.host.tpm.attestation` | For the hosts of a cluster, or one host: `capability.tpmSupported`, `tpmVersion`, `txtEnabled` and `summary.tpmAttestation`. With `include_report`, also `HostSystem.QueryTpmAttestationReport` per connected host. | `hosts`: one flat row per host (`tpm_supported`, `tpm_version`, `attestation_status`, `attestation_time`, `attestation_message`, `report_log_reliable`, `report_pcr_count`, `report_event_count`, `read_note`) | `safe` | 8.0, 9.x |
+| `vmware.composite.host.certificate.renew` | Renews the host certificate from the vCenter certificate authority (VMCA): `CertificateManager.CertMgrRefreshCertificates_Task` on vCenter's certificate manager (from `ServiceContent`). The task is polled (600 s). | `status` (`renewed`, `not_verified`, `timeout`, `not_found`, `not_connected`, `needs_vcenter`), `certificate_before`, `certificate_after`, `task` | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.composite.host.certificate.csr` | The host makes a new key and a CSR: `HostCertificateManager.GenerateCertificateSigningRequest`. The key stays on the host. | `status` (`generated`, ...), `csr_pem`, `common_name`, the certificate still in use | `caution`, waits for approval | 8.0, 9.x |
+| `vmware.composite.host.certificate.install` | Adds the CA chain to the host's trusted CAs (`ListCACertificates`, `ListCACertificateRevocationLists`, then `ReplaceCACertificatesAndCRLs` with the old list plus the new CAs), then `InstallServerCertificate` and `NotifyAffectedServices`. | `status` (`installed`, `unchanged`, `not_verified`, `invalid_certificate`, ...), `certificate_wanted`, `ca_certificates_added`, `services_notified`, `certificate_before`, `certificate_after` | `dangerous`, waits for approval | 8.0, 9.x (on 8.0 U1 and U2 without `NotifyAffectedServices`) |
+
+Code: the shared reads and the group text in `host_certificate.py`; the two
+reads in `typed_ops_host_certificate.py`; the renew, the CSR and the approval
+previews in `composites/_host_certificate.py`; the install in
+`composites/_host_certificate_install.py`; the schemas and AI guidance in
+`composites/_host_certificate_schemas.py`; the registry rows and vendor-call
+lists in `composites/_host_certificate_ops.py` (`_register.py` and
+`_governed_subops.py` read them in one place each).
+
+- **How it calls vCenter.** Every call is a VIM method or a property read,
+  sent as VI-JSON (`/sdk/vim25/<release>/...`). The changes go through the
+  governed write seam `_write_vmomi_sub_op`; the reads (`RetrievePropertiesEx`,
+  `RetrieveServiceContent`, `ListCACertificates`,
+  `ListCACertificateRevocationLists`, `QueryTpmAttestationReport`) do not.
+- **Before and after.** Each change reads the host first. A host that is not
+  connected answers `not_connected` and nothing is sent. Each change reads the
+  certificate before and after, and returns both. The renew answers `renewed`
+  only when the dates or the issuer changed, else `not_verified`. The install
+  compares the start and end dates the host reads back with the certificate
+  it sent: `installed`, or `not_verified`. When the host already has a
+  certificate with these dates, the install answers `unchanged` and sends
+  nothing.
+- **Vendor faults.** A task fault or a refused method fails the call with the
+  vendor's fault type and text (for example `HostConfigFault` when the
+  certificate does not match the key of the last CSR). A poll timeout of the
+  renew answers `timeout` with the task id and an `error` issue.
+- **No private key.** The CSR keeps the key on the host, and the install
+  sends only the signed certificate and the public CA certificates. The input
+  schema of the install refuses any text with `PRIVATE KEY`, so such a call is
+  `invalid_params` before it waits for approval, and no approval request
+  stores it. The install also checks that each input is a PEM certificate
+  (`invalid_certificate`, nothing sent). `ProvisionServerPrivateKey` (an own
+  key from outside the host) is not offered.
+- **CA chain.** `ReplaceCACertificatesAndCRLs` replaces the whole list, so
+  the install reads the CA certificates and CRLs the host has and sends them
+  again with the new CAs. A CA the host already has is not added twice;
+  nothing is removed.
+- **Versions.** vCenter 8.0 U1 to U3 and 9.0 serve every method, except
+  `NotifyAffectedServices`, which is in the API from 8.0 U3 on. On vCenter
+  8.0 U1 and U2 the install checks the vCenter version (`_version_gate.py`),
+  installs the certificate without that call, and answers
+  `services_notified: false` with a note to restart the host's management
+  agents (hostd and vpxa) or reboot the host. The approval preview shows the
+  same note as `version_problem`. A notify that fails after the install is a
+  note too, not an error, because the certificate is already installed.
+- **Approval previews.** The three changes show the host, its connection
+  state, the certificate now and what happens next; the install also shows
+  the certificate it sends (`certificate_wanted`). A failed read is listed
+  under `unavailable` and never blocks the request.
+- **Group text.** The text of `vmware-host-certificates` names the two reads
+  and the three changes, and claims no safety level for the group.
+
+Tests: `tests/test_connectors_vmware_rest_host_certificate.py` (the handlers
+against a vim fake), `tests/test_connectors_vmware_rest_host_certificate_http.py`
+(the real connector against `respx` on the 8.0.3 and 9.0 paths),
+`tests/test_connectors_vmware_rest_host_certificate_approval.py` (the
+dispatcher: levels on both catalogs, each change waits for approval, a private
+key is refused before it waits) and
+`tests/test_connectors_vmware_rest_host_certificate_reconcile.py` (the vendor
+calls, request fields and read properties against the pinned `vi-json.yaml`
+of 9.0 and the three 8.0 files). `NotifyAffectedServices` is listed in
+`_NOT_IN_8_0_VI_JSON` of `test_connectors_vmware_rest_8_0_spec_reconcile.py`
+for 8.0 U1 and U2.
 
 ### Port group settings (`vmware.network.portgroup.show`)
 

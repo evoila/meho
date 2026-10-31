@@ -9,8 +9,8 @@ respx-mocked appliance with no ingested catalog. Covered: the vendor
 paths and query (``extended_info``, ``limit`` / ``offset`` pages, the
 name filter), flat rows, the RPO fields, partial data in ``errors``, the
 disk read limit, the target datastores of another vCenter, secret names in
-a task result, a vendor error, a ``..`` id, a ``401`` that logs in again,
-and the registered metadata.
+a task result, a vendor error, a ``..`` id, a ``401`` on a list read and on
+a replication-server read that logs in again, and the registered metadata.
 
 Fixture values are made up; no real host, user or id appears here.
 """
@@ -460,6 +460,37 @@ async def test_401_on_a_list_read_logs_in_again_and_the_read_succeeds() -> None:
     assert result.status == "ok", result.error
     assert login.call_count == 2
     assert result.result["count"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_connector")
+async def test_401_on_a_replication_server_read_logs_in_again_and_returns_the_rows() -> None:
+    vrs_path = f"{_PAIRINGS}/{_PAIRING}/vrs"
+    servers_path = f"{vrs_path}/vrms-local-0001/replication-servers"
+
+    def _answer(request: httpx.Request) -> httpx.Response:
+        if request.headers["x-dr-session"] == "vr-session-1":
+            return httpx.Response(401)
+        return httpx.Response(200, json=_SERVERS_PAYLOAD)
+
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = mock.post(_SESSION)
+        login.side_effect = [_login("vr-session-1"), _login("vr-session-2")]
+        mock.get(_PAIRINGS).respond(200, json=_PAIRING_PAYLOAD)
+        mock.get(vrs_path).respond(200, json=_VRS_PAYLOAD)
+        servers = mock.get(servers_path).mock(side_effect=_answer)
+        mock.get(f"{vrs_path}/vrms-remote-0001/replication-servers").respond(
+            200, json={"list": [], "_meta": {"total": 0}}
+        )
+        result = await _dispatch("vr.pairing.list", {})
+
+    assert result.status == "ok", result.error
+    assert login.call_count == 2
+    assert servers.call_count == 2
+    assert servers.calls[1].request.headers["x-dr-session"] == "vr-session-2"
+    body = result.result
+    assert body["errors"] == []
+    assert [row["id"] for row in body["replication_servers"]] == ["vrs-0001"]
 
 
 # ---------------------------------------------------------------------------

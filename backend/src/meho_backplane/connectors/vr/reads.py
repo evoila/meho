@@ -305,6 +305,10 @@ async def _replication_servers(
         try:
             servers, server_errors, _ = await _read_all(connector, operator, target, path)
         except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 401:
+                # An expired session must reach the dispatcher, which logs
+                # in again and runs the whole read once more.
+                raise
             errors.append(
                 {
                     "code": str(exc.response.status_code),

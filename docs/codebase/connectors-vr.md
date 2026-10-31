@@ -234,7 +234,8 @@ call is sent.
 - `backend/tests/test_connectors_vr_replication_reads.py` -- the five
   replication reads: paths and query, pages, flat rows, RPO fields,
   partial data, the disk limit, target datastores, task result secrets,
-  a vendor error, a `..` id, a `401` that logs in again, metadata.
+  a vendor error, a `..` id, a `401` on a list read and on a
+  replication-server read that logs in again, metadata.
 - `backend/tests/test_connectors_vr_spec_reconcile.py` -- the login,
   `info` and every replication read path against the pinned 9.1 file
   (`vcf-protection-and-recovery-9.1/replication-vr-v2.yaml` on the spec

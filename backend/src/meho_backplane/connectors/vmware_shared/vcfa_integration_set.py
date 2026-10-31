@@ -54,8 +54,9 @@ from meho_backplane.connectors.vmware_shared.vcfa_integrations import (
     integration_row,
     list_integrations,
 )
+from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
-__all__ = ["IPAM_TEST_NOTE", "integration_set"]
+__all__ = ["IPAM_TEST_NOTE", "SET_OP_IDS", "integration_set", "integration_set_preview"]
 
 #: The note an IPAM test always adds to the answer.
 IPAM_TEST_NOTE: Final[str] = (
@@ -292,3 +293,64 @@ async def _save(run: _Run, spec: dict[str, Any]) -> dict[str, Any]:
         "its IP ranges) for a few minutes.",
         row if isinstance(row, Mapping) else None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Preview (the op sends a password, so the generic params echo is off)
+# ---------------------------------------------------------------------------
+
+#: The add-or-change op on each connector; both get the preview builder.
+SET_OP_IDS: Final[tuple[str, ...]] = (
+    "vcfa.tenant.integration.set",
+    "vcfa.vra8.integration.set",
+)
+
+
+async def _preview_would(ctx: PreviewContext, params: Mapping[str, Any]) -> dict[str, Any]:
+    """``would`` (add, change, exists) from one fail-soft read; unknown without a connector."""
+    connector: Any = ctx.connector_instance
+    if connector is None or ctx.target is None:
+        return {"would": "add_or_change", "current": None}
+    ns = ctx.descriptor.op_id.rsplit(".integration.set", 1)[0]
+    calls = Calls(connector=connector, operator=ctx.operator, target=ctx.target, ns=ns)
+    try:
+        if params.get("id"):
+            row = await calls.iaas("GET", path_with(INTEGRATION_PATH, params["id"], "id"))
+            return {"would": "change", "current": integration_row(row)}
+        same = [r for r in await list_integrations(calls) if r.get("name") == params.get("name")]
+    except (httpx.HTTPError, ValueError, RuntimeError):
+        return {"would": "add_or_change", "current": None}
+    if same:
+        return {"would": "exists", "current": integration_row(same[0])}
+    return {"would": "add", "current": None}
+
+
+async def integration_set_preview(ctx: PreviewContext) -> dict[str, Any]:
+    """What the approver sees: the integration, its properties and the Vault path.
+
+    Never a secret value: secret-named properties are left out, the password
+    or token shows only as its Vault path, the certificate only as given or not.
+    """
+    params = ctx.params
+    props = {
+        str(key): value
+        for key, value in (params.get("integration_properties") or {}).items()
+        if not is_secret_param_name(str(key)) and key not in _LOGIN_KEYS
+    }
+    return {
+        "integration": {
+            "id": params.get("id"),
+            "name": params.get("name"),
+            "integration_type": params.get("integration_type"),
+        },
+        **await _preview_would(ctx, params),
+        "integration_properties": props,
+        "user_name": params.get("user_name"),
+        "password_from_vault_path": params.get("password_secret_ref"),
+        "certificate_given": bool(params.get("certificate")),
+        "steps": ["test (validateOnly)", "save", "read"],
+    }
+
+
+for _op_id in SET_OP_IDS:
+    register_preview_builder(_op_id, integration_set_preview)

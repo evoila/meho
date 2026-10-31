@@ -474,3 +474,34 @@ def test_secret_is_only_a_vault_reference() -> None:
     assert "password_secret_ref" in names
     assert not names & {"password", "token", "private_key", "privateKey"}
     assert VAULT_VALUE not in str(schema)
+
+
+async def test_set_preview_shows_the_change_and_no_secret(
+    vcfa: VcfAutomationConnector, vault: Any
+) -> None:
+    from types import SimpleNamespace
+
+    from meho_backplane.operations._preview import _PREVIEW_BUILDERS
+    from tests._vcfa_provisioning_support import OPERATOR, resolved_target
+
+    builder = _PREVIEW_BUILDERS["vcfa.tenant.integration.set"]
+    params = {
+        **_VRO_CALL,
+        "integration_properties": {"hostName": "https://<orchestrator-host>", "token": "x"},
+    }
+    ctx = SimpleNamespace(
+        connector_instance=vcfa,
+        operator=OPERATOR,
+        target=await resolved_target(),
+        params=params,
+        descriptor=SimpleNamespace(op_id="vcfa.tenant.integration.set"),
+    )
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        mock.get(INTEGRATIONS).respond(200, json={"content": []})
+        preview = await builder(ctx)
+    assert preview["would"] == "add"
+    assert preview["password_from_vault_path"] == SECRET_REF
+    assert "token" not in preview["integration_properties"]
+    assert no_secret(preview)
+    vault.assert_not_called()

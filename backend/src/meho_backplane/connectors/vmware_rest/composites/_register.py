@@ -247,9 +247,13 @@ from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_library_iso impo
 from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_tools import (
     VM_CDROM_TOOLS_COMPOSITES,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_encryption import (
+    VM_ENCRYPTION_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._vm_llm_instructions import (
     VM_LLM_INSTRUCTIONS,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_vtpm import VM_VTPM_COMPOSITES
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
     cluster_drs_vm_host_rule_create_composite,
@@ -581,7 +585,10 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "installer (vm.tools.installer.unmount, caution); move a VM to another "
         "host (vm.migrate, dangerous); take a snapshot (vm.snapshot.create, "
         "caution), revert to one (vm.snapshot.revert, dangerous) or delete one "
-        "(vm.snapshot.delete, destructive); delete a powered-off VM and its "
+        "(vm.snapshot.delete, destructive); add a virtual TPM to a powered-off "
+        "VM (vm.vtpm.add, dangerous) or remove it (vm.vtpm.remove, "
+        "destructive); encrypt or decrypt a powered-off VM and its disks "
+        "(vm.encryption.set, dangerous); delete a powered-off VM and its "
         "disks (vm.destroy, destructive); create a VM folder (folder.create, "
         "dangerous) or delete an empty one (folder.delete, destructive). Pair "
         "with 'storage', 'networking' or 'cluster' for the reads a create or a "
@@ -2125,6 +2132,11 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # Mount and unmount a content-library ISO on a VM; the rows live in their
     # own module.
     *(_CompositeSpec(**row) for row in VM_CDROM_LIBRARY_ISO_COMPOSITES),
+    # --- VM security (#4337): add or remove a virtual TPM, encrypt or decrypt
+    # a VM. The rows live in their own modules.
+    *(_CompositeSpec(**row) for row in VM_VTPM_COMPOSITES),
+    *(_CompositeSpec(**row) for row in VM_ENCRYPTION_COMPOSITES),
+    # --- end VM security (#4337)
     # ----------------------------------------------------------------
     # Licence write -- dangerous / approval. The full key never leaves
     # the handler; the license-key tag keeps the vCenter bodies out of

@@ -51,6 +51,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _vm_allocation,
     _vm_cdrom_library_iso,
     _vm_cdrom_tools,
+    _vm_security,
     _write,
 )
 from meho_backplane.connectors.vmware_rest.composites._vcenter_install_ops import (
@@ -193,6 +194,11 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     # #4383 alarm changes: one AlarmManager write each, after two reads.
     "vmware.composite.alarm.acknowledge": _alarm._VIM_SUB_OPS_ALARM_ACKNOWLEDGE,
     "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,
+    # --- VM security (#4337): the VM read and one ReconfigVM_Task each.
+    "vmware.composite.vm.vtpm.add": _vm_security._VIM_SUB_OPS_VM_SECURITY,
+    "vmware.composite.vm.vtpm.remove": _vm_security._VIM_SUB_OPS_VM_SECURITY,
+    "vmware.composite.vm.encryption.set": _vm_security._VIM_SUB_OPS_VM_SECURITY,
+    # --- end VM security (#4337)
     # #4394 vCenter install: the deploy, the setup start and the answer.
     **VCENTER_INSTALL_GOVERNED_SUBOPS,
 }

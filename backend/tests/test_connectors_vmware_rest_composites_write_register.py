@@ -113,6 +113,11 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     # Mount and unmount a content-library ISO (both caution).
     "vmware.composite.vm.cdrom.mount_library_iso",
     "vmware.composite.vm.cdrom.unmount_library_iso",
+    # VM security (#4337): vTPM add (dangerous), vTPM remove (destructive),
+    # encrypt or decrypt (dangerous).
+    "vmware.composite.vm.vtpm.add",
+    "vmware.composite.vm.vtpm.remove",
+    "vmware.composite.vm.encryption.set",
     # VM CPU / memory limit + reservation write (#3880) -- caution + approval.
     "vmware.composite.vm.resource_allocation.set",
     "vmware.composite.host.evacuate",
@@ -468,6 +473,9 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.tools.installer.unmount": "vm",
     "vmware.composite.vm.cdrom.mount_library_iso": "vm",
     "vmware.composite.vm.cdrom.unmount_library_iso": "vm",
+    "vmware.composite.vm.vtpm.add": "vm",
+    "vmware.composite.vm.vtpm.remove": "vm",
+    "vmware.composite.vm.encryption.set": "vm",
     "vmware.composite.vm.resource_allocation.set": "vm",
     "vmware.composite.license.assign": "vmware-licensing",
     "vmware.composite.vcenter.appliance.deploy": "vcenter_install",
@@ -709,6 +717,8 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
             "vmware.composite.cluster.drs_group.delete",
             # The VM snapshot delete.
             "vmware.composite.vm.snapshot.delete",
+            # The vTPM remove (#4337).
+            "vmware.composite.vm.vtpm.remove",
         ):
             expected_level = "destructive"
         elif row.op_id in caution_ops:

@@ -200,7 +200,18 @@ async def _existing_for_change(calls: Calls, params: Mapping[str, Any]) -> dict[
 
 
 async def integration_set(calls: Calls, params: Mapping[str, Any]) -> dict[str, Any]:
-    """``<ns>.integration.set``: test, then save, then read the integration."""
+    """``<ns>.integration.set``: test, then save, then read the integration.
+
+    A refused input answers ``invalid_request`` with the reason (the op is
+    credential-class, so a raised error would hide its text).
+    """
+    try:
+        return await _integration_set(calls, params)
+    except ValueError as exc:
+        return _Run(calls, params).answer("invalid_request", str(exc))
+
+
+async def _integration_set(calls: Calls, params: Mapping[str, Any]) -> dict[str, Any]:
     existing = await _existing_for_change(calls, params) if params.get("id") else None
     integration_type = str(
         (existing or {}).get("integrationType") or params.get("integration_type") or ""

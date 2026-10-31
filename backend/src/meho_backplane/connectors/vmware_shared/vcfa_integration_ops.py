@@ -192,9 +192,9 @@ _SET = IntegrationOpSpec(
         "properties": {
             "status": field(
                 "string",
-                "saved, test_failed (nothing saved), failed, unfinished or exists (the name is "
-                "taken; nothing changed).",
-                enum=["saved", "test_failed", "failed", "unfinished", "exists"],
+                "saved, test_failed (nothing saved), failed, unfinished, exists (the name is "
+                "taken; nothing changed) or invalid_request (refused input; nothing sent).",
+                enum=["saved", "test_failed", "failed", "unfinished", "exists", "invalid_request"],
             ),
             "integration": INTEGRATION,
             "test": TRACKER,
@@ -210,7 +210,7 @@ _SET = IntegrationOpSpec(
         "required": ["status", "steps", "guidance"],
         "additionalProperties": True,
     },
-    tags=("write", "vcfa", "integrations"),
+    tags=("write", "vcfa", "integrations", "credential"),
     safety_level="dangerous",
     requires_approval=True,
     llm_instructions={

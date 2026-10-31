@@ -396,8 +396,8 @@ async def test_ipam_shapes_that_fail_are_refused(
         mount_logins_full(mock)
         post = mock.post(INTEGRATIONS)
         result = await run("vcfa.tenant.integration.set", call)
-    assert result["status"] == "error"
-    assert text in str(result["error"]) + str(result["extras"])
+    assert result["result"]["status"] == "invalid_request"
+    assert text in result["result"]["guidance"]
     assert not post.called
 
 

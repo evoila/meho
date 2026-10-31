@@ -492,7 +492,7 @@ async def _assert_audited(
 async def test_kv_read_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
 ) -> None:
-    """``vault.kv.read`` returns the seeded secret; audited; credential_read."""
+    """``vault.kv.read`` returns the seeded key names; audited; credential_read."""
     target, _ = vault_e2e
     operator = _make_operator(sub="op-kv-read")
     result = await dispatch(
@@ -503,8 +503,9 @@ async def test_kv_read_against_dev_vault(
         params={"path": "app/config"},
     )
     assert result.status == "ok", result.error
+    # The values are hidden by default; the key names and the version stay.
     assert result.result == {
-        "data": {"db_url": "postgres://example", "feature_flag": "on"},
+        "data": {"db_url": "[REDACTED:secret_value]", "feature_flag": "[REDACTED:secret_value]"},
         "version": 1,
     }
     await _assert_audited(

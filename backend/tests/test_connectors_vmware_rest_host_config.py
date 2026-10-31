@@ -344,6 +344,16 @@ async def test_dns_set_renames_the_host(gate: GateRecorder) -> None:
     assert out["after"]["domain_name"] == "lab.invalid"
 
 
+async def test_dns_set_treats_a_missing_domain_as_empty(gate: GateRecorder) -> None:
+    """A host without a domain reads back ``""`` after the change; that is a match."""
+    vim = HostConfigVim()
+    del vim.dns["domainName"]
+    out = await _call(host_dns_set_composite, vim, host="esxi-a", host_name="esxi-b")
+    assert out["status"] == "applied", out
+    assert vim.body_of("UpdateDnsConfig")["config"]["domainName"] == ""
+    assert out["after"]["host_name"] == "esxi-b"
+
+
 async def test_dns_set_refuses_dhcp_dns(gate: GateRecorder) -> None:
     vim = HostConfigVim()
     vim.dns["dhcp"] = True
@@ -451,6 +461,8 @@ async def test_ntp_preview_shows_the_current_and_the_asked_settings() -> None:
     assert out is not None
     assert out["host"] == HOST
     assert out["current"]["servers"] == ["old-ntp.example.invalid"]
+    assert out["current"]["service_policy"] == "off"
+    assert out["current"]["service_running"] is True
     assert out["requested"] == {"servers": _NEW_NTP}
     assert vim.writes() == []
 

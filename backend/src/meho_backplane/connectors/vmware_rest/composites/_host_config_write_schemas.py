@@ -153,7 +153,8 @@ NTP_SET_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     "preconditions": (
         "Read the host first with vmware.host.config.show. The servers must be reachable "
         "from the host on UDP 123. The list replaces the current one. The change waits "
-        "for approval."
+        "for approval. It does not change the clock protocol: on a host with protocol "
+        "'ptp' it still starts ntpd, so do not call it there."
     ),
     "parameter_hints": {
         "servers": "Host names or IP addresses, e.g. ['<ntp-server-1>'].",

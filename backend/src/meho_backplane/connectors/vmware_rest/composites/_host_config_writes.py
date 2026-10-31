@@ -363,6 +363,11 @@ async def host_ntp_set_composite(
 _DNS_FIELDS: Final = ("servers", "search_domains", "host_name", "domain_name")
 
 
+def _same_dns(state: dict[str, Any], wanted: dict[str, Any]) -> bool:
+    """Compare the DNS fields; a missing value and an empty one are the same."""
+    return all((state[key] or None) == (wanted[key] or None) for key in _DNS_FIELDS)
+
+
 async def host_dns_set_composite(
     *,
     operator: Operator,
@@ -396,7 +401,7 @@ async def host_dns_set_composite(
             "the host to static DNS first. Nothing was sent.",
         }
     wanted = {key: requested.get(key, before[key]) for key in _DNS_FIELDS}
-    if all(before[key] == wanted[key] for key in _DNS_FIELDS):
+    if _same_dns(before, wanted):
         return _unchanged(envelope)
     config = {
         "_typeName": "HostDnsConfig",
@@ -415,9 +420,7 @@ async def host_dns_set_composite(
     stopped = await _run_steps(connector, operator, target, [step], envelope)
     if stopped is not None:
         return stopped
-    return await _finish(
-        envelope, read, lambda after: all(after[key] == wanted[key] for key in _DNS_FIELDS)
-    )
+    return await _finish(envelope, read, lambda after: _same_dns(after, wanted))
 
 
 # ---------------------------------------------------------------------------

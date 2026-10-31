@@ -32,6 +32,7 @@ from meho_backplane.connectors.vmware_rest.composites._host_config_writes import
     VIM_SUB_OPS_HOST_DNS_SET,
     VIM_SUB_OPS_HOST_NTP_SET,
     VIM_SUB_OPS_HOST_SYSLOG_SET,
+    _ntp_reader,
     host_dns_set_composite,
     host_ntp_set_composite,
     host_syslog_set_composite,
@@ -40,7 +41,6 @@ from meho_backplane.connectors.vmware_rest.composites._host_config_writes import
 from meho_backplane.connectors.vmware_rest.host_config import (
     SYSLOG_LOG_HOST_KEY,
     dns_state,
-    ntp_state,
     query_option,
     read_property,
     syslog_state,
@@ -71,7 +71,9 @@ HOST_CONFIG_GOVERNED_SUBOPS: Final[dict[str, tuple[str, ...]]] = {
 
 
 async def _preview_current(
-    ctx: PreviewContext, manager: str, read: Callable[[Any, Any, dict[str, str]], Awaitable[Any]]
+    ctx: PreviewContext,
+    needed: tuple[str, ...],
+    read: Callable[[Any, Any, dict[str, str]], Awaitable[Any]],
 ) -> dict[str, Any] | None:
     if ctx.connector_instance is None:
         return None
@@ -79,7 +81,7 @@ async def _preview_current(
     asked = {k: v for k, v in ctx.params.items() if k != "host"}
     try:
         host_moid, managers, refusal = await locate_host_managers(
-            connector, ctx.operator, ctx.target, ctx.params.get("host"), (manager,)
+            connector, ctx.operator, ctx.target, ctx.params.get("host"), needed
         )
         if refusal is not None:
             return {
@@ -116,17 +118,21 @@ def _preview_builder(
             )
             return parse(value)
 
-        return await _preview_current(ctx, manager, read)
+        return await _preview_current(ctx, (manager,), read)
 
     return build
 
 
-register_preview_builder(
-    OP_ID_NTP_SET,
-    _preview_builder(
-        "dateTimeSystem", "HostDateTimeSystem", "dateTimeInfo", lambda v: ntp_state(v, None)
-    ),
-)
+async def _ntp_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """The NTP preview also shows the ntpd start policy and whether ntpd runs."""
+
+    async def read(connector: Any, _host_moid: Any, managers: dict[str, str]) -> Any:
+        return await _ntp_reader(connector, ctx.operator, ctx.target, managers)()
+
+    return await _preview_current(ctx, ("dateTimeSystem", "serviceSystem"), read)
+
+
+register_preview_builder(OP_ID_NTP_SET, _ntp_preview)
 register_preview_builder(
     OP_ID_DNS_SET, _preview_builder("networkSystem", "HostNetworkSystem", "dnsConfig", dns_state)
 )

@@ -83,6 +83,8 @@ _UPDATE = "k8s.secret.update"
 _DELETE = "k8s.secret.delete"
 _CONNECTOR_ID = "k8s-1.x"
 _TENANT_ID = UUID("00000000-0000-0000-0000-000000004957")
+#: Secret refs named in params must sit in the operator's tenant subtree.
+_REF_ROOT = f"tenants/{_TENANT_ID}"
 
 #: Made-up values. None of them may show up in a result, preview or audit row.
 _INLINE_VALUE = "made-up-inline-value-DO-NOT-ECHO"
@@ -383,7 +385,7 @@ async def test_ref_sourced_value_reaches_the_cluster_but_not_the_result(
     params = {
         "name": "db-creds",
         "namespace": "apps",
-        "string_data_secret_ref": {"bearer": "apps/api#token"},
+        "string_data_secret_ref": {"bearer": f"{_REF_ROOT}/apps/api#token"},
     }
     result = await _update(core, params)
 
@@ -392,7 +394,7 @@ async def test_ref_sourced_value_reaches_the_cluster_but_not_the_result(
     assert result["keys_set"] == ["bearer"]
     assert _REF_VALUE not in json.dumps(result)
     assert _REF_VALUE not in json.dumps(params)
-    assert fake.secrets.kv.v2.read_calls[-1]["path"] == "apps/api"
+    assert fake.secrets.kv.v2.read_calls[-1]["path"] == f"{_REF_ROOT}/apps/api"
 
 
 async def test_ref_without_the_field_names_the_update_op(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -401,7 +403,11 @@ async def test_ref_without_the_field_names_the_update_op(monkeypatch: pytest.Mon
     with pytest.raises(KubernetesSecretRefError, match=r"k8s\.secret\.update"):
         await _update(
             core,
-            {"name": "db-creds", "namespace": "apps", "string_data_secret_ref": {"t": "apps/x#t"}},
+            {
+                "name": "db-creds",
+                "namespace": "apps",
+                "string_data_secret_ref": {"t": f"{_REF_ROOT}/apps/x#t"},
+            },
         )
 
 
@@ -455,7 +461,7 @@ async def test_update_preview_without_a_connector_shows_params_only() -> None:
                 "name": "db-creds",
                 "namespace": "apps",
                 "string_data": {"password": _INLINE_VALUE},
-                "string_data_secret_ref": {"token": "vault:apps/api#token"},
+                "string_data_secret_ref": {"token": f"vault:{_REF_ROOT}/apps/api#token"},
                 "string_data_secret_mount": "kv-apps",
             },
         )
@@ -469,7 +475,7 @@ async def test_update_preview_without_a_connector_shows_params_only() -> None:
         "mode": "patch",
         "keys_set": ["password", "token"],
         "inline_key_names": ["password"],
-        "string_data_secret_ref": {"token": "vault:apps/api#token"},
+        "string_data_secret_ref": {"token": f"vault:{_REF_ROOT}/apps/api#token"},
         "string_data_secret_mount": "kv-apps",
     }
     assert _INLINE_VALUE not in json.dumps(effect)
@@ -735,7 +741,7 @@ _LEAK_PARAMS: dict[str, Any] = {
     "name": "db-creds",
     "namespace": "apps",
     "string_data": {"password": _INLINE_VALUE},
-    "string_data_secret_ref": {"token": "apps/api#token"},
+    "string_data_secret_ref": {"token": f"{_REF_ROOT}/apps/api#token"},
 }
 
 

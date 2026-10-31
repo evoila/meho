@@ -314,6 +314,12 @@ which one is in force, are in
 The chart prints the same warning in its `helm install` notes whenever
 `checkRunner.enabled: true` meets `config.credentialBackend: vault`.
 
+On a Vault install the backplane requires the preferred recipe: with a
+runner principal and `VAULT_ADDR` set, the check runner does not start
+unless `VAULT_CHECK_RUNNER_ROLE` names a role of its own (not
+`VAULT_OIDC_ROLE`). Set it through `extraEnv`, or turn
+`checkRunner.enabled` off.
+
 Diagnostics: the `gsm_secret_accessed` structlog event carries an
 `auth_path` of `wif`, `sa_direct`, or `sa_direct_fallback`, so you can see
 which identity served a given read. A read that could not resolve any

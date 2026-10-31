@@ -70,6 +70,7 @@ from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.pwsh import ps_single_quote, pwsh_run
 from meho_backplane.connectors._shared.vault_creds import (
     CredentialsReadError,
+    check_param_secret_ref,
     strip_credential_value,
 )
 from meho_backplane.connectors.msad.ops import SSH_TRANSPORT_NOTE, MsadOp
@@ -236,6 +237,8 @@ async def _read_password(
         secret_ref=path,
     )
     try:
+        # The path comes from the params: check it before the read.
+        check_param_secret_ref(operator, path, param="password_ref")
         data = await connector._resolve_secret(stub, operator)
     except (VaultClientError, CredentialsReadError) as exc:
         raise ValueError(f"could not read password_ref {path}#{field}: {exc}") from exc

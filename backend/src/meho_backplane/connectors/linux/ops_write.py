@@ -67,6 +67,7 @@ from typing import TYPE_CHECKING, Any
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.vault_creds import (
     CredentialsReadError,
+    check_param_secret_ref,
     strip_credential_value,
 )
 from meho_backplane.connectors.linux._sudo import run_remote_bash_with_sudo
@@ -631,6 +632,8 @@ async def _resolve_secret_env(
         if secret_data is None:
             stub = _VaultRefTarget(name=label, host=host, secret_ref=path)
             try:
+                # The path comes from the params: check it before the read.
+                check_param_secret_ref(operator, path, param="secret_env")
                 secret_data = await connector._resolve_secret(stub, operator)
             except (VaultClientError, CredentialsReadError) as exc:
                 # The underlying errors name the target / field / secret_ref

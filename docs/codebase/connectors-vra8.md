@@ -60,6 +60,20 @@ on a **fresh boot with zero catalog ingest**.
 | `vcfa-vra8-inventory` | `vcfa.vra8.project.list`, `.deployment.list`, `.deployment.get`, `.about` |
 | `vcfa-vra8-content` | `vcfa.vra8.blueprint.list`, `.catalog-item.list` |
 | `vcfa-vra8-api-files` | `vcfa.vra8.api_file.get` (see [API description files](#api-description-files-vcfavra8api_fileget) below) |
+| `vcfa-vra8-catalog` | `vcfa.vra8.catalog.item.list`, `.catalog.item.get`, `.catalog.item.request` (dangerous, approval), `.request.get`, `.request.events`, `.request.logs` |
+
+**Catalog items and requests.** The `vcfa-vra8-catalog` group holds the six
+ops this connector shares with VCF Automation 9 (written once in
+`connectors/vmware_shared/vra_catalog.py`, registered here by
+`catalog_ops.py`): list the items a project can request
+(`GET /catalog/api/items`), read one with its request form, request one into a
+project (a change: a second person must approve it), and read a request's
+state, events and logs (`/deployment/api/requests/{id}…`). The table, the
+secret rules and the version notes are in
+[connectors-vcf-automation.md](connectors-vcf-automation.md) ("Catalog items
+and requests"). `vcfa.vra8.catalog.item.list` reads the items the caller's
+projects may request; the older `vcfa.vra8.catalog-item.list` stays and reads
+the admin view of every project (`/catalog/api/admin/items`).
 
 Op ids are namespaced `vcfa.vra8.*` (distinct from the modern impl's
 `vcfa.provider.*` / `vcfa.tenant.*`): the two impls publish different read surfaces
@@ -389,6 +403,10 @@ update the manifest consciously. **Strengthening (deferred):** the sibling
 `vcf-automation` tenant lane shelf-arms its `/iaas/*` paths against the Swagger 2.0
 `vra-iaas.json`; the same could arm this connector's `/iaas` + `/deployment` +
 `/blueprint` + `/catalog` paths against the three vra-sdk-go swaggers once shelved.
+The shared catalog and request paths are already armed: the lane pins them
+(`tests/_vra_catalog_paths.py`) and checks them against
+`vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-catalog-deployment.json` when
+the shelf is set up.
 Full evidence + activation trigger live in the `vcfa-vra8` entry of
 [`spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 

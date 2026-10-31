@@ -20,6 +20,10 @@ Modules:
   rule for showing a licence key: only its last 5 characters stay
   visible. The ``sddc_manager``, ``vcf_operations`` and ``vmware_rest``
   connectors use it.
+* :mod:`meho_backplane.connectors.vmware_shared.vra_catalog` and
+  :mod:`~meho_backplane.connectors.vmware_shared.vra_catalog_ops` — the
+  catalog and request ops (handlers and metadata) that the ``vra8`` and
+  ``vcf_automation`` connectors both register.
 
 Shared code that is not VMware-only belongs in
 :mod:`meho_backplane.connectors._shared`. Code here may import

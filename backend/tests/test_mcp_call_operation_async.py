@@ -98,6 +98,7 @@ async def _insert_run(
     error: str | None = None,
     result: dict[str, Any] | None = None,
     tenant_id: uuid.UUID = OPERATOR_TENANT_ID,
+    identity_sub: str = "op-test",
 ) -> uuid.UUID:
     now = datetime.now(UTC)
     ended = status in (OperationRunStatus.FAILED, OperationRunStatus.SUCCEEDED)
@@ -105,7 +106,7 @@ async def _insert_run(
         run = OperationRun(
             id=uuid.uuid4(),
             tenant_id=tenant_id,
-            identity_sub="op-1",
+            identity_sub=identity_sub,
             origin=OperationRunOrigin.DIRECT.value,
             connector_id=_CONNECTOR,
             op_id=op_id,
@@ -271,8 +272,13 @@ async def test_unknown_mismatched_or_foreign_run_is_unknown_run(
     base = {"connector_id": _CONNECTOR, "op_id": _OP}
     other_op_run = await _insert_run(status=OperationRunStatus.RUNNING, op_id="topology.other")
     foreign_run = await _insert_run(status=OperationRunStatus.RUNNING, tenant_id=uuid.uuid4())
+    other_person_run = await _insert_run(
+        status=OperationRunStatus.SUCCEEDED,
+        identity_sub="someone-else",
+        result={"status": "ok", "op_id": _OP, "result": {"secret": "fake-value"}},
+    )
 
-    for run_id in (uuid.uuid4(), other_op_run, foreign_run):
+    for run_id in (uuid.uuid4(), other_op_run, foreign_run, other_person_run):
         response = _call(client, {**base, "run_id": str(run_id)})
         assert _invalid_params_reason(response) == "unknown_run"
 

@@ -44,6 +44,7 @@ _EXPECTED_NAMES = {
     "jwt",
     "api_key",
     "kubeconfig",
+    "pem_private_key",
     "bind_key_secret",
     "uuid",
     "ipv4",
@@ -80,6 +81,15 @@ _PUNCT_DOLLAR_HASH_FIXTURE = "password" + ": " + "hunter2" + "$plus#tail"
 # BIND key block (#4617): ``secret "<base64>";`` inside a ``key`` statement.
 _BIND_KEY_SECRET_FIXTURE_POS = 'secret "' + "exampleTsig" + 'Value==";'
 _BIND_KEY_SECRET_FIXTURE_NEG = 'the secret is in the vault; key "rndc-key" { algorithm hmac-md5; };'
+
+
+# Assembled from fragments so secret scanners do not flag the test source.
+_PEM_PRIVATE_KEY_FIXTURE_POS = (
+    "-----BEGIN " + "EC PRIVATE KEY-----\nMHcCAQEEmadeup\n-----END " + "EC PRIVATE KEY-----"
+)
+_PEM_PUBLIC_KEY_FIXTURE_NEG = (
+    "-----BEGIN " + "PUBLIC KEY-----\nMFkwmadeup\n-----END PUBLIC KEY-----"
+)
 
 
 def test_catalog_lists_expected_patterns() -> None:
@@ -666,6 +676,9 @@ def test_get_pattern_unknown_raises() -> None:
             ("apiVersion: v1\nkind: Pod\nmetadata:\n  name: nginx\n"),
             False,
         ),
+        # pem_private_key: a private key block, not a public key
+        ("pem_private_key", _PEM_PRIVATE_KEY_FIXTURE_POS, True),
+        ("pem_private_key", _PEM_PUBLIC_KEY_FIXTURE_NEG, False),
         # bind_key_secret: the quoted value after the ``secret`` keyword
         (
             "bind_key_secret",
@@ -792,6 +805,8 @@ _PATTERN_TEST_ROWS: list[tuple[str, str, bool]] = [
     ("api_key", "the token machine is broken", False),
     ("kubeconfig", "apiVersion: v1\nkind: Config\n", True),
     ("kubeconfig", "apiVersion: v1\nkind: Pod\n", False),
+    ("pem_private_key", _PEM_PRIVATE_KEY_FIXTURE_POS, True),
+    ("pem_private_key", _PEM_PUBLIC_KEY_FIXTURE_NEG, False),
     ("bind_key_secret", _BIND_KEY_SECRET_FIXTURE_POS, True),
     ("bind_key_secret", _BIND_KEY_SECRET_FIXTURE_NEG, False),
     ("uuid", "tenant_id=12345678-1234-1234-1234-123456789abc", True),

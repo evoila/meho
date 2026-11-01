@@ -11,7 +11,8 @@ site pairings, service mesh, jobs, alerts and inventory are defined in
 :mod:`meho_backplane.connectors.hcx.inventory_ops`; the service mesh changes
 and the task read in :mod:`meho_backplane.connectors.hcx.service_mesh_ops`; the
 network extension operations in
-:mod:`meho_backplane.connectors.hcx.network_extension_ops`. The dataclass +
+:mod:`meho_backplane.connectors.hcx.network_extension_ops`; the migration
+operations in :mod:`meho_backplane.connectors.hcx.migration_ops`. The dataclass +
 tuple + registrar shape mirrors :mod:`meho_backplane.connectors.nsx.typed_ops`.
 """
 
@@ -21,6 +22,10 @@ from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.hcx.diagnostics_ops import HCX_DIAGNOSTICS_OPS
 from meho_backplane.connectors.hcx.inventory_ops import HCX_INVENTORY_OPS
+from meho_backplane.connectors.hcx.migration_ops import (
+    HCX_MIGRATION_OPS,
+    HCX_MIGRATION_WHEN_TO_USE_BY_GROUP,
+)
 from meho_backplane.connectors.hcx.network_extension_ops import (
     HCX_NETWORK_EXTENSION_OPS,
     HCX_NETWORK_EXTENSION_WHEN_TO_USE_BY_GROUP,
@@ -55,6 +60,7 @@ HCX_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     ),
     **HCX_READ_WHEN_TO_USE_BY_GROUP,
     **HCX_NETWORK_EXTENSION_WHEN_TO_USE_BY_GROUP,
+    **HCX_MIGRATION_WHEN_TO_USE_BY_GROUP,
 }
 
 _PART_ITEM_SCHEMA: dict[str, Any] = {
@@ -193,6 +199,7 @@ HCX_TYPED_OPS: tuple[HcxTypedOp, ...] = (
     *HCX_INVENTORY_OPS,
     *HCX_SERVICE_MESH_OPS,
     *HCX_NETWORK_EXTENSION_OPS,
+    *HCX_MIGRATION_OPS,
 )
 
 

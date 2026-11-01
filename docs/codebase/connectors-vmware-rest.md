@@ -4866,6 +4866,72 @@ in `ImportVApp`, so check the inventory first and delete or rename that VM.
 A power-on that waits for approval saves the import's answer: approving it
 only powers on the VM and does not import again.
 
+### vSAN reads: settings, capacity, performance, resync, object health, maintenance pre-check (#4444)
+
+An agent or an operator can read the vSAN of a cluster with six typed
+operations. They need no spec ingest. They are on both catalogs,
+`vmware-rest-8.0` and `vmware-rest-9.0`, in the group `vmware-vsan`. All six
+are `safe` and run at once. The cluster health tests stay in
+`vmware.host.vsan_health`.
+
+| Operation | What it does | What it returns | vSphere calls | Versions |
+|---|---|---|---|---|
+| `vmware.vsan.cluster.info` | vSAN settings of a cluster. | `vsan_enabled`, `architecture` (`ESA` or `OSA`), `vsan_cluster_uuid`, deduplication, compression, encryption (on or off and the key provider name, never a key id), `stretched_or_two_node`, `witness_hosts`, `fault_domains`, and one row per host with its fault domain and vSAN node UUID | vSAN `VsanVcClusterConfigSystem.VsanClusterGetConfig`, vSAN `VimClusterVsanVcStretchedClusterSystem.VSANVcGetWitnessHosts`, the cluster's `configurationEx` (its `vsanHostConfig`) and the host `name` through `PropertyCollector.RetrievePropertiesEx` | 8.0, 9.x |
+| `vmware.vsan.capacity` | Capacity and space use. | total, free and used bytes, `overview`, `by_object_type`, `space_saving` (saved bytes and ratios), `capacity_threshold`, `host_failures` (what is left after 0, 1 or more host failures) | vSAN `VsanSpaceReportSystem.VsanQuerySpaceUsage`, vSAN `VsanVcClusterHealthSystem.VsanQueryVcClusterHealthSummary` with `fields: [limitHealth]` | 8.0, 9.x |
+| `vmware.vsan.performance` | Latency, IOPS, throughput and more over a time window. | flat `rows` `{entity, metric, time, value}`, and a `note` when vSAN sent no samples | vSAN `VsanPerformanceManager.VsanPerfQueryPerf` with one `VsanPerfQuerySpec` | 8.0, 9.x |
+| `vmware.vsan.resync.status` | Objects that resync now. | `objects_left`, `bytes_left`, `seconds_left`, `by_status` (active, queued, suspended), and one row per syncing component with bytes and time left and the reason | vSAN `VsanObjectSystem.QuerySyncingVsanObjectsSummary` | 8.0, 9.x |
+| `vmware.vsan.object.health` | Object health and the VMs of unhealthy objects. | `summary` (healthy, reduced redundancy, inaccessible, other), `by_state`, `unhealthy_objects` with type, VM, policy | vSAN `VsanVcClusterHealthSystem.VsanQueryVcClusterHealthSummary` with `fields: [objectHealth]`, then vSAN `VsanObjectSystem.VsanQueryObjectIdentities` for the objects that are not healthy | 8.0, 9.x |
+| `vmware.vsan.maintenance.precheck` | What a host's maintenance mode would do to vSAN data, for one vSAN data option (`ensureObjectAccessibility`, `evacuateAllData`, `noAction`). | `result` (green, yellow, red), data to move, objects that would become inaccessible or non-compliant, vSAN messages, one row per fault domain and host with space before and after, the task id, a `note` when the check did not end in 300 seconds | `HostSystem.parent` and the cluster's `configurationEx` (the host's vSAN node UUID), vSAN `VsanResourceCheckSystem.VsanPerformResourceCheck` (a vCenter task, polled to its end), then vSAN `VsanResourceCheckSystem.VsanGetResourceCheckStatus` | 8.0, 9.x |
+
+**How the calls go.** Every vSAN method goes through
+`VmwareRestConnector._post_vsan`: VI-JSON on
+`/sdk/vim25/{release}/vsan/<Type>/<moId>/<Method>` on vCenter 9.x, SOAP on
+`/vsanHealth` on vCenter 8.0 (the 8.0 VI/JSON files have no vSAN paths). The
+vSAN objects have fixed ids: `vsan-cluster-config-system`,
+`vsan-stretched-cluster-system`, `vsan-cluster-space-report-system`,
+`vsan-performance-manager`, `vsan-cluster-object-system`,
+`vsan-cluster-resource-check-system` and `vsan-cluster-health-system`. The
+property reads and the task poll are core vSphere and use VI-JSON on both.
+All these calls exist on vCenter 8.0 U1 to U3 and 9.0 to 9.1.1, so no
+operation stops early on a version.
+
+**The SOAP codec** (`soap_vsan.py`) now sends strings, whole numbers, lists
+(one element per entry) and data objects (one child per field, in the order
+of the dict, which must be the order the vendor type defines; no
+`xsi:type`, because each data object is the type the method declares). It
+reads every `returnval` of an answer, so a method that returns an array gives
+a list.
+
+**Fault domains** come from the cluster's `configurationEx.vsanHostConfig`
+(the same `VsanHostConfigInfo` as `HostVsanSystem.config`). One read covers
+all hosts, and the path is the same on vCenter 8.0 and 9.x.
+
+**Answers never look healthy by mistake.** A vSAN fault reaches the caller
+with vCenter's fault type and text; a missing cluster gives `not_found`. An
+empty answer, a capacity answer without `limitHealth`, an object-health answer
+without `objectHealth`, and a finished pre-check without a result all raise.
+A failed pre-check task raises with the task's error text.
+A pre-check whose task ended but whose status is not `resourceCheckCompleted`
+(for example `resourceCheckFailed`) raises and names the status.
+
+**Modules.** `typed_ops_vsan_common.py` (group text, readers that accept the
+VI-JSON and the SOAP form of a value, `vsan_call`, `read_properties`),
+`typed_ops_vsan_cluster_info.py`, `typed_ops_vsan_capacity.py`,
+`typed_ops_vsan_performance.py`, `typed_ops_vsan_objects.py` (resync and
+object health), `typed_ops_vsan_precheck.py`, and `typed_ops_vsan_reads.py`,
+the one tuple `typed_ops.VMWARE_TYPED_OPS` takes. Later vSAN operations join
+that tuple.
+
+Tests: `test_connectors_vmware_rest_typed_vsan_cluster_reads.py` and
+`test_connectors_vmware_rest_typed_vsan_object_reads.py` run the real
+connector over mocked HTTP on vCenter 9.1 (VI-JSON) and 8.0.3 (SOAP), with
+hand-made answers in the shape of the vendor types (`tests/_vsan_wire.py`).
+The reconcile lanes check every vSAN method against the pinned 9.0
+`vi-json.yaml` and the vSAN SDK method lists of 8.0 U1 and U2
+(`test_connectors_vmware_rest_composites_read_reconcile.py`,
+`test_connectors_vmware_rest_8_0_spec_reconcile.py`). No live vCenter was
+used; a separate lab proof runs the six reads on 8.0 and 9.x.
+
 ### Reads of many objects read every page (`vim_retrieve.py`, #4862)
 
 A `PropertyCollector.RetrievePropertiesEx` call that asks for many objects

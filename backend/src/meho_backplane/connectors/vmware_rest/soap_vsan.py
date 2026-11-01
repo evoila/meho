@@ -26,9 +26,10 @@ from defusedxml.ElementTree import ParseError, fromstring
 
 from meho_backplane.connectors._shared.soap_fault import find_body as _find_body
 from meho_backplane.connectors._shared.soap_fault import find_child as _find_child
+from meho_backplane.connectors._shared.soap_fault import local_name as _local
 from meho_backplane.connectors.vmware_rest.soap import (
     _envelope,
-    _parse_returnval,
+    _soap_val_to_json,
     _this,
     _xml_escape,
 )
@@ -62,23 +63,43 @@ def vsan_soap_action(api_version: str | None) -> str:
 
 
 def _argument_xml(name: str, value: Any) -> str:
-    """One method argument as XML.
+    """One method argument (or one field of a data object) as XML.
 
-    Two value types are supported, because that is all the vSAN operations
-    send today: a managed object reference (``cluster``) and a true/false
-    value (``fetchFromCache``, #4922), which becomes ``<name>true</name>`` as
-    ``xsd:boolean`` writes it. A later operation that sends another type adds
-    it here, with a test.
+    The value is in the VI-JSON body form:
+
+    * ``True`` / ``False`` becomes ``<name>true</name>``, as ``xsd:boolean``
+      writes it (``fetchFromCache``, #4922).
+    * A string or a whole number becomes its text (``xsd:string``,
+      ``xsd:int``, ``xsd:long``; a date and time is a string).
+    * A managed object reference (``cluster``) becomes
+      ``<name type="ClusterComputeResource">domain-c7</name>``.
+    * A list repeats the element once per entry, which is how SOAP sends an
+      array (``fields``, ``querySpecs``).
+    * Another data object becomes the element with one child per field, in
+      the order of the dict, which must be the order the vendor type defines.
+      Its ``_typeName`` is not sent: each data object MEHO sends is of the
+      type the method declares, and then SOAP needs no ``xsi:type``.
+
+    A ``None`` field is left out. Any other value raises :class:`TypeError`.
     """
     if isinstance(value, bool):
         return f"<{name}>{'true' if value else 'false'}</{name}>"
-    if isinstance(value, Mapping) and value.get(VIM_TYPE_NAME_KEY) == MOREF_TYPE_NAME:
-        mo_type = _xml_escape(str(value.get("type", "")))
-        moid = _xml_escape(str(value.get("value", "")))
-        return f'<{name} type="{mo_type}">{moid}</{name}>'
-    raise TypeError(
-        f"vSAN SOAP argument {name!r}: {type(value).__name__} values are not supported yet"
-    )
+    if isinstance(value, (str, int)):
+        return f"<{name}>{_xml_escape(str(value))}</{name}>"
+    if isinstance(value, list):
+        return "".join(_argument_xml(name, item) for item in value)
+    if isinstance(value, Mapping):
+        if value.get(VIM_TYPE_NAME_KEY) == MOREF_TYPE_NAME:
+            mo_type = _xml_escape(str(value.get("type", "")))
+            moid = _xml_escape(str(value.get("value", "")))
+            return f'<{name} type="{mo_type}">{moid}</{name}>'
+        fields = "".join(
+            _argument_xml(str(key), item)
+            for key, item in value.items()
+            if key != VIM_TYPE_NAME_KEY and item is not None
+        )
+        return f"<{name}>{fields}</{name}>"
+    raise TypeError(f"vSAN SOAP argument {name!r}: {type(value).__name__} values are not supported")
 
 
 def build_vsan_envelope(
@@ -102,11 +123,25 @@ def build_vsan_envelope(
 def parse_vsan_result(xml: str, method: str) -> Any:
     """The ``returnval`` of a vSAN SOAP answer, in the VI-JSON dict form.
 
-    SOAP has no list marker. A list field with one entry comes back as a
-    single dict (VI-JSON always sends a list), so the caller turns the list
+    A method that returns an array sends one ``returnval`` element per entry.
+    Two or more come back as a list. SOAP has no list marker, so one entry
+    comes back as a single dict, and a list field with one entry inside a data
+    object does too (VI-JSON always sends a list). The caller turns the list
     fields it reads into lists. ``None`` when the answer has no ``returnval``.
     """
-    return _parse_returnval(xml, method)
+    body = _find_body(fromstring(xml))
+    if body is None:
+        return None
+    response = _find_child(body, f"{method}Response")
+    if response is None:
+        # As the vim25 codec does: fall back to the first element of the body.
+        response = next(iter(body), None)
+    if response is None:
+        return None
+    values = [_soap_val_to_json(child) for child in response if _local(child.tag) == "returnval"]
+    if not values:
+        return None
+    return values[0] if len(values) == 1 else values
 
 
 def parse_fault_object(xml: str) -> dict[str, str] | None:

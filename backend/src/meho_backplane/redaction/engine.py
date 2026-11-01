@@ -305,11 +305,12 @@ def _apply_to_rows(
     leaf. *mutate* works as in :func:`_apply_to_str`.
 
     The spans come sorted and never overlap, so rows and spans are
-    walked together, each once: a span that ends before the current
-    row is left behind, and a span that starts after the row's end
-    waits for a later row. The cost grows with the number of rows plus
-    the number of matches, not their product, so a long log tail with
-    a secret in every row is handled in the same time as its rows alone.
+    walked together, each once, by index: a span that ends before the
+    current row is left behind, and a span that starts after the row's
+    end waits for a later row. The span list is never sliced or copied
+    per row. The cost grows with the number of rows plus the number of
+    matches, not their product, so a long log tail with many secrets in
+    every row is handled in about the time its rows take one by one.
     """
     pattern = get_pattern(rule.pattern)
     spans = secret_spans(pattern, "\n".join(rows))
@@ -318,17 +319,19 @@ def _apply_to_rows(
 
     out: list[str] = []
     offset = 0
-    next_span = 0
+    first = 0
+    total = len(spans)
     for index, row in enumerate(rows):
         end = offset + len(row)
-        while next_span < len(spans) and spans[next_span][1] <= offset:
-            next_span += 1
+        while first < total and spans[first][1] <= offset:
+            first += 1
         row_spans: list[tuple[int, int]] = []
-        for start, stop in spans[next_span:]:
-            if start >= end:
-                break
+        probe = first
+        while probe < total and spans[probe][0] < end:
+            start, stop = spans[probe]
             if start < stop:
                 row_spans.append((max(start, offset) - offset, min(stop, end) - offset))
+            probe += 1
         if row_spans:
             manifest.append(
                 RedactionManifestEntry(

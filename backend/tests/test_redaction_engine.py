@@ -226,13 +226,14 @@ def test_string_rows_keep_the_text_around_a_match_in_one_row() -> None:
 
 
 def test_string_rows_with_many_matches_are_redacted_in_linear_time() -> None:
-    """A long list of rows with a secret in every row does not stall.
+    """A long list of rows with many secrets in every row does not stall.
 
     This is the shape of a large ``log.tail`` result at its supported
-    limit. Every row is rewritten and gets its own manifest entry, and
-    the whole list is done well inside the time an operator waits for a
-    response. Rows and matches are walked together once, so the time
-    grows with the number of rows, not with rows times matches.
+    limit, with rows that each hold many tokens. Every row is rewritten
+    and gets its own manifest entry, and the whole list is done in about
+    the time the same rows take one by one. Rows and matches are walked
+    together once, without copying the remaining matches per row, so
+    the time grows with rows plus matches, not with rows times matches.
     """
     policy = _policy_with_rules(
         textwrap.dedent(
@@ -244,18 +245,28 @@ def test_string_rows_with_many_matches_are_redacted_in_linear_time() -> None:
             """,
         ),
     )
+    per_row = 40
     rows = [
-        f"row {index}: Authorization: Bearer abc123def456GHIJKL{index:05d}"
+        f"row {index}: "
+        + " ".join(
+            f"Authorization: Bearer abc123def456GHIJKL{index:05d}x{slot:02d}"
+            for slot in range(per_row)
+        )
         for index in range(10_000)
     ]
     started = time.perf_counter()
     result = redact({"rows": rows, "total": len(rows)}, policy)
-    elapsed = time.perf_counter() - started
-    assert elapsed < 5.0, f"redaction of 10000 rows took {elapsed:.1f}s"
-    assert len(result.redacted["rows"]) == len(rows)
+    as_list = time.perf_counter() - started
+    started = time.perf_counter()
+    one_by_one = [redact(row, policy).redacted for row in rows]
+    singly = time.perf_counter() - started
+    assert as_list < 5.0, f"redaction of 10000 rows took {as_list:.1f}s"
+    assert as_list < 5 * singly, f"the list took {as_list:.2f}s, the rows one by one {singly:.2f}s"
+    assert result.redacted["rows"] == one_by_one
     assert all("Bearer" not in row for row in result.redacted["rows"])
-    assert result.redacted["rows"][0] == "row 0: Authorization: [REDACTED:bearer_token]"
+    assert result.redacted["rows"][0].count("[REDACTED:bearer_token]") == per_row
     assert len(result.manifest) == len(rows)
+    assert all(entry.count == per_row for entry in result.manifest)
     assert result.manifest[-1].path == "rows.9999"
 
 

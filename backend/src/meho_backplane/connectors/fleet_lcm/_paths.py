@@ -3,9 +3,10 @@
 
 """Hand-coded Fleet LCM Service ``/v1/*`` path templates — the reconcile-lane surface.
 
-Every request path the modern ``fleet-lcm`` typed read core dispatches is
+Every request path the modern ``fleet-lcm`` typed ops dispatch is
 declared here as a module-level ``_*_PATH`` template constant, and every
-handler in :mod:`~meho_backplane.connectors.fleet_lcm.typed_reads` builds
+handler in :mod:`~meho_backplane.connectors.fleet_lcm.typed_reads` and
+:mod:`~meho_backplane.connectors.fleet_lcm.lifecycle_handlers` builds
 its concrete path from one of these templates via :func:`fill_path` (or
 uses a placeholder-free constant directly) — never from an inline
 f-string. Placeholder names are byte-for-byte the pinned spec's own
@@ -15,7 +16,7 @@ operator's spec shelf): the by-id reads take ``{sddcLcmId}`` /
 
 This lets the spec-reconcile lane
 (:mod:`tests.test_connectors_fleet_lcm_spec_reconcile`) introspect these
-live constants and assert each declared ``GET:/path`` is served by the
+live constants and assert each declared ``METHOD:/path`` is served by the
 pinned Apache-2.0 spec — the #2944 introspect-live-constants pattern
 (never a hardcoded mirror that can drift), the same shape
 :mod:`~meho_backplane.connectors.harbor._paths` and
@@ -60,6 +61,17 @@ _TASK_PATH = "/v1/tasks/{taskId}"
 _UPGRADE_PLANS_PATH = "/v1/upgrade-plans"
 _UPGRADE_PLAN_PATH = "/v1/upgrade-plans/{planId}"
 _RELEASE_VERSIONS_PATH = "/v1/release-versions"
+
+# -- change templates (sent as POST; the ``_POST_PATH`` suffix tells the
+# reconcile lane the method). The ``?action=`` part is part of the vendor's
+# own path key, so these match the pinned spec byte for byte.
+_TASK_RETRY_POST_PATH = "/v1/tasks/{taskId}?action=retry"
+_TASK_CANCEL_POST_PATH = "/v1/tasks/{taskId}?action=cancel"
+_UPGRADE_PLAN_VALIDATIONS_POST_PATH = "/v1/upgrade-plans/validations"
+_UPGRADE_PLANS_POST_PATH = "/v1/upgrade-plans"
+_UPGRADE_PLAN_PRECHECK_POST_PATH = "/v1/upgrade-plans/{planId}?action=precheck"
+_UPGRADE_PLAN_APPLY_POST_PATH = "/v1/upgrade-plans/{planId}?action=apply"
+_DEPOT_SYNC_POST_PATH = "/v1/depot-metadata?action=sync"
 
 
 _PLACEHOLDER_RE = re.compile(r"\{([^{}]+)\}")

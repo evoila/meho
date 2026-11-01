@@ -31,19 +31,11 @@ fleet appliance serves only the legacy ``/lcm/*`` API, which is why 9.0
 sits in the ``fleet-rest`` range and the resolver — not the connector —
 picks the surface per target.
 
-Skeleton-only — auth + fingerprint + probe + the G0.6 dispatch shim, the
-same shape the legacy ``vcf_fleet`` connector first shipped as (#831).
-The 51 ``/v1/*`` operations arrive via **G0.7 spec ingestion** against the
-pinned public ``fleet-lcm-openapi.yaml`` (Apache-2.0,
-``vmware/vcf-api-specs``) as ``source_kind="ingested"``
-``endpoint_descriptor`` rows under ``connector_id="fleet-lcm-9.0"`` — they
-are **not** hand-coded here. Registering this real
-:class:`HttpConnector` subclass is the load-bearing prerequisite that
-makes those ingested rows *dispatchable*: a bare ``GenericRestConnector``
-auto-shim is non-dispatchable (its ``auth_headers`` / ``execute`` raise),
-so the ingested ops ride *this* class's ``auth_headers`` on dispatch, the
+It is a hand-coded :class:`HttpConnector` subclass, so any ingested
+``fleet-lcm-9.0`` row is dispatchable too: it rides this class's
+:meth:`auth_headers` (the
 :class:`~meho_backplane.connectors.vmware_rest.connector.VmwareRestConnector`
-pattern.
+pattern).
 
 Auth
 ----
@@ -79,52 +71,27 @@ is renewed with one new login. A second ``401`` ends as
 Auth model gating
 -----------------
 
-v0.2 locks the connector to :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` (or
-``None`` for pre-G0.3 targets), the shared
-:func:`~meho_backplane.connectors._shared.vcf_auth.is_acceptable_auth_model`
-gate the Harbor / NSX / SDDC Manager / vcf-fleet precedents established.
+Only :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` (or ``None`` for older
+targets), through the shared
+:func:`~meho_backplane.connectors._shared.vcf_auth.is_acceptable_auth_model`.
 
 Fingerprint / probe
 -------------------
 
-Unlike the legacy impl — whose first-party diagnostic endpoints return
-HTTP 500 on 9.0 builds, forcing a datacenters-list workaround — the
-modern service exposes a first-class health endpoint. The connector
-probes ``GET /v1/health`` (``operationId`` ``getHealth``; the spec marks
-it ``security: []`` — no auth required, so it is the clean reachability
-surface). :meth:`fingerprint` sends the connector's auth headers anyway
-(harmless on an unauthenticated endpoint, and it keeps probe and dispatch
-on one auth path); on any transport/status failure it returns a
-non-reachable :class:`FingerprintResult` whose ``extras["error"]`` names
-the exception, the Harbor / NSX / vcf-fleet pattern. The product version
-is not assumed from any single ``/v1/*`` field; ``version`` is left
-``None`` unless the health payload carries an explicit ``version`` string.
+The connector probes ``GET /v1/health`` (no auth needed per the spec; the
+auth headers are sent anyway). A failure gives a non-reachable
+:class:`FingerprintResult` with ``extras["error"]``; ``version`` is set only
+when the health payload carries one. See :meth:`fingerprint`.
 
 Operations
 ----------
 
-A curated **13-op typed read core** ships here (#3047): health, system,
-config, SDDC-LCM list/detail, component list/detail/status, task
-list/detail, and upgrade-plan list/detail + release-versions. They are
-registered as ``source_kind="typed"`` (:mod:`.typed_ops` /
-:mod:`.typed_reads`, per-op ``llm_instructions`` in
-:mod:`._llm_instructions`), enabled at register time, so a VCF Fleet 9.1
-or newer target — which resolves to this impl by version range —
-dispatches a modern read op on a **fresh boot with zero catalog ingest**
-(initiative #3033); the two typed ops the legacy ``fleet-rest``
-impl carries are its ``/lcm/*`` back-compat surface, distinct from these
-``/v1/*`` reads.
-
-The handler bodies build their ``/v1/*`` request paths from the templates
-in :mod:`._paths` (reconcile-lane-introspectable) and dispatch on this
-class's authenticated client, so the reads ride :meth:`auth_headers`
-(the VCF Operations Bearer token) exactly as an ingested op would. The
-wider surface — the full 51-op spec as ``source_kind="ingested"`` breadth
-plus the component / upgrade / task **writes** — is a follow-up enabled
-operationally through the generic review flow
-(``ReviewService.enable_reads`` over ``meho connector ingest`` of the
-pinned ``fleet-lcm-openapi.yaml``); :meth:`execute` remains the G0.6
-dispatch shim for any such ingested ``op_id``.
+Typed ops, live on a fresh boot with no catalog ingest: a **13-op read
+core** (#3047, :mod:`.typed_reads`) and **six lifecycle changes** that wait
+for approval (:mod:`.lifecycle_ops` / :mod:`.lifecycle_handlers`). The
+bodies build their ``/v1/*`` paths from :mod:`._paths` and run on this
+class's authenticated client. :meth:`execute` is the G0.6 shim for any
+ingested ``op_id``.
 """
 
 from __future__ import annotations
@@ -397,19 +364,8 @@ class FleetLcmConnector(HttpConnector):
             params=params,
         )
 
-    # ------------------------------------------------------------------
-    # Typed read ops (#3047, initiative #3033)
-    #
-    # Thin bound-method shims for the modern ``/v1/*`` read core. Each
-    # delegates to the module-level ``_impl`` body in ``.typed_reads`` (lazy
-    # import so pure fingerprint/probe unit tests don't pay the operations
-    # package's embedding-pipeline import). The dispatcher resolves each
-    # persisted ``module.ClassName.method`` handler_ref back to the bound
-    # method and threads ``operator`` / ``target`` / ``params`` by name (see
-    # ``dispatch_typed``); ``operator`` reaches ``_get_json`` so the
-    # credential loader reads under the operator's identity. All read-only —
-    # no write op ships here (writes are a follow-up).
-    # ------------------------------------------------------------------
+    # Typed ops: thin bound-method shims. Each imports its body lazily, so
+    # fingerprint/probe unit tests do not pay the operations import.
 
     async def health(
         self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
@@ -516,6 +472,55 @@ class FleetLcmConnector(HttpConnector):
         )
 
         return await fleet_lcm_release_version_list_impl(self, operator, target, params)
+
+    # Lifecycle changes (each waits for approval). Bodies in ``.lifecycle_handlers``.
+    async def task_retry(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.task.retry`` shim."""
+        from meho_backplane.connectors.fleet_lcm.lifecycle_handlers import task_retry_impl
+
+        return await task_retry_impl(self, operator, target, params)
+
+    async def task_cancel(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.task.cancel`` shim."""
+        from meho_backplane.connectors.fleet_lcm.lifecycle_handlers import task_cancel_impl
+
+        return await task_cancel_impl(self, operator, target, params)
+
+    async def upgrade_plan_create(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.upgrade-plan.create`` shim."""
+        from meho_backplane.connectors.fleet_lcm.lifecycle_handlers import upgrade_plan_create_impl
+
+        return await upgrade_plan_create_impl(self, operator, target, params)
+
+    async def upgrade_plan_precheck(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.upgrade-plan.precheck`` shim."""
+        from meho_backplane.connectors.fleet_lcm import lifecycle_handlers as bodies
+
+        return await bodies.upgrade_plan_precheck_impl(self, operator, target, params)
+
+    async def upgrade_plan_apply(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.upgrade-plan.apply`` shim."""
+        from meho_backplane.connectors.fleet_lcm.lifecycle_handlers import upgrade_plan_apply_impl
+
+        return await upgrade_plan_apply_impl(self, operator, target, params)
+
+    async def depot_sync(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.depot.sync`` shim."""
+        from meho_backplane.connectors.fleet_lcm.lifecycle_handlers import depot_sync_impl
+
+        return await depot_sync_impl(self, operator, target, params)
 
     async def invalidate_session(
         self, target: FleetLcmTargetLike, *, rejected: httpx.Request | None = None

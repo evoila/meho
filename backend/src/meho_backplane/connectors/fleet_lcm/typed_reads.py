@@ -83,13 +83,13 @@ from meho_backplane.connectors.fleet_lcm._paths import (
     _SDDC_LCM_PATH,
     _SDDC_LCMS_PATH,
     _SYSTEM_PATH,
-    _TASK_PATH,
     _TASKS_PATH,
     _UPGRADE_PLAN_PATH,
     _UPGRADE_PLANS_PATH,
     encode_segment,
     fill_path,
 )
+from meho_backplane.connectors.fleet_lcm.lifecycle_handlers import task_status_impl
 from meho_backplane.connectors.fleet_lcm.session import FleetLcmTargetLike
 
 if TYPE_CHECKING:
@@ -296,11 +296,12 @@ async def fleet_lcm_task_info_impl(
     """``fleet-lcm.task.info`` — ``GET /v1/tasks/{taskId}``.
 
     Reads one async task by id. Requires ``taskId`` (a UUID from
-    ``fleet-lcm.task.list``). Returns the full ``Task`` object, including
-    its current status and any sub-task detail.
+    ``fleet-lcm.task.list`` or from the answer of a fleet change). Returns the
+    full ``Task`` object plus a plain ``state``, the stage ``progress`` and the
+    ``errors``; ``state: not_reachable`` when the service does not answer. The
+    body is in :func:`~.lifecycle_handlers.task_status_impl`.
     """
-    path = fill_path(_TASK_PATH, {"taskId": encode_segment(params["taskId"])})
-    return await connector._get_json(target, path, operator=operator)
+    return await task_status_impl(connector, operator, target, params)
 
 
 # ---------------------------------------------------------------------------

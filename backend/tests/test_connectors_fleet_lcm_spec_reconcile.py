@@ -30,7 +30,9 @@ endpoint, or a placeholder-name drift would dispatch a URL the real service
 never serves. This lane introspects those live ``_paths`` constants (the #2944
 pattern — never a hardcoded mirror) plus the connector's
 ``_FLEET_LCM_HEALTH_PATH`` reachability probe, and asserts each assembled
-``GET:/path`` is served by the pinned spec. The typed health op and the probe
+``METHOD:/path`` is served by the pinned spec. The six lifecycle changes add
+seven ``POST`` templates (named ``_*_POST_PATH``; their ``?action=`` part is part
+of the vendor's own path key). The typed health op and the probe
 share ``/v1/health`` — the pin asserts that link so the two never drift apart.
 (The wider 51-op ``/v1/*`` surface arrives as ``source_kind="ingested"`` breadth
 via an operator ingest of *this same spec* — reconciling ingested rows against
@@ -77,6 +79,7 @@ from tests._spec_shelf import (
 _SPEC_DIR = "fleet-lcm-9.0"
 _SPEC_FILE = "fleet-lcm-openapi.yaml"
 _SPEC_LABEL = f"{_SPEC_DIR}/{_SPEC_FILE}"
+_SPEC_FILE_9_1_1 = "fleet-lcm-openapi-9.1.1.yaml"
 
 #: The exact ``_*_PATH`` template-constant name set the typed read core declares
 #: in :mod:`~meho_backplane.connectors.fleet_lcm._paths`. Pinned so a dropped or
@@ -97,6 +100,13 @@ _EXPECTED_PATH_CONSTANT_NAMES = frozenset(
         "_UPGRADE_PLANS_PATH",
         "_UPGRADE_PLAN_PATH",
         "_RELEASE_VERSIONS_PATH",
+        "_TASK_RETRY_POST_PATH",
+        "_TASK_CANCEL_POST_PATH",
+        "_UPGRADE_PLAN_VALIDATIONS_POST_PATH",
+        "_UPGRADE_PLANS_POST_PATH",
+        "_UPGRADE_PLAN_PRECHECK_POST_PATH",
+        "_UPGRADE_PLAN_APPLY_POST_PATH",
+        "_DEPOT_SYNC_POST_PATH",
     }
 )
 
@@ -117,6 +127,13 @@ _EXPECTED_OP_IDS = frozenset(
         "GET:/v1/upgrade-plans",
         "GET:/v1/upgrade-plans/{planId}",
         "GET:/v1/release-versions",
+        "POST:/v1/tasks/{taskId}?action=retry",
+        "POST:/v1/tasks/{taskId}?action=cancel",
+        "POST:/v1/upgrade-plans/validations",
+        "POST:/v1/upgrade-plans",
+        "POST:/v1/upgrade-plans/{planId}?action=precheck",
+        "POST:/v1/upgrade-plans/{planId}?action=apply",
+        "POST:/v1/depot-metadata?action=sync",
     }
 )
 
@@ -131,16 +148,19 @@ def _typed_path_constants() -> dict[str, str]:
 
 
 def _declared_op_ids() -> set[str]:
-    """Every hand-coded ``GET:/path`` the fleet-lcm connector dispatches.
+    """Every hand-coded ``METHOD:/path`` the fleet-lcm connector dispatches.
 
-    The 13 typed read-core path templates (:mod:`._paths`) union the connector's
+    The typed path templates (:mod:`._paths`) union the connector's
     ``GET /v1/health`` reachability probe (which reuses the typed health path).
-    All are dispatched GET. Swept from live module constants — never a hardcoded
-    mirror.
+    A ``_*_POST_PATH`` template is sent as POST, every other one as GET. Swept
+    from live module constants — never a hardcoded mirror.
     """
-    paths = set(_typed_path_constants().values())
-    paths.add(_connector._FLEET_LCM_HEALTH_PATH)
-    return {f"GET:{path}" for path in paths}
+    declared = {
+        f"{'POST' if name.endswith('_POST_PATH') else 'GET'}:{path}"
+        for name, path in _typed_path_constants().items()
+    }
+    declared.add(f"GET:{_connector._FLEET_LCM_HEALTH_PATH}")
+    return declared
 
 
 def test_hand_coded_path_surface_is_pinned() -> None:
@@ -157,9 +177,15 @@ def test_hand_coded_path_surface_is_pinned() -> None:
     # endpoint — pin the link so a change to one is forced through the other.
     assert _paths._HEALTH_PATH == _connector._FLEET_LCM_HEALTH_PATH == "/v1/health"
     assert _declared_op_ids() == set(_EXPECTED_OP_IDS)
-    # One dispatched path per typed op (health's path is shared with the probe,
-    # so the distinct-path count equals the typed-op count).
-    assert len(FLEET_LCM_TYPED_OPS) == len(_declared_op_ids()) == 13
+    # One GET path per typed read (health's path is shared with the probe).
+    # The six changes use seven POST paths: upgrade-plan.create posts twice
+    # (the plan check, then the create).
+    reads = [op for op in FLEET_LCM_TYPED_OPS if op.safety_level == "safe"]
+    gets = {op_id for op_id in _declared_op_ids() if op_id.startswith("GET:")}
+    posts = _declared_op_ids() - gets
+    assert len(reads) == len(gets) == 13
+    assert len(FLEET_LCM_TYPED_OPS) - len(reads) == 6
+    assert len(posts) == 7
 
 
 def test_declared_op_ids_are_served_by_the_pinned_spec() -> None:
@@ -178,6 +204,17 @@ def test_declared_op_ids_are_served_by_the_pinned_spec() -> None:
     spec_path = require_shelf_spec(_SPEC_DIR, _SPEC_FILE)
     served = openapi_served_op_ids(spec_path)
     assert_op_ids_served(_declared_op_ids(), served, spec_label=_SPEC_LABEL)
+
+
+def test_declared_op_ids_are_served_by_the_9_1_1_spec() -> None:
+    """Every hand-coded op_id is also served by the vendor's 9.1.1 file.
+
+    The shelf keeps the 9.1.1 file (tag ``9.1.1.0`` of ``vmware/vcf-api-specs``)
+    next to the 9.1.0 one, so every operation is checked on both releases.
+    """
+    spec_path = require_shelf_spec(_SPEC_DIR, _SPEC_FILE_9_1_1)
+    served = openapi_served_op_ids(spec_path)
+    assert_op_ids_served(_declared_op_ids(), served, spec_label=f"{_SPEC_DIR}/{_SPEC_FILE_9_1_1}")
 
 
 #: The VCF Operations login op_ids, per the vendor file (server base

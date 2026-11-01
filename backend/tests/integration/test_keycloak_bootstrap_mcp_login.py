@@ -583,10 +583,22 @@ def test_upgrade_replaces_fixed_mappers_and_second_run_changes_nothing(
 
 
 def _device_login_request(base_url: str, realm: str, scope: str) -> httpx.Response:
-    """Start a device login on ``meho-cli``, as ``meho login`` does."""
+    """Start a device login on ``meho-cli``, as ``meho login`` does.
+
+    The CLI client requires PKCE, so the request carries a code challenge.
+    """
+    verifier = secrets.token_urlsafe(48)
+    challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    )
     return httpx.post(
         f"{base_url}/realms/{realm}/protocol/openid-connect/auth/device",
-        data={"client_id": "meho-cli", "scope": scope},
+        data={
+            "client_id": "meho-cli",
+            "scope": scope,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        },
     )
 
 

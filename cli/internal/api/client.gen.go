@@ -2300,6 +2300,13 @@ type BodyApprovalRejectUiApprovalsRequestIdRejectPost struct {
 	Reason *string `json:"reason,omitempty"`
 }
 
+// BodyApprovalsInOrderRunUiApprovalsInOrderPost defines model for Body_approvals_in_order_run_ui_approvals_in_order_post.
+type BodyApprovalsInOrderRunUiApprovalsInOrderPost struct {
+	ConfirmId *string `json:"confirm_id,omitempty"`
+	Reason    *string `json:"reason,omitempty"`
+	WorkRef   string  `json:"work_ref"`
+}
+
 // BodyBulkImportUiTopologyEdgesBulkPost defines model for Body_bulk_import_ui_topology_edges_bulk_post.
 type BodyBulkImportUiTopologyEdgesBulkPost struct {
 	DryRun   *bool   `json:"dry_run,omitempty"`
@@ -7082,7 +7089,9 @@ type OperationRunStatus string
 // “result“ carries the full persisted “OperationResult“ envelope once
 // the run reaches “succeeded“ (the dropped-response-class fix); “error“
 // carries the run-crash / reaper reason on a “failed“ run. Both are
-// “None“ while the run is still “pending“ / “running“.
+// “None“ while the run is still “pending“ / “running“. “result“ is
+// also “None“ for anyone but the person who started the run
+// (:func:`~meho_backplane.operations.operation_run_service.run_result_visible_to`).
 type OperationRunStatusResponse struct {
 	ApprovalRequestId *openapi_types.UUID     `json:"approval_request_id"`
 	ConnectorId       string                  `json:"connector_id"`
@@ -12089,6 +12098,11 @@ type ApprovalsIndexUiApprovalsGetParams struct {
 	Order   *string `form:"order,omitempty" json:"order,omitempty"`
 }
 
+// ApprovalsInOrderPlanUiApprovalsInOrderGetParams defines parameters for ApprovalsInOrderPlanUiApprovalsInOrderGet.
+type ApprovalsInOrderPlanUiApprovalsInOrderGetParams struct {
+	WorkRef string `form:"work_ref" json:"work_ref"`
+}
+
 // ApprovalsHistoryUiApprovalsListGetParams defines parameters for ApprovalsHistoryUiApprovalsListGet.
 type ApprovalsHistoryUiApprovalsListGetParams struct {
 	Tab     *string `form:"tab,omitempty" json:"tab,omitempty"`
@@ -12140,6 +12154,7 @@ type UiAuthCallbackUiAuthCallbackGetParams struct {
 // UiAuthLoginUiAuthLoginGetParams defines parameters for UiAuthLoginUiAuthLoginGet.
 type UiAuthLoginUiAuthLoginGetParams struct {
 	ReturnTo *string `form:"return_to,omitempty" json:"return_to,omitempty"`
+	Reason   *string `form:"reason,omitempty" json:"reason,omitempty"`
 }
 
 // UiBroadcastFeedUiBroadcastGetParams defines parameters for UiBroadcastFeedUiBroadcastGet.
@@ -12709,6 +12724,9 @@ type UiAgentsRunCancelUiAgentsNameRunHandleCancelPostJSONRequestBody = UISession
 
 // UiAgentsToggleUiAgentsNameTogglePostFormdataRequestBody defines body for UiAgentsToggleUiAgentsNameTogglePost for application/x-www-form-urlencoded ContentType.
 type UiAgentsToggleUiAgentsNameTogglePostFormdataRequestBody = BodyUiAgentsToggleUiAgentsNameTogglePost
+
+// ApprovalsInOrderRunUiApprovalsInOrderPostFormdataRequestBody defines body for ApprovalsInOrderRunUiApprovalsInOrderPost for application/x-www-form-urlencoded ContentType.
+type ApprovalsInOrderRunUiApprovalsInOrderPostFormdataRequestBody = BodyApprovalsInOrderRunUiApprovalsInOrderPost
 
 // ApprovalApproveUiApprovalsRequestIdApprovePostFormdataRequestBody defines body for ApprovalApproveUiApprovalsRequestIdApprovePost for application/x-www-form-urlencoded ContentType.
 type ApprovalApproveUiApprovalsRequestIdApprovePostFormdataRequestBody = BodyApprovalApproveUiApprovalsRequestIdApprovePost
@@ -15494,6 +15512,14 @@ type ClientInterface interface {
 
 	// ApprovalsBadgeUiApprovalsBadgeGet request
 	ApprovalsBadgeUiApprovalsBadgeGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ApprovalsInOrderPlanUiApprovalsInOrderGet request
+	ApprovalsInOrderPlanUiApprovalsInOrderGet(ctx context.Context, params *ApprovalsInOrderPlanUiApprovalsInOrderGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ApprovalsInOrderRunUiApprovalsInOrderPostWithBody request with any body
+	ApprovalsInOrderRunUiApprovalsInOrderPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ApprovalsInOrderRunUiApprovalsInOrderPostWithFormdataBody(ctx context.Context, body ApprovalsInOrderRunUiApprovalsInOrderPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ApprovalsHistoryUiApprovalsListGet request
 	ApprovalsHistoryUiApprovalsListGet(ctx context.Context, params *ApprovalsHistoryUiApprovalsListGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -20007,6 +20033,42 @@ func (c *Client) ApprovalsIndexUiApprovalsGet(ctx context.Context, params *Appro
 
 func (c *Client) ApprovalsBadgeUiApprovalsBadgeGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewApprovalsBadgeUiApprovalsBadgeGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApprovalsInOrderPlanUiApprovalsInOrderGet(ctx context.Context, params *ApprovalsInOrderPlanUiApprovalsInOrderGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalsInOrderPlanUiApprovalsInOrderGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApprovalsInOrderRunUiApprovalsInOrderPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalsInOrderRunUiApprovalsInOrderPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApprovalsInOrderRunUiApprovalsInOrderPostWithFormdataBody(ctx context.Context, body ApprovalsInOrderRunUiApprovalsInOrderPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalsInOrderRunUiApprovalsInOrderPostRequestWithFormdataBody(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -37630,6 +37692,91 @@ func NewApprovalsBadgeUiApprovalsBadgeGetRequest(server string) (*http.Request, 
 	return req, nil
 }
 
+// NewApprovalsInOrderPlanUiApprovalsInOrderGetRequest generates requests for ApprovalsInOrderPlanUiApprovalsInOrderGet
+func NewApprovalsInOrderPlanUiApprovalsInOrderGetRequest(server string, params *ApprovalsInOrderPlanUiApprovalsInOrderGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/approvals/in-order")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "work_ref", runtime.ParamLocationQuery, params.WorkRef); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewApprovalsInOrderRunUiApprovalsInOrderPostRequestWithFormdataBody calls the generic ApprovalsInOrderRunUiApprovalsInOrderPost builder with application/x-www-form-urlencoded body
+func NewApprovalsInOrderRunUiApprovalsInOrderPostRequestWithFormdataBody(server string, body ApprovalsInOrderRunUiApprovalsInOrderPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewApprovalsInOrderRunUiApprovalsInOrderPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewApprovalsInOrderRunUiApprovalsInOrderPostRequestWithBody generates requests for ApprovalsInOrderRunUiApprovalsInOrderPost with any type of body
+func NewApprovalsInOrderRunUiApprovalsInOrderPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/approvals/in-order")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewApprovalsHistoryUiApprovalsListGetRequest generates requests for ApprovalsHistoryUiApprovalsListGet
 func NewApprovalsHistoryUiApprovalsListGetRequest(server string, params *ApprovalsHistoryUiApprovalsListGetParams) (*http.Request, error) {
 	var err error
@@ -38522,6 +38669,22 @@ func NewUiAuthLoginUiAuthLoginGetRequest(server string, params *UiAuthLoginUiAut
 		if params.ReturnTo != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "return_to", runtime.ParamLocationQuery, *params.ReturnTo); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Reason != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "reason", runtime.ParamLocationQuery, *params.Reason); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -47801,6 +47964,14 @@ type ClientWithResponsesInterface interface {
 	// ApprovalsBadgeUiApprovalsBadgeGetWithResponse request
 	ApprovalsBadgeUiApprovalsBadgeGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ApprovalsBadgeUiApprovalsBadgeGetResponse, error)
 
+	// ApprovalsInOrderPlanUiApprovalsInOrderGetWithResponse request
+	ApprovalsInOrderPlanUiApprovalsInOrderGetWithResponse(ctx context.Context, params *ApprovalsInOrderPlanUiApprovalsInOrderGetParams, reqEditors ...RequestEditorFn) (*ApprovalsInOrderPlanUiApprovalsInOrderGetResponse, error)
+
+	// ApprovalsInOrderRunUiApprovalsInOrderPostWithBodyWithResponse request with any body
+	ApprovalsInOrderRunUiApprovalsInOrderPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ApprovalsInOrderRunUiApprovalsInOrderPostResponse, error)
+
+	ApprovalsInOrderRunUiApprovalsInOrderPostWithFormdataBodyWithResponse(ctx context.Context, body ApprovalsInOrderRunUiApprovalsInOrderPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*ApprovalsInOrderRunUiApprovalsInOrderPostResponse, error)
+
 	// ApprovalsHistoryUiApprovalsListGetWithResponse request
 	ApprovalsHistoryUiApprovalsListGetWithResponse(ctx context.Context, params *ApprovalsHistoryUiApprovalsListGetParams, reqEditors ...RequestEditorFn) (*ApprovalsHistoryUiApprovalsListGetResponse, error)
 
@@ -53650,6 +53821,50 @@ func (r ApprovalsBadgeUiApprovalsBadgeGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ApprovalsBadgeUiApprovalsBadgeGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ApprovalsInOrderPlanUiApprovalsInOrderGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ApprovalsInOrderPlanUiApprovalsInOrderGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ApprovalsInOrderPlanUiApprovalsInOrderGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ApprovalsInOrderRunUiApprovalsInOrderPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ApprovalsInOrderRunUiApprovalsInOrderPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ApprovalsInOrderRunUiApprovalsInOrderPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -60393,6 +60608,32 @@ func (c *ClientWithResponses) ApprovalsBadgeUiApprovalsBadgeGetWithResponse(ctx 
 		return nil, err
 	}
 	return ParseApprovalsBadgeUiApprovalsBadgeGetResponse(rsp)
+}
+
+// ApprovalsInOrderPlanUiApprovalsInOrderGetWithResponse request returning *ApprovalsInOrderPlanUiApprovalsInOrderGetResponse
+func (c *ClientWithResponses) ApprovalsInOrderPlanUiApprovalsInOrderGetWithResponse(ctx context.Context, params *ApprovalsInOrderPlanUiApprovalsInOrderGetParams, reqEditors ...RequestEditorFn) (*ApprovalsInOrderPlanUiApprovalsInOrderGetResponse, error) {
+	rsp, err := c.ApprovalsInOrderPlanUiApprovalsInOrderGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalsInOrderPlanUiApprovalsInOrderGetResponse(rsp)
+}
+
+// ApprovalsInOrderRunUiApprovalsInOrderPostWithBodyWithResponse request with arbitrary body returning *ApprovalsInOrderRunUiApprovalsInOrderPostResponse
+func (c *ClientWithResponses) ApprovalsInOrderRunUiApprovalsInOrderPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ApprovalsInOrderRunUiApprovalsInOrderPostResponse, error) {
+	rsp, err := c.ApprovalsInOrderRunUiApprovalsInOrderPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalsInOrderRunUiApprovalsInOrderPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ApprovalsInOrderRunUiApprovalsInOrderPostWithFormdataBodyWithResponse(ctx context.Context, body ApprovalsInOrderRunUiApprovalsInOrderPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*ApprovalsInOrderRunUiApprovalsInOrderPostResponse, error) {
+	rsp, err := c.ApprovalsInOrderRunUiApprovalsInOrderPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalsInOrderRunUiApprovalsInOrderPostResponse(rsp)
 }
 
 // ApprovalsHistoryUiApprovalsListGetWithResponse request returning *ApprovalsHistoryUiApprovalsListGetResponse
@@ -69773,6 +70014,58 @@ func ParseApprovalsBadgeUiApprovalsBadgeGetResponse(rsp *http.Response) (*Approv
 	response := &ApprovalsBadgeUiApprovalsBadgeGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseApprovalsInOrderPlanUiApprovalsInOrderGetResponse parses an HTTP response from a ApprovalsInOrderPlanUiApprovalsInOrderGetWithResponse call
+func ParseApprovalsInOrderPlanUiApprovalsInOrderGetResponse(rsp *http.Response) (*ApprovalsInOrderPlanUiApprovalsInOrderGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ApprovalsInOrderPlanUiApprovalsInOrderGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseApprovalsInOrderRunUiApprovalsInOrderPostResponse parses an HTTP response from a ApprovalsInOrderRunUiApprovalsInOrderPostWithResponse call
+func ParseApprovalsInOrderRunUiApprovalsInOrderPostResponse(rsp *http.Response) (*ApprovalsInOrderRunUiApprovalsInOrderPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ApprovalsInOrderRunUiApprovalsInOrderPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

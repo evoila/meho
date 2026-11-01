@@ -113,7 +113,6 @@ from meho_backplane.connectors._shared.vcf_auth import (
     basic_auth_header,
     is_acceptable_auth_model,
 )
-from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.schemas import (
     AuthModel,
     FingerprintResult,
@@ -121,6 +120,7 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
 )
 from meho_backplane.connectors.vcf_fleet import locker as _locker
+from meho_backplane.connectors.vcf_fleet.lifecycle import FleetLifecycleOps
 from meho_backplane.connectors.vcf_fleet.product_certificate import (
     product_certificate_replace as _replace_certificate,
 )
@@ -172,7 +172,7 @@ _FLEET_ABOUT_PATH = "/lcm/lcops/api/v2/about"
 _FLEET_ENVIRONMENTS_PATH = "/lcm/lcops/api/v2/environments"
 
 
-class VcfFleetConnector(HttpConnector):
+class VcfFleetConnector(FleetLifecycleOps):
     """VCF Fleet 9.0 REST connector with HTTP Basic auth.
 
     Per-target credentials cached in :attr:`_creds` via the shared
@@ -395,14 +395,20 @@ class VcfFleetConnector(HttpConnector):
     # ------------------------------------------------------------------
     # Typed ops (T4 · #2304, Initiative #2266, and later)
     #
-    # Dispatched off the connector's HTTP Basic session as
-    # ``source_kind="typed"`` (no ingested rows, no spec dependency). The
-    # dispatcher rebinds these bound methods to the per-process connector
-    # instance and threads ``operator`` by name (see ``dispatch_typed``);
-    # ``operator`` reaches ``auth_headers`` so the per-target Basic
-    # credentials are read under the operator's identity.
-    # ``fleet.api_file.get`` (body in ``api_file.py``) reads the API
-    # descriptions the appliance serves so the vendor's files can be pinned.
+    # The audited Fleet read set — about/health probe + component
+    # inventory — dispatched off the connector's existing HTTP Basic
+    # session as ``source_kind="typed"`` (no ingested endpoint_descriptor
+    # rows, no Fleet-LCM spec dependency). The dispatcher rebinds these
+    # bound methods to the per-process connector instance and threads
+    # ``operator`` by name (see ``dispatch_typed``); ``operator`` is
+    # forwarded to ``_get_json`` so the credential loader reads the
+    # per-target Basic credentials under the operator's identity. All are
+    # read-only. The request, inventory sync and health ops are in lifecycle.py.
+    # The locker and product-certificate ops are in locker.py and
+    # product_certificate.py.
+    # ``fleet.api_file.get`` (``api_file_get`` below, body in ``api_file.py``)
+    # reads the API descriptions the appliance serves so the vendor's
+    # ``/lcm`` files can be pinned.
     # ------------------------------------------------------------------
 
     async def about(

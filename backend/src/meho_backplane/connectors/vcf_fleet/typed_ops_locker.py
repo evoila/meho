@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from meho_backplane.connectors.vcf_fleet._op_meta import FleetTypedOp
+from meho_backplane.connectors.vcf_fleet._typed_op import FleetTypedOp
 
 __all__ = ["FLEET_LOCKER_OPS", "FLEET_LOCKER_WHEN_TO_USE_BY_GROUP"]
 

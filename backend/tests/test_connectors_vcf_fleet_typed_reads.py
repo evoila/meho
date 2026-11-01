@@ -301,13 +301,19 @@ async def test_typed_ops_registered_with_no_ingested_rows(
 # ---------------------------------------------------------------------------
 
 
-def test_typed_reads_are_read_only_and_ungated() -> None:
-    """Every read-only typed op is safe and requires no approval; every change waits."""
-    reads = {op.op_id for op in FLEET_TYPED_OPS if "read-only" in op.tags}
-    assert {"fleet.about", "fleet.environment.list", "fleet.api_file.get"} <= reads
+def test_typed_ops_are_read_only_and_ungated() -> None:
+    """The reads of this file are safe, read-only, and require no approval.
+
+    Every other op is a read with the same rules, or a change that waits
+    for approval. The changes themselves are checked in
+    ``test_connectors_vcf_fleet_lifecycle.py`` and
+    ``test_connectors_vcf_fleet_locker.py``.
+    """
+    reads = {"fleet.about", "fleet.environment.list", "fleet.api_file.get"}
     for op in FLEET_TYPED_OPS:
-        if "read-only" not in op.tags:
-            assert op.safety_level != "safe" and op.requires_approval is True, op.op_id
+        if op.op_id not in reads:
+            if "read-only" not in op.tags:
+                assert op.safety_level != "safe" and op.requires_approval is True, op.op_id
             continue
         assert op.safety_level == "safe", op.op_id
         assert op.requires_approval is False, op.op_id

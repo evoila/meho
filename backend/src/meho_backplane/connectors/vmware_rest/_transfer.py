@@ -78,13 +78,14 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import httpx
 import structlog
 
+from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
 from meho_backplane.connectors._shared.pinned_transport import build_pinned_async_transport
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
     load_param_secret_data,
     strip_credential_value,
 )
-from meho_backplane.targets.ssrf_guard import TargetDestinationBlockedError, screen_and_resolve
+from meho_backplane.targets.ssrf_guard import TargetDestinationBlockedError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -518,7 +519,7 @@ async def copy_files(
     client = httpx.AsyncClient(
         timeout=_TIMEOUT,
         follow_redirects=False,
-        transport=build_pinned_async_transport(screen_and_resolve),
+        transport=build_pinned_async_transport(screen_dial_addresses),
     )
     try:
         base = _base_url(destination.base_url)

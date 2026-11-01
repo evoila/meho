@@ -104,7 +104,11 @@ from meho_backplane.agent.toolset import toolset_admits_runbook_execution
 from meho_backplane.agents.schemas import AgentDefinitionRead
 from meho_backplane.agents.service import AgentDefinitionService
 from meho_backplane.auth.agent_token import get_client_credentials_token
-from meho_backplane.auth.delegation import actor_delegation, resolve_actor_sub
+from meho_backplane.auth.delegation import (
+    actor_delegation,
+    delegated_operator,
+    resolve_actor_sub,
+)
 from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
@@ -923,6 +927,8 @@ class AgentInvoker:
         # whole life; every audit row its in-process tool calls produce records
         # operator_sub=human + actor_sub=agent. Keycloak has no delegation
         # token exchange, so MEHO synthesises the sub+act binding here.
+        # The loop's tool calls get the person narrowed to the agent's own
+        # limits (delegated_operator), so the stricter identity applies.
         #
         # Persist the durable run row *inside* the binding so a fail-closed
         # actor_delegation (empty identity_ref) raises before the row is
@@ -944,7 +950,7 @@ class AgentInvoker:
             task = self._launch_run(
                 run_id,
                 definition,
-                operator,
+                delegated_operator(operator),
                 inputs,
                 meta=AgentRunAuditMeta(model=model, provider=provider),
                 lease_owner=lease_owner,
@@ -1587,7 +1593,9 @@ class AgentInvoker:
             name=f"agent-heartbeat-{run_id}",
         )
         try:
-            async for event in self._runtime.stream_events(definition, operator, inputs, run_id):
+            async for event in self._runtime.stream_events(
+                definition, delegated_operator(operator), inputs, run_id
+            ):
                 if event.kind is AgentRunEventKind.FINAL:
                     terminal_output = _project_output(event.data.get("output"))
                 elif event.kind is AgentRunEventKind.ERROR:

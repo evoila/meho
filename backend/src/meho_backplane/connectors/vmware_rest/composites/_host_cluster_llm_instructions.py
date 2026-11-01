@@ -95,6 +95,68 @@ HOST_CLUSTER_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
             "On deleted, nothing more to do. On unchanged, the rule was already gone. On "
             "precondition_failed, rename the duplicate rules in vCenter so the name is "
             "unique, then call again. On still_present or timeout, read the rules again "
+            "before you retry. A VM-Host rule's groups stay; remove them with "
+            "cluster.drs_group.delete when no rule uses them."
+        ),
+    },
+    _P + "cluster.drs_group.members.set": {
+        "when_to_call": (
+            "Call to add VMs to, or remove VMs from, an existing DRS VM group, for example "
+            "when a new VM must follow a VM-Host rule. It does the same for hosts in a host "
+            "group. To make new groups with a rule, use cluster.drs_vm_host_rule.create."
+        ),
+        "preconditions": (
+            "cluster is a cluster moid. group_name is the exact name of a VM group or host "
+            "group on it (else group_not_found). add and remove are VM names for a VM group, "
+            "host names for a host group. Every name in add must be in the cluster (else "
+            "names_not_found, no change). Give at least one of add or remove. A person must "
+            "approve the change."
+        ),
+        "parameter_hints": {
+            "cluster": "Cluster moid, e.g. 'domain-c7'.",
+            "add": "Display names, not moids.",
+            "remove": "Display names; a name not in the group is skipped.",
+        },
+        "output_shape": (
+            "{status: updated|unchanged|invalid_request|group_not_found|names_not_found|"
+            "mismatch|timeout, cluster, cluster_name, group_name, group_kind: vm|host, rules: "
+            "[{kind, name, key, rule_type}], members_before: [{moid, name}], "
+            "member_count_before, added: [{moid, name}], removed: [{moid, name}], "
+            "already_members, not_members, not_found, member_count_after, members: [{moid, "
+            "name}], task, task_state, guidance}. members is the group read back after the "
+            "change. A vSphere error makes the call fail; it is not a status."
+        ),
+        "next_step": (
+            "On updated, check members. On unchanged, the group already had these members. "
+            "On names_not_found, fix the names in not_found and call again. On mismatch or "
+            "timeout, call again with the same names to check the group."
+        ),
+    },
+    _P + "cluster.drs_group.delete": {
+        "when_to_call": (
+            "Call to remove one DRS VM group or host group from a cluster, for example a "
+            "group left behind after cluster.drs_rule.delete. The VMs and hosts stay."
+        ),
+        "preconditions": (
+            "cluster is a cluster moid. group_name is the exact group name. No rule may use "
+            "the group: if one does, nothing changes (precondition_failed) and blockers name "
+            "the rules. A second person must always approve this delete."
+        ),
+        "parameter_hints": {
+            "cluster": "Cluster moid, e.g. 'domain-c7'.",
+            "group_name": "Exact name of the VM group or host group.",
+        },
+        "output_shape": (
+            "{status: deleted|unchanged|invalid_request|precondition_failed|still_present|"
+            "timeout, object: {kind, cluster, cluster_name, name, group_kind, members: "
+            "[{moid, name}], member_count}, blockers: [{kind: drs_rule, name, key, "
+            "rule_type}], task, task_state, guidance}. A vSphere error makes the call fail; "
+            "it is not a status."
+        ),
+        "next_step": (
+            "On deleted, nothing more to do. On unchanged, the group was already gone. On "
+            "precondition_failed, delete the rules in blockers with cluster.drs_rule.delete "
+            "first, then call again. On still_present or timeout, read the cluster again "
             "before you retry."
         ),
     },
@@ -102,12 +164,15 @@ HOST_CLUSTER_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
         "when_to_call": (
             "Call to make a set of VMs run on (or stay away from) a set of hosts in a "
             "cluster. It creates a VM group, a host group and the rule in one step. For a "
-            "VM-to-VM rule, use cluster.drs_rule.create."
+            "VM-to-VM rule, use cluster.drs_rule.create. With use_existing_groups=true it "
+            "puts the rule on two groups that already exist and makes no group."
         ),
         "preconditions": (
             "rule_name, vm_group_name and host_group_name must all be new on the cluster "
             "(else rule_exists or group_exists, no change). vms and hosts are display "
             "names in this cluster; at least one of each must be found. With "
+            "use_existing_groups=true, leave out vms and hosts; both groups must exist "
+            "(else group_not_found, no change). With "
             "mandatory=true, DRS and HA never break the rule, which can block "
             "maintenance mode."
         ),
@@ -116,14 +181,17 @@ HOST_CLUSTER_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
             "affine": "true: VMs run on these hosts. false: VMs stay away from them.",
         },
         "output_shape": (
-            "{status: created|rule_exists|group_exists|insufficient_vms|"
+            "{status: created|rule_exists|group_exists|group_not_found|insufficient_vms|"
             "insufficient_hosts|timeout, cluster, rule_name, vm_group_name, "
             "host_group_name, affine, mandatory, enabled, task, resolved_vms: [{vm, "
             "name}], resolved_hosts: [{host, name}], guidance}."
         ),
         "next_step": (
             "On created, check resolved_vms and resolved_hosts: names that were not found "
-            "are left out. On rule_exists or group_exists, pick new names. On timeout, "
+            "are left out. On rule_exists or group_exists, pick new names, or use "
+            "use_existing_groups=true to reuse the groups. On group_not_found, check the "
+            "group names. To change a group later, use cluster.drs_group.members.set. On "
+            "timeout, "
             "check the task with vmware.tasks.recent."
         ),
     },
@@ -300,11 +368,12 @@ HOST_CLUSTER_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
     _P + "host.service_control": {
         "when_to_call": (
             "Call to start, stop or restart one ESXi host service, and optionally set "
-            "when it starts. Only TSM-SSH (SSH), TSM (ESXi Shell), ntpd and ptpd are "
-            "allowed."
+            "when it starts. Only TSM-SSH (SSH), TSM (ESXi Shell), ntpd, ptpd, snmpd "
+            "(SNMP), sfcbd-watchdog (CIM) and slpd (SLP) are allowed."
         ),
         "preconditions": (
-            "service must be one of TSM-SSH, TSM, ntpd or ptpd; any other is refused "
+            "service must be one of TSM-SSH, TSM, ntpd, ptpd, snmpd, sfcbd-watchdog or "
+            "slpd; any other is refused "
             "(service_not_allowed, no change). On a vCenter target, host is required. "
             "Turn SSH off again when the work is done."
         ),
@@ -315,11 +384,12 @@ HOST_CLUSTER_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
         "output_shape": (
             "{status: applied|service_not_allowed|host_not_found|ambiguous_host|"
             "config_manager_unreadable|unsupported_host_target|host_required, host, "
-            "service, action, policy, policy_updated, allowed_services, candidate_hosts, "
-            "guidance, issues}."
+            "service, action, policy, policy_updated, service_state: {key, label, running, "
+            "policy}, allowed_services, candidate_hosts, guidance, issues}."
         ),
         "next_step": (
-            "On applied, the service changed. On ambiguous_host, call again with one of "
+            "On applied, service_state shows the service as read back. On ambiguous_host, "
+            "call again with one of "
             "candidate_hosts."
         ),
     },

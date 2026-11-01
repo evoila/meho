@@ -49,7 +49,7 @@ and the connector packages Initiative [#5060](https://github.com/evoila/meho/iss
 
 | Wave | Folders | Notes |
 |---|---|---|
-| 1 (VMware wheel) | `vmware_rest`, `nsx`, `sddc_manager`, `sddc_vcf5`, `vcf_automation`, `vra8`, `vcf_fleet`, `fleet_lcm`, `vcf_installer`, `vcf_logs`, `vrli8`, `vcf_operations`, `vrops8`, `vcd`, `holodeck`, `hcx`, `srm`, `vr`, `vro` | Plus one VMware shared folder for the VMware-only modules of `_shared/`, the three VMware profile files, their tests and their docs pages. |
+| 1 (VMware wheel) | `vmware_rest`, `nsx`, `sddc_manager`, `sddc_vcf5`, `vcf_automation`, `vra8`, `vcf_fleet`, `fleet_lcm`, `vcf_installer`, `vcf_cloud_builder`, `vcf_logs`, `vrli8`, `vcf_operations`, `vrops8`, `vcd`, `holodeck`, `hcx`, `srm`, `vr`, `vro` | Plus one VMware shared folder for the VMware-only modules of `_shared/`, the three VMware profile files, their tests and their docs pages. |
 | 1 (VMware wheel) | `salt` | `salt-raas` is the API of VMware Aria Automation Config, so it moves with VMware. |
 | 2 | `azure` | After the VMware wave. |
 | Private only | Fortinet | Never built in this repository. The open FortiGate pull request #5169 is not merged here. |

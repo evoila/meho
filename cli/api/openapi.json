@@ -12318,7 +12318,7 @@
           "ui-auth"
         ],
         "summary": "Ui Auth Login",
-        "description": "Mint a PKCE authorization URL and 302 the browser to Keycloak.\n\n``?return_to=<path>`` is the originally-requested path the\noperator was bounced from (the middleware writes it). Declared as\na typed FastAPI ``Query`` parameter so the OpenAPI document\nreflects the real query-string contract; the value is validated\nvia :func:`_safe_return_to` to block open-redirect abuse.",
+        "description": "Mint a PKCE authorization URL and 302 the browser to Keycloak.\n\n``?return_to=<path>`` is the originally-requested path the\noperator was bounced from (the middleware writes it). Declared as\na typed FastAPI ``Query`` parameter so the OpenAPI document\nreflects the real query-string contract; the value is validated\nvia :func:`_safe_return_to` to block open-redirect abuse.\n\n``?reason=session_ended`` is set when a session the browser still\nheld has ended. Then the route answers with a small page: one plain\nline (\"Your session ended. Please sign in again.\") and a \"Sign in\"\nbutton that starts the normal login with the same ``return_to``.\nAny other ``reason`` value is ignored.",
         "operationId": "ui_auth_login_ui_auth_login_get",
         "parameters": [
           {
@@ -12329,6 +12329,16 @@
               "type": "string",
               "nullable": true,
               "title": "Return To"
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Reason"
             }
           }
         ],
@@ -20104,6 +20114,91 @@
         }
       }
     },
+    "/ui/approvals/in-order": {
+      "get": {
+        "tags": [
+          "ui-approvals"
+        ],
+        "summary": "Approvals In Order Plan",
+        "description": "Render the in-order modal with the steps and a Start button.",
+        "operationId": "approvals_in_order_plan_ui_approvals_in_order_get",
+        "parameters": [
+          {
+            "name": "work_ref",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "title": "Work Ref"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-approvals"
+        ],
+        "summary": "Approvals In Order Run",
+        "description": "Run the steps in order; render what happened to each.",
+        "operationId": "approvals_in_order_run_ui_approvals_in_order_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_approvals_in_order_run_ui_approvals_in_order_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/approvals/badge": {
       "get": {
         "tags": [
@@ -25345,6 +25440,32 @@
         },
         "type": "object",
         "title": "Body_approval_reject_ui_approvals__request_id__reject_post"
+      },
+      "Body_approvals_in_order_run_ui_approvals_in_order_post": {
+        "properties": {
+          "work_ref": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Work Ref"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Reason",
+            "default": ""
+          },
+          "confirm_id": {
+            "type": "string",
+            "title": "Confirm Id",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "work_ref"
+        ],
+        "title": "Body_approvals_in_order_run_ui_approvals_in_order_post"
       },
       "Body_bulk_import_ui_topology_edges_bulk_post": {
         "properties": {
@@ -32641,7 +32762,7 @@
           "ended_at"
         ],
         "title": "OperationRunStatusResponse",
-        "description": "Poll response for ``GET /operations/runs/{handle}``.\n\n``result`` carries the full persisted ``OperationResult`` envelope once\nthe run reaches ``succeeded`` (the dropped-response-class fix); ``error``\ncarries the run-crash / reaper reason on a ``failed`` run. Both are\n``None`` while the run is still ``pending`` / ``running``."
+        "description": "Poll response for ``GET /operations/runs/{handle}``.\n\n``result`` carries the full persisted ``OperationResult`` envelope once\nthe run reaches ``succeeded`` (the dropped-response-class fix); ``error``\ncarries the run-crash / reaper reason on a ``failed`` run. Both are\n``None`` while the run is still ``pending`` / ``running``. ``result`` is\nalso ``None`` for anyone but the person who started the run\n(:func:`~meho_backplane.operations.operation_run_service.run_result_visible_to`)."
       },
       "OperationRunSummaryResponse": {
         "properties": {

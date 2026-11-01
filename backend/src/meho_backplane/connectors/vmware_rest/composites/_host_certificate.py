@@ -62,9 +62,17 @@ if TYPE_CHECKING:
     from meho_backplane.operations._preview import PreviewContext
 
 __all__ = [
+    "OP_GENERATE_CSR",
     "OP_ID_HOST_CERTIFICATE_CSR",
     "OP_ID_HOST_CERTIFICATE_INSTALL",
     "OP_ID_HOST_CERTIFICATE_RENEW",
+    "OP_INSTALL_SERVER_CERTIFICATE",
+    "OP_LIST_CA_CERTIFICATES",
+    "OP_LIST_CA_CRLS",
+    "OP_NOTIFY_AFFECTED_SERVICES",
+    "OP_REFRESH_CERTIFICATES",
+    "OP_REPLACE_CA_CERTIFICATES",
+    "OP_RETRIEVE_SERVICE_CONTENT",
     "certificate_preview",
     "host_certificate_csr_composite",
     "host_certificate_renew_composite",

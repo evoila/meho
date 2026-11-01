@@ -145,11 +145,19 @@ by that cadence instead of `retry_backoff_seconds`).
   threshold is this × the tick interval (60 s by default). Scales with
   the tick grid; the minimum of 2 keeps the threshold above the ordinary
   sleep-then-tick gap.
+- `CHECK_RUNNER_CLIENT_ID` / `CHECK_RUNNER_CLIENT_SECRET` with
+  `VAULT_ADDR` set — then `VAULT_CHECK_RUNNER_ROLE` must name a Vault
+  role other than `VAULT_OIDC_ROLE`, or the runner does not start
+  (`sensor_runner_refusal`). The loop logs `sensor_runner_refused` and
+  returns; the watchdog then reports the runner as stalled. Each Vault
+  read the runner makes also passes the tenant path check for the
+  sensor's tenant (`docs/codebase/connectors-vault-tenant-scope.md`).
 
 ## Log lines
 
 | Surface | Name | When |
 |---|---|---|
+| structlog `error` | `sensor_runner_refused` | the runner did not start: it has a service principal on a Vault install but no Vault role of its own (carries `reason`) |
 | structlog `error` | `checks_scheduler_stalled` | stall detection edge |
 | structlog `warning` | `checks_scheduler_recovered` | first completed tick after a stall (carries `stalled_for_seconds`) |
 | structlog `warning` | `checks_watchdog_check_failed` | one watchdog check raised; the loop keeps running |

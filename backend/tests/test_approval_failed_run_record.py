@@ -57,7 +57,7 @@ _TARGET_NAME = "kc-approval-run"
 _KC_HOST = "kc-approval-run.test.invalid"
 _KC_BASE_URL = f"https://{_KC_HOST}"
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000038a4")
-_PASSWORD_REF = "tenants/team-a/new-user-password"
+_PASSWORD_REF = f"tenants/{_TENANT_ID}/new-user-password"
 _PARAMS: dict[str, Any] = {
     "representation": {"username": "new-user"},
     "password_secret_ref": _PASSWORD_REF,

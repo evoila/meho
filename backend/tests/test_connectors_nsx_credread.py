@@ -7,7 +7,7 @@ Proves the **full** dispatch chain end to end with a real (default,
 non-injected) credential loader:
 
     dispatch(...)
-      -> _resolve_connector_instance -> NsxConnector()           # default loader
+      -> _resolve_connector_instance -> Nsx4Connector()          # default loader
       -> dispatch_ingested -> _request_json -> auth_headers
       -> _session_token -> load_session_credentials_from_vault   # the live loader
       -> load_basic_credentials (#941)                           # operator-context Vault read
@@ -25,7 +25,7 @@ in the **secret-free unit lane** (``pytest -n auto`` /
   default loader is exercised verbatim — *not* an injected stub. This is
   the load-bearing difference from ``test_connectors_nsx_auth.py``
   (which injects ``_stub_loader``): here the connector is constructed by
-  the resolver as ``NsxConnector()`` with no ``session_loader``, so the
+  the resolver as ``Nsx4Connector()`` with no ``session_loader``, so the
   default ``load_session_credentials_from_vault`` runs.
 * **NSX manager** — respx replays ``POST /api/session/create`` (returns
   ``X-XSRF-TOKEN`` + ``JSESSIONID`` cookie) and the op ``GET`` (returns
@@ -51,7 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.nsx import NsxConnector
+from meho_backplane.connectors.nsx import Nsx4Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
@@ -69,12 +69,11 @@ _CANARY_USERNAME = "svc-nsx-canary"
 _CANARY_PASSWORD = "p4ss-canary-must-not-leak-credread-nsx"
 
 #: The connector triple ``nsx-rest-4.2`` decodes to. Deliberately a
-#: 4.x label (not the VCF-9-aligned "9.0" class pin) so this test
-#: doubles as a regression guard that a standalone NSX-T 4.x target
-#: still dispatches through the widened-range NsxConnector (#1530):
-#: the test registers this triple against a fresh registry and the
-#: target's fingerprint reports ``version=4.2``, so the resolver binds
-#: via the ``>=4.0,<10.0`` SpecifierSet, not the class pin.
+#: 4.x label so this test doubles as a regression guard that a
+#: standalone NSX-T 4.x target dispatches through the NSX 4.x
+#: implementation (``Nsx4Connector``, #4396): the test registers this
+#: triple against a fresh registry and the target's fingerprint reports
+#: ``version=4.2``, so the resolver binds via its ``>=4.0,<9.0`` band.
 _PRODUCT = "nsx"
 _VERSION = "4.2"
 _IMPL_ID = "nsx-rest"
@@ -122,7 +121,7 @@ def _reset_module_state() -> Iterator[None]:
     """Reset dispatcher caches + connector registry around every test.
 
     The connector-instance cache must be clear so the resolver builds a
-    fresh ``NsxConnector()`` (default loader) for this test rather than
+    fresh ``Nsx4Connector()`` (default loader) for this test rather than
     reusing one a sibling test wired with an injected stub loader.
     """
     reset_dispatcher_caches()
@@ -131,7 +130,7 @@ def _reset_module_state() -> Iterator[None]:
         product=_PRODUCT,
         version=_VERSION,
         impl_id=_IMPL_ID,
-        cls=NsxConnector,
+        cls=Nsx4Connector,
     )
     yield
     reset_dispatcher_caches()
@@ -233,7 +232,7 @@ async def test_dispatch_executes_full_credread_chain_returns_ok(
     # Vault leaf: the in-process fake returns the canary creds via the
     # real ``load_basic_credentials`` -> ``vault_client_for_operator``
     # path. No session_loader is injected anywhere — the resolver builds
-    # ``NsxConnector()`` so the default loader runs.
+    # ``Nsx4Connector()`` so the default loader runs.
     fake = install_fake_client(
         monkeypatch,
         secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD},

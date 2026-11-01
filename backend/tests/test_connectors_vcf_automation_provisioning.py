@@ -46,6 +46,7 @@ from tests._vcfa_provisioning_support import (
     ORG,
     ORG_UUID,
     PASSWORD,
+    TENANT_ID,
     TENANT_TOKEN,
     by_filter,
     mount_logins,
@@ -516,6 +517,7 @@ async def test_role_create_right_with_comma_is_matched_by_full_scan(
 # Org user create
 # ---------------------------------------------------------------------------
 
+_PASSWORD_REF = f"tenants/{TENANT_ID}/vcfa-org-admin"
 _USERS = "/cloudapi/1.0.0/users"
 _ROLES = "/cloudapi/1.0.0/roles"
 _ORG_ROLE = {"id": "urn:vcloud:role:r1", "name": "Custom Org Admin"}
@@ -523,7 +525,7 @@ _USER_PARAMS = {
     "org": "example-org",
     "username": "org-admin",
     "role": "Custom Org Admin",
-    "password_secret_ref": "example/vcfa-org-admin",
+    "password_secret_ref": _PASSWORD_REF,
 }
 
 
@@ -561,7 +563,7 @@ async def test_user_create_created_password_from_vault_not_in_result(
         headers = route.calls.last.request.headers
         assert headers["X-VMWARE-VCLOUD-TENANT-CONTEXT"] == ORG_UUID
         assert headers["X-VMWARE-VCLOUD-AUTH-CONTEXT"] == "example-org"
-    assert vault_secret["_last_ref"] == ("example/vcfa-org-admin", "secret")
+    assert vault_secret["_last_ref"] == (_PASSWORD_REF, "secret")
     assert PASSWORD not in json.dumps(result)
 
 

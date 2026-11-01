@@ -167,6 +167,7 @@ from meho_backplane.settings import get_settings
 
 __all__ = [
     "run_one_sensor_tick",
+    "sensor_runner_refusal",
     "start_sensor_runner",
     "stop_sensor_runner",
 ]
@@ -313,7 +314,10 @@ async def _sensor_operator(snap: _SensorSnapshot) -> Operator:
     internal-only marker (#2757) that routes its Vault JWT logins to
     ``vault_check_runner_role`` when an operator has provisioned a dedicated
     bounded role; unset, that marker is a no-op and the login keeps
-    ``vault_oidc_role``. It is the *only* site that sets the marker.
+    ``vault_oidc_role``. The inbound event intake
+    (:func:`~meho_backplane.events.ingest.service._build_ingest_operator`)
+    is the only other site that sets the marker: it presents the same
+    runner token, so it must log in under the same role.
     """
     return Operator(
         sub=snap.identity_sub,
@@ -737,6 +741,35 @@ async def _claim_and_spawn_due() -> tuple[bool, int]:
     return (True, dispatched)
 
 
+def sensor_runner_refusal() -> str | None:
+    """Return why the runner must not start, or ``None`` when it may start.
+
+    The runner reads secrets for every tenant with one identity. With a
+    service principal (``CHECK_RUNNER_CLIENT_ID`` / ``_SECRET``) on an
+    install that uses Vault (``VAULT_ADDR`` set), that identity needs its own
+    Vault role, bounded to the secrets Sensors read. So the runner refuses to
+    start when ``VAULT_CHECK_RUNNER_ROLE`` is unset or names the shared
+    ``VAULT_OIDC_ROLE``. Without a principal the runner has no token to log
+    in to Vault with, and a Vault-free install has nothing to bound, so both
+    start as before.
+    """
+    settings = get_settings()
+    if not (settings.check_runner_client_id and settings.check_runner_client_secret):
+        return None
+    if settings.vault_addr is None:
+        return None
+    role = (settings.vault_check_runner_role or "").strip()
+    if role and role != settings.vault_oidc_role:
+        return None
+    return (
+        "the check runner has a service principal (CHECK_RUNNER_CLIENT_ID) on a "
+        "Vault install, but VAULT_CHECK_RUNNER_ROLE does not name a role of its "
+        "own. Create a Vault role bounded to the secrets Sensors read and set "
+        "VAULT_CHECK_RUNNER_ROLE to it (docs/cross-repo/vault-provisioning.md, "
+        '"Bounding the check-runner principal").'
+    )
+
+
 async def _runner_loop() -> None:
     """The forever loop: sleep one cadence, tick, repeat.
 
@@ -747,7 +780,15 @@ async def _runner_loop() -> None:
     ``except`` so a transient failure (DB blip, advisory-lock query error) is
     logged and the loop continues; ``CancelledError`` propagates so lifespan
     shutdown stops the task cleanly.
+
+    The loop does not start when :func:`sensor_runner_refusal` gives a
+    reason: it logs ``sensor_runner_refused`` and returns, so no Sensor is
+    evaluated and the watchdog reports the runner as stalled.
     """
+    refusal = sensor_runner_refusal()
+    if refusal is not None:
+        _log().error("sensor_runner_refused", reason=refusal)
+        return
     interval = get_settings().sensor_runner_tick_interval_seconds
     _log().info("sensor_runner_started", interval_seconds=interval)
     while True:

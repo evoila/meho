@@ -171,6 +171,8 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vcenter.appliance.deploy",
     "vmware.composite.vcenter.install",
     "vmware.composite.vcenter.deployment.answer",
+    # Move a VM to another vCenter: dangerous + approval.
+    "vmware.composite.vm.migrate_cross_vcenter",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -354,6 +356,10 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
         "meho_backplane.connectors.vmware_rest.composites._vcenter_answer."
         "vcenter_deployment_answer_composite"
     ),
+    "vmware.composite.vm.migrate_cross_vcenter": (
+        "meho_backplane.connectors.vmware_rest.composites._vm_cross_vcenter."
+        "vm_migrate_cross_vcenter_composite"
+    ),
     "vmware.composite.guest.customization_spec.create": (
         "meho_backplane.connectors.vmware_rest.composites._write."
         "guest_customization_spec_create_composite"
@@ -473,6 +479,7 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vcenter.appliance.deploy": "vcenter_install",
     "vmware.composite.vcenter.install": "vcenter_install",
     "vmware.composite.vcenter.deployment.answer": "vcenter_install",
+    "vmware.composite.vm.migrate_cross_vcenter": "vm",
     "vmware.composite.host.evacuate": "host",
     "vmware.composite.host.maintenance.exit": "host",
     "vmware.composite.host.detach_from_vds": "host",
@@ -1190,6 +1197,16 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "answer_not_allowed",
             "answer_failed",
             "answer_unknown",
+        },
+        # Move a VM to another vCenter: a vendor job, accepted at once.
+        "vmware.composite.vm.migrate_cross_vcenter": {
+            "accepted",
+            "already_running",
+            "not_found",
+            "invalid_request",
+            "certificate_mismatch",
+            "destination_unreachable",
+            "destination_login_failed",
         },
     }
     for op_id, expected_values in expected_status_values.items():

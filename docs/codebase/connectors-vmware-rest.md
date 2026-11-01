@@ -2536,6 +2536,39 @@ same dispatch path as MCP. The VM name is resolved to its id on the client
 through the typed `vmware.vm.info` read, so the commands work before the
 catalog is ingested, and the approval names the VM id.
 
+### VM security: virtual TPM and encryption
+
+Three changes add or remove a virtual TPM and encrypt or decrypt a VM
+(`#4337`). vCenter's REST API has no call for them, so they use the VIM API
+as VI-JSON: read the VM (`RetrievePropertiesEx`), run one
+`VirtualMachine.ReconfigVM_Task` through the governed write seam
+(`_write._write_vmomi_sub_op`), poll the task, and read the VM again to
+return its new state. They are on both catalogs (`vmware-rest-8.0` and
+`vmware-rest-9.0`), wait for approval, and need no catalog ingest. Each takes
+the VM id (`vm`) only, so after approval the change runs on the VM the
+approver saw. All three need the VM powered off and stop with
+`precondition_failed` before any write when it is on. A VM already in the
+asked state answers `unchanged` and nothing is sent.
+
+| Operation | What it does | Returns | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.composite.vm.vtpm.add` | Adds a `VirtualTPM` device (`deviceChange` add). Checks first that the VM uses EFI firmware and hardware version 14 or newer. vCenter makes the keys from the default key provider. | `status` (`added`, `unchanged`, ...), the VM name and power state, the new vTPM (`key`, `label`) | `dangerous` | 8.0, 9.x |
+| `vmware.composite.vm.vtpm.remove` | Removes the VM's `VirtualTPM` device (`deviceChange` remove). The keys the guest kept in it (for example BitLocker keys) are lost. | the teardown envelope: `status` (`removed`, `unchanged`, `still_present`, ...), `object` (VM, vTPM, what is lost) | `destructive` | 8.0, 9.x |
+| `vmware.composite.vm.encryption.set` | `action=encrypt` or `decrypt`: gives the VM home (`vmProfile`) and every disk (`profile`) the storage policy `storage_policy_id`. Encrypt sends no `crypto`, so vCenter makes new keys from the default key provider; it is refused for a VM with snapshots. Decrypt sends `CryptoSpecDecrypt` for the VM and for each encrypted disk. | `status` (`encrypted`, `decrypted`, `unchanged`, `not_confirmed`, ...), `before` and `after`: whether the VM home and each disk are encrypted, and the key provider id | `dangerous` | 8.0, 9.x |
+
+The answers carry no key material: no key id, no vTPM certificate, only
+whether a part is encrypted and the id of the key provider. The vTPM remove
+uses the plan-then-act seam of `_teardown.py`: one read-only plan feeds the
+approval-card `blast_radius` (`object`, `children`, `irreversibility`) and
+the handler. A person calls `preview_operation` first, and an agent is always
+refused. The add and the encryption change have approval previews that show
+the VM, its state now, and whether the call would stop before the change.
+Code: `composites/_vm_security.py` (shared reads and the reconfigure step),
+`_vm_vtpm.py`, `_vm_encryption.py` and `_vm_security_schemas.py`. The
+sub-operation list `_vm_security._VIM_SUB_OPS_VM_SECURITY` is pinned by the
+reconcile lane against the pinned `vi-json.yaml`. Tests:
+`test_connectors_vmware_rest_composites_vm_security.py`.
+
 ### Shared disks for WSFC/FCI — bus-sharing, eagerzeroedthick, shared-attach (#3256)
 
 A Windows Server Failover Cluster (WSFC) / SQL FCI needs shared disks that

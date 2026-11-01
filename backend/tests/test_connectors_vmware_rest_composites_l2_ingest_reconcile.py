@@ -1337,6 +1337,7 @@ from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
     _snapshot_cleanup,
     _teardown,
     _teardown_network,
+    _vm_security,
 )
 
 _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
@@ -1457,6 +1458,15 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
             "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
             "POST:/ContainerView/{moId}/DestroyView",
             "POST:/SearchIndex/{moId}/FindByInventoryPath",
+        },
+    ),
+    # VM security (#4337): vTPM add / remove and encrypt / decrypt share the VM
+    # read and one ReconfigVM_Task.
+    "_VIM_SUB_OPS_VM_SECURITY": (
+        _vm_security,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualMachine/{moId}/ReconfigVM_Task",
         },
     ),
 }

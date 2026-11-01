@@ -4910,7 +4910,7 @@ approval.
 
 | Operation | Risk | Vendor call | What it returns | Versions |
 |---|---|---|---|---|
-| `vmware.composite.vsan.cluster.configure` | `dangerous`, waits for approval | vSAN `VsanVcClusterConfigSystem.VsanClusterReconfig` (`vsanClusterConfig`, `dataEfficiencyConfig`, `perfsvcConfig`) | `accepted` with the vCenter task id and the status read (`vmware.task.info`); `already_running` with the running vSAN job | 8.0, 9.x |
+| `vmware.composite.vsan.cluster.configure` | `dangerous`, waits for approval | vSAN `VsanVcClusterConfigSystem.VsanClusterReconfig` (`vsanClusterConfig`, `dataEfficiencyConfig`, `perfsvcConfig`) | `accepted` with the vCenter task id and the status read (`vmware.tasks.recent`); `already_running` with the running vSAN job | 8.0, 9.x |
 | `vmware.composite.vsan.disk.claim` | `dangerous`, waits for approval | vSAN `VimClusterVsanVcDiskManagementSystem.VsanAddStoragePoolDisk` (ESA) or `.InitializeDiskMappings` (OSA); VIM `HostVsanSystem.QueryDisksForVsan` | `claimed` with one row per disk, read again after the task | 8.0, 9.x |
 | `vmware.composite.vsan.disk.wipe` | `destructive`, a person only, after a preview | VIM `HostStorageSystem.UpdateDiskPartitions` (empty partition spec); vSAN `VsanSystemEx.VsanHostWipeDisk` and `.VsanHostQueryWipeDisk` (secure wipe) | `wiped` with one step per disk and the disks read again | 8.0, 9.x |
 | `vmware.composite.vsan.encryption.set` | `dangerous`, waits for approval | vSAN `VsanVcClusterConfigSystem.VsanClusterReconfig` (`dataEncryptionConfig`, `dataInTransitEncryptionConfig`) | like `vsan.cluster.configure` | 8.0, 9.x |
@@ -4922,7 +4922,7 @@ needed. All five are registered on `vmware-rest-8.0` and `vmware-rest-9.0`,
 in the group `vsan`.
 
 **How the vSAN calls are sent.** Each vSAN method is a `VsanMethod` constant
-in `composites/_vsan_common.py` and goes through
+in `composites/_vsan_config_common.py` and goes through
 `VmwareRestConnector._post_vsan`: VI-JSON `/vsan/<Type>/<moId>/<Method>` on
 vCenter 9.x, SOAP to `/vsanHealth` on vCenter 8.0. For the SOAP call,
 `soap_vsan.py` writes the data objects of the request as nested XML: one
@@ -4934,14 +4934,15 @@ The object ids are fixed: `vsan-cluster-config-system`,
 `host-<N>` (the vendor reference page of `VsanSystemEx`).
 `HostVsanSystem.QueryDisksForVsan` has another VI-JSON path per release:
 `/HostVsanSystem/...` in the 8.0 files and `/vsan/HostVsanSystem/...` from
-9.0 on. `_vsan_common.query_disks_for_vsan` picks the one of the target.
+9.0 on. `_vsan_config_common.query_disks_for_vsan` picks the one of the target.
 
 **Vendor jobs** (`vsan.cluster.configure`, `vsan.encryption.set`). vSAN can
 take a long time: a space-efficiency or encryption change writes all data
 again. So these two answer as soon as vSAN accepted the job:
 
 - The answer says `accepted`, gives the vCenter task id, and names the status
-  read `vmware.task.info` with that id. It never says the work is done.
+  read `vmware.tasks.recent`. The caller finds the task id in its list. It
+  never says the work is done.
 - Before a start, the operation reads the cluster's recent tasks. When a
   vSAN job (a task whose `descriptionId` or `name` has "vsan" in it) is
   queued or running, it returns that task as `already_running` and starts
@@ -4951,11 +4952,10 @@ again. So these two answer as soon as vSAN accepted the job:
   async run handle (when it used `async: true`, see
   `async-governed-dispatch.md`), or `vmware.tasks.recent`. Calling again is
   safe too: a running job comes back as `already_running`.
-- The status read `vmware.task.info` comes with the host power changes
-  (#4350). It gives the task state, the progress and the vendor's error
-  text. It logs in again when the login expired, and says
-  `not_reachable` (not `failed`) when vCenter does not answer. MEHO keeps no
-  job state between calls.
+- The status read `vmware.tasks.recent` gives the state, the progress and
+  the vendor's error text of each recent task. A later change switches the
+  status read to a read of one task by its id. MEHO keeps no job state
+  between calls.
 
 **Claim.** The handler reads the host and asks vSAN about the named disks
 (`QueryDisksForVsan`). It sends nothing unless every disk is `eligible`:

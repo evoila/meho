@@ -28,7 +28,7 @@ import respx
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest.composites import (
     _vsan_cluster,
-    _vsan_common,
+    _vsan_config_common,
     _vsan_disk_claim,
 )
 from meho_backplane.settings import get_settings
@@ -65,7 +65,7 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 @pytest.fixture(autouse=True)
 def _gate(monkeypatch: pytest.MonkeyPatch) -> GateRecorder:
     recorder = GateRecorder()
-    monkeypatch.setattr(_vsan_common, "enforce_subop_policy", recorder)
+    monkeypatch.setattr(_vsan_config_common, "enforce_subop_policy", recorder)
     monkeypatch.setattr(_vsan_disk_claim, "_TASK_TIMEOUT_SECONDS", 5.0)
     return recorder
 

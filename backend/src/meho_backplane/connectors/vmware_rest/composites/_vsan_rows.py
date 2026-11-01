@@ -19,13 +19,7 @@ from meho_backplane.connectors.vmware_rest.composites._vsan_cluster import (
     vsan_encryption_rekey_composite,
     vsan_encryption_set_composite,
 )
-from meho_backplane.connectors.vmware_rest.composites._vsan_disk_claim import (
-    vsan_disk_claim_composite,
-)
-from meho_backplane.connectors.vmware_rest.composites._vsan_disk_wipe import (
-    vsan_disk_wipe_composite,
-)
-from meho_backplane.connectors.vmware_rest.composites._vsan_schemas import (
+from meho_backplane.connectors.vmware_rest.composites._vsan_config_schemas import (
     VSAN_CLUSTER_CONFIGURE_PARAMETER_SCHEMA,
     VSAN_CLUSTER_JOB_RESPONSE_SCHEMA,
     VSAN_DISK_CLAIM_PARAMETER_SCHEMA,
@@ -35,6 +29,12 @@ from meho_backplane.connectors.vmware_rest.composites._vsan_schemas import (
     VSAN_ENCRYPTION_REKEY_PARAMETER_SCHEMA,
     VSAN_ENCRYPTION_REKEY_RESPONSE_SCHEMA,
     VSAN_ENCRYPTION_SET_PARAMETER_SCHEMA,
+)
+from meho_backplane.connectors.vmware_rest.composites._vsan_disk_claim import (
+    vsan_disk_claim_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._vsan_disk_wipe import (
+    vsan_disk_wipe_composite,
 )
 
 __all__ = ["VSAN_COMPOSITES", "VSAN_GROUP_KEY", "VSAN_WHEN_TO_USE"]
@@ -48,7 +48,7 @@ VSAN_WHEN_TO_USE: Final = (
     "(vsan.disk.claim, dangerous); wipe disks so vSAN can claim them (vsan.disk.wipe, "
     "destructive); turn data-at-rest or data-in-transit encryption on or off "
     "(vsan.encryption.set, dangerous) and rekey it (vsan.encryption.rekey, dangerous). "
-    "Follow a started vSAN job with vmware.task.info. For vSAN health, use "
+    "Follow a started vSAN job with vmware.tasks.recent. For vSAN health, use "
     "vmware.host.vsan_health. Pair with 'cluster' and 'host' to get the ids first."
 )
 
@@ -62,14 +62,13 @@ _JOB_LOST_REPLY: Final = (
 
 _JOB_OUTPUT: Final = (
     "{status: accepted|already_running|not_found|invalid_request, cluster, cluster_name, "
-    "requested, task, status_read: {op_id: vmware.task.info, params: {task}}, guidance}. "
+    "requested, task, status_read: {op_id: vmware.tasks.recent, params: {}}, guidance}. "
     "accepted means vSAN took the job; it does not mean the work is done."
 )
 
 _JOB_NEXT: Final = (
-    "Call status_read (vmware.task.info with the task id) until the task state is success or "
-    "error. It says not_reachable when vCenter does not answer; that is not a failure, read "
-    "again later. Then read the vSAN health (vmware.host.vsan_health)."
+    "Call status_read (vmware.tasks.recent) and find the task id in the list until its state "
+    "is success or error. Then read the vSAN health (vmware.host.vsan_health)."
 )
 
 _CONFIGURE_LLM: Final[dict[str, Any]] = {
@@ -126,7 +125,7 @@ _REKEY_LLM: Final[dict[str, Any]] = {
         "error with vCenter's fault type and text."
     ),
     "next_step": (
-        "On timeout follow the task with vmware.task.info; do not start the rekey again. "
+        "On timeout follow the task with vmware.tasks.recent; do not start the rekey again. "
         "Then read the vSAN health (vmware.host.vsan_health)."
     ),
 }

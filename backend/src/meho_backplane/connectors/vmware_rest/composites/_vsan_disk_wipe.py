@@ -28,7 +28,7 @@ from meho_backplane.connectors.vmware_rest.composites._teardown import (
     blast_radius,
 )
 from meho_backplane.connectors.vmware_rest.composites._teardown_reads import read_object
-from meho_backplane.connectors.vmware_rest.composites._vsan_common import (
+from meho_backplane.connectors.vmware_rest.composites._vsan_config_common import (
     VSAN_HOST_QUERY_WIPE_DISK,
     VSAN_HOST_WIPE_DISK,
     disk_results,
@@ -270,8 +270,13 @@ async def plan_disk_wipe(
     plan = TeardownPlan(
         object=obj,
         present=True,
+        # The preview shows the first LIST_CAP disks; the wipe runs on all of them.
         children=children[:LIST_CAP],
-        context={"storage_system": storage_system, "vsan_system": vsan_system},
+        context={
+            "storage_system": storage_system,
+            "vsan_system": vsan_system,
+            "disks": children,
+        },
     )
     plan.blockers = _wipe_blockers(names, by_name, vmfs, secure)
     if plan.blockers:
@@ -337,7 +342,7 @@ async def _wipe_partitions(
     host = plan.object["host"]
     steps = [
         {"disk": child["name"], "device_path": child["device_path"], "status": "not_run"}
-        for child in plan.children
+        for child in plan.context["disks"]
     ]
     for step in steps:
         try:
@@ -416,7 +421,7 @@ async def _wipe_secure(
             guidance=(
                 f"the secure wipe task {outcome.task} did not end within "
                 f"{int(_TASK_TIMEOUT_SECONDS)} seconds; a secure wipe can take hours. Follow "
-                "it with vmware.task.info. Do not start it again."
+                "it with vmware.tasks.recent. Do not start it again."
             ),
         )
         timed_out["issues"] = [_task_timeout_issue("VsanHostWipeDisk", outcome.task)]

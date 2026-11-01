@@ -51,7 +51,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CLUSTER_MO_TYPE",
     "HOST_MO_TYPE",
-    "TASK_INFO_OP_ID",
+    "STATUS_READ_OP_ID",
     "VSAN_ADD_STORAGE_POOL_DISK",
     "VSAN_CLUSTER_RECONFIG",
     "VSAN_ENCRYPTED_CLUSTER_REKEY",
@@ -74,8 +74,9 @@ CLUSTER_MO_TYPE: Final = "ClusterComputeResource"
 HOST_MO_TYPE: Final = "HostSystem"
 _TASK_MO_TYPE: Final = "Task"
 
-#: The status read of a vSAN job: one vCenter task by its id.
-TASK_INFO_OP_ID: Final = "vmware.task.info"
+#: The status read of a vSAN job: the recent vCenter tasks. The caller finds
+#: the task by its id in the list.
+STATUS_READ_OP_ID: Final = "vmware.tasks.recent"
 
 VSAN_CLUSTER_RECONFIG = VsanMethod(
     mo_type="VsanVcClusterConfigSystem",
@@ -142,9 +143,9 @@ def host_vsan_system_ex(method: VsanMethod, host: str) -> VsanMethod:
     return dataclasses.replace(method, moid=method.moid.replace("{host}", number))
 
 
-def status_read(task: str) -> dict[str, Any]:
-    """The read that follows a vSAN job: ``vmware.task.info`` with the task id."""
-    return {"op_id": TASK_INFO_OP_ID, "params": {"task": task}}
+def status_read() -> dict[str, Any]:
+    """The read that follows a vSAN job: ``vmware.tasks.recent`` (it takes no task id)."""
+    return {"op_id": STATUS_READ_OP_ID, "params": {}}
 
 
 async def send_vsan_change(

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
-from meho_backplane.connectors.vmware_rest.composites._vsan_common import (
+from meho_backplane.connectors.vmware_rest.composites._vsan_config_common import (
     HOST_MO_TYPE,
     VSAN_ADD_STORAGE_POOL_DISK,
     VSAN_INITIALIZE_DISK_MAPPINGS,
@@ -176,7 +176,7 @@ async def _claim_result(
             guidance=(
                 f"the claim task {outcome.task} did not end within "
                 f"{int(_TASK_TIMEOUT_SECONDS)} seconds; it may still end. Follow it with "
-                "vmware.task.info, then call this operation again: it sends nothing when "
+                "vmware.tasks.recent, then call this operation again: it sends nothing when "
                 "vSAN already uses the disks."
             ),
         )

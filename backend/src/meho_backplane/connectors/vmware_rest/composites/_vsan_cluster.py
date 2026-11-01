@@ -16,7 +16,7 @@
 The first two are vendor jobs: vSAN can take a long time (a space-efficiency
 or encryption change writes the disks again). They answer ``accepted`` with
 the vCenter task id as soon as vSAN took the job, and name the status read
-(``vmware.task.info``). Before a start they look for a vSAN job that still
+(``vmware.tasks.recent``). Before a start they look for a vSAN job that still
 runs on the cluster; when they find one they return it (``already_running``)
 and start nothing.
 
@@ -30,7 +30,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.vmware_rest.composites._teardown_reads import moid_problem
-from meho_backplane.connectors.vmware_rest.composites._vsan_common import (
+from meho_backplane.connectors.vmware_rest.composites._vsan_config_common import (
     VSAN_CLUSTER_RECONFIG,
     VSAN_ENCRYPTED_CLUSTER_REKEY,
     cluster_moref,
@@ -135,7 +135,7 @@ def _answer(
         "cluster_name": cluster_name,
         "requested": requested,
         "task": task,
-        "status_read": status_read(task) if task is not None else None,
+        "status_read": status_read() if task is not None else None,
         "guidance": guidance,
     }
 
@@ -262,7 +262,7 @@ async def _start_reconfigure(
             task=running,
             guidance=(
                 f"a vSAN job ({running}) already runs on cluster {cluster!r}. Nothing new was "
-                "started. Follow it with vmware.task.info, then read the cluster again and "
+                "started. Follow it with vmware.tasks.recent, then read the cluster again and "
                 "decide whether this change is still needed."
             ),
         )
@@ -290,7 +290,8 @@ async def _start_reconfigure(
         task=task,
         guidance=(
             f"vSAN accepted the {kind} change as task {task}; it is not done yet. Read "
-            "vmware.task.info with this task id until it ends. Do not start the change again."
+            "vmware.tasks.recent and find this task id until it ends. Do not start the "
+            "change again."
         ),
     )
 
@@ -458,7 +459,7 @@ async def vsan_encryption_rekey_composite(
             guidance=(
                 f"the rekey task {outcome.task} did not end within "
                 f"{int(_TASK_TIMEOUT_SECONDS)} seconds; a deep rekey writes all data again and "
-                "can take hours. Follow it with vmware.task.info. Do not start it again."
+                "can take hours. Follow it with vmware.tasks.recent. Do not start it again."
             ),
         )
         timed_out["issues"] = [_task_timeout_issue("VsanEncryptedClusterRekey_Task", outcome.task)]

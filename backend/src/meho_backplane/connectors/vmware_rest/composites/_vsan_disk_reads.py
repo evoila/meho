@@ -17,7 +17,7 @@ from meho_backplane.connectors.vmware_rest.composites._teardown_reads import (
     moid_problem,
     read_object,
 )
-from meho_backplane.connectors.vmware_rest.composites._vsan_common import (
+from meho_backplane.connectors.vmware_rest.composites._vsan_config_common import (
     HOST_MO_TYPE,
     query_disks_for_vsan,
 )

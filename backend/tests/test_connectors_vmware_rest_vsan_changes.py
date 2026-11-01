@@ -28,22 +28,23 @@ import pytest
 
 from meho_backplane.connectors.vmware_rest.composites import (
     _vsan_cluster,
-    _vsan_common,
+    _vsan_config_common,
     _vsan_disk_claim,
     _vsan_disk_wipe,
     _write,
 )
-from meho_backplane.connectors.vmware_rest.composites._vsan_common import (
+from meho_backplane.connectors.vmware_rest.composites._teardown import LIST_CAP
+from meho_backplane.connectors.vmware_rest.composites._vsan_config_common import (
     VSAN_HOST_WIPE_DISK,
     host_vsan_system_ex,
     vsan_op_id,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops import VMWARE_TYPED_OPS
 from meho_backplane.operations._preview import blast_radius_missing_reason
 from meho_backplane.operations._validate import validate_params
 from tests._vmware_teardown_fake import GateRecorder, moref, operator, parked, preview_ctx
 from tests._vmware_vsan_fake import CLUSTER, HOST, STORAGE_SYSTEM, VSAN_SYSTEM, VsanFake
 
-_CONFIGURE_OP = "vmware.composite.vsan.cluster.configure"
 _RECONFIG_SUB_OP = "POST:/vsan/VsanVcClusterConfigSystem/{moId}/VsanClusterReconfig"
 _DISK_A = "naa.0000000000000a"
 _DISK_B = "naa.0000000000000b"
@@ -54,7 +55,7 @@ _DISK_C = "naa.0000000000000c"
 def gate(monkeypatch: pytest.MonkeyPatch) -> GateRecorder:
     """One recorder for both seams: the vSAN changes and the VIM writes."""
     recorder = GateRecorder()
-    monkeypatch.setattr(_vsan_common, "enforce_subop_policy", recorder)
+    monkeypatch.setattr(_vsan_config_common, "enforce_subop_policy", recorder)
     monkeypatch.setattr(_write, "enforce_subop_policy", recorder)
     return recorder
 
@@ -92,7 +93,7 @@ async def test_configure_sends_the_spec_in_vendor_order_and_answers_accepted(
 
     assert out["status"] == "accepted"
     assert out["task"] == "task-1"
-    assert out["status_read"] == {"op_id": "vmware.task.info", "params": {"task": "task-1"}}
+    assert out["status_read"] == {"op_id": "vmware.tasks.recent", "params": {}}
     assert out["cluster_name"] == "cluster-a"
     assert "not done yet" in out["guidance"]
     [(method, body)] = conn.vsan_calls
@@ -128,6 +129,11 @@ async def test_configure_sends_the_spec_in_vendor_order_and_answers_accepted(
     assert gate.calls[0]["params"]["cluster"] == CLUSTER
 
 
+def test_status_read_is_a_registered_typed_op() -> None:
+    """The status read named in the answers exists on both vmware-rest connectors."""
+    assert _vsan_config_common.STATUS_READ_OP_ID in {op.op_id for op in VMWARE_TYPED_OPS}
+
+
 async def test_configure_returns_a_running_vsan_job_and_starts_nothing(
     gate: GateRecorder,
 ) -> None:
@@ -141,7 +147,7 @@ async def test_configure_returns_a_running_vsan_job_and_starts_nothing(
 
     assert out["status"] == "already_running"
     assert out["task"] == "task-78"
-    assert out["status_read"]["params"] == {"task": "task-78"}
+    assert out["status_read"]["op_id"] == "vmware.tasks.recent"
     assert conn.vsan_calls == []
     assert gate.calls == []
 
@@ -182,7 +188,7 @@ async def test_configure_returns_a_parked_gate_and_sends_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     waiting = parked(_RECONFIG_SUB_OP)
-    monkeypatch.setattr(_vsan_common, "enforce_subop_policy", GateRecorder(waiting))
+    monkeypatch.setattr(_vsan_config_common, "enforce_subop_policy", GateRecorder(waiting))
     conn = VsanFake()
     conn.add_cluster()
     out = await _run(
@@ -308,7 +314,7 @@ async def test_rekey_poll_timeout_answers_timeout_with_the_task(gate: GateRecord
     out = await _run(_vsan_cluster.vsan_encryption_rekey_composite, conn, cluster=CLUSTER)
     assert out["status"] == "timeout"
     assert out["task"] == "task-1"
-    assert out["status_read"]["op_id"] == "vmware.task.info"
+    assert out["status_read"]["op_id"] == "vmware.tasks.recent"
     assert out["issues"][0]["severity"] == "error"
 
 
@@ -574,6 +580,25 @@ async def test_wipe_erases_each_partition_table_in_turn(gate: GateRecorder) -> N
     assert [row["name"] for row in out["disks_after"]] == [_DISK_A, _DISK_B]
 
 
+async def test_wipe_of_more_disks_than_the_preview_shows_wipes_every_disk(
+    gate: GateRecorder,
+) -> None:
+    conn = VsanFake()
+    conn.add_host()
+    names = [f"naa.{n:014d}" for n in range(LIST_CAP + 5)]
+    for name in names:
+        conn.add_disk(name, "ineligible", partitions=1)
+    out = await _run(_vsan_disk_wipe.vsan_disk_wipe_composite, conn, host=HOST, disks=names)
+
+    assert out["status"] == "wiped"
+    assert len(out["disks"]) == LIST_CAP
+    assert [s["disk"] for s in out["steps"]] == names
+    assert [s["status"] for s in out["steps"]] == ["done"] * len(names)
+    assert [body["devicePath"] for _, body in conn.calls_to("UpdateDiskPartitions")] == [
+        f"/vmfs/devices/disks/{name}" for name in names
+    ]
+
+
 async def test_wipe_failure_at_step_two_lists_what_ran_and_what_did_not(
     gate: GateRecorder,
 ) -> None:
@@ -705,7 +730,7 @@ def test_vsan_system_ex_moid_follows_the_host_moid() -> None:
 
 
 def test_examples_and_either_or_rules_of_the_schemas() -> None:
-    from meho_backplane.connectors.vmware_rest.composites import _vsan_schemas as schemas
+    from meho_backplane.connectors.vmware_rest.composites import _vsan_config_schemas as schemas
 
     configure = schemas.VSAN_CLUSTER_CONFIGURE_PARAMETER_SCHEMA
     assert validate_params(configure, {"cluster": CLUSTER, "vsan_enabled": True}) == []
@@ -751,7 +776,7 @@ def test_examples_and_either_or_rules_of_the_schemas() -> None:
 
 def test_no_answer_field_carries_a_secret() -> None:
     """The answers name settings and ids only; no input or output field is a secret."""
-    from meho_backplane.connectors.vmware_rest.composites import _vsan_schemas as schemas
+    from meho_backplane.connectors.vmware_rest.composites import _vsan_config_schemas as schemas
 
     words = ("password", "secret", "token", "private", "licen")
     for name in dir(schemas):

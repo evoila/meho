@@ -86,11 +86,10 @@ _STATUS_READ_SCHEMA: dict[str, Any] = {
     "type": ["object", "null"],
     "description": "The read to follow the vCenter task: op_id and params. Null without a task.",
     "properties": {
-        "op_id": {"type": "string", "description": "vmware.task.info."},
+        "op_id": {"type": "string", "description": "vmware.tasks.recent."},
         "params": {
             "type": "object",
-            "description": "The parameters of that read.",
-            "properties": {"task": {"type": "string", "description": "The task id."}},
+            "description": "The parameters of that read (none; find the task id in its list).",
         },
     },
 }

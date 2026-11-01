@@ -404,10 +404,12 @@ meho approvals
 Approve a pending approval request
 
 ```
-meho approvals approve <id> [flags]
+meho approvals approve <id> | --filter-work-ref REF --in-order [flags]
 ```
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--filter-work-ref` — with --in-order: the change ticket whose pending requests to approve, oldest first
+- `--in-order` — approve every pending request of --filter-work-ref oldest first; stop at the first failure
 - `--json` — emit raw JSON response instead of summary
 - `--reason` — optional rationale for the approval; the command help explains the Instructed-by: layout
 
@@ -5574,7 +5576,7 @@ meho vcf-fleet datacenter
 
 #### `meho vcf-fleet datacenter list`
 
-List Fleet-managed datacenters (wrapper-verified reachability probe)
+List Fleet-managed datacenters and the vCenters in each
 
 ```
 meho vcf-fleet datacenter list [flags]

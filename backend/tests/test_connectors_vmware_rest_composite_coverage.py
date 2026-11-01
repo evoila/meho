@@ -8,12 +8,16 @@ from __future__ import annotations
 import pytest
 
 from meho_backplane.broadcast.events import classify_op
-from meho_backplane.connectors.vmware_rest.composites import _write_preview
 from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
     _GOVERNED_SUBOP_MANIFEST,
 )
 from meho_backplane.connectors.vmware_rest.composites._register import _COMPOSITES
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS
+
+# The preview builders the registration rows carry (``CompositeSpec.preview``).
+_ROW_PREVIEW_BUILDERS = {
+    spec.op_id: spec.preview for spec in _COMPOSITES if spec.preview is not None
+}
 
 # These writes deliberately do not park a proposed-effect preview. The exception
 # set names policy, while the registry remains the source for every op-id set.
@@ -65,6 +69,8 @@ _CLASSIFIER_OTHER = frozenset(
         # vlan.set ends in ``.set`` (not a write suffix) -> the classifier's
         # generic ``other`` branch, like security.set.
         "vmware.composite.network.portgroup.vlan.set",
+        # The DRS group member change ends in ``.set`` too -> ``other``.
+        "vmware.composite.cluster.drs_group.members.set",
         "vmware.composite.vm.resize",
         "vmware.composite.vm.nic.repoint",
         "vmware.composite.vm.device.cdrom",
@@ -78,6 +84,10 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.host.datastore_mount_nfs",
         "vmware.composite.host.disk_mark_flash",
         "vmware.composite.host.service_control",
+        # ``.set`` is not a classifier suffix -> ``other``.
+        "vmware.composite.host.ntp.set",
+        "vmware.composite.host.dns.set",
+        "vmware.composite.host.syslog.set",
         # #3717 — guest.env.read / guest.file.read moved OUT of ``other`` into
         # ``credential_write``: they log into the guest and their vim
         # ``NamePasswordAuthentication`` request body must never be recorded by
@@ -99,6 +109,11 @@ _CLASSIFIER_OTHER = frozenset(
         # #4394: ``.answer`` is not a classifier suffix -> ``other``. The
         # deploy and the install send a password: they are credential_write.
         "vmware.composite.vcenter.deployment.answer",
+        # #4349: ``.move`` / ``.connect`` / ``.disconnect`` are not classifier
+        # suffixes -> ``other``. ``host.add`` sends a password: credential_write.
+        "vmware.composite.host.move",
+        "vmware.composite.host.connect",
+        "vmware.composite.host.disconnect",
         # ``.inventory`` is not a classifier suffix -> ``other``; a read.
         "vmware.migration.inventory",
     }
@@ -145,9 +160,10 @@ def test_registry_coverage_is_derived_from_composites() -> None:
 
 
 def _registered_preview_builders(registry_ids: set[str]) -> dict[str, object]:
-    """Every preview builder of a composite: the shared map, and the ones a module registers."""
+    """Every preview builder of a composite: the one its row carries, registered at import."""
     found = {op_id: b for op_id, b in _PREVIEW_BUILDERS.items() if op_id in registry_ids}
-    assert set(_write_preview._WRITE_PREVIEW_BUILDERS) <= set(found)
+    for op_id, builder in _ROW_PREVIEW_BUILDERS.items():
+        assert found.get(op_id) is builder, op_id
     return found
 
 
@@ -160,7 +176,7 @@ def test_deliberately_unmapped_composite_fails_closed() -> None:
         _assert_composite_coverage(
             registry_ids,
             metadata,
-            dict(_write_preview._WRITE_PREVIEW_BUILDERS),
+            dict(_ROW_PREVIEW_BUILDERS),
             dict(_GOVERNED_SUBOP_MANIFEST),
             {op_id: classify_op(op_id) for op_id in registry_ids},
         )
@@ -175,7 +191,7 @@ def test_deliberately_unhandled_classifier_op_fails_closed() -> None:
         _assert_composite_coverage(
             registry_ids,
             {spec.op_id: spec for spec in _COMPOSITES},
-            dict(_write_preview._WRITE_PREVIEW_BUILDERS),
+            dict(_ROW_PREVIEW_BUILDERS),
             dict(_GOVERNED_SUBOP_MANIFEST),
             classifier,
         )

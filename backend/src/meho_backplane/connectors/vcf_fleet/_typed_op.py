@@ -1,11 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The metadata record of one typed Fleet op.
-
-It lives in its own module so every op module (``typed_ops`` and
-``typed_ops_locker``) can use it without importing the other.
-"""
+"""The metadata record of one typed Fleet op (:class:`FleetTypedOp`)."""
 
 from __future__ import annotations
 

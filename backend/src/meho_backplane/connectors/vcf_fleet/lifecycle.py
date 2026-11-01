@@ -1,459 +1,539 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Upgrade, binary and environment handlers for :class:`VcfFleetConnector`.
+"""Lifecycle requests, one environment, inventory sync, health and datacenters on ``/lcm``.
 
-Seven typed ops on the legacy ``/lcm`` API of Aria Suite Lifecycle 8.x and
-VCF 9.0 fleet management. The op metadata lives in
-:mod:`~meho_backplane.connectors.vcf_fleet.typed_ops_lifecycle`.
+The handlers of seven typed operations of the ``fleet-rest`` connector
+(Aria Suite Lifecycle 8.x and VCF 9.0 fleet management). They live on
+:class:`FleetLifecycleOps`, a base class of
+:class:`~meho_backplane.connectors.vcf_fleet.connector.VcfFleetConnector`,
+so the dispatcher binds them to the connector like its other handlers.
+The operation metadata is in :mod:`.lifecycle_ops`.
 
-* ``fleet.product.upgrade`` and ``fleet.product.upgrade.precheck`` start an
-  upgrade or its pre-check of one product in one environment.
-* ``fleet.binary.list`` reads the product binaries the appliance has;
-  ``fleet.binary.map`` finds the binaries at a depot path and maps them.
-* ``fleet.environment.precheck``, ``fleet.environment.create`` and
-  ``fleet.environment.delete`` check, create and delete an environment.
+**Requests.** Every change on the appliance runs as a request. The
+vendor's request state comes back as ``state``, and ``outcome`` puts it
+in plain words (:data:`OUTCOME_BY_STATE`): ``queued``, ``running``,
+``succeeded``, ``failed`` or ``cancelled``; a state that is not in the
+table gives ``unknown``. The vendor gives no progress number and no list
+of steps, so the request read returns the error causes of a failed
+request instead: the first one names the step that failed.
 
-Every change is a vendor job: the appliance answers with a ``requestId`` at
-once and does the work later. The handlers return ``accepted`` with that id
-and name the status read ``fleet.request.get``. They never wait for the end.
+**Not reachable.** When the appliance does not answer (a connection or
+time-out error, or a 502, 503 or 504 from the proxy in front of it, for
+example during its own upgrade), ``fleet.request.get`` returns
+``outcome: not_reachable`` with the request id and the time. It does not
+say ``failed``. Both reads of the operation are covered: when the request
+read worked and the error-causes read did not, ``state`` keeps what the
+request read said and ``outcome`` is still ``not_reachable``. Two errors
+are not "not reachable" and go on to the dispatcher: a certificate MEHO
+does not trust, and a destination MEHO refused before any request.
 
-Before an upgrade, an upgrade pre-check or an environment create, the
-handler reads the request list and looks for a running request of the same
-kind on the same object. When one runs, it returns that request's id and
-starts nothing. This is a help, not a lock.
+**Login again.** The connector sends the stored user and password with
+every call. When the appliance answers ``401``, the request read and the
+two changes drop the cached login, read it again and repeat the call
+once. A ``401`` means the appliance refused the call before it ran, so
+the repeat cannot run a change twice.
 
-The handlers sit on a mixin so the connector module stays small. The
-dispatcher rebinds each one to the live connector through
-:func:`~meho_backplane.operations._handler_resolve.is_unbound_method`, the
-same path the VCF Operations licence mixin uses.
+**Retry steps.** ``fleet.request.retry`` runs three steps: read the
+request, read its error causes, send the retry. A vendor or transport
+error at any step ends the operation with ``status: failed``; ``steps``
+then says which steps ran, which one failed (with the vendor's error) and
+which did not run. Nothing is undone.
 
-Sources: the vendor API reference (VMware Aria Suite Lifecycle API 1.3.0,
-8.12 to 8.16), the 8.18 programming guide (product upgrade), and the
-community scripts that map binaries and create environments.
+**Secrets.** MEHO's shared secret-field scrub
+(:func:`~meho_backplane.redaction.secret_fields.scrub_secret_fields`)
+runs on every vendor object an answer carries and on every vendor text
+(error causes, request reasons and error texts). A field whose name is a
+secret name (:func:`~meho_backplane.broadcast.events.is_secret_param_name`)
+is replaced by :data:`REDACTED`, at any depth, also when it sits as a
+quoted pair inside a text such as ``"adminPassword": "..."``. The
+datacenter list builds its rows from named fields only, so the vCenter
+password the vendor sends never reaches the answer.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Final
+import ssl
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from typing import Any, Final
+from urllib.parse import quote
 
 import httpx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import is_secret_param_name
-from meho_backplane.operations._preview import PreviewContext, register_preview_builder
-
-__all__ = [
-    "FLEET_LIFECYCLE_DECLARED_OP_IDS",
-    "FLEET_STATUS_READ_OP_ID",
-    "FleetLifecycleHandlers",
-    "environment_delete_preview",
-    "spec_secret_problem",
-]
-
-#: The status read every start names. It reads one request by its id.
-FLEET_STATUS_READ_OP_ID: Final = "fleet.request.get"
-
-_ENVIRONMENTS_PATH: Final = "/lcm/lcops/api/v2/environments"
-_ENVIRONMENT_PATH: Final = "/lcm/lcops/api/v2/environments/{environmentId}"
-_ENVIRONMENT_PRECHECK_PATH: Final = "/lcm/lcops/api/v2/environments/pre-validate"
-_UPGRADE_PATH: Final = "/lcm/lcops/api/v2/environments/{environmentId}/products/{productId}/upgrade"
-_UPGRADE_PRECHECK_PATH: Final = f"{_UPGRADE_PATH}/pre-validate"
-_BINARIES_PATH: Final = "/lcm/lcops/api/v2/settings/product-binaries"
-_BINARIES_MAP_PATH: Final = f"{_BINARIES_PATH}/download"
-_REQUESTS_PATH: Final = "/lcm/request/api/v2/requests"
-
-#: Every ``METHOD:/path`` these handlers call. The reconcile lane checks each
-#: one against the pinned ``/lcm`` API file when the shelf has it.
-FLEET_LIFECYCLE_DECLARED_OP_IDS: Final[frozenset[str]] = frozenset(
-    {
-        f"POST:{_UPGRADE_PATH}",
-        f"POST:{_UPGRADE_PRECHECK_PATH}",
-        f"GET:{_BINARIES_PATH}",
-        f"POST:{_BINARIES_PATH}",
-        f"POST:{_BINARIES_MAP_PATH}",
-        f"POST:{_ENVIRONMENT_PRECHECK_PATH}",
-        f"POST:{_ENVIRONMENTS_PATH}",
-        f"GET:{_ENVIRONMENT_PATH}",
-        f"DELETE:{_ENVIRONMENT_PATH}",
-        f"GET:{_REQUESTS_PATH}",
-    }
+from meho_backplane.connectors.adapters.http import HttpConnector, SsrfBlockedError
+from meho_backplane.connectors.vcf_fleet.session import VcfFleetTargetLike
+from meho_backplane.redaction.secret_fields import (
+    SECRET_FIELD_MARKER,
+    scrub_secret_fields,
+    scrub_secret_fields_in_text,
 )
 
-#: Request states that mean "not ended yet".
-_RUNNING_STATES: Final = frozenset({"CREATED", "SUBMITTED", "INPROGRESS", "IN_PROGRESS"})
+__all__ = [
+    "OUTCOME_BY_STATE",
+    "REDACTED",
+    "VENDOR_CALLS",
+    "FleetLifecycleOps",
+]
 
-#: Words in a request's type, name or reason that mark its kind.
-_UPGRADE_KIND: Final = ("upgrade",)
-_CREATE_KIND: Final = ("create_environment", "createenvironment", "create environment")
+_REQUESTS_PATH: Final = "/lcm/request/api/v2/requests"
+_REQUEST_PATH: Final = "/lcm/request/api/v2/requests/{requestId}"
+_REQUEST_ERROR_CAUSES_PATH: Final = "/lcm/request/api/v2/requests/{requestId}/error-causes"
+_REQUEST_RETRY_PATH: Final = "/lcm/request/api/v2/requests/{requestId}/retry"
+_ENVIRONMENT_PATH: Final = "/lcm/lcops/api/v2/environments/{environmentId}"
+_PRODUCT_INVENTORY_SYNC_PATH: Final = (
+    "/lcm/lcops/api/v2/environments/{environmentId}/products/{productId}/inventory-sync"
+)
+_SYSTEM_DETAILS_PATH: Final = "/lcm/lcops/api/v2/settings/system-details"
+_HEALTH_STATUS_PATH: Final = "/lcm/health/api/v2/status"
+_DATACENTERS_PATH: Final = "/lcm/lcops/api/v2/datacenters"
+_DATACENTER_VCENTERS_PATH: Final = "/lcm/lcops/api/v2/datacenters/{dataCenterVmid}/vcenters"
 
-#: A value that names a secret in the appliance's own store (the locker).
-_LOCKER_PREFIX: Final = "locker:"
+#: Every vendor call of this module, as ``(method, path)``. The reconcile
+#: lane checks each one against the pinned ``/lcm`` API file.
+VENDOR_CALLS: Final[tuple[tuple[str, str], ...]] = (
+    ("GET", _REQUESTS_PATH),
+    ("GET", _REQUEST_PATH),
+    ("GET", _REQUEST_ERROR_CAUSES_PATH),
+    ("PATCH", _REQUEST_RETRY_PATH),
+    ("GET", _ENVIRONMENT_PATH),
+    ("POST", _PRODUCT_INVENTORY_SYNC_PATH),
+    ("GET", _SYSTEM_DETAILS_PATH),
+    ("GET", _HEALTH_STATUS_PATH),
+    ("GET", _DATACENTERS_PATH),
+    ("GET", _DATACENTER_VCENTERS_PATH),
+)
 
-if TYPE_CHECKING:
-    # The connector also inherits HttpConnector; naming it as the base here
-    # only lets the type checker see the request seams.
-    from meho_backplane.connectors.adapters.http import HttpConnector
-    from meho_backplane.connectors.vcf_fleet.session import VcfFleetTargetLike
+#: The text in place of a secret value: the marker of MEHO's shared scrub.
+REDACTED: Final = SECRET_FIELD_MARKER
 
-    _Base = HttpConnector
-else:
-    _Base = object
+#: The vendor request state (lower case, no ``_`` or ``-``) in plain words.
+OUTCOME_BY_STATE: Final[dict[str, str]] = {
+    "created": "queued",
+    "scheduled": "queued",
+    "pending": "queued",
+    "inprogress": "running",
+    "running": "running",
+    "completed": "succeeded",
+    "success": "succeeded",
+    "succeeded": "succeeded",
+    "failed": "failed",
+    "failure": "failed",
+    "cancelled": "cancelled",
+    "canceled": "cancelled",
+}
+_ACTIVE_OUTCOMES: Final = frozenset({"queued", "running"})
+_NOT_REACHABLE: Final = "not_reachable"
+_UNKNOWN: Final = "unknown"
+_STATUS_READ: Final = "fleet.request.get"
+_GATEWAY_STATUSES: Final = frozenset({502, 503, 504})
+_ERROR_CAUSE_MAX: Final = 2000
+_ERROR_TEXT_MAX: Final = 500
+_LIST_LIMIT_DEFAULT: Final = 100
+_VENDOR_ERRORS: Final = (httpx.HTTPStatusError, httpx.TransportError)
 
 
-def _status_read(request_id: str) -> dict[str, Any]:
-    """The status read call that follows a start: its op id and its params."""
-    return {"op_id": FLEET_STATUS_READ_OP_ID, "params": {"request_id": request_id}}
+def _segment(kind: str, value: Any) -> str:
+    """Return *value* as one URL path segment, or raise ``ValueError``."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{kind} must be a non-empty string, got {value!r}")
+    if value in {".", ".."}:
+        raise ValueError(f"{kind} must not be {value!r}")
+    return quote(value, safe="")
 
 
-def _accepted(request_id: Any, **extra: Any) -> dict[str, Any]:
-    """The answer of a start the appliance accepted."""
-    rid = str(request_id) if request_id else ""
-    if not rid:
-        raise ValueError(
-            "the appliance answered without a requestId; the job may have started, so "
-            "read the request list (fleet.request.list) before you call again"
-        )
+def _plain(text: str) -> str:
+    """*text* in lower case without ``_`` and ``-``, for a loose name compare."""
+    return text.strip().lower().replace("_", "").replace("-", "")
+
+
+def _outcome(state: Any) -> str:
+    if not isinstance(state, str):
+        return _UNKNOWN
+    return OUTCOME_BY_STATE.get(_plain(state), _UNKNOWN)
+
+
+def _vendor_text(text: Any, limit: int = _ERROR_CAUSE_MAX) -> Any:
+    """A vendor text for an answer: secret-named values replaced, then cut at *limit*."""
+    if not isinstance(text, str):
+        return text
+    return scrub_secret_fields_in_text(text)[:limit]
+
+
+def _is_not_reachable(exc: Exception) -> bool:
+    """True when the appliance did not answer; False for an error MEHO must report."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _GATEWAY_STATUSES
+    if not isinstance(exc, httpx.TransportError) or isinstance(exc, SsrfBlockedError):
+        return False
+    return not (
+        isinstance(exc.__cause__, ssl.SSLCertVerificationError)
+        or "CERTIFICATE_VERIFY_FAILED" in str(exc)
+    )
+
+
+def _vendor_error(exc: Exception) -> str:
+    """The vendor's error text for a failed call, short, with secret values replaced."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        response = exc.response
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        text = response.text
+        if isinstance(body, dict):
+            parts = [str(body[key]) for key in ("errorCode", "message") if body.get(key)]
+            if parts:
+                text = " ".join(parts)
+        return f"HTTP {response.status_code}: {_vendor_text(text, _ERROR_TEXT_MAX)}"
+    return str(_vendor_text(f"{type(exc).__name__}: {exc}", _ERROR_TEXT_MAX))
+
+
+def _request_row(item: dict[str, Any]) -> dict[str, Any]:
     return {
-        "status": "accepted",
-        "request_id": rid,
-        "status_read": _status_read(rid),
-        **extra,
+        "request_id": item.get("vmid"),
+        "name": item.get("requestName"),
+        "type": item.get("requestType"),
+        "reason": _vendor_text(item.get("requestReason")),
+        "state": item.get("state"),
+        "outcome": _outcome(item.get("state")),
+        "execution_status": item.get("executionStatus"),
+        "error_cause": _vendor_text(item.get("errorCause")),
+        "created_by": item.get("createdBy"),
+        "last_updated_on": item.get("lastUpdatedOn"),
     }
 
 
-def _already_running(request: dict[str, Any], **extra: Any) -> dict[str, Any]:
-    """The answer when a request of the same kind already runs on the object."""
-    rid = str(request.get("vmid") or request.get("requestId") or "")
+def _error_cause_row(item: dict[str, Any]) -> dict[str, Any]:
     return {
-        "status": "already_running",
-        "request_id": rid,
-        "request_state": request.get("state"),
-        "status_read": _status_read(rid),
-        **extra,
+        "event_id": item.get("eventId"),
+        "message_id": item.get("messageId"),
+        "message": _vendor_text(item.get("message")),
+        "exception_message": _vendor_text(item.get("exceptionMessage")),
+        "retry": item.get("retry"),
+        "properties": scrub_secret_fields(item.get("properties") or {}),
     }
 
 
-def _request_rows(payload: Any) -> list[dict[str, Any]]:
-    """The request rows of a request-list answer (a bare list or a wrapper)."""
-    if isinstance(payload, dict):
-        for key in ("requests", "content", "items"):
-            if isinstance(payload.get(key), list):
-                payload = payload[key]
-                break
+def _as_list(payload: Any) -> list[dict[str, Any]]:
     if not isinstance(payload, list):
         return []
-    return [row for row in payload if isinstance(row, dict)]
+    return [item for item in payload if isinstance(item, dict)]
 
 
-def _input_values(value: Any) -> set[str]:
-    """Every text and number value in a request's ``inputMap``, at any depth."""
-    if isinstance(value, dict):
-        return {text for item in value.values() for text in _input_values(item)}
-    if isinstance(value, list):
-        return {text for item in value for text in _input_values(item)}
-    if isinstance(value, str | int) and not isinstance(value, bool):
-        return {str(value)}
-    return set()
-
-
-def _matches(request: dict[str, Any], kind: tuple[str, ...], words: tuple[str, ...]) -> bool:
-    """True when *request* runs, is of *kind*, and its ``inputMap`` holds every one of *words*.
-
-    Each word must equal a whole value in the ``inputMap``: a request for
-    ``Production-DR`` does not match ``Production``. An empty word never matches.
-    """
-    if str(request.get("state") or "").upper() not in _RUNNING_STATES:
-        return False
-    label = " ".join(
-        str(request.get(key) or "") for key in ("requestType", "requestName", "requestReason")
-    ).lower()
-    if not any(word in label for word in kind):
-        return False
-    if not words or not all(words):
-        return False
-    values = _input_values(request.get("inputMap"))
-    return all(word in values for word in words)
-
-
-def spec_secret_problem(value: Any, path: str = "spec") -> str | None:
-    """Why *value* holds a secret in clear text, or ``None`` when it holds none.
-
-    A field named like a password or secret, and a licence field, must hold a
-    locker reference (``locker:...``): the appliance resolves it from its own
-    secret store. A private key in any text is refused too.
-    """
-    if isinstance(value, dict):
-        for key, item in value.items():
-            where = f"{path}.{key}"
-            named = is_secret_param_name(str(key)) or "license" in str(key).lower()
-            if named and isinstance(item, str) and item and not item.startswith(_LOCKER_PREFIX):
-                return f"{where} must be a locker reference (locker:...), not a value"
-            problem = spec_secret_problem(item, where)
-            if problem is not None:
-                return problem
-    elif isinstance(value, list):
-        for index, item in enumerate(value):
-            problem = spec_secret_problem(item, f"{path}[{index}]")
-            if problem is not None:
-                return problem
-    elif isinstance(value, str) and "PRIVATE KEY" in value:
-        return f"{path} holds a private key; import it into the locker and use its reference"
+def _input_of(input_map: Any, name: str) -> str | None:
+    """The string value of the request input *name*; case, ``_`` and ``-`` do not matter."""
+    if not isinstance(input_map, dict):
+        return None
+    wanted = _plain(name)
+    for key, value in input_map.items():
+        if isinstance(key, str) and isinstance(value, str) and _plain(key) == wanted:
+            return value
     return None
 
 
-def _upgrade_body(params: dict[str, Any], *, pre_validate: bool) -> dict[str, Any]:
-    """The vendor ``UpgradeProductRequestDTO`` for an upgrade or its pre-check."""
-    license_ref = params.get("license_ref")
-    if license_ref and not str(license_ref).startswith(_LOCKER_PREFIX):
-        raise ValueError("license_ref must be a locker reference (locker:license:...)")
-    return {
-        "environmentId": params["environment_id"],
-        "productId": params["product_id"],
-        "productVersion": params["product_version"],
-        "repositoryType": params.get("repository_type", "lcmRepository"),
-        "repositoryUrl": params["repository_url"],
-        "licenseRef": license_ref,
-        "preValidate": pre_validate,
-        "takeProductSnapshot": bool(params.get("take_product_snapshot", False)),
-        "retainProductSnapshot": bool(params.get("retain_product_snapshot", False)),
-    }
+def _is_inventory_sync_for(item: dict[str, Any], environment_id: str, product_id: str) -> bool:
+    """True for an active inventory sync whose inputs name exactly this environment and product.
 
-
-def _vendor_error(exc: httpx.HTTPStatusError) -> str:
-    """The vendor's error text of *exc*: its ``message``, or the raw body."""
-    try:
-        body = exc.response.json()
-    except ValueError:
-        return exc.response.text[:500] or f"HTTP {exc.response.status_code}"
-    if isinstance(body, dict):
-        text = body.get("message") or body.get("errorLabel") or body.get("errorCode")
-        if text:
-            return str(text)
-    return f"HTTP {exc.response.status_code}"
-
-
-class FleetLifecycleHandlers(_Base):
-    """The upgrade, binary and environment handlers of the fleet connector."""
-
-    async def _running_request(
-        self,
-        target: VcfFleetTargetLike,
-        operator: Operator,
-        kind: tuple[str, ...],
-        words: tuple[str, ...],
-    ) -> dict[str, Any] | None:
-        """The first running request of *kind* that names all *words*, or ``None``."""
-        payload: Any = await self._get_json(target, _REQUESTS_PATH, operator=operator)
-        return next((r for r in _request_rows(payload) if _matches(r, kind, words)), None)
-
-    async def _start_upgrade(
-        self,
-        operator: Operator,
-        target: VcfFleetTargetLike,
-        params: dict[str, Any],
-        *,
-        path: str,
-        pre_validate: bool,
-    ) -> dict[str, Any]:
-        env_id, product_id = params["environment_id"], params["product_id"]
-        body = _upgrade_body(params, pre_validate=pre_validate)
-        running = await self._running_request(target, operator, _UPGRADE_KIND, (env_id, product_id))
-        ids = {"environment_id": env_id, "product_id": product_id}
-        if running is not None:
-            return _already_running(running, **ids)
-        url = path.format(environmentId=env_id, productId=product_id)
-        answer = await self._post_json(target, url, operator=operator, json=body)
-        return _accepted(answer.get("requestId"), **ids)
-
-    async def product_upgrade(
-        self, operator: Operator, target: VcfFleetTargetLike, params: dict[str, Any]
-    ) -> dict[str, Any]:
-        """``fleet.product.upgrade`` — start the upgrade of one product.
-
-        Sends ``preValidate: true`` unless ``skip_precheck`` is set, so the
-        appliance checks first and does not start an upgrade that fails it.
-        """
-        return await self._start_upgrade(
-            operator,
-            target,
-            params,
-            path=_UPGRADE_PATH,
-            pre_validate=not params.get("skip_precheck", False),
-        )
-
-    async def product_upgrade_precheck(
-        self, operator: Operator, target: VcfFleetTargetLike, params: dict[str, Any]
-    ) -> dict[str, Any]:
-        """``fleet.product.upgrade.precheck`` — start the pre-check of an upgrade."""
-        return await self._start_upgrade(
-            operator, target, params, path=_UPGRADE_PRECHECK_PATH, pre_validate=True
-        )
-
-    async def binary_list(
-        self, operator: Operator, target: VcfFleetTargetLike, params: dict[str, Any]
-    ) -> dict[str, Any]:
-        """``fleet.binary.list`` — the product binaries the appliance has, as rows."""
-        del params
-        payload: Any = await self._get_json(target, _BINARIES_PATH, operator=operator)
-        rows = payload if isinstance(payload, list) else []
-        return {"binaries": [row for row in rows if isinstance(row, dict)]}
-
-    async def binary_map(
-        self, operator: Operator, target: VcfFleetTargetLike, params: dict[str, Any]
-    ) -> dict[str, Any]:
-        """``fleet.binary.map`` — find the binaries at a depot path, then map them.
-
-        Two steps: ``find`` (``POST product-binaries``, answers at once with
-        the binaries it found) and ``map`` (``POST product-binaries/download``,
-        a vendor job). A failed step stops the run; the answer lists the steps
-        that ran, the step that failed with the vendor's error, and the steps
-        that did not run. Nothing is undone.
-        """
-        source = {"sourceLocation": params["source_location"], "sourceType": params["source_type"]}
-        try:
-            found: Any = await self._post_json(
-                target, _BINARIES_PATH, operator=operator, json=source
-            )
-        except httpx.HTTPStatusError as exc:
-            return _step_failure([], "find", _vendor_error(exc), ["map"])
-        rows = [row for row in (found if isinstance(found, list) else []) if isinstance(row, dict)]
-        names = set(params.get("names") or [])
-        chosen = [row for row in rows if not names or row.get("name") in names]
-        find_step = {"step": "find", "result": "ok", "found": len(rows)}
-        if not chosen:
-            error = "no product binary found at the path" + (" with those names" if names else "")
-            return _step_failure([find_step], "map", error, [])
-        body: Any = [
-            {"filePath": r.get("filePath"), "name": r.get("name"), "type": r.get("type")}
-            for r in chosen
-        ]
-        try:
-            answer = await self._post_json(target, _BINARIES_MAP_PATH, operator=operator, json=body)
-        except httpx.HTTPStatusError as exc:
-            return _step_failure([find_step], "map", _vendor_error(exc), [])
-        steps = [find_step, {"step": "map", "result": "accepted"}]
-        return _accepted(answer.get("requestId"), binaries=body, steps=steps)
-
-    async def environment_precheck(
-        self, operator: Operator, target: VcfFleetTargetLike, params: dict[str, Any]
-    ) -> dict[str, Any]:
-        """``fleet.environment.precheck`` — start the pre-check of a new environment."""
-        spec = _checked_spec(params)
-        answer = await self._post_json(
-            target, _ENVIRONMENT_PRECHECK_PATH, operator=operator, json=spec
-        )
-        return _accepted(answer.get("requestId"), environment_name=spec.get("environmentName"))
-
-    async def environment_create(
-        self, operator: Operator, target: VcfFleetTargetLike, params: dict[str, Any]
-    ) -> dict[str, Any]:
-        """``fleet.environment.create`` — start creating an environment from a spec."""
-        spec = _checked_spec(params)
-        name = str(spec.get("environmentName") or "")
-        running = await self._running_request(target, operator, _CREATE_KIND, (name,))
-        if running is not None:
-            return _already_running(running, environment_name=name)
-        answer = await self._post_json(target, _ENVIRONMENTS_PATH, operator=operator, json=spec)
-        return _accepted(answer.get("requestId"), environment_name=name)
-
-    async def environment_delete(
-        self, operator: Operator, target: VcfFleetTargetLike, params: dict[str, Any]
-    ) -> dict[str, Any]:
-        """``fleet.environment.delete`` — start deleting an environment.
-
-        ``delete_vms`` (default ``false``) also deletes the product VMs from
-        vCenter. The body is the vendor ``DeleteEnvironmentRequestDTO``.
-        """
-        env_id = params["environment_id"]
-        delete_vms = bool(params.get("delete_vms", False))
-        body = {
-            "deleteFromInventory": True,
-            "deleteFromVcenter": delete_vms,
-            "deleteLbFromSddc": False,
-            "deleteWindowsVMs": False,
-        }
-        url = _ENVIRONMENT_PATH.format(environmentId=env_id)
-        answer = await self._post_json(target, url, operator=operator, verb="DELETE", json=body)
-        return _accepted(answer.get("requestId"), environment_id=env_id, delete_vms=delete_vms)
-
-
-def _checked_spec(params: dict[str, Any]) -> dict[str, Any]:
-    """The environment spec of *params*, refused when it holds a clear secret."""
-    spec: dict[str, Any] = params["spec"]
-    problem = spec_secret_problem(spec)
-    if problem is not None:
-        raise ValueError(problem)
-    return spec
-
-
-def _step_failure(
-    ran: list[dict[str, Any]], failed: str, error: str, not_run: list[str]
-) -> dict[str, Any]:
-    """The answer of a multi-step change that stopped at step *failed*."""
-    return {
-        "status": "failed",
-        "steps": [
-            *ran,
-            {"step": failed, "result": "failed", "error": error},
-            *({"step": step, "result": "not_run"} for step in not_run),
-        ],
-    }
-
-
-async def environment_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Blast radius of ``fleet.environment.delete``: the environment and its products.
-
-    Reads the environment first. Raises when it does not exist, so the delete
-    is refused before it waits for approval.
+    The ids are compared with the ``environmentId`` and ``productId`` inputs
+    of the request, each as a whole value. A request whose inputs do not
+    carry both ids is not a match, whatever other text its inputs hold.
     """
-    connector = ctx.connector_instance
-    if connector is None:
-        return None
-    env_id = str(ctx.params.get("environment_id") or "")
-    if not env_id:
-        raise ValueError("environment_id is required")
-    try:
-        env: Any = await connector._get_json(  # type: ignore[attr-defined]
-            ctx.target, _ENVIRONMENT_PATH.format(environmentId=env_id), operator=ctx.operator
+    if _outcome(item.get("state")) not in _ACTIVE_OUTCOMES:
+        return False
+    kind = f"{item.get('requestType') or ''}{item.get('requestName') or ''}"
+    if "inventorysync" not in _plain(kind):
+        return False
+    inputs = item.get("inputMap")
+    return (
+        _input_of(inputs, "environmentId") == environment_id
+        and _input_of(inputs, "productId") == product_id
+    )
+
+
+def _failed_at(answer: dict[str, Any], step: dict[str, Any], exc: Exception) -> dict[str, Any]:
+    """The retry answer when *step* failed with *exc*: the steps before it stay ``done``."""
+    step.update(state="failed", error=_vendor_error(exc))
+    return {**answer, "status": "failed", "reason": step["error"]}
+
+
+class FleetLifecycleOps(HttpConnector):
+    """The request, environment, inventory sync, health and datacenter handlers."""
+
+    async def invalidate_credentials(self, target: VcfFleetTargetLike) -> None:
+        """Drop the cached login of *target*. The connector class implements it."""
+        raise NotImplementedError
+
+    async def _with_relogin(
+        self, target: VcfFleetTargetLike, call: Callable[[], Awaitable[Any]]
+    ) -> Any:
+        """Run *call*; on a ``401`` drop the cached login and run it once more."""
+        try:
+            return await call()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 401:
+                raise
+        await self.invalidate_credentials(target)
+        return await call()
+
+    async def _read(self, target: VcfFleetTargetLike, operator: Operator, path: str) -> Any:
+        """``GET`` *path* as JSON, with one new login after a ``401``."""
+        return await self._with_relogin(
+            target, lambda: self._get_json(target, path, operator=operator)
         )
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in (400, 404):
-            raise ValueError(f"environment {env_id!r} does not exist") from exc
-        raise
-    if not isinstance(env, dict) or not env:
-        raise ValueError(f"environment {env_id!r} does not exist")
-    delete_vms = bool(ctx.params.get("delete_vms", False))
-    children = [
-        {
-            "product_id": product.get("id") or product.get("productId"),
-            "version": product.get("version"),
-            "nodes": len(product.get("nodes") or []),
+
+    async def request_list(
+        self, operator: Operator, target: VcfFleetTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet.request.list`` -- ``GET /lcm/request/api/v2/requests``, newest first."""
+        payload = await self._get_json(target, _REQUESTS_PATH, operator=operator)
+        rows = [_request_row(item) for item in _as_list(payload)]
+        state = params.get("state")
+        if isinstance(state, str) and state.strip():
+            wanted = state.strip().lower()
+            rows = [row for row in rows if str(row["state"] or "").lower() == wanted]
+        outcome = params.get("outcome")
+        if isinstance(outcome, str) and outcome:
+            rows = [row for row in rows if row["outcome"] == outcome]
+        rows.sort(key=lambda row: row["last_updated_on"] or 0, reverse=True)
+        limit = int(params.get("limit") or _LIST_LIMIT_DEFAULT)
+        return {"requests": rows[:limit], "more_rows": len(rows) > limit}
+
+    async def request_get(
+        self, operator: Operator, target: VcfFleetTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet.request.get`` -- one request, and the error causes when it failed."""
+        request_id = _segment("request_id", params.get("request_id"))
+        base: dict[str, Any] = {
+            "checked_at": datetime.now(UTC).isoformat(),
+            "error": None,
+            "error_causes": [],
+            "failed_step": None,
         }
-        for product in (env.get("products") or [])
-        if isinstance(product, dict)
-    ]
-    if delete_vms:
-        irreversibility = (
-            "The product VMs are deleted from vCenter. They cannot be brought back, "
-            "and the environment leaves the lifecycle tool."
+        row = _request_row({"vmid": params.get("request_id")})
+        try:
+            payload = await self._read(target, operator, _REQUEST_PATH.format(requestId=request_id))
+        except _VENDOR_ERRORS as exc:
+            if not _is_not_reachable(exc):
+                raise
+            return {**row, **base, "outcome": _NOT_REACHABLE, "error": _vendor_error(exc)}
+        row = _request_row(payload if isinstance(payload, dict) else {})
+        if row["outcome"] != "failed":
+            return {**row, **base}
+        try:
+            raw = await self._read(
+                target, operator, _REQUEST_ERROR_CAUSES_PATH.format(requestId=request_id)
+            )
+        except _VENDOR_ERRORS as exc:
+            if not _is_not_reachable(exc):
+                raise
+            return {**row, **base, "outcome": _NOT_REACHABLE, "error": _vendor_error(exc)}
+        causes = [_error_cause_row(item) for item in _as_list(raw)]
+        return {**row, **base, "error_causes": causes, "failed_step": causes[0] if causes else None}
+
+    async def request_retry(
+        self, operator: Operator, target: VcfFleetTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet.request.retry`` -- read the request and its causes, then ``PATCH .../retry``."""
+        request_id = _segment("request_id", params.get("request_id"))
+        changes = _property_changes(params.get("properties"))
+        steps = [
+            {"step": "read_request", "state": "not_run", "error": None},
+            {"step": "read_error_causes", "state": "not_run", "error": None},
+            {"step": "retry", "state": "not_run", "error": None},
+        ]
+        answer: dict[str, Any] = {
+            "request_id": params.get("request_id"),
+            "state": None,
+            "outcome": _UNKNOWN,
+            "status_read": _STATUS_READ,
+            "retried_event_ids": [],
+            "steps": steps,
+        }
+        try:
+            request = await self._read(target, operator, _REQUEST_PATH.format(requestId=request_id))
+        except _VENDOR_ERRORS as exc:
+            return _failed_at(answer, steps[0], exc)
+        steps[0]["state"] = "done"
+        row = _request_row(request if isinstance(request, dict) else {})
+        answer.update(state=row["state"], outcome=row["outcome"])
+        if row["outcome"] != "failed":
+            return {**answer, "status": "not_started", "reason": "only a failed request is retried"}
+        try:
+            raw = await self._read(
+                target, operator, _REQUEST_ERROR_CAUSES_PATH.format(requestId=request_id)
+            )
+        except _VENDOR_ERRORS as exc:
+            return _failed_at(answer, steps[1], exc)
+        steps[1]["state"] = "done"
+        causes = _as_list(raw)
+        if not causes:
+            return {**answer, "status": "not_started", "reason": "the request has no error causes"}
+        body: Any = _retry_body(causes, changes)
+        try:
+            await self._with_relogin(
+                target,
+                lambda: self._post_json(
+                    target,
+                    _REQUEST_RETRY_PATH.format(requestId=request_id),
+                    operator=operator,
+                    verb="PATCH",
+                    json=body,
+                ),
+            )
+        except _VENDOR_ERRORS as exc:
+            return _failed_at(answer, steps[2], exc)
+        steps[2]["state"] = "done"
+        event_ids = [cause.get("eventId") for cause in causes]
+        return {**answer, "status": "accepted", "reason": None, "retried_event_ids": event_ids}
+
+    async def environment_get(
+        self, operator: Operator, target: VcfFleetTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet.environment.get`` -- one environment with its products and nodes."""
+        environment_id = _segment("environment_id", params.get("environment_id"))
+        payload = await self._get_json(
+            target, _ENVIRONMENT_PATH.format(environmentId=environment_id), operator=operator
         )
-    else:
-        irreversibility = (
-            "The environment and its products leave the lifecycle tool. The VMs stay "
-            "in vCenter, but the tool no longer manages them until they are imported again."
+        result = scrub_secret_fields(payload)
+        return result if isinstance(result, dict) else {"environment": result}
+
+    async def product_inventory_sync(
+        self, operator: Operator, target: VcfFleetTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet.product.inventory_sync`` -- start an inventory sync unless one runs."""
+        environment_id = _segment("environment_id", params.get("environment_id"))
+        product_id = _segment("product_id", params.get("product_id"))
+        answer: dict[str, Any] = {
+            "environment_id": params.get("environment_id"),
+            "product_id": params.get("product_id"),
+            "status_read": _STATUS_READ,
+        }
+        requests = await self._get_json(target, _REQUESTS_PATH, operator=operator)
+        for item in _as_list(requests):
+            if _is_inventory_sync_for(item, answer["environment_id"], answer["product_id"]):
+                return {**answer, "status": "already_running", "request_id": item.get("vmid")}
+        path = _PRODUCT_INVENTORY_SYNC_PATH.format(
+            environmentId=environment_id, productId=product_id
         )
+        started = await self._with_relogin(
+            target, lambda: self._post_json(target, path, operator=operator)
+        )
+        return {**answer, "status": "accepted", "request_id": _request_id_of(started)}
+
+    async def health(
+        self, operator: Operator, target: VcfFleetTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet.health`` -- appliance details and the state of its services."""
+        del params  # schema declares the param object empty
+        details, details_error = await self._read_part(target, _SYSTEM_DETAILS_PATH, operator)
+        status, status_error = await self._read_part(target, _HEALTH_STATUS_PATH, operator)
+        services = [
+            {"service": name, "state": state}
+            for name, state in (status.items() if isinstance(status, dict) else [])
+        ]
+        all_up = all(str(row["state"]).upper() == "UP" for row in services) if services else None
+        info = details if isinstance(details, dict) else {}
+        return {
+            "name": info.get("name"),
+            "vendor": info.get("vendor"),
+            "version": info.get("version"),
+            "build_number": info.get("buildNumber"),
+            "patch_version": info.get("patchVersion"),
+            "total_storage": info.get("totalStorage"),
+            "used_storage": info.get("usedStorage"),
+            "available_storage": info.get("availableStorage"),
+            "storage_percentage": info.get("storagePercentage"),
+            "all_up": all_up,
+            "services": services,
+            "system_details_error": details_error,
+            "health_error": status_error,
+        }
+
+    async def _read_part(
+        self, target: VcfFleetTargetLike, path: str, operator: Operator
+    ) -> tuple[Any, str | None]:
+        """One read of the health answer; a vendor error other than ``401`` is reported."""
+        try:
+            return await self._get_json(target, path, operator=operator), None
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 401:
+                raise
+            return None, _vendor_error(exc)
+
+    async def datacenter_list(
+        self, operator: Operator, target: VcfFleetTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet.datacenter.list`` -- one row per vCenter, with its datacenter."""
+        del params  # schema declares the param object empty
+        datacenters = await self._get_json(target, _DATACENTERS_PATH, operator=operator)
+        rows: list[dict[str, Any]] = []
+        for datacenter in _as_list(datacenters):
+            base = {
+                "datacenter_id": datacenter.get("dataCenterVmid"),
+                "datacenter_name": datacenter.get("dataCenterName"),
+                "primary_location": datacenter.get("primaryLocation"),
+            }
+            vmid = _segment("dataCenterVmid", datacenter.get("dataCenterVmid"))
+            vcenters = _as_list(
+                await self._get_json(
+                    target, _DATACENTER_VCENTERS_PATH.format(dataCenterVmid=vmid), operator=operator
+                )
+            )
+            if not vcenters:
+                rows.append({**base, **_vcenter_row({})})
+            rows.extend({**base, **_vcenter_row(vcenter)} for vcenter in vcenters)
+        return {"rows": rows}
+
+
+def _vcenter_row(vcenter: dict[str, Any]) -> dict[str, Any]:
+    """Named fields only: the vendor's ``vcPassword`` never reaches the answer."""
     return {
-        "blast_radius": {
-            "object": {
-                "environment_id": env_id,
-                "environment_name": env.get("environmentName"),
-            },
-            "children": children,
-            "irreversibility": irreversibility,
-            "delete_vms": delete_vms,
-        }
+        "vcenter_name": vcenter.get("vCenterName"),
+        "vcenter_host": vcenter.get("vCenterHost"),
+        "vcenter_username": vcenter.get("vcUsername"),
+        "used_as": vcenter.get("vcUsedAs"),
+        "data_collection_status": vcenter.get("vcDataCollectionStatus"),
     }
 
 
-register_preview_builder("fleet.environment.delete", environment_delete_preview)
+def _request_id_of(answer: Any) -> Any:
+    """The ``requestId`` of a start answer: an object, or a list of one object."""
+    if isinstance(answer, list) and answer:
+        answer = answer[0]
+    return answer.get("requestId") if isinstance(answer, dict) else None
+
+
+def _property_changes(raw: Any) -> dict[str, str]:
+    """Check the corrected inputs of a retry. A secret goes in as a locker reference only."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("properties must be an object of names and string values")
+    for name, value in raw.items():
+        if not isinstance(value, str):
+            raise ValueError(f"properties.{name} must be a string")
+        if is_secret_param_name(name) and not value.startswith("locker:"):
+            raise ValueError(
+                f"properties.{name} is a secret: give a locker reference "
+                "(locker:password:<id>:<alias>), never the value"
+            )
+    return dict(raw)
+
+
+def _retry_body(causes: list[dict[str, Any]], changes: dict[str, str]) -> list[dict[str, Any]]:
+    """The error causes as the vendor gave them, marked for retry, with the corrected inputs."""
+    known = {name for cause in causes for name in (cause.get("properties") or {})}
+    unknown = sorted(set(changes) - known)
+    if unknown:
+        raise ValueError(
+            f"properties {unknown} are not inputs of the failed step; known inputs: {sorted(known)}"
+        )
+    body = []
+    for cause in causes:
+        properties = dict(cause.get("properties") or {})
+        properties.update({name: value for name, value in changes.items() if name in properties})
+        body.append({**cause, "retry": True, "properties": properties})
+    return body

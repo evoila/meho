@@ -27,7 +27,7 @@ from typing import Any
 from meho_backplane.connectors.vmware_rest.composites._guest_secret_ref import (
     GUEST_SECRET_REF_PARAM,
 )
-from meho_backplane.operations._preview import PreviewContext, register_preview_builder
+from meho_backplane.operations._preview import PreviewContext
 
 OP_ID_GUEST_FILE_READ = "vmware.composite.vm.guest.file.read"
 
@@ -47,6 +47,3 @@ async def guest_file_read_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     if isinstance(guest_secret_ref, str) and guest_secret_ref:
         preview[GUEST_SECRET_REF_PARAM] = guest_secret_ref
     return preview
-
-
-register_preview_builder(OP_ID_GUEST_FILE_READ, guest_file_read_preview)

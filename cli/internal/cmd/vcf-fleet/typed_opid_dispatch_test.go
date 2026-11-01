@@ -14,8 +14,9 @@ import (
 
 // typedDispatchCases pins every Fleet verb whose backend read is typed
 // to the dotted typed op_id it must dispatch (#2266 repoint sweep
-// #2355). Both are no-param reads, so each swap was a pure op_id
-// change.
+// #2355). environment info, request list, request info and datacenter
+// list moved here when their typed reads shipped; the two with an id
+// send it as environment_id / request_id.
 var typedDispatchCases = []struct {
 	name   string
 	args   []string
@@ -23,6 +24,10 @@ var typedDispatchCases = []struct {
 }{
 	{"about", []string{"about"}, "fleet.about"},
 	{"environment list", []string{"environment", "list"}, "fleet.environment.list"},
+	{"environment info", []string{"environment", "info", "env-1"}, "fleet.environment.get"},
+	{"request list", []string{"request", "list"}, "fleet.request.list"},
+	{"request info", []string{"request", "info", "req-1"}, "fleet.request.get"},
+	{"datacenter list", []string{"datacenter", "list"}, "fleet.datacenter.list"},
 }
 
 // ingestedDispatchCases pins the Fleet verbs that legitimately
@@ -36,16 +41,10 @@ var ingestedDispatchCases = []struct {
 	args   []string
 	wantOp string
 }{
-	// No typed datacenter/vcenter/product reads.
-	{"datacenter list", []string{"datacenter", "list"}, "GET:/lcm/lcops/api/v2/datacenters"},
+	// No typed per-datacenter vCenter list or product list
+	// (fleet.datacenter.list covers all datacenters at once).
 	{"vcenter list", []string{"vcenter", "list", "dc-1"}, "GET:/lcm/lcops/api/v2/datacenters/{dataCenterVmid}/vcenters"},
 	{"product list", []string{"product", "list", "env-1"}, "GET:/lcm/lcops/api/v2/environments/{environmentId}/products"},
-	// Detail read with no typed counterpart (fleet.environment.list is
-	// list-only).
-	{"environment info", []string{"environment", "info", "env-1"}, "GET:/lcm/lcops/api/v2/environments/{environmentId}"},
-	// No typed request reads (initiative #2833 ranks them medium tier).
-	{"request list", []string{"request", "list"}, "GET:/lcm/request/api/v2/requests"},
-	{"request info", []string{"request", "info", "req-1"}, "GET:/lcm/request/api/v2/requests/{requestId}"},
 }
 
 // typedOpCLICoverage classifies every typed op_id the backend registers
@@ -58,6 +57,14 @@ var typedOpCLICoverage = map[string]string{
 	"fleet.about":            "about",
 	"fleet.environment.list": "environment list",
 	"fleet.api_file.get":     "", // agent surface only: the lab pins the vendor API files through MCP, no CLI verb
+	"fleet.environment.get":  "environment info",
+	"fleet.request.list":     "request list",
+	"fleet.request.get":      "request info",
+	"fleet.datacenter.list":  "datacenter list",
+	// Agent surface only: no CLI verb wraps these yet.
+	"fleet.health":                 "",
+	"fleet.request.retry":          "",
+	"fleet.product.inventory_sync": "",
 	// Upgrades, binaries and environments: changes that wait for approval.
 	// Agent surface only for now; run them with "meho operation call" or MCP call_operation.
 	"fleet.binary.list":              "",

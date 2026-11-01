@@ -33,6 +33,8 @@ from typing import Final
 from meho_backplane.connectors.vmware_rest.composites import (
     _alarm,
     _datastore_files,
+    _drs_group,
+    _drs_group_delete,
     _drs_rule_delete,
     _host,
     _library,
@@ -50,6 +52,12 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _vm_cdrom_library_iso,
     _vm_cdrom_tools,
     _write,
+)
+from meho_backplane.connectors.vmware_rest.composites._host_config_ops import (
+    HOST_CONFIG_GOVERNED_SUBOPS,
+)
+from meho_backplane.connectors.vmware_rest.composites._host_membership_ops import (
+    HOST_MEMBERSHIP_GOVERNED_SUBOPS,
 )
 from meho_backplane.connectors.vmware_rest.composites._vcenter_install_ops import (
     VCENTER_INSTALL_GOVERNED_SUBOPS,
@@ -112,6 +120,13 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     # destructive, so a human always decides.
     "vmware.composite.cluster.drs_rule.delete": (
         _drs_rule_delete._VIM_SUB_OPS_CLUSTER_DRS_RULE_DELETE
+    ),
+    # The DRS group ops: the same reconfigure, with a groupSpec edit or remove.
+    "vmware.composite.cluster.drs_group.members.set": (
+        _drs_group._VIM_SUB_OPS_CLUSTER_DRS_GROUP_MEMBERS_SET
+    ),
+    "vmware.composite.cluster.drs_group.delete": (
+        _drs_group_delete._VIM_SUB_OPS_CLUSTER_DRS_GROUP_DELETE
     ),
     "vmware.composite.resource_pool.create": (
         _write._SUB_OPS_RESOURCE_POOL_CREATE + _write._VIM_SUB_OPS_RESOURCE_POOL_CREATE
@@ -186,6 +201,10 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,
     # #4394 vCenter install: the deploy, the setup start and the answer.
     **VCENTER_INSTALL_GOVERNED_SUBOPS,
+    # #4349 host membership: add, move, connect, disconnect, remove.
+    **HOST_MEMBERSHIP_GOVERNED_SUBOPS,
+    # Set NTP, DNS and the syslog targets of one host.
+    **HOST_CONFIG_GOVERNED_SUBOPS,
 }
 
 

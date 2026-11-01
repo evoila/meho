@@ -58,6 +58,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _write_preview,
     register_vmware_composite_operations,
 )
+from meho_backplane.connectors.vmware_rest.composites._register import _COMPOSITES
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
@@ -128,6 +129,9 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.content_library.item.delete",
         # The destructive DRS rule delete: blast_radius from its own plan.
         "vmware.composite.cluster.drs_rule.delete",
+        # The DRS group ops: the handler's own plan.
+        "vmware.composite.cluster.drs_group.members.set",
+        "vmware.composite.cluster.drs_group.delete",
         # Licence assign: live-read of the asset's licence now and the new one.
         "vmware.composite.license.assign",
         # The two alarm changes (#4383): a live read of the alarm, or of the
@@ -352,9 +356,10 @@ def _strip_uniform_identity(effect: dict[str, Any], *, op_id: str) -> dict[str, 
 
 
 def test_all_write_composites_register_a_preview_builder() -> None:
-    """Importing the composites package wires a builder per write composite."""
-    assert set(_write_preview._WRITE_PREVIEW_BUILDERS) == set(_WRITE_COMPOSITE_OP_IDS)
-    for op_id, builder in _write_preview._WRITE_PREVIEW_BUILDERS.items():
+    """Importing the composites package wires the builder each write composite's row names."""
+    row_builders = {spec.op_id: spec.preview for spec in _COMPOSITES if spec.preview is not None}
+    assert set(_WRITE_COMPOSITE_OP_IDS) <= set(row_builders)
+    for op_id, builder in row_builders.items():
         assert _PREVIEW_BUILDERS.get(op_id) is builder, op_id
 
 

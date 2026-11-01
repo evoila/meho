@@ -82,11 +82,12 @@ _TOKEN_URN = f"urn:vcloud:token:{_CLIENT_ID}"
 _TOKEN_SEG = "urn%3Avcloud%3Atoken%3A4c1e0a52-0000-4000-8000-00000000c11d"
 
 _VAULT_TARGET = "example-vault-writer"
+_PASSWORD_REF = f"tenants/{TENANT_ID}/vcfa-org-admin"
 _CREATE_PARAMS = {
     "org": "example-org",
     "username": "org-admin",
     "token_name": "meho-tenant",
-    "password_secret_ref": "example/vcfa-org-admin",
+    "password_secret_ref": _PASSWORD_REF,
     "store_secret_ref": "example/vcfa-target",
     "vault_target": _VAULT_TARGET,
 }
@@ -710,7 +711,7 @@ async def test_create_user_login_401_is_connector_auth_failed(
         result = await run("vcfa.provider.api_token.create", _CREATE_PARAMS)
     assert result["status"] == "error"
     assert result["extras"]["error_code"] == "connector_auth_failed"
-    assert "example/vcfa-org-admin" in json.dumps(result)  # remediation names the password ref
+    assert _PASSWORD_REF in json.dumps(result)  # remediation names the password ref
     assert PASSWORD not in json.dumps(result)
     assert not register.called
 
@@ -972,9 +973,9 @@ async def test_user_create_preview_names_the_password_ref_not_the_password(
         "org": "example-org",
         "username": "org-admin",
         "role": "Custom Org Admin",
-        "password_secret_ref": "example/vcfa-org-admin",
+        "password_secret_ref": _PASSWORD_REF,
     }
     effect = await _preview("vcfa.provider.user.create", params, None)
     dumped = json.dumps(effect)
-    assert "example/vcfa-org-admin" in dumped
+    assert _PASSWORD_REF in dumped
     assert PASSWORD not in dumped

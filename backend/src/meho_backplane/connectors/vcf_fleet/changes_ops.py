@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Typed ops for product upgrades, product binaries and new environments.
+"""Metadata of the upgrade, binary and environment ops.
 
 Seven ops for Aria Suite Lifecycle 8.x and VCF 9.0 fleet management on the
 ``fleet-rest-9.0`` connector. The handlers live in
-:mod:`~meho_backplane.connectors.vcf_fleet.lifecycle`.
+:mod:`~meho_backplane.connectors.vcf_fleet.changes`; :mod:`.typed_ops` adds
+these ops to ``FLEET_TYPED_OPS``.
 
 Every change waits for approval. The starts are vendor jobs: they return
 ``accepted`` with the vendor's request id, and the caller follows the
@@ -16,11 +17,11 @@ from __future__ import annotations
 
 from typing import Any, Final
 
-from meho_backplane.connectors.vcf_fleet._op_meta import FleetTypedOp
+from meho_backplane.connectors.vcf_fleet._typed_op import FleetTypedOp
 
-__all__ = ["FLEET_LIFECYCLE_OPS", "FLEET_LIFECYCLE_WHEN_TO_USE_BY_GROUP"]
+__all__ = ["CHANGE_OPS", "CHANGE_WHEN_TO_USE_BY_GROUP"]
 
-FLEET_LIFECYCLE_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
+CHANGE_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "fleet-upgrade": (
         "Two changes for the products of a fleet environment: pre-check the upgrade "
         "of a product (fleet.product.upgrade.precheck) and start the upgrade "
@@ -562,7 +563,7 @@ _ENV_DELETE = FleetTypedOp(
 )
 
 #: The ops this module adds, in the order an operator uses them.
-FLEET_LIFECYCLE_OPS: Final[tuple[FleetTypedOp, ...]] = (
+CHANGE_OPS: Final[tuple[FleetTypedOp, ...]] = (
     _BINARY_LIST,
     _BINARY_MAP,
     _UPGRADE_PRECHECK,

@@ -494,17 +494,20 @@ do and with which rights: `command`, `args`, image, pod and container
 `args` are read as one command line, the way Kubernetes runs them. The
 words stay, but these values are hidden: the value of a `NAME=VALUE` or
 `--name=value` whose name holds a secret word (`PGPASSWORD=...`,
-`AWS_SECRET_ACCESS_KEY=...`, `--password=...`, any length; the value is the
-rest of the shell word, quotes, escapes and text joined after a closing
-quote included, so `"PGPASSWORD=x"suffix` hides `suffix` too; an unquoted
-shell operator, `;` `&` `|` `<` `>` `(` `)`, ends the word, so
-`PGPASSWORD=x;id` keeps `id`, and the commands after the word stay
-visible; a quoted shell string, `sh -c "..."`, is read as its own command
-line), the argument after a secret flag (`--password x`, `--token x`, `-p x`; the whole list
-item or the whole shell word, quotes and backslash escapes included, also
-when the flag ends `command` and the value starts `args`), the password in
+`AWS_SECRET_ACCESS_KEY=...`, `--password=...`, any length), the argument
+after a secret flag (`--password x`, `--token x`, `-p x`; also when the
+flag ends `command` and the value starts `args`), the password in
 `user:password` after `-u` or `--user`, the password in a URL that carries
 a user and password, and tokens with a known vendor prefix (`ghp_...`).
+How far such a value runs depends on who reads the list item. A list item
+is one argument of the program, no shell splits it: the value is the rest
+of the item, spaces, quotes and shell operators included, so
+`PGPASSWORD=x;tail` and `"PGPASSWORD=x"suffix` are hidden whole. Only the
+item right after `-c` is a shell command string (`sh -c "..."`): there
+the value is one shell word, quotes and backslash escapes included, and an
+unquoted shell operator (`;` `&` `|` `<` `>` `(` `)`) ends it, so
+`sh -c "PGPASSWORD=x;id"` keeps `id` and the commands after a secret stay
+visible.
 Then the same two-step redaction as the generic params echo
 runs over the spec: it hides secret-shaped text anywhere (JWTs, bearer
 tokens) and the value of a field with a secret-shaped name (a `secret`

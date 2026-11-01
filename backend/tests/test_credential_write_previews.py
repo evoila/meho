@@ -364,41 +364,58 @@ async def test_k8s_job_create_hides_the_whole_argument_after_a_secret_flag() -> 
     assert container["args"] == ["--password", "***REDACTED***", "-c", "tool -p ***REDACTED*** x"]
 
 
-@pytest.mark.asyncio
-async def test_k8s_job_create_hides_a_password_with_shell_escapes_whole() -> None:
-    """An escaped quote or space is part of the password, not its end."""
-    _, preview = await _preview(
-        "k8s.job.create",
-        _job_params(
-            {
-                "name": "run",
-                "image": "busybox:1.36",
-                "command": ["sh", "-c"],
-                "args": [
-                    f'tool --password "{_SHORT}\\" phrase" run',
-                    f"tool --password {_SHORT}\\ phrase run",
-                    f"tool -p '{_SHORT}' --user admin:{_SHORT}\\ phrase run",  # gitleaks:allow
-                ],
-            }
+@pytest.mark.parametrize(
+    ("shell_string", "shown"),
+    [
+        (
+            f'tool --password "{_SHORT}\\" phrase" run',
+            "tool --password ***REDACTED*** run",
         ),
-    )
-    (container,) = preview["spec"]["template"]["spec"]["containers"]
-    assert container["args"] == [
-        "tool --password ***REDACTED*** run",
-        "tool --password ***REDACTED*** run",
-        "tool -p ***REDACTED*** --user admin:***REDACTED*** run",
-    ]
-
-
+        (f"tool --password {_SHORT}\\ phrase run", "tool --password ***REDACTED*** run"),
+        (
+            f"tool -p '{_SHORT}' --user admin:{_SHORT}\\ phrase run",  # gitleaks:allow
+            "tool -p ***REDACTED*** --user admin:***REDACTED*** run",
+        ),
+        (f'env "PGPASSWORD={_SHORT}" pg_dump app', 'env "PGPASSWORD=***REDACTED***" pg_dump app'),
+        (
+            f"env 'PGPASSWORD={_SHORT} phrase' pg_dump app",
+            "env 'PGPASSWORD=***REDACTED***' pg_dump app",
+        ),
+        (
+            f'env "PGPASSWORD={_SHORT}"suffix pg_dump app',
+            'env "PGPASSWORD=***REDACTED***" pg_dump app',
+        ),
+        (
+            f"env PGPASSWORD='{_SHORT}'suffix pg_dump app",
+            "env PGPASSWORD=***REDACTED*** pg_dump app",
+        ),
+        (f"PGPASSWORD={_SHORT};id", "PGPASSWORD=***REDACTED***;id"),
+        (f'env "PGPASSWORD={_SHORT};id" pg_dump', 'env "PGPASSWORD=***REDACTED***" pg_dump'),
+        (
+            f'sh -c "PGPASSWORD={_SHORT}; id" && echo done',
+            'sh -c "PGPASSWORD=***REDACTED***; id" && echo done',
+        ),
+        (
+            f'sh -c "pg_dump --password {_SHORT} app" && echo done',
+            'sh -c "pg_dump --password ***REDACTED*** app" && echo done',
+        ),
+        (
+            f"sh -c 'curl --user=admin:{_SHORT} x.invalid' && echo done",  # gitleaks:allow
+            "sh -c 'curl --user=admin:***REDACTED*** x.invalid' && echo done",  # gitleaks:allow
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_k8s_job_create_keeps_the_commands_after_a_quoted_assignment() -> None:
-    """The whole shell word after ``NAME=`` is hidden; the commands after the word stay.
+async def test_k8s_job_create_reads_the_string_after_dash_c_as_a_shell_command(
+    shell_string: str, shown: str
+) -> None:
+    """The item after ``-c`` is a shell command string: its secrets are shell words.
 
-    Text joined to the word after a closing quote (``"PGPASSWORD=x"suffix``)
-    is part of the value for the shell, so it is hidden too. An unquoted
-    shell operator (``;``, ``&&``) ends the word, so the command after it
-    stays. A quoted shell string (``sh -c "..."``) is read as its own
-    command line, also when it starts with a secret assignment.
+    A secret value is one shell word, quotes and backslash escapes included,
+    and text joined after a closing quote (``"PGPASSWORD=x"suffix``) is part
+    of it. An unquoted shell operator (``;``, ``&&``) ends the word, so the
+    command after it stays. A quoted string after a nested ``sh -c`` is read
+    the same way.
     """
     _, preview = await _preview(
         "k8s.job.create",
@@ -407,37 +424,53 @@ async def test_k8s_job_create_keeps_the_commands_after_a_quoted_assignment() -> 
                 "name": "run",
                 "image": "busybox:1.36",
                 "command": ["sh", "-c"],
+                "args": [shell_string],
+            }
+        ),
+    )
+    (container,) = preview["spec"]["template"]["spec"]["containers"]
+    assert container["args"] == [shown]
+
+
+@pytest.mark.asyncio
+async def test_k8s_job_create_hides_a_direct_argument_to_its_end() -> None:
+    """A list item not after ``-c`` is one argument of the program: no shell splits it.
+
+    So a secret value in it runs to the end of the item. A shell operator
+    (``PGPASSWORD=x;tail``), a space or text joined after a closing quote
+    is part of the value, not a new command.
+    """
+    _, preview = await _preview(
+        "k8s.job.create",
+        _job_params(
+            {
+                "name": "run",
+                "image": "busybox:1.36",
+                "command": ["env", f"PGPASSWORD={_SHORT};tail", "pg_dump", "app"],
                 "args": [
-                    f'env "PGPASSWORD={_SHORT}" pg_dump app',
-                    f"env 'PGPASSWORD={_SHORT} phrase' pg_dump app",
+                    f"PGPASSWORD={_SHORT} tail",
                     f'env "PGPASSWORD={_SHORT}"suffix pg_dump app',
-                    f"env PGPASSWORD='{_SHORT}'suffix pg_dump app",
-                    f"PGPASSWORD={_SHORT};id",
-                    f'env "PGPASSWORD={_SHORT};id" pg_dump',
-                    f'sh -c "PGPASSWORD={_SHORT}; id" && echo done',
-                    f'sh -c "pg_dump --password={_SHORT} app" && echo done',
-                    f"sh -c 'curl --user=admin:{_SHORT} x.invalid' && echo done",  # gitleaks:allow
+                    f"tool --password {_SHORT} tail",
+                    f"tool -p {_SHORT}\\ phrase run",
+                    "--dry-run",
                 ],
             }
         ),
     )
     (container,) = preview["spec"]["template"]["spec"]["containers"]
-    assert _SHORT not in json.dumps(container)
-    assert "phrase" not in json.dumps(container)
-    assert "suffix" not in json.dumps(container)
-    assert container["args"][:7] == [
-        'env "PGPASSWORD=***REDACTED***" pg_dump app',
-        "env 'PGPASSWORD=***REDACTED***' pg_dump app",
-        'env "PGPASSWORD=***REDACTED***" pg_dump app',
-        "env PGPASSWORD=***REDACTED*** pg_dump app",
-        "PGPASSWORD=***REDACTED***;id",
-        'env "PGPASSWORD=***REDACTED***" pg_dump',
-        'sh -c "PGPASSWORD=***REDACTED***; id" && echo done',
+    text = json.dumps(container)
+    assert _SHORT not in text
+    assert "tail" not in text
+    assert "suffix" not in text
+    assert "phrase" not in text
+    assert container["command"] == ["env", "PGPASSWORD=***REDACTED***", "pg_dump", "app"]
+    assert container["args"] == [
+        "PGPASSWORD=***REDACTED***",
+        'env "PGPASSWORD=***REDACTED***"',
+        "tool --password ***REDACTED***",
+        "tool -p ***REDACTED***",
+        "--dry-run",
     ]
-    assert container["args"][7].endswith(' app" && echo done')
-    assert container["args"][8] == (
-        "sh -c 'curl --user=admin:***REDACTED*** x.invalid' && echo done"  # gitleaks:allow
-    )
 
 
 @pytest.mark.asyncio

@@ -330,18 +330,20 @@ async def test_cronjob_run_preview_shows_job_template_and_active_jobs_not_values
     pod_spec.containers[0].command = ["run-backup", "--password"]
     pod_spec.containers[0].args = [
         f"{_SHORT} phrase",
-        f"--token={_SECRET}",
-        f"PGPASSWORD={_SHORT} pg_dump -h db app",
+        f"AWS_SECRET_ACCESS_KEY={_SECRET}",
+        f"PGPASSWORD={_SHORT};tail",
+        f'env "PGPASSWORD={_SHORT}"suffix pg_dump app',
         "--password",
         _SHORT,
         f"curl -u admin:{_SHORT} {_URL_WITH_PASSWORD}",  # gitleaks:allow
-        f'tool --password "{_SHORT}\\" phrase" run',
-        f"tool --password {_SHORT}\\ phrase run",
-        f'env "PGPASSWORD={_SHORT}" pg_dump app',
+        "-c",
+        f"PGPASSWORD={_SHORT} pg_dump -h db app; id",
+        "-c",
         f'env "PGPASSWORD={_SHORT}"suffix pg_dump app',
-        f"PGPASSWORD={_SHORT};id",
+        "-c",
+        f'tool --password "{_SHORT}\\" phrase" run',
+        "-c",
         f'sh -c "PGPASSWORD={_SHORT}; id" && echo done',
-        f'sh -c "pg_dump --password={_SHORT} app" && echo done',
     ]
     ctx = PreviewContext(
         descriptor=_FakeDescriptor(op_id="k8s.cronjob.run"),  # type: ignore[arg-type]
@@ -378,16 +380,24 @@ async def test_cronjob_run_preview_shows_job_template_and_active_jobs_not_values
     (container,) = pod["containers"]
     assert container["image"] == "registry.example/backup:1.2"
     assert container["command"] == ["run-backup", "--password"]
-    assert container["args"][0] == "***REDACTED***"
-    assert container["args"][-7:-1] == [
-        "tool --password ***REDACTED*** run",
-        "tool --password ***REDACTED*** run",
+    assert "tail" not in json.dumps(effect)
+    assert container["args"] == [
+        "***REDACTED***",
+        "AWS_SECRET_ACCESS_KEY=***REDACTED***",
+        "PGPASSWORD=***REDACTED***",
+        'env "PGPASSWORD=***REDACTED***"',
+        "--password",
+        "***REDACTED***",
+        "curl -u admin:***REDACTED***",
+        "-c",
+        "PGPASSWORD=***REDACTED*** pg_dump -h db app; id",
+        "-c",
         'env "PGPASSWORD=***REDACTED***" pg_dump app',
-        'env "PGPASSWORD=***REDACTED***" pg_dump app',
-        "PGPASSWORD=***REDACTED***;id",
+        "-c",
+        "tool --password ***REDACTED*** run",
+        "-c",
         'sh -c "PGPASSWORD=***REDACTED***; id" && echo done',
     ]
-    assert container["args"][-1].endswith(' app" && echo done')
     assert container["securityContext"] == {"privileged": True}
     assert container["env"] == [{"name": "DB_PASSWORD", "value": "***REDACTED***"}]
     assert container["envFrom"] == [{"secretRef": {"name": "db-creds"}}]

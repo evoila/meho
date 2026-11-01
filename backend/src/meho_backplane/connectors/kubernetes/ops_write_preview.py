@@ -49,20 +49,21 @@ What is never shown
   are read as one command line, the way Kubernetes runs them. The words
   stay, but these values are hidden: the value of a ``NAME=VALUE`` or
   ``--name=value`` whose name holds a secret word (``PGPASSWORD=...``,
-  ``AWS_SECRET_ACCESS_KEY=...``, ``--password=...``, any length; the value
-  is the rest of the shell word, quotes, escapes and text joined after a
-  closing quote included, so ``"PGPASSWORD=x"suffix`` hides ``suffix`` too;
-  an unquoted shell operator, ``;`` ``&`` ``|`` ``<`` ``>`` ``(`` ``)``, ends
-  the word, so ``PGPASSWORD=x;id`` keeps ``id``, and the commands after the
-  word stay visible; a quoted shell string, ``sh -c "..."``, is read as its
-  own command line), the
+  ``AWS_SECRET_ACCESS_KEY=...``, ``--password=...``, any length), the
   argument after a secret flag (``--password x``, ``--token x``, ``-p x``;
-  the whole list item, or the whole shell word in a shell string, quotes
-  and backslash escapes included, also when the flag ends ``command`` and
-  the value starts ``args``), the
+  also when the flag ends ``command`` and the value starts ``args``), the
   password in ``user:password`` after ``-u`` or ``--user``, the password
   in a URL that carries a user and password and tokens with a known
-  vendor prefix (``ghp_...``). Then the shared
+  vendor prefix (``ghp_...``). How far such a value runs depends on who
+  reads the list item. A list item is one argument of the program, no
+  shell splits it: the value is the rest of the item, spaces, quotes and
+  shell operators included, so ``PGPASSWORD=x;tail`` and
+  ``"PGPASSWORD=x"suffix`` are hidden whole. Only the item right after
+  ``-c`` is a shell command string (``sh -c "..."``): there the value is
+  one shell word, quotes and escapes included, and an unquoted shell
+  operator (``;`` ``&`` ``|`` ``<`` ``>`` ``(`` ``)``) ends it, so
+  ``sh -c "PGPASSWORD=x;id"`` keeps ``id`` and the commands after a secret
+  stay visible. Then the shared
   params redaction of the generic echo runs over the spec: it hides
   secret-shaped text anywhere (JWTs, bearer tokens) and the value of a
   field with a secret-shaped name (a ``secret`` volume, for example). A
@@ -205,11 +206,15 @@ _SHELL_WORD = (
     r""""(?:[^"\\]|\\[\s\S])*(?:"|\Z))+"""
 )
 
-#: One token of a shell string: whitespace, a run of operator characters, or
-#: a shell word in which a quoted or escaped part may hold spaces
-#: (``--password 'my phrase'``, ``--password my\\ phrase``). Joined back,
-#: the tokens give the string as it was.
-_TOKEN = re.compile(rf"""\s+|[{_OPERATOR_CHARS}]+|{_SHELL_WORD}|\S+""")
+#: One token of a shell command string: whitespace, a run of operator
+#: characters, or a shell word in which a quoted or escaped part may hold
+#: spaces (``--password 'my phrase'``, ``--password my\\ phrase``). Joined
+#: back, the tokens give the string as it was.
+_SHELL_TOKEN = re.compile(rf"""\s+|[{_OPERATOR_CHARS}]+|{_SHELL_WORD}|\S+""")
+
+#: One token of a direct argument (a list item no shell reads): whitespace
+#: or a run of other characters. Quotes and operators are plain text here.
+_ARGUMENT_TOKEN = re.compile(r"\s+|\S+")
 
 #: A shell word that is one quoted part and nothing else: a shell string, as
 #: the one after ``sh -c``, or a quoted value.
@@ -271,12 +276,12 @@ def _secret_assignment(word: str) -> re.Match[str] | None:
 def _hide_assignment(word: str, match: re.Match[str]) -> str:
     """*word* with all that follows its ``NAME=`` at *match* hidden.
 
-    The value is the rest of the shell word, whatever quotes and escapes it
-    holds: ``"PGPASSWORD=x"suffix`` is one word, and the shell gives the
-    variable ``xsuffix``, so ``suffix`` is hidden too. No quote is read.
-    A quote right before the name is closed after the marker, so the line
-    still reads as a command line. After ``-u`` or ``--user`` only the
-    password of ``user:password`` is hidden.
+    *word* is the whole value span: one shell word in a shell string
+    (``"PGPASSWORD=x"suffix`` is one word, and the shell gives the variable
+    ``xsuffix``, so ``suffix`` is hidden too), or the rest of a direct
+    argument. No quote is read. A quote right before the name is closed
+    after the marker, so the line still reads as a command line. After
+    ``-u`` or ``--user`` only the password of ``user:password`` is hidden.
     """
     rest = word[match.end() :]
     hidden = _hide_user_password(rest) if match["name"].lstrip("-") in _USER_FLAGS else _HIDDEN
@@ -290,13 +295,16 @@ def _hide_flag_value(pending: str, value: str) -> str:
     return _HIDDEN if pending == "secret" else _hide_user_password(value)
 
 
-def _hide_command_text(text: str, pending: str | None) -> tuple[str, str | None]:
-    """One command-line string with its secret values hidden, word by word.
+def _hide_command_text(text: str, pending: str | None, *, shell: bool) -> tuple[str, str | None]:
+    """One command-line string with its secret values hidden.
 
     *pending* is the secret flag that still waits for its value when the
     string starts (``--password`` ended the item before). Returned with the
-    text is the flag that waits at its end, for the next item. For each
-    shell word, in this order:
+    text is the flag that waits at its end, for the next item.
+
+    With *shell* the text is a shell command string, the one after ``-c``.
+    It is split into shell words, in which a quoted or escaped part may hold
+    spaces. For each word, in this order:
 
     * An unquoted shell operator (``;``, ``&&``, ``|``) ends the command
       before it: a flag that still waits for its value gets none, and the
@@ -305,76 +313,102 @@ def _hide_command_text(text: str, pending: str | None) -> tuple[str, str | None]
     * A word that is one quoted part and starts with a secret-named
       assignment (``"PGPASSWORD=a b"``) is that assignment: hidden whole.
       Not after ``-c``: there it is a shell string.
-    * Any other word that is one quoted part is read as its own command
-      line (``sh -c "tool --password=x run"``,
-      ``sh -c "PGPASSWORD=x; id"``), so its words stay.
+    * Any other word that is one quoted part is read on its own: as a
+      shell command string after ``-c`` (``sh -c "PGPASSWORD=x; id"``
+      keeps ``id``), else as a direct argument.
     * A word that holds a secret-named assignment anywhere (``PGPASSWORD=x``,
       ``"PGPASSWORD=x"suffix``, ``--env=PGPASSWORD=x``) is hidden from the
       ``NAME=`` to its end.
     * A secret flag makes the next word its value.
+
+    Without *shell* the text is a direct argument: one argument of the
+    program, which no shell splits. Its words are found at whitespace only,
+    quotes and operators are plain text, and the first secret value found
+    (after a secret flag, or after a secret-named ``NAME=``) runs to the end
+    of the argument: ``PGPASSWORD=x;tail`` and ``--password x y`` hide all
+    that follows the marker.
     """
-    words = _TOKEN.findall(text)
+    words = (_SHELL_TOKEN if shell else _ARGUMENT_TOKEN).findall(text)
     previous = ""
     for index, word in enumerate(words):
         if word.isspace():
             continue
-        if word[0] in _OPERATOR_CHARS:
+        if shell and word[0] in _OPERATOR_CHARS:
             pending = None
             previous = ""
             continue
         previous, before = word, previous
-        if pending is not None and not word.startswith("-"):
-            words[index] = _hide_flag_value(pending, word)
-            pending = None
+        value = word if shell else "".join(words[index:])
+        hidden, pending = _hide_word(word, value, before=before, pending=pending, shell=shell)
+        if hidden is None:
             continue
-        pending = None
-        assignment = _secret_assignment(word)
-        shell_string = assignment is None or assignment.start() != 1 or before == "-c"
-        if _QUOTED_STRING.fullmatch(word) and shell_string:
-            inner, pending = _hide_command_text(word[1:-1], None)
-            words[index] = f"{word[0]}{inner}{word[0]}"
-            continue
-        if assignment is not None:
-            words[index] = _hide_assignment(word, assignment)
-            continue
-        flag = _FLAG.match(word)
-        if flag is None:
-            continue
-        name = flag["name"]
-        if name in _USER_FLAGS:
-            pending = "user"
-        elif name == "p" or _secret_shaped_name(name):
-            pending = "secret"
+        words[index] = hidden
+        if not shell:
+            return "".join(words[: index + 1]), pending
     return "".join(words), pending
+
+
+def _hide_word(
+    word: str, value: str, *, before: str, pending: str | None, shell: bool
+) -> tuple[str | None, str | None]:
+    """One word of a command line: its hidden form, or ``None`` when it is shown.
+
+    *value* is the span a secret in *word* hides: the word itself in a shell
+    string, the rest of the argument in a direct one. *before* is the word
+    before it. Returned with the hidden form is the secret flag that waits
+    for the next word. The rules are those of :func:`_hide_command_text`.
+    """
+    if pending is not None and not word.startswith("-"):
+        return _hide_flag_value(pending, value), None
+    assignment = _secret_assignment(word)
+    quoted_assignment = assignment is not None and assignment.start() == 1 and before != "-c"
+    if shell and not quoted_assignment and _QUOTED_STRING.fullmatch(word):
+        inner, waiting = _hide_command_text(word[1:-1], None, shell=before == "-c")
+        return f"{word[0]}{inner}{word[0]}", waiting
+    if assignment is not None:
+        return _hide_assignment(value, assignment), None
+    flag = _FLAG.match(word)
+    if flag is None:
+        return None, None
+    name = flag["name"]
+    if name in _USER_FLAGS:
+        return None, "user"
+    return None, "secret" if name == "p" or _secret_shaped_name(name) else None
 
 
 def _hide_command_secrets(parts: list[Any]) -> list[Any]:
     """Copy one command line (``command`` + ``args``) with its secret values hidden.
 
-    The words stay, so the approver still reads what runs. Hidden are: the
-    rest of a shell word after a ``NAME=`` (or ``--name=``) with a
-    secret-shaped name (an unquoted shell operator ends the word, so
-    ``PGPASSWORD=x;id`` keeps ``id``), the password in a URL, tokens with a
-    known vendor prefix, the argument after a secret-shaped flag
-    (``--password x``, ``-p x``) and the password in ``user:password`` after
-    ``-u`` or ``--user``. A flag and its value may be two list items or two
-    words of one string (``sh -c "..."``). The argument after a flag is hidden
-    whole: the whole list item, or the whole shell word in a string, quotes
-    and backslash escapes included (``"a\\" b"``, ``a\\ b``), so a password
-    with a space or a quote in it does not leak in part.
+    The words stay, so the approver still reads what runs. Hidden are: what
+    follows a ``NAME=`` (or ``--name=``) with a secret-shaped name, the
+    password in a URL, tokens with a known vendor prefix, the argument after
+    a secret-shaped flag (``--password x``, ``-p x``) and the password in
+    ``user:password`` after ``-u`` or ``--user``. A flag and its value may be
+    two list items or two words of one string.
+
+    Each list item is one argument of the program, so a secret value in it
+    runs to the end of the item, spaces and shell operators included
+    (``PGPASSWORD=x;tail`` is hidden whole). Only the item right after
+    ``-c`` is a shell command string (``sh -c "..."``): there a value is
+    one shell word, quotes and backslash escapes included (``"a\\" b"``,
+    ``a\\ b``), and an unquoted shell operator ends it
+    (``PGPASSWORD=x;id`` keeps ``id``).
     """
     hidden: list[Any] = []
     pending: str | None = None
+    previous = ""
     for part in parts:
         if not isinstance(part, str):
             hidden.append(part)
+            previous = ""
             continue
         if pending is not None and not part.startswith("-"):
             hidden.append(_hide_flag_value(pending, part))
             pending = None
-            continue
-        text, pending = _hide_command_text(_hide_in_text(part), pending)
-        hidden.append(text)
+        else:
+            text, pending = _hide_command_text(_hide_in_text(part), pending, shell=previous == "-c")
+            hidden.append(text)
+        previous = part
     return hidden
 
 

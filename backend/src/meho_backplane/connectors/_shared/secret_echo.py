@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Find a secret that a vendor repeats in its error text.
+"""Find a secret that a vendor error answer repeats.
 
-A connector that sends a secret (a password, a private key) may get an
-error answer that repeats it. Before the vendor text goes into an answer,
-:func:`mentions_secret` checks it for the secret as is and in the forms a
-vendor may use when it repeats a value: JSON-escaped, URL-encoded and
-HTML-escaped.
+Some vendors quote the value they refused in an error answer, for example
+a new password that does not meet the password policy. A connector that
+sends a secret calls :func:`mentions_secret` on the answer's texts before
+any of them leave the connector. When a secret is in them, the connector
+drops all vendor text.
 """
 
 from __future__ import annotations
@@ -17,7 +17,17 @@ import json
 from collections.abc import Iterable
 from urllib.parse import quote
 
-__all__ = ["mentions_secret"]
+import httpx
+
+__all__ = ["mentions_secret", "response_text"]
+
+
+def response_text(response: httpx.Response) -> str:
+    """The body of *response* as text, or ``""`` when it cannot be read."""
+    try:
+        return response.text
+    except (UnicodeDecodeError, httpx.StreamError):
+        return ""
 
 
 def mentions_secret(texts: Iterable[str], secret: str) -> bool:

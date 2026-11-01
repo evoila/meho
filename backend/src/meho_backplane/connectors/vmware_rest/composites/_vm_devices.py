@@ -22,7 +22,7 @@ some requests with HTTP 400 (for example a hot add it does not allow); the
 answer is then ``refused`` with vCenter's reason, and nothing changed.
 
 The registration rows live here, so the shared registry in ``_register.py``
-only splats :data:`VM_DEVICES_COMPOSITES`.
+only collects :data:`COMPOSITES`.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._teardown_reads import read_object
 from meho_backplane.connectors.vmware_rest.composites._vm_devices_schemas import (
     SCSI_CONTROLLER_TYPES,
@@ -47,11 +48,13 @@ from meho_backplane.connectors.vmware_rest.composites._vm_devices_schemas import
 from meho_backplane.connectors.vmware_rest.composites._vm_disk_remove import (
     OP_ID_VM_DISK_REMOVE,
     vm_disk_remove_composite,
+    vm_disk_remove_preview,
 )
 from meho_backplane.connectors.vmware_rest.composites._vm_nic_remove import (
     OP_ID_VM_NIC_REMOVE,
     vendor_refusal,
     vm_nic_remove_composite,
+    vm_nic_remove_preview,
 )
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _OP_RECONFIG_VM_TASK,
@@ -73,7 +76,6 @@ from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, pol
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
@@ -82,8 +84,8 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
+    "COMPOSITES",
     "SUB_OPS_VM_CONTROLLER_ADD",
-    "VM_DEVICES_COMPOSITES",
     "vm_controller_add_composite",
 ]
 
@@ -393,60 +395,60 @@ async def _vm_controller_add_preview(ctx: PreviewContext) -> dict[str, Any] | No
     }
 
 
-register_preview_builder(OP_ID_VM_CONTROLLER_ADD, _vm_controller_add_preview)
-
-
-#: The three registration rows, as ``_CompositeSpec`` keyword arguments.
-VM_DEVICES_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_VM_DISK_REMOVE,
-        "handler": vm_disk_remove_composite,
-        "summary": "Remove a virtual disk from a VM; optionally delete its VMDK file too.",
-        "description": (
+#: The three registration rows.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_VM_DISK_REMOVE,
+        handler=vm_disk_remove_composite,
+        summary="Remove a virtual disk from a VM; optionally delete its VMDK file too.",
+        description=(
             "Removes one virtual disk from a VM, named by VM id and disk id. By default the "
             "VMDK file stays on the datastore; with delete_file the data is gone for good. "
             "Returns the disks left. A second person always approves, after a preview."
         ),
-        "parameter_schema": VM_DISK_REMOVE_PARAMETER_SCHEMA,
-        "response_schema": VM_DISK_REMOVE_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "hardware", "disk", "vi-json"],
-        "safety_level": "destructive",
-        "requires_approval": True,
-        "llm_instructions": VM_DISK_REMOVE_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_VM_NIC_REMOVE,
-        "handler": vm_nic_remove_composite,
-        "summary": "Remove a network adapter from a VM.",
-        "description": (
+        parameter_schema=VM_DISK_REMOVE_PARAMETER_SCHEMA,
+        response_schema=VM_DISK_REMOVE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "hardware", "disk", "vi-json"],
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions=VM_DISK_REMOVE_LLM_INSTRUCTIONS,
+        preview=vm_disk_remove_preview,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_VM_NIC_REMOVE,
+        handler=vm_nic_remove_composite,
+        summary="Remove a network adapter from a VM.",
+        description=(
             "Removes one network adapter from a VM, named by VM id and adapter id. Reads the "
             "adapter first and sends nothing when it does not exist. Returns the adapters "
             "left. Waits for approval."
         ),
-        "parameter_schema": VM_NIC_REMOVE_PARAMETER_SCHEMA,
-        "response_schema": VM_NIC_REMOVE_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "hardware", "nic"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VM_NIC_REMOVE_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_VM_CONTROLLER_ADD,
-        "handler": vm_controller_add_composite,
-        "summary": "Add a SCSI, NVMe, SATA or USB 3 controller to a VM.",
-        "description": (
+        parameter_schema=VM_NIC_REMOVE_PARAMETER_SCHEMA,
+        response_schema=VM_NIC_REMOVE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "hardware", "nic"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VM_NIC_REMOVE_LLM_INSTRUCTIONS,
+        preview=vm_nic_remove_preview,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_VM_CONTROLLER_ADD,
+        handler=vm_controller_add_composite,
+        summary="Add a SCSI, NVMe, SATA or USB 3 controller to a VM.",
+        description=(
             "Adds one controller to a VM, named by its VM id: SCSI (LSI Logic SAS or "
             "ParaVirtual), NVMe, SATA, or USB 3. Reads the new controller back. vCenter may "
             "refuse a hot add on a running VM. Waits for approval."
         ),
-        "parameter_schema": VM_CONTROLLER_ADD_PARAMETER_SCHEMA,
-        "response_schema": VM_CONTROLLER_ADD_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "hardware", "controller"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VM_CONTROLLER_ADD_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=VM_CONTROLLER_ADD_PARAMETER_SCHEMA,
+        response_schema=VM_CONTROLLER_ADD_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "hardware", "controller"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VM_CONTROLLER_ADD_LLM_INSTRUCTIONS,
+        preview=_vm_controller_add_preview,
+    ),
 )

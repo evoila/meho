@@ -50,7 +50,6 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     _CLUSTER_COMPUTE_RESOURCE_MO_TYPE,
     _HOST_SYSTEM_MO_TYPE,
 )
-from meho_backplane.operations._preview import register_preview_builder
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -186,6 +185,3 @@ async def host_remove_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "datastores. To use the host again, add it again with host.add."
     )
     return preview
-
-
-register_preview_builder(OP_ID_HOST_REMOVE, host_remove_preview)

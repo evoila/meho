@@ -62,7 +62,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
 from meho_backplane.connectors.vmware_rest.composites.schemas import VM_MOID_PATTERN
 from meho_backplane.connectors.vmware_rest.vim_body import VIM_TYPE_NAME_KEY
 from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, poll_vim_task
-from meho_backplane.operations._preview import approved_preview, register_preview_builder
+from meho_backplane.operations._preview import approved_preview
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -354,6 +354,3 @@ async def vm_disk_remove_preview(ctx: PreviewContext) -> dict[str, Any] | None:
             "attached again."
         )
     return preview
-
-
-register_preview_builder(OP_ID_VM_DISK_REMOVE, vm_disk_remove_preview)

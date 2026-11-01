@@ -3,8 +3,7 @@
 
 """Registry rows and approval previews of the host NTP, DNS and syslog changes.
 
-``_register.py`` splats :data:`HOST_CONFIG_COMPOSITES` into its
-``_COMPOSITES`` table, and ``_governed_subops.py`` reads
+``_register.py`` collects :data:`COMPOSITES`, and ``_governed_subops.py`` reads
 :data:`HOST_CONFIG_GOVERNED_SUBOPS`. All three changes are ``dangerous`` with
 ``requires_approval=True``. The handlers are in :mod:`._host_config_writes`.
 """
@@ -38,6 +37,7 @@ from meho_backplane.connectors.vmware_rest.composites._host_config_writes import
     host_syslog_set_composite,
     locate_host_managers,
 )
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.host_config import (
     SYSLOG_LOG_HOST_KEY,
     dns_state,
@@ -49,13 +49,12 @@ from meho_backplane.operations._preview import (
     PreviewBuilder,
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
-__all__ = ["HOST_CONFIG_COMPOSITES", "HOST_CONFIG_GOVERNED_SUBOPS"]
+__all__ = ["COMPOSITES", "HOST_CONFIG_GOVERNED_SUBOPS"]
 
 #: composite op id -> the vim calls it may make.
 HOST_CONFIG_GOVERNED_SUBOPS: Final[dict[str, tuple[str, ...]]] = {
@@ -132,70 +131,69 @@ async def _ntp_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return await _preview_current(ctx, ("dateTimeSystem", "serviceSystem"), read)
 
 
-register_preview_builder(OP_ID_NTP_SET, _ntp_preview)
-register_preview_builder(
-    OP_ID_DNS_SET, _preview_builder("networkSystem", "HostNetworkSystem", "dnsConfig", dns_state)
-)
-register_preview_builder(
-    OP_ID_SYSLOG_SET,
-    _preview_builder("advancedOption", "OptionManager", SYSLOG_LOG_HOST_KEY, syslog_state),
+_dns_preview = _preview_builder("networkSystem", "HostNetworkSystem", "dnsConfig", dns_state)
+_syslog_preview = _preview_builder(
+    "advancedOption", "OptionManager", SYSLOG_LOG_HOST_KEY, syslog_state
 )
 
 
 # ---------------------------------------------------------------------------
-# Registration rows (``_CompositeSpec`` keyword arguments)
+# Registration rows
 # ---------------------------------------------------------------------------
 
-HOST_CONFIG_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_NTP_SET,
-        "handler": host_ntp_set_composite,
-        "summary": "Set the NTP servers of one ESXi host and make sure ntpd runs.",
-        "description": (
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_NTP_SET,
+        handler=host_ntp_set_composite,
+        summary="Set the NTP servers of one ESXi host and make sure ntpd runs.",
+        description=(
             "Sets the NTP server list of one host, sets ntpd to start with the host, and "
             "restarts ntpd (or starts it when it is stopped). Reads the settings first and "
             "sends nothing when they already match; reads them back after. Waits for approval."
         ),
-        "parameter_schema": NTP_SET_PARAMETER_SCHEMA,
-        "response_schema": NTP_SET_RESPONSE_SCHEMA,
-        "group_key": "host",
-        "tags": ["composite", "write", "host", "ntp", "time", "vi-json"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": NTP_SET_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_DNS_SET,
-        "handler": host_dns_set_composite,
-        "summary": "Set the DNS servers, search domains, host name or domain of one ESXi host.",
-        "description": (
+        parameter_schema=NTP_SET_PARAMETER_SCHEMA,
+        response_schema=NTP_SET_RESPONSE_SCHEMA,
+        group_key="host",
+        tags=["composite", "write", "host", "ntp", "time", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=NTP_SET_LLM_INSTRUCTIONS,
+        preview=_ntp_preview,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_DNS_SET,
+        handler=host_dns_set_composite,
+        summary="Set the DNS servers, search domains, host name or domain of one ESXi host.",
+        description=(
             "Sets the DNS servers, search domains, host name and domain name of one host; "
             "fields left out keep their value. Refused with DHCP DNS. Reads the settings "
             "first and back after; sends nothing when they match. Waits for approval."
         ),
-        "parameter_schema": DNS_SET_PARAMETER_SCHEMA,
-        "response_schema": DNS_SET_RESPONSE_SCHEMA,
-        "group_key": "host",
-        "tags": ["composite", "write", "host", "dns", "hostname", "vi-json"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": DNS_SET_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_SYSLOG_SET,
-        "handler": host_syslog_set_composite,
-        "summary": "Set the remote syslog targets of one ESXi host (Syslog.global.logHost).",
-        "description": (
+        parameter_schema=DNS_SET_PARAMETER_SCHEMA,
+        response_schema=DNS_SET_RESPONSE_SCHEMA,
+        group_key="host",
+        tags=["composite", "write", "host", "dns", "hostname", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=DNS_SET_LLM_INSTRUCTIONS,
+        preview=_dns_preview,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_SYSLOG_SET,
+        handler=host_syslog_set_composite,
+        summary="Set the remote syslog targets of one ESXi host (Syslog.global.logHost).",
+        description=(
             "Sets where one host sends its logs: the Syslog.global.logHost advanced option. "
             "The list replaces the current one; an empty list removes all. Reads the value "
             "first and back after; sends nothing when it matches. Waits for approval."
         ),
-        "parameter_schema": SYSLOG_SET_PARAMETER_SCHEMA,
-        "response_schema": SYSLOG_SET_RESPONSE_SCHEMA,
-        "group_key": "host",
-        "tags": ["composite", "write", "host", "syslog", "logging", "vi-json"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": SYSLOG_SET_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=SYSLOG_SET_PARAMETER_SCHEMA,
+        response_schema=SYSLOG_SET_RESPONSE_SCHEMA,
+        group_key="host",
+        tags=["composite", "write", "host", "syslog", "logging", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=SYSLOG_SET_LLM_INSTRUCTIONS,
+        preview=_syslog_preview,
+    ),
 )

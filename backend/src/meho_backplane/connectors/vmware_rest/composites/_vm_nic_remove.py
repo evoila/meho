@@ -30,7 +30,6 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware import check_vm
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
@@ -43,6 +42,7 @@ __all__ = [
     "SUB_OPS_VM_NIC_REMOVE",
     "vendor_refusal",
     "vm_nic_remove_composite",
+    "vm_nic_remove_preview",
 ]
 
 OP_ID_VM_NIC_REMOVE: Final = "vmware.composite.vm.nic.remove"
@@ -171,7 +171,7 @@ async def vm_nic_remove_composite(
     return {**envelope, "status": "removed"}
 
 
-async def _vm_nic_remove_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+async def vm_nic_remove_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Show the approver the adapter that goes away."""
     if ctx.connector_instance is None:
         return None
@@ -191,6 +191,3 @@ async def _vm_nic_remove_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "vm": vm,
         "nic": row,
     }
-
-
-register_preview_builder(OP_ID_VM_NIC_REMOVE, _vm_nic_remove_preview)

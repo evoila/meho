@@ -21,7 +21,7 @@ IDE drive on a running VM, or the installer of a VM that is off). The answer
 is then ``refused`` with vCenter's reason; nothing changed.
 
 The parameters, answers and AI guidance live here, so the shared registry
-in ``_register.py`` only splats :data:`VM_CDROM_TOOLS_COMPOSITES`.
+in ``_register.py`` only collects :data:`COMPOSITES`.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _parse_vsphere_error,
     _unwrap_value,
@@ -46,7 +47,6 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware import (
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
-    "VM_CDROM_TOOLS_COMPOSITES",
+    "COMPOSITES",
     "vm_cdrom_add_composite",
     "vm_tools_installer_unmount_composite",
 ]
@@ -279,10 +279,6 @@ async def _vm_tools_installer_unmount_preview(ctx: PreviewContext) -> dict[str, 
     }
 
 
-register_preview_builder(OP_ID_VM_CDROM_ADD, _vm_cdrom_add_preview)
-register_preview_builder(OP_ID_VM_TOOLS_INSTALLER_UNMOUNT, _vm_tools_installer_unmount_preview)
-
-
 # ---------------------------------------------------------------------------
 # Schemas, AI guidance and registration rows
 # ---------------------------------------------------------------------------
@@ -443,40 +439,42 @@ VM_TOOLS_INSTALLER_UNMOUNT_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     ),
 }
 
-#: The two registration rows, as ``_CompositeSpec`` keyword arguments.
-VM_CDROM_TOOLS_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_VM_CDROM_ADD,
-        "handler": vm_cdrom_add_composite,
-        "summary": "Add a CD drive to a VM, empty or with an ISO file from a datastore.",
-        "description": (
+#: The two registration rows.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_VM_CDROM_ADD,
+        handler=vm_cdrom_add_composite,
+        summary="Add a CD drive to a VM, empty or with an ISO file from a datastore.",
+        description=(
             "Adds one CD drive to a VM, named by its VM id: empty (client device) or with "
             "an ISO file from a datastore, on IDE or SATA. Reads the new drive back. vCenter "
             "refuses an IDE drive on a running VM. Waits for approval."
         ),
-        "parameter_schema": VM_CDROM_ADD_PARAMETER_SCHEMA,
-        "response_schema": VM_CDROM_ADD_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "hardware", "cdrom"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VM_CDROM_ADD_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_VM_TOOLS_INSTALLER_UNMOUNT,
-        "handler": vm_tools_installer_unmount_composite,
-        "summary": "Unmount the VMware Tools installer from a VM's CD drive.",
-        "description": (
+        parameter_schema=VM_CDROM_ADD_PARAMETER_SCHEMA,
+        response_schema=VM_CDROM_ADD_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "hardware", "cdrom"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VM_CDROM_ADD_LLM_INSTRUCTIONS,
+        preview=_vm_cdrom_add_preview,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_VM_TOOLS_INSTALLER_UNMOUNT,
+        handler=vm_tools_installer_unmount_composite,
+        summary="Unmount the VMware Tools installer from a VM's CD drive.",
+        description=(
             "Takes the VMware Tools installer out of a VM's CD drive, named by its VM id. "
             "Reads the installer state first and sends nothing when it is not mounted. The "
             "VM must be powered on. Waits for approval."
         ),
-        "parameter_schema": VM_TOOLS_INSTALLER_UNMOUNT_PARAMETER_SCHEMA,
-        "response_schema": VM_TOOLS_INSTALLER_UNMOUNT_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "vmware-tools", "cdrom"],
-        "safety_level": "caution",
-        "requires_approval": True,
-        "llm_instructions": VM_TOOLS_INSTALLER_UNMOUNT_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=VM_TOOLS_INSTALLER_UNMOUNT_PARAMETER_SCHEMA,
+        response_schema=VM_TOOLS_INSTALLER_UNMOUNT_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "vmware-tools", "cdrom"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=VM_TOOLS_INSTALLER_UNMOUNT_LLM_INSTRUCTIONS,
+        preview=_vm_tools_installer_unmount_preview,
+    ),
 )

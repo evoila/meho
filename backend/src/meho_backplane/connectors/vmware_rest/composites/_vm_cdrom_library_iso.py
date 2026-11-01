@@ -32,7 +32,7 @@ item or the drive does not exist. The answer is then ``refused`` or
 ``not_found`` with vCenter's reason; nothing changed.
 
 The parameters, answers and AI guidance live here, so the shared registry
-in ``_register.py`` only splats :data:`VM_CDROM_LIBRARY_ISO_COMPOSITES`.
+in ``_register.py`` only collects :data:`COMPOSITES`.
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _OP_FIND_LIBRARY,
     _OP_FIND_LIBRARY_ITEM,
@@ -60,7 +61,6 @@ from meho_backplane.operations._preview import (
     PreviewContext,
     approved_preview,
     preview_failure_reason,
-    register_preview_builder,
 )
 from meho_backplane.operations.composite import composite_resume_state
 
@@ -70,7 +70,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
-    "VM_CDROM_LIBRARY_ISO_COMPOSITES",
+    "COMPOSITES",
     "vm_cdrom_mount_library_iso_composite",
     "vm_cdrom_unmount_library_iso_composite",
 ]
@@ -353,10 +353,6 @@ async def _unmount_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return {"summary": summary, "vm": vm, "cdrom": cdrom, "cdrom_info": row}
 
 
-register_preview_builder(OP_ID_MOUNT_LIBRARY_ISO, _mount_preview)
-register_preview_builder(OP_ID_UNMOUNT_LIBRARY_ISO, _unmount_preview)
-
-
 # ---------------------------------------------------------------------------
 # Schemas, AI guidance and registration rows
 # ---------------------------------------------------------------------------
@@ -538,39 +534,41 @@ UNMOUNT_LIBRARY_ISO_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     ),
 }
 
-#: The two registration rows, as ``_CompositeSpec`` keyword arguments.
-VM_CDROM_LIBRARY_ISO_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_MOUNT_LIBRARY_ISO,
-        "handler": vm_cdrom_mount_library_iso_composite,
-        "summary": "Mount an ISO from a content library on a VM, as a new CD drive.",
-        "description": (
+#: The two registration rows.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_MOUNT_LIBRARY_ISO,
+        handler=vm_cdrom_mount_library_iso_composite,
+        summary="Mount an ISO from a content library on a VM, as a new CD drive.",
+        description=(
             "Mounts the ISO of a content-library item on a VM, named by its VM id. vCenter "
             "adds a new CD drive for it; MEHO reads it back. The item is named by id or "
             "by name. Waits for approval."
         ),
-        "parameter_schema": MOUNT_LIBRARY_ISO_PARAMETER_SCHEMA,
-        "response_schema": MOUNT_LIBRARY_ISO_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "cdrom", "content-library", "iso"],
-        "safety_level": "caution",
-        "requires_approval": True,
-        "llm_instructions": MOUNT_LIBRARY_ISO_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_UNMOUNT_LIBRARY_ISO,
-        "handler": vm_cdrom_unmount_library_iso_composite,
-        "summary": "Unmount a content-library ISO from a VM and remove its CD drive.",
-        "description": (
+        parameter_schema=MOUNT_LIBRARY_ISO_PARAMETER_SCHEMA,
+        response_schema=MOUNT_LIBRARY_ISO_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "cdrom", "content-library", "iso"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=MOUNT_LIBRARY_ISO_LLM_INSTRUCTIONS,
+        preview=_mount_preview,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_UNMOUNT_LIBRARY_ISO,
+        handler=vm_cdrom_unmount_library_iso_composite,
+        summary="Unmount a content-library ISO from a VM and remove its CD drive.",
+        description=(
             "Takes a content-library ISO off a VM, named by VM id and the CD drive id "
             "the mount returned. vCenter removes that drive. Waits for approval."
         ),
-        "parameter_schema": UNMOUNT_LIBRARY_ISO_PARAMETER_SCHEMA,
-        "response_schema": UNMOUNT_LIBRARY_ISO_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "cdrom", "content-library", "iso"],
-        "safety_level": "caution",
-        "requires_approval": True,
-        "llm_instructions": UNMOUNT_LIBRARY_ISO_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=UNMOUNT_LIBRARY_ISO_PARAMETER_SCHEMA,
+        response_schema=UNMOUNT_LIBRARY_ISO_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "cdrom", "content-library", "iso"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=UNMOUNT_LIBRARY_ISO_LLM_INSTRUCTIONS,
+        preview=_unmount_preview,
+    ),
 )

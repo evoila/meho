@@ -60,7 +60,6 @@ from meho_backplane.connectors.vmware_rest.vim_body import (
 )
 from meho_backplane.connectors.vmware_rest.vim_retrieve import retrieve_all_pages
 from meho_backplane.connectors.vmware_rest.vim_task import task_moref_value
-from meho_backplane.operations._preview import register_preview_builder
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -304,6 +303,3 @@ async def _host_add_preview(ctx: PreviewContext) -> dict[str, Any] | None:
             "once; follow the task with vmware.task.info."
         ),
     }
-
-
-register_preview_builder(OP_ID_HOST_ADD, _host_add_preview)

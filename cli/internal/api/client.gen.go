@@ -12158,8 +12158,9 @@ type UiAuthCallbackUiAuthCallbackGetParams struct {
 
 // UiAuthLoginUiAuthLoginGetParams defines parameters for UiAuthLoginUiAuthLoginGet.
 type UiAuthLoginUiAuthLoginGetParams struct {
-	ReturnTo *string `form:"return_to,omitempty" json:"return_to,omitempty"`
-	Reason   *string `form:"reason,omitempty" json:"reason,omitempty"`
+	ReturnTo    *string `form:"return_to,omitempty" json:"return_to,omitempty"`
+	Reason      *string `form:"reason,omitempty" json:"reason,omitempty"`
+	FreshSignIn *string `form:"fresh_sign_in,omitempty" json:"fresh_sign_in,omitempty"`
 }
 
 // UiBroadcastFeedUiBroadcastGetParams defines parameters for UiBroadcastFeedUiBroadcastGet.
@@ -38690,6 +38691,22 @@ func NewUiAuthLoginUiAuthLoginGetRequest(server string, params *UiAuthLoginUiAut
 		if params.Reason != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "reason", runtime.ParamLocationQuery, *params.Reason); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.FreshSignIn != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "fresh_sign_in", runtime.ParamLocationQuery, *params.FreshSignIn); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

@@ -75,6 +75,7 @@ from meho_backplane.ui.auth.routes import (
     AUTHORIZATION_STATE_EXPIRED_DETAIL,
     LOGIN_BINDING_COOKIE_PREFIX,
     login_binding_cookie_name,
+    login_location,
 )
 from meho_backplane.ui.auth.session_store import (
     create_session,
@@ -278,6 +279,34 @@ def test_login_redirects_to_keycloak_with_pkce_and_resource() -> None:
     # RFC 8707 resource indicator -- the BFF binds tokens to the
     # backplane API.
     assert params["resource"] == [f"{_BACKPLANE_URL}/api"]
+
+
+def test_login_fresh_sign_in_asks_keycloak_for_the_credentials_again() -> None:
+    """``?fresh_sign_in=1`` adds ``prompt=login`` and ``max_age=0``; a plain login sends neither.
+
+    Keycloak then ignores its SSO cookie, also in a remembered browser, so
+    the new token's ``auth_time`` is now. The approvals console sends a
+    person here when their sign-in is too old to approve.
+    """
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router)
+        client = TestClient(_build_app(), follow_redirects=False)
+        fresh = client.get(login_location("/ui/approvals", fresh_sign_in=True))
+        plain = client.get("/ui/auth/login?return_to=%2Fui%2Fapprovals")
+        other_value = client.get("/ui/auth/login?fresh_sign_in=yes")
+    assert fresh.status_code == 302
+    fresh_params = parse_qs(urlparse(fresh.headers["location"]).query)
+    assert fresh_params["prompt"] == ["login"]
+    assert fresh_params["max_age"] == ["0"]
+    assert fresh_params["client_id"] == ["meho-web"]
+    for response in (plain, other_value):
+        assert response.status_code == 302
+        params = parse_qs(urlparse(response.headers["location"]).query)
+        assert "prompt" not in params
+        assert "max_age" not in params
+    # The flag is kept out of the stored return path.
+    store = get_verifier_store()
+    assert {flow.return_to for flow in store._flows.values()} == {"/ui/approvals", "/ui/"}
 
 
 def test_login_persists_verifier_in_server_side_store_not_cookie() -> None:

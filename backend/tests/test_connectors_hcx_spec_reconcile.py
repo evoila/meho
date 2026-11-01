@@ -21,6 +21,9 @@ here with its method, introspected from the live module constants:
   Optimized Networking and the policy routes;
 * the calls of the migration operations (``migrations.MIGRATION_VENDOR_CALLS``):
   the migration query, the mobility groups and the migration cancel;
+* the calls of the Network Extension HA operations
+  (``ha_groups.VENDOR_CALLS``): list, build and dissolve an HA group, and
+  the appliance, task and extension reads they check first;
 * the documentation path, ``GET /hybridity/docs`` -- marked
   "documentation path, not in the API file" and left out of the served
   check, because the Manager serves it as a web page, not as an API call.
@@ -47,6 +50,7 @@ import pytest
 
 from meho_backplane.connectors.hcx import api_file as _api_file_module
 from meho_backplane.connectors.hcx import connector as _connector_module
+from meho_backplane.connectors.hcx import ha_groups as _ha_groups_module
 from meho_backplane.connectors.hcx import manager_restart as _manager_restart_module
 from meho_backplane.connectors.hcx import manager_setup as _manager_setup_module
 from meho_backplane.connectors.hcx import migrations as _migrations_module
@@ -77,9 +81,9 @@ def _declared_api_op_ids() -> set[str]:
     Every ``*_PATH`` constant of the connector module (``POST``), plus every
     ``(method, path)`` pair of ``typed_reads.VENDOR_CALLS``,
     ``profile_writes.VENDOR_CALLS``, ``site_pairing_writes.VENDOR_CALLS``,
-    ``service_mesh_writes.VENDOR_CALLS``, ``network_extension.VENDOR_CALLS``
-    and ``migrations.MIGRATION_VENDOR_CALLS``, and the migration query of the
-    restart (``manager_restart.MIGRATION_QUERY_CALL``).
+    ``service_mesh_writes.VENDOR_CALLS``, ``network_extension.VENDOR_CALLS``,
+    ``migrations.MIGRATION_VENDOR_CALLS`` and ``ha_groups.VENDOR_CALLS``, and the
+    migration query of the restart (``manager_restart.MIGRATION_QUERY_CALL``).
     """
     connector_calls = {
         f"POST:{value}"
@@ -101,8 +105,17 @@ def _declared_api_op_ids() -> set[str]:
     }
     restart_method, restart_path = _manager_restart_module.MIGRATION_QUERY_CALL
     restart_calls = {f"{restart_method}:{restart_path}"}
-    main_api_calls = connector_calls | read_calls | setup_calls | mesh_calls | extension_calls
-    return main_api_calls | migration_calls | restart_calls
+    ha_calls = {f"{method}:{path}" for method, path in _ha_groups_module.VENDOR_CALLS}
+    return (
+        connector_calls
+        | read_calls
+        | setup_calls
+        | mesh_calls
+        | extension_calls
+        | migration_calls
+        | ha_calls
+        | restart_calls
+    )
 
 
 def test_hcx_hand_coded_op_id_manifest_is_pinned() -> None:
@@ -156,6 +169,9 @@ def test_hcx_hand_coded_op_id_manifest_is_pinned() -> None:
         "POST:/hybridity/api/mobility/migrations/forceCancel",
         "POST:/hybridity/api/v2/mobility-groups/query",
         "GET:/hybridity/api/v2/mobility-groups/{mobilityGroupId}/summary",
+        "GET:/hybridity/api/interconnect/appliances/ha/groups",
+        "POST:/hybridity/api/interconnect/appliances/ha/groups",
+        "DELETE:/hybridity/api/interconnect/appliances/ha/groups/{groupId}",
     }
     assert {"GET:/hybridity/docs"} == _DOCUMENTATION_OP_IDS
 

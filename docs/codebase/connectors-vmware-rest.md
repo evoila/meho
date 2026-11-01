@@ -2375,6 +2375,88 @@ of these operations against the pinned `vcenter.yaml` of 8.0 and 9.0 (it
 skips without the vendor spec files). Tests use saved responses
 (`test_connectors_vmware_rest_typed_vm_hardware.py`).
 
+### VM boot settings, hardware and Tools upgrades, advanced settings
+
+Six typed operations for everyday VM settings. They need no catalog ingest and
+are on both catalogs (`vmware-rest-8.0` and `vmware-rest-9.0`). The two reads
+take the VM id (`vm`) or `name`. The four changes take the VM id only, wait
+for approval and are `dangerous`. Each change reads the current state first,
+sends only what differs (so it is safe to run twice) and reads the object back
+after the vendor call.
+
+| Operation | What it does | Returns | Vendor calls | Versions |
+|---|---|---|---|---|
+| `vmware.vm.boot.show` (`safe`) | Boot settings of one VM. | `firmware`, `efi_secure_boot`, `efi_legacy_boot`, `network_protocol`, `delay_ms`, `retry`, `retry_delay_ms`, `enter_setup_mode`, `boot_order` rows (`type`, `nic`, `disks`), `read_notes` | REST `GET .../hardware/boot` and `.../hardware/boot/device`; VIM `RetrievePropertiesEx` of `config.bootOptions` | 8.0, 9.x |
+| `vmware.composite.vm.boot.set` | Boot delay, enter setup, boot retry, boot order; with the VM off, firmware and EFI secure boot. | `status` (`set`, `unchanged`, `partial`, `refused`, `invalid_request`, `timeout`), `applied` steps, `before`, `after` | REST `PATCH .../hardware/boot`, `PUT .../hardware/boot/device`; VIM `ReconfigVM_Task` (`bootOptions.efiSecureBootEnabled`) | 8.0, 9.x |
+| `vmware.composite.vm.hardware.upgrade` | Upgrade a powered-off VM's hardware version to a given or the newest version. | `status` (`upgraded`, `unchanged`, `partial`, `refused`, `invalid_request`), `before` / `after` version | REST `GET .../hardware`, `POST .../hardware?action=upgrade` | 8.0, 9.x |
+| `vmware.composite.vm.tools.upgrade` | Upgrade VMware Tools in a running guest (`mode=upgrade`), or mount the Tools installer (`mode=mount_installer`). | `status` (`upgraded`, `upgrade_started`, `installer_mounted`, `unchanged`, `refused`, `invalid_request`), `before` / `after` Tools state | REST `GET .../tools`, `POST .../tools?action=upgrade`, `GET .../tools/installer`, `POST .../tools/installer?action=connect` | 8.0, 9.x |
+| `vmware.vm.advanced_settings.show` (`safe`) | The VM advanced settings (`extraConfig`), filter by `key_prefix`. | `settings` rows (`key`, `value`, `masked`), sorted by key; a long list goes behind a result handle | VIM `RetrievePropertiesEx` of `config.extraConfig` | 8.0, 9.x |
+| `vmware.composite.vm.advanced_settings.set` | Set or remove `extraConfig` keys. | `status` (`set`, `unchanged`, `partial`, `invalid_request`, `timeout`), `changes` rows (`key`, `action`, `before`, `after`, `masked`) | VIM `RetrievePropertiesEx`, `ReconfigVM_Task` (`extraConfig`) | 8.0, 9.x |
+
+Modules: `typed_ops_vm_boot.py`, `typed_ops_vm_advanced_settings.py` (schemas
+in `_vm_settings_schemas.py`, the VIM read in `vim_vm_props.py`), and
+`composites/_vm_boot.py`, `composites/_vm_upgrade.py`,
+`composites/_vm_advanced_settings.py` (shared helpers in
+`composites/_vm_change_common.py`). Both reads are in the
+`vmware-vm-hardware` group; the changes are in the `vm` group.
+
+Details:
+
+- **Boot change order.** Secure boot off runs first (so a switch to BIOS
+  works), then the REST `PATCH`, then the boot order `PUT`, then secure boot
+  on (after a switch to EFI). Secure boot on a VM that stays on BIOS is
+  `invalid_request`; nothing is sent. So is a switch to BIOS while secure
+  boot is on, unless the call also passes `efi_secure_boot: false`. A `DISK`
+  boot order entry without `disks` matches any disks vCenter reads back, so
+  a second run sends nothing. A REST HTTP 400 (for example a firmware
+  change on a running VM) gives `refused` with vCenter's error type and text,
+  and `applied` lists the steps that already ran.
+- **Hardware upgrade.** A VM already at the asked version gets nothing
+  (`unchanged`); a version older than now is `invalid_request`. vCenter's
+  `ALREADY_IN_DESIRED_STATE` also maps to `unchanged`. The upgrade cannot be
+  undone; the preview says so.
+- **Tools upgrade.** Tools with `version_status=CURRENT` gets nothing.
+  `command_line_options` with `mode=mount_installer` is `invalid_request`. vCenter
+  starts the upgrade in the guest, so the answer is `upgrade_started` until the
+  read-back shows `CURRENT`. The installer mount uses the REST form of the VIM
+  `MountToolsInstaller` call; an already mounted installer gets nothing. Both
+  upgrade calls use a long read timeout (900 s), because vCenter can answer
+  late.
+- **Secrets in advanced settings.** Keys that may hold a secret (the
+  `guestinfo.userdata`, `guestinfo.vendordata` and `guestinfo.ovfEnv` blobs,
+  the Ignition and Talos guest config keys (`guestinfo.ignition.*`,
+  `guestinfo.talos.*`), and any key whose name says password, secret, token, private key, API key,
+  credential or licence key) are never returned: `value` is `null` and
+  `masked` is true. The change refuses to set such a key (MEHO takes no
+  secret as a plain value) but can remove it. A removal sends the empty value;
+  vSphere removes a key whose value is empty. The `OptionValue.value` field is
+  an `Any` field in VI-JSON, so the string is boxed
+  (`{"_typeName": "string", "_value": ...}`).
+- **Flight recorder.** The `extraConfig` read goes through the traced HTTP
+  path, and the shared redaction does not know a setting value by shape. So
+  `VmwareRestConnector.trace_response_body` runs every JSON answer through
+  `trace.trace_payload` before the trace stores it: the `value` of every
+  `{key, value}` row whose key `is_secret_key` names is replaced by
+  `[MEHO-REDACTED:advanced-setting-value]`, the other rows stay. A stored
+  trace of the read or the change holds the key names, never a secret value
+  (`test_flight_recorder_spans_hold_no_secret_setting_value`, with a control
+  case without the mask).
+- **Faults.** A `ReconfigVM_Task` fault raises with the vim fault type and
+  text, so the dispatcher records a failed call. A task that does not finish
+  in 600 s gives `timeout` with an error issue.
+- **Previews.** Each change has an approval preview: the current boot settings
+  and the planned steps, the current hardware version, the current Tools
+  state, or the keys that change with their current values (masked where
+  needed).
+
+`test_connectors_vmware_rest_vm_settings_reconcile.py` checks every REST call
+against the pinned `vcenter.yaml` of 8.0 and 9.0, the REST body fields against
+the pinned 9.0 `vcenter.yaml` (`Vcenter.Vm.Hardware.Boot.UpdateSpec` and the
+other bodies), and every VIM method against the pinned 9.0 `vi-json.yaml` (it skips without the vendor spec files). The 8.0 U1 to U3
+VI-JSON files are checked by the source scan of
+`test_connectors_vmware_rest_8_0_spec_reconcile.py`. Tests use saved responses
+(`test_connectors_vmware_rest_vm_settings.py`).
+
 ### Content-library ISO mount and unmount
 
 Two changes put an ISO from a vCenter content library into a VM and take it
@@ -5266,6 +5348,116 @@ a key; flight-recorder spans, with a control case without the tag),
 `tests/test_connectors_vmware_rest_license_reconcile.py` (the pinned 9.0
 `vi-json.yaml`) and the source scan in
 `tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` (8.0 U1, U2, U3).
+
+### Host local users and Active Directory (`host.local_user.*`, `host.ad.*`)
+
+Seven operations for who can log in to an ESXi host: its local users, and
+its Active Directory domain. They share the group `vmware-host-access` (two
+typed reads and five changes, one group text). Every change waits until a
+second person approves.
+
+| Operation | What it does | Returns | Vendor call | Risk |
+|---|---|---|---|---|
+| `vmware.host.local_user.list` | The local users of the host and their access role. | `users: [{user, full_name, uid, shell_access, access_mode}]`, `read_notes` | `UserDirectory.RetrieveUserGroups`, `HostAccessManager.RetrieveHostAccessControlEntries` | `safe` |
+| `vmware.composite.host.local_user.create` | Creates a local user; the password comes from Vault. | `status` (`created`, `already_exists`, `failed`, ...), `user` | `HostLocalAccountManager.CreateUser` | `dangerous` |
+| `vmware.composite.host.local_user.password.set` | Sets a new password for a local user, from Vault. | `status` (`password_set`, `not_found`, `failed`), `user` | `HostLocalAccountManager.UpdateUser` | `dangerous` |
+| `vmware.composite.host.local_user.delete` | Deletes a local user and its access role. Never `root`. | `status` (`deleted`, `unchanged`, `protected`, ...), `user` | `HostLocalAccountManager.RemoveUser` | `destructive` |
+| `vmware.host.ad.status` | Is the host in a domain, which one, and is the membership healthy. | `joined`, `domain`, `trusted_domains`, `membership_status` | property `info` of `HostAuthenticationManager` | `safe` |
+| `vmware.composite.host.ad.join` | Joins the host to a domain; the join account's password comes from Vault. | `status` (`joined`, `unchanged`, `joined_other_domain`, `failed`, `timeout`, ...), the domain fields, `task` | `HostActiveDirectoryAuthentication.JoinDomain_Task` | `dangerous` |
+| `vmware.composite.host.ad.leave` | Takes the host out of its domain; `force` also deletes the permissions of domain users. | `status` (`left`, `unchanged`, `failed`, `timeout`, ...), the domain fields, `task` | `HostActiveDirectoryAuthentication.LeaveCurrentDomain_Task` | `dangerous` |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 U1, 8.0 U2, 8.0 U3 and ESXi 8.0 U1 to U3 | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 and ESX 9.0 to 9.1.1 | `vmware-rest-9.0` |
+
+Every vendor call exists on all these versions, so no operation needs the
+version check (`_version_gate.py`).
+
+- **Which target.** Local users live on the host, not on vCenter:
+  `HostLocalAccountManager` and the host's `UserDirectory` are on the ESXi
+  service instance. So the four local-user operations need the ESXi host
+  itself as the target (MEHO's single-host path, with the host's own
+  credentials in Vault), also when a vCenter manages the host. On a vCenter
+  target they answer `needs_esxi_target` before any call
+  (`host_access.needs_esxi_target`). The domain operations work on both: on a
+  vCenter target the `host` parameter names the host (name or moid, the
+  `_resolve_host_and_manager` ladder of `composites/_host.py`); on an ESXi
+  target the host is the target (`ha-host`).
+- **How they call the host.** Through `_post_vmomi_json`: VI-JSON on
+  vCenter, SOAP on a single host. `soap_host_access.py` builds the SOAP
+  envelopes of `RetrieveServiceContent`, `RetrieveUserGroups`,
+  `RetrieveHostAccessControlEntries`, `CreateUser`, `UpdateUser`,
+  `RemoveUser`, `JoinDomain_Task` and `LeaveCurrentDomain_Task` from the same
+  VI-JSON body, in the order of the vim25 WSDL, and turns the answers back
+  into the VI-JSON shape (a list answer is an `ArrayOf...` box that
+  `unwrap_vim_value` opens). The connector hands these methods to it in
+  `_build_esxi_soap_envelope` and `_parse_esxi_soap_response`.
+- **The ids.** The account manager and the user directory come from
+  `RetrieveServiceContent`. The access manager and the authentication manager
+  come from `HostSystem.configManager`. The Active Directory object is the
+  `HostActiveDirectoryAuthentication` entry of the authentication manager's
+  `supportedStore`; its `info.authConfig` holds the `HostActiveDirectoryInfo`.
+- **Passwords.** The create, the password change and the join read the
+  password from Vault (`password_secret_ref`, with the optional
+  `password_secret_mount` and `password_secret_key`; `read_secret_param`) when
+  the call runs, under the identity of the person who runs it. The parameter
+  schemas have `additionalProperties: false`, so a password cannot be passed
+  in. The password is only in the call to the host. The gate params (and so
+  the approval request), the previews and the answers name the Vault path. A
+  vendor fault text that holds the password is replaced (`hide_secrets`).
+  The three operations are pinned `credential_write` in
+  `broadcast/events.py`: the flight recorder keeps no request body, the
+  broadcast keeps no params and the dispatcher withholds the vendor text of
+  an error result. On a single host, the SOAP vendor-call span never has a
+  request body anyway.
+- **Each change.** It reads first and sends nothing when the host already is
+  as asked (`already_exists`, `not_found`, `unchanged`, `joined_other_domain`).
+  Then one gated call through `_write_vmomi_sub_op`. The domain changes wait
+  for their task (`poll_vim_task`, 600 s). Then it reads again and answers with
+  the new state; when the read-back does not show the change, the answer is
+  `not_verified` / `still_present` with an `error` issue, so the audit row says
+  `error`. A vendor fault (a VI-JSON fault body, a SOAP fault, or a task fault)
+  answers `failed` with `error_type` and `error_message` and an `error` issue.
+  A login problem or a lost connection is raised to the dispatcher as before.
+- **A refused join account.** The join sends the join account's user name and
+  password, so the host can answer the call with an `InvalidLogin` fault that
+  means that account, not the target's credentials. Both transports turn an
+  `InvalidLogin` fault into a `ConnectorAuthError`; the join reads it back
+  (`host_access.vendor_fault` with `request_login`) when the error is from a
+  call on a live session (`stage` is `call`; the SOAP path sets it in
+  `_post_soap`). Then the answer is `failed` with `error_type` `InvalidLogin`,
+  the fault text without the password, and guidance that names the join
+  account. A fault of the session login (`stage` `establish`), and a
+  `NotAuthenticated` fault (a lost session), still go to the dispatcher as
+  `connector_auth_failed`.
+- **Large user lists.** `host.local_user.list` answers with two lists,
+  `users` and `read_notes`. Its `result_digest` hint names `users` as the
+  collection, so a long list comes back as a result handle whose rows the
+  caller pages and filters with `result_query`, with `status_counts` per
+  `access_mode` inline (a `null` role counts as `UNKNOWN`). Without the hint
+  the reducer would keep the whole answer as one document.
+- **The delete.** `host.local_user.delete` is `destructive`. Its preview reads
+  the user and its access role and fills the `blast_radius` (`object` is the
+  user, `children` its access role, `irreversibility` is `permanent`). It
+  refuses a user that does not exist, so nothing waits for approval. MEHO never
+  deletes `root` (`protected`): without it, nobody may be able to log in.
+- **Not in this part.** Giving a new user an access role, local groups, and
+  the domain join through a vSphere Authentication Proxy (`JoinDomainWithCAM_Task`).
+
+Files: `host_access.py` (shared reads, group text, vendor-call ids),
+`typed_ops_host_access.py` (the two reads), `composites/_host_local_users.py`,
+`composites/_host_ad.py`, `composites/_host_access_schemas.py`,
+`composites/_host_access_ops.py` (registry rows and vendor-call lists),
+`soap_host_access.py`.
+
+Tests: `tests/test_connectors_vmware_rest_host_access.py` (the handlers on a
+fake), `tests/test_connectors_vmware_rest_host_access_http.py` (mocked HTTP on
+the vCenter 8.0.3 and 9.0 VI-JSON paths and SOAP on a single host),
+`tests/test_connectors_vmware_rest_host_access_approval.py` (the dispatcher:
+levels on both catalogs, waiting for approval, the delete preview) and
+`tests/test_connectors_vmware_rest_host_access_reconcile.py` (the pinned 9.0
+and 8.0 U1, U2, U3 `vi-json.yaml`).
 
 ### Cluster list (`vmware.cluster.list`)
 

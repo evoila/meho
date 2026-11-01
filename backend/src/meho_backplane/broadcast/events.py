@@ -320,6 +320,13 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # stores the approval input encrypted, and the flight recorder keeps
         # no body for it.
         "msad.user.set-password",
+        # The fleet locker writes. The password and the private key come from
+        # Vault at run time and go in the request body; params carry only
+        # Vault references. The pin keeps the body out of the flight recorder
+        # (the generate answer holds the new private key) and the params off
+        # the feed.
+        "fleet.locker.password.add",
+        "fleet.locker.certificate.import",
         # G-Node/RKE2-T3 #2430 — the RKE2 node-config write op. Its ``patch``
         # param carries key -> value edits, and an RKE2 ``config.yaml`` body
         # holds ``token:`` / ``agent-token:`` join credentials, so a plain
@@ -509,6 +516,15 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # flight-recorder spans, collapses the broadcast to aggregate-only and
         # keeps a waiting approval's params in the encrypted handoff store.
         "keycloak.user.check_login",
+        # The host local-user create and password change, and the host's
+        # Active Directory join. The params carry only a Vault path
+        # (``password_secret_ref``); the password goes only into the call to
+        # the host (``CreateUser`` / ``UpdateUser`` / ``JoinDomain_Task``).
+        # The pin keeps those bodies out of the flight recorder, the params
+        # out of the broadcast and the vendor text out of an error result.
+        "vmware.composite.host.local_user.create",
+        "vmware.composite.host.local_user.password.set",
+        "vmware.composite.host.ad.join",
         # The three Cloud Builder changes that send a bring-up spec. Their
         # params carry only Vault paths (``secrets``); the passwords are read
         # in-process and go only into the Cloud Builder request BODY. The pin

@@ -34,7 +34,9 @@ Today the connector ships:
   extension" below), and
 - **seven migration operations**: validate, start, list and cancel
   migrations, list and set mobility groups, and set the switchover window
-  (see "The migration operations").
+  (see "The migration operations"), and
+- the **Network Extension HA groups**: one read and one change that
+  builds or dissolves a group (see "Network Extension HA groups" below).
 
 Why `hcx.api_file.get` came first: Broadcom publishes no file and no
 versioned reference of the main HCX API (`/hybridity/api/...`). Only a
@@ -87,6 +89,8 @@ Package: `backend/src/meho_backplane/connectors/hcx/`.
 | `hcx.mobility_group.list` | The mobility groups (migration waves) with state and configuration status, or the summary of one group. | `POST /hybridity/api/v2/mobility-groups/query`, `GET /hybridity/api/v2/mobility-groups/{mobilityGroupId}/summary` | read (`safe`, no approval) | 4.11, 9.x |
 | `hcx.mobility_group.set` | Make a mobility group, or replace the settings of one. Starts nothing. | `POST /hybridity/api/mobility/groups`, `PUT /hybridity/api/mobility/groups` | change (`caution`, waits for approval) | 4.11, 9.x |
 | `hcx.migration.schedule` | Set or clear the switchover window (and optionally the copy window) of a mobility group. | `POST /hybridity/api/mobility/groups/{mobilityGroupId}/schedule` | change (`dangerous`, waits for approval) | 4.11, 9.x |
+| `hcx.network_extension.ha.list` | Network Extension HA groups: the member appliances with their partner and role (active or standby), and the group state (healthy, degraded, failing over, failed, maintenance). | `GET /hybridity/api/interconnect/appliances/ha/groups` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.network_extension.ha.set` | Build an HA group from a free Network Extension appliance at the source site (HCX picks the standby pair), or dissolve a group; the appliances become standalone again. Returns the task. | `POST /hybridity/api/interconnect/appliances/ha/groups`, `DELETE /hybridity/api/interconnect/appliances/ha/groups/{groupId}` | change (`dangerous`, approval) | 4.11, 9.x |
 | `hcx.manager.config.show` | How the HCX Manager is set up: vCenter, SSO lookup service, NSX, location, role mapping and activation state. Never a password or key. | port 9443: `GET /api/admin/global/config/vcenter`, `.../lookupservice`, `.../nsx`, `.../location`, `.../roleMappings`, then `GET /api/admin/global/config/hcx` (4.x) or `GET /license/hcx/activationStatus` (9.x) | read (`safe`, no approval) | 4.11, 9.x |
 | `hcx.manager.vcenter.set` | Connect the HCX Manager to its vCenter (user and password from a Vault reference) and to the SSO lookup service. A restart makes it take effect. | port 9443: `POST /api/admin/global/config/vcenter`, then `POST /api/admin/global/config/lookupservice` | change (`dangerous`, waits for approval) | 4.11, 9.x |
 | `hcx.manager.nsx.set` | Connect the HCX Manager to NSX (user and password from a Vault reference). | port 9443: `POST /api/admin/global/config/nsx` | change (`dangerous`, waits for approval) | 4.11, 9.x |
@@ -817,6 +821,90 @@ HCX does the migration after the start call returns. So:
   `errors` and `warnings` lists of an answer (the group's, and each
   migration's), so the copies next to the step error hold no secret
   either.
+### Network Extension HA groups
+
+An HA group joins four Network Extension appliances, two at each site: an
+active pair carries the extended networks, a standby pair takes over when
+an appliance fails. The bodies are in `ha_groups.py`, the op metadata in
+`ha_group_ops.py`. Group `hcx-network-extension-ha`.
+
+`hcx.network_extension.ha.list` takes an optional `service_mesh_id` and
+`all_group_members` (default `false`: only the members at this site; each
+member still names its partner at the other site). It returns one row per
+group: `group_id`, `name`, `service_mesh_id`, `group_state` (`HEALTHY`,
+`DEGRADED`, `FAILINGOVER`, `FAILED`, `MAINTENANCE`), `status_message`,
+`availability_state`, `policy`, `network_extension_count` and `members`
+(`appliance_id`, `appliance_name`, `peer_appliance_id`,
+`peer_appliance_name`, `role`: `ACTIVE`, `STANDBY`, `UNDECIDED` or
+`UNINIT`). The vendor fields stay. A long list is behind a result handle.
+
+`hcx.network_extension.ha.set` takes `action`:
+
+- `build` with `appliance_ids` (one free appliance at the source site, or
+  two). It sends `POST .../ha/groups` with `{"appliances": [...]}`.
+- `dissolve` with `group_id`. It sends
+  `DELETE .../ha/groups/{groupId}?force=false`. A forced dissolve is not
+  offered: it can leave extensions on the standby appliances.
+
+Both are `dangerous` with `requires_approval`, so a person's call waits
+until a second person approves it, and an agent needs a grant for it.
+
+The vendor does the work after the start call returns. The Manager answers
+`202` with `data.interconnectTaskId` and `data.groupId`. The answer is
+`{status, action, group_id, interconnect_task_id, status_read:
+"hcx.task.get", group_state, warnings, errors}`. `accepted` means HCX took
+the task; it never means the work is done. A `202` without a task id is
+an error that carries the Manager's `errors` text.
+
+Before a start the operation checks, and starts nothing when a check
+finds something:
+
+- build: every appliance is in `GET /hybridity/api/interconnect/appliances`,
+  is a Network Extension appliance (`HCX-NET-EXT`) and runs HCX 4.3 or
+  newer. Otherwise the call fails with a message and sends no change.
+  An appliance that is already in a group (as a member or a partner)
+  returns `already_grouped` with the group id and state.
+- dissolve: the group is in the HA group list; else `not_found`.
+- both: `POST /hybridity/api/interconnect/tasks/query` with
+  `{"filter": {"status": ["QUEUED", "RUNNING"], "entityIds": [...]}}`.
+  A task on the same appliance or group returns `already_running` with
+  its task id. This check helps; it is not a lock: two callers can both
+  check before either starts.
+
+HCX itself refuses an appliance that already extends a network, too few
+free appliances for the second pair, or a missing licence. The vendor's
+error text reaches the answer (`upstream_message`).
+
+After a start:
+
+- Use MEHO's async mode (`async: true`,
+  `docs/codebase/async-governed-dispatch.md`), so MEHO keeps the answer
+  with the task id under a run handle even if the reply is lost.
+- Follow the task with `hcx.task.get` (pass `interconnect_task_id` as
+  `task_id`) until it ends. A Manager that does not answer gives
+  `not_reachable` with the task id; ask again later. A failed task step
+  names a job id; `hcx.job.get` shows that job's error.
+- After a lost reply, do not start again blindly. Read
+  `hcx.network_extension.ha.list` first: after a build, a group with the
+  appliance means the task was started; after a dissolve, a missing group
+  means the same. Or ask `hcx.task.get` about the task id kept under the
+  async run handle.
+- A status read logs in again when the login expired after the start: the
+  dispatcher drops the token on `401` and runs the read once more.
+
+The approval request of a dissolve reads the group and
+`GET /hybridity/api/l2Extensions`, and fills the `blast_radius` block:
+the group with its members and state, and as `children` the network
+extensions whose source appliance is a member of the group. These
+networks keep running on the pair that was active; only the HA protection
+ends. The `preview_operation` tool does not show this block: it never
+contacts the HCX Manager, so its answer says that the plan is shown on
+the approval request. When the group does not exist, the request still
+waits for approval; the approval request says the preview is unavailable
+and why, and after approval the run answers `not_found` and sends no
+change. A build has no preview of its own (the approval request shows
+the inputs).
+
 ### The HCX Manager setup
 
 The setup operations use the HCX Manager **appliance management API** on
@@ -1051,6 +1139,18 @@ is sent.
   vendor progress flags first; the state names `MIGRATED`,
   `MIGRATE_FAILED` and `MIGRATE_CANCELED` come from VMware's PowerShell
   module for HCX.
+- The HA group calls come from the vendor reference, which names no
+  version and shows only placeholder values. It does not say whether
+  `appliances` in the build body takes one appliance (as the HCX user guide
+  does: HCX picks the second pair) or both of the source pair, so the
+  build takes one or two ids. It lists no values for `groupState` and
+  `role`; the values in the docs come from the HCX 4.11 user guide. The
+  HA group of an extension is found by its source appliance, because the
+  extension rows name no group. The live proof confirms all three.
+- The HA build and dissolve answer with an interconnect task id, not a
+  job id. The status read of an interconnect task is `hcx.task.get` (pass
+  `interconnect_task_id` as `task_id`), the same read the service mesh
+  changes use.
 - The setup calls are checked against Broadcom's 9.1 reference only; no
   appliance management API file is pinned, so their reconcile lane
   (`appliance_management_api.openapi3.json`) skips. The 4.x key activation
@@ -1066,7 +1166,8 @@ is sent.
 - Task #4608 (this connector, login, version helper and the read);
   #4545 (the reads that build on it); #4549 (the site setup); #4548 (the service mesh changes);
   #4547 (network extension); #4546 (the migration operations); #4550 (the HCX Manager
-  setup); #4395 (the same read for NSX); #4505 (the same shape for Site Recovery Manager).
+  setup); #4395 (the same read for NSX); #4505 (the same shape for Site Recovery
+  Manager); #4551 (the Network Extension HA groups).
 - `docs/decisions/spec-reconcile-guards-standard.md` -- the waiting lane.
 - `docs/codebase/connectors-nsx.md` -- the sibling connector this one
   mirrors.

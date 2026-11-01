@@ -546,7 +546,8 @@ new call, because the appliance may be mapping the files. Nothing is undone.
 certificate and licence by its locker reference (`locker:password:...`,
 `locker:license:...`): the appliance resolves it from its own secret store.
 A field named like a password or secret, or a licence field, with any other
-value is refused, and so is a private key anywhere in the spec. The check
+value is refused, whatever its type (a text, a number, a list or an object),
+and so is a private key anywhere in the spec. The check
 (`spec_secret_problem`) is registered as the params check of both
 environment ops (`register_params_check` in `operations/_validate.py`), so
 the dispatcher and `preview_operation` refuse the spec as `invalid_params`

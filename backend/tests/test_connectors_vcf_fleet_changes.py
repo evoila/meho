@@ -659,6 +659,11 @@ async def test_environment_create_vendor_error_text_reaches_the_answer() -> None
         {"infrastructure": {"properties": {"vcPassword": "plain-text"}}},
         {"products": [{"properties": {"licenseRef": "AAAAA-BBBBB"}}]},
         {"infrastructure": {"properties": {"certificate": _PRIVATE_KEY_TEXT}}},
+        {"infrastructure": {"properties": {"defaultPassword": 4815162342}}},
+        {"infrastructure": {"properties": {"defaultPassword": ["plain-text"]}}},
+        {"products": [{"properties": {"licenseKey": {"value": "AAAAA-BBBBB"}}}]},
+        {"infrastructure": {"properties": {"defaultPassword": True}}},
+        {"infrastructure": {"properties": {"defaultPassword": ""}}},
     ],
 )
 @pytest.mark.asyncio
@@ -679,6 +684,12 @@ def test_locker_references_pass_the_secret_check() -> None:
     assert environment_spec_check({"spec": _SPEC}) is None
 
 
+def test_an_unset_secret_field_passes_the_secret_check() -> None:
+    """``None`` under a secret name holds no value: the field is not set."""
+    spec = {**_SPEC, "infrastructure": {"properties": {"defaultPassword": None}}}
+    assert spec_secret_problem(spec) is None
+
+
 def test_the_params_check_names_the_field_and_not_the_value() -> None:
     bad = {**_SPEC, "infrastructure": {"properties": {"defaultPassword": "plain-text-pw"}}}
     problem = environment_spec_check({"spec": bad})
@@ -689,13 +700,20 @@ def test_the_params_check_names_the_field_and_not_the_value() -> None:
 
 
 @pytest.mark.parametrize("op_id", ["fleet.environment.precheck", "fleet.environment.create"])
+@pytest.mark.parametrize(
+    "secret", ["plain-text-pw", 4815162342, ["plain-text-pw"], {"value": "plain-text-pw"}]
+)
 @pytest.mark.asyncio
 async def test_a_clear_secret_is_refused_before_the_call_waits_for_approval(
-    _stub_embedding: None, session: AsyncSession, op_id: str
+    _stub_embedding: None, session: AsyncSession, op_id: str, secret: Any
 ) -> None:
-    """The dispatcher refuses the spec as invalid params: no approval row, no vendor call."""
+    """The dispatcher refuses the spec as invalid params: no approval row, no vendor call.
+
+    A secret of any type is refused: a text, a number, a list or an object.
+    """
     instance = await _register_and_bind()
-    bad = {**_SPEC, "infrastructure": {"properties": {"defaultPassword": "plain-text-pw"}}}
+    bad = {**_SPEC, "infrastructure": {"properties": {"defaultPassword": secret}}}
+    marker = str(secret) if isinstance(secret, int) else "plain-text-pw"
     rows_before = (
         await session.execute(select(func.count()).select_from(ApprovalRequest))
     ).scalar_one()
@@ -712,7 +730,7 @@ async def test_a_clear_secret_is_refused_before_the_call_waits_for_approval(
         assert result.status == "error", result
         assert result.extras["error_code"] == "invalid_params"
         assert result.extras["validation_errors"][0]["validator"] == "params_check"
-        assert "plain-text-pw" not in str(result.extras)
+        assert marker not in str(result.extras)
         assert not route.called
     finally:
         await instance.aclose()
@@ -723,7 +741,7 @@ async def test_a_clear_secret_is_refused_before_the_call_waits_for_approval(
     stored = (
         await session.execute(select(ApprovalRequest).where(ApprovalRequest.op_id == op_id))
     ).scalars()
-    assert all("plain-text-pw" not in json.dumps(row.params or {}) for row in stored)
+    assert all(marker not in json.dumps(row.params or {}) for row in stored)
 
 
 @pytest.mark.asyncio

@@ -205,18 +205,26 @@ def _runs_on(request: dict[str, Any], words: tuple[str, ...]) -> bool:
     return all(word in values for word in words)
 
 
+def _is_locker_reference(value: Any) -> bool:
+    """True when *value* is a text that names a secret in the locker."""
+    return isinstance(value, str) and value.startswith(_LOCKER_PREFIX)
+
+
 def spec_secret_problem(value: Any, path: str = "spec") -> str | None:
     """Why *value* holds a secret in clear text, or ``None`` when it holds none.
 
     A field named like a password or secret, and a licence field, must hold a
     locker reference (``locker:...``): the appliance resolves it from its own
-    secret store. A private key in any text is refused too.
+    secret store. Any other value under such a name is refused, whatever its
+    type: a number, a list or an object can carry a secret as well as a text.
+    Only ``None`` passes, as the field is then not set. A private key in any
+    text is refused too.
     """
     if isinstance(value, dict):
         for key, item in value.items():
             where = f"{path}.{key}"
             named = is_secret_param_name(str(key)) or "license" in str(key).lower()
-            if named and isinstance(item, str) and item and not item.startswith(_LOCKER_PREFIX):
+            if named and item is not None and not _is_locker_reference(item):
                 return f"{where} must be a locker reference (locker:...), not a value"
             problem = spec_secret_problem(item, where)
             if problem is not None:

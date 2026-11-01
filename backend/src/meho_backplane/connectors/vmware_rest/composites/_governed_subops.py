@@ -53,8 +53,14 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _vm_cdrom_tools,
     _write,
 )
+from meho_backplane.connectors.vmware_rest.composites._customization_spec_delete import (
+    CUSTOMIZATION_SPEC_DELETE_GOVERNED_SUBOPS,
+)
 from meho_backplane.connectors.vmware_rest.composites._vcenter_install_ops import (
     VCENTER_INSTALL_GOVERNED_SUBOPS,
+)
+from meho_backplane.connectors.vmware_rest.composites._vm_template import (
+    VM_TEMPLATE_GOVERNED_SUBOPS,
 )
 
 #: Default connector of the step list when the caller names none. A write
@@ -195,6 +201,9 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,
     # #4394 vCenter install: the deploy, the setup start and the answer.
     **VCENTER_INSTALL_GOVERNED_SUBOPS,
+    # VM templates in a content library and the guest customization spec delete.
+    **VM_TEMPLATE_GOVERNED_SUBOPS,
+    **CUSTOMIZATION_SPEC_DELETE_GOVERNED_SUBOPS,
 }
 
 

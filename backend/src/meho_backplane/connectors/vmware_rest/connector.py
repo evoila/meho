@@ -3625,6 +3625,35 @@ class VmwareRestConnector(HttpConnector):
 
         return await network_list_impl(self, operator, target, params)
 
+    # The two guest customization spec reads. Each delegates to
+    # :mod:`.customization_specs` (imported lazily, like the other typed ops).
+
+    async def customization_spec_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.guest.customization_spec.list`` -- the saved customization specs."""
+        from meho_backplane.connectors.vmware_rest.customization_specs import (
+            customization_spec_list_impl,
+        )
+
+        return await customization_spec_list_impl(self, operator, target, params)
+
+    async def customization_spec_get(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.guest.customization_spec.get`` -- one spec, secrets hidden."""
+        from meho_backplane.connectors.vmware_rest.customization_specs import (
+            customization_spec_get_impl,
+        )
+
+        return await customization_spec_get_impl(self, operator, target, params)
+
     # The six content-library typed reads. Each delegates to
     # :mod:`.content_library_reads` (imported lazily, like the other typed ops).
 

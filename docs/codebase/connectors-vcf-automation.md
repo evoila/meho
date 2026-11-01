@@ -421,7 +421,7 @@ registered on both connectors:
 | `blueprint.get` | one template: its fields, draft YAML (`content`, secret values replaced by a marker), `inputs_schema` and `secrets_replaced` | safe | `GET /blueprint/api/blueprints/{blueprintId}`, `GET …/{blueprintId}/inputs-schema` | 8.18, 9.x |
 | `blueprint.create` | a new draft template in a project; `created` / `unchanged` (same name in the project) | caution, approval | `GET /blueprint/api/blueprints?name=&projects=`, then `POST /blueprint/api/blueprints` | 8.18, 9.x |
 | `blueprint.update` | changes the draft YAML, name, description or org-wide flag; `updated` (with `changed_fields`) / `unchanged` | dangerous, approval | `GET`, then `PUT /blueprint/api/blueprints/{blueprintId}` with the whole template | 8.18, 9.x |
-| `blueprint.delete` | deletes a template and all its versions; `deleted` / `unchanged` (404) | destructive, approval, preview first | `DELETE /blueprint/api/blueprints/{blueprintId}` | 8.18, 9.x |
+| `blueprint.delete` | deletes a template and all its versions; `deleted` / `unchanged` (404) | destructive, approval, preview first | `GET …/{blueprintId}`, every page of `GET …/{blueprintId}/versions` (preview), then `DELETE /blueprint/api/blueprints/{blueprintId}` | 8.18, 9.x |
 | `blueprint.version.list` | flat rows `{id, version, status, versionDescription, versionChangeLog, createdAt, createdBy}` | safe | `GET /blueprint/api/blueprints/{blueprintId}/versions` | 8.18, 9.x |
 | `blueprint.version.release` | `release`: makes a new version from the draft and releases it, or releases an existing one; `unrelease`: takes it out of the catalog | dangerous, approval | `GET …/versions?version=`, then `POST …/versions` (`release: true`), `POST …/versions/{version}/actions/release` or `…/unrelease` | 8.18, 9.x |
 | `blueprint.validate` | checks template YAML or a stored template; `{valid, validationMessages}`; saves nothing | safe | `POST /blueprint/api/blueprint-validation` | 8.18, 9.x |
@@ -441,11 +441,14 @@ registered on both connectors:
 - **Plane.** `/catalog/api/*` is a tenant-plane prefix, like
   `/blueprint/api/*`.
 - **Delete preview.** `vcfa_templates.blueprint_delete_preview` reads the
-  template and its versions and fills `blast_radius`: `object` (the
-  template), `children` (each version and its state) and
-  `irreversibility: irreversible`, with a note that counts the released
-  versions that leave the catalog. When the template does not exist it
-  raises, so MEHO refuses to queue the delete (`blast_radius_required`).
+  template and every page of its versions (200 per page, at most 50
+  pages) and fills `blast_radius`: `object` (the template), `children`
+  (each version and its state) and `irreversibility: irreversible`, with
+  a note that counts the released versions that leave the catalog. When
+  the template does not exist, or when the versions do not fit in the
+  pages it reads, it raises, so MEHO refuses to queue the delete
+  (`blast_radius_required`): a person must not approve a preview that
+  names only some of the versions.
 - **Secrets.** No op takes or returns a password, token or key. A
   template should take a password through a secret input, never as a
   value in the YAML. `blueprint.get` still hides any secret value it
@@ -453,18 +456,30 @@ registered on both connectors:
   line, so a `cloudConfig` block is checked too): the value of every
   secret-named key (the rule of `is_secret_param_name`), the whole
   cloud-init `chpasswd` value and every PEM private key block become a
-  `[REDACTED:...]` marker. A secret input (an input under `inputs:` with
-  a secret name or `encrypted: true`) keeps its lines; only its
-  `default`, `const`, `enum`, `example` and `examples` become a marker,
-  in the YAML and in `inputs_schema` alike
-  (`vcfa_yaml_secrets.scrub_inputs_schema`). `secrets_replaced` counts
-  all markers. References such as `${secret.<name>}` or
+  `[REDACTED:...]` marker. In a cloud-init `chpasswd` block only the
+  `list` part and the passwords of `users` are hidden; `expire` stays. A
+  secret input (an input under `inputs:` with a secret name, or any map
+  with `encrypted: true`, also as a one-line flow map and with quoted
+  keys) keeps its lines; only its `default`, `const`, `enum`, `example`
+  and `examples` become a marker, in the YAML and in `inputs_schema`
+  alike (`vcfa_yaml_secrets.scrub_inputs_schema`). `secrets_replaced`
+  counts all markers. References such as `${secret.<name>}` or
   `${input.<name>}` stay. Every other line comes back as written.
-- **No markers written back.** `blueprint.create` and `blueprint.update`
-  refuse `content` that holds `[REDACTED`, before any call to the
-  vendor. Otherwise a read, edit and update would write the marker into
-  the template in place of the real value. The caller gives the full
-  value or uses a secret input.
+- **No secret value is sent.** `blueprint.create`, `blueprint.update`
+  and `blueprint.validate` run the same check on the `content` they get
+  (`vcfa_templates.refuse_secret_values`) and refuse YAML that holds a
+  secret value or a `[REDACTED:...]` marker, before any call to the
+  vendor. `blueprint.validate` also refuses a secret-named key in
+  `inputs` whose value is not a reference. A template takes a password
+  through `${secret.<name>}` or an `encrypted: true` input without a
+  default; the request fills it in. The approval card of a create or
+  update (`vcfa_templates.blueprint_write_preview`, registered for both
+  connectors) shows the YAML with its secret values hidden and
+  `secret_values_hidden`; when there are any, `refused` tells the
+  approver that MEHO will refuse the call, so they can reject it. The
+  dispatcher has no hook that stops a caution or dangerous call before
+  it waits for approval, so the refusal itself runs when the approved
+  call starts.
 - **No template list on 9.x.** Aria Automation 8 has
   `vcfa.vra8.blueprint.list`; VCF Automation 9 has no template list op
   yet, so a 9.x agent gets template ids from `blueprint.create` or from a

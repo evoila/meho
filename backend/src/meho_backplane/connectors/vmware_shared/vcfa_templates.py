@@ -23,9 +23,18 @@ one exception is a ``404`` on the delete: the template is already gone, so
 the op answers ``unchanged``.
 
 ``vcfa.*.blueprint.delete`` is ``destructive``, so it has a preview builder
-(registered at import). It reads the template and its versions and fills
-the ``blast_radius`` block. It raises when the template does not exist, so
-MEHO refuses to queue the delete.
+(registered at import). It reads the template and every page of its
+versions and fills the ``blast_radius`` block. It raises when the template
+does not exist, or when it cannot read all versions, so MEHO refuses to
+queue the delete.
+
+A template must not hold a secret value: a password or key goes in a
+secret input (``${secret.<name>}``) or an ``encrypted: true`` input that a
+request fills in. ``blueprint.create``, ``blueprint.update`` and
+``blueprint.validate`` refuse YAML with a secret value
+(:func:`refuse_secret_values`) before any vendor call, and the approval
+card of a create or update shows the YAML with its secret values hidden
+(:func:`blueprint_write_preview`).
 """
 
 from __future__ import annotations
@@ -36,8 +45,10 @@ from urllib.parse import quote
 
 import httpx
 
+from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.connectors.vmware_shared.vcfa_yaml_secrets import (
     MARKER_PREFIX,
+    is_reference,
     scrub_inputs_schema,
     scrub_template_yaml,
 )
@@ -55,6 +66,8 @@ __all__ = [
     "BLUEPRINT_VERSION_RELEASE_PATH",
     "BLUEPRINT_VERSION_UNRELEASE_PATH",
     "DELETE_OP_IDS",
+    "MAX_VERSION_PAGES",
+    "WRITE_OP_IDS",
     "ContentTransport",
     "blueprint_create",
     "blueprint_delete",
@@ -64,6 +77,7 @@ __all__ = [
     "blueprint_version_list",
     "blueprint_version_release",
     "quote_segment",
+    "refuse_secret_values",
 ]
 
 BLUEPRINTS_PATH: Final[str] = "/blueprint/api/blueprints"
@@ -84,8 +98,20 @@ DELETE_OP_IDS: Final[tuple[str, ...]] = (
     "vcfa.vra8.blueprint.delete",
 )
 
-#: Page size for the lookups that find one row by name or version.
+#: The create and update op id on each connector. Both get the same preview
+#: builder, which hides the secret values of the YAML on the approval card.
+WRITE_OP_IDS: Final[tuple[str, ...]] = (
+    "vcfa.tenant.blueprint.create",
+    "vcfa.vra8.blueprint.create",
+    "vcfa.tenant.blueprint.update",
+    "vcfa.vra8.blueprint.update",
+)
+
+#: Page size for the lookups that find one row by name or version, and for
+#: the version pages of the delete preview.
 LOOKUP_PAGE_SIZE: Final[int] = 200
+#: How many version pages the delete preview reads before it refuses.
+MAX_VERSION_PAGES: Final[int] = 50
 
 JSON_ACCEPT: Final[dict[str, str]] = {"Accept": "application/json"}
 
@@ -265,6 +291,7 @@ async def blueprint_validate(
     connector: ContentTransport, operator: Operator, target: Any, params: dict[str, Any]
 ) -> dict[str, Any]:
     """``*.blueprint.validate``: check template YAML or a stored template. Changes nothing."""
+    refuse_secret_values(params)
     fields = {
         "project_id": "projectId",
         "content": "content",
@@ -285,20 +312,49 @@ async def blueprint_validate(
 # ---------------------------------------------------------------------------
 
 
-def refuse_hidden_values(params: Mapping[str, Any]) -> None:
-    """Refuse template YAML that holds a marker MEHO put in place of a value.
+_SECRET_INPUT_NOTE: Final[str] = (
+    "A password, key or token belongs in a secret input: put ${secret.<name>} in the "
+    "YAML, or an input with encrypted: true and no default, which the request fills in"
+)
 
-    A template read hides secret values behind ``[REDACTED:...]``. Writing
-    that YAML back would put the marker into the template in place of the
-    real value, so create and update stop before any vendor call.
+
+def refuse_secret_values(params: Mapping[str, Any]) -> None:
+    """Refuse a call whose ``content`` or ``inputs`` holds a secret value.
+
+    The same check that hides values on a read finds them here: a value of
+    a secret-named key, a cloud-init password list, a private key block, or
+    the default or example of a secret input. A reference such as
+    ``${secret.<name>}`` names a secret and passes. A ``[REDACTED:...]``
+    marker from a read is refused too: written back, it would replace the
+    real value. In ``inputs`` (``blueprint.validate``), a secret-named input
+    takes a reference, never a value. Raises :exc:`ValueError`, so create,
+    update and validate stop before any vendor call.
     """
     content = params.get("content")
-    if isinstance(content, str) and MARKER_PREFIX in content:
-        raise ValueError(
-            "the template YAML holds a hidden value ([REDACTED:...]); MEHO does not write "
-            "it back. Give the full value, or use a secret input (${secret.<name>}) in the "
-            "template"
+    if isinstance(content, str):
+        if MARKER_PREFIX in content:
+            raise ValueError(
+                "the template YAML holds a [REDACTED:...] marker from a read; MEHO does "
+                f"not write it back. {_SECRET_INPUT_NOTE}"
+            )
+        _, found = scrub_template_yaml(content)
+        if found:
+            raise ValueError(
+                f"the template YAML holds {found} value(s) that MEHO treats as a secret; "
+                f"it does not send them. {_SECRET_INPUT_NOTE}"
+            )
+    inputs = params.get("inputs")
+    if isinstance(inputs, Mapping):
+        literal = sorted(
+            str(name)
+            for name, value in inputs.items()
+            if is_secret_param_name(str(name)) and not is_reference(value)
         )
+        if literal:
+            raise ValueError(
+                f"the secret input(s) {', '.join(literal)} hold a value; MEHO does not send "
+                "it. Give a reference such as ${secret.<name>}, or leave the input out"
+            )
 
 
 async def _find_by_name(
@@ -322,7 +378,7 @@ async def blueprint_create(
     connector: ContentTransport, operator: Operator, target: Any, params: dict[str, Any]
 ) -> dict[str, Any]:
     """``*.blueprint.create``: a new draft template. Safe to run twice."""
-    refuse_hidden_values(params)
+    refuse_secret_values(params)
     name = str(params["name"])
     project_id = str(params["project_id"])
     existing = await _find_by_name(connector, operator, target, name, project_id)
@@ -368,7 +424,7 @@ async def blueprint_update(
     Reads the template first and sends the whole template back with the
     changes (``PUT`` replaces it). When nothing differs, nothing is sent.
     """
-    refuse_hidden_values(params)
+    refuse_secret_values(params)
     path = _blueprint_path(params["id"])
     current = await get_json(connector, operator, target, path)
     changes = {
@@ -486,16 +542,65 @@ def _release_answer(status: str, row: Mapping[str, Any] | None, guidance: str) -
 
 
 # ---------------------------------------------------------------------------
-# Preview for the delete (destructive)
+# Previews: the delete (destructive) and the create / update approval card
 # ---------------------------------------------------------------------------
 
 
+async def blueprint_write_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """What the approval card of a create or update shows: the call's inputs.
+
+    The YAML comes with its secret values hidden, like a read returns it,
+    and ``secret_values_hidden`` counts them. When there are any, or when
+    the YAML holds a marker, ``refused`` says that MEHO will refuse the call
+    when it runs (:func:`refuse_secret_values`), so the approver can reject
+    it at once. Needs no connector and makes no vendor call.
+    """
+    params = dict(ctx.params)
+    content = params.get("content")
+    hidden = 0
+    if isinstance(content, str):
+        params["content"], hidden = scrub_template_yaml(content)
+    preview: dict[str, Any] = {**params, "secret_values_hidden": hidden}
+    if hidden or (isinstance(content, str) and MARKER_PREFIX in content):
+        preview["refused"] = (
+            "the template YAML holds a value that MEHO treats as a secret, or a "
+            f"[REDACTED:...] marker; MEHO refuses this call when it runs. {_SECRET_INPUT_NOTE}"
+        )
+    return preview
+
+
+async def _all_versions(
+    connector: ContentTransport, operator: Operator, target: Any, blueprint_id: str
+) -> list[dict[str, Any]]:
+    """Every version of a template, over all pages.
+
+    Raises :exc:`LookupError` when the versions do not fit in
+    :data:`MAX_VERSION_PAGES` pages: a preview that does not name every
+    version must not be approved.
+    """
+    path = BLUEPRINT_VERSIONS_PATH.format(blueprintId=quote_segment(blueprint_id))
+    rows: list[dict[str, Any]] = []
+    for page in range(MAX_VERSION_PAGES):
+        query = {"$top": LOOKUP_PAGE_SIZE, "$skip": page * LOOKUP_PAGE_SIZE}
+        payload = await get_json(connector, operator, target, path, query)
+        content = page_rows(payload)
+        rows.extend(version_row(row) for row in content)
+        total = payload.get("totalElements") if isinstance(payload, Mapping) else None
+        if len(content) < LOOKUP_PAGE_SIZE or (isinstance(total, int) and len(rows) >= total):
+            return rows
+    raise LookupError(
+        f"the template has more than {MAX_VERSION_PAGES * LOOKUP_PAGE_SIZE} versions; "
+        "MEHO cannot list them all, so it does not preview the delete"
+    )
+
+
 async def blueprint_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """The ``blast_radius`` of a template delete: the template and its versions.
+    """The ``blast_radius`` of a template delete: the template and all its versions.
 
     Returns ``None`` without a connector (the ``preview_operation`` call does
     not reach the vendor). Raises :exc:`LookupError` when the template does
-    not exist: MEHO then refuses to queue the delete.
+    not exist, or when not every version can be read: MEHO then refuses to
+    queue the delete.
     """
     connector: Any = ctx.connector_instance
     blueprint_id = ctx.params.get("id")
@@ -507,12 +612,10 @@ async def blueprint_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None
         if exc.response.status_code == 404:
             raise LookupError(f"no cloud template has the id {blueprint_id!r}") from exc
         raise
-    versions = await blueprint_version_list(
-        connector, ctx.operator, ctx.target, {"id": blueprint_id, "$top": LOOKUP_PAGE_SIZE}
-    )
+    versions = await _all_versions(connector, ctx.operator, ctx.target, blueprint_id)
     children = [
         {"kind": "cloud_template_version", "version": v["version"], "status": v["status"]}
-        for v in versions["content"]
+        for v in versions
     ]
     released = sum(1 for child in children if child["status"] == "RELEASED")
     return {
@@ -538,3 +641,5 @@ async def blueprint_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None
 
 for _op_id in DELETE_OP_IDS:
     register_preview_builder(_op_id, blueprint_delete_preview)
+for _op_id in WRITE_OP_IDS:
+    register_preview_builder(_op_id, blueprint_write_preview)

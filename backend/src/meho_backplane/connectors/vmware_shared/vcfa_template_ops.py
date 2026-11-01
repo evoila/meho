@@ -169,7 +169,7 @@ _BLUEPRINT_CREATE = ContentOpSpec(
     description=(
         "Sends POST /blueprint/api/blueprints. The new template is a draft; it is in "
         "the catalog only after a released version. A template with this name in "
-        "the project answers 'unchanged'."
+        "the project answers 'unchanged'. YAML that holds a secret value is refused."
     ),
     parameter_schema={
         "type": "object",
@@ -185,8 +185,10 @@ _BLUEPRINT_CREATE = ContentOpSpec(
                 "type": "string",
                 "minLength": 1,
                 "description": (
-                    "The template YAML (formatVersion, inputs, resources). Use a secret "
-                    "input for a password, never the value."
+                    "The template YAML (formatVersion, inputs, resources). A password or "
+                    "key goes in a secret input (${secret.<name>}, or an input with "
+                    "encrypted: true and no default), never as a value: YAML with a secret "
+                    "value is refused."
                 ),
             },
             "description": {
@@ -220,8 +222,8 @@ _BLUEPRINT_CREATE = ContentOpSpec(
         when_to_call="Call to add a new cloud template to a project.",
         preconditions=(
             "Check the YAML with {ns}.blueprint.validate first. Content that holds a "
-            "[REDACTED:...] marker is refused; give the full value or use a secret input "
-            "(${secret.<name>}). A person must approve the call."
+            "secret value or a [REDACTED:...] marker is refused; put a secret input "
+            "(${secret.<name>}) in its place. A person must approve the call."
         ),
         output_shape="{status: created | unchanged, blueprint: {id, name, status, valid}, "
         "guidance}.",
@@ -237,7 +239,7 @@ _BLUEPRINT_UPDATE = ContentOpSpec(
     description=(
         "Reads the template, then sends PUT /blueprint/api/blueprints/{blueprintId} "
         "with the changes. Only the draft changes; released versions stay. No "
-        "difference answers 'unchanged'."
+        "difference answers 'unchanged'. YAML that holds a secret value is refused."
     ),
     parameter_schema={
         "type": "object",
@@ -246,7 +248,10 @@ _BLUEPRINT_UPDATE = ContentOpSpec(
             "content": {
                 "type": "string",
                 "minLength": 1,
-                "description": "The new template YAML. Use a secret input for a password.",
+                "description": (
+                    "The new template YAML. A password or key goes in a secret input "
+                    "(${secret.<name>}), never as a value: YAML with a secret value is refused."
+                ),
             },
             "name": {
                 "type": "string",
@@ -297,8 +302,8 @@ _BLUEPRINT_UPDATE = ContentOpSpec(
         preconditions=(
             "Read the template with {ns}.blueprint.get and check the new YAML with "
             "{ns}.blueprint.validate. The YAML from {ns}.blueprint.get hides secret values "
-            "behind [REDACTED:...] markers; content that still holds a marker is refused. "
-            "Put back the full value or use a secret input (${secret.<name>}). A second "
+            "behind [REDACTED:...] markers; content that holds a marker or a secret value "
+            "is refused. Put a secret input (${secret.<name>}) in its place. A second "
             "person must approve the call."
         ),
         output_shape=(
@@ -467,7 +472,7 @@ _VALIDATE = ContentOpSpec(
     description=(
         "Sends POST /blueprint/api/blueprint-validation with template YAML (content) or "
         "a stored template (blueprint_id). Returns valid and the problems found. "
-        "Nothing is saved."
+        "Nothing is saved. YAML or an input with a secret value is refused."
     ),
     parameter_schema={
         "type": "object",
@@ -490,7 +495,10 @@ _VALIDATE = ContentOpSpec(
             },
             "inputs": {
                 "type": "object",
-                "description": "Optional input values, by input name.",
+                "description": (
+                    "Optional input values, by input name. A secret input (a password, "
+                    "key or token) takes a reference such as ${secret.<name>}, never the value."
+                ),
                 "additionalProperties": True,
             },
         },

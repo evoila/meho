@@ -23,18 +23,21 @@ What is replaced:
   written as one line of JSON) that holds such a key: the whole value.
 * The value of every key with a secret name
   (:func:`~meho_backplane.broadcast.events.is_secret_param_name`), and of
-  the cloud-init key ``chpasswd`` (its ``list`` or ``users`` part holds
-  plain ``user:password`` pairs). The line keeps the key and gets the
-  marker as its value. The lines that belong to the value (a ``|`` or
-  ``>`` block, a nested map or list) are removed.
+  the ``list`` part of the cloud-init key ``chpasswd`` (it holds plain
+  ``user:password`` pairs; the ``users`` part names its passwords). The
+  line keeps the key and gets the marker as its value. The lines that
+  belong to the value (a ``|`` or ``>`` block, a nested map or list) are
+  removed.
 * Every PEM private key block (``-----BEGIN ... PRIVATE KEY-----`` to its
   ``END`` line), under any key.
 
 A secret input keeps its lines: an input under the top-level ``inputs:``
-map whose name is a secret name, or which has ``encrypted: true`` (such as
-``inputs.adminPassword``). It describes the input; it does not hold the
-secret. Only its example, default and fixed values (``default``,
-``const``, ``enum``, ``example``, ``examples``, ``value``) are replaced.
+map whose name is a secret name, or any map with ``encrypted: true`` (such
+as ``inputs.adminPassword``), in block form or as a one-line flow map. It
+describes the input; it does not hold the secret. Only its example,
+default and fixed values (``default``, ``const``, ``enum``, ``example``,
+``examples``, ``value``) are replaced; a one-line definition that holds
+one becomes the marker as a whole. Keys may be quoted (``"encrypted"``).
 
 :func:`scrub_inputs_schema` does the same for the inputs schema (a JSON
 schema): each secret input loses its example and default values.
@@ -53,7 +56,13 @@ from typing import Any, Final
 
 from meho_backplane.broadcast.events import is_secret_param_name
 
-__all__ = ["MARKER_PREFIX", "SECRET_MARKER", "scrub_inputs_schema", "scrub_template_yaml"]
+__all__ = [
+    "MARKER_PREFIX",
+    "SECRET_MARKER",
+    "is_reference",
+    "scrub_inputs_schema",
+    "scrub_template_yaml",
+]
 
 #: Every marker MEHO puts in place of a value starts with this text.
 MARKER_PREFIX: Final[str] = "[REDACTED"
@@ -64,9 +73,11 @@ SECRET_MARKER: Final[str] = "[REDACTED:param_name]"
 #: The line put in place of a PEM private key block.
 PRIVATE_KEY_MARKER: Final[str] = "[REDACTED:private_key]"
 
+#: A ``key: value`` line. A line that starts with ``{`` or ``[`` is a flow map
+#: or list, not a key line (see :data:`_FLOW_LINE`).
 _KEY_LINE: Final[re.Pattern[str]] = re.compile(
     r"^(?P<lead>[ \t]*(?:-[ \t]+)*)"
-    r"(?P<key>\"[^\"\n]*\"|'[^'\n]*'|[^\s#'\"\-:][^:#\n]*?|-[^\s:#][^:#\n]*?)"
+    r"(?P<key>\"[^\"\n]*\"|'[^'\n]*'|[^\s#'\"\-:{\[][^:#\n]*?|-[^\s:#][^:#\n]*?)"
     r"[ \t]*:(?:[ \t]+(?P<value>.*?))?[ \t\r]*$"
 )
 _PEM_BEGIN: Final[re.Pattern[str]] = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----")
@@ -93,12 +104,24 @@ _FLOW_KEY: Final[re.Pattern[str]] = re.compile(
 _FLOW_LINE: Final[re.Pattern[str]] = re.compile(
     r"^(?P<lead>[ \t]*(?:-[ \t]+)*)(?P<flow>[{\[].*?)\r?$"
 )
-#: Cloud-init keys whose whole value is secret, in lower case. ``chpasswd``
-#: holds ``user:password`` lines (``list``) or users with a ``password``.
-_CLOUD_INIT_SECRET_KEYS: Final[frozenset[str]] = frozenset({"chpasswd"})
-_INPUTS_LINE: Final[re.Pattern[str]] = re.compile(r"^inputs[ \t]*:[ \t]*(?:#.*)?\r?$")
+#: The cloud-init key whose ``list`` part holds plain ``user:password``
+#: lines. Its ``users`` part names each password; ``expire`` is no secret.
+_CHPASSWD: Final[str] = "chpasswd"
+_CHPASSWD_SECRET_KEYS: Final[frozenset[str]] = frozenset({"list"})
+#: The key that marks a map as the definition of a secret input.
+_ENCRYPTED: Final[str] = "encrypted"
+#: A YAML true, bare or quoted (YAML 1.1 also reads ``yes`` and ``on`` as true).
+_TRUE_VALUE: Final[re.Pattern[str]] = re.compile(r"(?P<q>[\"']?)(?i:true|yes|on)(?P=q)")
+#: The top-level ``inputs:`` line, also quoted or opening a multi-line ``{``.
+_INPUTS_LINE: Final[re.Pattern[str]] = re.compile(
+    r"^(?P<q>[\"']?)inputs(?P=q)[ \t]*:[ \t]*\{?[ \t]*(?:#.*)?\r?$"
+)
+#: An ``encrypted: true`` row of a block map; the key or the value may be quoted,
+#: and a trailing comma (multi-line JSON) is allowed.
 _ENCRYPTED_LINE: Final[re.Pattern[str]] = re.compile(
-    r"^[ \t]*encrypted[ \t]*:[ \t]*(?i:true)[ \t]*(?:#.*)?\r?$"
+    r"^[ \t]*(?P<q>[\"']?)encrypted(?P=q)[ \t]*:[ \t]*"
+    + _TRUE_VALUE.pattern.replace("(?P<q>", "(?P<v>").replace("(?P=q)", "(?P=v)")
+    + r"[ \t]*,?[ \t]*(?:#.*)?\r?$"
 )
 
 
@@ -162,6 +185,8 @@ class _Scrub:
         self.count = 0
         #: The open input definitions: (index after the last line, key column).
         self.definitions: list[tuple[int, int]] = []
+        #: The open cloud-init ``chpasswd`` blocks, in the same form.
+        self.chpasswd: list[tuple[int, int]] = []
         #: The lines of the top-level ``inputs:`` map and the column of its keys.
         self.inputs = _input_column(self.lines)
 
@@ -169,6 +194,7 @@ class _Scrub:
         index = 0
         while index < len(self.lines):
             self.definitions = [scope for scope in self.definitions if scope[0] > index]
+            self.chpasswd = [scope for scope in self.chpasswd if scope[0] > index]
             following = self._key_line(index)
             if following is None:
                 following = _scrub_pem(self.lines, index, self.out)
@@ -183,11 +209,11 @@ class _Scrub:
         return "\n".join(self.out)
 
     def _secret_key(self, key: str, key_col: int) -> bool:
-        if is_secret_param_name(key) or key.lower() in _CLOUD_INIT_SECRET_KEYS:
+        if is_secret_param_name(key):
             return True
-        return key in _DEFINITION_VALUE_KEYS and any(
-            key_col > col for _end, col in self.definitions
-        )
+        if key.lower() in _CHPASSWD_SECRET_KEYS and _inside(key_col, self.chpasswd):
+            return True
+        return key in _DEFINITION_VALUE_KEYS and _inside(key_col, self.definitions)
 
     def _is_input(self, index: int, key_col: int) -> bool:
         """True when the key at *index* names one input of ``inputs:``."""
@@ -199,16 +225,18 @@ class _Scrub:
     def _secret_input(self, index: int, key: str, key_col: int) -> int | None:
         """Open an input definition at *index* when the input is secret.
 
-        Return the index after its lines, or ``None`` when it is no secret
-        input with nested lines.
+        A secret input is a map with an ``encrypted: true`` row, wherever it
+        sits, or an input of the top-level ``inputs:`` map with a secret
+        name. Return the index after its lines, or ``None`` when the key
+        opens no such map.
         """
-        if not self._is_input(index, key_col):
-            return None
         end = _value_lines_end(self.lines, index + 1, key_col, nested=True)
         rows = _map_rows(self.lines[index + 1 : end])
         if not rows:
             return None
-        if is_secret_param_name(key) or any(_ENCRYPTED_LINE.match(row) for row in rows):
+        if any(_ENCRYPTED_LINE.match(row) for row in rows):
+            return end
+        if self._is_input(index, key_col) and is_secret_param_name(key):
             return end
         return None
 
@@ -222,11 +250,19 @@ class _Scrub:
         value = (match["value"] or "").split(" #", 1)[0].strip()
         if value.startswith("#"):
             value = ""
-        definition_end = None if value else self._secret_input(index, key, key_col)
+        opens_map = not value or value == "{"
+        definition_end = self._secret_input(index, key, key_col) if opens_map else None
         if definition_end is not None:
             self.definitions.append((definition_end, key_col))
             return None
-        secret = self._secret_key(key, key_col) or _flow_has_secret_key(value)
+        if key.lower() == _CHPASSWD and opens_map:
+            self.chpasswd.append(
+                (_value_lines_end(self.lines, index + 1, key_col, nested=True), key_col)
+            )
+            return None
+        secret = self._secret_key(key, key_col) or _flow_has_secret_key(
+            value, chpasswd=key.lower() == _CHPASSWD
+        )
         if not secret or _KEPT_VALUE.fullmatch(value):
             return None
         end = _value_lines_end(self.lines, index + 1, key_col, nested=not value)
@@ -237,16 +273,34 @@ class _Scrub:
         return end
 
 
-def _flow_has_secret_key(value: str) -> bool:
-    """True when *value* is a one-line flow map or list with a secret-named key."""
+def _inside(key_col: int, scopes: list[tuple[int, int]]) -> bool:
+    """True when a key at *key_col* is nested in one of the open *scopes*."""
+    return any(key_col > col for _end, col in scopes)
+
+
+def _flow_has_secret_key(value: str, *, chpasswd: bool = False) -> bool:
+    """True when *value* is a one-line flow map or list that holds a secret.
+
+    That is a secret-named key with a value, the ``list`` of a ``chpasswd``
+    map (*chpasswd*), or a secret input definition (``encrypted: true``)
+    with a default, example or fixed value.
+    """
     if value[:1] not in "{[":
         return False
+    encrypted = fixed_value = False
     for found in _FLOW_KEY.finditer(value):
         name = found["dq"] if found["dq"] is not None else found["sq"] or found["plain"] or ""
-        secret = is_secret_param_name(name) or name.lower() in _CLOUD_INIT_SECRET_KEYS
-        if secret and not _KEPT_VALUE.fullmatch(found["value"].strip()):
+        held = found["value"].strip()
+        if name.lower() == _ENCRYPTED and _TRUE_VALUE.fullmatch(held):
+            encrypted = True
+            continue
+        if _KEPT_VALUE.fullmatch(held):
+            continue
+        if is_secret_param_name(name) or (chpasswd and name.lower() in _CHPASSWD_SECRET_KEYS):
             return True
-    return False
+        if name in _DEFINITION_VALUE_KEYS:
+            fixed_value = True
+    return encrypted and fixed_value
 
 
 def _scrub_flow_line(lines: list[str], index: int, out: list[str]) -> int | None:
@@ -275,6 +329,17 @@ def _scrub_pem(lines: list[str], index: int, out: list[str]) -> int | None:
     marker = PRIVATE_KEY_MARKER if not prefix.strip() else f"'{PRIVATE_KEY_MARKER}'"
     out.append(prefix + marker)
     return min(end + 1, len(lines))
+
+
+def is_reference(value: Any) -> bool:
+    """True when *value* names a secret or input (``${secret.<name>}``) or holds none.
+
+    Such a value may travel in a call. ``None``, a bool and a marker count
+    too; a number or any other text is a value.
+    """
+    if value is None or isinstance(value, bool):
+        return True
+    return isinstance(value, str) and _KEPT_VALUE.fullmatch(value.strip()) is not None
 
 
 def scrub_template_yaml(text: str) -> tuple[str, int]:

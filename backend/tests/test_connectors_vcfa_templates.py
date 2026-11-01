@@ -19,11 +19,13 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 import respx
 from sqlalchemy import select
 
 from meho_backplane.connectors.vcf_automation import VcfAutomationConnector
+from meho_backplane.connectors.vmware_shared import vcfa_templates
 from meho_backplane.connectors.vra8 import register_vra8_typed_operations
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor, OperationGroup
@@ -49,6 +51,9 @@ from tests._vcfa_provisioning_support import (
 
 _BP = "/blueprint/api/blueprints"
 _BP_1 = f"{_BP}/bp-1"
+
+#: The changes whose approval card shows the YAML with its secret values hidden.
+_WRITES_WITH_PREVIEW = {"blueprint.create", "blueprint.update"}
 
 #: The table of the Task: op name -> (safety level, requires approval).
 TIERS: dict[str, tuple[str, bool]] = {
@@ -150,7 +155,8 @@ async def test_each_op_has_its_risk_level_on_both_connectors(
         assert row.source_kind == "typed"
         assert (row.safety_level, row.requires_approval) == (safety, approval), name
         assert f"{prefix}.{name}" in "".join(texts.values()), name
-        assert (f"{prefix}.{name}" in _PREVIEW_BUILDERS) == (safety == "destructive")
+        has_preview = safety == "destructive" or name in _WRITES_WITH_PREVIEW
+        assert (f"{prefix}.{name}" in _PREVIEW_BUILDERS) == has_preview, name
     assert set(texts) == groups
     assert "{ns}" not in "".join(texts.values())
 
@@ -492,6 +498,81 @@ async def test_delete_preview_fills_the_blast_radius(vcfa: VcfAutomationConnecto
     ]
     assert blast["irreversibility"] == "irreversible"
     assert "1 released version(s)" in blast["note"]
+
+
+def _preview_ctx(vcfa: VcfAutomationConnector, target: Any) -> Any:
+    return SimpleNamespace(
+        connector_instance=vcfa, operator=OPERATOR, target=target, params={"id": "bp-1"}
+    )
+
+
+def _version_pages(total: int, page_size: int) -> Any:
+    """A respx side effect that serves *total* versions, *page_size* per ``$skip``."""
+    rows = [
+        {"id": f"v-{n}", "version": str(n), "status": "RELEASED" if n % 2 else "VERSIONED"}
+        for n in range(1, total + 1)
+    ]
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["$top"] == str(page_size)
+        skip = int(request.url.params["$skip"])
+        return httpx.Response(
+            200, json={"content": rows[skip : skip + page_size], "totalElements": total}
+        )
+
+    return serve
+
+
+async def test_delete_preview_reads_every_version_page(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(vcfa_templates, "LOOKUP_PAGE_SIZE", 2)
+    builder = _PREVIEW_BUILDERS["vcfa.tenant.blueprint.delete"]
+    ctx = _preview_ctx(vcfa, await resolved_target())
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(_BP_1).respond(200, json=_TEMPLATE)
+        versions = mock.get(f"{_BP_1}/versions").mock(side_effect=_version_pages(5, 2))
+        preview = await builder(ctx)
+    assert versions.call_count == 3
+    children = preview["blast_radius"]["children"]
+    assert [child["version"] for child in children] == ["1", "2", "3", "4", "5"]
+    assert "3 released version(s)" in preview["blast_radius"]["note"]
+
+
+async def test_delete_preview_refuses_when_it_cannot_read_every_version(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(vcfa_templates, "LOOKUP_PAGE_SIZE", 2)
+    monkeypatch.setattr(vcfa_templates, "MAX_VERSION_PAGES", 2)
+    builder = _PREVIEW_BUILDERS["vcfa.tenant.blueprint.delete"]
+    ctx = _preview_ctx(vcfa, await resolved_target())
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(_BP_1).respond(200, json=_TEMPLATE)
+        versions = mock.get(f"{_BP_1}/versions").mock(side_effect=_version_pages(5, 2))
+        with pytest.raises(LookupError, match="cannot list them all"):
+            await builder(ctx)
+    assert versions.call_count == 2
+
+
+async def test_delete_of_a_template_with_too_many_versions_is_refused(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(vcfa_templates, "LOOKUP_PAGE_SIZE", 2)
+    monkeypatch.setattr(vcfa_templates, "MAX_VERSION_PAGES", 1)
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(_BP_1).respond(200, json=_TEMPLATE)
+        mock.get(f"{_BP_1}/versions").mock(side_effect=_version_pages(3, 2))
+        delete = mock.delete(_BP_1).respond(204)
+        preview = await preview_operation(OPERATOR, _call_args())
+        call = await call_operation(
+            OPERATOR, {**_call_args(), "preview_hash": preview["preview_hash"]}
+        )
+    assert call["status"] == "denied", call
+    assert call["extras"]["error_code"] == "blast_radius_required"
+    assert not delete.called
 
 
 async def test_delete_preview_refuses_an_unknown_template(

@@ -14,7 +14,12 @@ the person's own approval sign-in (#5515):
   ``401`` as an old sign-in, whatever its ``auth_time``;
 * the sign-in is inside the approval window: the token's ``auth_time`` is
   at most ``FRESH_SIGN_IN_MAX_AGE_SECONDS`` old (default 15 minutes). A
-  token without ``auth_time`` never approves.
+  token without ``auth_time`` never approves;
+* the sign-in asked for the person's credentials: the token's ``acr`` is
+  set and is not ``"0"``. With no level-of-authentication mapping,
+  Keycloak gives ``"1"`` to a sign-in that asked for the password and
+  ``"0"`` to one that did not. The approval client's own sign-in flow
+  always asks, so its tokens carry ``"1"`` (or a higher level).
 
 Inside the window one sign-in may approve several requests. A request
 whose operation is ``destructive`` is stricter: the sign-in must be at most
@@ -46,6 +51,7 @@ from meho_backplane.settings import Settings, get_settings
 __all__ = [
     "FRESH_SIGN_IN_REMEDIATION",
     "ApprovalAuth",
+    "asked_for_credentials",
     "check_fresh_approval_sign_in",
     "fresh_sign_in_required",
     "is_approval_sign_in",
@@ -54,6 +60,9 @@ __all__ = [
 
 ApprovalChannel = Literal["rest", "web"]
 ApprovalMethod = Literal["fresh_sign_in", "one_time_code", "web_click"]
+
+#: The ``acr`` Keycloak gives a sign-in that did not ask for credentials.
+_NO_CREDENTIAL_ACR: Final[str] = "0"
 
 #: The text a refused approve carries after its machine-readable prefix.
 FRESH_SIGN_IN_REMEDIATION: Final[str] = (
@@ -150,6 +159,14 @@ def is_approval_sign_in(operator: Operator, settings: Settings) -> bool:
     return bool(client_id) and is_human_principal(operator) and operator.azp == client_id
 
 
+def asked_for_credentials(operator: Operator) -> bool:
+    """Whether the token's ``acr`` shows a sign-in that asked for credentials.
+
+    False for a token without ``acr`` and for ``acr`` ``"0"``.
+    """
+    return operator.acr is not None and operator.acr != _NO_CREDENTIAL_ACR
+
+
 def check_fresh_approval_sign_in(
     operator: Operator,
     settings: Settings,
@@ -161,19 +178,27 @@ def check_fresh_approval_sign_in(
     The token must come from the person's approval sign-in
     (:func:`is_approval_sign_in`), and that sign-in must be inside the
     approval window: ``auth_time`` at most ``FRESH_SIGN_IN_MAX_AGE_SECONDS``
-    old (:func:`~meho_backplane.auth.fresh_sign_in.has_fresh_sign_in`). A
-    token with no ``auth_time`` is refused (fail closed). Every refusal is
-    the same ``401``, so a client cannot tell which part failed.
+    old (:func:`~meho_backplane.auth.fresh_sign_in.has_fresh_sign_in`), and
+    it must have asked for credentials (:func:`asked_for_credentials`). A
+    token with no ``auth_time`` or no ``acr`` is refused (fail closed).
+    Every refusal is the same ``401``, so a client cannot tell which part
+    failed.
     """
     approval_client = is_approval_sign_in(operator, settings)
-    if not approval_client or not has_fresh_sign_in(
-        operator, now=now, max_age_seconds=settings.fresh_sign_in_max_age_seconds
+    credentials = asked_for_credentials(operator)
+    if (
+        not approval_client
+        or not credentials
+        or not has_fresh_sign_in(
+            operator, now=now, max_age_seconds=settings.fresh_sign_in_max_age_seconds
+        )
     ):
         structlog.get_logger(__name__).warning(
             "approval_sign_in_not_fresh",
             operator_sub=operator.sub,
             has_auth_time=operator.auth_time is not None,
             approval_client=approval_client,
+            asked_for_credentials=credentials,
         )
         raise fresh_sign_in_required(
             reason="fresh_sign_in_required",

@@ -126,13 +126,17 @@ async def _approval_auth(request_id: uuid.UUID) -> Any:
 
 
 def _token(key: Any, **claims: Any) -> str:
-    """A person's token; from the approval client unless *claims* say otherwise."""
+    """A person's token from a password sign-in with the approval client.
+
+    *claims* change or add claims; a claim set to ``None`` is left out.
+    """
+    payload = {"azp": _APPROVAL_CLIENT, "acr": "1", **claims}
     return mint_token(
         key,
         sub="op-approver",
         tenant_role=TenantRole.OPERATOR.value,
         tenant_id=str(_TENANT_A),
-        extra_claims={"azp": _APPROVAL_CLIENT, **claims},
+        extra_claims={k: v for k, v in payload.items() if v is not None},
     )
 
 
@@ -199,6 +203,28 @@ async def test_token_without_sign_in_time_is_refused(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["approve", "decide"])
+@pytest.mark.parametrize("acr", ["0", None])
+async def test_a_recent_sign_in_without_credentials_is_refused(
+    route: str,
+    acr: str | None,
+    _client: tuple[httpx.AsyncClient, Any],
+    _fake_resume: list[uuid.UUID],
+) -> None:
+    """A recent approval-client token needs ``acr`` set and not ``"0"``."""
+    ac, key = _client
+    request_id = await _park()
+    token = _token(key, auth_time=int(time.time()) - 5, sid="s-no-password", acr=acr)
+
+    response = await _approve(ac, route, request_id, token)
+
+    _assert_challenge(response)
+    assert response.json()["detail"].startswith("fresh_sign_in_required:")
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+    assert _fake_resume == []
+
+
+@pytest.mark.asyncio
 async def test_max_age_follows_the_setting(
     monkeypatch: pytest.MonkeyPatch,
     _client: tuple[httpx.AsyncClient, Any],
@@ -231,7 +257,7 @@ async def test_fresh_sign_in_approves_and_is_recorded(
     assert recorded["channel"] == "rest"
     assert recorded["method"] == "fresh_sign_in"
     assert recorded["auth_time"] == auth_time
-    assert recorded["acr"] is None
+    assert recorded["acr"] == "1"
     assert "single_use" not in recorded
     # The session id itself is not stored, only a hash of the sign-in.
     assert "s-1" not in str(recorded)

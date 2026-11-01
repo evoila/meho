@@ -124,9 +124,10 @@ def mint_token(
     ``tenant_role="read_only"`` to mint a dedicated approver principal that
     can decide approvals but cannot dispatch.
 
-    ``fresh_sign_in`` adds ``auth_time`` (now), a new random ``sid`` and
-    ``azp`` = the approval client (``meho-cli-approve``): a person who just
-    signed in with the approval sign-in. An approve over REST needs it
+    ``fresh_sign_in`` adds ``auth_time`` (now), a new random ``sid``,
+    ``azp`` = the approval client (``meho-cli-approve``) and ``acr`` ``"1"``:
+    a person who just signed in with the approval sign-in and typed their
+    password. An approve over REST needs it
     (#3979, #5515). Each call gives a new ``sid``, so each token is a new
     sign-in.
 
@@ -168,6 +169,7 @@ def mint_token(
             payload["auth_time"] = now
             payload["sid"] = str(uuid.uuid4())
             payload["azp"] = APPROVAL_CLIENT_ID
+            payload["acr"] = "1"
         if extra_claims is not None:
             payload.update(extra_claims)
         header = {"alg": "RS256", "kid": private_key.as_dict()["kid"], "typ": "JWT"}

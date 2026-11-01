@@ -145,7 +145,11 @@ click it.
 
 **On an existing realm.** `meho admin keycloak bootstrap-clients` creates
 `meho-cli-approve` and its login flow when you run it again, and sets
-the two token settings above on an existing `meho-cli-approve`. The
+the two token settings above on an existing `meho-cli-approve`. A run
+that stopped half-way leaves a flow with missing steps; the next run
+finishes it. A flow `meho approval sign-in` with other steps than the
+ones above is left as it is, and the client is not bound to it: fix the
+flow by hand, then run the command again. The
 Keycloak that ships with the MEHO chart creates the client on the next
 upgrade (the realm finishing job adds a client that is missing, and sets
 the two token settings on an existing one). The job makes

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 )
@@ -93,60 +94,9 @@ func flowExecutionsPath(alias string) string {
 	return "authentication/flows/" + url.PathEscape(alias) + "/executions"
 }
 
-// reconcileApprovalFlow makes the approval sign-in flow when the realm
-// does not have it, and returns its id. An existing flow is kept as it
-// is.
-func reconcileApprovalFlow(ctx context.Context, c *adminClient) (string, []string, error) {
-	flows, err := c.listFlows(ctx)
-	if err != nil {
-		return "", nil, err
-	}
-	for _, f := range flows {
-		if f.Alias == approvalFlowAlias {
-			return f.ID, []string{fmt.Sprintf("[skip] login flow %q exists", approvalFlowAlias)}, nil
-		}
-	}
-	top := flowRep{
-		Alias:       approvalFlowAlias,
-		Description: "Sign-in of `meho approvals approve`: always asks for the password, and for the one-time code when the person has set one up. Provisioned by `meho admin keycloak bootstrap-clients`.",
-		ProviderID:  "basic-flow",
-		TopLevel:    true,
-	}
-	if _, err := c.flowCall(ctx, http.MethodPost, "authentication/flows", top, http.StatusCreated); err != nil {
-		return "", nil, err
-	}
-	for _, s := range approvalFlowSteps() {
-		path := flowExecutionsPath(s.Parent) + "/execution"
-		body := map[string]string{"provider": s.Provider}
-		if s.Subflow != "" {
-			path = flowExecutionsPath(s.Parent) + "/flow"
-			body = map[string]string{
-				"alias": s.Subflow, "type": "basic-flow",
-				"description": "Asks for the one-time code when the person has set one up.",
-			}
-		}
-		if _, err := c.flowCall(ctx, http.MethodPost, path, body, http.StatusCreated); err != nil {
-			return "", nil, err
-		}
-	}
-	if err := setApprovalFlowRequirements(ctx, c); err != nil {
-		return "", nil, err
-	}
-	flows, err = c.listFlows(ctx)
-	if err != nil {
-		return "", nil, err
-	}
-	for _, f := range flows {
-		if f.Alias == approvalFlowAlias {
-			return f.ID, []string{fmt.Sprintf("[created] login flow %q", approvalFlowAlias)}, nil
-		}
-	}
-	return "", nil, fmt.Errorf("login flow %q not found after it was created", approvalFlowAlias)
-}
-
-// setApprovalFlowRequirements sets the requirement of every step. A new
-// step starts as DISABLED.
-func setApprovalFlowRequirements(ctx context.Context, c *adminClient) error {
+// wantApprovalFlowSteps is the requirement of every step of the approval
+// flow, by step name (a sub-flow by its alias, a step by its provider).
+func wantApprovalFlowSteps() map[string]string {
 	want := map[string]string{}
 	for _, s := range approvalFlowSteps() {
 		name := s.Provider
@@ -155,28 +105,169 @@ func setApprovalFlowRequirements(ctx context.Context, c *adminClient) error {
 		}
 		want[name] = s.Requirement
 	}
-	path := flowExecutionsPath(approvalFlowAlias)
-	body, err := c.flowCall(ctx, http.MethodGet, path, nil, http.StatusOK)
+	return want
+}
+
+// reconcileApprovalFlow makes the approval sign-in flow when the realm
+// does not have it, finishes one that an earlier run left half-made,
+// and returns its id. A flow with other steps than the ones here is
+// kept as it is, and the id is "": the approval client is not bound to
+// a flow that is not the one the bootstrap makes.
+func reconcileApprovalFlow(ctx context.Context, c *adminClient) (string, []string, error) {
+	id, err := c.findApprovalFlow(ctx)
 	if err != nil {
-		return err
+		return "", nil, err
+	}
+	created := id == ""
+	if created {
+		top := flowRep{
+			Alias:       approvalFlowAlias,
+			Description: "Sign-in of `meho approvals approve`: always asks for the password, and for the one-time code when the person has set one up. Provisioned by `meho admin keycloak bootstrap-clients`.",
+			ProviderID:  "basic-flow",
+			TopLevel:    true,
+		}
+		if _, err := c.flowCall(ctx, http.MethodPost, "authentication/flows", top, http.StatusCreated); err != nil {
+			return "", nil, err
+		}
+		if id, err = c.findApprovalFlow(ctx); err != nil {
+			return "", nil, err
+		}
+		if id == "" {
+			return "", nil, fmt.Errorf("login flow %q not found after it was created", approvalFlowAlias)
+		}
+	}
+	have, err := c.readApprovalFlowSteps(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	changed, err := finishApprovalFlow(ctx, c, have)
+	if err != nil {
+		return "", nil, err
+	}
+	if changed {
+		if have, err = c.readApprovalFlowSteps(ctx); err != nil {
+			return "", nil, err
+		}
+	}
+	if !maps.Equal(stepRequirements(have), wantApprovalFlowSteps()) {
+		return "", []string{fmt.Sprintf(
+			"[skip] login flow %q has other steps than the bootstrap makes; the approval client is not bound to it",
+			approvalFlowAlias)}, nil
+	}
+	switch {
+	case created:
+		return id, []string{fmt.Sprintf("[created] login flow %q", approvalFlowAlias)}, nil
+	case changed:
+		return id, []string{fmt.Sprintf("[updated] login flow %q: finished the steps an earlier run left out", approvalFlowAlias)}, nil
+	}
+	return id, []string{fmt.Sprintf("[skip] login flow %q exists", approvalFlowAlias)}, nil
+}
+
+// findApprovalFlow returns the id of the approval flow, or "" when the
+// realm does not have it.
+func (c *adminClient) findApprovalFlow(ctx context.Context) (string, error) {
+	flows, err := c.listFlows(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, f := range flows {
+		if f.Alias == approvalFlowAlias {
+			return f.ID, nil
+		}
+	}
+	return "", nil
+}
+
+// readApprovalFlowSteps GETs the steps of the approval flow as Keycloak
+// lists them: the steps of a sub-flow follow the sub-flow.
+func (c *adminClient) readApprovalFlowSteps(ctx context.Context) ([]map[string]any, error) {
+	body, err := c.flowCall(ctx, http.MethodGet, flowExecutionsPath(approvalFlowAlias), nil, http.StatusOK)
+	if err != nil {
+		return nil, err
 	}
 	var steps []map[string]any
 	if err := json.Unmarshal(body, &steps); err != nil {
-		return fmt.Errorf("decode the steps of login flow %q: %w", approvalFlowAlias, err)
+		return nil, fmt.Errorf("decode the steps of login flow %q: %w", approvalFlowAlias, err)
 	}
+	return steps, nil
+}
+
+// stepName is the name of a listed step: the alias of a sub-flow, else
+// the step's provider.
+func stepName(step map[string]any) string {
+	if isFlow, _ := step["authenticationFlow"].(bool); isFlow {
+		name, _ := step["displayName"].(string)
+		return name
+	}
+	name, _ := step["providerId"].(string)
+	return name
+}
+
+// stepRequirements maps the listed steps to their requirement by name.
+func stepRequirements(steps []map[string]any) map[string]string {
+	have := map[string]string{}
 	for _, step := range steps {
-		name, _ := step["providerId"].(string)
-		if isFlow, _ := step["authenticationFlow"].(bool); isFlow {
-			name, _ = step["displayName"].(string)
+		requirement, _ := step["requirement"].(string)
+		have[stepName(step)] = requirement
+	}
+	return have
+}
+
+// finishApprovalFlow adds the steps the flow lacks and sets the
+// requirement of every step; it reports whether anything changed. A
+// run that stopped half-way leaves missing steps and steps that are
+// still DISABLED (a new step starts so). Keycloak puts a new step after
+// the existing ones, so the first steps a stopped run left get the rest
+// in the right order.
+func finishApprovalFlow(ctx context.Context, c *adminClient, have []map[string]any) (bool, error) {
+	present := stepRequirements(have)
+	added := false
+	for _, s := range approvalFlowSteps() {
+		name := s.Provider
+		path := flowExecutionsPath(s.Parent) + "/execution"
+		body := map[string]string{"provider": s.Provider}
+		if s.Subflow != "" {
+			name = s.Subflow
+			path = flowExecutionsPath(s.Parent) + "/flow"
+			body = map[string]string{
+				"alias": s.Subflow, "type": "basic-flow",
+				"description": "Asks for the one-time code when the person has set one up.",
+			}
 		}
-		requirement, ok := want[name]
+		if _, ok := present[name]; ok {
+			continue
+		}
+		if _, err := c.flowCall(ctx, http.MethodPost, path, body, http.StatusCreated); err != nil {
+			return false, err
+		}
+		added = true
+	}
+	set, err := setApprovalFlowRequirements(ctx, c)
+	if err != nil {
+		return false, err
+	}
+	return added || set, nil
+}
+
+// setApprovalFlowRequirements sets the requirement of every step and
+// reports whether any changed. A new step starts as DISABLED.
+func setApprovalFlowRequirements(ctx context.Context, c *adminClient) (bool, error) {
+	want := wantApprovalFlowSteps()
+	steps, err := c.readApprovalFlowSteps(ctx)
+	if err != nil {
+		return false, err
+	}
+	changed := false
+	for _, step := range steps {
+		requirement, ok := want[stepName(step)]
 		if !ok || step["requirement"] == requirement {
 			continue
 		}
 		step["requirement"] = requirement
-		if _, err := c.flowCall(ctx, http.MethodPut, path, step, http.StatusNoContent); err != nil {
-			return err
+		if _, err := c.flowCall(ctx, http.MethodPut, flowExecutionsPath(approvalFlowAlias), step, http.StatusNoContent); err != nil {
+			return false, err
 		}
+		changed = true
 	}
-	return nil
+	return changed, nil
 }

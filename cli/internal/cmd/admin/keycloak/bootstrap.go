@@ -739,7 +739,9 @@ func Bootstrap(
 	}
 	res.MapperEventsLog = append(res.MapperEventsLog, flowEvents...)
 	desiredApprove := opts.desiredCLIApproveClient()
-	desiredApprove.AuthenticationFlowBindingOverrides = map[string]string{"browser": flowID}
+	if flowID != "" {
+		desiredApprove.AuthenticationFlowBindingOverrides = map[string]string{"browser": flowID}
+	}
 	approveUUID, approveEvents, err := reconcileClient(ctx, c, desiredApprove)
 	if err != nil {
 		return nil, fmt.Errorf(

@@ -264,10 +264,16 @@ Steps of the realm stage, in order:
    Before the clients come the **login flows** of the realm file
    (`core/keycloak_flows.py`, #5515). Today that is one flow, `meho
    approval sign-in`: the password form, then the one-time code when the
-   person has set one up. A missing flow is made with its steps; an
-   existing flow is kept as it is. When the steps or their requirements of
-   an existing flow differ from the file, the step prints `kept, but its
-   steps differ from the realm file`. A client that names a flow in
+   person has set one up. A missing flow is made with its steps. A run
+   that stops half-way (a timeout, a restart) can leave a flow with
+   missing steps or steps that are still off; the next run adds the
+   missing steps and sets the requirements of the file (output:
+   `completed (an earlier run had not finished it)`). A flow that then
+   still has other steps than the file is kept as it is, and the step
+   prints `kept, but its steps differ from the realm file; no client is
+   bound to it`: such a flow is left out of the bindings, so a new
+   `meho-cli-approve` is made without a flow of its own, and an existing
+   binding is not changed. A client that names a flow in
    `authenticationFlowBindingOverrides` (only `meho-cli-approve`) is bound
    to it (output: `kept (login flow set)`). Reading and making login flows
    needs `manage-realm`. Without it the step prints `not checked (no right

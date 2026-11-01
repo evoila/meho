@@ -53,6 +53,12 @@ type fakeKeycloak struct {
 	// Counts requests per (method, path-template) so tests can assert
 	// idempotency: a re-run must not increment "POST /clients".
 	calls map[string]int
+
+	// flowCalls counts the requests to the login flow API. The request
+	// number failFlowCallAt (1-based; 0 = never) answers HTTP 500 once:
+	// a run that stops half-way through the flow setup.
+	flowCalls      int
+	failFlowCallAt int
 }
 
 func newFakeKeycloak() *fakeKeycloak {
@@ -124,6 +130,11 @@ func (f *fakeKeycloak) handleFlows(w http.ResponseWriter, r *http.Request, sub s
 		return false
 	}
 	f.calls[r.Method+" /authentication/flows..."]++
+	f.flowCalls++
+	if f.flowCalls == f.failFlowCallAt {
+		http.Error(w, "Request timed out", http.StatusInternalServerError)
+		return true
+	}
 	rest := strings.TrimPrefix(strings.TrimPrefix(sub, prefix), "/")
 	switch {
 	case rest == "" && r.Method == http.MethodGet:
@@ -1750,22 +1761,8 @@ func TestBootstrap_ApprovalFlowSteps(t *testing.T) {
 	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
-	var got []string
-	for _, s := range fake.flowSteps(approvalFlowAlias, 0) {
-		name, _ := s["providerId"].(string)
-		if s["authenticationFlow"] == true {
-			name = s["displayName"].(string)
-		}
-		got = append(got, fmt.Sprintf("%d %s %s", s["level"], name, s["requirement"]))
-	}
-	want := []string{
-		"0 auth-username-password-form REQUIRED",
-		"0 " + approvalCodeFlowAlias + " CONDITIONAL",
-		"1 conditional-user-configured REQUIRED",
-		"1 auth-otp-form REQUIRED",
-	}
-	if !slices.Equal(got, want) {
-		t.Errorf("steps = %v, want %v", got, want)
+	if got := approvalFlowStepLines(fake); !slices.Equal(got, wantApprovalFlowStepLines) {
+		t.Errorf("steps = %v, want %v", got, wantApprovalFlowStepLines)
 	}
 	// Only the approval client is bound to a flow of its own.
 	for _, c := range fake.clients {
@@ -1775,11 +1772,49 @@ func TestBootstrap_ApprovalFlowSteps(t *testing.T) {
 	}
 }
 
-// An existing flow is kept; an existing approval client without the
-// binding gets it, and gets the token settings of the approval client.
+// seedApprovalFlow gives the fake realm the approval flow with all its
+// steps, as a finished run leaves it.
+func seedApprovalFlow(fake *fakeKeycloak) *fakeFlow {
+	flow := &fakeFlow{ID: "flow-existing", TopLevel: true}
+	fake.flows[approvalFlowAlias] = flow
+	for _, s := range approvalFlowSteps() {
+		if s.Subflow != "" {
+			fake.flows[s.Subflow] = &fakeFlow{ID: fake.mintID()}
+		}
+		fake.flows[s.Parent].Steps = append(fake.flows[s.Parent].Steps, &fakeFlowStep{
+			ID: fake.mintID(), Provider: s.Provider, Subflow: s.Subflow, Requirement: s.Requirement,
+		})
+	}
+	return flow
+}
+
+// approvalFlowStepLines lists the approval flow's steps of the fake as
+// "<level> <name> <requirement>" lines.
+func approvalFlowStepLines(fake *fakeKeycloak) []string {
+	var got []string
+	for _, s := range fake.flowSteps(approvalFlowAlias, 0) {
+		name, _ := s["providerId"].(string)
+		if s["authenticationFlow"] == true {
+			name = s["displayName"].(string)
+		}
+		got = append(got, fmt.Sprintf("%d %s %s", s["level"], name, s["requirement"]))
+	}
+	return got
+}
+
+var wantApprovalFlowStepLines = []string{
+	"0 auth-username-password-form REQUIRED",
+	"0 " + approvalCodeFlowAlias + " CONDITIONAL",
+	"1 conditional-user-configured REQUIRED",
+	"1 auth-otp-form REQUIRED",
+}
+
+// A finished flow is kept without a change; an existing approval client
+// without the binding gets it, and gets the token settings of the
+// approval client.
 func TestBootstrap_ReRunKeepsFlowAndBindsExistingClient(t *testing.T) {
 	fake := newFakeKeycloak()
-	fake.flows[approvalFlowAlias] = &fakeFlow{ID: "flow-existing", TopLevel: true}
+	seedApprovalFlow(fake)
 	old := fullOpts().withDefaults().desiredCLIApproveClient()
 	old.ID = "uuid-existing-approve"
 	old.Attributes["use.refresh.tokens"] = "true"
@@ -1796,10 +1831,90 @@ func TestBootstrap_ReRunKeepsFlowAndBindsExistingClient(t *testing.T) {
 	if got := fake.clients[old.ID].Attributes; got["use.refresh.tokens"] != "false" || got["access.token.lifespan"] != "900" {
 		t.Errorf("token settings of the existing approval client = %v, want no refresh token and 900", got)
 	}
-	if n := fake.calls["POST /authentication/flows..."]; n != 0 {
-		t.Errorf("POST to the flow API %d times, want 0", n)
+	if n := fake.calls["POST /authentication/flows..."] + fake.calls["PUT /authentication/flows..."]; n != 0 {
+		t.Errorf("changed the flow API %d times, want 0", n)
 	}
 	if !slices.Contains(res.MapperEventsLog, `[skip] login flow "meho approval sign-in" exists`) {
 		t.Errorf("events miss the kept flow line: %v", res.MapperEventsLog)
+	}
+}
+
+// A run that stops at any call of the flow setup leaves a half-made
+// flow. The next run finishes it and binds the approval client to it.
+func TestBootstrap_FinishesAFlowSetupThatStoppedHalfWay(t *testing.T) {
+	clean := newFakeKeycloak()
+	if _, _, err := runBootstrapOnce(t, clean, fullOpts()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	setupCalls := clean.flowCalls
+	if setupCalls < 10 {
+		t.Fatalf("a clean run made %d flow API calls, want the whole setup", setupCalls)
+	}
+	for stopAt := 1; stopAt <= setupCalls; stopAt++ {
+		t.Run(fmt.Sprintf("stop at call %d", stopAt), func(t *testing.T) {
+			fake := newFakeKeycloak()
+			fake.failFlowCallAt = stopAt
+			if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err == nil {
+				t.Fatal("the stopped run reported no error")
+			}
+			for _, c := range fake.clients {
+				if c.ClientID == "meho-cli-approve" {
+					t.Fatal("the stopped run made the approval client")
+				}
+			}
+
+			res, _, err := runBootstrapOnce(t, fake, fullOpts())
+			if err != nil {
+				t.Fatalf("the next run: %v", err)
+			}
+			if got := approvalFlowStepLines(fake); !slices.Equal(got, wantApprovalFlowStepLines) {
+				t.Errorf("steps = %v, want %v", got, wantApprovalFlowStepLines)
+			}
+			flow := fake.flows[approvalFlowAlias]
+			for _, c := range fake.clients {
+				if c.ClientID == "meho-cli-approve" && c.AuthenticationFlowBindingOverrides["browser"] != flow.ID {
+					t.Errorf("browser flow of the approval client = %q, want %q", c.AuthenticationFlowBindingOverrides["browser"], flow.ID)
+				}
+			}
+			// A stop after the last change leaves a finished flow, so the
+			// next run keeps it.
+			finished := slices.ContainsFunc(res.MapperEventsLog, func(e string) bool {
+				return strings.HasPrefix(e, `[created] login flow "meho approval sign-in"`) ||
+					strings.HasPrefix(e, `[updated] login flow "meho approval sign-in": finished`) ||
+					e == `[skip] login flow "meho approval sign-in" exists`
+			})
+			if !finished {
+				t.Errorf("events miss the flow line: %v", res.MapperEventsLog)
+			}
+		})
+	}
+}
+
+// A flow with a step the bootstrap does not make is kept as it is, and
+// the approval client is not bound to it.
+func TestBootstrap_DoesNotBindAFlowWithOtherSteps(t *testing.T) {
+	fake := newFakeKeycloak()
+	flow := seedApprovalFlow(fake)
+	flow.Steps = append(flow.Steps, &fakeFlowStep{
+		ID: fake.mintID(), Provider: "auth-cookie", Requirement: "ALTERNATIVE"})
+
+	res, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	for _, c := range fake.clients {
+		if c.ClientID == "meho-cli-approve" && len(c.AuthenticationFlowBindingOverrides) != 0 {
+			t.Errorf("the approval client is bound to %v, want no binding", c.AuthenticationFlowBindingOverrides)
+		}
+	}
+	if n := fake.calls["POST /authentication/flows..."] + fake.calls["PUT /authentication/flows..."]; n != 0 {
+		t.Errorf("changed the flow API %d times, want 0", n)
+	}
+	want := `[skip] login flow "meho approval sign-in" has other steps than the bootstrap makes; the approval client is not bound to it`
+	if !slices.Contains(res.MapperEventsLog, want) {
+		t.Errorf("events miss the line %q: %v", want, res.MapperEventsLog)
+	}
+	if got := approvalFlowStepLines(fake); !slices.Equal(got, append(slices.Clone(wantApprovalFlowStepLines), "0 auth-cookie ALTERNATIVE")) {
+		t.Errorf("the flow was changed: %v", got)
 	}
 }

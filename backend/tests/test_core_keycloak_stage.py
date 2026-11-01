@@ -122,6 +122,10 @@ class FakeKeycloak:
         self._add_flow({"alias": "browser", "providerId": "basic-flow", "topLevel": True})
         # False: the account lacks manage-realm, so login flows answer 403.
         self.flow_rights = flow_rights
+        # The n-th call to the login flow API answers HTTP 500 once: a run
+        # that stops half-way through the flow setup.
+        self.fail_flow_call_at: int | None = None
+        self.flow_calls = 0
         if bootstrap:
             self.master_clients[bootstrap[0]] = {"id": str(uuid.uuid4()), "secret": bootstrap[1]}
         self.scopes: dict[str, dict[str, Any]] = {}
@@ -267,6 +271,10 @@ class FakeKeycloak:
         if self.session is None:
             return Reply(401, {"error": "HTTP 401 Unauthorized"})
         params = dict(params or {})
+        if path.startswith("/admin/realms/meho/authentication/"):
+            self.flow_calls += 1
+            if self.flow_calls == self.fail_flow_call_at:
+                return Reply(500, {"error": "HTTP 500 Internal Server Error"})
         handler = getattr(self, f"_{method.lower()}")
         result: Reply = handler(path, json, params)
         return result
@@ -664,10 +672,10 @@ async def test_upgrade_binds_an_existing_approval_client_to_its_flow(
     assert f"login flow {_APPROVAL_FLOW}: kept\n" in capfd.readouterr().out
 
 
-async def test_a_kept_login_flow_with_other_steps_is_named(
+async def test_a_login_flow_with_a_step_that_is_off_is_finished(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
-    """A login flow that differs from the realm file is kept, and the stage says so."""
+    """A step a stopped run left off is set as in the realm file, and the flow is bound."""
     kc = FakeKeycloak(bootstrap=None)
     kc.import_realm(_realm_as_imported())
     kc.flows[_APPROVAL_FLOW]["executions"][0]["requirement"] = "DISABLED"
@@ -675,8 +683,66 @@ async def test_a_kept_login_flow_with_other_steps_is_named(
     await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
 
     out = capfd.readouterr().out
-    assert f"login flow {_APPROVAL_FLOW}: kept, but its steps differ from the realm file" in out
-    assert kc.flows[_APPROVAL_FLOW]["executions"][0]["requirement"] == "DISABLED"
+    assert f"login flow {_APPROVAL_FLOW}: completed (an earlier run had not finished it)" in out
+    assert _steps(kc, _APPROVAL_FLOW) == _APPROVAL_STEPS
+    overrides = kc.clients["meho-cli-approve"]["authenticationFlowBindingOverrides"]
+    assert overrides == {"browser": kc.flows[_APPROVAL_FLOW]["id"]}
+
+
+#: The calls to the login flow API that make the approval flow: list the
+#: flows, create the flow, add its four steps, list the steps, set the four
+#: requirements.
+_FLOW_SETUP_CALLS = 11
+
+
+@pytest.mark.parametrize("stop_at", range(1, _FLOW_SETUP_CALLS + 1))
+async def test_a_flow_setup_that_stopped_half_way_is_finished_on_the_next_run(
+    stop_at: int, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """Whatever call of the flow setup fails, the next run completes the flow and binds it."""
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(_realm_before_the_approval_flow())
+    kc.fail_flow_call_at = stop_at
+    with pytest.raises(RealmStageError, match="login flow"):
+        await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+    assert kc.flow_calls == stop_at
+    assert "meho-cli-approve" not in kc.clients
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    assert _steps(kc, _APPROVAL_FLOW) == _APPROVAL_STEPS
+    overrides = kc.clients["meho-cli-approve"]["authenticationFlowBindingOverrides"]
+    assert overrides == {"browser": kc.flows[_APPROVAL_FLOW]["id"]}
+    out = capfd.readouterr().out
+    ended = "created" if stop_at <= 2 else "completed (an earlier run had not finished it)"
+    assert f"login flow {_APPROVAL_FLOW}: {ended}" in out
+    # The run after that finds the flow in place.
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+    assert f"login flow {_APPROVAL_FLOW}: kept\n" in capfd.readouterr().out
+
+
+async def test_a_login_flow_with_other_steps_is_kept_and_not_bound(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """A flow with a step the realm file does not have is kept, named, and binds no client."""
+    old = _realm_as_imported()
+    approve = next(c for c in old["clients"] if c["clientId"] == "meho-cli-approve")
+    del approve["authenticationFlowBindingOverrides"]
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(old)
+    kc._add_step(_APPROVAL_FLOW, "auth-cookie", None)
+    kc.flows[_APPROVAL_FLOW]["executions"][-1]["requirement"] = "ALTERNATIVE"
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    out = capfd.readouterr().out
+    assert (
+        f"login flow {_APPROVAL_FLOW}: kept, but its steps differ from the realm file; "
+        "no client is bound to it"
+    ) in out
+    assert "authenticationFlowBindingOverrides" not in kc.clients["meho-cli-approve"]
+    assert _steps(kc, _APPROVAL_FLOW) == [*_APPROVAL_STEPS, ("auth-cookie", "ALTERNATIVE", 0)]
+    assert not [c for c in kc.calls if c[0] in {"POST", "PUT"} and "authentication" in c[1]]
 
 
 async def test_upgrade_sets_the_token_settings_of_an_existing_approval_client(

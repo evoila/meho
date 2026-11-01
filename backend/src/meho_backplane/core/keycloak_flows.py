@@ -5,9 +5,13 @@
 
 Keycloak makes the flows of the realm file at its first start. On a realm
 made before a flow was in the file, :func:`ensure_flows` makes it through
-the Admin REST API: the flow, its steps and their requirements. A flow the
-realm has already is kept as it is; when its steps or their requirements
-differ from the realm file, the stage says so in one line.
+the Admin REST API: the flow, its steps and their requirements. A run that
+stops half-way (a timeout, a restart) can leave a flow with missing steps
+or steps that are still off. The next run finishes such a flow: it adds the
+missing steps and sets the requirements of the realm file. A flow with
+other steps than the file is kept as it is, the stage says so in one line,
+and no client is bound to it: a flow that is not the one of the file must
+not guard the approval sign-in.
 
 Reading and changing login flows needs the ``manage-realm`` role. The
 ``meho-admin`` account of the realm file has it only when the company login
@@ -54,23 +58,35 @@ def _requirements(flow: Mapping[str, Any], by_alias: Mapping[str, Any]) -> dict[
     return wanted
 
 
-async def _add_steps(admin: Admin, flow: Mapping[str, Any], by_alias: Mapping[str, Any]) -> None:
+async def _add_missing_steps(
+    admin: Admin, flow: Mapping[str, Any], by_alias: Mapping[str, Any], have: set[str]
+) -> bool:
+    """Add the steps of the realm file that *flow* lacks; whether any was added.
+
+    *have* names the steps the realm's flow has (sub-flows by alias, other
+    steps by provider). Keycloak puts a new step after the existing ones,
+    so a run that stopped half-way, which leaves the first steps, gets the
+    rest in the order of the file.
+    """
+    added = False
     steps = sorted(flow.get("authenticationExecutions") or [], key=lambda s: s.get("priority", 0))
     for step in steps:
         if step.get("authenticatorFlow"):
             sub = by_alias[step["flowAlias"]]
-            body = {
-                "alias": sub["alias"],
-                "type": sub["providerId"],
-                "description": sub.get("description", ""),
-            }
-            expect(
-                await admin.call("POST", f"{_flow_url(flow['alias'])}/flow", json=body),
-                201,
-                what=f"cannot add the sub-flow {sub['alias']} to login flow {flow['alias']}",
-            )
-            await _add_steps(admin, sub, by_alias)
-        else:
+            if sub["alias"] not in have:
+                body = {
+                    "alias": sub["alias"],
+                    "type": sub["providerId"],
+                    "description": sub.get("description", ""),
+                }
+                expect(
+                    await admin.call("POST", f"{_flow_url(flow['alias'])}/flow", json=body),
+                    201,
+                    what=f"cannot add the sub-flow {sub['alias']} to login flow {flow['alias']}",
+                )
+                added = True
+            added = await _add_missing_steps(admin, sub, by_alias, have) or added
+        elif step["authenticator"] not in have:
             expect(
                 await admin.call(
                     "POST",
@@ -80,6 +96,8 @@ async def _add_steps(admin: Admin, flow: Mapping[str, Any], by_alias: Mapping[st
                 201,
                 what=f"cannot add step {step['authenticator']} to login flow {flow['alias']}",
             )
+            added = True
+    return added
 
 
 def _step_name(step: Mapping[str, Any]) -> str:
@@ -88,21 +106,22 @@ def _step_name(step: Mapping[str, Any]) -> str:
     return str(name)
 
 
-async def _same_steps(
-    admin: Admin, flow: Mapping[str, Any], by_alias: Mapping[str, Any]
-) -> bool | None:
-    """Whether the realm's *flow* has the steps of the realm file; ``None`` when unreadable."""
-    reply = await admin.call("GET", _flow_url(flow["alias"]))
+async def _read_steps(admin: Admin, alias: str) -> dict[str, str] | None:
+    """The requirement of every step of the realm's flow *alias*, by step name.
+
+    ``None`` when the account may not read them.
+    """
+    reply = await admin.call("GET", _flow_url(alias))
     if reply.status == 403:
         return None
-    steps = expect(reply, 200, what=f"cannot list the steps of login flow {flow['alias']}").data
-    have = {_step_name(step): step.get("requirement") for step in steps}
-    return have == _requirements(flow, by_alias)
+    steps = expect(reply, 200, what=f"cannot list the steps of login flow {alias}").data
+    return {_step_name(step): step.get("requirement") for step in steps}
 
 
 async def _set_requirements(
     admin: Admin, flow: Mapping[str, Any], by_alias: Mapping[str, Any]
-) -> None:
+) -> bool:
+    """Set the requirement of the realm file on every step; whether any changed."""
     wanted = _requirements(flow, by_alias)
     alias = flow["alias"]
     steps = expect(
@@ -110,6 +129,7 @@ async def _set_requirements(
         200,
         what=f"cannot list the steps of login flow {alias}",
     ).data
+    changed = False
     for step in steps:
         name = _step_name(step)
         want = wanted.get(name)
@@ -120,6 +140,28 @@ async def _set_requirements(
             204,
             what=f"cannot set the requirement of step {name} in login flow {alias}",
         )
+        changed = True
+    return changed
+
+
+async def _finish_flow(admin: Admin, flow: Mapping[str, Any], by_alias: Mapping[str, Any]) -> str:
+    """Finish the realm's *flow* so it has the steps of the realm file.
+
+    Adds the steps the flow lacks and sets their requirements: a run that
+    stopped half-way leaves both. Returns ``"kept"`` when the flow already
+    matched the file (or its steps cannot be read), ``"completed"`` when it
+    matches after this, and ``"differs"`` when it still has other steps
+    than the file.
+    """
+    wanted = _requirements(flow, by_alias)
+    have = await _read_steps(admin, flow["alias"])
+    if have is None or have == wanted:
+        return "kept"
+    added = await _add_missing_steps(admin, flow, by_alias, set(have))
+    changed = await _set_requirements(admin, flow, by_alias)
+    if added or changed:
+        have = await _read_steps(admin, flow["alias"])
+    return "completed" if have == wanted else "differs"
 
 
 async def _make_flow(
@@ -137,7 +179,7 @@ async def _make_flow(
     if reply.status == 403:
         return None
     flow_id = id_from(expect(reply, 201, what=f"cannot create login flow {flow['alias']}"))
-    await _add_steps(admin, flow, by_alias)
+    await _add_missing_steps(admin, flow, by_alias, set())
     await _set_requirements(admin, flow, by_alias)
     return flow_id
 
@@ -145,8 +187,11 @@ async def _make_flow(
 async def ensure_flows(admin: Admin, flows: list[Mapping[str, Any]]) -> dict[str, str]:
     """Make the top-level login flows of the realm file that the realm lacks.
 
-    Returns the flow id of the realm file -> the flow id in the realm, for
-    every flow the realm has after this step.
+    A flow the realm has is finished when an earlier run left it half-made
+    (:func:`_finish_flow`). Returns the flow id of the realm file -> the flow
+    id in the realm, for every flow that has the steps of the file after
+    this step. A flow with other steps is left out, so no client is bound
+    to it.
     """
     top = [flow for flow in flows if flow.get("topLevel")]
     if not top:
@@ -165,8 +210,15 @@ async def ensure_flows(admin: Admin, flows: list[Mapping[str, Any]]) -> dict[str
     for flow in top:
         alias = flow["alias"]
         if alias in have:
-            if await _same_steps(admin, flow, by_alias) is False:
-                _say(f"login flow {alias}: kept, but its steps differ from the realm file")
+            state = await _finish_flow(admin, flow, by_alias)
+            if state == "differs":
+                _say(
+                    f"login flow {alias}: kept, but its steps differ from the realm file; "
+                    "no client is bound to it"
+                )
+                continue
+            if state == "completed":
+                _say(f"login flow {alias}: completed (an earlier run had not finished it)")
             else:
                 _say(f"login flow {alias}: kept")
         else:

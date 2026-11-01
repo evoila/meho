@@ -179,6 +179,7 @@ async def _resolve_value_inputs(
                     target,
                     dict(refs),
                     mount=str(params.get(mount_field) or DEFAULT_KV_MOUNT).strip(),
+                    param=ref_field,
                     op_id=_OP_UPDATE,
                 )
             )

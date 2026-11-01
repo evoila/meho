@@ -70,6 +70,7 @@ from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.pwsh import ps_single_quote, pwsh_run
 from meho_backplane.connectors._shared.vault_creds import (
     CredentialsReadError,
+    check_param_secret_ref,
     strip_credential_value,
 )
 from meho_backplane.connectors.msad.ops import SSH_TRANSPORT_NOTE, MsadOp
@@ -235,6 +236,10 @@ async def _read_password(
         host=host if isinstance(host, str) and host else "unknown",
         secret_ref=path,
     )
+    # The path comes from the params: check it before the read. A refused
+    # path raises SecretRefScopeError unchanged, so the dispatcher answers
+    # vault_credentials_read_error with only the path's first segment.
+    check_param_secret_ref(operator, path, param="password_ref")
     try:
         data = await connector._resolve_secret(stub, operator)
     except (VaultClientError, CredentialsReadError) as exc:

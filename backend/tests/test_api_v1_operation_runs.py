@@ -100,13 +100,14 @@ async def _insert_run(
     result: dict[str, Any] | None = None,
     tenant_id: str = DEFAULT_TENANT_ID,
     op_id: str = "vm.list",
+    identity_sub: str = "op-1",
 ) -> uuid.UUID:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         run = OperationRun(
             id=uuid.uuid4(),
             tenant_id=uuid.UUID(tenant_id),
-            identity_sub="op-1",
+            identity_sub=identity_sub,
             origin=OperationRunOrigin.DIRECT.value,
             connector_id="vmware-rest-9.0",
             op_id=op_id,
@@ -218,6 +219,29 @@ async def test_poll_returns_persisted_result_envelope() -> None:
     assert body["status"] == "succeeded"
     assert body["result"] == envelope
     assert body["connector_id"] == "vmware-rest-9.0"
+
+
+@pytest.mark.asyncio
+async def test_poll_shows_the_result_only_to_the_person_who_started_the_run() -> None:
+    """Another operator in the tenant sees the run's state, not its result."""
+    envelope = {"status": "ok", "op_id": "vm.list", "result": {"secret": "fake"}}
+    run_id = await _insert_run(
+        status=OperationRunStatus.SUCCEEDED, result=envelope, identity_sub="someone-else"
+    )
+
+    key = make_rsa_keypair("kid-A")
+    client = TestClient(_build_app())
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            f"/api/v1/operations/runs/{run_id}",
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "succeeded"
+    assert body["result"] is None
+    assert "fake" not in response.text
 
 
 def test_poll_unknown_handle_is_404(client: TestClient) -> None:

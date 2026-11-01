@@ -33,10 +33,15 @@ files are pinned.
 
 from __future__ import annotations
 
+import ssl
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import quote
 
+import httpx
+
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.adapters.http import SsrfBlockedError
 from meho_backplane.connectors.hcx.connector import (
     _APPLIANCES_PATH,
     _APPLIANCES_QUERY_BODY,
@@ -65,6 +70,7 @@ __all__ = [
     "hcx_service_mesh_diagnostics_list_impl",
     "hcx_service_mesh_list_impl",
     "hcx_site_pairing_list_impl",
+    "job_outcome",
     "manager_role",
     "redact_secrets",
     "rows_of",
@@ -434,16 +440,85 @@ async def hcx_service_mesh_diagnostics_get_impl(
     return _redact_object({**run, **_envelope_notes(payload)})
 
 
+def job_outcome(job: dict[str, Any]) -> str:
+    """The plain state of a vendor job, from its flags.
+
+    ``failed``, ``cancelled``, ``rolled_back``, ``succeeded``, ``queued`` or
+    ``running``. A failure wins over the other flags.
+    """
+    if job.get("didFail") is True:
+        return "failed"
+    if job.get("isCancelled") is True:
+        return "cancelled"
+    if job.get("isRolledBack") is True:
+        return "rolled_back"
+    if job.get("isDone") is True:
+        return "succeeded"
+    if job.get("isQueued") is True:
+        return "queued"
+    return "running"
+
+
+def _job_error(job: dict[str, Any]) -> str | None:
+    """The vendor's error text of a job, when the job object has one.
+
+    A list of errors becomes one text: each item's ``message`` (or the
+    item itself), joined with ``"; "``.
+    """
+    for key in ("errorMessage", "error", "errors"):
+        value = job.get(key)
+        if not value:
+            continue
+        if isinstance(value, list):
+            return "; ".join(
+                str(item.get("message", item)) if isinstance(item, dict) else str(item)
+                for item in value
+            )
+        return str(value)
+    return None
+
+
+def _is_tls_verify_failure(exc: httpx.TransportError) -> bool:
+    """True when the Manager answered but its certificate is not trusted."""
+    return isinstance(exc.__cause__, ssl.SSLCertVerificationError) or (
+        "CERTIFICATE_VERIFY_FAILED" in str(exc)
+    )
+
+
 async def hcx_job_get_impl(
     connector: HcxConnector,
     operator: Operator,
     target: HcxTargetLike,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    """``hcx.job.get`` -- ``GET /hybridity/api/jobs/{jobid}``, the vendor job object."""
-    path = _JOB_PATH.format(jobid=_segment("job", params["job_id"]))
-    payload = await connector._get_json(target, path, operator=operator)
-    return _redact_object(payload) if isinstance(payload, dict) else {"job": payload}
+    """``hcx.job.get`` -- ``GET /hybridity/api/jobs/{jobid}``, the vendor job object.
+
+    Adds ``outcome`` (:func:`job_outcome`), ``error`` and ``checked_at``.
+    When the Manager does not answer (a connection or time-out error after
+    the retries), returns ``outcome: not_reachable`` with the job id and
+    ``checked_at``; MEHO keeps no job state, so the caller reads again
+    later. A certificate MEHO does not trust and a destination MEHO
+    refused before any request are not "not reachable": they are raised,
+    so the dispatcher reports the real reason.
+    """
+    job_id = params["job_id"]
+    path = _JOB_PATH.format(jobid=_segment("job", job_id))
+    checked_at = datetime.now(UTC).isoformat()
+    try:
+        payload = await connector._get_json(target, path, operator=operator)
+    except httpx.TransportError as exc:
+        if isinstance(exc, SsrfBlockedError) or _is_tls_verify_failure(exc):
+            raise
+        return {
+            "jobId": job_id,
+            "outcome": "not_reachable",
+            "error": None,
+            "checked_at": checked_at,
+        }
+    if not isinstance(payload, dict):
+        return {"job": payload, "outcome": "unknown", "error": None, "checked_at": checked_at}
+    job = _redact_object(payload)
+    return {**job, "outcome": job_outcome(job), "error": _job_error(job), "checked_at": checked_at}
 
 
 async def hcx_alert_list_impl(

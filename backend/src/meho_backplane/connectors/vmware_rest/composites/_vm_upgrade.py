@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._vm_change_common import (
     VM_ID_PROPERTY,
     refused,
@@ -47,7 +48,6 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware import (
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
@@ -58,7 +58,7 @@ if TYPE_CHECKING:
 __all__ = [
     "SUB_OPS_VM_HARDWARE_UPGRADE",
     "SUB_OPS_VM_TOOLS_UPGRADE",
-    "VM_UPGRADE_COMPOSITES",
+    "COMPOSITES",
     "vm_hardware_upgrade_composite",
     "vm_tools_upgrade_composite",
 ]
@@ -384,10 +384,6 @@ async def _vm_tools_upgrade_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     }
 
 
-register_preview_builder(OP_ID_VM_HARDWARE_UPGRADE, _vm_hardware_upgrade_preview)
-register_preview_builder(OP_ID_VM_TOOLS_UPGRADE, _vm_tools_upgrade_preview)
-
-
 # ---------------------------------------------------------------------------
 # Schemas, AI guidance and registration rows
 # ---------------------------------------------------------------------------
@@ -551,39 +547,41 @@ VM_TOOLS_UPGRADE_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     ),
 }
 
-VM_UPGRADE_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_VM_HARDWARE_UPGRADE,
-        "handler": vm_hardware_upgrade_composite,
-        "summary": "Upgrade a powered-off VM's hardware version, to a given or the newest one.",
-        "description": (
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_VM_HARDWARE_UPGRADE,
+        handler=vm_hardware_upgrade_composite,
+        summary="Upgrade a powered-off VM's hardware version, to a given or the newest one.",
+        description=(
             "Upgrades the virtual hardware version of a powered-off VM, named by its VM id, "
             "to a given version or the newest one its host supports. Sends nothing when the "
             "VM is already there. Reads the version back. Cannot be undone."
         ),
-        "parameter_schema": VM_HARDWARE_UPGRADE_PARAMETER_SCHEMA,
-        "response_schema": VM_HARDWARE_UPGRADE_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "hardware", "upgrade"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VM_HARDWARE_UPGRADE_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_VM_TOOLS_UPGRADE,
-        "handler": vm_tools_upgrade_composite,
-        "summary": "Upgrade VMware Tools in a running VM, or mount the Tools installer.",
-        "description": (
+        parameter_schema=VM_HARDWARE_UPGRADE_PARAMETER_SCHEMA,
+        response_schema=VM_HARDWARE_UPGRADE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "hardware", "upgrade"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VM_HARDWARE_UPGRADE_LLM_INSTRUCTIONS,
+        preview=_vm_hardware_upgrade_preview,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_VM_TOOLS_UPGRADE,
+        handler=vm_tools_upgrade_composite,
+        summary="Upgrade VMware Tools in a running VM, or mount the Tools installer.",
+        description=(
             "Upgrades VMware Tools in a running VM, named by its VM id, or mounts the Tools "
             "installer in its CD drive. Sends nothing when Tools is current or the installer "
             "is mounted. Reads the Tools state back."
         ),
-        "parameter_schema": VM_TOOLS_UPGRADE_PARAMETER_SCHEMA,
-        "response_schema": VM_TOOLS_UPGRADE_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "vmware-tools", "upgrade"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VM_TOOLS_UPGRADE_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=VM_TOOLS_UPGRADE_PARAMETER_SCHEMA,
+        response_schema=VM_TOOLS_UPGRADE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "vmware-tools", "upgrade"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VM_TOOLS_UPGRADE_LLM_INSTRUCTIONS,
+        preview=_vm_tools_upgrade_preview,
+    ),
 )

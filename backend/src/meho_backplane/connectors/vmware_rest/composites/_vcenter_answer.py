@@ -51,7 +51,6 @@ from meho_backplane.connectors.vmware_rest.vcenter_deployment import (
     unreachable_reason,
     vendor_detail,
 )
-from meho_backplane.operations._preview import register_preview_builder
 from meho_backplane.operations.composite import enforce_subop_policy
 
 if TYPE_CHECKING:
@@ -206,6 +205,3 @@ async def vcenter_deployment_answer_preview(ctx: PreviewContext) -> dict[str, An
         "answer": answer,
         "note": "MEHO sends the answer only if this question is still open and allows it.",
     }
-
-
-register_preview_builder(ANSWER_OP_ID, vcenter_deployment_answer_preview)

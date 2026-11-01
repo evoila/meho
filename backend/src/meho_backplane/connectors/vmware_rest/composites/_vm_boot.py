@@ -36,6 +36,7 @@ from meho_backplane.connectors.vmware_rest._vm_settings_schemas import (
     BOOT_DEVICE_TYPES,
     BOOT_STATE_PROPERTIES,
 )
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._vm_change_common import (
     RECONFIG_VM_TASK_CALL,
     VM_ID_PROPERTY,
@@ -54,7 +55,6 @@ from meho_backplane.connectors.vmware_rest.vim_body import VIM_TYPE_NAME_KEY
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors import OperationResult
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
-__all__ = ["SUB_OPS_VM_BOOT_SET", "VM_BOOT_COMPOSITES", "vm_boot_set_composite"]
+__all__ = ["SUB_OPS_VM_BOOT_SET", "COMPOSITES", "vm_boot_set_composite"]
 
 OP_ID_VM_BOOT_SET: Final = "vmware.composite.vm.boot.set"
 
@@ -316,9 +316,6 @@ async def _vm_boot_set_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return {"summary": summary, "vm": vm, "current": current, "changes": plan}
 
 
-register_preview_builder(OP_ID_VM_BOOT_SET, _vm_boot_set_preview)
-
-
 # ---------------------------------------------------------------------------
 # Schemas, AI guidance and the registration row
 # ---------------------------------------------------------------------------
@@ -470,22 +467,23 @@ VM_BOOT_SET_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     ),
 }
 
-VM_BOOT_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_VM_BOOT_SET,
-        "handler": vm_boot_set_composite,
-        "summary": "Change a VM's boot delay, setup flag, boot order, firmware or secure boot.",
-        "description": (
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_VM_BOOT_SET,
+        handler=vm_boot_set_composite,
+        summary="Change a VM's boot delay, setup flag, boot order, firmware or secure boot.",
+        description=(
             "Changes the boot settings of a VM, named by its VM id: boot delay, enter setup "
             "on the next boot, boot retry, boot order and, with the VM off, firmware (BIOS or "
             "EFI) and EFI secure boot. Sends only what differs and reads the settings back."
         ),
-        "parameter_schema": VM_BOOT_SET_PARAMETER_SCHEMA,
-        "response_schema": VM_BOOT_SET_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "boot"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VM_BOOT_SET_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=VM_BOOT_SET_PARAMETER_SCHEMA,
+        response_schema=VM_BOOT_SET_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "boot"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VM_BOOT_SET_LLM_INSTRUCTIONS,
+        preview=_vm_boot_set_preview,
+    ),
 )

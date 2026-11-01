@@ -421,6 +421,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_folder_list import (  # noq
     FOLDER_LIST_WHEN_TO_USE,
     VMWARE_FOLDER_LIST_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_host_config import (  # noqa: E402
+    HOST_CONFIG_GROUP_KEY,
+    HOST_CONFIG_WHEN_TO_USE,
+    VMWARE_HOST_CONFIG_SHOW_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_host_datastores import (  # noqa: E402
     HOST_DATASTORES_GROUP_KEY,
     HOST_DATASTORES_WHEN_TO_USE,
@@ -477,6 +482,9 @@ from meho_backplane.connectors.vmware_rest.typed_ops_sso_admin_api_file import (
     SSO_ADMIN_API_FILE_WHEN_TO_USE,
     VCENTER_SSO_ADMIN_API_FILE_GET_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_task_info import (  # noqa: E402
+    VMWARE_TASK_INFO_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_tasks_history import (  # noqa: E402
     TASKS_HISTORY_GROUP_KEY,
     TASKS_HISTORY_WHEN_TO_USE,
@@ -513,6 +521,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vm_question import (  # noq
     VM_QUESTION_WHEN_TO_USE,
     VMWARE_VM_QUESTION_ANSWER_OP,
     VMWARE_VM_QUESTION_GET_OP,
+)
+from meho_backplane.connectors.vmware_rest.typed_ops_vsan_reads import (  # noqa: E402
+    VSAN_GROUP_KEY,
+    VSAN_READ_OPS,
+    VSAN_WHEN_TO_USE,
 )
 
 #: Curated ``when_to_use`` blurb per typed-op group.
@@ -556,6 +569,8 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # Shared with the three install composites: the same key and text.
     DEPLOYMENT_STATUS_GROUP_KEY: DEPLOYMENT_STATUS_WHEN_TO_USE,
     PORTGROUP_SHOW_GROUP_KEY: PORTGROUP_SHOW_WHEN_TO_USE,
+    HOST_CONFIG_GROUP_KEY: HOST_CONFIG_WHEN_TO_USE,
+    VSAN_GROUP_KEY: VSAN_WHEN_TO_USE,
 }
 
 VMWARE_HOST_USAGE_OP = VmwareTypedOp(
@@ -645,6 +660,9 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     *CONTENT_LIBRARY_OPS,
     VMWARE_VCENTER_DEPLOYMENT_STATUS_OP,
     VMWARE_NETWORK_PORTGROUP_SHOW_OP,
+    VMWARE_HOST_CONFIG_SHOW_OP,
+    *VSAN_READ_OPS,
+    VMWARE_TASK_INFO_OP,
 )
 
 

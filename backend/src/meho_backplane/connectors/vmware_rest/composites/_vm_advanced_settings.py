@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._vm_change_common import (
     RECONFIG_VM_TASK_CALL,
     VM_ID_PROPERTY,
@@ -42,7 +43,6 @@ from meho_backplane.connectors.vmware_rest.vim_body import VIM_TYPE_NAME_KEY, VI
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
@@ -52,7 +52,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "VIM_SUB_OPS_VM_ADVANCED_SETTINGS_SET",
-    "VM_ADVANCED_SETTINGS_COMPOSITES",
+    "COMPOSITES",
     "vm_advanced_settings_set_composite",
 ]
 
@@ -226,9 +226,6 @@ async def _vm_advanced_settings_set_preview(ctx: PreviewContext) -> dict[str, An
     return {"summary": summary, "vm": vm, "changes": rows}
 
 
-register_preview_builder(OP_ID, _vm_advanced_settings_set_preview)
-
-
 # ---------------------------------------------------------------------------
 # Schemas, AI guidance and the registration row
 # ---------------------------------------------------------------------------
@@ -350,22 +347,23 @@ VM_ADVANCED_SETTINGS_SET_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     ),
 }
 
-VM_ADVANCED_SETTINGS_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID,
-        "handler": vm_advanced_settings_set_composite,
-        "summary": "Set or remove VM advanced settings (extraConfig keys).",
-        "description": (
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID,
+        handler=vm_advanced_settings_set_composite,
+        summary="Set or remove VM advanced settings (extraConfig keys).",
+        description=(
             "Adds, changes or removes advanced settings (extraConfig keys) of a VM, named by "
             "its VM id. Sends only keys that differ and reads them back. Keys that may hold "
             "a secret cannot be set."
         ),
-        "parameter_schema": VM_ADVANCED_SETTINGS_SET_PARAMETER_SCHEMA,
-        "response_schema": VM_ADVANCED_SETTINGS_SET_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "advanced-settings"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VM_ADVANCED_SETTINGS_SET_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=VM_ADVANCED_SETTINGS_SET_PARAMETER_SCHEMA,
+        response_schema=VM_ADVANCED_SETTINGS_SET_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "advanced-settings"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VM_ADVANCED_SETTINGS_SET_LLM_INSTRUCTIONS,
+        preview=_vm_advanced_settings_set_preview,
+    ),
 )

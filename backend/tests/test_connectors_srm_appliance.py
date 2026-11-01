@@ -19,7 +19,9 @@ What is covered, with a respx-mocked appliance setup API
   registration task, both registration forms (up to 9.0 and 9.1), a wrong
   SSO password at step two (steps that ran, failed and did not run);
 * ``srm.appliance.network.set``: a new address on MEHO's interface needs
-  the explicit input and ends the session; a vendor error at step two;
+  the explicit input; a lost answer on that change is ``unconfirmed`` and
+  ends the session; a refused connection or a failed login before the
+  change is ``failed``; a vendor error at step two;
 * ``srm.appliance.time.set``: success, a vendor error, a bad input;
 * a change waits for approval when a person calls it.
 
@@ -708,10 +710,71 @@ async def test_new_address_ends_the_session_and_names_the_target_change(
                 "allow_address_change": True,
             },
         )
-    assert body["outcome"] == "done"
+    assert body["outcome"] == "unconfirmed"
+    assert body["steps"] == [
+        {"step": "set_interface", "status": "unconfirmed", "note": body["steps"][0]["note"]}
+    ]
+    assert "before an answer came" in body["steps"][0]["note"]
     assert body["session_ended"] is True
     assert body["target_must_change"]["new_address"] == "<new-ip>"
+    assert "did not take the change" in body["target_must_change"]["what_to_do"]
     assert json.loads(change.calls[0].request.content) == {"ipv4": _NEW_ADDRESS["ipv4"]}
+    assert connector.setup_sessions == {}
+
+
+_ADDRESS_CHANGE = {
+    "appliance_secret_ref": _ADMIN_REF,
+    "interface": _NEW_ADDRESS,
+    "allow_address_change": True,
+}
+
+
+def _assert_nothing_was_sent(body: dict[str, Any], connector: SrmConnector) -> None:
+    assert body["outcome"] == "failed"
+    assert body["steps"][0]["step"] == "set_interface"
+    assert body["steps"][0]["status"] == "failed"
+    assert body["session_ended"] is False
+    assert body["target_must_change"] is None
+    # The cached login stays: the appliance did not change its address.
+    assert len(connector.setup_sessions) == 1
+
+
+async def test_connection_refused_before_the_address_change_is_a_failure(
+    _stub_embedding: AsyncMock,
+) -> None:
+    connector, _ = await _connector(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL) as mock:
+        _network(mock)
+        mock.post(f"{_API}/appliance/settings/network/interfaces/eth0").mock(
+            side_effect=httpx.ConnectError("refused")
+        )
+        body = await connector.appliance_network_set(_operator(), _Target(), _ADDRESS_CHANGE)
+    _assert_nothing_was_sent(body, connector)
+    assert "could not be reached" in body["steps"][0]["error"]
+    assert "ConnectError" in body["steps"][0]["error"]
+
+
+async def test_login_failure_before_the_address_change_is_a_failure(
+    _stub_embedding: AsyncMock,
+) -> None:
+    """The session expired, and the new login does not get through: nothing was sent."""
+    connector, _ = await _connector(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL) as mock:
+        _network(mock)
+        mock.post(f"{_API}/session").mock(
+            side_effect=[
+                httpx.Response(200, json={"session_id": "setup-1"}),
+                httpx.ConnectError("refused"),
+            ]
+        )
+        change = mock.post(f"{_API}/appliance/settings/network/interfaces/eth0").respond(401)
+        body = await connector.appliance_network_set(_operator(), _Target(), _ADDRESS_CHANGE)
+    assert change.call_count == 1
+    assert body["outcome"] == "failed"
+    assert body["steps"][0]["status"] == "failed"
+    assert "login" in body["steps"][0]["error"]
+    assert body["session_ended"] is False
+    assert body["target_must_change"] is None
     assert connector.setup_sessions == {}
 
 

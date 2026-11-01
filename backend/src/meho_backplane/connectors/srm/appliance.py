@@ -248,15 +248,36 @@ def _check_interface(
 
 
 async def _set_interface(api: SetupApi, wanted: dict[str, Any], *, ends_session: bool) -> str:
+    """Send the interface change; return ``done``, or ``unconfirmed`` when no answer came."""
     path = f"/appliance/settings/network/interfaces/{quote(wanted['name'], safe='')}"
     try:
         await api.call("POST", path, json={"ipv4": wanted["ipv4"]})
-    except SetupApiUnreachableError:
-        if not ends_session:
+    except SetupApiUnreachableError as exc:
+        # Only a lost answer can be the vendor ending the connection for the
+        # new address. A failed login or connection means nothing was sent.
+        if not ends_session or exc.stage != "reply":
             raise
-        # The vendor ends the connection when the address changes.
-        return "sent; the connection ended, as expected for a new address"
-    return "set"
+        return "unconfirmed"
+    return "done"
+
+
+_UNCONFIRMED_NOTE = (
+    "the change was sent, but the connection ended before an answer came; the vendor "
+    "does this when the address changes, so the appliance probably has the new address"
+)
+
+
+def _what_to_do(unconfirmed: bool) -> str:
+    check = (
+        "Change the host of this target to the new address (or to a name that points to "
+        "it), then read srm.appliance.show to check the result."
+    )
+    if not unconfirmed:
+        return check
+    return (
+        f"{check} If the appliance does not answer at the new address, it did not take "
+        "the change: read it at the old address."
+    )
 
 
 async def appliance_network_set(
@@ -265,7 +286,10 @@ async def appliance_network_set(
     """``srm.appliance.network.set``: DNS first, then the interface.
 
     Returns the steps; a failed step carries the vendor's error and stops
-    the steps after it. Nothing that ran is undone.
+    the steps after it. Nothing that ran is undone. A new address on the
+    interface MEHO uses ends the connection before the answer: then the
+    outcome is ``unconfirmed``. A login or connection failure before the
+    change was sent is ``failed``, like any other error.
     """
     dns = params.get("dns")
     wanted = _interface_input(params)
@@ -296,27 +320,30 @@ async def appliance_network_set(
             steps.done(step)
         if wanted is not None:
             step = "set_interface"
-            steps.done(step, note=await _set_interface(api, wanted, ends_session=ends_session))
+            if await _set_interface(api, wanted, ends_session=ends_session) == "done":
+                steps.done(step)
+            else:
+                steps.unconfirmed(step, _UNCONFIRMED_NOTE)
+                answer["outcome"] = "unconfirmed"
     except SetupApiError as exc:
         steps.failed(step, str(exc))
         answer["outcome"] = "failed"
-    if ends_session and _ran(steps, "set_interface"):
+    if ends_session and _sent(steps, "set_interface"):
         await api.forget_session()
         new_address = wanted["ipv4"].get("address") if wanted else None
         answer["session_ended"] = True
         answer["target_must_change"] = {
             "new_address": new_address,
-            "what_to_do": (
-                "Change the host of this target to the new address (or to a name that "
-                "points to it), then read srm.appliance.show to check the result."
-            ),
+            "what_to_do": _what_to_do(answer["outcome"] == "unconfirmed"),
         }
     answer["steps"] = steps.as_list()
     return answer
 
 
-def _ran(steps: Steps, name: str) -> bool:
-    return any(row["step"] == name and row["status"] == "done" for row in steps.as_list())
+def _sent(steps: Steps, name: str) -> bool:
+    return any(
+        row["step"] == name and row["status"] in ("done", "unconfirmed") for row in steps.as_list()
+    )
 
 
 def _time_body(params: dict[str, Any]) -> dict[str, Any]:

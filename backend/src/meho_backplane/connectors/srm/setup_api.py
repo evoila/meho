@@ -22,7 +22,9 @@ What this module gives the operations:
   that expired between a start and a status read does not fail the read.
 * :class:`SetupApiError` -- the vendor's answer was an error. The message
   holds the HTTP status and the vendor's ``message``.
-  :class:`SetupApiUnreachableError` -- the appliance did not answer.
+  :class:`SetupApiUnreachableError` -- the appliance did not answer. Its
+  ``stage`` says how far the call got: not past the login, no connection
+  for the call, or sent with no answer.
 * :func:`task_view`, :func:`find_running_task` and :func:`wait_for_task`
   -- the setup API's own tasks (``/tasks``): the status read of a vendor
   job, the "is one running already" check, and the wait of a read that
@@ -124,6 +126,17 @@ TASK_POLL_SECONDS: float = 2.0
 SetupCredentialsLoader = Callable[["DrTargetLike", "Operator", str, str], Awaitable[dict[str, str]]]
 """Async callable ``(target, operator, param, secret_ref) -> {"username", "password"}``."""
 
+#: httpx errors raised before the request left MEHO: no connection, or the
+#: pool, proxy or URL refused it. The appliance got nothing.
+_NOT_SENT: Final = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+    httpx.ProxyError,
+    httpx.UnsupportedProtocol,
+    httpx.LocalProtocolError,
+)
+
 
 class SetupApiError(RuntimeError):
     """The setup API answered with an error, or a check before a change failed.
@@ -141,7 +154,21 @@ class SetupApiError(RuntimeError):
 
 
 class SetupApiUnreachableError(SetupApiError):
-    """The appliance did not answer (connection refused, timeout, TLS failure)."""
+    """The appliance did not answer (connection refused, timeout, TLS failure).
+
+    ``stage`` says how far the call got:
+
+    * ``"login"`` -- the setup API login did not get through. Nothing of
+      the call was sent.
+    * ``"connect"`` -- no connection for the call (refused, connect
+      timeout, TLS failure). The request was not sent.
+    * ``"reply"`` -- the request went out, but no answer came back. Whether
+      the appliance ran it is unknown.
+    """
+
+    def __init__(self, message: str, *, stage: str) -> None:
+        super().__init__(message)
+        self.stage = stage
 
 
 @dataclass
@@ -248,7 +275,8 @@ class SetupApi:
             )
         except httpx.TransportError as exc:
             raise SetupApiUnreachableError(
-                f"the appliance did not answer the setup API login ({type(exc).__name__})"
+                f"the appliance did not answer the setup API login ({type(exc).__name__})",
+                stage="login",
             ) from None
         if resp.status_code in (401, 403):
             raise SetupApiError(
@@ -324,8 +352,11 @@ class SetupApi:
                 )
             except httpx.TransportError as exc:
                 flight_recorder_capture.record_vendor_call_error(span, method=method, exc=exc)
+                sent = not isinstance(exc, _NOT_SENT)
+                what = "gave no answer" if sent else "could not be reached"
                 raise SetupApiUnreachableError(
-                    f"{method} {path}: the appliance did not answer ({type(exc).__name__})"
+                    f"{method} {path}: the appliance {what} ({type(exc).__name__})",
+                    stage="reply" if sent else "connect",
                 ) from None
             # No request body in the trace: register and the server certificate
             # send the SSO admin password in it.
@@ -428,7 +459,8 @@ class Steps:
     """The step list of a multi-step change.
 
     Each row is ``{"step", "status"}`` with ``status`` one of ``done``,
-    ``failed`` and ``not_run``. A failed row has ``error``.
+    ``unconfirmed``, ``failed`` and ``not_run``. A failed row has
+    ``error``; an unconfirmed row has ``note``.
     """
 
     def __init__(self, names: Iterable[str]) -> None:
@@ -448,6 +480,10 @@ class Steps:
     def failed(self, name: str, error: str) -> None:
         """Mark *name* as failed with the vendor's or MEHO's error text."""
         self._rows[name].update(status="failed", error=error)
+
+    def unconfirmed(self, name: str, note: str) -> None:
+        """Mark *name* as sent with no answer: whether it ran is unknown."""
+        self._rows[name].update(status="unconfirmed", note=note)
 
     def fail(self, error: str) -> None:
         """Mark the step that runs now as failed."""

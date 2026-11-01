@@ -63,7 +63,7 @@ start with `/api/rest/configure/v2`):
 | `srm.appliance.show` | The appliance's setup. | Version and build; registration with vCenter (state, site name, SSO address, services); DNS and interfaces; time zone and NTP; server certificate (subject, issuer, valid to). | `GET /appliance`, `GET /appliance/configuration-manager/configuration`, `GET /appliance/settings/network`, `GET /appliance/settings/time`, `GET /appliance/certificates/server` | read (`safe`) | 8.8, 9.0, 9.1 |
 | `srm.appliance.task.get` | One setup task: the status read of `register` and `certificate.set`. | State (`queued`, `running`, `succeeded`, `failed`, `cancelled`, `not_reachable`), progress, the vendor's error text, the time of the read. | `GET /tasks/{task_id}` | read (`safe`) | 8.8, 9.0, 9.1 |
 | `srm.appliance.register` | Register the appliance with its vCenter and SSO. | `accepted` with the task id and the status read, or `already_running`, `refused` or `failed`, with the steps. | `POST .../probe-ssl-connection`, `POST .../validate-connection`, `POST .../check-existing-registrations`, up to 9.0 `POST .../list-vc-services`, then `PUT /appliance/configuration-manager/configuration` | change (`dangerous`, waits for approval) | 8.8, 9.0, 9.1 |
-| `srm.appliance.network.set` | Set DNS and host name, or the IPv4 setup of one interface. | The steps; `session_ended` and `target_must_change` when MEHO's address changed. | `PUT /appliance/settings/network/dns`, `POST /appliance/settings/network/interfaces/{interface_name}` | change (`dangerous`, waits for approval) | 8.8, 9.0, 9.1 |
+| `srm.appliance.network.set` | Set DNS and host name, or the IPv4 setup of one interface. | `done`, `unconfirmed` or `failed` with the steps; `session_ended` and `target_must_change` when MEHO's address changed. | `PUT /appliance/settings/network/dns`, `POST /appliance/settings/network/interfaces/{interface_name}` | change (`dangerous`, waits for approval) | 8.8, 9.0, 9.1 |
 | `srm.appliance.time.set` | Set the time zone and the time sync (NTP servers, the host, or none). | The time settings read back. | `PUT /appliance/settings/time` | change (`dangerous`, waits for approval) | 8.8, 9.0, 9.1 |
 | `srm.appliance.csr.create` | Make a new key and a certificate signing request. The key stays on the appliance. | The request (PEM), its subject, names and a hash of its public key. | `POST /appliance/certificates/actions/generate-csr` | change (`caution`, waits for approval) | 8.8, 9.0, 9.1 |
 | `srm.appliance.certificate.set` | Install the signed certificate for the request, with its CA chain; or add or remove trusted CA certificates. | Server certificate: `accepted` with the task, or `already_running`, `refused`, `failed`. CA change: `done`. | `POST /appliance/certificates/server/actions/update`, `POST /appliance/certificates/ca`, `POST /appliance/certificates/ca/actions/remove` | change (`dangerous`, waits for approval) | 8.8, 9.0, 9.1 |
@@ -468,10 +468,20 @@ the network first and refuses an interface the appliance does not have.
 The interface MEHO uses is every interface unless the target's host is
 the address of another interface. A new address there (a new static
 address, or a change to DHCP) needs `allow_address_change: true`;
-without it nothing changes. The vendor ends the connection when the
-address changes, so a lost connection on that call counts as sent. The
-answer then has `session_ended: true` and `target_must_change`: change
-the target's host to the new address. IPv4 only.
+without it nothing changes. IPv4 only.
+
+The vendor ends the connection when the address changes, so the answer
+to that call is often lost. MEHO tells the cases apart by how far the
+call got:
+
+- The request went out, but no answer came back: the step and the
+  outcome are `unconfirmed`. The answer has `session_ended: true` and
+  `target_must_change`: change the target's host to the new address and
+  read `srm.appliance.show`. If the appliance does not answer there, it
+  did not take the change; read it at the old address.
+- The login failed, or no connection could be made (refused, timeout,
+  TLS failure): nothing was sent. The step and the outcome are `failed`,
+  like any other error, and the session stays.
 
 ### Certificates
 

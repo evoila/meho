@@ -71,13 +71,17 @@ SSO_REF: Final[dict[str, Any]] = {
 
 STEPS_SCHEMA: Final[dict[str, Any]] = {
     "type": "array",
-    "description": "The steps in order: done, failed (with error) or not_run.",
+    "description": (
+        "The steps in order: done, unconfirmed (sent, no answer; with note), failed (with "
+        "error) or not_run."
+    ),
     "items": {
         "type": "object",
         "properties": {
             "step": {"type": "string"},
-            "status": {"type": "string", "enum": ["done", "failed", "not_run"]},
+            "status": {"type": "string", "enum": ["done", "unconfirmed", "failed", "not_run"]},
             "error": {"type": "string"},
+            "note": {"type": "string"},
         },
     },
 }
@@ -369,7 +373,7 @@ _NETWORK_SET = SrmTypedOp(
     response_schema={
         "type": "object",
         "properties": {
-            "outcome": {"type": "string", "enum": ["done", "failed"]},
+            "outcome": {"type": "string", "enum": ["done", "unconfirmed", "failed"]},
             "steps": STEPS_SCHEMA,
             "session_ended": {"type": "boolean"},
             "target_must_change": {"type": ["object", "null"]},
@@ -390,13 +394,16 @@ _NETWORK_SET = SrmTypedOp(
             "interface MEHO uses needs allow_address_change: true."
         ),
         "output_shape": (
-            "outcome done or failed; steps set_dns and set_interface (done, failed with the "
-            "vendor's error, not_run); session_ended true when MEHO's address changed; "
-            "target_must_change with the new address and what to do."
+            "outcome done, unconfirmed or failed; steps set_dns and set_interface (done, "
+            "unconfirmed when the new address ended the connection before an answer came, "
+            "failed with the vendor's error, not_run); session_ended true when MEHO's "
+            "address changed; target_must_change with the new address and what to do. A "
+            "login or connection failure before the change was sent is failed."
         ),
         "next_step": (
             "session_ended: change the target's host to the new address, then call "
-            "srm.appliance.show. Otherwise call srm.appliance.show to check the result."
+            "srm.appliance.show; if the appliance does not answer there, it did not take "
+            "the change. Otherwise call srm.appliance.show to check the result."
         ),
     },
 )

@@ -9,6 +9,26 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.40.0](https://github.com/evoila/meho/releases/tag/v0.40.0) — 2026-11-01
+
+- **Secret values stay hidden.** Secret reads show names, not values. A
+  person can still ask for a value, and the audit keeps a fingerprint in
+  its place.
+- **Approvals run as approved.** An approved request runs only on the
+  target and preview the person approved. Approving on the command line
+  needs a fresh sign-in. A failed approved run can run again, and a
+  change ticket can be approved step by step.
+- **Agents work with operator rights.** Tenant admin work is for people.
+- **One tenant at a time.** A person in several tenants picks one with
+  `meho tenants use`. The MCP clients send it too.
+- **New operations.** HCX, Site Recovery Manager, vSphere Replication,
+  Cloud Director, the VCF Installer, Cloud Builder for VCF 5.x, fleet
+  management, Azure networks, Google keyless access, GitHub issues, and
+  many vSphere tasks.
+- **Read first.** Three database migrations, a Vault role for the check
+  runner, and a few scripts must change. See "Breaking changes" and
+  "Steps after the upgrade" in the release notes.
+
 ## [v0.39.0](https://github.com/evoila/meho/releases/tag/v0.39.0) — 2026-10-30
 
 - **Safer approvals.** The sender of a change that waits for approval

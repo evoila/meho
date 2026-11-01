@@ -32,6 +32,16 @@ invisibility until the first op lands. v1-compat shim entries
 into the v2 table) are excluded — they're an internal compat
 detail, not separately registered connectors.
 
+Connector packages (#5560)
+--------------------------
+
+Rows written by a connector package that is not installed are hidden
+(:func:`~meho_backplane.operations._lookup.installed_owner_clause`): the
+counts leave them out, and a group that holds only such rows is not
+counted. A connector whose rows all come from such a package is still
+listed, with ``state="package_not_installed"``, zero counts,
+``dispatchable=False`` and a ``next_step`` that names the package.
+
 Status filter semantics
 -----------------------
 
@@ -84,10 +94,16 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
-from meho_backplane.operations._lookup import connector_exists, parse_connector_id
+from meho_backplane.operations._lookup import (
+    connector_exists,
+    installed_owner_clause,
+    package_visible_group_clause,
+    parse_connector_id,
+)
 from meho_backplane.operations.ingest._llm_grouping_internals import build_connector_id
 from meho_backplane.operations.ingest.api_schemas import (
     ConnectorListItem,
+    ConnectorState,
     ConnectorStatusFilter,
     NextStep,
 )
@@ -292,7 +308,9 @@ async def _aggregate_groups_by_connector(
 
     Returns a dict keyed on ``(tenant_id, product, version,
     impl_id)`` whose values are
-    ``{total, staged, enabled, disabled}`` counts.
+    ``{total, staged, enabled, disabled}`` counts. A group that holds
+    only rows of a connector package that is not installed is left out
+    (:func:`package_visible_group_clause`, #5560).
     """
     staged_case = func.sum(
         case((OperationGroup.review_status == "staged", 1), else_=0),
@@ -318,6 +336,7 @@ async def _aggregate_groups_by_connector(
         )
         .where(
             (OperationGroup.tenant_id.is_(None)) | (OperationGroup.tenant_id == operator_tenant_id),
+            package_visible_group_clause(),
         )
         .group_by(
             OperationGroup.tenant_id,
@@ -377,6 +396,10 @@ async def _operation_count_by_connector(
     of rows. The ``enabled`` split rides on the same unfiltered
     universe: both numbers count the same rows, one of them narrowed
     by ``is_enabled`` only.
+
+    Rows of a connector package that is not installed are not counted
+    (:func:`installed_owner_clause`, #5560), the same rows search and
+    dispatch hide.
     """
     enabled_case = func.sum(
         case((EndpointDescriptor.is_enabled.is_(True), 1), else_=0),
@@ -402,6 +425,7 @@ async def _operation_count_by_connector(
         .where(
             (EndpointDescriptor.tenant_id.is_(None))
             | (EndpointDescriptor.tenant_id == operator_tenant_id),
+            installed_owner_clause(),
         )
         .group_by(
             EndpointDescriptor.tenant_id,
@@ -420,6 +444,56 @@ async def _operation_count_by_connector(
             "code_shipped": int(code_shipped_v or 0),
         }
     return counts
+
+
+async def _missing_package_by_connector(
+    session: AsyncSession,
+    *,
+    operator_tenant_id: UUID,
+) -> dict[tuple[UUID | None, str, str, str], str]:
+    """Map each connector triple to a connector package it needs that is not installed.
+
+    Keyed like :func:`_operation_count_by_connector`. A connector with
+    rows of more than one missing package gets the first name in sorted
+    order. Built-in rows (``owner_package IS NULL``) never appear.
+    """
+    stmt = (
+        select(
+            EndpointDescriptor.tenant_id,
+            EndpointDescriptor.product,
+            EndpointDescriptor.version,
+            EndpointDescriptor.impl_id,
+            func.min(EndpointDescriptor.owner_package),
+        )
+        .where(
+            (EndpointDescriptor.tenant_id.is_(None))
+            | (EndpointDescriptor.tenant_id == operator_tenant_id),
+            ~installed_owner_clause(),
+        )
+        .group_by(
+            EndpointDescriptor.tenant_id,
+            EndpointDescriptor.product,
+            EndpointDescriptor.version,
+            EndpointDescriptor.impl_id,
+        )
+    )
+    result = await session.execute(stmt)
+    return {
+        (tenant_uuid, product, version, impl_id): package
+        for tenant_uuid, product, version, impl_id, package in result.all()
+    }
+
+
+def _package_not_installed_step(package: str) -> NextStep:
+    """Return the ``next_step`` of a ``state="package_not_installed"`` row (#5560)."""
+    return NextStep(
+        verb="meho status",
+        rationale=(
+            f"the operations of this connector come from the connector package "
+            f"{package!r}, which is not installed in this MEHO. Install the package "
+            f"again to use this connector. `meho status` lists the installed packages."
+        ),
+    )
 
 
 async def list_ingested_connectors(
@@ -491,11 +565,20 @@ async def list_ingested_connectors(
             session,
             operator_tenant_id=operator.tenant_id,
         )
+        missing_packages = await _missing_package_by_connector(
+            session,
+            operator_tenant_id=operator.tenant_id,
+        )
+    # A connector whose groups are all hidden still gets a row, so the
+    # operator sees that its package is missing (#5560).
+    for key in missing_packages:
+        groups_by_connector.setdefault(key, {"total": 0, "staged": 0, "enabled": 0, "disabled": 0})
 
     items = await _emit_db_backed_rows(
         operator=operator,
         groups_by_connector=groups_by_connector,
         op_counts_by_connector=op_counts_by_connector,
+        missing_packages=missing_packages,
         status=status,
     )
     items.extend(
@@ -594,6 +677,7 @@ async def _emit_db_backed_rows(
     operator: Operator,
     groups_by_connector: dict[tuple[UUID | None, str, str, str], dict[str, int]],
     op_counts_by_connector: dict[tuple[UUID | None, str, str, str], dict[str, int]],
+    missing_packages: dict[tuple[UUID | None, str, str, str], str],
     status: ConnectorStatusFilter | None,
 ) -> list[ConnectorListItem]:
     """Emit one ``state="ingested"`` :class:`ConnectorListItem` per DB-backed connector.
@@ -613,6 +697,11 @@ async def _emit_db_backed_rows(
     it would drop the old copy and the operator would never see it or
     its clean-up hint. Such a row is kept with ``dispatchable=False``
     and the delete hint instead (:func:`_legacy_tenant_copy_hint`).
+
+    A connector with no visible operation and rows of a connector package
+    that is not installed (*missing_packages*) gets
+    ``state="package_not_installed"``, ``dispatchable=False`` and the
+    install hint instead (#5560).
 
     Extracted from :func:`list_ingested_connectors` so the DB-side
     emission and the class-side-only emission stay each below the
@@ -645,7 +734,13 @@ async def _emit_db_backed_rows(
             enabled_operation_count=enabled_op_count,
             has_code_shipped_op=op_counts.get("code_shipped", 0) > 0,
         )
+        state: ConnectorState = "ingested"
+        next_step = legacy_hint
         if legacy_hint is not None:
+            dispatchable = False
+        elif op_counts.get("total", 0) == 0 and key in missing_packages:
+            state = "package_not_installed"
+            next_step = _package_not_installed_step(missing_packages[key])
             dispatchable = False
         items.append(
             ConnectorListItem(
@@ -660,8 +755,8 @@ async def _emit_db_backed_rows(
                 disabled_group_count=row["disabled"],
                 operation_count=op_counts.get("total", 0),
                 enabled_operation_count=enabled_op_count,
-                state="ingested",
-                next_step=legacy_hint,
+                state=state,
+                next_step=next_step,
                 kind=kind,
                 dispatchable=dispatchable,
                 scope="tenant" if tenant_uuid is not None else "builtin",

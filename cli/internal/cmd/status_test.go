@@ -459,8 +459,8 @@ func TestStatus_RefreshRejected_ExitsAuthExpiredWithSessionMessage(t *testing.T)
 	if !strings.Contains(stderr.String(), "session expired") {
 		t.Errorf("expected 'session expired' in stderr; got %q", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "--offline") {
-		t.Errorf("expected '--offline' durable-session hint in stderr; got %q", stderr.String())
+	if !strings.Contains(stderr.String(), "meho login") {
+		t.Errorf("expected a 'meho login' hint in stderr; got %q", stderr.String())
 	}
 }
 

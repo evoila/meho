@@ -39,7 +39,7 @@ import assert from "node:assert/strict";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BUNDLE_ROOT = join(HERE, "..");
-const GUARD = join(BUNDLE_ROOT, "..", "claude-code-plugin", "lib", "login-guard.mjs");
+const PLUGIN_LIB = join(BUNDLE_ROOT, "..", "claude-code-plugin", "lib");
 const RECONNECT =
   "turn the MEHO extension off and on again in Claude Desktop (Settings > Extensions)";
 const LOGIN_EXPIRED =
@@ -65,12 +65,15 @@ for (const name of ["open", "xdg-open", "browser"]) {
   chmodSync(join(STUB_BIN, name), 0o755);
 }
 
-// A bundle copy the way build.sh stages it: server/ plus the guard.
+// A bundle copy the way build.sh stages it: server/ plus the guard and its
+// helper files.
 // `nodeModules` is either a folder to link in or a stub entry source.
 function makeBundle({ realNodeModules, stubSource }) {
   const dir = tempDir("meho-mcpb-guard-");
   cpSync(join(BUNDLE_ROOT, "server"), join(dir, "server"), { recursive: true });
-  cpSync(GUARD, join(dir, "server", "login-guard.mjs"));
+  for (const name of readdirSync(PLUGIN_LIB).filter((n) => n.endsWith(".mjs"))) {
+    cpSync(join(PLUGIN_LIB, name), join(dir, "server", name));
+  }
   if (realNodeModules) {
     symlinkSync(realNodeModules, join(dir, "node_modules"), "dir");
   } else {
@@ -146,7 +149,7 @@ function portIsFree(port) {
 
 function signInLocks(authDir) {
   try {
-    return readdirSync(authDir).filter((f) => f.startsWith("meho-claude-desktop-"));
+    return readdirSync(authDir).filter((f) => f.startsWith("meho-signin-"));
   } catch {
     return [];
   }
@@ -412,7 +415,8 @@ e2e("e2e: an unfinished login stops at the time limit and frees the port", { tim
 });
 
 e2e("e2e: a second start during an unfinished login waits, then stops cleanly", { timeout: 40000 }, async () => {
-  // Claude Desktop can start the extension twice at once (#3857).
+  // Claude Desktop can start the extension twice at once (#3857). The time
+  // limit covers the wait for the other copy's login too (#5514).
   const fake = await startFakeMeho("login", TLS);
   try {
     const bundle = makeBundle({ realNodeModules: REAL_NODE_MODULES });
@@ -429,7 +433,11 @@ e2e("e2e: a second start during an unfinished login waits, then stops cleanly", 
       assert.doesNotMatch(run.stderr, /EADDRINUSE|Fatal error|Unhandled|TypeError/);
     }
     assert.match(second.stderr, /another MEHO instance \(pid \d+\) is signing in; waiting/);
-    assert.ok(b.ms > a.ms, "the second copy must start its login after the first one stopped");
+    assert.doesNotMatch(
+      second.stderr,
+      /Please authorize this client by visiting/,
+      "the second copy must not start its own login while the first one runs",
+    );
     assert.deepEqual(signInLocks(bundle.authDir), []);
   } finally {
     fake.close();

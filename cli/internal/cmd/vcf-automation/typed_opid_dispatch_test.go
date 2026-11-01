@@ -110,6 +110,16 @@ var typedOpCLICoverage = map[string]string{
 	"vcfa.tenant.abx.run.get":       "",
 	"vcfa.tenant.subscription.list": "",
 	"vcfa.tenant.subscription.set":  "",
+	// Day-2 ops, shared with Aria Automation 8: agent-surface-only,
+	// reached through `meho operation call` / MCP call_operation.
+	"vcfa.tenant.deployment.actions.list": "",
+	"vcfa.tenant.deployment.action.run":   "",
+	"vcfa.tenant.resource.action.run":     "",
+	"vcfa.tenant.deployment.lease.change": "",
+	"vcfa.tenant.machine.list":            "",
+	"vcfa.tenant.block_device.list":       "",
+	"vcfa.tenant.machine.create":          "",
+	"vcfa.tenant.block_device.create":     "",
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed VCFA

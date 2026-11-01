@@ -78,6 +78,14 @@
                              guidance points at (#2669)
     self_approval_error   -- bool: the failed decision was a self-approval 403 —
                              render the actionable guidance, not the bare error (#2669)
+    fresh_sign_in_error   -- bool: the approve was refused because the session's
+                             sign-in is too old, did not ask for the password, or
+                             already approved a destructive operation — render the
+                             "sign in again" guidance with the sign-in link
+    approve_needs_sign_in -- bool: the session's sign-in is already too old for any
+                             approval — offer the sign-in link instead of Approve
+    sign_in_url           -- str: the console login that asks for the password
+                             again and comes back to the approvals page
     operator_sub          -- str: the reviewing operator's subject
     status_pill_class     -- dict[str, str]: status -> DaisyUI badge modifier
     result_state_pill     -- dict[str, tuple[str, str]]: run state of an
@@ -166,6 +174,21 @@
               Requester and approver must differ (the four-eyes rule). You may still deny it.
             </p>
             {{ single_operator_choices(self_approval_docs_url, self_approval_setting) }}
+          </div>
+        </div>
+      {% elif fresh_sign_in_error %}
+        {# An approval needs a recent sign-in that asked for the password; a
+           destructive operation needs a sign-in of its own. The banner names
+           the way forward: a new sign-in, then approve again. #}
+        <div class="alert alert-warning mt-4 items-start" role="alert" aria-live="assertive" data-testid="approval-fresh-sign-in">
+          <div class="text-sm">
+            <h4 class="font-semibold">Sign in again to approve</h4>
+            <p class="mt-1 opacity-90">
+              An approval needs a recent sign-in that asked for your password.
+              A destructive operation needs a sign-in of its own.
+              Sign in again, then open this request and approve it.
+            </p>
+            <a class="btn btn-sm btn-primary mt-2" href="{{ sign_in_url }}" data-action="sign-in-to-approve">Sign in again</a>
           </div>
         </div>
       {% else %}
@@ -578,6 +601,18 @@
       </div>
     {% endif %}
 
+    {% if request.status == "pending" and approve_needs_sign_in and not fresh_sign_in_error and not self_approval_blocked %}
+      {#- The session's sign-in is too old for an approval, or it did not ask
+          for the password. The Approve button below is a sign-in link. -#}
+      <div class="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-sm" role="note" data-testid="approval-sign-in-note">
+        <h4 class="font-semibold">Sign in again to approve</h4>
+        <p class="mt-1 opacity-90">
+          Your sign-in is too old for an approval, or it did not ask for your
+          password. Denying needs no new sign-in.
+        </p>
+      </div>
+    {% endif %}
+
     {% if request.status == "pending" %}
     {# Decision forms only for a pending row -- a decided row is read-only. #}
 
@@ -664,6 +699,18 @@
           {{ icon("ban", class="size-4") }}
           Deny
         </button>
+        {% if approve_needs_sign_in and not self_approval_blocked %}
+        {# The sign-in is too old for an approval: the Approve button is the
+           link to a new sign-in. The POST checks the sign-in again anyway. #}
+        <a
+          class="btn btn-sm btn-primary gap-1"
+          href="{{ sign_in_url }}"
+          data-action="sign-in-to-approve"
+        >
+          {{ icon("check", class="size-4") }}
+          Sign in to approve
+        </a>
+        {% else %}
         <button
           type="button"
           class="btn btn-sm btn-primary gap-1"
@@ -673,6 +720,7 @@
           {{ icon("check", class="size-4") }}
           Approve
         </button>
+        {% endif %}
       </div>
 
       {# Phase 2 -- armed Deny confirm. Only the Confirm button posts; it carries
@@ -704,7 +752,7 @@
       {# Phase 2 -- armed Approve confirm. NOT rendered on a blocked self-approval
          (#1401): with no approve armer above and no confirm block here, there is
          no reachable approve confirm state at all. #}
-      {% if not self_approval_blocked %}
+      {% if not self_approval_blocked and not approve_needs_sign_in %}
       {# Out-of-order step (#3596): one more confirm before the normal approve
          confirm, when an earlier step of the same change ticket still waits. #}
       {% if out_of_order %}

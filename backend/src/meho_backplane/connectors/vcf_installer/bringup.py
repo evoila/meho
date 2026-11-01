@@ -85,6 +85,7 @@ from meho_backplane.connectors.vcf_installer.typed_writes import (
     INSTALLER_DEPOT_SET_OP_ID,
     INSTALLER_TRUSTED_CERTIFICATE_ADD_OP_ID,
 )
+from meho_backplane.operations import register_plain_fields
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 from meho_backplane.operations.composite import enforce_subop_policy
 
@@ -663,3 +664,7 @@ register_preview_builder(INSTALLER_BRINGUP_RETRY_OP_ID, _sddc_bringup_retry_prev
 register_preview_builder(INSTALLER_DEPOT_SET_OP_ID, _depot_set_preview)
 register_preview_builder(INSTALLER_TRUSTED_CERTIFICATE_ADD_OP_ID, _trusted_certificate_add_preview)
 register_preview_builder(INSTALLER_BUNDLES_DOWNLOAD_OP_ID, _bundles_download_preview)
+
+
+# ``referenceToken`` is the id of a vendor error message, not a credential.
+register_plain_fields(INSTALLER_BRINGUP_OP_ID, ("referenceToken",))

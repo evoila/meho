@@ -435,9 +435,13 @@ async def test_execute_vault_kv_read_returns_secret_data(
 
     assert result.status == "ok", result.error
     # The handler returns ``{"data": <secret>, "version": <int|None>}``;
-    # the dispatcher's PassThroughReducer lands it as result.result.
+    # the dispatcher's PassThroughReducer lands it as result.result, with
+    # the key names and without the values.
     assert isinstance(result.result, dict)
-    assert result.result["data"] == {"username": "demo", "region": "eu-central-1"}
+    assert result.result["data"] == {
+        "username": "[REDACTED:secret_value]",
+        "region": "[REDACTED:secret_value]",
+    }
     assert result.result["version"] == 7
     assert fake.auth.jwt.login_calls == [
         {"role": "meho-mcp", "jwt": "op-jwt", "path": "jwt"},

@@ -52,7 +52,7 @@ can only GET):
 * ``POST /ui/agents/{name}/run`` -- CSRF-gated, operator-role. Validates
   the prompt, confirms the agent is runnable (404 / 409 / 429 surface
   here, before any stream opens, mirroring the REST route's
-  ``ensure_runnable`` pre-check), then mints a short-lived signed run
+  ``ensure_runnable`` pre-check), then mints a short-lived encrypted run
   token (:mod:`~meho_backplane.ui.routes.agents.run_token`) and returns
   the transcript fragment whose ``sse-connect`` carries it.
 * ``GET /ui/agents/{name}/run/stream?token=...`` -- the cookie-authed

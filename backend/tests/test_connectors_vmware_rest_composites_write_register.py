@@ -171,6 +171,13 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vcenter.appliance.deploy",
     "vmware.composite.vcenter.install",
     "vmware.composite.vcenter.deployment.answer",
+    # The vSAN changes: dangerous + approval; the disk wipe is destructive and
+    # special-cased in the tier assertion below.
+    "vmware.composite.vsan.cluster.configure",
+    "vmware.composite.vsan.disk.claim",
+    "vmware.composite.vsan.disk.wipe",
+    "vmware.composite.vsan.encryption.set",
+    "vmware.composite.vsan.encryption.rekey",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -510,6 +517,11 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.cluster.drs_rule.delete": "cluster",
     "vmware.composite.cluster.drs_group.members.set": "cluster",
     "vmware.composite.cluster.drs_group.delete": "cluster",
+    "vmware.composite.vsan.cluster.configure": "vsan",
+    "vmware.composite.vsan.disk.claim": "vsan",
+    "vmware.composite.vsan.disk.wipe": "vsan",
+    "vmware.composite.vsan.encryption.set": "vsan",
+    "vmware.composite.vsan.encryption.rekey": "vsan",
 }
 
 
@@ -709,6 +721,8 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
             "vmware.composite.cluster.drs_group.delete",
             # The VM snapshot delete.
             "vmware.composite.vm.snapshot.delete",
+            # The vSAN disk wipe.
+            "vmware.composite.vsan.disk.wipe",
         ):
             expected_level = "destructive"
         elif row.op_id in caution_ops:

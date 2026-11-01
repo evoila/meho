@@ -103,6 +103,13 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.vcenter.deployment.answer",
         # ``.inventory`` is not a classifier suffix -> ``other``; a read.
         "vmware.migration.inventory",
+        # The vSAN changes: ``.configure`` / ``.claim`` / ``.wipe`` / ``.set`` /
+        # ``.rekey`` are not classifier suffixes -> ``other``. None sends a secret.
+        "vmware.composite.vsan.cluster.configure",
+        "vmware.composite.vsan.disk.claim",
+        "vmware.composite.vsan.disk.wipe",
+        "vmware.composite.vsan.encryption.set",
+        "vmware.composite.vsan.encryption.rekey",
     }
 )
 

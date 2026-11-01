@@ -97,6 +97,10 @@ Scope:
   the typed read ``vmware.snapshot.list``; the revert lives in ``_write``.
 * the two alarm changes ``alarm.acknowledge`` and ``alarm.reset``
   (``_alarm``, #4383): both ``caution`` with ``requires_approval=True``.
+* the five vSAN changes (``_vsan_cluster``, ``_vsan_disk_claim``,
+  ``_vsan_disk_wipe``): ``vsan.cluster.configure``, ``vsan.disk.claim``,
+  ``vsan.encryption.set`` and ``vsan.encryption.rekey`` are ``dangerous``,
+  ``vsan.disk.wipe`` is ``destructive``; all wait for approval.
 """
 
 from meho_backplane.connectors.vmware_rest.composites._alarm import (
@@ -234,8 +238,10 @@ register_typed_op_registrar(register_vmware_composite_operations_8_0)
 # ``connectors/argocd/__init__`` wires ``ops_write_preview``.
 # Same for the guest file read (#4850): a caution read, so an agent's call
 # waits for approval.
+# The five vSAN changes register their previews in their own module.
 from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402,F401
     _guest_file_read_preview,
+    _vsan_preview,
     _write_preview,
 )
 

@@ -154,6 +154,14 @@ def test_vsan_read_paths_are_the_reconciled_keys() -> None:
     """Pin the vSAN VI-JSON paths the connector calls (sandbox-safe, always runs)."""
     assert {vsan_vi_json_op_id(method) for method in vsan_methods()} == {
         "POST:/vsan/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary",
+        # The vSAN changes: turn on and configure vSAN, claim and wipe disks,
+        # encryption.
+        "POST:/vsan/VsanVcClusterConfigSystem/{moId}/VsanClusterReconfig",
+        "POST:/vsan/VsanVcClusterConfigSystem/{moId}/VsanEncryptedClusterRekey_Task",
+        "POST:/vsan/VimClusterVsanVcDiskManagementSystem/{moId}/VsanAddStoragePoolDisk",
+        "POST:/vsan/VimClusterVsanVcDiskManagementSystem/{moId}/InitializeDiskMappings",
+        "POST:/vsan/VsanSystemEx/{moId}/VsanHostWipeDisk",
+        "POST:/vsan/VsanSystemEx/{moId}/VsanHostQueryWipeDisk",
     }
 
 

@@ -31,6 +31,7 @@ LEAVING_FOLDERS: frozenset[str] = frozenset(
         "vcf_fleet",
         "fleet_lcm",
         "vcf_installer",
+        "vcf_cloud_builder",
         "vcf_logs",
         "vrli8",
         "vcf_operations",

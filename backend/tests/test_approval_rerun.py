@@ -472,6 +472,48 @@ async def test_destructive_request_checks_the_preview_again(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("host_changed", [False, True])
+async def test_rerun_checks_the_target_settings_again(
+    fake_dispatch: _FakeDispatch, host_changed: bool
+) -> None:
+    from meho_backplane.db.models import Target
+    from meho_backplane.operations.approval_resume_checks import (
+        TARGET_HASH_FIELDS,
+        compute_target_hash,
+    )
+
+    target_id = uuid.uuid4()
+    request_id = await _park_failed()
+    async with get_sessionmaker()() as s:
+        target = Target(
+            id=target_id,
+            tenant_id=_TENANT_ID,
+            name="vc-rerun",
+            product="vmware",
+            host="first.invalid",
+            aliases=[],
+        )
+        s.add(target)
+        await s.flush()
+        row = await get_request(s, tenant_id=_TENANT_ID, request_id=request_id)
+        row.target_id = target_id
+        row.target_hash = compute_target_hash({f: getattr(target, f) for f in TARGET_HASH_FIELDS})
+        if host_changed:
+            target.host = "second.invalid"
+        await s.commit()
+
+    if not host_changed:
+        outcome = await rerun_failed_request(operator=_operator(), request_id=request_id)
+        assert outcome.result.status == "ok"
+        assert fake_dispatch.calls[0]["target"].id == target_id
+        return
+    with pytest.raises(RerunNeedsNewApprovalError) as exc_info:
+        await rerun_failed_request(operator=_operator(), request_id=request_id)
+    assert exc_info.value.reason is RerunRefusal.TARGET_CHANGED
+    await _assert_refused_and_nothing_ran(request_id, fake_dispatch, "target_changed")
+
+
+@pytest.mark.asyncio
 async def test_credential_write_needs_the_params_sent_again(
     fake_dispatch: _FakeDispatch,
 ) -> None:

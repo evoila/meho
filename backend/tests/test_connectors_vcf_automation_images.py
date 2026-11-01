@@ -12,6 +12,7 @@ profile's own ``_links.region.href``. All names are synthetic.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, suppress
@@ -653,6 +654,28 @@ async def test_mapping_update_holds_the_cross_worker_lock_of_the_profile(
     assert key != lock_module.lock_key(target, "image profile", "ip-2")
     assert key != lock_module.lock_key(target, "flavor profile", "ip-1")
     assert kwargs["wait_seconds"] == images_module.PROFILE_LOCK_WAIT_SECONDS
+
+
+def _key_before_the_shared_lock_module(target: Any, profile_id: str) -> int:
+    """The image profile key as `_images.py` computed it before `_resource_lock.py`."""
+    raw = f"{target.tenant_id}\0{target.id}\0{profile_id}".encode()
+    digest = hashlib.blake2b(raw, digest_size=8).digest()
+    return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
+
+
+async def test_image_profile_lock_key_matches_the_key_before_the_shared_module(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    """A worker from before the upgrade and one from after lock the same profile."""
+    target = await resolved_target()
+    before = _key_before_the_shared_lock_module(target, "ip-1")
+    assert lock_module.lock_key(target, lock_module.IMAGE_PROFILE, "ip-1") == before
+    assert lock_module.lock_key(target, "image profile", "ip-1") == before
+    assert lock_module.lock_key(target, lock_module.IMAGE_PROFILE, "ip-2") != before
+    # Only the image profile keeps the old key; every other kind has a kind part.
+    assert lock_module.lock_key(target, "flavor profile", "ip-1") != before
+    assert lock_module.lock_key(target, "cloud zone", "ip-1") != before
+    assert lock_module.lock_key(target, "project", "ip-1") != before
 
 
 async def test_mapping_update_fails_without_writing_when_the_lock_stays_busy(

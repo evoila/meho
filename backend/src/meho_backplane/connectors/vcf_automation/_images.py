@@ -45,7 +45,7 @@ from meho_backplane.connectors.vcf_automation._paths import (
     TENANT_IMAGE_PROFILES_PATH,
     TENANT_REQUEST_TRACKER_PATH,
 )
-from meho_backplane.connectors.vcf_automation._resource_lock import resource_lock
+from meho_backplane.connectors.vcf_automation._resource_lock import IMAGE_PROFILE, resource_lock
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:
@@ -393,7 +393,7 @@ async def tenant_image_profile_mapping_update(
     if problem is not None:
         return {"status": "invalid_request", "guidance": f"{problem}; nothing was written"}
     async with resource_lock(
-        target, "image profile", str(params["profile_id"]), wait_seconds=PROFILE_LOCK_WAIT_SECONDS
+        target, IMAGE_PROFILE, str(params["profile_id"]), wait_seconds=PROFILE_LOCK_WAIT_SECONDS
     ):
         plan, problem = await _resolve(connector, operator, target, params)
         if plan is None:

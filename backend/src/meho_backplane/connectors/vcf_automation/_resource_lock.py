@@ -30,10 +30,14 @@ from dataclasses import dataclass
 from meho_backplane.connectors._shared.cache_key import TenantScopedTargetLike
 from meho_backplane.db.advisory import advisory_lock
 
-__all__ = ["LOCK_WAIT_SECONDS", "lock_key", "resource_lock"]
+__all__ = ["IMAGE_PROFILE", "LOCK_WAIT_SECONDS", "lock_key", "resource_lock"]
 
 #: How long a change waits for another change to the same object.
 LOCK_WAIT_SECONDS: float = 30.0
+
+#: The kind of the image name change, the first change with this lock. Its
+#: key has no kind part (see :func:`lock_key`).
+IMAGE_PROFILE = "image profile"
 
 
 @dataclass(slots=True)
@@ -50,9 +54,17 @@ def lock_key(target: TenantScopedTargetLike, kind: str, resource_id: str) -> int
     """A stable signed-63-bit key for one object of one target (a PG ``bigint``).
 
     *kind* names the kind of object in plain words (``"flavor profile"``), so
-    two kinds whose ids could be the same never share a key.
+    two kinds whose ids could be the same never share a key. The key of an
+    :data:`IMAGE_PROFILE` leaves the kind out: it is the key the image name
+    change took before this module existed, and during a rolling upgrade a
+    worker from before and a worker from after must take the same lock for
+    the same profile.
     """
-    raw = f"{target.tenant_id}\0{target.id}\0{kind}\0{resource_id}".encode()
+    parts = [str(target.tenant_id), str(target.id)]
+    if kind != IMAGE_PROFILE:
+        parts.append(kind)
+    parts.append(resource_id)
+    raw = "\0".join(parts).encode()
     digest = hashlib.blake2b(raw, digest_size=8).digest()
     return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
 

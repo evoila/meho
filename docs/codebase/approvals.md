@@ -2617,7 +2617,16 @@ requester.
   run on the server, through the same `_commit_decision` +
   `resume_dispatch_after_approval` calls the single Approve button uses;
   after `already_resumed` it re-reads the row until `resume_result` is
-  stored. A
+  stored. Every step is an approval, so the sign-in behind the console
+  session must pass the same checks as a single approve (see "Approve
+  needs a fresh approval sign-in"): a `destructive` step needs a sign-in
+  that approved nothing else, and after it that sign-in approves no
+  further step. When a step's approval is refused for its sign-in
+  (`fresh_sign_in_required` / `fresh_sign_in_already_used`), the run
+  stops there and the modal shows **Sign in again**: the console login
+  with `fresh_sign_in=1`, which comes back to the Pending tab filtered to
+  the ticket. The operator then starts the run again; the steps that ran
+  OK are skipped. A
   server-side loop was picked over re-opening the detail modal for each
   step: the server reads each step's run result before it goes on, with no
   round trip per step. At a dangerous or destructive step the POST returns

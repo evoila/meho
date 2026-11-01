@@ -86,7 +86,11 @@ next step only when the run was OK. It stops at the first step that fails
 or is refused, and names that step and the steps it did not run. At each
 step it shows what the step does and asks you to type `yes` first. In
 the console, filter the Pending tab to the change ticket and use
-**Approve group in order**.
+**Approve group in order**. The sign-in rules hold for every step: when
+a step needs a new sign-in (your sign-in is too old, or the step is
+`destructive` and your sign-in already approved something), the run
+stops there and shows **Sign in again**. Sign in, then start the run
+again; the steps that ran OK are skipped.
 
 You can also approve several requests by id in one run:
 `meho approvals approve <id> <id> ...`. The command shows each request

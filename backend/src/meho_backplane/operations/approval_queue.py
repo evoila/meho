@@ -117,6 +117,7 @@ from meho_backplane.operations._errors import (
     result_release_changed_while_waiting,
     result_target_changed_since_approval,
 )
+from meho_backplane.operations._secret_values import split_reveal_secret, with_reveal_secret
 from meho_backplane.operations._validate import (
     params_hash_candidates,
     params_hash_matches,
@@ -1235,6 +1236,7 @@ async def create_pending_request(
     resume_parent: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
     requester: ResumeRequester | None = None,
+    reveal_secret: bool = False,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
 
@@ -1304,6 +1306,15 @@ async def create_pending_request(
             requester of the request being re-run, not to the reviewer who
             runs it. ``None`` saves *operator* (and the bound actor) as the
             requester.
+        reveal_secret: The caller asked for the hidden values of the answer
+            (``reveal_secret: true``; the dispatcher refused an agent
+            already). The choice is saved in its own column on the request,
+            not with the params and not in the encrypted payload of a
+            credential write, so every approved run returns the values,
+            also the re-run of a failed credential write after the first
+            run deleted the payload. It is not part of *params_hash*, so
+            the retry check and the approval surfaces compare the call
+            without it.
 
     Returns:
         The flushed :class:`ApprovalRequest` row (new, or reused).
@@ -1419,6 +1430,7 @@ async def create_pending_request(
         target_hash=await park_time_target_hash(
             session, tenant_id=operator.tenant_id, target_id=target_id
         ),
+        reveal_secret=reveal_secret,
     )
     if idempotency_key is None:
         session.add(request)
@@ -1495,8 +1507,8 @@ async def _check_sign_in_use(
     sign-in may approve several requests (#5515). A ``destructive`` request
     is the exception: its sign-in must have approved nothing else, and
     after it that sign-in approves nothing more
-    (:class:`ApprovalSignInReusedError` in both cases). A web click is
-    never checked.
+    (:class:`ApprovalSignInReusedError` in both cases). The check is the
+    same for an approve on REST and in the web interface.
 
     The earlier approves of the sign-in are the person's
     ``approval.decision`` audit rows with the same ``sign_in_key``,
@@ -1515,8 +1527,6 @@ async def _check_sign_in_use(
     have an audit time before ``auth_time``.
     """
     key = approval_auth.sign_in_key(operator.sub)
-    if key is None or approval_auth.auth_time is None:
-        return False
     destructive = _is_destructive(request)
     from meho_backplane.settings import get_settings
 
@@ -1622,11 +1632,11 @@ async def approve_request(
         reason: Optional human-readable approval reason (recorded in the
             audit payload). Mirrors :func:`reject_request`.
         approval_auth: How the person proved they were present (#3979): a
-            web click, a fresh sign-in or a one-time code. Recorded in the
-            audit payload as ``approval_auth``. Inside the approval window
-            one token sign-in may approve several requests; a
-            ``destructive`` request needs a sign-in of its own (#5515).
-            Every production approve path passes it.
+            fresh sign-in or a one-time code, on REST or in the web
+            interface. Recorded in the audit payload as ``approval_auth``.
+            Inside the approval window one sign-in may approve several
+            requests; a ``destructive`` request needs a sign-in of its own
+            (#5515). Every production approve path passes it.
 
     Returns:
         The updated, flushed :class:`ApprovalRequest`.
@@ -2102,7 +2112,10 @@ async def resume_dispatch_after_approval(
     (:func:`refuse_resume_if_preview_changed`). Either change refuses the
     run, and the requester asks again.
     """
-    effective_params = params if params is not None else request.params
+    # The requester's reveal choice is on the request row, outside the
+    # params and the hash (``create_pending_request``). It goes on the
+    # params of the run only.
+    effective_params, reveal_secret = _stored_call(request, params)
     if effective_params is None and request.execution_handle is None:
         return _resume_pre0036_denied(operator, request)
 
@@ -2165,7 +2178,28 @@ async def resume_dispatch_after_approval(
         resolved_target=resolved_target,
         effective_params=cast(dict[str, Any], effective_params),
         resume_parent_override=resume_parent_override,
+        reveal_secret=reveal_secret,
     )
+
+
+def _stored_call(
+    request: ApprovalRequest, params: dict[str, Any] | None
+) -> tuple[dict[str, Any] | None, bool]:
+    """Return the params an approved run uses, and the requester's reveal choice.
+
+    *params* (the caller's own copy of the call) win over the stored
+    ``request.params``. A ``reveal_secret`` flag sent with them comes off
+    before the hash and preview checks and does not count: the choice is the
+    one of the original call, stored on the request row
+    (``request.reveal_secret``). So the choice also survives for a
+    credential write, whose params are not on the row and come from the
+    caller on a re-run. The params are ``None`` when the row stores none and
+    none were sent.
+    """
+    if params is not None:
+        params, _ = split_reveal_secret(params)
+    effective = params if params is not None else request.params
+    return cast(dict[str, Any] | None, effective), bool(request.reveal_secret)
 
 
 async def refuse_resume_if_release_changed(
@@ -2553,6 +2587,7 @@ async def _dispatch_resume_with_bound_context(
     effective_params: dict[str, Any],
     resume_parent_override: dict[str, Any] | None = None,
     rerun_attempt: int | None = None,
+    reveal_secret: bool = False,
 ) -> Any:
     """Re-bind the parked row's stored context, then dispatch ``_approved=True``.
 
@@ -2594,6 +2629,11 @@ async def _dispatch_resume_with_bound_context(
     (:func:`~meho_backplane.operations.secondary_target_policy.bind_approved_requester`),
     so an op that writes to a second, caller-named target checks the
     requester's policy there too, not only the reviewer's.
+
+    *reveal_secret* is the requester's ``reveal_secret: true``, stored on
+    the request row. It goes on the params of the run, so the answer holds
+    the values the requester asked for; the dispatcher stamps the choice on
+    the audit row of the run.
     """
     from meho_backplane.operations.dispatcher import dispatch
     from meho_backplane.operations.secondary_target_policy import bind_approved_requester
@@ -2623,6 +2663,8 @@ async def _dispatch_resume_with_bound_context(
             dispatch_op_id, dispatch_params = (
                 parent_call if parent_call is not None else (request.op_id, effective_params)
             )
+            if reveal_secret:
+                dispatch_params = with_reveal_secret(dispatch_params)
             result = await dispatch(
                 operator=operator,
                 connector_id=request.connector_id,

@@ -119,6 +119,26 @@ declare_op_classes(
         # Vault path; the host password goes only into the ``AddHost_Task``
         # / ``AddStandaloneHost_Task`` request body.
         "vmware.composite.host.add",
+        # The ESXi SNMP agent change. Its params carry only a Vault *path*
+        # (``community_secret_ref``); the community string goes only into the
+        # ``ReconfigureSnmpAgent`` request BODY.
+        "vmware.composite.host.snmp.set",
+        # The ESXi advanced settings change. A setting that holds a secret
+        # takes its value from a Vault *path* (``value_secret_ref``); the
+        # value goes into the ``UpdateOptions`` request BODY and comes back in
+        # the ``QueryOptions`` read-back. The class keeps both bodies out of
+        # the flight recorder, the params out of the broadcast, and a waiting
+        # approval's params in the encrypted handoff store.
+        "vmware.composite.host.advanced_settings.set",
+        # The host local-user create and password change, and the host's
+        # Active Directory join. The params carry only a Vault path
+        # (``password_secret_ref``); the password goes only into the call to
+        # the host (``CreateUser`` / ``UpdateUser`` / ``JoinDomain_Task``).
+        # The class keeps those bodies out of the flight recorder, the params
+        # out of the broadcast and the vendor text out of an error result.
+        "vmware.composite.host.local_user.create",
+        "vmware.composite.host.local_user.password.set",
+        "vmware.composite.host.ad.join",
     ),
     # A hand-written ``safe`` operation that is not a plain read: it makes
     # the target rescan a datastore. Without this class it would get

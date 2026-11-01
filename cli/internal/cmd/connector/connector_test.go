@@ -1001,6 +1001,32 @@ func TestPrintListTableHappyPath(t *testing.T) {
 	}
 }
 
+// TestPrintListTableMarksMissingPackage — a connector whose operations
+// all come from a connector package that is not installed (#5560) shows
+// "no-package" in the status column, not the "(empty)" rollup, and the
+// dead-end "*" on its kind.
+func TestPrintListTableMarksMissingPackage(t *testing.T) {
+	r := &connectorListEnvelope{
+		Items: []listEntry{
+			{
+				ConnectorID:  "gizmobox-rest-1.x",
+				State:        "package_not_installed",
+				Kind:         "ingested-shim",
+				Dispatchable: false,
+			},
+		},
+	}
+	var buf bytes.Buffer
+	printListTable(&buf, "all", r)
+	out := buf.String()
+	if !strings.Contains(out, "no-package") || !strings.Contains(out, "ingested-shim*") {
+		t.Errorf("list render missing the no-package marker in:\n%s", out)
+	}
+	if strings.Contains(out, "(empty)") {
+		t.Errorf("list render shows the (empty) rollup for a missing package:\n%s", out)
+	}
+}
+
 // TestPrintListTableMarksShadowedBuiltin — a built-in row shadowed by a
 // tenant-scoped twin (#2474) renders "(shadowed)" in the tenant column,
 // while the tenant-scoped twin that dispatch resolves keeps its tenant

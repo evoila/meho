@@ -103,8 +103,13 @@ again (it sends `prompt=login` and `max_age=0`). It keeps the token in
 memory for this one run and never stores it. The approval client gives
 no refresh token, and its access token lasts as long as the approval
 window. When the token runs out, the CLI says so and asks for a new
-sign-in. Reject needs no new
-sign-in. The web interface needs none either: the click is the proof.
+sign-in. Reject needs no new sign-in.
+
+The web interface applies the same age rules to the sign-in behind the
+console session, and it checks that this sign-in asked for the password.
+When the sign-in is too old, the console shows **Sign in to approve**
+and asks for the password again (see
+[The web console session](#the-web-console-session)).
 
 Create a second public client with these settings:
 
@@ -428,6 +433,19 @@ The two MEHO settings are `UI_SESSION_SLIDING_EXTENSION_SECONDS`
 (default `3600`) and `UI_SESSION_ABSOLUTE_LIFETIME_SECONDS` (default
 `36000`). If you change them, change the realm values to match.
 
+**Approving in the console needs a recent sign-in.** The console session
+may be hours old, but an approval needs the sign-in behind it to be at
+most 15 minutes old (`FRESH_SIGN_IN_MAX_AGE_SECONDS`) and to have asked
+for the password (the `acr` claim). A `destructive` operation needs a
+sign-in of its own, at most 5 minutes old. When the sign-in is too old,
+the request shows **Sign in to approve** in place of **Approve**. That
+link starts a console login with `prompt=login` and `max_age=0`, so
+Keycloak asks for the password (and the code, or a passkey) also in a
+browser it remembers. The person then opens the request again and
+approves. Deny needs no new sign-in. For this check the `meho-web` client
+needs the `basic` and `acr` default scopes: the realm file and
+`meho admin keycloak bootstrap-clients` set them.
+
 **Why the console has no long login.** The console does not ask for
 `offline_access`:
 
@@ -504,23 +522,27 @@ set them once (see [A realm that already runs](#a-realm-that-already-runs)).
 
 ### What stays strict
 
-- **Approvals on the command line and through REST still ask every
-  time.** The fresh sign-in for an approval
-  (see [Why approve needs a fresh sign-in](#why-approve-needs-a-fresh-sign-in))
+- **Approvals still ask every time, on every surface.** The fresh
+  sign-in for an approval
+  (see [The approval client](#the-approval-client-meho-cli-approve))
   sends `prompt=login` and `max_age=0`. Keycloak then asks again, also in
   a remembered browser: password and code, or a passkey. MEHO also checks
   the sign-in time in the token. A token from a remembered browser keeps
   the time of the first sign-in, so a browser cookie alone cannot approve
-  on the command line or through REST.
-- **Approvals in the console accept a click.** In the web interface the
-  click of the signed-in person is the proof. MEHO asks for no new
-  sign-in there. So whoever uses a remembered browser can also approve in
-  the console. See the next section for how to end such a login.
+  on the command line, through REST, or in the console.
+- **Approvals in the console need the same recent sign-in.** The console
+  checks the sign-in behind the console session: at most 15 minutes old,
+  5 minutes for a `destructive` operation, and it must have asked for the
+  password. When it is older, the request shows **Sign in to approve**,
+  and that login asks for the password also in a remembered browser (see
+  [The web console session](#the-web-console-session)). Deny needs no new
+  sign-in.
 - **The console keeps its own limit.** MEHO ends a console session after
   `UI_SESSION_ABSOLUTE_LIFETIME_SECONDS` (12 hours by default). The longer
   Keycloak login does not make it longer. After that limit the console
   sends the person to the login page. In a remembered browser, that login
-  asks nothing.
+  asks nothing, and the new session can read and deny, but not approve
+  until the person signs in again with the password.
 
 ### The risk, and how to end a login
 
@@ -664,6 +686,7 @@ usually appear:
 | Everyone gets the same role, whatever their group | A fixed-value (Hardcoded claim) `tenant_role` mapper is still on the client | Delete it, or re-run `meho admin keycloak bootstrap-clients`, which replaces it. |
 | Token issued, every call 401s with `invalid_token` or `missing_sub`; the decoded token has no `sub` | The `basic` scope is not a default scope on the client | Step 4 — assign it, re-login (existing tokens stay broken). |
 | `meho approvals approve` fails with `fresh_sign_in_required` right after you signed in again | The access token has no `auth_time` or no `acr` (the `basic` or `acr` scope is missing), or it was not made for the approval client (the chart's `config.keycloakCliApproveClientId` does not name the client), or the client does not use its own login flow | Step 4 — assign `basic` and `acr` to `meho-cli-approve`; check the client ID and its login flow in Step 2. Or approve in the web interface. |
+| The console shows **Sign in to approve** right after you signed in with your password | The access token of `meho-web` has no `auth_time` or no `acr` (the `basic` or `acr` scope is missing on `meho-web`), or `FRESH_SIGN_IN_MAX_AGE_SECONDS` is very short | Step 4 — assign `basic` and `acr` to `meho-web` as default scopes, then sign in again. |
 | The browser shows "Client not found" or "Invalid parameter: redirect_uri" during `meho approvals approve` | `meho-cli-approve` is missing, or `http://127.0.0.1:*` is not one of its redirect URIs | Step 2 — create it, or re-run `meho admin keycloak bootstrap-clients`. |
 | `meho login` times out before you can approve | An ambient wrapper timeout (CI step, IDE task) shorter than the approval wait | Run `meho login` in a real terminal, or raise the wrapper timeout. |
 | MCP login fails with `invalid_scope` ("Invalid scopes: …") and the Keycloak login page never appears | The client asked for a scope that `meho-mcp` does not offer: `offline_access`, `mcp:read`, `mcp:execute` or `mcp:admin` | Create the scope if it is missing, then assign it as an **optional** scope on `meho-mcp` (see the MCP client table above). Or re-run `meho admin keycloak bootstrap-clients`. |

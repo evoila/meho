@@ -42,6 +42,9 @@ documentation that a running HCX Manager serves, so the vendor API files
 can be pinned. The other reads (``hcx.about``, site pairings, service
 meshes, appliances, the service mesh diagnostics, jobs, alerts and the
 inventory) live in :mod:`meho_backplane.connectors.hcx.typed_reads`.
+The profile changes live in :mod:`meho_backplane.connectors.hcx.profile_writes`,
+the site pairing change and the certificate trust in
+:mod:`meho_backplane.connectors.hcx.site_pairing_writes`.
 The service mesh changes and the task read ``hcx.task.get`` live in
 :mod:`meho_backplane.connectors.hcx.service_mesh_writes`. The network
 extension operations (list, extend, unextend, Mobility Optimized
@@ -49,6 +52,8 @@ Networking) live in :mod:`meho_backplane.connectors.hcx.network_extension`.
 The migration operations (validate, start, list, cancel, mobility groups
 and the switchover window) live in
 :mod:`meho_backplane.connectors.hcx.migrations`.
+The Network Extension HA group operations live in
+:mod:`meho_backplane.connectors.hcx.ha_groups`.
 
 Traces
 ------
@@ -443,6 +448,38 @@ class HcxConnector(HttpConnector):
 
         return await hcx_inventory_network_list_impl(self, operator, target, params)
 
+    async def profile_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.profile.list`` shim."""
+        from meho_backplane.connectors.hcx.profile_writes import hcx_profile_list_impl
+
+        return await hcx_profile_list_impl(self, operator, target, params)
+
+    async def profile_set(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.profile.set`` shim."""
+        from meho_backplane.connectors.hcx.profile_writes import hcx_profile_set_impl
+
+        return await hcx_profile_set_impl(self, operator, target, params)
+
+    async def site_pairing_set(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.site_pairing.set`` shim."""
+        from meho_backplane.connectors.hcx.site_pairing_writes import hcx_site_pairing_set_impl
+
+        return await hcx_site_pairing_set_impl(self, operator, target, params)
+
+    async def certificate_trust(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.certificate.trust`` shim."""
+        from meho_backplane.connectors.hcx.site_pairing_writes import hcx_certificate_trust_impl
+
+        return await hcx_certificate_trust_impl(self, operator, target, params)
+
     async def service_mesh_create(
         self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -578,6 +615,22 @@ class HcxConnector(HttpConnector):
         from meho_backplane.connectors.hcx.migrations import hcx_migration_schedule_impl
 
         return await hcx_migration_schedule_impl(self, operator, target, params)
+
+    async def network_extension_ha_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.network_extension.ha.list`` shim."""
+        from meho_backplane.connectors.hcx.ha_groups import hcx_network_extension_ha_list_impl
+
+        return await hcx_network_extension_ha_list_impl(self, operator, target, params)
+
+    async def network_extension_ha_set(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.network_extension.ha.set`` shim."""
+        from meho_backplane.connectors.hcx.ha_groups import hcx_network_extension_ha_set_impl
+
+        return await hcx_network_extension_ha_set_impl(self, operator, target, params)
 
     def trace_response_body(self, response: httpx.Response) -> Any:
         """Mask the secret-named fields of a vendor answer before the trace records it.

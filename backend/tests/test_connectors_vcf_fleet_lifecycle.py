@@ -234,7 +234,12 @@ async def test_request_list_filters_sorts_and_limits(
     instance = await _bind()
     payload = [
         _request("req-a", "COMPLETED", 1),
-        _request("req-b", "FAILED", 3),
+        _request(
+            "req-b",
+            "FAILED",
+            3,
+            inputMap={"environmentId": _ENV_ID, "productId": _PRODUCT_ID, "password": "s3cret"},
+        ),
         _request("req-c", "FAILED", 2),
         _request("req-d", "INPROGRESS", 4),
     ]
@@ -242,6 +247,7 @@ async def test_request_list_filters_sorts_and_limits(
         async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
             mock.get(_REQUESTS).respond(200, json=payload)
             result = await _dispatch("fleet.request.list", {"outcome": "failed", "limit": 1})
+            no_inputs = await _dispatch("fleet.request.list", {"outcome": "succeeded"})
     finally:
         await instance.aclose()
     assert result.status == "ok", result.error
@@ -249,6 +255,13 @@ async def test_request_list_filters_sorts_and_limits(
     rows = result.result["requests"]
     assert [row["request_id"] for row in rows] == ["req-b"]
     assert rows[0]["outcome"] == "failed"
+    assert rows[0]["environment_id"] == _ENV_ID
+    assert rows[0]["product_id"] == _PRODUCT_ID
+    assert "inputMap" not in rows[0]
+    assert "s3cret" not in json.dumps(rows[0])
+    assert no_inputs.status == "ok", no_inputs.error
+    row_a = no_inputs.result["requests"][0]
+    assert (row_a["environment_id"], row_a["product_id"]) == (None, None)
 
 
 @pytest.mark.asyncio

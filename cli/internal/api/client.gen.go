@@ -153,8 +153,9 @@ const (
 
 // Defines values for ConnectorListItemState.
 const (
-	ConnectorListItemStateIngested   ConnectorListItemState = "ingested"
-	ConnectorListItemStateRegistered ConnectorListItemState = "registered"
+	ConnectorListItemStateIngested            ConnectorListItemState = "ingested"
+	ConnectorListItemStatePackageNotInstalled ConnectorListItemState = "package_not_installed"
+	ConnectorListItemStateRegistered          ConnectorListItemState = "registered"
 )
 
 // Defines values for ConnectorReviewPayloadKind.
@@ -3746,7 +3747,10 @@ type ConfirmVerifyResponseAnswer string
 // when “state == "ingested"“, and explicitly labelled
 // not-yet-dispatchable when “state == "registered"“. Defaults to
 // “"ingested"“ so existing call sites (tests, MCP fakes)
-// construct rows without breakage.
+// construct rows without breakage. “"package_not_installed"“ (#5560)
+// marks a connector whose rows all come from a connector package that
+// is not installed: it is listed so the operator sees why it cannot be
+// used, with zero counts and “dispatchable=False“.
 //
 // “next_step“ (G0.13-T3 / #1133) is the self-describing hint that
 // closes the workflow gap the v0.6.0 RDC dogfood surfaced (signal 11:
@@ -12154,8 +12158,9 @@ type UiAuthCallbackUiAuthCallbackGetParams struct {
 
 // UiAuthLoginUiAuthLoginGetParams defines parameters for UiAuthLoginUiAuthLoginGet.
 type UiAuthLoginUiAuthLoginGetParams struct {
-	ReturnTo *string `form:"return_to,omitempty" json:"return_to,omitempty"`
-	Reason   *string `form:"reason,omitempty" json:"reason,omitempty"`
+	ReturnTo    *string `form:"return_to,omitempty" json:"return_to,omitempty"`
+	Reason      *string `form:"reason,omitempty" json:"reason,omitempty"`
+	FreshSignIn *string `form:"fresh_sign_in,omitempty" json:"fresh_sign_in,omitempty"`
 }
 
 // UiBroadcastFeedUiBroadcastGetParams defines parameters for UiBroadcastFeedUiBroadcastGet.
@@ -38686,6 +38691,22 @@ func NewUiAuthLoginUiAuthLoginGetRequest(server string, params *UiAuthLoginUiAut
 		if params.Reason != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "reason", runtime.ParamLocationQuery, *params.Reason); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.FreshSignIn != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "fresh_sign_in", runtime.ParamLocationQuery, *params.FreshSignIn); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

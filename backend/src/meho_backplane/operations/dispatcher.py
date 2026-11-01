@@ -369,6 +369,7 @@ from meho_backplane.operations._secret_values import (
     hide_secret_values,
     hides_secret_values,
     reveal_hidden_values,
+    split_reveal_secret,
 )
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
@@ -973,9 +974,11 @@ async def _execute_and_audit_inner(
     )
 
 
-#: How a secret read answers. ``"hidden"`` is the default view: names without
-#: values. ``"revealed"`` is a person's ``reveal_secret: true``: the secret
-#: fields as the connector returned them. ``None`` is any other operation.
+#: How an operation answers. ``"hidden"`` is the default view of every
+#: operation: the secret-named fields without their values, and for a secret
+#: read every value. ``"revealed"`` is a ``reveal_secret: true`` by a person
+#: or a service principal: the secret fields as the connector returned them.
+#: ``None`` is an operation that makes a new credential; the caller gets it.
 SecretView = Literal["hidden", "revealed"]
 
 
@@ -988,12 +991,14 @@ def _protect_secret_values(
 ) -> RedactionMiddlewareResult:
     """Build what the caller sees and what the audit row stores.
 
-    ``redacted`` becomes the caller's answer. A secret read returns the
-    default view (:func:`hide_secret_values`) unless a person asked for the
-    values; then the secret fields the default view hides are put back as the
-    connector returned them (:func:`reveal_hidden_values`), and the redaction
-    of the other fields stays. Any other operation returns the redacted
-    answer.
+    ``redacted`` becomes the caller's answer. Every operation returns the
+    default view (:func:`hide_secret_values`: the secret-named fields hidden,
+    every value of a secret read hidden) unless a person or a service
+    principal asked for the values; then the fields the default view hides
+    are put back as the connector returned them (:func:`reveal_hidden_values`),
+    and the redaction of the other fields stays. An operation that makes a
+    new credential (*secret_view* is ``None``) returns the redacted answer,
+    so the caller gets the credential it asked for.
 
     ``raw`` -- the copy the audit row stores as ``raw_payload`` -- gets a
     keyed fingerprint in place of every value the default view hides, whether
@@ -1022,9 +1027,9 @@ def _protect_secret_values(
     )
 
 
-def _secret_view(secret_read: bool, reveal_secret: bool) -> SecretView | None:
-    """The view of a dispatch: ``None`` unless the op is a secret read."""
-    if not secret_read:
+def _secret_view(*, makes_new_secret: bool, reveal_secret: bool) -> SecretView | None:
+    """The view of a dispatch: ``None`` for an operation that makes a new credential."""
+    if makes_new_secret:
         return None
     return "revealed" if reveal_secret else "hidden"
 
@@ -1045,9 +1050,10 @@ async def _refuse_agent_reveal(
 ) -> OperationResult:
     """Refuse ``reveal_secret: true`` for an agent, with a synchronous audit row.
 
-    Only a person may get the raw value of a secret read back. The agent
-    gets the names without the values by calling again without the flag,
-    or uses an operation that moves the secret without showing it.
+    Only a person or a service principal may get the hidden values of an
+    answer back. The agent gets the names without the values by calling
+    again without the flag, or uses an operation that moves the secret
+    without showing it.
     """
     duration_ms = _elapsed_ms(started)
     receipt = await audit_safe(
@@ -3178,6 +3184,7 @@ async def _handle_needs_approval(
     duration_ms: float,
     preview_hash: str | None = None,
     idempotency_key: str | None = None,
+    reveal_secret: bool = False,
 ) -> OperationResult:
     """Create a durable pending approval row and return an awaiting_approval result.
 
@@ -3220,6 +3227,11 @@ async def _handle_needs_approval(
     ``idempotency_key_conflict`` and nothing is parked.
     On unexpected failure, logs at error level and falls back to a
     ``denied`` result so the dispatcher never raises.
+
+    *reveal_secret* is the caller's ``reveal_secret: true`` (an agent was
+    refused before this point). It is saved on the request, outside the
+    params and the params hash, so the approved run returns the values the
+    caller asked for instead of the default view.
     """
     # Thread the current agent run id (if any) from the contextvar so the
     # approval request links back to the paused run.
@@ -3322,6 +3334,7 @@ async def _handle_needs_approval(
                 proposed_effect=proposed_effect,
                 preview_hash=preview_hash,
                 idempotency_key=idempotency_key,
+                reveal_secret=reveal_secret,
             )
             await session.commit()
         if getattr(request, "_reused", False):
@@ -3463,20 +3476,21 @@ async def dispatch(
     gate is the only authorization path for an ordinary dispatch.
     """
     started = time.monotonic()
-    # #2467 -- ``reveal_secret`` is a MEHO dispatch control, not a connector
-    # op param. Strip it before hashing / schema validation / handler
-    # forwarding: the answer of a secret read (a ``credential_read`` op, or
-    # an op of ``_secret_values._VALUE_HIDING_OPS``) hides its secret values
-    # by default, and returning the raw value requires this explicit opt-in
-    # by a person (stamped on the audit row; an agent is refused). Stripping
-    # keeps the flag off the op's ``additionalProperties: false`` schema,
-    # out of the handler's params, and out of ``params_hash`` -- so a
-    # scrubbed read and its reveal share one hash (the reveal choice is
-    # recorded separately on the audit row).
-    reveal_secret = bool(params.get("reveal_secret"))
-    if "reveal_secret" in params:
-        params = {key: value for key, value in params.items() if key != "reveal_secret"}
-    secret_read = classify_op(op_id) == "credential_read" or hides_secret_values(op_id)
+    # ``reveal_secret`` is a MEHO dispatch control, not a connector op param.
+    # Strip it before hashing / schema validation / handler forwarding: every
+    # answer hides its secret-named fields by default, and a secret read (a
+    # ``credential_read`` op, or an op of ``_secret_values._VALUE_HIDING_OPS``)
+    # hides every value. Getting the values back needs this explicit opt-in
+    # by a person or a service principal (stamped on the audit row; an agent
+    # is refused). Stripping keeps the flag off the op's
+    # ``additionalProperties: false`` schema, out of the handler's params,
+    # and out of ``params_hash`` -- so a hidden answer and its reveal share
+    # one hash (the reveal choice is recorded separately on the audit row,
+    # and a call that waits for approval keeps it on the approval request).
+    params, reveal_secret = split_reveal_secret(params)
+    op_class = classify_op(op_id)
+    secret_read = op_class == "credential_read" or hides_secret_values(op_id)
+    makes_new_secret = op_class == "credential_mint"
     # The hash every audit row of this dispatch carries: keyed, with
     # secret-named values left out. A parked approval stores the full
     # approval hash instead (``_handle_needs_approval``).
@@ -3622,14 +3636,15 @@ async def dispatch(
     # child ``dispatch`` rebinds the var, and clears it for the next dispatch
     # reusing this task.
     _verdict_token = policy_decision_var.set(None)
-    # Stamp the reveal choice on the audit row of a secret read.
-    # Bound only for a secret read (True/False = raw / scrubbed
-    # response); every other dispatch binds ``None`` so the key stays absent.
-    # Same token/finally reset discipline as ``policy_decision_var`` so a
-    # composite parent's value is restored after a child dispatch rebinds it.
-    _reveal_token = reveal_secret_var.set(reveal_secret if secret_read else None)
+    # Stamp the reveal choice on the audit row: on every secret read
+    # (True/False = values / names only), and on any other operation only
+    # when the caller asked for the values (True). Every other dispatch binds
+    # ``None`` so the key stays absent. Same token/finally reset discipline
+    # as ``policy_decision_var`` so a composite parent's value is restored
+    # after a child dispatch rebinds it.
+    _reveal_token = reveal_secret_var.set(reveal_secret if (secret_read or reveal_secret) else None)
     try:
-        if reveal_secret and secret_read and _agent_acts(operator):
+        if reveal_secret and _agent_acts(operator):
             return await _refuse_agent_reveal(
                 op_id=op_id,
                 operator=operator,
@@ -3688,6 +3703,7 @@ async def dispatch(
                     duration_ms=duration_ms,
                     preview_hash=preview_hash,
                     idempotency_key=idempotency_key,
+                    reveal_secret=reveal_secret,
                 )
             if verdict is not PermissionVerdict.AUTO_EXECUTE:
                 # Defensive fail-closed: only an explicit AUTO_EXECUTE proceeds
@@ -3832,10 +3848,14 @@ async def dispatch(
             params=params,
             params_hash=params_hash,
             started=started,
-            # A secret read answers with names without values, unless a
-            # person asked for the values. The audit row stores
-            # fingerprints in place of them either way.
-            secret_view=_secret_view(secret_read, reveal_secret),
+            # Every answer hides its secret-named fields, and a secret read
+            # every value, unless a person or a service principal asked for
+            # the values. An operation that makes a new credential returns
+            # it. The audit row stores fingerprints in place of the hidden
+            # values either way.
+            secret_view=_secret_view(
+                makes_new_secret=makes_new_secret, reveal_secret=reveal_secret
+            ),
         )
     finally:
         policy_decision_var.reset(_verdict_token)

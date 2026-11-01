@@ -22,7 +22,8 @@ Where the paths come from:
   (the Swagger 2.0 file of ``vmware/vra-sdk-go``); the reconcile lane
   checks it against that file on the spec shelf.
 * ``/approval/api/*`` is in the vendor's published Approvals API
-  reference. No pinned file holds it; the lane pins the calls instead.
+  reference; the lane checks it against the vendor's reference lists of
+  VCF Automation 9.0, 9.1 and 9.1.1 on the spec shelf.
 
 An upstream 4xx/5xx raises :exc:`httpx.HTTPStatusError`; the dispatcher
 turns it into ``connector_error`` with the vendor's message.

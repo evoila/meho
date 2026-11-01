@@ -467,16 +467,27 @@ ride the tenant login.
   A subscription create finds an existing one by name and answers
   `unchanged`; update, disable and enable send only the fields that differ.
 - **Secrets.** The source code, configuration and input defaults of an ABX
-  action are never returned, only the input names. A run input with a secret
-  name is refused: a script reads its secrets from Automation action
+  action are never returned, only the input names. A run input that holds a
+  secret is refused: a script reads its secrets from Automation action
   constants, never from MEHO. Run inputs, outputs, error text and log lines,
   and policy definitions, go through the secret-name scrub.
 - **Spec check.** `tests/test_vra_governance_spec_reconcile.py` pins all
   shared calls. The policy calls are checked against
-  `vra-catalog-deployment.json` of the pinned `vra-sdk-go` v0.6.5 shelf. No
-  pinned file holds the approval, ABX or event broker calls; they follow the
-  vendor's published API references, and the live test after the merge
-  proves them.
+  `vra-catalog-deployment.json` of the pinned `vra-sdk-go` v0.6.5 shelf.
+  Every call is also checked against the vendor's own reference lists on the
+  shelf, per VCF Automation version (9.0, 9.1, 9.1.1): approvals, policies
+  and ABX on each, and the event broker on 9.1 and 9.1.1 (the vendor
+  publishes no 9.0 event broker reference). Three calls are in no public
+  vendor reference, on any version: the subscription list, create and
+  change (`GET` and `POST /event-broker/api/subscriptions`, `PATCH
+  /event-broker/api/subscriptions/{id}`). The lane pins them as an evidenced
+  exclusion and fails when a vendor list starts to serve one. The live test
+  after the merge proves them. CI lists every shelf file the lane reads in
+  its required-file check, so the lane cannot skip there.
+- **Secrets in run inputs.** A run input that holds a secret is refused at
+  the preview and at the run, before any vendor call: a secret-named key at
+  any depth (inside an object or a list too), or a text input that holds a
+  secret-named pair. The refusal names the path, never the value.
 **Day-2 work: actions, lease, delete, machines and disks.** These ops are
 written once for VCF Automation 9 and Aria Automation 8.18, because both serve
 the same deployment API (`/deployment/api`) and IaaS API (`/iaas/api`). The

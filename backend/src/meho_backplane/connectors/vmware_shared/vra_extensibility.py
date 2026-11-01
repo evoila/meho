@@ -31,7 +31,10 @@ Secrets:
   secret-name scrub (:func:`~meho_backplane.redaction.secret_fields.scrub_secret_fields`).
 
 Where the paths come from: the vendor's published ABX and Event Broker API
-references. No pinned API file holds them; the reconcile lane pins the calls.
+references. The reconcile lane checks them against the vendor's reference
+lists of VCF Automation 9.0, 9.1 and 9.1.1 on the spec shelf. Three
+subscription calls (list, create, change) are in no public vendor reference;
+the lane pins them as an evidenced exclusion.
 """
 
 from __future__ import annotations

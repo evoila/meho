@@ -11,20 +11,35 @@ Automation connector. So one lane covers both connectors. It reads the live
 * pins the ``METHOD:/path`` manifest, with no shelf needed;
 * checks that every op of both connectors uses a swept constant;
 * checks the policy calls against ``vra-catalog-deployment.json`` of the
-  pinned ``vra-sdk-go`` v0.6.5 shelf (skips when the shelf is not set up).
+  pinned ``vra-sdk-go`` v0.6.5 shelf;
+* checks every call against the vendor's own reference lists on the shelf,
+  one set per VCF Automation version (9.0, 9.1 and 9.1.1): the approval,
+  policy and ABX lists, and on 9.1 and 9.1.1 the event broker list too (the
+  vendor publishes no 9.0 event broker reference). Each list was made from
+  the operation index of the vendor's public API reference pages.
 
-**Evidenced exclusion: approval, ABX and event broker calls.** The
-``vra-sdk-go`` Swagger files hold no ``/approval``, ``/abx`` or
-``/event-broker`` path, and no other vendor API file for them is pinned on the
-shelf. The calls follow the vendor's published API references (Approvals API,
-ABX API, Event Broker API). The manifest pin below still covers them, so a
-change to one of them is a conscious change. A live test after the merge
-proves them on Aria Automation 8.18 and VCF Automation 9.
+The shelf-backed checks skip when the shelf is not set up
+(``tests/_spec_shelf.py``); CI lists every file they read in its
+required-file check, so there they run.
+
+**Evidenced exclusion: three event broker calls.** No public vendor
+reference lists ``GET /event-broker/api/subscriptions``,
+``POST /event-broker/api/subscriptions`` or
+``PATCH /event-broker/api/subscriptions/{id}``: the 9.1 and 9.1.1 Event
+Broker Service API indexes list only the read and the delete of one
+subscription and the topic reads, 9.0 has no event broker reference, and the
+portal has no 8.x event broker reference (its "Event Broker Service API"
+covers 7.x and uses other paths). The three calls are the ones the Task
+names; they stay pinned in :data:`_NOT_IN_ANY_VENDOR_REFERENCE`, and the lane
+fails the day a vendor list serves one of them, so the exclusion is removed
+then. A live test after the merge proves them on Aria Automation 8.18 and
+VCF Automation 9.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -65,6 +80,43 @@ _PATH_METHODS: Final[dict[str, frozenset[str]]] = {
 
 #: The calls that are in the pinned ``vra-catalog-deployment.json``.
 _SHELF_PREFIXES: Final[tuple[str, ...]] = ("/policy/api/",)
+
+#: The vendor reference lists per VCF Automation version: shelf directory,
+#: version, the path prefixes its lists cover, and the services whose list
+#: it reads (``vcf-automation-<version>-vm-apps-org-<service>-reference-operations.tsv``).
+_VENDOR_LISTS: Final[tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...]] = (
+    (
+        "vcf-automation-9.0-reference",
+        "9.0",
+        ("/approval/api/", "/policy/api/", "/abx/api/"),
+        ("approval", "policies", "abx"),
+    ),
+    (
+        "vcf-automation-9.1",
+        "9.1",
+        ("/approval/api/", "/policy/api/", "/abx/api/", "/event-broker/api/"),
+        ("approval", "policies", "abx", "event-broker-service-api"),
+    ),
+    (
+        "vcf-automation-9.1.1",
+        "9.1.1",
+        ("/approval/api/", "/policy/api/", "/abx/api/", "/event-broker/api/"),
+        ("approval", "policies", "abx", "event-broker-service-api"),
+    ),
+)
+
+#: The calls no public vendor reference lists (module docstring). Pinned, so
+#: adding a fourth is a conscious change, and the vendor-list check fails
+#: when a list starts to serve one of them.
+_NOT_IN_ANY_VENDOR_REFERENCE: Final[frozenset[str]] = frozenset(
+    {
+        "GET:/event-broker/api/subscriptions",
+        "POST:/event-broker/api/subscriptions",
+        "PATCH:/event-broker/api/subscriptions/{id}",
+    }
+)
+
+_BRACES: Final[re.Pattern[str]] = re.compile(r"\{([^}/]+)\}")
 
 
 def _path_constants() -> dict[str, str]:
@@ -139,6 +191,66 @@ def _swagger2_served_op_ids(spec_path: Path) -> set[str]:
     if not served:
         pytest.fail(f"{spec_path.name}: read zero operations; the shelf file layout moved")
     return served
+
+
+def _without_braces(op_id: str) -> str:
+    """``GET:/x/{id}`` as ``GET:/x/id``: the vendor's index drops the braces."""
+    return _BRACES.sub(r"\1", op_id)
+
+
+def _vendor_list_op_ids(list_path: Path, label: str) -> set[str]:
+    """The ``METHOD:/path`` set of one shelf reference list (TSV), braces dropped."""
+    lines = list_path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0].split("\t")[:2] != ["method", "path"]:
+        pytest.fail(f"{label}: expected a TSV header starting with 'method<TAB>path'.")
+    served = {
+        _without_braces(f"{cols[0].upper()}:{cols[1]}")
+        for cols in (line.split("\t") for line in lines[1:])
+        if len(cols) >= 2
+    }
+    if not served:
+        pytest.fail(f"{label}: read zero operations; the list layout moved.")
+    return served
+
+
+def test_every_call_has_a_vendor_list_or_is_an_evidenced_exclusion() -> None:
+    """No call is left out by accident: each prefix has a vendor list on 9.1.1."""
+    declared = _declared_op_ids()
+    assert declared >= _NOT_IN_ANY_VENDOR_REFERENCE
+    covered = max(_VENDOR_LISTS, key=lambda row: len(row[2]))[2]
+    uncovered = {op_id for op_id in declared if not op_id.partition(":")[2].startswith(covered)}
+    assert not uncovered, f"no vendor list covers {sorted(uncovered)}"
+
+
+@pytest.mark.parametrize(
+    ("spec_dir", "version", "prefixes", "services"),
+    _VENDOR_LISTS,
+    ids=[version for _, version, _, _ in _VENDOR_LISTS],
+)
+def test_calls_are_in_the_vendor_reference_lists_of_each_version(
+    spec_dir: str, version: str, prefixes: tuple[str, ...], services: tuple[str, ...]
+) -> None:
+    """Every call a version's vendor lists cover is in them, except the pinned three.
+
+    Skips when the spec shelf is not set up (``tests/_spec_shelf.py``); CI runs it.
+    """
+    served: set[str] = set()
+    for service in services:
+        list_file = f"vcf-automation-{version}-vm-apps-org-{service}-reference-operations.tsv"
+        served |= _vendor_list_op_ids(
+            require_shelf_spec(spec_dir, list_file), f"{spec_dir}/{list_file}"
+        )
+    in_scope = {
+        op_id for op_id in _declared_op_ids() if op_id.partition(":")[2].startswith(prefixes)
+    }
+    excluded = {_without_braces(op_id) for op_id in _NOT_IN_ANY_VENDOR_REFERENCE}
+    now_listed = excluded & served
+    assert not now_listed, (
+        f"the {version} vendor lists now serve {sorted(now_listed)}; remove them from "
+        "_NOT_IN_ANY_VENDOR_REFERENCE"
+    )
+    declared = {_without_braces(op_id) for op_id in in_scope} - excluded
+    assert_op_ids_served(declared, served, spec_label=f"{spec_dir} vendor reference lists")
 
 
 def test_policy_calls_are_served_by_the_pinned_catalog_spec() -> None:

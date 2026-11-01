@@ -164,7 +164,9 @@ The steps:
 
 Two credential-backend shapes are supported. Both use the same chart; they
 differ only in `config.credentialBackend` and the credential-store block
-the schema then requires. The recommended flow substitutes an example
+the schema then requires. For a test cluster, the chart can also bring
+its own PostgreSQL, Keycloak and Vault: see
+[A throwaway install with the built-in parts](#a-throwaway-install-with-the-built-in-parts). The recommended flow substitutes an example
 values file rather than long `--set` strings (the `--set` form is in
 [`codebase/devops.md`](codebase/devops.md#install--upgrade)).
 
@@ -327,6 +329,72 @@ Diagnostics: the `gsm_secret_accessed` structlog event carries an
 which identity served a given read. A read that could not resolve any
 identity fails with `connector_error: GcpSecretManagerReadError` — never a
 Vault-named error on a Vault-free deploy (#2642).
+
+### A throwaway install with the built-in parts
+
+Use this for a test cluster, for example [kind](https://kind.sigs.k8s.io/),
+when you need a real login, a real policy check and a real Vault. The chart
+brings its own PostgreSQL, Keycloak and OpenBao (an open-source Vault), so
+you need nothing outside the cluster. The kind example file
+(`values-kind.yaml`) is not enough for this: it runs with mocks only.
+
+1. **Install an ingress controller** in the cluster. kind has none; see
+   kind's Ingress guide.
+2. **Write a values file.** Start from
+   [`../deploy/linux-server/values-single-node.yaml`](../deploy/linux-server/values-single-node.yaml),
+   the values of the single-server install. It turns on `corePostgres`,
+   `coreKeycloak` and `coreVault`. Add the answers of your cluster:
+
+   ```yaml
+   ingress:
+     className: nginx                  # your ingress controller's class
+     host: meho.example.com            # a name your browser reaches
+   networkPolicy:
+     ingressControllerNamespace: ingress-nginx
+     postgresCIDR: 10.244.0.0/16       # the pod range; kind's default
+     vaultCIDR: 10.244.0.0/16
+   coreKeycloak:
+     hostname: meho.example.com        # the same as ingress.host
+     firstTenantId: <a new UUID>
+     ci:                               # optional: a login for scripts
+       enabled: true
+       tenantId: <another new UUID>
+   ```
+
+3. **Keep the three keys at the end of `values-single-node.yaml`:**
+   `postgres.credentialsSecret`, `vault.address` and `config.vaultAddr`.
+   The chart needs them even with all built-in parts on, until it fills
+   them in itself (#4047). Without them, Helm refuses the values with
+   errors about empty or invalid fields, and does not say why.
+4. **Install and wait:**
+
+   ```bash
+   helm upgrade --install meho ./deploy/charts/meho/ \
+     --namespace meho --create-namespace --wait --wait-for-jobs --timeout 15m \
+     --set image.tag=<release tag> \
+     -f deploy/linux-server/values-single-node.yaml -f my-values.yaml
+   ```
+
+   Keep `--wait`: without it, Helm says `deployed` while a pod still fails.
+5. **Log in.** The install makes two people with temporary passwords. The
+   first login needs a browser: Keycloak asks for a new password, a name
+   and an email. See [`codebase/core-bootstrap.md`](codebase/core-bootstrap.md).
+   Give the people an email on a normal domain, such as `example.com`.
+   Today MEHO refuses a person whose email ends in `.local` or `.test`
+   (#5561).
+
+The CI login (`coreKeycloak.ci`) is a machine login. It cannot register an
+agent or create a grant; both answer 403 `human_principal_required`. A
+proof that uses an agent also needs a person's login. See
+[`codebase/core-bootstrap.md`, "The CI login"](codebase/core-bootstrap.md#the-ci-login-off-by-default).
+
+To test your own image on kind (`kind load docker-image` and
+`image.pullPolicy: Never`), see
+[`codebase/connector-packages.md`](codebase/connector-packages.md#try-your-image-on-a-local-kind-cluster).
+
+Throw the cluster away after the test. With `coreKeycloak.ci` on, the
+install has a login with fixed admin rights, so never use it for real
+work.
 
 ### Operator console (`/ui/*`) — optional, either backend
 

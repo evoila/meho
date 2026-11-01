@@ -10,11 +10,10 @@ on the appliance. MEHO does the whole install inside its own call:
 1. ``list_before`` -- the adapters on the appliance. The vendor answers
    ``GET /storage-replication-adapters`` with a task; MEHO reads the task
    until it ends.
-2. ``download`` -- MEHO fetches the archive from ``archive_url`` into a
-   temporary folder (name prefix :data:`TEMP_PREFIX`, file ending
-   ``.meho-partial`` until the check passed). No redirect is followed, so
-   no credential can travel to another host; the address passes the same
-   screen as a target address.
+2. ``download`` -- MEHO fetches the archive into a temporary folder (name
+   prefix :data:`TEMP_PREFIX`, file ending ``.meho-partial`` until the
+   check passed). No redirect is followed, so no credential can travel to
+   another host; the address passes the same screen as a target address.
 3. ``check_sha256`` -- the archive's SHA-256 must equal ``sha256``; else
    nothing is uploaded.
 4. ``upload`` -- ``POST /storage-replication-adapters`` with the archive
@@ -31,8 +30,13 @@ timeout. A broken upload leaves nothing on the appliance that MEHO knows
 of: the answer reads the list again and says whether an adapter was
 installed.
 
-The answer and the logs carry the archive URL without its query part:
-a signed URL keeps its token there.
+The archive URL comes in one of two ways. ``archive_url`` is a plain
+URL with no query part. A signed URL keeps its token in the query part,
+and the parameters of a call are shown in the public preview, the
+approval and the broadcast; so a signed URL is read from Vault instead:
+``archive_url_secret_ref`` names a secret whose field ``url`` holds it,
+read under the operator's identity. The answer, the preview and the logs
+carry the URL without its query part.
 
 The operation is ``destructive``: only a person runs it, after
 ``preview_operation``. The preview builder reads the appliance and its
@@ -62,6 +66,7 @@ from meho_backplane.connectors.srm.setup_api import (
     SetupApi,
     SetupApiError,
     Steps,
+    parse_ref,
     wait_for_task,
 )
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
@@ -113,18 +118,48 @@ class _ArchiveError(RuntimeError):
     """The archive could not be fetched or checked. The message has no URL query."""
 
 
-def _archive_url(params: dict[str, Any]) -> tuple[httpx.URL, str]:
-    """Check ``archive_url``; return it and the form that answers and logs show."""
-    raw = params.get("archive_url")
+def _archive_url(raw: Any, *, allow_query: bool) -> tuple[httpx.URL, str]:
+    """Check an archive URL; return it and the form that answers and logs show.
+
+    The messages never carry the value: the URL may be a signed one.
+    """
     if not isinstance(raw, str):
-        raise ValueError("archive_url must be an http or https URL")
+        raise ValueError("must be an http or https URL")
     parts = urlsplit(raw.strip())
     if parts.scheme not in ("http", "https") or not parts.hostname:
-        raise ValueError("archive_url must be an http or https URL with a host")
+        raise ValueError("must be an http or https URL with a host")
     if parts.username is not None or parts.password is not None or parts.fragment:
-        raise ValueError("archive_url must not carry a user name, password or fragment")
+        raise ValueError("must not carry a user name, password or fragment")
+    if parts.query and not allow_query:
+        raise ValueError(
+            "must have no query part: a signed URL keeps its token there, and the parameters "
+            "are shown in the preview, the approval and the broadcast; put the full URL in "
+            "a Vault secret (field url) and give archive_url_secret_ref instead"
+        )
     shown = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
     return httpx.URL(raw.strip()), shown
+
+
+async def _resolve_archive(
+    connector: SrmConnector, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+) -> tuple[httpx.URL, str]:
+    """The archive URL from ``archive_url`` or from Vault, and the form answers show."""
+    direct = params.get("archive_url")
+    ref = params.get("archive_url_secret_ref")
+    if (direct is None) == (ref is None):
+        raise ValueError("give exactly one of archive_url and archive_url_secret_ref")
+    if ref is None:
+        try:
+            return _archive_url(direct, allow_query=False)
+        except ValueError as exc:
+            raise ValueError(f"archive_url {exc}") from None
+    data = await connector.setup_secret_loader(
+        target, operator, "archive_url_secret_ref", parse_ref(params, "archive_url_secret_ref")
+    )
+    try:
+        return _archive_url(data.get("url"), allow_query=True)
+    except ValueError as exc:
+        raise ValueError(f"archive_url_secret_ref: the secret's field url {exc}") from None
 
 
 def _expected_sha256(params: dict[str, Any]) -> str:
@@ -303,7 +338,7 @@ async def storage_adapter_install(
     connector: SrmConnector, operator: Operator, target: DrTargetLike, params: dict[str, Any]
 ) -> dict[str, Any]:
     """``srm.storage_adapter.install``; see the module docstring."""
-    url, shown = _archive_url(params)
+    url, shown = await _resolve_archive(connector, operator, target, params)
     expected = _expected_sha256(params)
     api = setup_api_for(connector, operator, target, params)
     steps = Steps(_STEPS)
@@ -370,12 +405,14 @@ async def storage_adapter_install_preview(ctx: PreviewContext) -> dict[str, Any]
     Raises (and so refuses the park) when the appliance's setup API cannot
     be read or the archive URL answers 404 or 410.
     """
+    from meho_backplane.connectors.srm.connector import SrmConnector
+
     connector = ctx.connector_instance
-    if connector is None or not hasattr(connector, "setup_credentials_loader"):
+    if not isinstance(connector, SrmConnector):
         raise ValueError("the preview needs the srm connector")
-    url, shown = _archive_url(ctx.params)
+    url, shown = await _resolve_archive(connector, ctx.operator, ctx.target, ctx.params)
     expected = _expected_sha256(ctx.params)
-    api = setup_api_for(connector, ctx.operator, ctx.target, ctx.params)  # type: ignore[arg-type]
+    api = setup_api_for(connector, ctx.operator, ctx.target, ctx.params)
     info = await api.call("GET", "/appliance")
     adapters = await list_adapters(api)
     archive = await _archive_check(url)

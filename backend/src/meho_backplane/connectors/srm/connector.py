@@ -74,7 +74,9 @@ from meho_backplane.connectors.srm.session import (
 )
 from meho_backplane.connectors.srm.setup_api import (
     SetupCredentialsLoader,
+    SetupSecretLoader,
     load_param_basic_credentials,
+    load_param_secret,
 )
 from meho_backplane.connectors.vmware_shared.dr_api_file import dr_api_file_get
 from meho_backplane.connectors.vmware_shared.dr_rest import DrRestConnector, DrTargetLike
@@ -113,6 +115,9 @@ class SrmConnector(DrRestConnector):
         self.setup_lock = asyncio.Lock()
         #: Reads a username and password named by an op param (a Vault reference).
         self.setup_credentials_loader: SetupCredentialsLoader = load_param_basic_credentials
+        # Reads a secret named in the op params, for example the signed archive
+        # URL of a storage replication adapter. A test swaps it.
+        self.setup_secret_loader: SetupSecretLoader = load_param_secret
 
     async def about(
         self, operator: Operator, target: DrTargetLike, params: dict[str, Any]

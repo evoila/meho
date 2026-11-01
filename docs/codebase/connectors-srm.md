@@ -67,7 +67,7 @@ start with `/api/rest/configure/v2`):
 | `srm.appliance.time.set` | Set the time zone and the time sync (NTP servers, the host, or none). | The time settings read back. | `PUT /appliance/settings/time` | change (`dangerous`, waits for approval) | 8.8, 9.0, 9.1 |
 | `srm.appliance.csr.create` | Make a new key and a certificate signing request. The key stays on the appliance. | The request (PEM), its subject, names and a hash of its public key. | `POST /appliance/certificates/actions/generate-csr` | change (`caution`, waits for approval) | 8.8, 9.0, 9.1 |
 | `srm.appliance.certificate.set` | Install the signed certificate for the request, with its CA chain; or add or remove trusted CA certificates. | Server certificate: `accepted` with the task, or `already_running`, `refused`, `failed`. CA change: `done`. | `POST /appliance/certificates/server/actions/update`, `POST /appliance/certificates/ca`, `POST /appliance/certificates/ca/actions/remove` | change (`dangerous`, waits for approval) | 8.8, 9.0, 9.1 |
-| `srm.storage_adapter.install` | Fetch a storage replication adapter archive, check its SHA-256, upload it. | The new adapter, the archive (name, source, size, SHA-256), the adapter lists before and after, the steps, the clean-up. | `GET /storage-replication-adapters`, `POST /storage-replication-adapters` | change (`destructive`: only a person, after a preview) | 8.8, 9.0, 9.1 |
+| `srm.storage_adapter.install` | Fetch a storage replication adapter archive (a plain URL, or a signed URL read from Vault), check its SHA-256, upload it. | The new adapter, the archive (name, source, size, SHA-256), the adapter lists before and after, the steps, the clean-up. | `GET /storage-replication-adapters`, `POST /storage-replication-adapters` | change (`destructive`: only a person, after a preview) | 8.8, 9.0, 9.1 |
 
 Every operation exists on every covered version, so none needs a
 version check yet. The Tasks that add 9.x-only operations add that check.
@@ -508,7 +508,7 @@ does all the work inside its own call (`storage_adapter.py`):
 
 1. `list_before` -- `GET /storage-replication-adapters`. The vendor
    answers with a task; MEHO reads it until it ends.
-2. `download` -- MEHO fetches `archive_url` into a temporary folder
+2. `download` -- MEHO fetches the archive into a temporary folder
    (`meho-srm-sra-*` under the system temp folder, the file named
    `<name>.meho-partial` until the check passed). Size limit 4 GiB.
 3. `check_sha256` -- the SHA-256 must equal `sha256`; else nothing is
@@ -536,20 +536,32 @@ Rules:
 - **A broken upload.** MEHO reads the list again and sets `installed`:
   `false` (nothing installed), `true`, or `null` when the list could not
   be read.
+- **The archive URL.** Give exactly one of two inputs. `archive_url` is
+  a plain URL with no query part, user name or password. A signed URL
+  (its token is in the query part) goes into a Vault secret, in the field
+  `url`, and `archive_url_secret_ref` names that secret. MEHO reads it
+  under the operator's identity, like `appliance_secret_ref`. The reason:
+  the parameters of a call are shown in the public preview, the approval
+  row and the broadcast feed, so a token there would be visible. An
+  `archive_url` with a query part is refused before anything runs.
 - **Credentials and URLs.** MEHO sends no credential to the archive
   server and follows no redirect, so nothing crosses to another host. The
   archive address passes the same address screen as a target address.
-  Answers, errors and logs show the URL without its query part (a signed
-  URL keeps its token there); a connection error is named by its class
-  only.
-- **Preview.** The operation is `destructive`: agents cannot run it, and
-  a person calls `preview_operation` first. The preview builder reads the
-  appliance and its adapters and sends `HEAD` to the archive URL. Its
-  `blast_radius` names the appliance and the archive (`object`), the
-  adapters already there (`children`) and what cannot be undone. It
-  refuses when the setup API cannot be read or the archive URL answers
-  404 or 410. `call_operation` without the matching `preview_hash` is
-  refused.
+  Answers, previews, errors and logs show the URL without its query part;
+  a connection error is named by its class only.
+- **Preview, in two steps.** The operation is `destructive`: agents
+  cannot run it, and a person calls `preview_operation` first. That public
+  preview shows the redacted parameters, the risk level and the
+  `preview_hash`; it does not show the adapter's impact, because it runs
+  with no connector and sends nothing. `call_operation` with the
+  `preview_hash` then parks the call for approval, and at that point the
+  preview builder runs with the connector: it reads the appliance and its
+  adapters and sends `HEAD` to the archive URL. Its `blast_radius` names
+  the appliance and the archive (`object`), the adapters already there
+  (`children`) and what cannot be undone; the approver reads it in the
+  approval row. The builder refuses when the setup API cannot be read or
+  the archive URL answers 404 or 410. `call_operation` without the
+  matching `preview_hash` is refused.
 
 ## Dependencies
 
@@ -603,7 +615,9 @@ Rules:
 - `backend/tests/test_connectors_srm_appliance_certs_sra.py` -- the
   request, the certificate checks, CA changes, and the adapter install
   (good run, unreachable archive, wrong SHA-256, redirect, broken upload,
-  keep-alive, clean-up, preview, refused without a preview hash).
+  keep-alive, clean-up, a signed URL from Vault in no public preview and
+  no approval row, a plain URL with a query part refused, preview,
+  refused without a preview hash).
 
 ## Known issues
 

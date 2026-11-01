@@ -67,10 +67,12 @@ __all__ = [
     "SetupApiError",
     "SetupApiUnreachableError",
     "SetupCredentialsLoader",
+    "SetupSecretLoader",
     "Steps",
     "as_dict",
     "find_running_task",
     "load_param_basic_credentials",
+    "load_param_secret",
     "now_iso",
     "parse_ref",
     "task_view",
@@ -125,6 +127,9 @@ TASK_POLL_SECONDS: float = 2.0
 
 SetupCredentialsLoader = Callable[["DrTargetLike", "Operator", str, str], Awaitable[dict[str, str]]]
 """Async callable ``(target, operator, param, secret_ref) -> {"username", "password"}``."""
+
+SetupSecretLoader = Callable[["DrTargetLike", "Operator", str, str], Awaitable[dict[str, object]]]
+"""Async callable ``(target, operator, param, secret_ref) -> the secret's fields``."""
 
 #: httpx errors raised before the request left MEHO: no connection, or the
 #: pool, proxy or URL refused it. The appliance got nothing.
@@ -190,6 +195,17 @@ def parse_ref(params: dict[str, Any], name: str) -> str:
     return raw.strip()
 
 
+async def load_param_secret(
+    target: DrTargetLike, operator: Operator, param: str, secret_ref: str
+) -> dict[str, object]:
+    """Read the secret at *secret_ref* (an op param) from Vault, under the operator's identity.
+
+    Errors name *param*, never a value.
+    """
+    stub = _RefTarget(name=target.name, host=target.host, secret_ref=secret_ref)
+    return await load_param_secret_data(stub, operator, param=param)
+
+
 async def load_param_basic_credentials(
     target: DrTargetLike, operator: Operator, param: str, secret_ref: str
 ) -> dict[str, str]:
@@ -197,8 +213,7 @@ async def load_param_basic_credentials(
 
     Errors name *param*, never a value.
     """
-    stub = _RefTarget(name=target.name, host=target.host, secret_ref=secret_ref)
-    data = await load_param_secret_data(stub, operator, param=param)
+    data = await load_param_secret(target, operator, param, secret_ref)
     username = data.get("username")
     password = data.get("password")
     if not isinstance(username, str) or not isinstance(password, str):

@@ -250,8 +250,18 @@ _SRA_INSTALL = SrmTypedOp(
                 "type": "string",
                 "minLength": 1,
                 "description": (
-                    "http(s) URL of the adapter archive (.tar.gz) that MEHO can reach. No "
-                    "user name or password in it; MEHO follows no redirect."
+                    "http(s) URL of the adapter archive (.tar.gz) that MEHO can reach, with no "
+                    "query part, user name or password. MEHO follows no redirect. For a signed "
+                    "URL (its token is in the query part) give archive_url_secret_ref instead."
+                ),
+            },
+            "archive_url_secret_ref": {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "Vault path of a secret whose field url holds the archive URL. Use it for "
+                    "a signed URL: the token stays in Vault and is in no preview, approval, "
+                    "broadcast or answer. MEHO reads it under the operator's identity."
                 ),
             },
             "sha256": {
@@ -260,7 +270,8 @@ _SRA_INSTALL = SrmTypedOp(
                 "description": "SHA-256 of the archive from the storage vendor: 64 hex digits.",
             },
         },
-        "required": ["appliance_secret_ref", "archive_url", "sha256"],
+        "required": ["appliance_secret_ref", "sha256"],
+        "oneOf": [{"required": ["archive_url"]}, {"required": ["archive_url_secret_ref"]}],
         "additionalProperties": False,
         "examples": [
             {
@@ -303,8 +314,10 @@ _SRA_INSTALL = SrmTypedOp(
         ),
         "preconditions": (
             "A person called preview_operation with the same inputs and passes its "
-            "preview_hash. The archive and its SHA-256 come from the storage vendor. "
-            "Use async: true: the download and upload can take many minutes."
+            "preview_hash. The archive and its SHA-256 come from the storage vendor. A "
+            "signed archive URL goes into a Vault secret (field url) named by "
+            "archive_url_secret_ref, never into archive_url. Use async: true: the download "
+            "and upload can take many minutes."
         ),
         "output_shape": (
             "outcome installed or failed; installed (true, false, or null when unknown "

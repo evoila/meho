@@ -19,9 +19,12 @@ server, and certificates made in the test:
   wrong SHA-256, a redirect to another host and an upload that breaks off
   (nothing installed, and the answer says so); the vendor session kept
   alive during a slow download; the temporary folder removed every time
-  and old leftovers removed; the URL query (a signed-URL token) in no
-  answer; the preview with its blast radius, the preview that refuses a
-  missing archive, and the call refused without a matching preview hash.
+  and old leftovers removed; a signed URL read from Vault
+  (``archive_url_secret_ref``): its token goes to the archive server only
+  and is in no answer, no public preview and no approval row; a plain
+  ``archive_url`` with a query part is refused; the preview with its blast
+  radius, the preview that refuses a missing archive, and the call refused
+  without a matching preview hash.
 
 Fixture values are made up; no real host, user or id appears here.
 """
@@ -49,6 +52,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
+from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -61,12 +65,15 @@ from meho_backplane.connectors.srm import (
     register_srm_typed_operations,
 )
 from meho_backplane.connectors.srm import storage_adapter as sra
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
     reset_handler_cache,
 )
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
+from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.settings import get_settings
 
 _HOST = "srm-certs.test.invalid"
@@ -79,8 +86,10 @@ _SSO_PASSWORD = "sso-admin-made-up"
 _APPLIANCE_FQDN = "srm-01.test.invalid"
 _ARCHIVE_HOST = "downloads.test.invalid"
 _ARCHIVE_PATH = "/sra/made-up-adapter.tar.gz"
+_PLAIN_ARCHIVE_URL = f"https://{_ARCHIVE_HOST}{_ARCHIVE_PATH}"
 _SIGNED_QUERY = "sig=made-up-signed-url-token"
-_ARCHIVE_URL = f"https://{_ARCHIVE_HOST}{_ARCHIVE_PATH}?{_SIGNED_QUERY}"
+_SIGNED_ARCHIVE_URL = f"{_PLAIN_ARCHIVE_URL}?{_SIGNED_QUERY}"
+_ARCHIVE_REF = "<vault-path-of-signed-archive-url>"
 _ARCHIVE = b"made-up adapter archive bytes " * 1000
 _ARCHIVE_SHA = hashlib.sha256(_ARCHIVE).hexdigest()
 
@@ -153,11 +162,19 @@ async def _loader(_target: object, _operator: Operator, param: str, _ref: str) -
     return {"username": "admin", "password": _ADMIN_PASSWORD}
 
 
+async def _secret_loader(
+    _target: object, _operator: Operator, param: str, ref: str
+) -> dict[str, object]:
+    assert (param, ref) == ("archive_url_secret_ref", _ARCHIVE_REF)
+    return {"url": _SIGNED_ARCHIVE_URL}
+
+
 async def _connector(_stub_embedding: AsyncMock) -> SrmConnector:
     await register_srm_typed_operations()
     instance = get_or_create_connector_instance(SrmConnector)
     assert isinstance(instance, SrmConnector)
     instance.setup_credentials_loader = _loader
+    instance.setup_secret_loader = _secret_loader
     return instance
 
 
@@ -426,12 +443,19 @@ def _mock_sra(mock: respx.MockRouter, *, after: list[Any] | None = None) -> dict
 
 
 def _sra_params(**overrides: Any) -> dict[str, Any]:
+    """The install with a signed URL read from Vault (the default of these tests)."""
     params = {
         "appliance_secret_ref": _ADMIN_REF,
-        "archive_url": _ARCHIVE_URL,
+        "archive_url_secret_ref": _ARCHIVE_REF,
         "sha256": _ARCHIVE_SHA,
     }
     params.update(overrides)
+    return params
+
+
+def _plain_params() -> dict[str, Any]:
+    params = _sra_params(archive_url=_PLAIN_ARCHIVE_URL)
+    del params["archive_url_secret_ref"]
     return params
 
 
@@ -451,7 +475,7 @@ async def test_install_downloads_checks_uploads_and_lists(
     assert body["adapter"]["name"] == "Made-up SRA"
     assert body["archive"] == {
         "name": "made-up-adapter.tar.gz",
-        "source": f"https://{_ARCHIVE_HOST}{_ARCHIVE_PATH}",
+        "source": _PLAIN_ARCHIVE_URL,
         "size": len(_ARCHIVE),
         "sha256": _ARCHIVE_SHA,
         "expected_sha256": _ARCHIVE_SHA,
@@ -460,12 +484,122 @@ async def test_install_downloads_checks_uploads_and_lists(
     assert upload.headers["content-type"].startswith("multipart/form-data")
     assert upload.headers["x-dr-session"] == "setup-1"
     assert _ARCHIVE in upload.read()
-    assert "authorization" not in routes["archive"].calls[0].request.headers
-    assert "x-dr-session" not in routes["archive"].calls[0].request.headers
+    download = routes["archive"].calls[0].request
+    # The signed URL from Vault goes to the archive server, with its token.
+    assert download.url.query.decode() == _SIGNED_QUERY
+    assert "authorization" not in download.headers
+    assert "x-dr-session" not in download.headers
     assert [row["status"] for row in body["steps"]] == ["done"] * 5
     assert body["cleanup"]["temporary_folder_removed"] is True
     _no_temp_folders(tmp_path)
     _no_secret(body)
+
+
+async def test_plain_archive_url_needs_no_vault_read(
+    _stub_embedding: AsyncMock, tmp_path: Path
+) -> None:
+    connector = await _connector(_stub_embedding)
+    connector.setup_secret_loader = AsyncMock(side_effect=AssertionError("no Vault read"))
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        routes = _mock_sra(mock)
+        body = await connector.storage_adapter_install(_operator(), _Target(), _plain_params())
+    assert body["outcome"] == "installed", body
+    assert routes["archive"].calls[0].request.url.query == b""
+    _no_temp_folders(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("params", "match"),
+    [
+        (_sra_params(archive_url=_SIGNED_ARCHIVE_URL), "exactly one of"),
+        (_plain_params() | {"archive_url": _SIGNED_ARCHIVE_URL}, "archive_url must have no query"),
+        (_plain_params() | {"archive_url": f"https://u:p@{_ARCHIVE_HOST}/x"}, "user name"),
+    ],
+)
+async def test_archive_url_with_a_query_or_login_is_refused_before_anything_runs(
+    _stub_embedding: AsyncMock, params: dict[str, Any], match: str
+) -> None:
+    """A signed URL in ``archive_url`` would show its token in the preview and approval."""
+    connector = await _connector(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        routes = _mock_sra(mock)
+        head = mock.head(f"https://{_ARCHIVE_HOST}{_ARCHIVE_PATH}").respond(200)
+        with pytest.raises(ValueError, match=match) as handler_error:
+            await connector.storage_adapter_install(_operator(), _Target(), params)
+        with pytest.raises(ValueError, match=match) as preview_error:
+            await sra.storage_adapter_install_preview(_preview_ctx(connector, params))
+    assert _SIGNED_QUERY not in str(handler_error.value)
+    assert _SIGNED_QUERY not in str(preview_error.value)
+    assert routes["archive"].call_count == 0
+    assert routes["upload"].call_count == 0
+    assert head.call_count == 0
+
+
+async def test_secret_without_a_url_field_is_refused(_stub_embedding: AsyncMock) -> None:
+    connector = await _connector(_stub_embedding)
+    connector.setup_secret_loader = AsyncMock(return_value={"token": "made-up"})
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        routes = _mock_sra(mock)
+        with pytest.raises(ValueError, match="archive_url_secret_ref: the secret's field url"):
+            await connector.storage_adapter_install(_operator(), _Target(), _sra_params())
+    assert routes["archive"].call_count == 0
+
+
+async def test_public_preview_and_approval_carry_the_reference_not_the_token(
+    _stub_embedding: AsyncMock,
+) -> None:
+    """The signed URL is in no public preview and in no approval row.
+
+    ``preview_operation`` shows the redacted parameters and the preview
+    hash; the blast radius is built when the call parks for approval.
+    """
+    await _connector(_stub_embedding)
+    params = _sra_params()
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        routes = _mock_sra(mock)
+        routes["list"].mock(
+            return_value=httpx.Response(202, json={"id": "list-1", "status": "RUNNING"})
+        )
+        head = mock.head(f"https://{_ARCHIVE_HOST}{_ARCHIVE_PATH}").respond(
+            200, headers={"content-length": str(len(_ARCHIVE))}
+        )
+        preview = await preview_dispatch(
+            operator=_operator(),
+            connector_id=SRM_CONNECTOR_ID,
+            op_id=sra.OP_ID,
+            target=_Target(),
+            params=params,
+        )
+        assert preview["status"] == "ok", preview
+        assert preview["redacted_body"]["archive_url_secret_ref"] == _ARCHIVE_REF
+        _no_secret(preview)
+        result = await dispatch(
+            operator=_operator(),
+            connector_id=SRM_CONNECTOR_ID,
+            op_id=sra.OP_ID,
+            target=_Target(),
+            params=params,
+            preview_hash=preview["preview_hash"],
+        )
+    assert result.status == "awaiting_approval", result
+    # The park built the blast radius: the signed URL went to the archive server.
+    assert head.call_count == 1
+    assert head.calls[0].request.url.query.decode() == _SIGNED_QUERY
+    assert routes["archive"].call_count == 0
+    assert routes["upload"].call_count == 0
+    async with get_sessionmaker()() as session:
+        row = (
+            await session.execute(
+                select(ApprovalRequest).where(
+                    ApprovalRequest.id == UUID(result.extras["approval_request_id"])
+                )
+            )
+        ).scalar_one()
+    assert row.params["archive_url_secret_ref"] == _ARCHIVE_REF
+    archive = row.proposed_effect["preview"]["blast_radius"]["object"]["archive"]
+    assert archive["source"] == _PLAIN_ARCHIVE_URL
+    _no_secret(row.params)
+    _no_secret(row.proposed_effect)
 
 
 async def test_wrong_sha256_uploads_nothing(_stub_embedding: AsyncMock, tmp_path: Path) -> None:

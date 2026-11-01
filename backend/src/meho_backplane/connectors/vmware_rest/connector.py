@@ -92,7 +92,7 @@ import os
 import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import httpx
 import structlog
@@ -164,6 +164,11 @@ from meho_backplane.connectors.vmware_rest.soap import (
     parse_service_content,
     parse_soap_fault,
     soap_action_for_version,
+)
+from meho_backplane.connectors.vmware_rest.soap_host_access import (
+    HOST_ACCESS_SOAP_METHODS,
+    build_host_access_envelope,
+    parse_host_access_response,
 )
 from meho_backplane.connectors.vmware_rest.soap_pbm import (
     PBM_PATH,
@@ -1852,7 +1857,7 @@ class VmwareRestConnector(HttpConnector):
             if promote_managed_object_not_found:
                 self._raise_managed_object_not_found_fault(fault, vmomi_path, json)
             message = f"vmware vim {method} failed on target {target.name!r} ({mo_type}:{moid})"
-            raise self._soap_fault_error(fault, target, message=message)
+            raise self._soap_fault_error(fault, target, message=message, stage="call")
         resp.raise_for_status()
         return self._parse_esxi_soap_response(method, resp.text)
 
@@ -2435,11 +2440,15 @@ class VmwareRestConnector(HttpConnector):
                 str(body.get("datastorePath", "")),
                 body.get("searchSpec", {}) or {},
             )
+        if method in HOST_ACCESS_SOAP_METHODS:
+            # Host local users and Active Directory (``soap_host_access``).
+            return build_host_access_envelope(mo_type, moid, method, body)
         raise RuntimeError(
             f"vmware vim method {method!r} has no SOAP builder — the standalone-ESXi "
             f"SOAP transport (#3363) implements RetrievePropertiesEx / QueryBootDevices "
             f"/ CreateNasDatastore / MarkAs*_Task / RefreshDatastore(StorageInfo) / "
-            f"SearchDatastore(SubFolders)_Task only"
+            f"SearchDatastore(SubFolders)_Task and the host user and Active Directory calls "
+            f"only"
         )
 
     @staticmethod
@@ -2460,6 +2469,8 @@ class VmwareRestConnector(HttpConnector):
         """
         if method == "RetrievePropertiesEx":
             return parse_retrieve_result(xml)
+        if method in HOST_ACCESS_SOAP_METHODS:
+            return parse_host_access_response(method, xml)
         if method == "QueryBootDevices":
             return parse_boot_devices(xml)
         if method in ("RefreshDatastore", "RefreshDatastoreStorageInfo"):
@@ -2473,6 +2484,7 @@ class VmwareRestConnector(HttpConnector):
         target: VsphereTargetLike,
         *,
         message: str,
+        stage: Literal["establish", "call"] = "establish",
     ) -> Exception:
         """Map a parsed :class:`SoapFault` to the error the caller should raise.
 
@@ -2489,6 +2501,11 @@ class VmwareRestConnector(HttpConnector):
         Both arms also carry the parsed *fault* (:func:`.soap.attach_soap_fault`),
         so the error envelope can show ``extras.upstream_fault`` with the fault
         type and the full faultstring (#3567).
+
+        *stage* says which step faulted: the session login (``establish``,
+        the default) or a call on a live session (``call``). A caller that
+        sends a login of its own (the domain join) reads it to tell a
+        refused request login from a refused target credential.
         """
         err: Exception
         if fault.fault_type in _SOAP_AUTH_FAULT_TYPES:
@@ -2499,6 +2516,7 @@ class VmwareRestConnector(HttpConnector):
                 target_name=getattr(target, "name", None),
                 host=getattr(target, "host", None),
                 secret_ref=getattr(target, "secret_ref", None),
+                stage=stage,
             )
         else:
             fault_type = fault.fault_type or fault.faultcode or "SoapFault"
@@ -3335,6 +3353,40 @@ class VmwareRestConnector(HttpConnector):
 
         return await host_datastores_impl(self, operator, target, params)
 
+    async def host_local_user_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.local_user.list`` -- the local users of one ESXi host.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_access.host_local_user_list_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_access import (
+            host_local_user_list_impl,
+        )
+
+        return await host_local_user_list_impl(self, operator, target, params)
+
+    async def host_ad_status(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.ad.status`` -- the Active Directory domain of one host.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_access.host_ad_status_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_access import (
+            host_ad_status_impl,
+        )
+
+        return await host_ad_status_impl(self, operator, target, params)
+
     async def host_config_show(
         self,
         operator: Operator,
@@ -3649,6 +3701,38 @@ class VmwareRestConnector(HttpConnector):
 
         return await vm_hardware_show_impl(self, operator, target, params)
 
+    async def vm_boot_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vm.boot.show`` -- one VM's firmware, secure boot and boot order.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vm_boot.vm_boot_show_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vm_boot import vm_boot_show_impl
+
+        return await vm_boot_show_impl(self, operator, target, params)
+
+    async def vm_advanced_settings_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vm.advanced_settings.show`` -- one VM's extraConfig keys and values.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vm_advanced_settings.vm_advanced_settings_show_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vm_advanced_settings import (
+            vm_advanced_settings_show_impl,
+        )
+
+        return await vm_advanced_settings_show_impl(self, operator, target, params)
+
     async def license_list(
         self,
         operator: Operator,
@@ -3961,6 +4045,31 @@ class VmwareRestConnector(HttpConnector):
         )
 
         return await host_tpm_attestation_impl(self, operator, target, params)
+
+    def trace_response_body(self, response: httpx.Response) -> Any:
+        """Mask secret-named setting values before the flight recorder records the answer.
+
+        A VM advanced setting (an ``OptionValue`` of ``config.extraConfig``)
+        can hold a secret in a plain string the shared redaction does not
+        know by shape, for example a cloud-init user-data blob. So every JSON
+        answer passes :func:`~meho_backplane.connectors.vmware_rest.trace.trace_payload`
+        before the trace stores it. A body that is not JSON is recorded as
+        the shared engine sees fit. A failure in the masking records a
+        marker, never the raw body.
+        """
+        from meho_backplane.connectors.vmware_rest.trace import (
+            SECRET_SETTING_MARKER,
+            trace_payload,
+        )
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        try:
+            return trace_payload(payload)
+        except Exception:  # a trace must never break the call; store the marker instead
+            return SECRET_SETTING_MARKER
 
     async def aclose(self) -> None:
         """Revoke every cached session before closing the httpx pool.

@@ -19,6 +19,9 @@ Today the connector ships:
   mesh diagnostics (start a run, list the runs, read the findings), jobs,
   alerts and the inventory for a migration (resource containers, the
   compute tree, datastores and networks), and
+- **the site setup**: list the compute and network profiles, create or
+  change one, pair with a remote site or remove a pairing, and trust the
+  remote site's certificate. Each change waits for a person's approval, and
 - **four service mesh changes** (create, change, resync, delete) with the
   status read `hcx.task.get`. Each change waits for a person's approval, and
 - **network extension**: one read of the extended networks and three
@@ -27,7 +30,9 @@ Today the connector ships:
   extension" below), and
 - **seven migration operations**: validate, start, list and cancel
   migrations, list and set mobility groups, and set the switchover window
-  (see "The migration operations").
+  (see "The migration operations"), and
+- the **Network Extension HA groups**: one read and one change that
+  builds or dissolves a group (see "Network Extension HA groups" below).
 
 Why `hcx.api_file.get` came first: Broadcom publishes no file and no
 versioned reference of the main HCX API (`/hybridity/api/...`). Only a
@@ -60,6 +65,10 @@ Package: `backend/src/meho_backplane/connectors/hcx/`.
 | `hcx.inventory.compute.list` | The vCenter instances HCX knows with their datacenters and clusters, as a flat list with parent ids. | `POST /hybridity/api/service/inventory/vc/list` | read (`safe`, no approval) | 4.11, 9.x |
 | `hcx.inventory.datastore.list` | The datastores of one or more clusters of a vCenter instance. | `POST /hybridity/api/service/inventory/vc/datastores/query` | read (`safe`, no approval) | 4.11, 9.x |
 | `hcx.inventory.network.list` | The networks (port groups, segments) of one site. | `POST /hybridity/api/service/inventory/networks` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.profile.list` | The compute profiles and network profiles, as one flat list with `profile_type` and `profile_id`. | `GET /hybridity/api/interconnect/computeProfiles`, `GET /hybridity/api/networks` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.profile.set` | Create or change one compute or network profile. Returns `accepted` with the task id (compute) or job id (network). | `POST /hybridity/api/interconnect/computeProfiles`, `GET` then `PUT /hybridity/api/interconnect/computeProfiles/{computeProfileId}`, `POST /hybridity/api/networks`, `GET` then `PUT /hybridity/api/networks/{networkId}` | change (`dangerous`) | 4.11, 9.x |
+| `hcx.site_pairing.set` | Pair with a remote site (user and password from a Vault path), or remove a pairing that no service mesh uses. Returns the job id, or the remote certificate when it is not trusted. | `GET /hybridity/api/cloudConfigs`, `POST /hybridity/api/cloudConfigs`, `GET /hybridity/api/interconnect/serviceMesh`, `DELETE /hybridity/api/endpointPairing/{endpointId}` | change (`dangerous`) | 4.11, 9.x |
+| `hcx.certificate.trust` | Add one PEM certificate to the Manager's trusted certificates, optionally only when its SHA-256 fingerprint matches. | `POST /hybridity/api/admin/certificates` | change (`dangerous`) | 4.11, 9.x |
 | `hcx.service_mesh.create` | Start the creation of a service mesh from two compute profiles (local, then paired site) and a list of services. Returns `accepted` with the interconnect task id. | `POST /hybridity/api/interconnect/serviceMesh` | change (`dangerous`) | 4.11, 9.x |
 | `hcx.service_mesh.update` | Change a service mesh: its services, compute profiles, uplinks, switch pairs, bandwidth or traffic settings. Reads the mesh, merges the change, sends it back. Returns `accepted` with the task id. | `GET` then `PUT /hybridity/api/interconnect/serviceMesh/{serviceMeshId}` | change (`dangerous`) | 4.11, 9.x |
 | `hcx.service_mesh.resync` | Resync a service mesh with its compute profiles: HCX computes the difference and applies it, and can redeploy appliances. Returns `accepted` with the task id. | `POST /hybridity/api/interconnect/serviceMesh/{serviceMeshId}/resync` | change (`dangerous`) | 4.11, 9.x |
@@ -76,6 +85,8 @@ Package: `backend/src/meho_backplane/connectors/hcx/`.
 | `hcx.mobility_group.list` | The mobility groups (migration waves) with state and configuration status, or the summary of one group. | `POST /hybridity/api/v2/mobility-groups/query`, `GET /hybridity/api/v2/mobility-groups/{mobilityGroupId}/summary` | read (`safe`, no approval) | 4.11, 9.x |
 | `hcx.mobility_group.set` | Make a mobility group, or replace the settings of one. Starts nothing. | `POST /hybridity/api/mobility/groups`, `PUT /hybridity/api/mobility/groups` | change (`caution`, waits for approval) | 4.11, 9.x |
 | `hcx.migration.schedule` | Set or clear the switchover window (and optionally the copy window) of a mobility group. | `POST /hybridity/api/mobility/groups/{mobilityGroupId}/schedule` | change (`dangerous`, waits for approval) | 4.11, 9.x |
+| `hcx.network_extension.ha.list` | Network Extension HA groups: the member appliances with their partner and role (active or standby), and the group state (healthy, degraded, failing over, failed, maintenance). | `GET /hybridity/api/interconnect/appliances/ha/groups` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.network_extension.ha.set` | Build an HA group from a free Network Extension appliance at the source site (HCX picks the standby pair), or dissolve a group; the appliances become standalone again. Returns the task. | `POST /hybridity/api/interconnect/appliances/ha/groups`, `DELETE /hybridity/api/interconnect/appliances/ha/groups/{groupId}` | change (`dangerous`, approval) | 4.11, 9.x |
 
 Every operation in the table exists on every version the connector
 covers, so none stops early with a version message.
@@ -105,6 +116,11 @@ covers, so none stops early with a version message.
   (`inventory_ops.py`) hold the other five. `HcxTypedOp`, the group keys
   and the schema helpers live in `op_types.py`, so every op module shares
   them.
+- `HCX_PROFILE_OPS` (`profile_ops.py`, with the `hcx-profiles` group
+  text) and `profile_writes.py` -- the profile read and change and their
+  `VENDOR_CALLS`. `HCX_SITE_PAIRING_OPS` (`site_pairing_ops.py`) and
+  `site_pairing_writes.py` -- the site pairing change, the certificate
+  trust, `certificate_facts` and their `VENDOR_CALLS`.
 - `HCX_SERVICE_MESH_OPS` (`service_mesh_ops.py`) and
   `service_mesh_writes.py` -- the service mesh changes, `hcx.task.get`,
   their `VENDOR_CALLS` and the delete preview.
@@ -289,7 +305,8 @@ Groups (the text the agent reads in `list_operation_groups`):
 
 | Group | Reads |
 |---|---|
-| `hcx-manager` | `hcx.about`, `hcx.site_pairing.list` |
+| `hcx-manager` | `hcx.about`, `hcx.site_pairing.list`, and the changes `hcx.site_pairing.set`, `hcx.certificate.trust` |
+| `hcx-profiles` | `hcx.profile.list`, and the change `hcx.profile.set` |
 | `hcx-service-mesh` | `hcx.service_mesh.list`, `hcx.appliance.list`, `hcx.service_mesh.diagnose`, `hcx.service_mesh.diagnostics.list`, `hcx.service_mesh.diagnostics.get`, and the changes `hcx.service_mesh.create`, `hcx.service_mesh.update`, `hcx.service_mesh.resync`, `hcx.service_mesh.delete` |
 | `hcx-jobs-alerts` | `hcx.job.get`, `hcx.task.get`, `hcx.alert.list` |
 | `hcx-inventory` | `hcx.inventory.list`, `hcx.inventory.compute.list`, `hcx.inventory.datastore.list`, `hcx.inventory.network.list` |
@@ -380,6 +397,89 @@ hook is `HttpConnector.trace_response_body`, see
 `docs/codebase/redaction.md`). A test dispatches `hcx.site_pairing.list`
 with capture on and checks the stored span.
 
+### The site setup: profiles, pairing, certificate trust
+
+The metadata lives in `profile_ops.py` and `site_pairing_ops.py`, the
+bodies in `profile_writes.py` and `site_pairing_writes.py`. The three
+changes are `dangerous` with `requires_approval: true`: a person's call
+waits until a second person approves it; an agent's call is refused
+unless the agent holds a grant, and with a grant it waits for approval.
+None is `destructive`, so none needs a preview first. Because the pairing
+is a credential write, a waiting approval shows no copy of its inputs, so
+`site_pairing_preview` (`site_pairing_ops.py`) shows the approver what
+changes: the action, the remote address or site id, and the Vault path.
+It never reads the secret.
+
+`hcx.profile.list` takes an optional `kind` (`compute` or `network`).
+It reads `GET .../interconnect/computeProfiles` (`{"items": [...]}`) and
+`GET /hybridity/api/networks` (a bare list) and returns one flat row per
+profile with the vendor fields, plus `profile_type`, `profile_id`
+(`computeProfileId` or `objectId`), `last_task_id` and
+`last_task_status` (compute) or `last_job_id` (network).
+
+`hcx.profile.set` takes `compute_profile` or `network_profile` (exactly
+one), and `profile_id` to change an existing profile.
+
+- **Create** (no `profile_id`) sends `POST`. A compute profile needs
+  `name`, `services`, `clusters`, `deployment` and `networks`; a network
+  profile needs `name`, `backing`, `prefix_length` and `ip_ranges`. A
+  missing field is refused before any call.
+- **Change** reads the profile (`GET .../{id}`), replaces the fields that
+  were set and sends back only the vendor fields of the object (no
+  `state`, no last task or job) with `PUT`. A network profile change
+  keeps the other subnet fields, for example `poolId`.
+- The parameters use plain names; the op writes the vendor names
+  (`cmpId`, `deploymentContainer.compute` / `storage`, `cpuReservation`,
+  `maxMtu`, `backings[].backingId`, `vCenterInstanceUuid`,
+  `ipScopes[0].prefixLength`, `networkIpRanges`, ...).
+- A new network profile also gets `organization: DEFAULT`,
+  `l3TenantManaged: false` and `ownedBySystem: true`, the values VMware's
+  Terraform provider sends.
+- Answer: `{status: "accepted", kind, action: create|change, profile_id,
+  interconnect_task_id, job_id, status_read, warnings, errors}`. A
+  compute profile answers `202` with `data.interconnectTaskId`; follow it
+  with `hcx.task.get`. A network profile answers `data.jobId`; follow it
+  with `hcx.job.get`. An answer without the id, or a network answer with
+  `error: true`, is an error with the Manager's text.
+
+`hcx.site_pairing.set` takes `action`:
+
+- **`pair`** with `url` (`https://<host>[:port]`) and
+  `remote_secret_ref` (the Vault path of a secret with `username` and
+  `password` of the remote site). It first reads the pairings: a pairing
+  with the same `url` answers `already_paired` and sends nothing. Then it
+  reads the secret under the caller's identity
+  (`load_param_secret_data`; after an approval: the approver) and sends
+  `POST /hybridity/api/cloudConfigs` with
+  `{"remote": {"username", "password", "url"}}`. A started pairing
+  answers `accepted` with `job_id`; follow it with `hcx.job.get`.
+- When the Manager does not trust the remote site's certificate, its
+  answer (`200` or an error status) holds the certificate in
+  `errors[].data[].certificate`. Then nothing is paired, and the op
+  answers `certificate_not_trusted` with `remote_certificate`:
+  `certificate` (PEM), `sha256`, `subject`, `issuer`, `not_after`. MEHO
+  never trusts a certificate by itself: a person checks the fingerprint
+  and runs `hcx.certificate.trust`, then the pairing again.
+- **`unpair`** with `endpoint_id`. It first reads the service meshes; when
+  one has a compute profile on that site, the op removes nothing and
+  answers `in_use` with `service_mesh_ids`. Else it sends
+  `DELETE /hybridity/api/endpointPairing/{endpointId}` and answers
+  `removed`.
+- The password never comes back and never reaches a log. The op is pinned
+  `credential_write` (`broadcast/events.py`), so the flight recorder keeps
+  no body of its calls, the broadcast carries no params, and the
+  dispatcher withholds the vendor's text of every error of the op (also
+  for `unpair`); the error code and HTTP status stay. An HTTP error of the
+  pairing call is raised again without the request body.
+
+`hcx.certificate.trust` takes `certificate` (one PEM certificate) and
+an optional `expected_sha256` (64 hex digits, with or without colons).
+It parses the certificate first and refuses text with a private key,
+more than one certificate, or no valid certificate, and a fingerprint
+that differs from `expected_sha256`. Then it sends
+`POST /hybridity/api/admin/certificates` with `{"certificate": <pem>}`
+and answers `{status: "trusted", sha256, subject, issuer, not_after}`. An
+answer without `success: true` is an error with the Manager's text.
 ### The service mesh changes
 
 The metadata lives in `service_mesh_ops.py`, the bodies and the delete
@@ -699,6 +799,89 @@ HCX does the migration after the start call returns. So:
   `errors` and `warnings` lists of an answer (the group's, and each
   migration's), so the copies next to the step error hold no secret
   either.
+### Network Extension HA groups
+
+An HA group joins four Network Extension appliances, two at each site: an
+active pair carries the extended networks, a standby pair takes over when
+an appliance fails. The bodies are in `ha_groups.py`, the op metadata in
+`ha_group_ops.py`. Group `hcx-network-extension-ha`.
+
+`hcx.network_extension.ha.list` takes an optional `service_mesh_id` and
+`all_group_members` (default `false`: only the members at this site; each
+member still names its partner at the other site). It returns one row per
+group: `group_id`, `name`, `service_mesh_id`, `group_state` (`HEALTHY`,
+`DEGRADED`, `FAILINGOVER`, `FAILED`, `MAINTENANCE`), `status_message`,
+`availability_state`, `policy`, `network_extension_count` and `members`
+(`appliance_id`, `appliance_name`, `peer_appliance_id`,
+`peer_appliance_name`, `role`: `ACTIVE`, `STANDBY`, `UNDECIDED` or
+`UNINIT`). The vendor fields stay. A long list is behind a result handle.
+
+`hcx.network_extension.ha.set` takes `action`:
+
+- `build` with `appliance_ids` (one free appliance at the source site, or
+  two). It sends `POST .../ha/groups` with `{"appliances": [...]}`.
+- `dissolve` with `group_id`. It sends
+  `DELETE .../ha/groups/{groupId}?force=false`. A forced dissolve is not
+  offered: it can leave extensions on the standby appliances.
+
+Both are `dangerous` with `requires_approval`, so a person's call waits
+until a second person approves it, and an agent needs a grant for it.
+
+The vendor does the work after the start call returns. The Manager answers
+`202` with `data.interconnectTaskId` and `data.groupId`. The answer is
+`{status, action, group_id, interconnect_task_id, status_read:
+"hcx.task.get", group_state, warnings, errors}`. `accepted` means HCX took
+the task; it never means the work is done. A `202` without a task id is
+an error that carries the Manager's `errors` text.
+
+Before a start the operation checks, and starts nothing when a check
+finds something:
+
+- build: every appliance is in `GET /hybridity/api/interconnect/appliances`,
+  is a Network Extension appliance (`HCX-NET-EXT`) and runs HCX 4.3 or
+  newer. Otherwise the call fails with a message and sends no change.
+  An appliance that is already in a group (as a member or a partner)
+  returns `already_grouped` with the group id and state.
+- dissolve: the group is in the HA group list; else `not_found`.
+- both: `POST /hybridity/api/interconnect/tasks/query` with
+  `{"filter": {"status": ["QUEUED", "RUNNING"], "entityIds": [...]}}`.
+  A task on the same appliance or group returns `already_running` with
+  its task id. This check helps; it is not a lock: two callers can both
+  check before either starts.
+
+HCX itself refuses an appliance that already extends a network, too few
+free appliances for the second pair, or a missing licence. The vendor's
+error text reaches the answer (`upstream_message`).
+
+After a start:
+
+- Use MEHO's async mode (`async: true`,
+  `docs/codebase/async-governed-dispatch.md`), so MEHO keeps the answer
+  with the task id under a run handle even if the reply is lost.
+- Follow the task with `hcx.task.get` (pass `interconnect_task_id` as
+  `task_id`) until it ends. A Manager that does not answer gives
+  `not_reachable` with the task id; ask again later. A failed task step
+  names a job id; `hcx.job.get` shows that job's error.
+- After a lost reply, do not start again blindly. Read
+  `hcx.network_extension.ha.list` first: after a build, a group with the
+  appliance means the task was started; after a dissolve, a missing group
+  means the same. Or ask `hcx.task.get` about the task id kept under the
+  async run handle.
+- A status read logs in again when the login expired after the start: the
+  dispatcher drops the token on `401` and runs the read once more.
+
+The approval request of a dissolve reads the group and
+`GET /hybridity/api/l2Extensions`, and fills the `blast_radius` block:
+the group with its members and state, and as `children` the network
+extensions whose source appliance is a member of the group. These
+networks keep running on the pair that was active; only the HA protection
+ends. The `preview_operation` tool does not show this block: it never
+contacts the HCX Manager, so its answer says that the plan is shown on
+the approval request. When the group does not exist, the request still
+waits for approval; the approval request says the preview is unavailable
+and why, and after approval the run answers `not_found` and sends no
+change. A build has no preview of its own (the approval request shows
+the inputs).
 
 ### Shutdown
 
@@ -722,7 +905,13 @@ is sent.
   the paths and fields of the reads.
 - VMware's Terraform provider for HCX (`hcx/utils.go` in
   https://github.com/vmware/terraform-provider-hcx): the inventory calls
-  `cloud/list`, `vc/list`, `vc/datastores/query` and `networks`.
+  `cloud/list`, `vc/list`, `vc/datastores/query` and `networks`; and
+  (`compute_profile.go`, `network_profile.go`, `site_pairing.go`,
+  `certificate.go`) the bodies and answers of the site setup.
+- `connectors/_shared/vault_creds.py`: `load_param_secret_data`, the
+  read of the remote site's secret from a Vault path in the params.
+- `cryptography` (`x509.load_pem_x509_certificate`): the certificate
+  check and fingerprint.
 - `settings.py`: the result-handle limits the read checks against.
 - VMware's PowerShell module for HCX (`VMware.HCX` on the PowerShell
   Gallery): the migration state names the status read knows.
@@ -745,6 +934,22 @@ is sent.
   diagnostics calls come from the Terraform provider and the vendor
   reference, with no HCX version named. The datastore query always sends
   `computeType: ClusterComputeResource`, the only shape the provider uses.
+- `hcx.certificate.trust` uses `POST /hybridity/api/admin/certificates`
+  on the Manager's main API, the call VMware's Terraform provider for HCX
+  uses. The first plan named the appliance management API on port 9443
+  ("import a CA certificate from a URL"); no vendor page names that call.
+  The certificate comes from the pairing answer instead of a URL, so
+  MEHO never fetches a certificate from a host itself.
+- A new network profile is sent to `POST /hybridity/api/networks` (the
+  vendor reference's "Create network"); the Terraform provider uses
+  `POST /admin/hybridity/api/networks` ("Import network"). The body and
+  the answer shape (`data.jobId`, `data.objectId`, `error`,
+  `errorMessage`) come from the provider and the reference. The live proof
+  confirms both.
+- The vendor reference documents the pairing call's request only by an
+  example and its answers not at all. The answer shapes
+  (`data.jobId`, the certificate in `errors[].data[]`, `success` on the
+  unpair and the trust) come from the Terraform provider.
 - The service mesh changes and `hcx.task.get` come from the vendor
   reference ("Service Mesh" and "Tasks") and VMware's Terraform provider
   for HCX. Two details differ from the first plan of this work: the mesh
@@ -807,13 +1012,26 @@ is sent.
   vendor progress flags first; the state names `MIGRATED`,
   `MIGRATE_FAILED` and `MIGRATE_CANCELED` come from VMware's PowerShell
   module for HCX.
+- The HA group calls come from the vendor reference, which names no
+  version and shows only placeholder values. It does not say whether
+  `appliances` in the build body takes one appliance (as the HCX user guide
+  does: HCX picks the second pair) or both of the source pair, so the
+  build takes one or two ids. It lists no values for `groupState` and
+  `role`; the values in the docs come from the HCX 4.11 user guide. The
+  HA group of an extension is found by its source appliance, because the
+  extension rows name no group. The live proof confirms all three.
+- The HA build and dissolve answer with an interconnect task id, not a
+  job id. The status read of an interconnect task is `hcx.task.get` (pass
+  `interconnect_task_id` as `task_id`), the same read the service mesh
+  changes use.
 
 ## References
 
 - Task #4608 (this connector, login, version helper and the read);
-  #4545 (the reads that build on it); #4548 (the service mesh changes);
+  #4545 (the reads that build on it); #4549 (the site setup); #4548 (the service mesh changes);
   #4547 (network extension); #4546 (the migration operations); #4395 (the same read for NSX);
-  #4505 (the same shape for Site Recovery Manager).
+  #4505 (the same shape for Site Recovery Manager); #4551 (the Network
+  Extension HA groups).
 - `docs/decisions/spec-reconcile-guards-standard.md` -- the waiting lane.
 - `docs/codebase/connectors-nsx.md` -- the sibling connector this one
   mirrors.

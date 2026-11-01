@@ -2099,7 +2099,10 @@ consume so the wire contract is defined once:
   land. `ConnectorListItem.state` (G0.9.1-T1 / #773) is `"ingested"`
   for DB-backed rows the dispatcher can resolve and `"registered"`
   for class-side-only rows the dispatcher cannot resolve yet — see
-  the listing-integrity contract section above.
+  the listing-integrity contract section above. A third value,
+  `"package_not_installed"` (#5560), marks a connector whose rows all
+  come from a connector package that is not installed; see
+  `connector-packages.md`, "When a package is removed".
   `ConnectorListItem.next_step` (G0.13-T3 / #1133) is the workflow-
   completion hint: a `NextStep` object (verb + rationale) on
   `state="registered"` rows, `null` on `state="ingested"` rows — see

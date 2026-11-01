@@ -92,6 +92,8 @@ _VMWARE_COMPOSITE_GROUPS: Final[frozenset[str]] = frozenset(
         "content_library",
         # Shared with the two typed licence reads.
         "vmware-licensing",
+        # Host local users and Active Directory; shared with two typed reads.
+        "vmware-host-access",
         "alarms",
         # The migration inventory read.
         "migration",

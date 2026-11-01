@@ -27,6 +27,7 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `hyperv-ssh-2022.x` | `hyperv` | — | — |
 | `idb-rest-9.0` | `idb` | >=9.0,<10.0 | — |
 | `idb-wsa-3.3` | `idb` | >=3.3,<4.0 | — |
+| `installer-cb-5.0` | `installer` | >=5.0,<9.0 | — |
 | `installer-rest-9.1` | `installer` | >=9.0,<10.0 | — |
 | `k8s-1.x` | `k8s` | — | typed |
 | `keycloak-admin-26.x` | `keycloak` | >=26.0,<27.0 | — |

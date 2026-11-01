@@ -146,6 +146,7 @@ __all__ = [
     "SearchOutcome",
     "UnknownConnectorError",
     "UnknownOperationError",
+    "apply_target_fqdn_override",
     "call_operation",
     "call_operation_with_approval",
     "describe_descriptor",
@@ -287,12 +288,17 @@ SEARCH_LIMIT_MAX: int = 50
 #: * ``unknown_group`` — the ``group`` filter names no visible group.
 #: * ``zero_enabled_operations`` — the connector is ingested, but none of
 #:   its operations is enabled for this caller. Nothing can be called.
+#: * ``package_not_installed`` — the connector's operations all come from a
+#:   connector package that is not installed in this MEHO (#5560), whether
+#:   they are enabled or not. The advisory names the package. Nothing can
+#:   be called until the package is installed again.
 SearchOutcome = Literal[
     "matched",
     "ambiguous",
     "no_match",
     "unknown_group",
     "zero_enabled_operations",
+    "package_not_installed",
 ]
 SEARCH_OUTCOMES: Final[tuple[str, ...]] = get_args(SearchOutcome)
 
@@ -1056,6 +1062,53 @@ async def _has_enabled_operation(
     return bool((await session.execute(stmt)).scalar())
 
 
+async def _missing_package_of_connector(
+    session: Any,
+    *,
+    tenant_id: uuid.UUID,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> str | None:
+    """Return the missing connector package the connector's rows come from, else ``None``.
+
+    The twin of :func:`_has_enabled_operation` for the rows that
+    :func:`installed_owner_clause` hides (#5560). Same tenant scope. The
+    enabled flags do not count: an operator may have turned every op off
+    before the package was removed, and the advice is still to install
+    the package, not to enable the ops. A connector that still has an
+    installed row, enabled or not, gives ``None``: there the operator can
+    enable the rows that are left. It runs only when the caller can see no
+    enabled op, so its answer tells ``package_not_installed`` from
+    ``zero_enabled_operations`` and ``unknown_group``.
+    """
+    connector_rows = (
+        visible_scope_clause(
+            EndpointDescriptor,
+            tenant_id=tenant_id,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+        ),
+        EndpointDescriptor.product == product,
+        EndpointDescriptor.version == version,
+        EndpointDescriptor.impl_id == impl_id,
+    )
+    installed_row = select(
+        select(EndpointDescriptor.id).where(*connector_rows, installed_owner_clause()).exists()
+    )
+    if (await session.execute(installed_row)).scalar():
+        return None
+    stmt = (
+        select(EndpointDescriptor.owner_package)
+        .where(*connector_rows, ~installed_owner_clause())
+        .order_by(EndpointDescriptor.owner_package)
+        .limit(1)
+    )
+    package: str | None = (await session.execute(stmt)).scalar_one_or_none()
+    return package
+
+
 async def _visible_group_keys(
     session: Any,
     *,
@@ -1104,13 +1157,22 @@ def _search_guidance(
     *,
     group_key: str | None,
     group_keys: list[str] | None = None,
+    package: str | None = None,
 ) -> tuple[str | None, list[str]]:
     """Return the ``(advisory, narrowing)`` pair for *outcome*.
 
-    The text names no disabled op and no count of hidden rows.
+    The text names no disabled op and no count of hidden rows. For
+    ``package_not_installed`` it names the missing *package*.
     """
     if outcome == "matched":
         return None, []
+    if outcome == "package_not_installed":
+        return (
+            f"The operations of this connector come from the connector package "
+            f"{package!r}, which is not installed in this MEHO. Do not call any "
+            f"operation on this connector.",
+            [f"Ask an operator to install the connector package {package!r} again."],
+        )
     if outcome == "unknown_group":
         return (
             f"Group {group_key!r} does not exist on this connector or has no "
@@ -1155,9 +1217,12 @@ async def _run_search(
 ) -> tuple[list[OperationSearchHit], SearchOutcome, list[str] | None]:
     """Run the search and pick its outcome.
 
-    Returns ``(hits, outcome, group_keys)``. ``group_keys`` is set only for
-    ``unknown_group``. The enabled-op ``EXISTS`` runs only when the search
-    found nothing, to tell ``no_match`` from ``zero_enabled_operations``.
+    Returns ``(hits, outcome, detail)``. ``detail`` is the visible group
+    keys for ``unknown_group`` and ``[package]`` for
+    ``package_not_installed``, else ``None``. The enabled-op ``EXISTS``
+    runs only when the search found nothing, to tell ``no_match`` from
+    ``zero_enabled_operations``; then the missing-package probe tells
+    ``package_not_installed`` from ``zero_enabled_operations`` (#5560).
 
     The retriever is asked for at least :data:`SEARCH_CLASSIFY_MIN_HITS`
     hits so the near-tie check can see the second hit. The outcome is read
@@ -1184,6 +1249,21 @@ async def _run_search(
                 version=version,
                 impl_id=impl_id,
             )
+            # No visible group at all: when a missing package is the
+            # reason, say so rather than "unknown group" (#5560).
+            package = (
+                None
+                if group_keys
+                else await _missing_package_of_connector(
+                    session,
+                    tenant_id=tenant_id,
+                    product=product,
+                    version=version,
+                    impl_id=impl_id,
+                )
+            )
+            if package is not None:
+                return [], "package_not_installed", [package]
             return [], "unknown_group", group_keys
     hits = await hybrid_search(
         session,
@@ -1204,7 +1284,14 @@ async def _run_search(
         version=version,
         impl_id=impl_id,
     )
-    return [], "no_match" if has_enabled else "zero_enabled_operations", None
+    if has_enabled:
+        return [], "no_match", None
+    package = await _missing_package_of_connector(
+        session, tenant_id=tenant_id, product=product, version=version, impl_id=impl_id
+    )
+    if package is not None:
+        return [], "package_not_installed", [package]
+    return [], "zero_enabled_operations", None
 
 
 async def search_operations(
@@ -1249,8 +1336,10 @@ async def search_operations(
     one (:class:`ConnectorNotIngestedError`, #1482). Every other result
     carries one ``outcome`` from :data:`SEARCH_OUTCOMES`: ``matched``,
     ``ambiguous`` (:func:`_classify_hits`), ``no_match``,
-    ``unknown_group`` (``narrowing`` lists the visible group keys), or
-    ``zero_enabled_operations`` (an abstention advisory, no op ids).
+    ``unknown_group`` (``narrowing`` lists the visible group keys),
+    ``zero_enabled_operations`` (an abstention advisory, no op ids), or
+    ``package_not_installed`` (the advisory names the missing connector
+    package, #5560).
     ``advisory`` explains a non-``matched`` outcome in one sentence;
     ``narrowing`` holds at most :data:`SEARCH_NARROWING_MAX` next steps.
     Hit order is the retriever's; the outcome never re-ranks.
@@ -1298,7 +1387,7 @@ async def search_operations(
     started = time.monotonic()
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        hits, outcome, group_keys = await _run_search(
+        hits, outcome, detail = await _run_search(
             session,
             tenant_id=operator.tenant_id,
             product=product,
@@ -1309,7 +1398,12 @@ async def search_operations(
             limit=limit,
         )
     duration_ms = (time.monotonic() - started) * 1000
-    advisory, narrowing = _search_guidance(outcome, group_key=group_key, group_keys=group_keys)
+    advisory, narrowing = _search_guidance(
+        outcome,
+        group_key=group_key,
+        group_keys=detail if outcome == "unknown_group" else None,
+        package=detail[0] if outcome == "package_not_installed" and detail else None,
+    )
     _log.info(
         "search_operations",
         connector_id=connector_id,
@@ -1475,14 +1569,31 @@ async def _resolve_target_or_error(
             # on the eventual audit row. Same shape as the targets routes.
             structlog.contextvars.bind_contextvars(audit_target_id=str(resolved_target.id))
 
-    # Per-call ``fqdn`` override -- applied in memory only. The DB row is not
-    # touched; the override travels with the resolved Target for the lifetime
-    # of this dispatch and is read by connectors that honour vhost routing
-    # (G3.6 VCF Automation). Non-string / empty values fall through silently.
+    apply_target_fqdn_override(resolved_target, target_arg)
+    return resolved_target, None
+
+
+def apply_target_fqdn_override(resolved_target: Any, target_arg: Any) -> None:
+    """Apply the per-call ``fqdn`` of a dict-shaped *target_arg* to *resolved_target*.
+
+    In memory only: the database row is not touched. The override travels
+    with the resolved target for the lifetime of one dispatch and is read by
+    connectors that route by virtual host (G3.6 VCF Automation: the HTTP
+    ``Host`` header and the TLS server name). The bare-string ``target``
+    shape carries no override; a non-string or empty value falls through
+    silently, and so does a missing target.
+
+    Shared by the name lookup of every call (:func:`_resolve_target_or_error`)
+    and by the agent waiter's resume after approval, which loads the target
+    by the id the approval row saved and then applies the override of the
+    agent's original call again, so the approved call reaches the same
+    virtual host as the call that waited for approval.
+    """
+    if resolved_target is None or not isinstance(target_arg, dict):
+        return
     fqdn_override = target_arg.get("fqdn")
     if isinstance(fqdn_override, str) and fqdn_override:
         resolved_target.fqdn = fqdn_override
-    return resolved_target, None
 
 
 async def _call_operation_impl(
@@ -1511,7 +1622,7 @@ async def _call_operation_impl(
 
     A caller that already holds the live target row passes it as
     *resolved_target*; then ``arguments["target"]`` is not read at all. The
-    agent waiter's composite re-entry uses this (#3421): it loads the target
+    agent waiter uses this on every resume: it loads the target
     the approval row saved by id, so the name the agent used when it parked
     cannot point at a different target by the time the approval lands.
     """
@@ -1672,10 +1783,11 @@ async def call_operation_with_approval(
     unenforced "coexist by design" note (#1117) had left open.
 
     *resolved_target*: the live target row to dispatch against, when the
-    caller already loaded it. The waiter's composite re-entry passes the
-    target the approval row saved by id (#3421), so ``arguments["target"]``
-    is ignored and no name lookup runs. A direct re-dispatch leaves it
-    ``None`` and resolves the agent's original ``target`` name as before.
+    caller already loaded it. The waiter passes the target the approval row
+    saved by id, for a composite re-entry and for a direct
+    re-dispatch, so ``arguments["target"]`` is ignored and no name lookup
+    runs. The waiter also sets ``arguments["target"]`` to ``None``, so a
+    tenant-wide op (no saved target) stays without a target.
     """
     return await _call_operation_impl(
         operator, arguments, approved=True, resolved_target=resolved_target

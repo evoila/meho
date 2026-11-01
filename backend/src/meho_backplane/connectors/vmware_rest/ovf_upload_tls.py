@@ -7,6 +7,8 @@ HTTPcore calls ``start_tls`` before writing HTTP headers or body bytes.
 Wrap that stream, and never allow a write before its certificate matches
 vCenter's lease hash. Each new connection gets its own check. A dedicated
 client carries no vCenter cookies, follows no redirects, and uses no proxy.
+Before that, the device host from the lease passes the shared connect-time
+address check, and the client dials only the checked IP address.
 See https://www.encode.io/httpcore/network-backends/ for the stream API.
 """
 
@@ -22,6 +24,8 @@ import httpx
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
+from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
+from meho_backplane.connectors._shared.pinned_transport import build_pinned_async_transport
 from meho_backplane.connectors.adapters.http import _build_ca_pinned_ssl_context
 
 
@@ -125,15 +129,17 @@ def upload_client(
         if not getattr(target, "verify_tls", True) and not ca_pin:
             raise DeviceThumbprintError("upload requires a lease sslThumbprint or verified TLS")
         verify = _build_ca_pinned_ssl_context(ca_pin) if ca_pin else True
-        transport = httpx.AsyncHTTPTransport(verify=verify)
+        transport = build_pinned_async_transport(screen_dial_addresses, verify=verify)
         return httpx.AsyncClient(transport=transport, trust_env=False, follow_redirects=False)
     expected = thumbprint.replace(":", "").replace(" ", "").strip().lower()
     if len(expected) not in (40, 64) or any(c not in "0123456789abcdef" for c in expected):
         raise DeviceThumbprintError(
             "lease sslThumbprint must be a SHA-1 or SHA-256 certificate hash"
         )
-    transport = httpx.AsyncHTTPTransport(verify=False)
-    # Same network-backend seam as connectors/_shared/pinned_transport.py.
+    transport = build_pinned_async_transport(screen_dial_addresses, verify=False)
+    # Same network-backend seam as connectors/_shared/pinned_transport.py: the
+    # lease check wraps the address-pinning backend, so the address is checked
+    # and pinned before the TLS handshake starts.
     pool = transport._pool
     pool._network_backend = _LeaseBackend(pool._network_backend, expected)
     return httpx.AsyncClient(transport=transport, trust_env=False, follow_redirects=False)

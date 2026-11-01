@@ -92,7 +92,7 @@ import os
 import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import httpx
 import structlog
@@ -164,6 +164,11 @@ from meho_backplane.connectors.vmware_rest.soap import (
     parse_service_content,
     parse_soap_fault,
     soap_action_for_version,
+)
+from meho_backplane.connectors.vmware_rest.soap_host_access import (
+    HOST_ACCESS_SOAP_METHODS,
+    build_host_access_envelope,
+    parse_host_access_response,
 )
 from meho_backplane.connectors.vmware_rest.soap_pbm import (
     PBM_PATH,
@@ -1852,7 +1857,7 @@ class VmwareRestConnector(HttpConnector):
             if promote_managed_object_not_found:
                 self._raise_managed_object_not_found_fault(fault, vmomi_path, json)
             message = f"vmware vim {method} failed on target {target.name!r} ({mo_type}:{moid})"
-            raise self._soap_fault_error(fault, target, message=message)
+            raise self._soap_fault_error(fault, target, message=message, stage="call")
         resp.raise_for_status()
         return self._parse_esxi_soap_response(method, resp.text)
 
@@ -2435,11 +2440,15 @@ class VmwareRestConnector(HttpConnector):
                 str(body.get("datastorePath", "")),
                 body.get("searchSpec", {}) or {},
             )
+        if method in HOST_ACCESS_SOAP_METHODS:
+            # Host local users and Active Directory (``soap_host_access``).
+            return build_host_access_envelope(mo_type, moid, method, body)
         raise RuntimeError(
             f"vmware vim method {method!r} has no SOAP builder — the standalone-ESXi "
             f"SOAP transport (#3363) implements RetrievePropertiesEx / QueryBootDevices "
             f"/ CreateNasDatastore / MarkAs*_Task / RefreshDatastore(StorageInfo) / "
-            f"SearchDatastore(SubFolders)_Task only"
+            f"SearchDatastore(SubFolders)_Task and the host user and Active Directory calls "
+            f"only"
         )
 
     @staticmethod
@@ -2460,6 +2469,8 @@ class VmwareRestConnector(HttpConnector):
         """
         if method == "RetrievePropertiesEx":
             return parse_retrieve_result(xml)
+        if method in HOST_ACCESS_SOAP_METHODS:
+            return parse_host_access_response(method, xml)
         if method == "QueryBootDevices":
             return parse_boot_devices(xml)
         if method in ("RefreshDatastore", "RefreshDatastoreStorageInfo"):
@@ -2473,6 +2484,7 @@ class VmwareRestConnector(HttpConnector):
         target: VsphereTargetLike,
         *,
         message: str,
+        stage: Literal["establish", "call"] = "establish",
     ) -> Exception:
         """Map a parsed :class:`SoapFault` to the error the caller should raise.
 
@@ -2489,6 +2501,11 @@ class VmwareRestConnector(HttpConnector):
         Both arms also carry the parsed *fault* (:func:`.soap.attach_soap_fault`),
         so the error envelope can show ``extras.upstream_fault`` with the fault
         type and the full faultstring (#3567).
+
+        *stage* says which step faulted: the session login (``establish``,
+        the default) or a call on a live session (``call``). A caller that
+        sends a login of its own (the domain join) reads it to tell a
+        refused request login from a refused target credential.
         """
         err: Exception
         if fault.fault_type in _SOAP_AUTH_FAULT_TYPES:
@@ -2499,6 +2516,7 @@ class VmwareRestConnector(HttpConnector):
                 target_name=getattr(target, "name", None),
                 host=getattr(target, "host", None),
                 secret_ref=getattr(target, "secret_ref", None),
+                stage=stage,
             )
         else:
             fault_type = fault.fault_type or fault.faultcode or "SoapFault"
@@ -3181,6 +3199,106 @@ class VmwareRestConnector(HttpConnector):
 
         return await host_vsan_health_impl(self, operator, target, params)
 
+    async def vsan_cluster_info(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vsan.cluster.info`` -- the vSAN settings of one cluster.
+
+        Delegates to ``vsan_cluster_info_impl`` in :mod:`.typed_ops_vsan_cluster_info`, imported
+        lazily like the other typed reads.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vsan_cluster_info import (
+            vsan_cluster_info_impl,
+        )
+
+        return await vsan_cluster_info_impl(self, operator, target, params)
+
+    async def vsan_capacity(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vsan.capacity`` -- capacity and space use of one vSAN cluster.
+
+        Delegates to ``vsan_capacity_impl`` in :mod:`.typed_ops_vsan_capacity`, imported
+        lazily like the other typed reads.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vsan_capacity import vsan_capacity_impl
+
+        return await vsan_capacity_impl(self, operator, target, params)
+
+    async def vsan_performance(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vsan.performance`` -- vSAN latency, IOPS and throughput.
+
+        Delegates to ``vsan_performance_impl`` in :mod:`.typed_ops_vsan_performance`, imported
+        lazily like the other typed reads.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vsan_performance import (
+            vsan_performance_impl,
+        )
+
+        return await vsan_performance_impl(self, operator, target, params)
+
+    async def vsan_resync_status(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vsan.resync.status`` -- the vSAN objects that resync now.
+
+        Delegates to ``vsan_resync_status_impl`` in :mod:`.typed_ops_vsan_objects`, imported
+        lazily like the other typed reads.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vsan_objects import (
+            vsan_resync_status_impl,
+        )
+
+        return await vsan_resync_status_impl(self, operator, target, params)
+
+    async def vsan_object_health(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vsan.object.health`` -- vSAN object health and the VMs of unhealthy objects.
+
+        Delegates to ``vsan_object_health_impl`` in :mod:`.typed_ops_vsan_objects`, imported
+        lazily like the other typed reads.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vsan_objects import (
+            vsan_object_health_impl,
+        )
+
+        return await vsan_object_health_impl(self, operator, target, params)
+
+    async def vsan_maintenance_precheck(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vsan.maintenance.precheck`` -- vSAN data during a host's maintenance.
+
+        Delegates to ``vsan_maintenance_precheck_impl`` in :mod:`.typed_ops_vsan_precheck`, imported
+        lazily like the other typed reads.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vsan_precheck import (
+            vsan_maintenance_precheck_impl,
+        )
+
+        return await vsan_maintenance_precheck_impl(self, operator, target, params)
+
     async def host_storage_devices(
         self,
         operator: Operator,
@@ -3235,6 +3353,58 @@ class VmwareRestConnector(HttpConnector):
 
         return await host_datastores_impl(self, operator, target, params)
 
+    async def host_local_user_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.local_user.list`` -- the local users of one ESXi host.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_access.host_local_user_list_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_access import (
+            host_local_user_list_impl,
+        )
+
+        return await host_local_user_list_impl(self, operator, target, params)
+
+    async def host_ad_status(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.ad.status`` -- the Active Directory domain of one host.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_access.host_ad_status_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_access import (
+            host_ad_status_impl,
+        )
+
+        return await host_ad_status_impl(self, operator, target, params)
+
+    async def host_config_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.config.show`` -- NTP, DNS, syslog and other settings of one host.
+
+        A ``source_kind="typed"`` read. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_config.host_config_show_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_config import (
+            host_config_show_impl,
+        )
+
+        return await host_config_show_impl(self, operator, target, params)
+
     async def vm_info(
         self,
         operator: Operator,
@@ -3262,6 +3432,40 @@ class VmwareRestConnector(HttpConnector):
         from meho_backplane.connectors.vmware_rest.typed_ops_vm_info import vm_info_impl
 
         return await vm_info_impl(self, operator, target, params)
+
+    async def vm_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vm.list`` -- every VM, one row each, through a VIM container view.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vm_list.vm_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vm_list import vm_list_impl
+
+        return await vm_list_impl(self, operator, target, params)
+
+    async def inventory_find(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.inventory.find`` -- objects by name, name pattern or inventory path.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_inventory_find.inventory_find_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_inventory_find import (
+            inventory_find_impl,
+        )
+
+        return await inventory_find_impl(self, operator, target, params)
 
     async def snapshot_list(
         self,
@@ -3306,6 +3510,41 @@ class VmwareRestConnector(HttpConnector):
         )
 
         return await portgroup_show_impl(self, operator, target, params)
+
+    async def host_advanced_settings_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.advanced_settings.show`` -- the advanced settings of one host.
+
+        A ``source_kind="typed"`` read. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_security.advanced_settings_show_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_security import (
+            advanced_settings_show_impl,
+        )
+
+        return await advanced_settings_show_impl(self, operator, target, params)
+
+    async def host_firewall_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.firewall.show`` -- the firewall rule sets of one host.
+
+        A ``source_kind="typed"`` read. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_security.firewall_show_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_security import (
+            firewall_show_impl,
+        )
+
+        return await firewall_show_impl(self, operator, target, params)
 
     async def vm_question_get(
         self,
@@ -3387,6 +3626,21 @@ class VmwareRestConnector(HttpConnector):
         )
 
         return await object_collect_impl(self, operator, target, params)
+
+    async def task_info(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.task.info`` -- one vCenter task by id (#4349).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_task_info.task_info_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_task_info import task_info_impl
+
+        return await task_info_impl(self, operator, target, params)
 
     async def tasks_recent(
         self,
@@ -3516,6 +3770,38 @@ class VmwareRestConnector(HttpConnector):
 
         return await vm_hardware_show_impl(self, operator, target, params)
 
+    async def vm_boot_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vm.boot.show`` -- one VM's firmware, secure boot and boot order.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vm_boot.vm_boot_show_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vm_boot import vm_boot_show_impl
+
+        return await vm_boot_show_impl(self, operator, target, params)
+
+    async def vm_advanced_settings_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vm.advanced_settings.show`` -- one VM's extraConfig keys and values.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vm_advanced_settings.vm_advanced_settings_show_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vm_advanced_settings import (
+            vm_advanced_settings_show_impl,
+        )
+
+        return await vm_advanced_settings_show_impl(self, operator, target, params)
+
     async def license_list(
         self,
         operator: Operator,
@@ -3605,6 +3891,25 @@ class VmwareRestConnector(HttpConnector):
         )
 
         return await datacenter_list_impl(self, operator, target, params)
+
+    async def network_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.network.list`` -- every network, with datacenter, switch and VLAN.
+
+        A ``source_kind="typed"`` read on the REST API (plus one vim read for
+        the distributed port groups). Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_network_list.network_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_network_list import (
+            network_list_impl,
+        )
+
+        return await network_list_impl(self, operator, target, params)
 
     # The six content-library typed reads. Each delegates to
     # :mod:`.content_library_reads` (imported lazily, like the other typed ops).
@@ -3775,6 +4080,31 @@ class VmwareRestConnector(HttpConnector):
         )
 
         return await local_account_policy_set_impl(self, operator, target, params)
+
+    def trace_response_body(self, response: httpx.Response) -> Any:
+        """Mask secret-named setting values before the flight recorder records the answer.
+
+        A VM advanced setting (an ``OptionValue`` of ``config.extraConfig``)
+        can hold a secret in a plain string the shared redaction does not
+        know by shape, for example a cloud-init user-data blob. So every JSON
+        answer passes :func:`~meho_backplane.connectors.vmware_rest.trace.trace_payload`
+        before the trace stores it. A body that is not JSON is recorded as
+        the shared engine sees fit. A failure in the masking records a
+        marker, never the raw body.
+        """
+        from meho_backplane.connectors.vmware_rest.trace import (
+            SECRET_SETTING_MARKER,
+            trace_payload,
+        )
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        try:
+            return trace_payload(payload)
+        except Exception:  # a trace must never break the call; store the marker instead
+            return SECRET_SETTING_MARKER
 
     async def aclose(self) -> None:
         """Revoke every cached session before closing the httpx pool.

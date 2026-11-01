@@ -81,6 +81,10 @@ var typedOpCLICoverage = map[string]string{
 	"vrops.licensing.vcenter.query":       "",
 	"vrops.licensing.server.query":        "",
 	"vrops.licensing.assign":              "",
+	// VCF 9.1 fleet roles: no CLI verb yet, agent surface only.
+	"vrops.fleet.role.list":      "",
+	"vrops.fleet.principal.find": "",
+	"vrops.fleet.role.assign":    "",
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed vROps

@@ -21,10 +21,11 @@ the appliance serves no ``/cloudapi/1.0.0/openapi*`` (evidenced 404 on the same
 vCloud-Director-derived surface via the VCFA 9.0.2 Holodeck probe — no
 vCD-specific appliance probe was run; live-verify is the deferred tail). This is the
 CLAUDE.md postulate-1 "no usable spec → typed" case, the same posture the
-``fleet-lcm`` (#3047) and ``vcf-automation`` provider-plane cores ship with. The
-spec-reconcile lane is therefore a **manifest pin + evidenced exclusion** (see
-``docs/decisions/spec-reconcile-guards-standard.md``), not a served-op-id
-compare.
+``fleet-lcm`` (#3047) and ``vcf-automation`` provider-plane cores ship with. A
+running cell does serve its own ``/cloudapi`` Swagger 2.0 file; it is pinned on
+the spec shelf and the spec-reconcile lane checks every ``/cloudapi`` path
+against it. The ``/api`` paths stay in the lane's manifest pin (see
+``docs/decisions/spec-reconcile-guards-standard.md``).
 
 Auth — provider session mint
 ----------------------------
@@ -79,12 +80,14 @@ provider/System-scoped so one session sees the whole estate:
 * ``vcd.edge-gateway.list`` — ``GET /api/query?type=edgeGateway``.
 * ``vcd.task.list`` — ``GET /api/query?type=adminTask``.
 
-All read-only, ``safety_level=safe``, ungated; registered as
-``source_kind="typed"`` (:mod:`.typed_ops` / :mod:`.typed_reads`, per-op
-``llm_instructions`` in :mod:`._llm_instructions`) so they dispatch on a fresh
-boot with **zero catalog ingest**. Set-shaped results are reduced to a JSONFlux
-handle by the dispatcher. By-id detail reads, non-``System`` provider identities,
-and any write surface are deliberately out of scope for this read core.
+The reads are ``safety_level=safe`` and ungated. The organisation ops
+(``vcd.org.get`` / ``.create`` / ``.update`` / ``.delete``, :mod:`.org_ops` /
+:mod:`.org_handlers`) add one read and three changes on the CloudAPI org paths;
+each change waits for approval, and the delete needs a preview. All are
+registered as ``source_kind="typed"`` (:mod:`.typed_ops`, per-op
+``llm_instructions`` in :mod:`._llm_instructions` and :mod:`.org_ops`) so they
+dispatch on a fresh boot with **zero catalog ingest**. Set-shaped results are
+reduced to a JSONFlux handle by the dispatcher.
 """
 
 from __future__ import annotations
@@ -405,8 +408,7 @@ class VcloudDirectorConnector(HttpConnector):
     # import so pure fingerprint/probe unit tests don't pay the operations
     # package's embedding-pipeline import). The dispatcher resolves each
     # persisted ``module.ClassName.method`` handler_ref back to the bound
-    # method and threads ``operator`` / ``target`` / ``params`` by name. All
-    # read-only — no write op ships here.
+    # method and threads ``operator`` / ``target`` / ``params`` by name.
     # ------------------------------------------------------------------
 
     async def org_list(
@@ -464,6 +466,40 @@ class VcloudDirectorConnector(HttpConnector):
         from meho_backplane.connectors.vcd.typed_reads import vcd_task_list_impl
 
         return await vcd_task_list_impl(self, operator, target, params)
+
+    # Organisation ops (read one, create, change, delete). Bodies in ``.org_handlers``.
+
+    async def org_get(
+        self, operator: Operator, target: VcloudDirectorTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcd.org.get`` shim."""
+        from meho_backplane.connectors.vcd.org_handlers import vcd_org_get_impl
+
+        return await vcd_org_get_impl(self, operator, target, params)
+
+    async def org_create(
+        self, operator: Operator, target: VcloudDirectorTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcd.org.create`` shim."""
+        from meho_backplane.connectors.vcd.org_handlers import vcd_org_create_impl
+
+        return await vcd_org_create_impl(self, operator, target, params)
+
+    async def org_update(
+        self, operator: Operator, target: VcloudDirectorTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcd.org.update`` shim."""
+        from meho_backplane.connectors.vcd.org_handlers import vcd_org_update_impl
+
+        return await vcd_org_update_impl(self, operator, target, params)
+
+    async def org_delete(
+        self, operator: Operator, target: VcloudDirectorTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcd.org.delete`` shim."""
+        from meho_backplane.connectors.vcd.org_handlers import vcd_org_delete_impl
+
+        return await vcd_org_delete_impl(self, operator, target, params)
 
     async def invalidate_session(
         self, target: VcloudDirectorTargetLike, *, rejected: httpx.Request | None = None

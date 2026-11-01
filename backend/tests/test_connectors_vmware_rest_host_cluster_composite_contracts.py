@@ -26,6 +26,8 @@ from meho_backplane.connectors.vmware_rest.composites._host_cluster_llm_instruct
 from meho_backplane.operations._validate import validate_params
 
 _PARAMETER_SCHEMAS: dict[str, dict[str, Any]] = {
+    "cluster.drs_group.delete": schemas.CLUSTER_DRS_GROUP_DELETE_PARAMETER_SCHEMA,
+    "cluster.drs_group.members.set": schemas.CLUSTER_DRS_GROUP_MEMBERS_SET_PARAMETER_SCHEMA,
     "cluster.drs_recommendations": schemas.CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA,
     "cluster.drs_rule.create": schemas.CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA,
     "cluster.drs_rule.delete": schemas.CLUSTER_DRS_RULE_DELETE_PARAMETER_SCHEMA,

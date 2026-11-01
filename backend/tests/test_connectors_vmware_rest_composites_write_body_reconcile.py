@@ -408,3 +408,24 @@ def test_drs_rule_delete_remove_key_box_is_the_spec_int_alias() -> None:
         "the pinned vi-json.yaml Any discriminator no longer maps 'int' to PrimitiveInt"
     )
     assert _vi_json_component_schema_exists(spec_text, "PrimitiveInt")
+
+
+def test_drs_group_delete_remove_key_box_is_the_spec_string_alias() -> None:
+    """The DRS group delete sends ``removeKey`` as ``{"_typeName": "string", "_value": name}``.
+
+    vim keys a cluster group by its name, so the ``Any``-typed ``removeKey``
+    carries a boxed string. ``string`` is an alias in the ``Any`` discriminator
+    mapping (to ``PrimitiveString``). Skips uniformly without the spec shelf.
+    """
+    from meho_backplane.connectors.vmware_rest.composites import _drs_group_delete
+
+    body = _drs_group_delete._remove_group_body("example-vms")
+    assert body["groupSpec"][0]["removeKey"] == {"_typeName": "string", "_value": "example-vms"}
+    assert body["groupSpec"][0]["_typeName"] == "ClusterGroupSpec"
+    spec_path = require_shelf_spec("vcenter-9.0", "vi-json.yaml")
+    spec_text = spec_path.read_text(encoding="utf-8")
+    assert "\n          string: '#/components/schemas/PrimitiveString'\n" in spec_text, (
+        "the pinned vi-json.yaml Any discriminator no longer maps 'string' to PrimitiveString"
+    )
+    assert _vi_json_component_schema_exists(spec_text, "PrimitiveString")
+    assert _vi_json_component_schema_exists(spec_text, "ClusterGroupSpec")

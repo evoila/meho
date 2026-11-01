@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _license
 from meho_backplane.connectors.vmware_rest.composites._license import (
     LICENSE_ASSIGN_LLM_INSTRUCTIONS,
     LICENSE_ASSIGN_PARAMETER_SCHEMA,
@@ -46,5 +47,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=LICENSE_ASSIGN_LLM_INSTRUCTIONS,
         preview=license_assign_preview,
+        governed_subops=_license._VIM_SUB_OPS_LICENSE_ASSIGN,
     ),
 )

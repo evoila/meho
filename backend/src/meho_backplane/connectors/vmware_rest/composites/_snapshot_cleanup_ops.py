@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _snapshot_cleanup
 from meho_backplane.connectors.vmware_rest.composites._snapshot_cleanup import (
     vm_disks_consolidate_composite,
     vm_disks_consolidate_preview,
@@ -51,6 +52,8 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.snapshot.delete_all"],
         # Destructive: the blast radius is the handler's plan (every snapshot of the VM).
         preview=vm_snapshot_delete_all_preview,
+        # RemoveAllSnapshots_Task is delete-shaped: a human always decides.
+        governed_subops=_snapshot_cleanup._VIM_SUB_OPS_VM_SNAPSHOT_DELETE_ALL,
         # ``.delete_all`` is not a classifier suffix -> ``other``.
         classifier_other=True,
     ),
@@ -71,6 +74,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.disks.consolidate"],
         preview=vm_disks_consolidate_preview,
+        governed_subops=_snapshot_cleanup._VIM_SUB_OPS_VM_DISKS_CONSOLIDATE,
         # ``.consolidate`` is not a classifier suffix -> ``other``.
         classifier_other=True,
     ),

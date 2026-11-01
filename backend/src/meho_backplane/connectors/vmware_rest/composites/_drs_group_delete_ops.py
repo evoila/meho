@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _drs_group_delete
 from meho_backplane.connectors.vmware_rest.composites._drs_group_delete import (
     cluster_drs_group_delete_composite,
     cluster_drs_group_delete_preview,
@@ -46,5 +47,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.cluster.drs_group.delete"],
         preview=cluster_drs_group_delete_preview,
+        governed_subops=_drs_group_delete._VIM_SUB_OPS_CLUSTER_DRS_GROUP_DELETE,
     ),
 )

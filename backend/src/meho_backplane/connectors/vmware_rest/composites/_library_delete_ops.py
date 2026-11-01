@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _library_delete
 from meho_backplane.connectors.vmware_rest.composites._library_delete import (
     content_library_delete_composite,
     content_library_delete_preview,
@@ -53,6 +54,8 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
             "vmware.composite.content_library.delete"
         ],
         preview=content_library_delete_preview,
+        governed_subops=_library_delete._SUB_OPS_CONTENT_LIBRARY_DELETE
+        + _library_delete._VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK,
     ),
     CompositeSpec(
         op_id="vmware.composite.content_library.item.delete",
@@ -73,5 +76,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
             "vmware.composite.content_library.item.delete"
         ],
         preview=content_library_item_delete_preview,
+        governed_subops=_library_delete._SUB_OPS_CONTENT_LIBRARY_ITEM_DELETE
+        + _library_delete._VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK,
     ),
 )

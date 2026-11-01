@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _write
 from meho_backplane.connectors.vmware_rest.composites._host_cluster_llm_instructions import (
     HOST_CLUSTER_LLM_INSTRUCTIONS,
 )
@@ -57,6 +58,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.evacuate"],
         preview=_host_evacuate_preview,
+        governed_subops=_write._SUB_OPS_HOST_EVACUATE + _write._VIM_SUB_OPS_HOST_EVACUATE,
         classifier_other=True,
     ),
     CompositeSpec(
@@ -77,6 +79,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.maintenance.exit"],
         preview=_host_maintenance_exit_preview,
+        governed_subops=_write._VIM_SUB_OPS_HOST_MAINTENANCE_EXIT,
         classifier_other=True,
     ),
     CompositeSpec(
@@ -96,6 +99,8 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.detach_from_vds"],
         preview=_host_detach_from_vds_preview,
+        governed_subops=_write._SUB_OPS_HOST_DETACH_FROM_VDS
+        + _write._VIM_SUB_OPS_HOST_DETACH_FROM_VDS,
         classifier_other=True,
     ),
 )

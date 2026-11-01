@@ -84,7 +84,7 @@ _OP_LIST_VM_CDROMS: Final = "GET:/vcenter/vm/{vm}/hardware/cdrom"
 _OP_GET_VM_CDROM: Final = "GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"
 
 #: Every REST call of each change. The reconcile test checks them against the
-#: pinned vCenter 8.0 and 9.0 API files, and ``_governed_subops`` lists them
+#: pinned vCenter 8.0 and 9.0 API files, and the composite rows list them
 #: for the grant set.
 SUB_OPS_MOUNT_LIBRARY_ISO: Final[tuple[str, ...]] = (
     _OP_FIND_LIBRARY,
@@ -553,6 +553,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=MOUNT_LIBRARY_ISO_LLM_INSTRUCTIONS,
         preview=_mount_preview,
+        governed_subops=SUB_OPS_MOUNT_LIBRARY_ISO,
         classifier_other=True,
     ),
     CompositeSpec(
@@ -571,6 +572,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=UNMOUNT_LIBRARY_ISO_LLM_INSTRUCTIONS,
         preview=_unmount_preview,
+        governed_subops=SUB_OPS_UNMOUNT_LIBRARY_ISO,
         classifier_other=True,
     ),
 )

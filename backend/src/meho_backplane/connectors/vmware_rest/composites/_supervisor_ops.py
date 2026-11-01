@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _supervisor
 from meho_backplane.connectors.vmware_rest.composites._spec import (
     CompositeSpec,
 )
@@ -66,6 +67,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS["vmware.composite.supervisor.enable"],
         preview=_supervisor_enable_preview,
         not_on_8_0=SUPERVISOR_9X_REASON,
+        governed_subops=_supervisor._SUB_OPS_SUPERVISOR_ENABLE,
         classifier_other=True,
     ),
     CompositeSpec(
@@ -86,6 +88,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS["vmware.composite.supervisor.disable"],
         preview=_supervisor_disable_preview,
         not_on_8_0=SUPERVISOR_9X_REASON,
+        governed_subops=_supervisor._SUB_OPS_SUPERVISOR_DISABLE,
         classifier_other=True,
     ),
     CompositeSpec(

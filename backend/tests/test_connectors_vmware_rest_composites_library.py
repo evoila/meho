@@ -613,7 +613,7 @@ def test_create_op_is_pinned_credential_write() -> None:
 
 
 def test_governed_subop_manifest_lists_the_two_writes() -> None:
-    from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
+    from meho_backplane.connectors.vmware_rest.composites._register import (
         _GOVERNED_SUBOP_MANIFEST,
     )
 

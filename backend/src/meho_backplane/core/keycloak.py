@@ -12,6 +12,9 @@ running realm up to date through the Admin REST API:
   else as ``meho-admin``;
 * it adds every client scope, group, client, mapper and client scope
   assignment of the realm file that the realm does not have yet;
+* it adds the login flows of the realm file the realm does not have yet,
+  and binds a client to its own flow
+  (:mod:`meho_backplane.core.keycloak_flows`);
 * it sets the secrets of the confidential clients from the ``<release>-core-…``
   Secrets, so Keycloak and the backplane always agree;
 * it adds the client attributes in ``ADDED_CLIENT_ATTRIBUTES`` (the idle
@@ -70,6 +73,7 @@ from meho_backplane.core.keycloak_api import (
     expect,
     id_from,
 )
+from meho_backplane.core.keycloak_flows import OVERRIDES, ensure_flows, flow_overrides
 from meho_backplane.core.secrets import (
     CoreSecretsError,
     KubernetesSecretStore,
@@ -234,6 +238,23 @@ def load_realm_file(path: str, environ: Mapping[str, str]) -> dict[str, Any]:
     return realm
 
 
+#: Client attributes of the realm file that every run keeps in line on an
+#: existing client: whether the client gets a refresh token, and how long
+#: its access token lasts.
+_TOKEN_SETTINGS = ("use.refresh.tokens", "access.token.lifespan")
+
+
+def _token_settings(want: Mapping[str, Any], have: Mapping[str, Any]) -> dict[str, str]:
+    """The token settings of *want* that differ on the existing client *have*."""
+    wanted = want.get("attributes") or {}
+    current = have.get("attributes") or {}
+    return {
+        key: wanted[key]
+        for key in _TOKEN_SETTINGS
+        if key in wanted and current.get(key) != wanted[key]
+    }
+
+
 class _Realm:
     """One session on realm ``meho``, with the lookups the steps share."""
 
@@ -325,16 +346,25 @@ class _Realm:
             _say(f"client scope {name}: created")
         return ids
 
-    async def ensure_client(self, want: Mapping[str, Any], scope_ids: Mapping[str, str]) -> None:
+    async def ensure_client(
+        self,
+        want: Mapping[str, Any],
+        scope_ids: Mapping[str, str],
+        flow_ids: Mapping[str, str],
+    ) -> None:
         client_id = want["clientId"]
+        overrides = flow_overrides(want, flow_ids)
         found = expect(
             await self.admin.call("GET", f"{self.base}/clients", params={"clientId": client_id}),
             200,
             what=f"cannot look up client {client_id}",
         )
         if not found.data:
+            body = {key: value for key, value in want.items() if key != OVERRIDES}
+            if overrides:
+                body[OVERRIDES] = overrides
             expect(
-                await self.admin.call("POST", f"{self.base}/clients", json=dict(want)),
+                await self.admin.call("POST", f"{self.base}/clients", json=body),
                 201,
                 what=f"cannot create client {client_id}",
             )
@@ -343,35 +373,51 @@ class _Realm:
         url = f"{self.base}/clients/{found.data[0]['id']}"
         changes = await self._add_mappers(url, want)
         changes += await self._add_scopes(url, want, scope_ids)
-        changes += await self._update_client(url, want)
+        changes += await self._update_client(url, want, found.data[0], overrides)
         _say(f"client {client_id}: kept" + (f" ({', '.join(changes)})" if changes else ""))
 
-    async def _update_client(self, url: str, want: Mapping[str, Any]) -> list[str]:
-        """Set the secret, and add the attributes of ``ADDED_CLIENT_ATTRIBUTES`` that are missing.
+    async def _update_client(
+        self,
+        url: str,
+        want: Mapping[str, Any],
+        have: Mapping[str, Any],
+        overrides: Mapping[str, str],
+    ) -> list[str]:
+        """Set the secret, the login flow and the token settings of an existing client.
 
-        An attribute the client has already keeps its value: an admin may have set it.
+        The client also gets the attributes of ``ADDED_CLIENT_ATTRIBUTES`` that are
+        missing. One of them the client has already keeps its value: an admin may
+        have set it.
         """
         client_id = want["clientId"]
         file_attributes = want.get("attributes") or {}
         names = [name for name in ADDED_CLIENT_ATTRIBUTES if name in file_attributes]
-        if "secret" not in want and not names:
+        bound = have.get(OVERRIDES) or {}
+        rebind = any(bound.get(binding) != flow_id for binding, flow_id in overrides.items())
+        token_settings = _token_settings(want, have)
+        if "secret" not in want and not names and not rebind and not token_settings:
             return []
         current = expect(
             await self.admin.call("GET", url), 200, what=f"cannot read client {client_id}"
         ).data
-        attributes = current.get("attributes") or {}
+        attributes = dict(current.get("attributes") or {})
         changes: list[str] = []
+        if "secret" in want:
+            current["secret"] = want["secret"]
+            changes.append("secret set")
+        if rebind:
+            current[OVERRIDES] = {**bound, **overrides}
+            changes.append("login flow set")
+        if token_settings:
+            attributes.update(token_settings)
+            changes.append("token settings set")
         for name in names:
             if not attributes.get(name):
                 attributes[name] = file_attributes[name]
                 changes.append(f"attribute {name} added")
-        if changes:
-            current["attributes"] = attributes
-        if "secret" in want:
-            current["secret"] = want["secret"]
-            changes.append("secret set")
         if not changes:
             return []
+        current["attributes"] = attributes
         expect(
             await self.admin.call("PUT", url, json=current),
             204,
@@ -614,7 +660,7 @@ async def _ensure_ci(
     want = _ci_client(
         data["client_id"], data["client_secret"], environ[TENANT_ID_ENV], environ[PUBLIC_URL_ENV]
     )
-    await realm.ensure_client(want, scope_ids)
+    await realm.ensure_client(want, scope_ids, {})
 
 
 Session = Literal["bootstrap", "admin"]
@@ -683,8 +729,9 @@ async def finish_realm(
     for tenant in plan.tenants:
         for group in tenant_groups(tenant):
             await realm.ensure_group(group, drop=OLD_ACCESS_ATTRIBUTES)
+    flow_ids = await ensure_flows(admin, realm_file.get("authenticationFlows") or [])
     for want in realm_file.get("clients") or []:
-        await realm.ensure_client(want, scope_ids)
+        await realm.ensure_client(want, scope_ids, flow_ids)
     if plan.ci.enabled:
         await _ensure_ci(realm, plan, environ, store, scope_ids)
     if plan.company_login.enabled:

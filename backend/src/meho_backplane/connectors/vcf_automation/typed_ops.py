@@ -258,8 +258,22 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "with a quota and a network rule (vcfa.tenant.project.create), deploy "
         "from a cloud template or only plan it "
         "(vcfa.tenant.blueprint_request.create), and delete a deployment "
-        "(vcfa.tenant.deployment.delete). A person must approve each call. Safe "
-        "to run twice: an object that exists answers 'unchanged'."
+        "(vcfa.tenant.deployment.delete; only a person can run it, after a preview). "
+        "A person must approve each call. Safe to run twice: an object that exists "
+        "answers 'unchanged'."
+    ),
+    "vcfa-tenant-day2": (
+        "Day-2 work on the deployments of a VCF Automation tenant org, on the tenant "
+        "plane. Reads: the actions a deployment or machine offers "
+        "(vcfa.tenant.deployment.actions.list), the machines (vcfa.tenant.machine.list) "
+        "and the disks with their machines (vcfa.tenant.block_device.list). Changes, "
+        "each after a person approves: run a built-in deployment action "
+        "(vcfa.tenant.deployment.action.run) or machine action such as power, resize, "
+        "add disk or snapshot (vcfa.tenant.resource.action.run), change a lease "
+        "(vcfa.tenant.deployment.lease.change), create a machine "
+        "(vcfa.tenant.machine.create) or a disk for a machine "
+        "(vcfa.tenant.block_device.create). To delete a deployment, use "
+        "vcfa.tenant.deployment.delete."
     ),
     "vcfa-tenant-images": (
         "Image names of the tenant org (image profiles), on the tenant plane. A cloud "

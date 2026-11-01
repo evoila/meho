@@ -44,6 +44,11 @@ Dispatch-fidelity of each path is proven live-mocked in
 
 from __future__ import annotations
 
+from meho_backplane.connectors.vcf_automation import _day2_paths as _day2_paths_module
+from meho_backplane.connectors.vcf_automation._paths import (
+    TENANT_DEPLOYMENT_API_DEPLOYMENT_PATH,
+    TENANT_REQUEST_TRACKER_PATH,
+)
 from meho_backplane.connectors.vra8 import _paths as _paths_module
 from meho_backplane.connectors.vra8 import api_file as _api_file
 from meho_backplane.connectors.vra8 import connector as _connector
@@ -53,9 +58,18 @@ from tests._vra_catalog_paths import (
     catalog_op_ids,
     swagger2_served_op_ids,
 )
+from tests.test_connectors_vcf_automation_spec_reconcile import _DAY2_PATHS_METHODS
 
+#: The pinned ``vra-sdk-go`` v0.6.5 files on the spec shelf. The vRA 8 day-2 ops
+#: use the same deployment and IaaS APIs as VCF Automation 9, so they are checked
+#: against the same files as the VCF Automation lane.
+_SPEC_DIR = "vcf-automation-9.0"
+_DAY2_SPEC_FILES = (
+    "swagger-vra-sdk-go-v0.6.5/vra-iaas.json",
+    "swagger-vra-sdk-go-v0.6.5/vra-catalog-deployment.json",
+)
 #: The shelf file that holds the catalog and deployment API of vRA 8.
-_CATALOG_SPEC_DIR = "vcf-automation-9.0"
+_CATALOG_SPEC_DIR = _SPEC_DIR
 _CATALOG_SPEC_FILE = "swagger-vra-sdk-go-v0.6.5/vra-catalog-deployment.json"
 
 #: HTTP method per hand-coded path constant. The two login endpoints are POSTed
@@ -121,6 +135,55 @@ def _declared_op_ids() -> set[str]:
             )
         declared.add(f"{method}:{path}")
     return declared
+
+
+def _day2_op_ids() -> set[str]:
+    """Every ``METHOD:/path`` the shared day-2 ops send (``vcfa.vra8.*`` shims).
+
+    Swept from the live ``vcf_automation._day2_paths`` constants with the methods
+    the VCF Automation lane maps, plus the deployment read and delete and the IaaS
+    request tracker the handlers also use.
+    """
+    declared = {
+        f"{method}:{path}"
+        for name, path in vars(_day2_paths_module).items()
+        if name.endswith("_PATH") and isinstance(path, str)
+        for method in _DAY2_PATHS_METHODS[name]
+    }
+    declared |= {
+        f"GET:{TENANT_DEPLOYMENT_API_DEPLOYMENT_PATH}",
+        f"DELETE:{TENANT_DEPLOYMENT_API_DEPLOYMENT_PATH}",
+        f"GET:{TENANT_REQUEST_TRACKER_PATH}",
+    }
+    return declared
+
+
+def test_day2_op_id_manifest_is_pinned() -> None:
+    """Pin the day-2 surface the vRA 8 connector shares with VCF Automation 9."""
+    assert _day2_op_ids() == {
+        "DELETE:/deployment/api/deployments/{deploymentId}",
+        "GET:/deployment/api/deployments/{deploymentId}",
+        "GET:/deployment/api/deployments/{deploymentId}/actions",
+        "GET:/deployment/api/resources/{resourceId}/actions",
+        "GET:/iaas/api/block-devices",
+        "GET:/iaas/api/machines",
+        "GET:/iaas/api/request-tracker/{id}",
+        "POST:/deployment/api/deployments/{deploymentId}/requests",
+        "POST:/deployment/api/resources/{resourceId}/requests",
+        "POST:/iaas/api/block-devices",
+        "POST:/iaas/api/machines",
+        "POST:/iaas/api/machines/{id}/disks",
+    }
+
+
+def test_day2_paths_are_served_by_the_pinned_vra_files() -> None:
+    """Every day-2 call is in the pinned ``vra-sdk-go`` files (skips without the shelf)."""
+    served: set[str] = set()
+    for spec_file in _DAY2_SPEC_FILES:
+        served |= swagger2_served_op_ids(require_shelf_spec(_SPEC_DIR, spec_file))
+    assert_op_ids_served(
+        _day2_op_ids(), served, spec_label=f"{_SPEC_DIR} vra-iaas + vra-catalog-deployment"
+    )
 
 
 def test_path_constant_names_are_pinned() -> None:

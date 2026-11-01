@@ -53,6 +53,10 @@ from meho_backplane.connectors.vcf_automation.connector import (
 from meho_backplane.connectors.vcf_automation.day2_ops import VCFA_DAY2_OPS
 from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
 from meho_backplane.connectors.vcf_automation.feature_flag_ops import VCFA_FEATURE_FLAG_OPS
+from meho_backplane.connectors.vcf_automation.governance_ops import (
+    VCFA_GOVERNANCE_OPS,
+    register_vcfa_governance_operations,
+)
 from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
 from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OPS
 from meho_backplane.connectors.vcf_automation.provisioning_ops import VCFA_PROVISIONING_OPS
@@ -131,12 +135,15 @@ register_connector_v2(
 # before the first dispatch — no ingested catalog state required (VCFA
 # ships no vendor spec; typed conversion is the only working read path).
 register_typed_op_registrar(register_vcfa_typed_operations)
+# The approval, policy, ABX and subscription ops (shared with vRA 8).
+register_typed_op_registrar(register_vcfa_governance_operations)
 
 __all__ = [
     "VCFA_CONNECTOR_ID",
     "VCFA_DAY2_OPS",
     "VCFA_DEPLOY_OPS",
     "VCFA_FEATURE_FLAG_OPS",
+    "VCFA_GOVERNANCE_OPS",
     "VCFA_IMAGE_OPS",
     "VCFA_IMPL_ID",
     "VCFA_NETWORK_OPS",
@@ -152,5 +159,6 @@ __all__ = [
     "VcfAutomationTargetLike",
     "VcfaTypedOp",
     "load_credentials_from_vault",
+    "register_vcfa_governance_operations",
     "register_vcfa_typed_operations",
 ]

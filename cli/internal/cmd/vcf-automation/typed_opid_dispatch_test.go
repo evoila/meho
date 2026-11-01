@@ -98,6 +98,18 @@ var typedOpCLICoverage = map[string]string{
 	// `meho operation call` / MCP call_operation.
 	"vcfa.provider.feature_flag.list": "",
 	"vcfa.provider.feature_flag.set":  "",
+	// Approvals, policies, ABX actions and event subscriptions:
+	// agent-surface-only, reached through `meho operation call` / MCP
+	// call_operation.
+	"vcfa.tenant.approval.list":     "",
+	"vcfa.tenant.approval.decide":   "",
+	"vcfa.tenant.policy.list":       "",
+	"vcfa.tenant.policy.set":        "",
+	"vcfa.tenant.abx.action.list":   "",
+	"vcfa.tenant.abx.action.run":    "",
+	"vcfa.tenant.abx.run.get":       "",
+	"vcfa.tenant.subscription.list": "",
+	"vcfa.tenant.subscription.set":  "",
 	// Day-2 ops, shared with Aria Automation 8: agent-surface-only,
 	// reached through `meho operation call` / MCP call_operation.
 	"vcfa.tenant.deployment.actions.list": "",

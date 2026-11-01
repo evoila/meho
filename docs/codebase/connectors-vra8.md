@@ -60,6 +60,19 @@ on a **fresh boot with zero catalog ingest**.
 | `vcfa-vra8-inventory` | `vcfa.vra8.project.list`, `.deployment.list`, `.deployment.get`, `.about` |
 | `vcfa-vra8-content` | `vcfa.vra8.blueprint.list`, `.catalog-item.list` |
 | `vcfa-vra8-api-files` | `vcfa.vra8.api_file.get` (see [API description files](#api-description-files-vcfavra8api_fileget) below) |
+| `vcfa-vra8-governance` | `vcfa.vra8.approval.list`, `.approval.decide` (dangerous, approval), `.policy.list`, `.policy.set` (dangerous, approval) |
+| `vcfa-vra8-extensibility` | `vcfa.vra8.abx.action.list`, `.abx.action.run` (destructive, preview), `.abx.run.get`, `.subscription.list`, `.subscription.set` (destructive, preview) |
+
+**Approvals, policies, ABX actions and event subscriptions.** The two groups
+`vcfa-vra8-governance` and `vcfa-vra8-extensibility` hold the nine ops this
+connector shares with VCF Automation 9 (written once in
+`connectors/vmware_shared/vra_governance.py` and `vra_extensibility.py`,
+registered here by `governance_ops.py` with its own registrar). The handlers
+come from the `VraSharedHandlers` mixin (`vmware_shared/vra_handlers.py`);
+this connector adds `vra_gov_calls`, the bearer GET and send. The table, the
+approval and preview rules, the secret rules and the version notes are in
+[connectors-vcf-automation.md](connectors-vcf-automation.md) ("Approvals,
+policies, ABX actions and event subscriptions").
 
 Op ids are namespaced `vcfa.vra8.*` (distinct from the modern impl's
 `vcfa.provider.*` / `vcfa.tenant.*`): the two impls publish different read surfaces

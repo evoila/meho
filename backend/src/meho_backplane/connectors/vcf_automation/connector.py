@@ -150,6 +150,8 @@ from meho_backplane.connectors.vcf_automation.typed_ops import (
     TENANT_PROJECTS_PATH,
     provider_regions_path,
 )
+from meho_backplane.connectors.vmware_shared.vra_governance import VraGovCalls
+from meho_backplane.connectors.vmware_shared.vra_handlers import VraSharedHandlers
 
 __all__ = ["VcfAutomationConfigurationError", "VcfAutomationConnector"]
 
@@ -182,7 +184,7 @@ def _plane_cache_key(target: VcfAutomationTargetLike, plane: Plane) -> tuple[str
     return credential_cache_key(target, fqdn, _tenant_domain(target))
 
 
-class VcfAutomationConnector(HttpConnector):
+class VcfAutomationConnector(HttpConnector, VraSharedHandlers):
     """VCF Automation 9.x REST connector with dual-plane Bearer-token auth.
 
     Two independent per-target token caches:
@@ -1110,6 +1112,31 @@ class VcfAutomationConnector(HttpConnector):
     # ------------------------------------------------------------------
     # Image ops -- thin shims over :mod:`._images`; metadata in :mod:`.image_ops`.
     # ------------------------------------------------------------------
+
+    def vra_gov_calls(self, operator: Operator, target: Any) -> VraGovCalls:
+        """The tenant-login GET and send of the shared governance ops.
+
+        The approval, policy, ABX and subscription handlers are inherited from
+        :class:`~meho_backplane.connectors.vmware_shared.vra_handlers.VraSharedHandlers`;
+        the metadata is in :mod:`.governance_ops`.
+        """
+
+        async def get(path: str, query: Mapping[str, Any] | None) -> dict[str, Any]:
+            return await self._request_json(target, "GET", path, operator=operator, params=query)
+
+        async def send(
+            method: str,
+            path: str,
+            query: Mapping[str, Any] | None,
+            body: Mapping[str, Any] | None,
+        ) -> Any:
+            # A write answer can be a list or empty, which _post_json refuses.
+            resp = await self._send_with_retry(
+                target, method, path, operator=operator, params=query, json=body
+            )
+            return json_payload_or_empty(resp)
+
+        return VraGovCalls(get=get, send=send, prefix="vcfa.tenant")
 
     async def tenant_image_profile_list(
         self,

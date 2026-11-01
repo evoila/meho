@@ -156,7 +156,7 @@ from meho_backplane.connectors.registry import (
 from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.connectors.schemas import AuthModel, CandidateHint, FingerprintResult
 from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
-from meho_backplane.connectors.vault.tenant_scope import rendered_tenant_prefix
+from meho_backplane.connectors.vault.tenant_scope import is_plain_kv_path, rendered_tenant_prefix
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
@@ -981,6 +981,9 @@ def _enforce_secret_ref_tenant_scope(
       via :func:`~meho_backplane.connectors.vault.tenant_scope.rendered_tenant_prefix`;
     * matching is on a path-segment boundary, so a ``tenants/<id>``
       prefix cannot be satisfied by ``tenants/<id>-evil/...``;
+    * a ref with a ``.`` / ``..`` segment, a ``%`` or a backslash is
+      refused even when it starts with the prefix
+      (:func:`~meho_backplane.connectors.vault.tenant_scope.is_plain_kv_path`);
     * an **empty** template (``VAULT_KV_TENANT_SCOPE_PREFIX=""``, the
       guard-disabled mid-migration state) makes this check a no-op —
       there is no defined subtree to enforce.
@@ -1024,7 +1027,8 @@ def _enforce_secret_ref_tenant_scope(
     prefix = rendered_tenant_prefix(operator, template=template)
     normalised_prefix = prefix.strip().strip("/")
     candidate = f"{DEFAULT_KV_MOUNT}/{secret_ref.strip().strip('/')}"
-    if candidate == normalised_prefix or candidate.startswith(normalised_prefix + "/"):
+    in_prefix = candidate == normalised_prefix or candidate.startswith(normalised_prefix + "/")
+    if in_prefix and is_plain_kv_path(candidate):
         return
 
     try:

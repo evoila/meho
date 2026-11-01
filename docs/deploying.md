@@ -300,7 +300,9 @@ Bound the role first if it isn't:
   Vault JWT role whose policy covers only the secrets your Sensors evaluate,
   and point the backplane at that role with `VAULT_CHECK_RUNNER_ROLE` (#2757)
   so only background dispatch uses it while interactive logins keep
-  `VAULT_OIDC_ROLE`.
+  `VAULT_OIDC_ROLE`. The inbound event intake reads event source secrets
+  with the same token and role, so the role's policy must also cover
+  `secret/data/tenants/+/event-sources/*` (the recipe lists the paths).
 - **Otherwise** — add an **exact-match** `bound_claims` to `meho-mcp` keyed
   on a claim value only operator tokens carry, e.g. a dedicated
   `meho-operator` realm role. A `bound_claims_type=glob` `"*"` is not a
@@ -313,6 +315,12 @@ which one is in force, are in
 [`cross-repo/vault-provisioning.md` § "Bounding the check-runner principal"](cross-repo/vault-provisioning.md#7-bounding-the-check-runner-principal-2642).
 The chart prints the same warning in its `helm install` notes whenever
 `checkRunner.enabled: true` meets `config.credentialBackend: vault`.
+
+On a Vault install the backplane requires the preferred recipe: with a
+runner principal and `VAULT_ADDR` set, the check runner does not start
+unless `VAULT_CHECK_RUNNER_ROLE` names a role of its own (not
+`VAULT_OIDC_ROLE`). Set it through `extraEnv`, or turn
+`checkRunner.enabled` off.
 
 Diagnostics: the `gsm_secret_accessed` structlog event carries an
 `auth_path` of `wif`, `sa_direct`, or `sa_direct_fallback`, so you can see

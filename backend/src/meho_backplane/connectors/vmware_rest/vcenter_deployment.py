@@ -23,6 +23,7 @@ like on any vCenter target.
 This module holds:
 
 * the vendor paths, the operation group and its text;
+* :func:`setup_body`, the body shape of the POST calls of the setup;
 * the reads of the setup state and the open question, and the flat views
   the operations return;
 * the Vault read of a password that a call names by reference
@@ -82,6 +83,7 @@ __all__ = [
     "read_deployment",
     "read_questions",
     "read_secret_param",
+    "setup_body",
     "status_read_ref",
     "unreachable_reason",
     "vendor_detail",
@@ -94,6 +96,23 @@ OP_QUESTION_GET: Final = "GET:/vcenter/deployment/question"
 OP_INSTALL_CHECK: Final = "POST:/vcenter/deployment/install?action=check"
 OP_INSTALL_START: Final = "POST:/vcenter/deployment/install?action=start"
 OP_QUESTION_ANSWER: Final = "POST:/vcenter/deployment/question?action=answer"
+
+
+def setup_body(spec: dict[str, Any]) -> dict[str, Any]:
+    """The JSON body of a POST call of the setup: ``{"spec": <spec>}``.
+
+    The setup service of a new appliance (port 5480) reads each top-level
+    key of the body as a parameter of the method. The install check, the
+    install start and the answer each have one parameter, ``spec``. A body
+    with the spec fields at the top is refused: a vCenter 8.0.3 appliance
+    answers ``400 INVALID_REQUEST Unexpected parameter 'auto_answer' in JSON
+    body``. The vendor's guide for this setup ("HTTP Requests for Install
+    Stage 2" in the vSphere Automation REST programming guide) shows the same
+    wrapped body. The pinned ``vcenter.yaml`` shows the spec fields at the
+    top, so the reconcile test checks the fields inside ``spec`` against it.
+    """
+    return {"spec": spec}
+
 
 #: The status read that follows a started install or an answer.
 STATUS_OP_ID: Final = "vmware.vcenter.deployment.status"

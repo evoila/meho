@@ -13,7 +13,8 @@ A fake connector answers with saved vSphere REST and VI-JSON responses and
 changes its state the way vCenter does, so the read after each change sees
 the result. The policy check of the write seam is replaced by a recorder, so
 the tests show that a held write never reaches vCenter. The last tests run
-the real connector over mocked HTTP on the vCenter 8 and 9 VI-JSON paths.
+the real connector over mocked HTTP on the vCenter 8 and 9 VI-JSON paths, and
+check that a flight-recorder trace of these calls holds no secret setting value.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid4
@@ -35,6 +37,7 @@ from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector, VsphereTargetLike
+from meho_backplane.connectors.vmware_rest import trace as vmware_trace
 from meho_backplane.connectors.vmware_rest import typed_ops_vm_advanced_settings as adv
 from meho_backplane.connectors.vmware_rest import typed_ops_vm_boot as boot
 from meho_backplane.connectors.vmware_rest.composites import _vm_advanced_settings as adv_set
@@ -47,6 +50,7 @@ from meho_backplane.connectors.vmware_rest.composites._register import (
     COMPOSITES_NOT_ON_8_0,
 )
 from meho_backplane.connectors.vmware_rest.typed_ops import VMWARE_TYPED_OPS
+from meho_backplane.flight_recorder import capture
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
@@ -968,11 +972,8 @@ class _StubTarget:
     fingerprint: dict[str, Any] | None = None
 
 
-@pytest.mark.parametrize(("about", "release"), [("8.0.3", "8.0.3.0"), ("9.0.0.0", "9.0.0.0")])
-async def test_real_connector_advanced_settings_set_on_vcenter_8_and_9(
-    gate: _Gate, about: str, release: str
-) -> None:
-    fake = _Fake()
+def _vim_route(fake: _Fake, release: str) -> Any:
+    """Answer the VI-JSON calls of the change from *fake*, on the path of *release*."""
 
     def vim(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -998,6 +999,14 @@ async def test_real_connector_advanced_settings_set_on_vcenter_8_and_9(
             )
         return httpx.Response(200, json={"objects": [fake._vm_object(prop_spec["pathSet"])]})
 
+    return vim
+
+
+@pytest.mark.parametrize(("about", "release"), [("8.0.3", "8.0.3.0"), ("9.0.0.0", "9.0.0.0")])
+async def test_real_connector_advanced_settings_set_on_vcenter_8_and_9(
+    gate: _Gate, about: str, release: str
+) -> None:
+    fake = _Fake()
     connector = VmwareRestConnector(session_loader=_stub_loader)
     try:
         async with respx.mock(base_url="https://vc.example.test") as mock:
@@ -1005,7 +1014,7 @@ async def test_real_connector_advanced_settings_set_on_vcenter_8_and_9(
             mock.get("/api/about").respond(200, json={"version": about})
             route = mock.post(
                 url__regex=rf"^https://vc\.example\.test/sdk/vim25/{release}/.*"
-            ).mock(side_effect=vim)
+            ).mock(side_effect=_vim_route(fake, release))
             out = await adv_set.vm_advanced_settings_set_composite(
                 operator=_operator(),
                 target=_StubTarget(),
@@ -1021,3 +1030,150 @@ async def test_real_connector_advanced_settings_set_on_vcenter_8_and_9(
         for client in connector._clients.values():
             await client.aclose()
         connector._clients.clear()
+
+
+# ---------------------------------------------------------------------------
+# The flight recorder: a stored trace holds no secret setting value
+# ---------------------------------------------------------------------------
+
+_SECRET_VALUE = "<base64-user-data>"
+_SHOW_OP = adv.VMWARE_VM_ADVANCED_SETTINGS_SHOW_OP
+
+
+@contextmanager
+def _capture_scope(op_id: str, tags: tuple[str, ...]) -> Iterator[Any]:
+    """Bind a flight-recorder scope the way the dispatcher does, without a DB."""
+    scope = capture._CaptureScope(audit_id=uuid4(), tenant_id=uuid4(), target_id=None)
+    op = capture._OpContext(
+        op_id=op_id,
+        connector_id="vmware-rest-9.0",
+        impl_id="vmware-rest",
+        product="vmware",
+        tags=tags,
+        body_paths=(),
+        delete_shaped_patterns=(),
+    )
+    cap_token = capture._active_capture_var.set(scope)
+    op_token = capture._op_context_var.set(op)
+    try:
+        yield scope
+    finally:
+        capture._op_context_var.reset(op_token)
+        capture._active_capture_var.reset(cap_token)
+
+
+async def _vim_spans_of_show_and_set() -> list[Any]:
+    """Run the read and the change on the real connector; return the VI-JSON spans."""
+    fake = _Fake()
+    connector = VmwareRestConnector(session_loader=_stub_loader)
+    try:
+        async with respx.mock(base_url="https://vc.example.test") as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": "9.0.0.0"})
+            mock.post(url__regex=r"^https://vc\.example\.test/sdk/vim25/9\.0\.0\.0/.*").mock(
+                side_effect=_vim_route(fake, "9.0.0.0")
+            )
+            with _capture_scope(_SHOW_OP.op_id, _SHOW_OP.tags) as scope:
+                shown = await connector.vm_advanced_settings_show(
+                    _operator(), _StubTarget(), {"vm": _VM}
+                )
+                changed = await adv_set.vm_advanced_settings_set_composite(
+                    operator=_operator(),
+                    target=_StubTarget(),
+                    params={"vm": _VM, "settings": [{"key": "disk.EnableUUID", "value": "TRUE"}]},
+                    connector=connector,
+                )
+    finally:
+        connector._session_tokens.clear()
+        for client in connector._clients.values():
+            await client.aclose()
+        connector._clients.clear()
+    assert shown["masked_count"] == 1
+    assert changed["status"] == "set"
+    return [
+        span
+        for span in scope.spans
+        if span.span_kind == "vendor_call" and "/sdk/vim25/" in span.attributes["url"]
+    ]
+
+
+@pytest.mark.usefixtures("gate")
+async def test_flight_recorder_spans_hold_no_secret_setting_value() -> None:
+    spans = await _vim_spans_of_show_and_set()
+    reads = [
+        span
+        for span in spans
+        if span.attributes["url"].endswith(_RETRIEVE)
+        and "config.extraConfig" in json.dumps(span.attributes["response_body"])
+    ]
+    assert len(reads) == 3  # the show, and the read before and after the change
+    for span in reads:
+        assert span.attributes["body_recorded"] is True
+        rows = json.dumps(span.attributes["response_body"])
+        assert "guestinfo.userdata" in rows
+        assert vmware_trace.SECRET_SETTING_MARKER in rows
+        assert "disk.EnableUUID" in rows
+    assert _SECRET_VALUE not in repr(spans)
+
+
+@pytest.mark.usefixtures("gate")
+async def test_without_the_mask_the_flight_recorder_would_keep_the_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Control: the connector's mask is what keeps the value out, so the test above is not empty."""
+    monkeypatch.setattr(VmwareRestConnector, "trace_response_body", lambda self, response: None)
+    spans = await _vim_spans_of_show_and_set()
+    assert _SECRET_VALUE in repr(spans)
+
+
+def test_trace_payload_masks_only_secret_named_values() -> None:
+    payload: dict[str, Any] = {
+        "objects": [
+            {
+                "propSet": [
+                    {
+                        "name": "config.extraConfig",
+                        "val": {
+                            "_typeName": "ArrayOfOptionValue",
+                            "_value": [
+                                {
+                                    "_typeName": "OptionValue",
+                                    "key": "svga.present",
+                                    "value": _box("TRUE"),
+                                },
+                                {
+                                    "_typeName": "OptionValue",
+                                    "key": "guestinfo.userdata",
+                                    "value": _box(_SECRET_VALUE),
+                                },
+                                {"key": "ovf.Password", "value": "hunter2"},
+                            ],
+                        },
+                    }
+                ]
+            }
+        ]
+    }
+    masked = vmware_trace.trace_payload(payload)
+    rows = masked["objects"][0]["propSet"][0]["val"]["_value"]
+    assert rows[0] == {"_typeName": "OptionValue", "key": "svga.present", "value": _box("TRUE")}
+    assert rows[1]["key"] == "guestinfo.userdata"
+    assert rows[1]["value"] == vmware_trace.SECRET_SETTING_MARKER
+    assert rows[2] == {"key": "ovf.Password", "value": vmware_trace.SECRET_SETTING_MARKER}
+    assert _SECRET_VALUE not in json.dumps(masked)
+    assert payload["objects"][0]["propSet"][0]["val"]["_value"][1]["value"] == _box(_SECRET_VALUE)
+
+
+def test_trace_response_body_leaves_non_json_to_the_shared_engine_and_never_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connector = VmwareRestConnector(session_loader=_stub_loader)
+    assert connector.trace_response_body(httpx.Response(200, text="<xml/>")) is None
+    assert connector.trace_response_body(httpx.Response(200, json={"a": 1})) == {"a": 1}
+
+    def boom(payload: Any) -> Any:
+        raise RecursionError
+
+    monkeypatch.setattr(vmware_trace, "trace_payload", boom)
+    out = connector.trace_response_body(httpx.Response(200, json={"a": 1}))
+    assert out == vmware_trace.SECRET_SETTING_MARKER

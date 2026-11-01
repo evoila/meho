@@ -2383,6 +2383,15 @@ Details:
   vSphere removes a key whose value is empty. The `OptionValue.value` field is
   an `Any` field in VI-JSON, so the string is boxed
   (`{"_typeName": "string", "_value": ...}`).
+- **Flight recorder.** The `extraConfig` read goes through the traced HTTP
+  path, and the shared redaction does not know a setting value by shape. So
+  `VmwareRestConnector.trace_response_body` runs every JSON answer through
+  `trace.trace_payload` before the trace stores it: the `value` of every
+  `{key, value}` row whose key `is_secret_key` names is replaced by
+  `[MEHO-REDACTED:advanced-setting-value]`, the other rows stay. A stored
+  trace of the read or the change holds the key names, never a secret value
+  (`test_flight_recorder_spans_hold_no_secret_setting_value`, with a control
+  case without the mask).
 - **Faults.** A `ReconfigVM_Task` fault raises with the vim fault type and
   text, so the dispatcher records a failed call. A task that does not finish
   in 600 s gives `timeout` with an error issue.

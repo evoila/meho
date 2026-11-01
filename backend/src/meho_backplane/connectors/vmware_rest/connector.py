@@ -3827,6 +3827,31 @@ class VmwareRestConnector(HttpConnector):
 
         return await local_account_policy_set_impl(self, operator, target, params)
 
+    def trace_response_body(self, response: httpx.Response) -> Any:
+        """Mask secret-named setting values before the flight recorder records the answer.
+
+        A VM advanced setting (an ``OptionValue`` of ``config.extraConfig``)
+        can hold a secret in a plain string the shared redaction does not
+        know by shape, for example a cloud-init user-data blob. So every JSON
+        answer passes :func:`~meho_backplane.connectors.vmware_rest.trace.trace_payload`
+        before the trace stores it. A body that is not JSON is recorded as
+        the shared engine sees fit. A failure in the masking records a
+        marker, never the raw body.
+        """
+        from meho_backplane.connectors.vmware_rest.trace import (
+            SECRET_SETTING_MARKER,
+            trace_payload,
+        )
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        try:
+            return trace_payload(payload)
+        except Exception:  # a trace must never break the call; store the marker instead
+            return SECRET_SETTING_MARKER
+
     async def aclose(self) -> None:
         """Revoke every cached session before closing the httpx pool.
 

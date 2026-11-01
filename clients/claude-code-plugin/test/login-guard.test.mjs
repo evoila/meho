@@ -2,7 +2,7 @@
 // Copyright (c) 2026 evoila Group
 //
 // Behavioural suite for lib/login-guard.mjs (#3961). The guard runs the
-// vendored mcp-remote in its own process and adds two rules:
+// vendored mcp-remote in its own process and adds these rules:
 //   1. A connect that does not finish within MEHO_MCP_LOGIN_TIMEOUT seconds
 //      stops, so an unfinished browser login frees the callback port.
 //   2. When the login expires during a session, the failed call gets a clear
@@ -11,6 +11,8 @@
 //      its own lockfile, so another session can run its own login (#4000).
 //      It also drops mcp-remote's exit hooks that would later delete
 //      another session's lockfile.
+//   4. One browser login at a time for all sessions (#5514).
+//   5. A failed renewal keeps the shared login (#5514).
 //
 // Two layers:
 //   - Stub tests: tiny fake mcp-remote entries. No network, always run.
@@ -461,6 +463,10 @@ e2e("e2e: a login that expires during a session fails the call fast", { timeout:
     assert.ok(answer, `no answer to the call; stderr:\n${run.stderr}`);
     assert.equal(answer.error.message, LOGIN_EXPIRED);
     assert.ok(Date.now() - callSent < 10000, "the call must fail fast");
+    // A connected session opens no browser (its callback server is gone),
+    // and it never deletes the shared login file (#5514).
+    assert.doesNotMatch(run.stderr, /Please authorize this client by visiting/);
+    assert.equal(existsSync(join(dir, `${hash}_tokens.json`)), true, "the login file must stay");
   } finally {
     fake.close();
   }
@@ -636,6 +642,341 @@ e2e("e2e: a connected session that stops leaves another session's lockfile alone
 
     second.child.kill("SIGTERM");
     await second.exited;
+  } finally {
+    fake.close();
+  }
+});
+
+// --- Renewal rules (#5514), with the real pinned mcp-remote ----------------
+
+// A fake MEHO /mcp plus a fake Keycloak that renews logins.
+//   - A refresh token in `live` gets a new access token and a new refresh
+//     token. Any other refresh token gets invalid_grant.
+//   - A finished browser login (an authorization code) gets a new login too.
+//   - /mcp accepts only access tokens in `valid`.
+//   - onRefresh(token, n) can answer a renewal itself: "drop" closes the
+//     connection, a number answers with that HTTP status, a function runs
+//     before the normal answer.
+async function startRenewingMeho({ onRefresh } = {}) {
+  let base;
+  let issued = 0;
+  const valid = new Set();
+  const live = new Set();
+  const refreshes = [];
+  const server = createHttpServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      const path = new URL(req.url, base).pathname;
+      const json = (status, obj, headers = {}) => {
+        res.writeHead(status, { "content-type": "application/json", ...headers });
+        res.end(JSON.stringify(obj));
+      };
+      const issue = () => {
+        issued += 1;
+        const login = {
+          access_token: `access-${issued}`,
+          token_type: "Bearer",
+          expires_in: 300,
+          refresh_token: `refresh-${issued}`,
+        };
+        valid.add(login.access_token);
+        live.add(login.refresh_token);
+        return json(200, login);
+      };
+      if (path.startsWith("/.well-known/oauth-protected-resource")) {
+        return json(200, {
+          resource: `${base}/mcp`,
+          authorization_servers: [`${base}/realms/test`],
+          scopes_supported: ["mcp:read", "mcp:execute", "offline_access"],
+        });
+      }
+      if (path.includes("/.well-known/")) {
+        return json(200, {
+          issuer: `${base}/realms/test`,
+          authorization_endpoint: `${base}/realms/test/auth`,
+          token_endpoint: `${base}/realms/test/token`,
+          response_types_supported: ["code"],
+          code_challenge_methods_supported: ["S256"],
+        });
+      }
+      if (path === "/realms/test/token") {
+        const params = new URLSearchParams(body);
+        if (params.get("grant_type") === "authorization_code") return issue();
+        const token = params.get("refresh_token");
+        refreshes.push(token);
+        const verdict = onRefresh?.(token, refreshes.length);
+        if (verdict === "drop") return req.socket.destroy();
+        if (typeof verdict === "number") return json(verdict, { error: "server_error" });
+        if (live.has(token)) {
+          live.delete(token);
+          return issue();
+        }
+        return json(400, { error: "invalid_grant", error_description: "Token is not active" });
+      }
+      if (path !== "/mcp") {
+        res.writeHead(404);
+        return res.end();
+      }
+      const bearer = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+      if (!valid.has(bearer)) {
+        return json(401, { detail: "unauthorized" }, {
+          // The challenge MEHO sends since #5514.
+          "www-authenticate":
+            `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource", ` +
+            'scope="mcp:read mcp:execute offline_access"',
+        });
+      }
+      if (req.method !== "POST") {
+        res.writeHead(405);
+        return res.end();
+      }
+      const msg = JSON.parse(body || "{}");
+      if (msg.id === undefined) {
+        res.writeHead(202);
+        return res.end();
+      }
+      const result =
+        msg.method === "initialize"
+          ? {
+              protocolVersion: msg.params.protocolVersion,
+              capabilities: { tools: {} },
+              serverInfo: { name: "fake-meho", version: "0" },
+            }
+          : { content: [{ type: "text", text: "ok" }] };
+      return json(200, { jsonrpc: "2.0", id: msg.id, result });
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  base = `http://127.0.0.1:${server.address().port}`;
+  return { url: `${base}/mcp`, valid, live, refreshes, close: () => server.close() };
+}
+
+// The shared login file of a fake MEHO, in a fresh config folder.
+function loginFile(url) {
+  const configDir = tempDir("meho-guard-auth-");
+  const dir = join(configDir, `mcp-remote-${mcpRemoteConfigVersion()}`);
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `${createHash("md5").update(url).digest("hex")}_tokens.json`);
+  return {
+    configDir,
+    file,
+    write: (login) =>
+      writeFileSync(file, JSON.stringify({ token_type: "Bearer", expires_in: 300, ...login })),
+    read: () => (existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null),
+  };
+}
+
+const BROWSER_LOGIN = /Please authorize this client by visiting/g;
+const TOOL_CALL = { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "meho_status", arguments: {} } };
+
+// Start a session and wait until it is connected.
+async function connectedSession(fake, login, env = {}) {
+  const run = startGuard(REAL_ENTRY, mcpRemoteArgs(fake.url), {
+    MCP_REMOTE_CONFIG_DIR: login.configDir,
+    MEHO_LOGIN_GUARD_RETRY_BASE_MS: "20",
+    ...env,
+  });
+  run.send(INITIALIZE);
+  const answer = await waitForAnswer(run, 1, "the session to connect");
+  assert.ok(answer.result, `the session must connect; stderr:\n${run.stderr}`);
+  // No notifications/initialized: with it, the notification and the call
+  // would each run a renewal, and the counts below would vary.
+  return run;
+}
+
+e2e("e2e: a session uses the login another session renewed", { timeout: 30000 }, async () => {
+  const fake = await startRenewingMeho();
+  try {
+    const login = loginFile(fake.url);
+    fake.valid.add("access-old");
+    login.write({ access_token: "access-old", refresh_token: "refresh-old" });
+    const run = await connectedSession(fake, login);
+
+    // Another session renews: the old access token and the old refresh
+    // token stop working, and the file holds the newer login. Its access
+    // token has ended too, so this session must renew with the newer
+    // refresh token.
+    fake.valid.delete("access-old");
+    fake.live.add("refresh-other");
+    login.write({ access_token: "access-other", refresh_token: "refresh-other" });
+
+    run.send(TOOL_CALL);
+    const answer = await waitForAnswer(run, 2, "the call");
+    assert.ok(answer.result, `the call must work; stderr:\n${run.stderr}`);
+    assert.deepEqual(fake.refreshes, ["refresh-other"], "renew with the newest saved token");
+    assert.equal(login.read()?.refresh_token, "refresh-1", "the renewed login is saved");
+    assert.doesNotMatch(run.stderr, BROWSER_LOGIN);
+    assert.equal(run.child.exitCode, null, "the session keeps running");
+    run.child.kill("SIGTERM");
+    await run.exited;
+  } finally {
+    fake.close();
+  }
+});
+
+e2e("e2e: one invalid_grant while another session saves a newer login: no delete, no browser", { timeout: 30000 }, async () => {
+  let login;
+  const fake = await startRenewingMeho({
+    // Another session saves a newer login while this renewal is on its way.
+    onRefresh: (token) => {
+      if (token === "refresh-old") {
+        fake.live.add("refresh-other");
+        login.write({ access_token: "access-other", refresh_token: "refresh-other" });
+      }
+    },
+  });
+  try {
+    login = loginFile(fake.url);
+    fake.valid.add("access-old");
+    login.write({ access_token: "access-old", refresh_token: "refresh-old" });
+    const run = await connectedSession(fake, login);
+    fake.valid.delete("access-old");
+
+    run.send(TOOL_CALL);
+    const answer = await waitForAnswer(run, 2, "the call");
+    assert.ok(answer.result, `the call must work; stderr:\n${run.stderr}`);
+    assert.deepEqual(fake.refreshes, ["refresh-old", "refresh-other"]);
+    assert.equal(login.read()?.refresh_token, "refresh-1", "the login file must stay, renewed");
+    assert.doesNotMatch(run.stderr, BROWSER_LOGIN);
+    assert.equal(run.child.exitCode, null, "the session keeps running");
+    run.child.kill("SIGTERM");
+    await run.exited;
+  } finally {
+    fake.close();
+  }
+});
+
+e2e("e2e: a network error and a server error during renewal are tried again", { timeout: 30000 }, async () => {
+  const fake = await startRenewingMeho({
+    onRefresh: (_token, n) => (n === 1 ? "drop" : n === 2 ? 503 : undefined),
+  });
+  try {
+    const login = loginFile(fake.url);
+    fake.valid.add("access-old");
+    fake.live.add("refresh-old");
+    login.write({ access_token: "access-old", refresh_token: "refresh-old" });
+    const run = await connectedSession(fake, login);
+    fake.valid.delete("access-old");
+
+    run.send(TOOL_CALL);
+    const answer = await waitForAnswer(run, 2, "the call");
+    assert.ok(answer.result, `the call must work; stderr:\n${run.stderr}`);
+    assert.deepEqual(fake.refreshes, ["refresh-old", "refresh-old", "refresh-old"]);
+    assert.match(run.stderr, /renewing the MEHO login failed .*; trying again/);
+    assert.equal(login.read()?.refresh_token, "refresh-1", "the login file must stay, renewed");
+    assert.doesNotMatch(run.stderr, BROWSER_LOGIN);
+    assert.equal(run.child.exitCode, null, "the session keeps running");
+    run.child.kill("SIGTERM");
+    await run.exited;
+  } finally {
+    fake.close();
+  }
+});
+
+e2e("e2e: when the login server stays down, the call fails and the login is kept", { timeout: 30000 }, async () => {
+  const fake = await startRenewingMeho({ onRefresh: () => 503 });
+  try {
+    const login = loginFile(fake.url);
+    fake.valid.add("access-old");
+    fake.live.add("refresh-old");
+    login.write({ access_token: "access-old", refresh_token: "refresh-old" });
+    const run = await connectedSession(fake, login);
+    fake.valid.delete("access-old");
+
+    run.send(TOOL_CALL);
+    const answer = await waitForAnswer(run, 2, "the call");
+    assert.match(answer.error?.message ?? "", /login server did not answer.*Your login is kept/);
+    assert.equal(fake.refreshes.length, 5, "the first try and four more");
+    assert.equal(login.read()?.refresh_token, "refresh-old", "the login file must stay unchanged");
+    assert.doesNotMatch(run.stderr, BROWSER_LOGIN);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(run.child.exitCode, null, "the session keeps running");
+    run.child.kill("SIGTERM");
+    await run.exited;
+  } finally {
+    fake.close();
+  }
+});
+
+e2e("e2e: an ended login at start gives exactly one browser login", { timeout: 30000 }, async () => {
+  const fake = await startRenewingMeho();
+  try {
+    const login = loginFile(fake.url);
+    login.write({ access_token: "access-old", refresh_token: "refresh-ended" });
+    const run = startGuard(REAL_ENTRY, mcpRemoteArgs(fake.url), {
+      MCP_REMOTE_CONFIG_DIR: login.configDir,
+      MEHO_LOGIN_GUARD_RETRY_BASE_MS: "20",
+      MEHO_MCP_LOGIN_TIMEOUT: "20",
+    });
+    run.send(INITIALIZE);
+    await finishBrowserLogin(run, "code-new");
+    const answer = await waitForAnswer(run, 1, "the session to connect");
+    assert.ok(answer.result, `the session must connect; stderr:\n${run.stderr}`);
+    assert.equal(run.stderr.match(BROWSER_LOGIN).length, 1, "exactly one browser login");
+    assert.ok(fake.refreshes.every((t) => t === "refresh-ended"));
+    assert.equal(login.read()?.refresh_token, "refresh-1", "the new login is saved");
+    run.child.kill("SIGTERM");
+    await run.exited;
+  } finally {
+    fake.close();
+  }
+});
+
+e2e("e2e: two sessions that need a browser login open only one", { timeout: 60000 }, async () => {
+  const fake = await startRenewingMeho();
+  try {
+    const login = loginFile(fake.url);
+    const env = {
+      MCP_REMOTE_CONFIG_DIR: login.configDir,
+      MEHO_LOGIN_GUARD_RETRY_BASE_MS: "20",
+      MEHO_MCP_LOGIN_TIMEOUT: "30",
+    };
+    const first = startGuard(REAL_ENTRY, mcpRemoteArgs(fake.url), env);
+    first.send(INITIALIZE);
+    await waitFor(() => BROWSER_LOGIN.test(first.stderr), "the first browser login");
+    const second = startGuard(REAL_ENTRY, mcpRemoteArgs(fake.url), env);
+    second.send(INITIALIZE);
+    await waitFor(() => /is signing in; waiting for it to finish/.test(second.stderr), "the second session to wait");
+
+    await finishBrowserLogin(first, "code-a");
+    const answerA = await waitForAnswer(first, 1, "the first session to connect");
+    assert.ok(answerA.result, `the first session must connect; stderr:\n${first.stderr}`);
+    const answerB = await waitForAnswer(second, 1, "the second session to connect");
+    assert.ok(answerB.result, `the second session must connect; stderr:\n${second.stderr}`);
+    assert.doesNotMatch(second.stderr, BROWSER_LOGIN, "the second session opens no browser");
+
+    first.child.kill("SIGTERM");
+    second.child.kill("SIGTERM");
+    await Promise.all([first.exited, second.exited]);
+  } finally {
+    fake.close();
+  }
+});
+
+e2e("e2e: the browser login asks for the plugin's own scopes, also with mcp:admin", { timeout: 30000 }, async () => {
+  // MEHO advertises "mcp:read mcp:execute offline_access" in its challenge
+  // and in scopes_supported. mcp-remote 0.1.39 still puts the scopes from
+  // --static-oauth-client-metadata into the login URL, so MEHO_MCP_SCOPES
+  // with mcp:admin reaches the login server.
+  const fake = await startRenewingMeho();
+  try {
+    const login = loginFile(fake.url);
+    const scopes = "mcp:read mcp:execute mcp:admin offline_access";
+    const args = mcpRemoteArgs(fake.url);
+    args[args.indexOf("--static-oauth-client-metadata") + 1] = JSON.stringify({ scope: scopes });
+    const run = startGuard(REAL_ENTRY, args, {
+      MCP_REMOTE_CONFIG_DIR: login.configDir,
+      MEHO_MCP_LOGIN_TIMEOUT: "20",
+    });
+    run.send(INITIALIZE);
+    const loginUrl = await waitFor(
+      () => run.stderr.match(/Please authorize this client by visiting:\n(\S+)/)?.[1],
+      "the browser login URL",
+    );
+    assert.equal(new URL(loginUrl).searchParams.get("scope"), scopes);
+    run.child.kill("SIGTERM");
+    await run.exited;
   } finally {
     fake.close();
   }

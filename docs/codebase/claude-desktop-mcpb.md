@@ -20,9 +20,10 @@ records the launcher's contract and invariants.
 | File | Role |
 |---|---|
 | `manifest.json` | MCPB 0.3 manifest. `mcp_config` runs `node server/index.mjs <backplane_url> <ca_cert>`; env carries `MEHO_MCP_CLIENT_ID`, `MEHO_MCP_SCOPES`, `MEHO_TENANT` (the optional `tenant` setting, #5242), and `NODE_EXTRA_CA_CERTS` (older-Node CA fallback). |
-| `server/index.mjs` | The launcher. Validates argv, injects the internal CA, takes the sign-in lock, rewrites `process.argv`, imports the login guard, which imports the vendored `mcp-remote` entry in-process. |
-| `server/signin-lock.mjs` | One sign-in at a time (#3857). A per-endpoint lock file, so two copies started together do not both run the browser login. |
-| `../claude-code-plugin/lib/login-guard.mjs` | The login guard (#4003), shared with the Claude Code plugin. Not in this folder: `build.sh` copies it to `server/login-guard.mjs` in the staged bundle. |
+| `server/index.mjs` | The launcher. Validates argv, injects the internal CA, rewrites `process.argv`, imports the login guard, which takes the sign-in lock and imports the vendored `mcp-remote` entry in-process. |
+| `../claude-code-plugin/lib/login-guard.mjs` | The login guard (#4003), shared with the Claude Code plugin. Not in this folder: `build.sh` copies every `lib/*.mjs` file into `server/` in the staged bundle. |
+| `../claude-code-plugin/lib/signin-lock.mjs` | One sign-in at a time (#3857, #5514). A per-endpoint lock file, so two copies (of the bundle or of the plugin) do not both run the browser login. The guard uses the same code, with another file name, for the renewal lock. |
+| `../claude-code-plugin/lib/token-renewal.mjs` | The renewal rules (#5514): the shared login file is never deleted, one renewal at a time, a network or server error is tried again, a refused renewal first looks for a newer saved login. |
 | `package.json` / `package-lock.json` | Pin `mcp-remote@0.1.39` and its tree; `build.sh` vendors it with `npm ci --omit=dev`. |
 | `test/index.test.mjs` | `node --test` suite: runs the launcher against a stub `mcp-remote` that reports the argv, env, pid/ppid, and default-CA fingerprints it sees at import time. |
 | `test/login-guard.test.mjs` | The guard inside the bundle: stub tests, and end-to-end tests with the real pinned `mcp-remote` against a fake MEHO + Keycloak on `127.0.0.1` over https (throwaway `openssl` certificate passed as the CA argument). CI sets `MEHO_MCPB_E2E=1`, so a missing `node_modules` fails instead of skipping. |
@@ -62,11 +63,33 @@ records the launcher's contract and invariants.
    own saved login.
 4. **mcp-remote entry.** Resolved from the bundle's `node_modules` via the
    package's `bin` mapping.
-5. **Sign-in lock (#3857).** `acquireSignInLock(url.href)` waits until it
-   can create `<config dir>/meho-claude-desktop-<sha256(url)[:16]>.lock`
-   with the exclusive `wx` flag. The config dir is `MCP_REMOTE_CONFIG_DIR`
-   or `~/.mcp-auth`, the same base folder `mcp-remote` uses. The file holds
-   the owner's pid. A lock is stale when its pid is not running, when it is
+5. **Hand-off.** `process.argv` becomes
+   `[node, server/login-guard.mjs, entry, url, --static-oauth-client-info, {"client_id"}, --static-oauth-client-metadata, {"scope"}]`,
+   plus `--header, "Meho-Tenant: <tenant>"` when a tenant is set,
+   the launcher sets `MEHO_LOGIN_GUARD_PREFIX` / `MEHO_LOGIN_GUARD_RECONNECT`
+   (the bundle's log prefix and the "turn the extension off and on" hint),
+   and imports the guard. The guard reads and deletes those two variables,
+   sets `process.argv` to `[node, entry, url, ...]`, and imports the entry;
+   `mcp-remote` parses argv at module top level and owns stdio from then
+   on.
+6. **Login guard (#4003, #5514).** The guard starts its connect timer,
+   then takes the sign-in lock (below), then sets up the renewal rules,
+   then imports `mcp-remote`. The timer covers the wait for the lock: a
+   copy that waits for another copy's login stops at the same limit. If
+   `mcp-remote` writes nothing to stdout within `MEHO_MCP_LOGIN_TIMEOUT`
+   seconds (unset in the bundle, so 300), the guard exits 1: the exit frees
+   the OAuth callback port, and the `exit` listeners remove `mcp-remote`'s
+   lockfile and the sign-in lock. The first stdout write (`mcp-remote`
+   answering the host, which only happens after it is connected) releases
+   the sign-in lock. When the login has ended during a session, the call
+   fails with the "login has expired" message and the guard exits 1.
+7. **Sign-in lock (#3857).** `acquireSignInLock(url)` waits until it can
+   create `<config dir>/meho-signin-<sha256(url)[:16]>.lock` with the
+   exclusive `wx` flag. The config dir is `MCP_REMOTE_CONFIG_DIR` or
+   `~/.mcp-auth`, the same base folder `mcp-remote` uses. The URL is
+   normalised with `new URL(...).href`, so the Claude Code plugin and the
+   bundle use the same lock for the same MEHO server. The file holds the
+   owner's pid. A lock is stale when its pid is not running, when it is
    older than five minutes, or when it has no readable pid after five
    seconds; the next copy takes it over in place. It never deletes the stale
    file, because two copies can see the same stale lock, and the second
@@ -79,41 +102,43 @@ records the launcher's contract and invariants.
    a live lock and wait. The second name is removed afterwards. A copy
    removes a second name left behind by another copy only when the pid in
    the name is not running; no other process can have made that exact name,
-   so the removal never hits a name a running copy is using. The launcher
-   wraps
-   `process.stdout.write`: the first write (`mcp-remote` answering the
-   host, which only happens after it is connected) releases the lock. The
-   wrapper stays in place for later writes (the release does nothing once
-   done), because the login guard wraps `process.stdout.write` on top of
-   it; a wrapper that swapped itself out would remove the guard's. An
-   `exit` listener also releases it. The release uses the same second-name
-   step as the takeover: it gives the file a second name, goes on only when
-   the file has exactly two names, and deletes the lock path only when the
-   file still holds its own pid. While another copy's second name exists,
-   that copy may be about to write its pid; the release then leaves the
-   lock and tries again on the next call. So a release never deletes a lock
-   another copy has just taken over. After waiting five minutes, or when
-   the lock file cannot be used, the launcher starts without the lock.
-6. **Hand-off.** `process.argv` becomes
-   `[node, server/login-guard.mjs, entry, url, --static-oauth-client-info, {"client_id"}, --static-oauth-client-metadata, {"scope"}]`,
-   plus `--header, "Meho-Tenant: <tenant>"` when a tenant is set,
-   the launcher sets `MEHO_LOGIN_GUARD_PREFIX` / `MEHO_LOGIN_GUARD_RECONNECT`
-   (the bundle's log prefix and the "turn the extension off and on" hint),
-   and imports the guard. The guard reads and deletes those two variables,
-   sets `process.argv` to `[node, entry, url, ...]`, and imports the entry;
-   `mcp-remote` parses argv at module top level and owns stdio from then
-   on.
-7. **Login guard (#4003).** The guard's connect timer starts only now,
-   after the sign-in lock is taken, so a copy that waits for another copy
-   is not stopped while it waits. If `mcp-remote` writes nothing to stdout
-   within `MEHO_MCP_LOGIN_TIMEOUT` seconds (unset in the bundle, so 300),
-   the guard exits 1: the exit frees the OAuth callback port, and the
-   `exit` listeners remove `mcp-remote`'s lockfile and the sign-in lock.
-   When `mcp-remote` 0.1.39 answers a call with
-   `Failed to forward message to remote server: Unauthorized` (a call that
-   needs a new login), the guard replaces the error text with the
-   "login has expired" message and exits 1. `mcp-remote` 0.1.38 sent no
-   answer in that case, which is why the pin moved with the guard.
+   so the removal never hits a name a running copy is using. The release
+   uses the same second-name step as the takeover: it gives the file a
+   second name, goes on only when the file has exactly two names, and
+   deletes the lock path only when the file still holds its own pid. While
+   another copy's second name exists, that copy may be about to write its
+   pid; the release then leaves the lock and tries again on the next call.
+   So a release never deletes a lock another copy has just taken over.
+   After waiting five minutes, or when the lock file cannot be used, the
+   guard starts without the lock.
+8. **Renewal rules (#5514).** All copies on one computer share one saved
+   login file (`<config dir>/mcp-remote-<v>/<hash>_tokens.json`).
+   `token-renewal.mjs` changes `mcp-remote` from the inside, without
+   editing its files:
+   - It wraps `fs.promises.unlink`, so `mcp-remote` never deletes the
+     login file (it did that on every `invalid_grant`), and
+     `fs.promises.writeFile`, so the file is written all at once (a new
+     file, then a rename).
+   - It wraps the global `fetch` for the refresh-token request only. One
+     renewal runs at a time per MEHO server (`meho-renew-<hash>.lock`,
+     same lock code). Under the lock it reads the login file again and
+     renews with the newest refresh token in it, then saves the result.
+   - A network error or HTTP 5xx is tried again after 1, 2, 4 and 8
+     seconds (about 30 seconds in total). If it still fails, `mcp-remote`
+     gets a `temporarily_unavailable` answer. That is an OAuth error that
+     is not a server error, so `mcp-remote` fails the call and opens no
+     browser. The login is kept.
+   - On `invalid_grant` it reads the file again. A newer refresh token
+     (another copy renewed, or finished a browser login) is tried once.
+     When the same token is refused, the login has ended.
+   - An ended login before connect: the guard wraps
+     `fs.promises.readFile` so `mcp-remote` sees no login file, and runs
+     its browser login (under the sign-in lock). An ended login after
+     connect: the guard waits while another copy holds the sign-in lock,
+     looks again, and otherwise answers `invalid_grant` with its own
+     "login has ended" text. `mcp-remote` then fails the call without a
+     browser (the login file still has a refresh token), and the guard
+     rewrites the error and exits, as for `Unauthorized`.
 
 ## Invariants
 
@@ -133,14 +158,14 @@ records the launcher's contract and invariants.
 - **One copy signs in at a time (#3857).** `mcp-remote` 0.1.39 has its own
   lockfile, but it checks for it and creates it in two steps, so copies
   that start together both miss it; on Windows it skips the check. The
-  launcher lock closes that gap. It relies on `mcp-remote` writing nothing
+  guard's sign-in lock closes that gap, for the bundle and the plugin. It relies on `mcp-remote` writing nothing
   to stdout before it is connected (its `log` goes to stderr, and the stdio
   transport starts only after the remote connection). Newer upstream
   `mcp-remote` (0.15.x checked) coordinates concurrent starts itself; if
   the pin moves there, re-check whether this lock is still needed.
-- **One guard file.** The bundle does not keep its own copy of
-  `login-guard.mjs`; `build.sh` copies the plugin's file, and
-  `mcpb-bundle.yml` also runs on changes to that file. The guard's own
+- **One guard.** The bundle does not keep its own copy of the guard or its
+  helper files; `build.sh` copies the plugin's `lib/*.mjs`, and
+  `mcpb-bundle.yml` also runs on changes there. The guard's own
   contract (argv shape, rules) is documented in its header.
 - **One tenant per session (#5242).** The tenant is fixed when the launcher
   starts; there is no MCP tool to change it. No setting sends no header, so
@@ -171,7 +196,16 @@ records the launcher's contract and invariants.
 - If Desktop stops the copy that holds the sign-in lock before the login
   finishes, the waiting copy takes over and opens a second browser tab.
 - The takeover of a stale lock needs hard links. On a file system without
-  them the launcher logs that it cannot use the lock and starts without it.
+  them the guard logs that it cannot use the lock and starts without it.
+- The renewal rules depend on `mcp-remote` 0.1.39 internals: the token
+  request goes through the global `fetch` with a `URLSearchParams` body,
+  and the login file is read, written and deleted through `fs.promises`.
+  The end-to-end tests in `clients/claude-code-plugin/test/` pin this; a
+  pin bump that changes it turns them red.
+- A login file without a refresh token (not issued by Keycloak for this
+  client) cannot be renewed; a connected session then still reaches
+  `mcp-remote`'s own browser login, which cannot finish without its
+  callback server.
 - The field tests so far (#3143) ran on macOS; how Desktop on Windows
   handles either CA route is unverified.
 

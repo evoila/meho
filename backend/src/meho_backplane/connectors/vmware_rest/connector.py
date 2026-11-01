@@ -3181,6 +3181,106 @@ class VmwareRestConnector(HttpConnector):
 
         return await host_vsan_health_impl(self, operator, target, params)
 
+    async def vsan_cluster_info(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vsan.cluster.info`` -- the vSAN settings of one cluster.
+
+        Delegates to ``vsan_cluster_info_impl`` in :mod:`.typed_ops_vsan_cluster_info`, imported
+        lazily like the other typed reads.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vsan_cluster_info import (
+            vsan_cluster_info_impl,
+        )
+
+        return await vsan_cluster_info_impl(self, operator, target, params)
+
+    async def vsan_capacity(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vsan.capacity`` -- capacity and space use of one vSAN cluster.
+
+        Delegates to ``vsan_capacity_impl`` in :mod:`.typed_ops_vsan_capacity`, imported
+        lazily like the other typed reads.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vsan_capacity import vsan_capacity_impl
+
+        return await vsan_capacity_impl(self, operator, target, params)
+
+    async def vsan_performance(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vsan.performance`` -- vSAN latency, IOPS and throughput.
+
+        Delegates to ``vsan_performance_impl`` in :mod:`.typed_ops_vsan_performance`, imported
+        lazily like the other typed reads.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vsan_performance import (
+            vsan_performance_impl,
+        )
+
+        return await vsan_performance_impl(self, operator, target, params)
+
+    async def vsan_resync_status(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vsan.resync.status`` -- the vSAN objects that resync now.
+
+        Delegates to ``vsan_resync_status_impl`` in :mod:`.typed_ops_vsan_objects`, imported
+        lazily like the other typed reads.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vsan_objects import (
+            vsan_resync_status_impl,
+        )
+
+        return await vsan_resync_status_impl(self, operator, target, params)
+
+    async def vsan_object_health(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vsan.object.health`` -- vSAN object health and the VMs of unhealthy objects.
+
+        Delegates to ``vsan_object_health_impl`` in :mod:`.typed_ops_vsan_objects`, imported
+        lazily like the other typed reads.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vsan_objects import (
+            vsan_object_health_impl,
+        )
+
+        return await vsan_object_health_impl(self, operator, target, params)
+
+    async def vsan_maintenance_precheck(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vsan.maintenance.precheck`` -- vSAN data during a host's maintenance.
+
+        Delegates to ``vsan_maintenance_precheck_impl`` in :mod:`.typed_ops_vsan_precheck`, imported
+        lazily like the other typed reads.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vsan_precheck import (
+            vsan_maintenance_precheck_impl,
+        )
+
+        return await vsan_maintenance_precheck_impl(self, operator, target, params)
+
     async def host_storage_devices(
         self,
         operator: Operator,
@@ -3605,6 +3705,25 @@ class VmwareRestConnector(HttpConnector):
         )
 
         return await datacenter_list_impl(self, operator, target, params)
+
+    async def network_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.network.list`` -- every network, with datacenter, switch and VLAN.
+
+        A ``source_kind="typed"`` read on the REST API (plus one vim read for
+        the distributed port groups). Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_network_list.network_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_network_list import (
+            network_list_impl,
+        )
+
+        return await network_list_impl(self, operator, target, params)
 
     # The six content-library typed reads. Each delegates to
     # :mod:`.content_library_reads` (imported lazily, like the other typed ops).

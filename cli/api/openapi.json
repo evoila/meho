@@ -32827,7 +32827,7 @@
           "ended_at"
         ],
         "title": "OperationRunStatusResponse",
-        "description": "Poll response for ``GET /operations/runs/{handle}``.\n\n``result`` carries the full persisted ``OperationResult`` envelope once\nthe run reaches ``succeeded`` (the dropped-response-class fix); ``error``\ncarries the run-crash / reaper reason on a ``failed`` run. Both are\n``None`` while the run is still ``pending`` / ``running``."
+        "description": "Poll response for ``GET /operations/runs/{handle}``.\n\n``result`` carries the full persisted ``OperationResult`` envelope once\nthe run reaches ``succeeded`` (the dropped-response-class fix); ``error``\ncarries the run-crash / reaper reason on a ``failed`` run. Both are\n``None`` while the run is still ``pending`` / ``running``. ``result`` is\nalso ``None`` for anyone but the person who started the run\n(:func:`~meho_backplane.operations.operation_run_service.run_result_visible_to`)."
       },
       "OperationRunSummaryResponse": {
         "properties": {

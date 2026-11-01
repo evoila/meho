@@ -7245,7 +7245,9 @@ type OperationRunStatus string
 // “result“ carries the full persisted “OperationResult“ envelope once
 // the run reaches “succeeded“ (the dropped-response-class fix); “error“
 // carries the run-crash / reaper reason on a “failed“ run. Both are
-// “None“ while the run is still “pending“ / “running“.
+// “None“ while the run is still “pending“ / “running“. “result“ is
+// also “None“ for anyone but the person who started the run
+// (:func:`~meho_backplane.operations.operation_run_service.run_result_visible_to`).
 type OperationRunStatusResponse struct {
 	ApprovalRequestId *openapi_types.UUID     `json:"approval_request_id"`
 	ConnectorId       string                  `json:"connector_id"`

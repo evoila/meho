@@ -78,6 +78,7 @@ from meho_backplane.broadcast import OP_CLASS_ENUM
 from meho_backplane.db.engine import get_raw_session
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.tenant import PAGE_TENANT_FORM_FIELD
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.templating import get_templates
 
@@ -143,7 +144,9 @@ _TARGET_OPTIONS_LIMIT: Final[int] = 500
 _STREAM_ENDPOINT: Final[str] = "/ui/broadcast/stream"
 
 
-def _stream_url(*, op_class: str | None, principal: str | None, target: str | None) -> str:
+def _stream_url(
+    *, op_class: str | None, principal: str | None, target: str | None, page_tenant: str
+) -> str:
     """Build the ``sse-connect`` URL carrying the active server-side filters.
 
     Only the three stream-supported filters (``op_class`` / ``principal``
@@ -153,6 +156,13 @@ def _stream_url(*, op_class: str | None, principal: str | None, target: str | No
     percent-encodes operator-supplied values (a principal sub or target
     name can contain ``&`` / ``=`` / spaces) so the query string can
     never be corrupted or injected.
+
+    *page_tenant* always rides along as ``meho_tenant`` (#5240): the
+    browser's ``EventSource`` can send no header, so the page's tenant
+    marker goes in the URL. The form-protection middleware refuses the
+    stream with ``409`` when the session works in another tenant by then
+    (a switch in another browser tab), on the first connect and on every
+    reconnect. The stream route itself never reads the parameter.
     """
     params = {
         key: value
@@ -163,8 +173,7 @@ def _stream_url(*, op_class: str | None, principal: str | None, target: str | No
         )
         if value
     }
-    if not params:
-        return _STREAM_ENDPOINT
+    params[PAGE_TENANT_FORM_FIELD] = page_tenant
     return f"{_STREAM_ENDPOINT}?{urlencode(params)}"
 
 
@@ -205,6 +214,7 @@ def _feed_context(
     principal: str,
     target: str,
     op_id: str,
+    page_tenant: str,
 ) -> dict[str, object]:
     """Build the context shared by the full page and the feed fragment.
 
@@ -225,6 +235,7 @@ def _feed_context(
             op_class=server_op_class,
             principal=server_principal,
             target=server_target,
+            page_tenant=page_tenant,
         ),
         "in_dom_row_cap": IN_DOM_ROW_CAP,
         # Serialised once server-side so the Alpine row-builder reads a
@@ -287,6 +298,7 @@ async def _render_page(
             principal=principal,
             target=target,
             op_id=op_id,
+            page_tenant=str(session_ctx.tenant_id),
         ),
     }
     template = "broadcast/wall.html" if wall else "broadcast/feed.html"
@@ -328,6 +340,7 @@ async def _render_fragment(
         principal=principal,
         target=target,
         op_id=op_id,
+        page_tenant=str(session_ctx.tenant_id),
     )
     return get_templates().TemplateResponse(request, "broadcast/_feed.html", context)
 

@@ -115,6 +115,7 @@ from meho_backplane.ui.routes.runners import build_runners_router
 from meho_backplane.ui.routes.scheduler import build_scheduler_router
 from meho_backplane.ui.routes.sensors import build_sensors_router
 from meho_backplane.ui.routes.stubs import build_stubs_router
+from meho_backplane.ui.routes.tenant import build_tenant_router
 from meho_backplane.ui.routes.topology import build_router as build_topology_router
 from meho_backplane.ui.routes.vault import (
     build_vault_router,
@@ -148,6 +149,7 @@ __all__ = [
     "build_scheduler_router",
     "build_sensors_router",
     "build_stubs_router",
+    "build_tenant_router",
     "build_topology_router",
     "build_vault_router",
     "build_vault_status_router",
@@ -188,6 +190,9 @@ def build_router() -> APIRouter:
     """
     router = APIRouter()
     router.include_router(build_dashboard_router())
+    # Tenant picker + switch (#5240): literal ``/ui/tenant`` paths, ahead
+    # of the stubs aggregate's placeholder ``/ui/{slug}``.
+    router.include_router(build_tenant_router())
     # Surface routers ahead of stubs -- their concrete paths win
     # the match against the stubs' placeholder ``/ui/{slug}``.
     router.include_router(build_broadcast_router())

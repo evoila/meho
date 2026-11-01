@@ -72,6 +72,20 @@ document.addEventListener("alpine:init", () => {
     // attribute, so untrusted event fields can never break out of it.
     events: [],
     connected: false,
+
+    // The sse extension fires ``htmx:sseError`` on every stream error, with
+    // no status code. After a tenant switch in another tab the server
+    // refuses the stream URL (its ``meho_tenant`` marker is old) with 409
+    // and the EventSource stops. ``page-tenant.js`` finds that out with one
+    // HEAD probe and shows the reload banner; a plain network error shows
+    // nothing and the stream keeps retrying (#5240).
+    onSseError() {
+      this.connected = false;
+      var helper = window.mehoPageTenant;
+      if (helper && typeof helper.probeTenantChanged === "function") {
+        helper.probeTenantChanged();
+      }
+    },
     autoScroll: opts.autoScroll === true,
     cap: opts.cap,
     badgeClasses: opts.badgeClasses,

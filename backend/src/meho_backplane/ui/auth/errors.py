@@ -79,6 +79,11 @@ from meho_backplane.ui.auth.routes import (
     LOGIN_PATH,
     clear_session_cookie,
 )
+from meho_backplane.ui.auth.tenant import (
+    TENANT_PICKER_PATH,
+    TENANT_REMOVED_DETAIL,
+    TENANT_REMOVED_NOTICE,
+)
 
 __all__ = ["ui_session_expired_exception_handler"]
 
@@ -118,6 +123,38 @@ def _is_expired_callback_state_request(request: Request, exc: StarletteHTTPExcep
         and exc.detail == AUTHORIZATION_STATE_EXPIRED_DETAIL
         and request.url.path == _CALLBACK_PATH
     )
+
+
+def _is_tenant_removed_ui_request(request: Request, exc: StarletteHTTPException) -> bool:
+    """True when *exc* says the session lost its tenant (#5240) on a ``/ui/*`` path."""
+    return (
+        exc.status_code == status.HTTP_409_CONFLICT
+        and exc.detail == TENANT_REMOVED_DETAIL
+        and request.url.path.startswith(_UI_PREFIX)
+    )
+
+
+async def _handle_tenant_removed(request: Request, exc: StarletteHTTPException) -> Response:
+    """Send the person to the tenant picker after the session lost its tenant.
+
+    The session row was already moved
+    (:func:`~meho_backplane.ui.auth.tenant.fall_back_after_removal`). A
+    page load gets a ``303``, an htmx request a ``204`` with
+    ``HX-Redirect`` (htmx would swap a plain redirect into the page).
+    Other callers keep the JSON body.
+    """
+    location = f"{TENANT_PICKER_PATH}?notice={TENANT_REMOVED_NOTICE}"
+    structlog.get_logger(__name__).info("ui_session_tenant_removed_redirect", path=request.url.path)
+    if request.headers.get("hx-request", "").lower() == "true":
+        return Response(
+            status_code=status.HTTP_204_NO_CONTENT,
+            headers={"HX-Redirect": location, "cache-control": "no-store"},
+        )
+    if "text/html" in request.headers.get("accept", ""):
+        response = RedirectResponse(url=location, status_code=status.HTTP_303_SEE_OTHER)
+        response.headers["cache-control"] = "no-store"
+        return response
+    return await http_exception_handler(request, exc)
 
 
 def _login_redirect(request: Request) -> RedirectResponse:
@@ -224,6 +261,8 @@ async def ui_session_expired_exception_handler(
       failed, bounce to login carrying ``return_to``.
     * ``400 authorization_state_expired`` on ``/ui/auth/callback``
       (G0.29 #2089) -- the login window lapsed, restart the flow.
+    * ``409 tenant_removed`` on ``/ui/*`` (#5240) -- the token no longer
+      allows the session's tenant; go to the tenant picker.
 
     Everything else -- other detail codes, other statuses, other paths,
     including the ``/api/*`` structured 401 codes and the callback's
@@ -236,4 +275,6 @@ async def ui_session_expired_exception_handler(
         return await _handle_session_expired(request, exc)
     if _is_expired_callback_state_request(request, exc):
         return await _handle_expired_callback_state(request, exc)
+    if _is_tenant_removed_ui_request(request, exc):
+        return await _handle_tenant_removed(request, exc)
     return await http_exception_handler(request, exc)

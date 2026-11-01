@@ -112,6 +112,12 @@ from meho_backplane.ui.audit import bind_ui_view_audit
 from meho_backplane.ui.auth.revalidation import revalidate_read_session
 from meho_backplane.ui.auth.routes import LOGIN_PATH, SESSION_COOKIE_NAME
 from meho_backplane.ui.auth.session_store import load_session
+from meho_backplane.ui.auth.tenant import (
+    TENANT_PICKER_PATH,
+    TENANT_REMOVED_NOTICE,
+    TENANT_SWITCH_PATH,
+    TenantRemovedError,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import TenantRole
@@ -176,6 +182,12 @@ class UISessionContext:
     tenant row was deleted between session-creation and the request
     (an ops anomaly; the operator still authenticates fine, the chip
     just falls back to the tenant UUID).
+
+    ``tenant_id`` is the session's current tenant (#5240).
+    ``tenant_chosen`` is ``False`` while a person with several tenants
+    has not picked one; the middleware then lets the request reach only
+    the tenant picker. ``can_switch_tenant`` makes the sidebar tenant box
+    a switch.
     """
 
     session_id: uuid.UUID
@@ -183,6 +195,8 @@ class UISessionContext:
     tenant_id: uuid.UUID
     tenant_slug: str | None = None
     tenant_name: str | None = None
+    tenant_chosen: bool = True
+    can_switch_tenant: bool = False
 
 
 def _select_path(scope: Scope) -> str:
@@ -275,7 +289,15 @@ def _redirect_to_login(
       precedent (e.g. ``ui/routes/connectors/forms.py``).
     """
     encoded = quote(original_path_with_query, safe="")
-    location = f"{LOGIN_PATH}?return_to={encoded}"
+    return _redirect_to(f"{LOGIN_PATH}?return_to={encoded}", is_htmx=is_htmx)
+
+
+def _redirect_to(location: str, *, is_htmx: bool) -> tuple[int, list[tuple[bytes, bytes]]]:
+    """Build the redirect start of :func:`_redirect_to_login` for any *location*.
+
+    A plain ``302`` for a page load, a ``204`` with ``HX-Redirect`` for an
+    htmx request (see :func:`_redirect_to_login`).
+    """
     if is_htmx:
         # No ``content-length`` here: RFC 9110 §8.6 forbids it on a 204,
         # and this middleware writes the raw ASGI response (no framework
@@ -366,6 +388,75 @@ async def _stash_ui_readiness(scope_state: dict[str, object], *, path: str) -> N
         scope_state["ui_ready"] = False
 
 
+#: The only pages a session without a chosen tenant may open (#5240).
+_TENANT_CHOICE_PATHS: Final[frozenset[str]] = frozenset({TENANT_PICKER_PATH, TENANT_SWITCH_PATH})
+
+
+async def _send_redirect(send: Send, location: str, *, is_htmx: bool) -> None:
+    """Answer the request with a redirect to *location* (see :func:`_redirect_to`)."""
+    status_code, headers = _redirect_to(location, is_htmx=is_htmx)
+    await send({"type": "http.response.start", "status": status_code, "headers": headers})
+    await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+
+async def _load_session_context(cookie_value: str | None, *, path: str) -> UISessionContext | None:
+    """Load the session row named by the cookie, or ``None`` for "no session".
+
+    One transaction loads the session row AND the tenant row -- the
+    tenant lookup is a PK probe on a tiny write-mostly table, so paying
+    it inside the already-running ``load_session`` transaction is
+    microseconds and keeps the page header from needing a separate DB
+    round-trip per request (G0.15-T9 #1217). Then the drift-gated token
+    revalidation runs (read-path revocation-lag bound -- see the module
+    docstring). Raises
+    :class:`~meho_backplane.ui.auth.tenant.TenantRemovedError` when that
+    check finds the token no longer allows the session's tenant.
+    """
+    log = structlog.get_logger(__name__)
+    if cookie_value is None:
+        return None
+    try:
+        cookie_id = uuid.UUID(cookie_value)
+    except ValueError:
+        log.info("ui_session_malformed_cookie", path=path)
+        return None
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        decrypted = await load_session(session, cookie_id)
+        if decrypted is None:
+            return None
+        tenant_row = (
+            await session.execute(
+                select(Tenant.slug, Tenant.name).where(Tenant.id == decrypted.tenant_id),
+            )
+        ).one_or_none()
+    # ``None`` means the stored token failed the JWT chain terminally;
+    # collapse to the same redirect-to-login as a missing session.
+    revalidated = await revalidate_read_session(decrypted)
+    if revalidated is None:
+        return None
+    if tenant_row is None:
+        # Session row references a tenant_id with no tenant row -- the
+        # tenant was deleted out from under the operator's session.
+        # Surface the anomaly so on-call sees the broken FK while still
+        # letting the operator's request proceed (the page header falls
+        # back to the UUID).
+        log.warning(
+            "ui_session_tenant_row_missing",
+            session_id=str(revalidated.id),
+            tenant_id=str(revalidated.tenant_id),
+        )
+    return UISessionContext(
+        session_id=revalidated.id,
+        operator_sub=revalidated.operator_sub,
+        tenant_id=revalidated.tenant_id,
+        tenant_slug=tenant_row[0] if tenant_row is not None else None,
+        tenant_name=tenant_row[1] if tenant_row is not None else None,
+        tenant_chosen=revalidated.tenant_chosen,
+        can_switch_tenant=revalidated.can_switch_tenant,
+    )
+
+
 class UISessionMiddleware:
     """Pure-ASGI middleware: load operator identity from the session cookie.
 
@@ -418,60 +509,18 @@ class UISessionMiddleware:
         # to login".
         log = structlog.get_logger(__name__)
         cookie_value = _extract_session_cookie(scope)
-        session_context: UISessionContext | None = None
-        if cookie_value is not None:
-            try:
-                cookie_id = uuid.UUID(cookie_value)
-            except ValueError:
-                log.info("ui_session_malformed_cookie", path=path)
-                cookie_id = None
-            if cookie_id is not None:
-                sessionmaker = get_sessionmaker()
-                # One transaction loads the session row AND the tenant
-                # row -- the tenant lookup is a PK probe on a tiny
-                # write-mostly table, so paying it inside the
-                # already-running ``load_session`` transaction is
-                # microseconds and keeps the page header from needing a
-                # separate DB round-trip per request (G0.15-T9 #1217).
-                async with sessionmaker() as session, session.begin():
-                    decrypted = await load_session(session, cookie_id)
-                    if decrypted is not None:
-                        tenant_row = (
-                            await session.execute(
-                                select(Tenant.slug, Tenant.name).where(
-                                    Tenant.id == decrypted.tenant_id,
-                                ),
-                            )
-                        ).one_or_none()
-                if decrypted is not None:
-                    # Drift-gated token revalidation (read-path
-                    # revocation-lag bound -- see module docstring).
-                    # ``None`` means the stored token failed the JWT
-                    # chain terminally; collapse to the same
-                    # redirect-to-login as a missing session.
-                    decrypted = await revalidate_read_session(decrypted)
-                if decrypted is not None:
-                    tenant_slug = tenant_row[0] if tenant_row is not None else None
-                    tenant_name = tenant_row[1] if tenant_row is not None else None
-                    if tenant_row is None:
-                        # Session row references a tenant_id with no
-                        # tenant row -- the tenant was deleted out from
-                        # under the operator's session. Surface the
-                        # anomaly so on-call sees the broken FK while
-                        # still letting the operator's request proceed
-                        # (the page header falls back to the UUID).
-                        log.warning(
-                            "ui_session_tenant_row_missing",
-                            session_id=str(decrypted.id),
-                            tenant_id=str(decrypted.tenant_id),
-                        )
-                    session_context = UISessionContext(
-                        session_id=decrypted.id,
-                        operator_sub=decrypted.operator_sub,
-                        tenant_id=decrypted.tenant_id,
-                        tenant_slug=tenant_slug,
-                        tenant_name=tenant_name,
-                    )
+        try:
+            session_context = await _load_session_context(cookie_value, path=path)
+        except TenantRemovedError:
+            # #5240: the token no longer allows the session's tenant. The
+            # row already moved (to the only tenant left, or back to "not
+            # chosen"); the picker says so in plain words.
+            await _send_redirect(
+                send,
+                f"{TENANT_PICKER_PATH}?notice={TENANT_REMOVED_NOTICE}",
+                is_htmx=_request_is_htmx(scope),
+            )
+            return
 
         if session_context is None:
             # Build the original-path-with-query for the post-login
@@ -502,6 +551,11 @@ class UISessionMiddleware:
                 }
             )
             await send({"type": "http.response.body", "body": b"", "more_body": False})
+            return
+
+        if not session_context.tenant_chosen and path not in _TENANT_CHOICE_PATHS:
+            # #5240: a person with several tenants picks one first.
+            await _send_redirect(send, TENANT_PICKER_PATH, is_htmx=_request_is_htmx(scope))
             return
 
         # Happy path -- stash the session context on the scope so
@@ -686,6 +740,7 @@ async def require_ui_admin(
         _refreshed, operator = await verify_access_token_with_refresh(
             decrypted,
             expected_audience=settings.keycloak_audience,
+            request_tenant=session.tenant_id,
         )
     except HTTPException as exc:
         log.info(

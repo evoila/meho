@@ -42,8 +42,11 @@ another operator's sessions" surface; the listing and both revoke
 actions are scoped to the caller's own ``operator_sub`` from the
 session, never a form field.
 
-Out of scope (Keycloak-owned / future): role editing, tenant switching
-(a slot is left in the template), password / MFA / token rotation.
+The page also lists the person's tenants with the role in each (#5240);
+switching happens on the tenant picker (:mod:`meho_backplane.ui.routes.tenant`).
+
+Out of scope (Keycloak-owned / future): role editing, password / MFA /
+token rotation.
 """
 
 from __future__ import annotations
@@ -69,8 +72,10 @@ from meho_backplane.ui.auth.session_store import (
     revoke_other_sessions,
     revoke_session,
 )
+from meho_backplane.ui.auth.tenant import TenantChangedError, TenantRemovedError
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.connectors.operator import _lift_operator
+from meho_backplane.ui.routes.tenant import TenantChoice, tenant_choices
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_account_router"]
@@ -105,30 +110,26 @@ class _SessionRowView:
     is_current: bool
 
 
-async def _lift_role_value(session_ctx: UISessionContext) -> str:
-    """Return the live ``tenant_role`` value from the freshly-verified token.
+async def _lift_identity(session_ctx: UISessionContext) -> tuple[str, list[TenantChoice]]:
+    """Return the live role and the person's tenants from the freshly-verified token.
 
-    Lifts the full :class:`~meho_backplane.auth.operator.Operator` through
-    the shared JWT re-verify path
-    (:func:`~meho_backplane.ui.routes.connectors.operator._lift_operator`)
-    so a same-session role demotion shows up immediately -- the role is
-    never read from a value cached on the session row. Fails **soft**: a
-    JWT-validation hiccup (session row gone, JWKS unreachable, token
-    swapped) degrades the rendered role to ``"unknown"`` rather than
-    5xx-ing the read-only account page. No security gate hangs off this
-    value; the page only displays it.
+    The tenants carry the role in each (#5240). Fails soft like the role:
+    an empty list when the token cannot be lifted.
     """
     try:
         operator = await _lift_operator(session_ctx)
+    except (TenantChangedError, TenantRemovedError):
+        raise
     except Exception as exc:
         _log.info(
             "ui_account_role_lift_unavailable",
             session_id=str(session_ctx.session_id),
             reason=type(exc).__name__,
         )
-        return _ROLE_UNKNOWN
+        return _ROLE_UNKNOWN, []
     role = operator.tenant_role
-    return role.value if isinstance(role, TenantRole) else str(role)
+    role_value = role.value if isinstance(role, TenantRole) else str(role)
+    return role_value, await tenant_choices(operator, include_all=False)
 
 
 def _project_session_row(row: ActiveSessionRow, *, current_id: uuid.UUID) -> _SessionRowView:
@@ -165,7 +166,7 @@ async def _render_page(
     db_session: AsyncSession,
 ) -> HTMLResponse:
     """Render ``GET /ui/account`` -- the full account page."""
-    role_value = await _lift_role_value(session_ctx)
+    role_value, tenants = await _lift_identity(session_ctx)
     expires_at = await _load_expires_at(db_session, session_ctx)
     rows = await list_active_sessions(
         db_session,
@@ -179,6 +180,7 @@ async def _render_page(
         "active_surface": "account",
         "operator_sub": session_ctx.operator_sub,
         "role_value": role_value,
+        "tenants": tenants,
         "expires_at": expires_at,
         "sessions": session_views,
         "current_session_id": str(session_ctx.session_id),

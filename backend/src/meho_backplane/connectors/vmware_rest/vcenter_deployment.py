@@ -279,6 +279,26 @@ def unreachable_reason(exc: httpx.TransportError) -> str:
     return "connect_failed"
 
 
+#: HTTP answers of a gateway, or of vCenter's own front door, while the
+#: service behind it is down or slow. The request may or may not have reached
+#: the service: a status read says ``not_reachable``, a start says
+#: ``start_unknown``.
+_UNREACHABLE_HTTP_REASONS: Final[dict[int, str]] = {
+    502: "gateway_error",
+    503: "service_unavailable",
+    504: "gateway_error",
+}
+
+
+def unreachable_http_reason(exc: httpx.HTTPStatusError) -> str | None:
+    """``service_unavailable`` or ``gateway_error`` for HTTP 503, 502 and 504; else ``None``.
+
+    Any other HTTP error is an answer of the service itself (a vendor fault, a
+    refused login) and is not an outage.
+    """
+    return _UNREACHABLE_HTTP_REASONS.get(exc.response.status_code)
+
+
 async def mounted(
     connector: VmwareRestConnector, target: Any, operator: Operator, op_id: str
 ) -> str:

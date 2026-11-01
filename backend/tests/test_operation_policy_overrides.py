@@ -947,9 +947,8 @@ _OFF = {"requires_approval": False, "reason": "read-only in practice"}
         {"platform_admin": True, "extra_claims": {"auth_time": int(time.time()) - 3600}},
         {"platform_admin": True},
         {"platform_admin": True, "principal_kind": "service", "extra_claims": {"auth_time": 1}},
-        {"platform_admin": True, "principal_kind": "agent"},
     ],
-    ids=["old-sign-in", "no-auth-time", "service-principal", "agent"],
+    ids=["old-sign-in", "no-auth-time", "service-principal"],
 )
 async def test_rest_without_fresh_sign_in_cannot_turn_approval_off(
     embedding: AsyncMock, token_kwargs: dict[str, Any]
@@ -960,6 +959,19 @@ async def test_rest_without_fresh_sign_in_cannot_turn_approval_off(
     assert 'error="insufficient_user_authentication"' in response.headers["www-authenticate"]
     assert "approval_off_needs_fresh_sign_in" in response.json()["detail"]
     assert report.json() == {"overrides": []}
+
+
+@pytest.mark.asyncio
+async def test_rest_agent_token_cannot_turn_approval_off(embedding: AsyncMock) -> None:
+    """An agent acts with operator rights, so the tenant-admin route refuses it."""
+    await _register_typed(embedding, requires_approval=True)
+    tenant_id = uuid.uuid4()
+    response, _ = _patch(
+        {"platform_admin": True, "principal_kind": "agent"}, _OFF, tenant_id=tenant_id
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == "insufficient_role"
+    assert (await _effective(tenant_id))[1] is True
 
 
 @pytest.mark.asyncio

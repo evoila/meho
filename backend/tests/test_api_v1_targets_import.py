@@ -277,6 +277,26 @@ def test_create_rejects_fingerprint_via_extra_forbid(client: TestClient) -> None
     assert any("fingerprint" in tuple(map(str, item.get("loc", []))) for item in detail)
 
 
+def test_create_rejects_bad_name_and_host_from_yaml_entry(client: TestClient) -> None:
+    """A YAML entry with a broken name and host is refused with 422 (#5244).
+
+    A shell mistake can split a value, giving a name with a space and an
+    IPv4 address with a part missing. The server refuses the POST the CLI
+    fires for that entry and names both fields.
+    """
+    entry = yaml.safe_load('name: "node-01 157"\nproduct: linux\nhost: "10.0.0."\n')
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        r = client.post(
+            "/api/v1/targets",
+            json=_entry_to_create_body(entry),
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert r.status_code == 422
+    assert {item["loc"][-1] for item in r.json()["detail"]} == {"name", "host"}
+
+
 def test_create_accepts_preferred_impl_id_top_level(client: TestClient) -> None:
     """POST with ``preferred_impl_id`` lands as a top-level column.
 

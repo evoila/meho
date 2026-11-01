@@ -8,8 +8,9 @@ connector registry under ``(product="hcx", version="9.0",
 impl_id="hcx-rest")`` plus the product wildcard, and queues the typed-op
 registrar so ``hcx.api_file.get`` and the reads (``hcx.about`` and the
 site pairing, service mesh, diagnostics, appliance, job, alert and
-inventory reads, and the service mesh changes with their task read) land
-in ``endpoint_descriptor`` before the first dispatch. The class pin tracks
+inventory reads, the service mesh changes with their task read, and the
+network extension operations) land in ``endpoint_descriptor`` before the
+first dispatch. The class pin tracks
 the VCF 9 line; the ``>=4.7,<10.0`` range keeps HCX 4.x dispatchable
 through the same class.
 """

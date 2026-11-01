@@ -40,11 +40,11 @@ Three ops ship here: one per audited bucket and one for the vendor files:
   :mod:`meho_backplane.connectors.vcf_fleet.api_file`. It exists so the
   vendor's ``/lcm`` files, which no vendor download ships, can be pinned.
 
-The remaining six curated ops (datacenter/vcenter list, environment
-detail, product list, request list/detail) are **declined** from typed
-conversion — they are outside the adopter's audited set. The decline
-rationale is posted on #2304; the ingested breadth catalog still covers
-their browse case until T7 retires the curation apparatus.
+Seven more ops are in :mod:`.lifecycle_ops` (metadata) and
+:mod:`.lifecycle` (handlers): the lifecycle requests (list, read, retry), one
+environment, a product inventory sync, the appliance health and the
+datacenters with their vCenters. Two of them are changes and wait for a
+person's approval.
 
 Mold
 ----
@@ -61,8 +61,10 @@ a ``module.ClassName.method`` dotted path.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
+
+from meho_backplane.connectors.vcf_fleet._typed_op import FleetTypedOp
+from meho_backplane.connectors.vcf_fleet.lifecycle_ops import LIFECYCLE_OPS
 
 __all__ = [
     "FLEET_TYPED_OPS",
@@ -71,45 +73,28 @@ __all__ = [
 ]
 
 
-@dataclass(frozen=True)
-class FleetTypedOp:
-    """Metadata for one typed Fleet op the connector registers at startup.
-
-    Fields mirror the keyword arguments
-    :func:`~meho_backplane.operations.typed_register.register_typed_operation`
-    accepts so the registrar can splat the dataclass into the helper
-    without per-op boilerplate. ``handler_attr`` is the attribute name on
-    :class:`~meho_backplane.connectors.vcf_fleet.connector.VcfFleetConnector`
-    exposing the async handler; the registrar resolves the bound method
-    against the class at registration time so the dispatcher can recover
-    the callable from the persisted ``module.ClassName.method`` path.
-    """
-
-    op_id: str
-    handler_attr: str
-    summary: str
-    description: str
-    parameter_schema: dict[str, Any]
-    response_schema: dict[str, Any] | None
-    group_key: str | None
-    tags: tuple[str, ...]
-    safety_level: Literal["safe", "caution", "dangerous", "destructive"]
-    requires_approval: bool
-    llm_instructions: dict[str, Any] | None
-
-
 #: Curated ``when_to_use`` blurbs per typed group. ``register_typed_operation``
 #: requires a non-empty string whenever ``group_key`` is set; the registrar
 #: looks each op's ``group_key`` up here.
 FLEET_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "fleet-about": (
-        "One read: the VCF Fleet (vRSLCM) appliance's API version, product version "
-        "and build. On VCF 9.0 builds the call fails with HTTP 500 although the "
-        "appliance is reachable; then read the version from SDDC Manager. A read."
+        "Two reads: the VCF Fleet (vRSLCM) appliance's API version, product version and "
+        "build (fleet.about; on VCF 9.0 builds it fails with HTTP 500 although the "
+        "appliance is reachable), and its health: version, disk use and the state of each "
+        "service (fleet.health)."
     ),
     "fleet-inventory": (
-        "One read: the Fleet environments and the products deployed in each (vRA, "
-        "vROps, vRLI, vIDM and more). Answers 'what has Fleet deployed'. A read."
+        "Reads: the Fleet environments and the products deployed in each "
+        "(fleet.environment.list), one environment with its products, versions and nodes "
+        "(fleet.environment.get), and the datacenters with their vCenters "
+        "(fleet.datacenter.list). One change: start an inventory sync of one product "
+        "(fleet.product.inventory_sync); it waits for a person's approval."
+    ),
+    "fleet-requests": (
+        "The lifecycle requests the appliance runs (deployments, upgrades, syncs, day-2 "
+        "actions). Reads: list requests (fleet.request.list) and read one with the error "
+        "causes of a failure (fleet.request.get). One change: retry a failed request "
+        "(fleet.request.retry); it waits for a person's approval."
     ),
     "fleet-api-docs": (
         "One read: the API descriptions a running Aria Suite Lifecycle or VCF Fleet "
@@ -252,9 +237,9 @@ _ENVIRONMENT_LIST = FleetTypedOp(
         ),
         "next_step": (
             "Surface each environment's products[] versions for the inventory "
-            "snapshot. For a DEPLOY_FAILED environment, the deeper per-request "
-            "diagnostics remain on the ingested breadth catalog (not part of "
-            "the typed audited set)."
+            "snapshot. Call fleet.environment.get for one environment's nodes. For a "
+            "DEPLOY_FAILED environment, find the failed request with fleet.request.list "
+            "(outcome failed) and read it with fleet.request.get."
         ),
     },
 )
@@ -398,13 +383,12 @@ _API_FILE_GET = FleetTypedOp(
 )
 
 
-#: The typed read ops :class:`VcfFleetConnector` registers at lifespan
-#: startup — the #2304 audited set (about/health probe + component
-#: inventory), then the API description read that pins the vendor files.
-#: Ordered probe → inventory → documentation to match the operator's
-#: typical "is it up, what's on it, what does its API look like" path.
+#: The typed ops :class:`VcfFleetConnector` registers at lifespan startup:
+#: the about probe, the environment list, the API description read, then the
+#: request, environment, inventory sync, health and datacenter ops.
 FLEET_TYPED_OPS: tuple[FleetTypedOp, ...] = (
     _ABOUT,
     _ENVIRONMENT_LIST,
     _API_FILE_GET,
+    *LIFECYCLE_OPS,
 )

@@ -17,8 +17,9 @@ The rules, checked in this order:
 3. Nothing changed. MEHO refuses and says a new approval is needed when the
    ``expires_at`` deadline has passed, MEHO was updated since the request was
    made, the work reference differs, the params do not match
-   ``params_hash``, the saved target no longer resolves, or the preview hash
-   of a ``destructive`` request differs. The operation, connector and target
+   ``params_hash``, the saved target no longer resolves, its connection
+   settings changed since the request was made, or the preview hash of a
+   ``destructive`` request differs. The operation, connector and target
    always come from the request, so the caller cannot change them.
 4. One run at a time. The claim is one conditional ``UPDATE`` that clears
    ``resume_result`` and adds one to ``rerun_count``, only while the stored
@@ -68,6 +69,7 @@ from meho_backplane.operations.approval_queue import (
     persist_resume_result,
     rehydrate_resume_target,
 )
+from meho_backplane.operations.approval_resume_checks import preview_changed_since_request
 
 __all__ = [
     "RERUN_AUDIT_PATH",
@@ -100,6 +102,7 @@ class RerunRefusal(StrEnum):
     WORK_REF_CHANGED = "work_ref_changed"
     PARAMS_CHANGED = "params_changed"
     TARGET_GONE = "target_gone"
+    TARGET_CHANGED = "target_changed"
     PREVIEW_CHANGED = "preview_changed"
     INPUT_NOT_KEPT = "input_not_kept"
 
@@ -110,6 +113,9 @@ _REFUSAL_MESSAGES: Final[dict[RerunRefusal, str]] = {
     RerunRefusal.WORK_REF_CHANGED: "the work reference differs from the approved one",
     RerunRefusal.PARAMS_CHANGED: "the params differ from the approved ones",
     RerunRefusal.TARGET_GONE: "the approved target no longer exists",
+    RerunRefusal.TARGET_CHANGED: (
+        "the connection settings of the approved target changed after the request was made"
+    ),
     RerunRefusal.PREVIEW_CHANGED: "the preview of the call differs from the approved one",
     RerunRefusal.INPUT_NOT_KEPT: (
         "MEHO did not keep the input of this multi-step credential write after its first run"
@@ -195,27 +201,12 @@ def _static_refusal(request: ApprovalRequest, params: dict[str, Any]) -> RerunRe
     return None
 
 
-async def _preview_changed(
-    operator: Operator, request: ApprovalRequest, target: Any, params: dict[str, Any]
-) -> bool:
-    """True when a ``destructive`` request's preview hash differs now (#3197)."""
-    if request.preview_hash is None:
-        return False
-    from meho_backplane.operations._request_preview import (
-        compute_preview_hash,
-        preview_dispatch,
-    )
-
-    envelope = await preview_dispatch(
-        operator=operator,
-        connector_id=request.connector_id,
-        op_id=request.op_id,
-        target=target,
-        params=params,
-    )
-    if envelope.get("status") != "ok":
-        return True
-    return compute_preview_hash(envelope) != request.preview_hash
+def _target_refusal(denied: OperationResult) -> RerunRefusal:
+    """Map the target refusal of :func:`rehydrate_resume_target` to a reason."""
+    extras = denied.extras or {}
+    if extras.get("error_code") == "target_changed_since_approval":
+        return RerunRefusal.TARGET_CHANGED
+    return RerunRefusal.TARGET_GONE
 
 
 async def _audit_rerun(
@@ -337,8 +328,8 @@ async def _check_rerun(
     if reason is None:
         target, denied = await rehydrate_resume_target(operator, request)
         if denied is not None:
-            reason = RerunRefusal.TARGET_GONE
-        elif await _preview_changed(operator, request, target, effective):
+            reason = _target_refusal(denied)
+        elif await preview_changed_since_request(operator, request, target, effective):
             reason = RerunRefusal.PREVIEW_CHANGED
     if reason is not None:
         raise await _refuse(

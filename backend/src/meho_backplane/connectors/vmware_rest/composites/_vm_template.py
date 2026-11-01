@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._teardown import (
     STATUS_INVALID_REQUEST,
     STATUS_PRECONDITION_FAILED,
@@ -55,7 +56,6 @@ from meho_backplane.connectors.vmware_rest.vim_body import vim_moref
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
-    "VM_TEMPLATE_COMPOSITES",
+    "COMPOSITES",
     "unmark_body",
     "vm_template_mark_composite",
     "vm_template_unmark_composite",
@@ -251,44 +251,48 @@ def _preview_for(to_template: bool) -> Any:
     return _preview
 
 
-register_preview_builder(OP_ID_VM_TEMPLATE_MARK, _preview_for(True))
-register_preview_builder(OP_ID_VM_TEMPLATE_UNMARK, _preview_for(False))
+_mark_preview = _preview_for(True)
+_unmark_preview = _preview_for(False)
 
 
-#: The two registration rows, as ``_CompositeSpec`` keyword arguments.
-VM_TEMPLATE_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_VM_TEMPLATE_MARK,
-        "handler": vm_template_mark_composite,
-        "summary": "Turn a powered-off VM into a template.",
-        "description": (
+#: The registration rows; ``_register.py`` collects them at start-up.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_VM_TEMPLATE_MARK,
+        handler=vm_template_mark_composite,
+        summary="Turn a powered-off VM into a template.",
+        description=(
             "Marks a VM, named by its VM id, as a template (VIM MarkAsTemplate). The VM must be "
             "off. A template can be cloned but not powered on. Returns the VM before and after. "
             "Waits for approval."
         ),
-        "parameter_schema": VM_TEMPLATE_MARK_PARAMETER_SCHEMA,
-        "response_schema": VM_TEMPLATE_MARK_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "template", "vi-json"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VM_TEMPLATE_MARK_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_VM_TEMPLATE_UNMARK,
-        "handler": vm_template_unmark_composite,
-        "summary": "Turn a template back into a VM in a resource pool.",
-        "description": (
+        parameter_schema=VM_TEMPLATE_MARK_PARAMETER_SCHEMA,
+        response_schema=VM_TEMPLATE_MARK_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "template", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VM_TEMPLATE_MARK_LLM_INSTRUCTIONS,
+        preview=_mark_preview,
+        classifier_other=True,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_VM_TEMPLATE_UNMARK,
+        handler=vm_template_unmark_composite,
+        summary="Turn a template back into a VM in a resource pool.",
+        description=(
             "Turns a template, named by its VM id, back into a VM (VIM MarkAsVirtualMachine) "
             "and places it in the given resource pool, optionally on a given host. The VM "
             "stays powered off. Waits for approval."
         ),
-        "parameter_schema": VM_TEMPLATE_UNMARK_PARAMETER_SCHEMA,
-        "response_schema": VM_TEMPLATE_UNMARK_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "template", "vi-json"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VM_TEMPLATE_UNMARK_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=VM_TEMPLATE_UNMARK_PARAMETER_SCHEMA,
+        response_schema=VM_TEMPLATE_UNMARK_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "template", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VM_TEMPLATE_UNMARK_LLM_INSTRUCTIONS,
+        preview=_unmark_preview,
+        classifier_other=True,
+    ),
 )

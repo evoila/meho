@@ -26,6 +26,7 @@ These tests pin the contract:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock
@@ -298,7 +299,7 @@ async def test_reveal_secret_does_not_reach_op_schema_or_hash(
 
 
 # ---------------------------------------------------------------------------
-# Non-credential_read ops are untouched
+# Every other op hides its secret-named fields too
 # ---------------------------------------------------------------------------
 
 
@@ -311,15 +312,7 @@ async def _module_metadata_handler(
     return {"password": _PASSWORD_SECRET, "note": "not a credential_read op"}
 
 
-async def test_non_credential_read_op_is_not_scrubbed_or_stamped(
-    stub_embedding_service: AsyncMock,
-) -> None:
-    """A ``read``-class op keeps its payload and carries no reveal stamp.
-
-    ``vault.kv.versions`` classifies ``read`` (metadata browse), not
-    ``credential_read`` -- the response scrub must not fire on it, and the
-    audit row must not carry a ``reveal_secret`` key.
-    """
+async def _register_metadata_read(stub_embedding_service: AsyncMock) -> None:
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
     await register_typed_operation(
         product="vault",
@@ -334,6 +327,19 @@ async def test_non_credential_read_op_is_not_scrubbed_or_stamped(
         embedding_service=stub_embedding_service,
     )
 
+
+async def test_read_op_hides_secret_named_fields_and_carries_no_stamp(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A ``read``-class op hides a secret-named field, and its audit row has no reveal key.
+
+    ``vault.kv.versions`` classifies ``read`` (metadata browse), not
+    ``credential_read``. The answer still hides the ``password`` field: the
+    name rule runs on every answer. The reveal stamp is for secret reads
+    and reveals only, so the row of a plain read carries no key.
+    """
+    await _register_metadata_read(stub_embedding_service)
+
     result = await dispatch(
         operator=_make_operator(),
         connector_id="vault-1.x",
@@ -342,12 +348,34 @@ async def test_non_credential_read_op_is_not_scrubbed_or_stamped(
         params={"path": "app/db"},
     )
     assert result.status == "ok", result.error
-    # Not a credential_read op: the answer is untouched by the scrub.
-    assert result.result["password"] == _PASSWORD_SECRET
+    assert result.result["password"] == "[REDACTED:param_name]"
     assert result.result["note"] == "not a credential_read op"
+    assert _PASSWORD_SECRET not in result.model_dump_json()
 
     row = await _audit_row("vault.kv.versions")
     assert "reveal_secret" not in row.payload
+    assert _PASSWORD_SECRET not in json.dumps(row.raw_payload)
+
+
+async def test_read_op_reveal_by_a_person_returns_the_field_and_stamps_audit(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """``reveal_secret: true`` on a plain read works as on a secret read."""
+    await _register_metadata_read(stub_embedding_service)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.versions",
+        target=None,
+        params={"path": "app/db", "reveal_secret": True},
+    )
+    assert result.status == "ok", result.error
+    assert result.result["password"] == _PASSWORD_SECRET
+
+    row = await _audit_row("vault.kv.versions")
+    assert row.payload["reveal_secret"] is True
+    assert _PASSWORD_SECRET not in json.dumps(row.raw_payload)
 
 
 # ---------------------------------------------------------------------------

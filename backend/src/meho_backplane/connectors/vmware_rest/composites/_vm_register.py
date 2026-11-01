@@ -25,6 +25,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any, Final
 
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._teardown import (
     STATUS_INVALID_REQUEST,
     STATUS_PRECONDITION_FAILED,
@@ -66,7 +67,6 @@ from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, pol
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
@@ -75,7 +75,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
-    "VM_REGISTER_COMPOSITES",
+    "COMPOSITES",
     "register_body",
     "vm_register_composite",
     "vm_unregister_composite",
@@ -341,44 +341,44 @@ async def _unregister_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return preview
 
 
-register_preview_builder(OP_ID_VM_REGISTER, _register_preview)
-register_preview_builder(OP_ID_VM_UNREGISTER, _unregister_preview)
-
-
-#: The two registration rows, as ``_CompositeSpec`` keyword arguments.
-VM_REGISTER_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_VM_REGISTER,
-        "handler": vm_register_composite,
-        "summary": "Register a VM or template from its .vmx or .vmtx file on a datastore.",
-        "description": (
+#: The registration rows; ``_register.py`` collects them at start-up.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_VM_REGISTER,
+        handler=vm_register_composite,
+        summary="Register a VM or template from its .vmx or .vmtx file on a datastore.",
+        description=(
             "Adds a VM to the vCenter inventory from its files (VIM RegisterVM_Task): the "
             ".vmx path, a VM folder and a resource pool, or a host for a template. Returns "
             "the new VM id and state. Waits for approval."
         ),
-        "parameter_schema": VM_REGISTER_PARAMETER_SCHEMA,
-        "response_schema": VM_REGISTER_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "register", "vi-json"],
-        "safety_level": "caution",
-        "requires_approval": True,
-        "llm_instructions": VM_REGISTER_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_VM_UNREGISTER,
-        "handler": vm_unregister_composite,
-        "summary": "Remove a VM from the vCenter inventory; its files stay on the datastore.",
-        "description": (
+        parameter_schema=VM_REGISTER_PARAMETER_SCHEMA,
+        response_schema=VM_REGISTER_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "register", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=VM_REGISTER_LLM_INSTRUCTIONS,
+        preview=_register_preview,
+        classifier_other=True,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_VM_UNREGISTER,
+        handler=vm_unregister_composite,
+        summary="Remove a VM from the vCenter inventory; its files stay on the datastore.",
+        description=(
             "Unregisters a VM or template, named by its VM id (VIM UnregisterVM). The VM must "
             "not be powered on. Its files stay; vCenter drops its statistics, permissions and "
             "alarms. Returns the .vmx path to register it again. Waits for approval."
         ),
-        "parameter_schema": VM_UNREGISTER_PARAMETER_SCHEMA,
-        "response_schema": VM_UNREGISTER_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "register", "vi-json"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VM_UNREGISTER_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=VM_UNREGISTER_PARAMETER_SCHEMA,
+        response_schema=VM_UNREGISTER_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "register", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VM_UNREGISTER_LLM_INSTRUCTIONS,
+        preview=_unregister_preview,
+        classifier_other=True,
+    ),
 )

@@ -46,7 +46,15 @@ rules in policy order, and returns:
   than `str` / `bytes` / `bytearray`) flatten to `list`. Only string
   leaves change content; everything else is structure. The result is
   always JSON-serialisable so the downstream JSONFlux reducer can
-  consume it without further shape-fixing.
+  consume it without further shape-fixing. A list whose items are all
+  strings (the `rows` of `linux.log.tail`, the lines of a ruleset) is
+  matched as one text, joined with newlines, so a secret that spans
+  rows (a PEM key: `BEGIN` row, body rows, `END` row) is found whole.
+  The list keeps its length and every row keeps its place; a row
+  inside a match loses only its part of the match. A match inside one
+  row gives the same result as matching that row alone. Rows and
+  matches are walked together once by index, so a long list with many
+  secrets in every row costs about the same as its rows one by one.
 - `manifest` — a tuple of `RedactionManifestEntry` records, one per
   rule firing per leaf, carrying `rule`, `pattern`, `action`,
   `count`, `span`, `reason`, and `path`. C1-b will persist this
@@ -125,6 +133,7 @@ production traffic cannot reach that branch.
 | `api_key` | Labelled credential pairs: `api_key`, `access_token`, `refresh_token`, `auth_token`, `session_token`, `token` (bare), `secret` / `secret_key` / `secret_id`, `private_key`, `password`, `passwd`, `pwd`, `client_secret` — each followed by `=` or `:` and an 8+ char value. The label may follow `_` or `-` (`DB_PASSWORD=...`, `GITHUB_TOKEN=...`); a label glued to letters (`mypassword=`) does not match |
 | `pem_private_key` | A PEM private key block, from the `BEGIN ... PRIVATE KEY` line to the matching `END` line (or to the end of the text when the `END` line is missing). Public keys and certificates do not match. Runs before `api_key` in the default policy, so a `private_key=-----BEGIN ...` pair loses the whole block |
 | `kubeconfig` | YAML kubeconfig blobs (`apiVersion: v1` + `kind: Config`) |
+| `password_hash` | A crypt(3) password hash as in `/etc/shadow`: `$1$`, `$2a$`/`$2b$`/`$2x$`/`$2y$`, `$5$`, `$6$`, `$7$`, `$y$`, `$gy$`, `$sha1$`, `$argon2id$`/`$argon2i$`/`$argon2d$`. The match stops at `:`, so the other `/etc/shadow` columns stay readable |
 | `bind_key_secret` | The value after the `secret` keyword in a BIND `key` block (`secret "<base64>";`, TSIG and rndc keys) and after `cookie-secret` in the `options` block, with or without quotes, also when BIND comments (`/* */`, `//`, `#`) sit between the keyword and the value; the keyword and the comments stay so the file stays readable. Not a regex: `bind_secret.py` first splits the text into comments, quoted strings and code the way BIND's lexer does, then reads the value only inside the same scope. So a `secret` word in a comment can never reach past that comment, a commented-out key block is still hidden, an old secret in a comment between the keyword and its value is hidden together with the value, a key *name* like `"transfer-secret"` or `"my secret"` is never the keyword, and a `#` or `//` inside a quoted string does not start a comment (#4617, #5342 review). A quoted value must be base64 or hex. A value without quotes must be followed by `;` or a comment |
 | `uuid` | RFC 4122 canonical 8-4-4-4-12 hex |
 | `ipv4` | Dotted-quad with 0-255 per-octet bounds |
@@ -227,10 +236,11 @@ Numbers, booleans and `null` stay. A value an earlier step already masked
 | Multi-step error envelope (`dispatcher._reduce_and_audit_composite_error` → `redact_error_payload`) | the walk, then Tier-1 (default policy, pinned), **before** the reducer stores the full envelope behind a result handle, so the stored rows, the handle's sample rows and the inline summary are all clean. The envelope went through the operator's own policy first, and a shadow-mode policy leaves every secret in place; the cleanup of the inline result runs later and cannot reach the stored copy. The audit row's `raw_payload` gets a fingerprint for every value this cleanup hid (`_protect_secret_values`). If this cleanup fails, the envelope is withheld like a reducer failure (`delivery` is `unavailable`), nothing is stored, and `raw_payload` is one fingerprint of the whole envelope. |
 | Trace bodies and header values (`flight_recorder/_content.py::scrub_content`) | the walk, then the trace's credential-shape policy, for every recorded request and answer body |
 
-**What does not change.** The normal result path: a secret-named field in a
-normal answer is removed only for a secret read (see "Secret reads" below).
-The audit row's `raw_payload` keeps the answer for replay, with a keyed
-fingerprint in place of each hidden value. The row of a multi-step error
+**The normal result path.** A secret-named field in a normal answer is
+hidden for every operation by the same name rule, with the plain fields the
+operation declared left in place (see "Secret-named fields in every answer"
+below). The audit row's `raw_payload` keeps the answer for replay, with a
+keyed fingerprint in place of each hidden value. The row of a multi-step error
 envelope is stored the same way: the handler returned the envelope like a
 normal answer. A connector's own trace mask
 (`HttpConnector.trace_response_body`) still runs first.
@@ -247,7 +257,8 @@ caller's result, the committed audit row and every MEHO log line. A second
 test hands a normal answer and error answers, with an `Authorization`
 header and a password in the request body, to the trace redaction
 (`redact_span`) for every connector and checks the recorded span. The
-normal answer holds only labelled secrets, for the reason above. A new
+normal answer holds the secrets as labelled text and as fields, and the
+audit row is checked with its `raw_payload` for every answer. A new
 connector is covered as soon as it is registered.
 
 `backend/tests/test_operations_composite_error_redaction.py` drives the
@@ -324,7 +335,7 @@ falls through to the packaged **default-safe** policy
 The default-safe policy is the load-bearing guarantee: a connector
 landing without a registered override **still gets credentials
 stripped** (`authorization_header`, `bearer_token`, `jwt`, `api_key`,
-`kubeconfig`, `bind_key_secret`). Identifier patterns (`uuid` / `ipv4` / `ipv6` / `fqdn`)
+`pem_private_key`, `kubeconfig`, `password_hash`, `bind_key_secret`). Identifier patterns (`uuid` / `ipv4` / `ipv6` / `fqdn`)
 are deliberately not in the default — most connector responses are
 mostly identifiers, and a global default that redacts them would
 blank operator-facing summaries. Operators wanting them at the global
@@ -378,46 +389,82 @@ crash) are caught and converted to a structured `connector_error`
 preserved — a redactor failure must not leak raw payloads through a
 500 with no audit record.
 
-### Secret reads: names without values, `reveal_secret` for people only
+### Secret-named fields in every answer, `reveal_secret` for people and service principals
 
 The Tier-1 engine matches only **labelled** secret shapes inside string
 leaves (`password=…`, `Bearer …`); a structured `{"password": "<value>"}`
 dict carries no label in the leaf, so the engine passes it through
-verbatim. A secret read returns exactly this shape. The dispatcher adds a
-second layer, `operations/_secret_values.py`, right after the
-connector-boundary redaction (`dispatcher._protect_secret_values`):
+verbatim. A vendor often returns a secret in exactly this shape, and a
+secret read returns nothing else. The dispatcher adds a second layer,
+`operations/_secret_values.py`, right after the connector-boundary
+redaction (`dispatcher._protect_secret_values`), for **every** operation:
 
-- **Which ops.** A secret read is a `credential_read` op
-  (`broadcast/events.py:_CREDENTIAL_READ_OPS`) or an op of
-  `_secret_values._VALUE_HIDING_OPS`.
-- **Default view** (`hide_secret_values`):
+- **Default view** (`hide_secret_values`), what the caller gets unless a
+  person or a service principal asked for the values:
   - `vault.kv.read` keeps the key names under `data` and hides every value
     (`[REDACTED:secret_value]`), whatever the key name is (`ssh_key`,
     `value`, `pin`, a number). `version` stays. An answer of another shape
     is hidden whole.
   - `vmware.composite.vm.guest.env.read` keeps each variable name and hides
     the value (`NAME=[REDACTED:secret_value]`).
-  - Every other secret read: values under secret-shaped key names are
-    replaced with `[REDACTED:param_name]`
+  - Every other operation, a secret read (a `credential_read` op,
+    `broadcast/events.py:_CREDENTIAL_READ_OPS`) or a plain read or write,
+    built in or from a connector package: values under secret-shaped key
+    names are replaced with `[REDACTED:param_name]`
     (`broadcast.events.scrub_secret_named_values(..., hide_numbers=True)`),
-    numbers included; booleans and `None` stay.
+    numbers included; booleans and `None` stay. The name rule is
+    `is_secret_param_name` ("One name rule for secret fields" above). The
+    reducer runs on this view, so the rows stored behind a result handle
+    and its sample rows are clean too.
+- **Plain fields** (`register_plain_fields(op_id, names)`, exported by
+  `meho_backplane.operations`). Some names look like a secret but hold
+  none: `password_expires_at` is a date, `secret_id_ttl` a number of
+  seconds, `image_pull_secrets` a list of names, the `token` entry of
+  `rke2.posture.show` the mode and owner of the token file. A connector
+  module declares them at import time, like a preview builder, and a
+  connector package's registrar does the same. The default view keeps a
+  declared field with its whole value, at every depth of the answer. A
+  field that is not declared stays hidden, so a forgotten declaration never
+  shows a secret.
+  Declared today: the vCenter appliance local account reads and sets, the
+  Active Directory password and domain operations, the Windows local user
+  list, the Cloud Builder validation and bring-up operations
+  (`referenceToken`, the id of a vendor error), `sddc.license.list`
+  (`licenseKeyUsage`), `vault.auth.approle.read` (the SecretID settings),
+  `vrops.license.info` (the handler masks the key), `k8s.pod.info`,
+  `k8s.deployment.info` and `rke2.posture.show`. A generic (ingested)
+  operation cannot declare fields: a plain field with a secret-shaped name
+  in its answer stays hidden.
 - **`reveal_secret: true`.** `dispatch()` strips this reserved control
   flag **before** hashing / schema validation / handler forwarding (the op
-  schemas are `additionalProperties: false`). With the flag, a person gets
-  the redacted answer with the secret fields put back as the connector
-  returned them (`reveal_hidden_values`: every field the default view
-  hides, so a PEM private key comes back whole; the redaction of the other
-  fields stays). An agent principal, or a
-  person's hosted agent run (an RFC 8693 actor is bound), is refused before
-  the policy gate: `status="denied"`, a synchronous `POLICY_DECISION` audit
-  row, and no value. The people's call sites are the `/ui` Vault console
-  (`ui/routes/vault/routes.py`, reveal-on-click) and CLI `meho secret
-  read` (`cli/internal/cmd/secret/read.go`). Service principals may still
-  reveal.
+  schemas are `additionalProperties: false`). With the flag, a person or a
+  service principal gets the redacted answer with the hidden fields put
+  back as the connector returned them (`reveal_hidden_values`: every field
+  the default view hides, so a PEM private key comes back whole; the
+  redaction of the other fields stays). It works on every operation. An
+  agent principal, or a person's hosted agent run (an RFC 8693 actor is
+  bound), is refused before the policy gate: `status="denied"`, a
+  synchronous `POLICY_DECISION` audit row, and no value. The people's call
+  sites are the `/ui` Vault console (`ui/routes/vault/routes.py`,
+  reveal-on-click) and CLI `meho secret read`
+  (`cli/internal/cmd/secret/read.go`).
+  A call that waits for approval keeps the choice: `create_pending_request`
+  stores it in its own column, `approval_request.reveal_secret` (migration
+  `0131`), not with the params and not in the encrypted payload of a
+  credential write, and outside `params_hash`, so the retry check and the
+  approve surfaces compare the call without it. `resume_dispatch_after_approval`
+  and the rerun of a failed run read the choice from the row (also after the
+  first run deleted the encrypted payload of a credential write), take a
+  flag sent again with the params off before the hash and preview checks
+  (`_secret_values.split_reveal_secret`), and put the stored choice on the
+  params of the approved run, which answers with the values and stamps the
+  choice on its audit row.
 - **Audit stamp.** `reveal_secret_var` (bound with the same token/finally
   discipline as `policy_decision_var`) lands as `payload['reveal_secret']`
-  on the audit row of a secret read (`True` = raw asked for, `False` =
-  default view). Other dispatches leave it `None`, so the key is absent.
+  on the audit row of every secret read (`True` = values asked for,
+  `False` = default view) and on the row of any other operation when the
+  values were asked for (`True`). Every other dispatch leaves it `None`,
+  so the key is absent.
 - **Fail closed.** The success-path audit row is required
   (`require_audit=True`): when it does not commit, the caller gets
   `audit_commit_failed` and no value, also for a reveal.

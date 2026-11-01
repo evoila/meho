@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._teardown import (
     STATUS_INVALID_REQUEST,
     STATUS_PRECONDITION_FAILED,
@@ -49,7 +50,6 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
@@ -58,7 +58,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
-    "VM_INSTANT_CLONE_COMPOSITES",
+    "COMPOSITES",
     "instant_clone_body",
     "vm_instant_clone_composite",
 ]
@@ -216,26 +216,25 @@ async def _instant_clone_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return preview
 
 
-register_preview_builder(OP_ID_VM_INSTANT_CLONE, _instant_clone_preview)
-
-
-#: The registration row, as ``_CompositeSpec`` keyword arguments.
-VM_INSTANT_CLONE_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_VM_INSTANT_CLONE,
-        "handler": vm_instant_clone_composite,
-        "summary": "Make an instant clone of a running VM.",
-        "description": (
+#: The registration rows; ``_register.py`` collects them at start-up.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_VM_INSTANT_CLONE,
+        handler=vm_instant_clone_composite,
+        summary="Make an instant clone of a running VM.",
+        description=(
             "Makes a new, running VM that shares the memory and disk state of a running source "
             "VM (REST instant-clone). Optional folder, resource pool and datastore; default: "
             "as the source. Returns the new VM id and state. Waits for approval."
         ),
-        "parameter_schema": VM_INSTANT_CLONE_PARAMETER_SCHEMA,
-        "response_schema": VM_INSTANT_CLONE_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "clone", "rest"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VM_INSTANT_CLONE_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=VM_INSTANT_CLONE_PARAMETER_SCHEMA,
+        response_schema=VM_INSTANT_CLONE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "clone", "rest"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VM_INSTANT_CLONE_LLM_INSTRUCTIONS,
+        preview=_instant_clone_preview,
+        classifier_other=True,
+    ),
 )

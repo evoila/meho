@@ -21,6 +21,7 @@ way the in-process agent waiter does.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -153,9 +154,25 @@ def _fake_other_caller(results: dict[str, str | None], *, after: float = 0.2) ->
     return AsyncMock(side_effect=_run)
 
 
-def _post(session_id: uuid.UUID, resume: AsyncMock, **form: str) -> Any:
+def _post(
+    session_id: uuid.UUID,
+    resume: AsyncMock,
+    *,
+    sid: str = "kc-sid-1",
+    sign_in_age: int | None = 0,
+    auth_time: int | None = None,
+    **form: str,
+) -> Any:
+    """POST a run as the reviewer.
+
+    *sid* and *auth_time* name the sign-in behind the session: two posts
+    with the same pair come from one sign-in. *auth_time* pins the time;
+    without it the sign-in is from now minus *sign_in_age* seconds.
+    """
     csrf = _csrf_token(session_id)
-    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, sid=sid, sign_in_age=sign_in_age)
+    if auth_time is not None:
+        operator = operator.model_copy(update={"auth_time": auth_time})
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         client.cookies.set(CSRF_COOKIE_NAME, csrf)
@@ -214,7 +231,22 @@ def test_plan_lists_steps_oldest_first_with_a_start_form() -> None:
     assert _request_status(second) == "pending"
 
 
+_SIGN_IN_URL = (
+    "/ui/auth/login?return_to=%2Fui%2Fapprovals%3Ftab%3Dpending%26work_ref%3D"
+    + quote(_REF_Q, safe="")
+    + "&amp;fresh_sign_in=1"
+)
+
+
 def test_mixed_group_goes_on_waits_at_risky_steps_and_stops_at_the_failure() -> None:
+    """Caution steps go on, risky steps wait, a destructive step needs its own sign-in.
+
+    One sign-in approves steps 1 and 2. Step 3 is destructive, so that
+    sign-in is refused there and the run links to a new sign-in. The new
+    sign-in approves step 3 and is then used up, so step 4 needs a third
+    sign-in. Step 4 runs and fails, and the run stops; step 5 stays
+    pending.
+    """
     session_id = _session()
     s1 = _seed(1, "caution")
     s2 = _seed(2, "dangerous")
@@ -222,9 +254,10 @@ def test_mixed_group_goes_on_waits_at_risky_steps_and_stops_at_the_failure() -> 
     s4 = _seed(4, "caution")
     s5 = _seed(5, "caution")
     resume = _fake_resume(failing_ops={"op.step4"})
+    signed_in = int(time.time()) - 20
 
     # Start: step 1 (caution) runs, the run waits at step 2 (dangerous).
-    first = _post(session_id, resume)
+    first = _post(session_id, resume, auth_time=signed_in)
     assert first.status_code == 200, first.text
     assert 'data-approval-in-order-waiting="2"' in first.text
     assert f'name="confirm_id" value="{s2}"' in first.text
@@ -240,17 +273,35 @@ def test_mixed_group_goes_on_waits_at_risky_steps_and_stops_at_the_failure() -> 
 
     # Yes for step 2: step 1 is skipped (ran OK), step 2 runs, the run
     # waits at step 3 (destructive).
-    second = _post(session_id, resume, confirm_id=str(s2))
+    second = _post(session_id, resume, auth_time=signed_in, confirm_id=str(s2))
     assert 'data-approval-in-order-waiting="3"' in second.text
     assert "ran OK before, skipped" in second.text
     assert [_request_status(r) for r in (s1, s2, s3)] == ["approved", "approved", "pending"]
 
-    # Yes for step 3: step 3 runs, step 4 runs and fails, the run stops;
-    # step 5 stays pending.
-    third = _post(session_id, resume, confirm_id=str(s3))
-    assert 'data-approval-in-order-stopped="4"' in third.text
-    assert "connector_error: file not found" in third.text
-    assert "Not run: step" in third.text
+    # Yes for step 3 with the same sign-in: step 3 is destructive and this
+    # sign-in already approved steps 1 and 2, so the run stops and asks
+    # for a new sign-in. Nothing ran.
+    third = _post(session_id, resume, auth_time=signed_in, confirm_id=str(s3))
+    assert 'data-approval-in-order-stopped="3"' in third.text
+    assert "needs a new sign-in" in third.text
+    assert f'href="{_SIGN_IN_URL}"' in third.text
+    assert _request_status(s3) == "pending"
+    assert resume.await_count == 2
+
+    # A new sign-in, yes for step 3: step 3 runs. That sign-in approved a
+    # destructive step, so step 4 needs yet another sign-in.
+    fourth = _post(session_id, resume, sid="kc-sid-2", confirm_id=str(s3))
+    assert 'data-approval-in-order-stopped="4"' in fourth.text
+    assert f'href="{_SIGN_IN_URL}"' in fourth.text
+    assert [_request_status(r) for r in (s3, s4)] == ["approved", "pending"]
+
+    # A third sign-in: steps 1 to 3 are skipped, step 4 runs and fails, the
+    # run stops; step 5 stays pending.
+    fifth = _post(session_id, resume, sid="kc-sid-3")
+    assert 'data-approval-in-order-stopped="4"' in fifth.text
+    assert "connector_error: file not found" in fifth.text
+    assert 'data-action="sign-in-to-approve"' not in fifth.text
+    assert "Not run: step" in fifth.text
     assert [_request_status(r) for r in (s3, s4, s5)] == ["approved", "approved", "pending"]
     assert [call.kwargs["request"].op_id for call in resume.await_args_list] == [
         "op.step1",
@@ -383,6 +434,22 @@ def test_a_yes_for_another_request_does_not_approve_the_risky_step() -> None:
 
     assert 'data-approval-in-order-waiting="1"' in response.text
     assert _request_status(s1) == "pending"
+    resume.assert_not_awaited()
+
+
+def test_old_sign_in_stops_the_run_at_the_first_step_with_a_sign_in_link() -> None:
+    """A sign-in from ten days ago approves nothing; the run links to a new sign-in."""
+    session_id = _session()
+    s1 = _seed(1, "caution")
+    s2 = _seed(2, "caution")
+    resume = _fake_resume(failing_ops=set())
+
+    response = _post(session_id, resume, sign_in_age=10 * 24 * 3600)
+
+    assert 'data-approval-in-order-stopped="1"' in response.text
+    assert "needs a new sign-in" in response.text
+    assert f'href="{_SIGN_IN_URL}"' in response.text
+    assert [_request_status(r) for r in (s1, s2)] == ["pending", "pending"]
     resume.assert_not_awaited()
 
 

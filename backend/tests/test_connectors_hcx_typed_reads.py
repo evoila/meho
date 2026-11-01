@@ -283,7 +283,8 @@ async def test_site_pairing_list_returns_rows_without_the_password(
     assert result.status == "ok", result.error
     (row,) = result.result["items"]
     assert row["endpointId"] == "ep-remote"
-    assert row["password"] == REDACTED
+    # The connector masks the field; the default view of every answer hides it once more.
+    assert row["password"] == "[REDACTED:param_name]"
     assert _PASSWORD not in json.dumps(result.result)
 
 
@@ -457,7 +458,7 @@ async def test_appliance_list_adds_state_tunnel_and_version_fields(
     assert (row["tunnels_active"], row["tunnels_total"]) == (1, 2)
     assert (row["version"], row["build"]) == ("4.11.0", 42)
     assert row["update_available"] is False
-    assert row["config"]["privateKey"] == REDACTED
+    assert row["config"]["privateKey"] == "[REDACTED:param_name]"
 
 
 # ---------------------------------------------------------------------------

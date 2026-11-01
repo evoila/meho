@@ -419,7 +419,8 @@ with no further provisioning and hands it the full policy. Enabling
 calls cannot perform an operator-context Vault read" carve-out for *all*
 background dispatch, not just for Sensors. Operators are told to bound the
 role first — a distinct audience plus a dedicated narrower role (the backplane
-points the check-runner's background dispatch at it via `VAULT_CHECK_RUNNER_ROLE`,
+points the check-runner's background dispatch, and the inbound event
+intake's secret read, at it via `VAULT_CHECK_RUNNER_ROLE`,
 #2757, leaving interactive logins on `VAULT_OIDC_ROLE`), or an
 **exact-match** `bound_claims` on `meho-mcp` keyed on a claim value only
 operator tokens carry (a `bound_claims_type=glob` `"*"` is not one: it

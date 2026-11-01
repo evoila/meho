@@ -95,9 +95,12 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
   only fetch its own assignment and submit its own results.
 * ``check_runner_dispatch`` — internal-only marker that this operator is the
   in-process check-runner's synthetic *background-dispatch* identity
-  (#2757). Set to ``True`` **solely** by
-  :func:`~meho_backplane.checks.runner._sensor_operator`; defaults ``False``
-  for every other construction site (fail-closed). It selects the dedicated
+  (#2757). Set to ``True`` by
+  :func:`~meho_backplane.checks.runner._sensor_operator` and by the inbound
+  event intake's :func:`~meho_backplane.events.ingest.service._build_ingest_operator`
+  (both present the check runner's token, so both log in under its role);
+  defaults ``False`` for every other construction site (fail-closed). It
+  selects the dedicated
   :attr:`~meho_backplane.settings.Settings.vault_check_runner_role`, when one
   is configured, at the single Vault JWT-login site
   (:func:`~meho_backplane.auth.vault.vault_client_for_operator`) so an
@@ -118,11 +121,33 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
   login (agent, service, runner). The role and flags of an entry come
   from :func:`group_grant`, the one table in code that matches
   ``docs/decisions/login-role-groups.md``. When the list is not empty,
-  ``tenant_id`` / ``tenant_role`` / ``approver`` hold the values of the
-  **current** tenant's entry, picked per request by
+  ``tenant_id`` / ``tenant_role`` / ``approver`` / ``self_approver`` hold
+  the values of the **current** tenant's entry, picked per request by
   :func:`~meho_backplane.auth.current_tenant.select_current_tenant`
   (#5239); the flat ``tenant_id`` / ``tenant_role`` / ``approver`` claims
   are not used.
+* ``self_approver`` — whether the person is in the ``MEHO-SA-Operators``
+  group of the current tenant (#3327). SA-Operators may approve their own
+  changes, at every risk level that waits for approval (#3325). Read by
+  :func:`~meho_backplane.auth.jwt._extract_self_approver`: from the
+  current tenant's ``meho_tenants`` entry when the token has that claim,
+  else from the ``groups`` claim (group name ``JWT_SELF_APPROVER_GROUP``).
+  When the request names another tenant of the list,
+  :func:`~meho_backplane.auth.current_tenant.with_membership` reads it
+  again from that tenant's entry, the same as ``approver``. A platform
+  admin working in a tenant without a role group there never gets it.
+  Defaults to ``False`` and fails closed: a missing or malformed claim
+  gives ``False``, in every tenant (``tenants_claim_malformed``).
+  Separate from :class:`TenantRole` (an SA-Operator has the ``operator``
+  role) and from ``approver``. It gives no right to run operations.
+  Never read from a request field, header or command-line flag. The
+  approval checks ask :attr:`Operator.may_self_approve`, which also
+  refuses every machine login.
+* ``tenants_claim_malformed`` — ``True`` when the ``meho_tenants`` claim
+  is there but is not a list, or has an entry MEHO could not read
+  (:func:`~meho_backplane.auth.jwt._tenants_claim_malformed`). The good
+  entries still fill ``tenants``; ``self_approver`` stays ``False`` in
+  every tenant.
 * ``tenant_chosen`` — ``False`` only for a status answer (``meho status``,
   ``meho_status``) of a login with several tenants that named no tenant.
   The tenant fields then hold the first entry and must not be used for
@@ -248,8 +273,8 @@ class GroupGrant(NamedTuple):
     * ``approver`` — the person may decide approval requests
       (the same meaning as :attr:`Operator.approver`).
     * ``self_approval`` — the person may approve their own change. Only
-      ``SA-Operators`` sets it. Nothing reads it yet: the rule comes with
-      the self-approval work (#3327).
+      ``SA-Operators`` sets it. It sets :attr:`Operator.self_approver`
+      for the current tenant (#3327).
     """
 
     role: TenantRole
@@ -342,6 +367,12 @@ class Operator(BaseModel):
     #: claim, and always empty for a machine login. The current tenant is
     #: picked from it per request (#5239).
     tenants: tuple[TenantMembership, ...] = ()
+    #: The person is in the SA-Operators group of the current tenant
+    #: (#3327). Off by default. Read it through :attr:`may_self_approve`.
+    self_approver: bool = False
+    #: The ``meho_tenants`` claim had a part MEHO could not read. Then
+    #: ``self_approver`` stays off in every tenant (#3327).
+    tenants_claim_malformed: bool = False
     #: How the person signed in, from the ``acr`` claim. ``None`` when absent.
     acr: str | None = None
     #: The Keycloak sign-in session id, from the ``sid`` claim. ``None`` when
@@ -353,6 +384,22 @@ class Operator(BaseModel):
     tenant_chosen: bool = True
     #: The role comes from the platform admin group, not a role group (#5239).
     role_from_platform_admin: bool = False
+
+    @property
+    def may_self_approve(self) -> bool:
+        """Return ``True`` when this person may approve their own change.
+
+        The one place the approval checks ask (#3328). True only for a
+        person (``principal_kind=user``) with :attr:`self_approver` set
+        in a chosen current tenant. A machine login (agent, service,
+        runner) always gets ``False``, even when its token carries the
+        group: agents never approve (#3325). A status answer without a
+        chosen tenant (:attr:`tenant_chosen` is ``False``) gets ``False``
+        too. The answer is the same for every risk level that waits for
+        approval. There are no per-system, per-connector or time-limited
+        exceptions.
+        """
+        return self.self_approver and self.tenant_chosen and is_human_principal(self)
 
 
 #: Machine (non-human) principal kinds. A human operator authenticates as

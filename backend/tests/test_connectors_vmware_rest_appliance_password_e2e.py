@@ -58,7 +58,7 @@ _TENANT_ID = UUID("00000000-0000-0000-0000-00000000a1c5")
 _HOST = "vcenter-local-accounts.test.invalid"
 _BASE_URL = f"https://{_HOST}"
 _TARGET_SECRET_REF = "targets/local-accounts/vcenter"
-_NEW_PASSWORD_REF = "appliance/vcenter/root-new"
+_NEW_PASSWORD_REF = f"tenants/{_TENANT_ID}/appliance/vcenter/root-new"
 #: Made-up values. The test fails if the new password shows up anywhere but the PATCH.
 _SERVICE_ACCOUNT = "svc-meho-local-accounts"
 _SERVICE_PASSWORD = "svc-login-canary-7c1d"

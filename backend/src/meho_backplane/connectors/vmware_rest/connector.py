@@ -855,6 +855,13 @@ class VmwareRestConnector(HttpConnector):
         # version. Empty until the first vSAN call on such a target.
         self._vsan_sessions: dict[tuple[str, str], tuple[str, str]] = {}
         self._vsan_lock = asyncio.Lock()
+        # vim SOAP session for vCenter's datastore file access (``GET
+        # /folder/...``), which takes the ``vmware_soap_session`` cookie. Per
+        # target: logged in once and reused by every file read until
+        # :meth:`invalidate_session` or a 401 drops it. Empty until the first
+        # file read (the VM screenshot).
+        self._file_access_cookies: dict[tuple[str, str], str] = {}
+        self._file_access_lock = asyncio.Lock()
         self._session_lock = asyncio.Lock()
         self._session_loader: VsphereSessionLoader = (
             session_loader if session_loader is not None else load_session_credentials_from_vault
@@ -1945,6 +1952,33 @@ class VmwareRestConnector(HttpConnector):
             )
         return cookie
 
+    async def _ensure_file_access_session(
+        self, target: VsphereTargetLike, operator: Operator
+    ) -> str:
+        """Return the ``vmware_soap_session`` cookie for datastore file reads, logging in once.
+
+        vCenter's datastore file access (``GET /folder/...``) takes the cookie
+        of a normal vCenter SOAP login (:meth:`_vcenter_soap_login`). One
+        session per target is kept and reused, so repeated file reads do not
+        each open a vCenter session (vCenter limits the sessions of one user).
+        :meth:`invalidate_session` drops it; a caller drops it with
+        :meth:`_drop_file_access_session` when vCenter answers HTTP 401 (the
+        session expired), and the next call logs in again.
+        """
+        cache_key = target_cache_key(target)
+        async with self._file_access_lock:
+            cookie = self._file_access_cookies.get(cache_key)
+            if cookie is None:
+                cookie = await self._vcenter_soap_login(
+                    target, operator, service="datastore file access"
+                )
+                self._file_access_cookies[cache_key] = cookie
+            return cookie
+
+    def _drop_file_access_session(self, target: VsphereTargetLike) -> None:
+        """Forget the datastore file access session of *target*; the next read logs in again."""
+        self._file_access_cookies.pop(target_cache_key(target), None)
+
     # -----------------------------------------------------------------------
     # PBM (Storage Policy Based Management) SOAP transport (#3494)
     # -----------------------------------------------------------------------
@@ -2661,6 +2695,8 @@ class VmwareRestConnector(HttpConnector):
         self._invalidate_pbm(cache_key)
         # The same for the vSAN SOAP session (#4441): the next vSAN call logs in again.
         self._vsan_sessions.pop(cache_key, None)
+        # And for the datastore file access session: the next file read logs in again.
+        self._file_access_cookies.pop(cache_key, None)
         if flavor == HOST_FLAVOR_ESXI and token is not None:
             await self._esxi_logout_quiet(cache_key, sm_moid, extensions or {})
 

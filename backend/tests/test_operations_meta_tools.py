@@ -1233,6 +1233,7 @@ async def test_search_operations_outcome_taxonomy(
         "no_match",
         "unknown_group",
         "zero_enabled_operations",
+        "package_not_installed",
     }
     entry = get_tool("search_operations")
     assert entry is not None
@@ -1585,7 +1586,8 @@ async def test_call_operation_with_target_resolves_and_dispatches(
             "connector_id": "vault-1.x",
             "op_id": "vault.kv.read",
             "target": {"name": "rdc-vault"},
-            "params": {"path": "secret/foo"},
+            # vault.kv.read hides values by default; the echo needs them.
+            "params": {"path": "secret/foo", "reveal_secret": True},
         },
     )
 
@@ -1625,7 +1627,8 @@ async def test_call_operation_without_target_uses_none(
             "connector_id": "vault-1.x",
             "op_id": "vault.kv.read",
             "target": None,
-            "params": {"hello": "world"},
+            # vault.kv.read hides values by default; the echo needs them.
+            "params": {"hello": "world", "reveal_secret": True},
         },
     )
 
@@ -1781,7 +1784,8 @@ async def test_call_operation_with_bare_string_target_resolves_and_dispatches(
             "connector_id": "vault-1.x",
             "op_id": "vault.kv.read",
             "target": "rdc-vault",
-            "params": {"path": "secret/foo"},
+            # vault.kv.read hides values by default; the echo needs them.
+            "params": {"path": "secret/foo", "reveal_secret": True},
         },
     )
 

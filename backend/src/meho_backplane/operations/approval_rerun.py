@@ -17,8 +17,9 @@ The rules, checked in this order:
 3. Nothing changed. MEHO refuses and says a new approval is needed when the
    ``expires_at`` deadline has passed, MEHO was updated since the request was
    made, the work reference differs, the params do not match
-   ``params_hash``, the saved target no longer resolves, or the preview hash
-   of a ``destructive`` request differs. The operation, connector and target
+   ``params_hash``, the saved target no longer resolves, its connection
+   settings changed since the request was made, or the preview hash of a
+   ``destructive`` request differs. The operation, connector and target
    always come from the request, so the caller cannot change them.
 4. One run at a time. The claim is one conditional ``UPDATE`` that clears
    ``resume_result`` and adds one to ``rerun_count``, only while the stored
@@ -61,6 +62,7 @@ from meho_backplane.operations.approval_queue import (
     _dispatch_resume_with_bound_context,
     _now,
     _resolve_default_ttl,
+    _stored_call,
     _write_audit_row,
     approval_release_changed,
     approval_result_state,
@@ -68,6 +70,7 @@ from meho_backplane.operations.approval_queue import (
     persist_resume_result,
     rehydrate_resume_target,
 )
+from meho_backplane.operations.approval_resume_checks import preview_changed_since_request
 
 __all__ = [
     "RERUN_AUDIT_PATH",
@@ -100,6 +103,7 @@ class RerunRefusal(StrEnum):
     WORK_REF_CHANGED = "work_ref_changed"
     PARAMS_CHANGED = "params_changed"
     TARGET_GONE = "target_gone"
+    TARGET_CHANGED = "target_changed"
     PREVIEW_CHANGED = "preview_changed"
     INPUT_NOT_KEPT = "input_not_kept"
 
@@ -110,6 +114,9 @@ _REFUSAL_MESSAGES: Final[dict[RerunRefusal, str]] = {
     RerunRefusal.WORK_REF_CHANGED: "the work reference differs from the approved one",
     RerunRefusal.PARAMS_CHANGED: "the params differ from the approved ones",
     RerunRefusal.TARGET_GONE: "the approved target no longer exists",
+    RerunRefusal.TARGET_CHANGED: (
+        "the connection settings of the approved target changed after the request was made"
+    ),
     RerunRefusal.PREVIEW_CHANGED: "the preview of the call differs from the approved one",
     RerunRefusal.INPUT_NOT_KEPT: (
         "MEHO did not keep the input of this multi-step credential write after its first run"
@@ -195,27 +202,12 @@ def _static_refusal(request: ApprovalRequest, params: dict[str, Any]) -> RerunRe
     return None
 
 
-async def _preview_changed(
-    operator: Operator, request: ApprovalRequest, target: Any, params: dict[str, Any]
-) -> bool:
-    """True when a ``destructive`` request's preview hash differs now (#3197)."""
-    if request.preview_hash is None:
-        return False
-    from meho_backplane.operations._request_preview import (
-        compute_preview_hash,
-        preview_dispatch,
-    )
-
-    envelope = await preview_dispatch(
-        operator=operator,
-        connector_id=request.connector_id,
-        op_id=request.op_id,
-        target=target,
-        params=params,
-    )
-    if envelope.get("status") != "ok":
-        return True
-    return compute_preview_hash(envelope) != request.preview_hash
+def _target_refusal(denied: OperationResult) -> RerunRefusal:
+    """Map the target refusal of :func:`rehydrate_resume_target` to a reason."""
+    extras = denied.extras or {}
+    if extras.get("error_code") == "target_changed_since_approval":
+        return RerunRefusal.TARGET_CHANGED
+    return RerunRefusal.TARGET_GONE
 
 
 async def _audit_rerun(
@@ -311,8 +303,14 @@ async def _claim_rerun(operator: Operator, request: ApprovalRequest) -> int | No
 
 async def _check_rerun(
     operator: Operator, request: ApprovalRequest, params: dict[str, Any] | None
-) -> tuple[dict[str, Any], Any]:
-    """Apply rules 2 and 3; return the params and target to run with."""
+) -> tuple[dict[str, Any], Any, bool]:
+    """Apply rules 2 and 3; return the params, target and reveal choice to run with.
+
+    The reveal choice (``reveal_secret: true`` of the original call) is
+    stored on the request, not in the params, the hash or the preview. A
+    flag sent again with the params comes off before the hash check and
+    does not change the stored choice, which goes on the params of the run.
+    """
     state = _not_failed_state(request)
     if state is not None:
         raise await _refuse(
@@ -322,7 +320,7 @@ async def _check_rerun(
             code=f"state_{state}",
             status=_CONFLICT_STATUS_CODE,
         )
-    effective = params if params is not None else request.params
+    effective, reveal_secret = _stored_call(request, params)
     if effective is None:
         raise await _refuse(
             operator,
@@ -331,14 +329,13 @@ async def _check_rerun(
             code="params_required",
             status=_PARAMS_REQUIRED_STATUS_CODE,
         )
-    effective = cast(dict[str, Any], effective)
     reason = _static_refusal(request, effective)
     target: Any = None
     if reason is None:
         target, denied = await rehydrate_resume_target(operator, request)
         if denied is not None:
-            reason = RerunRefusal.TARGET_GONE
-        elif await _preview_changed(operator, request, target, effective):
+            reason = _target_refusal(denied)
+        elif await preview_changed_since_request(operator, request, target, effective):
             reason = RerunRefusal.PREVIEW_CHANGED
     if reason is not None:
         raise await _refuse(
@@ -348,7 +345,7 @@ async def _check_rerun(
             code=reason.value,
             status=_CONFLICT_STATUS_CODE,
         )
-    return effective, target
+    return effective, target, reveal_secret
 
 
 async def rerun_failed_request(
@@ -379,7 +376,7 @@ async def rerun_failed_request(
     if operator.sub != request.principal_sub:
         raise RerunForbiddenError(request_id=request_id, principal_sub=operator.sub)
 
-    effective_params, target = await _check_rerun(operator, request, params)
+    effective_params, target, reveal_secret = await _check_rerun(operator, request, params)
 
     attempt = await _claim_rerun(operator, request)
     if attempt is None:
@@ -404,6 +401,7 @@ async def rerun_failed_request(
             resolved_target=target,
             effective_params=effective_params,
             rerun_attempt=attempt,
+            reveal_secret=reveal_secret,
         )
     except Exception as exc:
         # Store a failed result, so the request can be run again later

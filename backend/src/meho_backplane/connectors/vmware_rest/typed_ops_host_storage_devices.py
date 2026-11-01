@@ -73,7 +73,9 @@ if TYPE_CHECKING:
 __all__ = [
     "HOST_STORAGE_DEVICES_GROUP_KEY",
     "HOST_STORAGE_DEVICES_WHEN_TO_USE",
+    "TYPED_OPS",
     "VMWARE_HOST_STORAGE_DEVICES_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "build_host_storage_devices_retrieve_params",
     "host_storage_devices_impl",
 ]
@@ -588,3 +590,8 @@ VMWARE_HOST_STORAGE_DEVICES_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_HOST_STORAGE_DEVICES_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {
+    HOST_STORAGE_DEVICES_GROUP_KEY: HOST_STORAGE_DEVICES_WHEN_TO_USE
+}

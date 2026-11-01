@@ -56,6 +56,7 @@ from meho_backplane.connectors.vra8.session import (
     load_credentials_from_vault,
 )
 from meho_backplane.connectors.vra8.typed_ops import (
+    VRA8_DAY2_OPS,
     VRA8_TYPED_OPS,
     VRA8_TYPED_WHEN_TO_USE_BY_GROUP,
     Vra8TypedOp,
@@ -97,6 +98,7 @@ register_typed_op_registrar(register_vra8_integration_operations)
 
 __all__ = [
     "VRA8_CONNECTOR_ID",
+    "VRA8_DAY2_OPS",
     "VRA8_IMPL_ID",
     "VRA8_PRODUCT",
     "VRA8_TYPED_OPS",

@@ -14,7 +14,8 @@ new appliance target, like ``vcenter.install``. ``dangerous`` with
    (``unknown_question``), and the answer must be one of its
    ``possible_answers`` (``answer_not_allowed``).
 3. ``POST /vcenter/deployment/question?action=answer`` with exactly the id and
-   the answer the approver saw.
+   the answer the approver saw, in the ``{"spec": ...}`` body of
+   :func:`~meho_backplane.connectors.vmware_rest.vcenter_deployment.setup_body`.
 
 The vendor answers at once and goes on by itself: the answer is ``accepted``
 with the status read that follows the setup. A lost reply gives
@@ -45,11 +46,11 @@ from meho_backplane.connectors.vmware_rest.vcenter_deployment import (
     mounted,
     read_deployment,
     read_questions,
+    setup_body,
     status_read_ref,
     unreachable_reason,
     vendor_detail,
 )
-from meho_backplane.operations._preview import register_preview_builder
 from meho_backplane.operations.composite import enforce_subop_policy
 
 if TYPE_CHECKING:
@@ -134,7 +135,7 @@ async def _post_answer(
 ) -> dict[str, Any]:
     """Step 3, after the gate: send the answer and say what happened."""
     path = await mounted(connector, run.target, operator, OP_QUESTION_ANSWER)
-    body = {"question_id": run.question_id, "answer_val": run.wanted}
+    body = setup_body({"question_id": run.question_id, "answer_val": run.wanted})
     try:
         await connector._post_json(run.target, path, operator=operator, json=body)
     except httpx.HTTPStatusError as exc:
@@ -204,6 +205,3 @@ async def vcenter_deployment_answer_preview(ctx: PreviewContext) -> dict[str, An
         "answer": answer,
         "note": "MEHO sends the answer only if this question is still open and allows it.",
     }
-
-
-register_preview_builder(ANSWER_OP_ID, vcenter_deployment_answer_preview)

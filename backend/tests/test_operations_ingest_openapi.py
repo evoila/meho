@@ -1983,6 +1983,7 @@ def test_assert_fetchable_remote_url_rejects_missing_hostname() -> None:
         "172.16.0.1",  # RFC-1918
         "192.168.1.1",  # RFC-1918
         "169.254.169.254",  # cloud metadata (link-local)
+        "100.64.1.1",  # carrier-grade NAT (shared address space)
         "::1",  # IPv6 loopback
         "fc00::1",  # ULA (unique local)
         "fe80::1",  # IPv6 link-local

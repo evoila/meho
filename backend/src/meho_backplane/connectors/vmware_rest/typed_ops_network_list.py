@@ -404,3 +404,6 @@ VMWARE_NETWORK_LIST_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_NETWORK_LIST_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {NETWORK_LIST_GROUP_KEY: NETWORK_LIST_WHEN_TO_USE}

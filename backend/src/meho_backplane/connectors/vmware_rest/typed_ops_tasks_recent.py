@@ -362,3 +362,6 @@ VMWARE_TASKS_RECENT_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_TASKS_RECENT_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {TASKS_RECENT_GROUP_KEY: TASKS_RECENT_WHEN_TO_USE}

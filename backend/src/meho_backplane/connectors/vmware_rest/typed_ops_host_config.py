@@ -375,3 +375,6 @@ VMWARE_HOST_CONFIG_SHOW_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_HOST_CONFIG_SHOW_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {HOST_CONFIG_GROUP_KEY: HOST_CONFIG_WHEN_TO_USE}

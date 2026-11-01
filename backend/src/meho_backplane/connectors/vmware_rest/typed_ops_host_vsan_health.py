@@ -529,3 +529,6 @@ VMWARE_HOST_VSAN_HEALTH_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_HOST_VSAN_HEALTH_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {HOST_VSAN_HEALTH_GROUP_KEY: HOST_VSAN_HEALTH_WHEN_TO_USE}

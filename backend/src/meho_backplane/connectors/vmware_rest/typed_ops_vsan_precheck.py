@@ -41,6 +41,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vsan_common import (
     CLUSTER_MO_TYPE,
     HOST_MO_TYPE,
     VSAN_GROUP_KEY,
+    VSAN_WHEN_TO_USE,
     as_bool,
     as_int,
     as_text,
@@ -275,3 +276,6 @@ VMWARE_VSAN_MAINTENANCE_PRECHECK_OP: Final[VmwareTypedOp] = VmwareTypedOp(
     requires_approval=False,
     llm_instructions=PRECHECK_LLM_INSTRUCTIONS,
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_VSAN_MAINTENANCE_PRECHECK_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {VSAN_GROUP_KEY: VSAN_WHEN_TO_USE}

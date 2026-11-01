@@ -542,3 +542,6 @@ VMWARE_VM_HARDWARE_SHOW_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_VM_HARDWARE_SHOW_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {VM_HARDWARE_GROUP_KEY: VM_HARDWARE_WHEN_TO_USE}

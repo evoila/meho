@@ -37,6 +37,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vsan_common import (
     CLUSTER_PARAM_SCHEMA,
     FROM_CACHE_PARAM_SCHEMA,
     VSAN_GROUP_KEY,
+    VSAN_WHEN_TO_USE,
     as_float,
     as_int,
     as_text,
@@ -341,3 +342,6 @@ VMWARE_VSAN_CAPACITY_OP: Final[VmwareTypedOp] = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_VSAN_CAPACITY_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {VSAN_GROUP_KEY: VSAN_WHEN_TO_USE}

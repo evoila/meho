@@ -501,3 +501,6 @@ VMWARE_HOST_DATASTORES_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_HOST_DATASTORES_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {HOST_DATASTORES_GROUP_KEY: HOST_DATASTORES_WHEN_TO_USE}

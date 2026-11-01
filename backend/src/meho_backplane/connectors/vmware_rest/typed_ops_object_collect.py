@@ -623,3 +623,6 @@ VMWARE_OBJECT_COLLECT_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_OBJECT_COLLECT_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {OBJECT_COLLECT_GROUP_KEY: OBJECT_COLLECT_WHEN_TO_USE}

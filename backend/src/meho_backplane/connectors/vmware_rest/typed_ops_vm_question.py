@@ -463,3 +463,6 @@ VMWARE_VM_QUESTION_ANSWER_OP = VmwareTypedOp(
 )
 
 register_preview_builder(VMWARE_VM_QUESTION_ANSWER_OP.op_id, vm_question_answer_preview)
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_VM_QUESTION_GET_OP, VMWARE_VM_QUESTION_ANSWER_OP)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {VM_QUESTION_GROUP_KEY: VM_QUESTION_WHEN_TO_USE}

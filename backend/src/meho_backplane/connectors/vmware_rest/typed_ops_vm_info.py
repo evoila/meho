@@ -480,3 +480,6 @@ VMWARE_VM_INFO_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_VM_INFO_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {VM_INFO_GROUP_KEY: VM_INFO_WHEN_TO_USE}

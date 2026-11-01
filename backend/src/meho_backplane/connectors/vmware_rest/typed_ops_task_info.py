@@ -40,6 +40,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops import (
 )
 from meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent import (
     TASKS_RECENT_GROUP_KEY,
+    TASKS_RECENT_WHEN_TO_USE,
     build_task_info_retrieve_params,
 )
 from meho_backplane.connectors.vmware_rest.vcenter_deployment import (
@@ -332,3 +333,6 @@ VMWARE_TASK_INFO_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_TASK_INFO_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {TASKS_RECENT_GROUP_KEY: TASKS_RECENT_WHEN_TO_USE}

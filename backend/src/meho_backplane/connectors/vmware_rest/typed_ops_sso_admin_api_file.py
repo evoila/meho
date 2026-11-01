@@ -581,3 +581,8 @@ VCENTER_SSO_ADMIN_API_FILE_GET_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VCENTER_SSO_ADMIN_API_FILE_GET_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {
+    SSO_ADMIN_API_FILE_GROUP_KEY: SSO_ADMIN_API_FILE_WHEN_TO_USE
+}

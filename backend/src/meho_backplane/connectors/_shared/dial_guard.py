@@ -38,8 +38,9 @@ import asyncio
 import ipaddress
 import socket
 from collections.abc import Awaitable, Callable, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from aiohttp import ClientHttpProxyError
 from aiohttp.abc import ResolveResult
 
 from meho_backplane.targets.ssrf_guard import (
@@ -51,7 +52,7 @@ from meho_backplane.targets.ssrf_guard import (
 )
 
 if TYPE_CHECKING:
-    from aiohttp import TCPConnector
+    from aiohttp import ClientRequest, ClientTimeout, TCPConnector
     from aiohttp.tracing import Trace
 
 __all__ = [
@@ -63,6 +64,9 @@ __all__ = [
 ]
 
 _NUMERIC_FLAGS = socket.AI_NUMERICHOST | socket.AI_NUMERICSERV
+
+#: A proxy answers one of these to a tunnel request it could not open.
+_PROXY_COULD_NOT_CONNECT = frozenset({502, 503, 504})
 
 
 class DialHostUnresolvedError(TargetDestinationBlockedError):
@@ -182,10 +186,23 @@ def screen_connector_dials(connector: TCPConnector) -> None:
     resolved by aiohttp itself. A connection that is already open is
     reused as it is.
 
-    aiohttp has no public seam for this. It is the same kind of private
-    seam :mod:`.pinned_transport` uses for httpcore's network backend.
+    Through a proxy, aiohttp resolves only the proxy and hands the
+    destination to the proxy by name. So the connector's
+    ``_create_proxy_connection`` method is hooked as well: the
+    destination is checked before the proxy is dialed, and the proxy is
+    asked for a checked address instead of the name. The ``Host`` header
+    and the TLS name check keep the destination's name. For a TLS tunnel
+    (``CONNECT``) the next checked address is asked for when the proxy
+    answers that it could not connect. This holds for the first request
+    and for every redirect the client follows through the proxy, because
+    each new destination opens a new connection.
+
+    aiohttp has no public seam for either hook. It is the same kind of
+    private seam :mod:`.pinned_transport` uses for httpcore's network
+    backend.
     """
-    original = connector._resolve_host
+    original_resolve = connector._resolve_host
+    original_proxy_connect = connector._create_proxy_connection
     family: socket.AddressFamily = connector._family
 
     async def _resolve_host(
@@ -193,7 +210,30 @@ def screen_connector_dials(connector: TCPConnector) -> None:
     ) -> list[ResolveResult]:
         addresses = await screen_dial_addresses_async(host)
         if addresses is None:
-            return await original(host, port, traces)
+            return await original_resolve(host, port, traces)
         return _resolve_results(host, port, addresses, family)
 
+    async def _create_proxy_connection(
+        req: ClientRequest, traces: list[Trace], timeout: ClientTimeout
+    ) -> tuple[asyncio.BaseTransport, Any]:
+        host = req.url.raw_host
+        assert host is not None
+        addresses = await screen_dial_addresses_async(host)
+        if addresses is None:
+            return await original_proxy_connect(req, traces, timeout)
+        # The TLS name check keeps the name; the proxy gets the address.
+        req.server_hostname = req.server_hostname or host.rstrip(".")
+        last_exc: ClientHttpProxyError | None = None
+        for address in addresses:
+            req.url = req.url.with_host(address)
+            try:
+                return await original_proxy_connect(req, traces, timeout)
+            except ClientHttpProxyError as exc:
+                if exc.status not in _PROXY_COULD_NOT_CONNECT:
+                    raise
+                last_exc = exc
+        assert last_exc is not None
+        raise last_exc
+
     connector._resolve_host = _resolve_host  # type: ignore[method-assign]
+    connector._create_proxy_connection = _create_proxy_connection  # type: ignore[method-assign]

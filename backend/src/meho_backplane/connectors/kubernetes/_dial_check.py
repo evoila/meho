@@ -17,7 +17,8 @@ module makes those clients use the shared connect-time check
 
 This holds for the target's ``host`` and for a ``server`` the kubeconfig
 names by itself. Through a proxy, MEHO checks the proxy address and the
-API server address. The proxy makes its own connection to the API server.
+destination address, and asks the proxy for a checked address of the
+destination instead of its name. The TLS name check keeps the name.
 """
 
 from __future__ import annotations

@@ -19,6 +19,8 @@ refusal of names that do not resolve, so the real rules run.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import ipaddress
 import types
 import uuid
@@ -564,6 +566,131 @@ async def test_k8s_client_refuses_a_blocked_proxy(proxy: str) -> None:
             )
     finally:
         await api_client.close()
+
+
+class _TlsStoppedError(Exception):
+    """Raised by the test's TLS stand-in once it has seen the TLS name."""
+
+
+async def _fake_proxy(answers: list[bytes]) -> tuple[asyncio.Server, int, list[bytes]]:
+    """A local proxy stand-in: records each request head and answers them in order."""
+    heads: list[bytes] = []
+
+    async def _serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        heads.append(await reader.readuntil(b"\r\n\r\n"))
+        writer.write(answers[min(len(heads), len(answers)) - 1])
+        await writer.drain()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(reader.read(), 5)
+        writer.close()
+
+    server = await asyncio.start_server(_serve, "127.0.0.1", 0)
+    return server, server.sockets[0].getsockname()[1], heads
+
+
+def _stop_at_tls(monkeypatch: pytest.MonkeyPatch) -> list[str | None]:
+    """Replace the loop's TLS start: record the TLS name, then stop."""
+    tls_names: list[str | None] = []
+
+    async def _start_tls(*_args: Any, server_hostname: str | None = None, **_kw: Any) -> None:
+        tls_names.append(server_hostname)
+        raise _TlsStoppedError
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "start_tls", _start_tls)
+    return tls_names
+
+
+async def _get_through_proxy(api_client: k8s_client.ApiClient, url: str, port: int) -> None:
+    await api_client.rest_client.pool_manager.get(url, proxy=f"http://127.0.0.1:{port}")
+
+
+@pytest.mark.asyncio
+async def test_k8s_client_asks_the_proxy_for_a_checked_address(_live: pytest.MonkeyPatch) -> None:
+    """The tunnel request names the checked address; Host and the TLS name keep the name."""
+    proxy, port, heads = await _fake_proxy([b"HTTP/1.1 200 Connection established\r\n\r\n"])
+    _live.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.1/32")
+    tls_names = _stop_at_tls(_live)
+    api_client = _api_client("https://public.example.test:6443")
+    try:
+        await check_api_client_dials(api_client)
+        with pytest.raises(_TlsStoppedError):
+            await _get_through_proxy(api_client, "https://public.example.test:6443/api", port)
+    finally:
+        await api_client.close()
+        proxy.close()
+        await proxy.wait_closed()
+    assert len(heads) == 1
+    assert heads[0].startswith(f"CONNECT {_PUBLIC_IP}:6443 HTTP/1.1\r\n".encode())
+    assert b"Host: public.example.test:6443\r\n" in heads[0]
+    assert tls_names == ["public.example.test"]
+
+
+@pytest.mark.asyncio
+async def test_k8s_client_asks_the_proxy_for_the_next_checked_address(
+    _live: pytest.MonkeyPatch,
+) -> None:
+    """When the proxy could not connect, the next checked address is asked for."""
+    proxy, port, heads = await _fake_proxy(
+        [
+            b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n",
+            b"HTTP/1.1 200 Connection established\r\n\r\n",
+        ]
+    )
+    _live.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.1/32")
+    tls_names = _stop_at_tls(_live)
+    api_client = _api_client("https://public.example.test:6443")
+    try:
+        await check_api_client_dials(api_client)
+        with pytest.raises(_TlsStoppedError):
+            await _get_through_proxy(api_client, "https://public.example.test:6443/api", port)
+    finally:
+        await api_client.close()
+        proxy.close()
+        await proxy.wait_closed()
+    assert [h.split(b"\r\n", 1)[0] for h in heads] == [
+        f"CONNECT {_PUBLIC_IP}:6443 HTTP/1.1".encode(),
+        f"CONNECT {_PUBLIC_IP_2}:6443 HTTP/1.1".encode(),
+    ]
+    assert tls_names == ["public.example.test"]
+
+
+@pytest.mark.asyncio
+async def test_k8s_client_refuses_a_redirect_through_a_proxy(_live: pytest.MonkeyPatch) -> None:
+    """A plain request names the checked address; a redirect to a blocked one is not followed."""
+    proxy, port, heads = await _fake_proxy(
+        [b"HTTP/1.1 302 Found\r\nLocation: http://10.0.0.9/redirected\r\nContent-Length: 0\r\n\r\n"]
+    )
+    _live.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.1/32")
+    api_client = _api_client("http://public.example.test")
+    try:
+        await check_api_client_dials(api_client)
+        with pytest.raises(TargetDestinationBlockedError):
+            await _get_through_proxy(api_client, "http://public.example.test/api", port)
+    finally:
+        await api_client.close()
+        proxy.close()
+        await proxy.wait_closed()
+    assert len(heads) == 1
+    assert heads[0].startswith(f"GET http://{_PUBLIC_IP}/api HTTP/1.1\r\n".encode())
+    assert b"Host: public.example.test\r\n" in heads[0]
+
+
+@pytest.mark.asyncio
+async def test_k8s_client_hands_an_allowlisted_name_to_the_proxy(_live: pytest.MonkeyPatch) -> None:
+    proxy, port, heads = await _fake_proxy([b"HTTP/1.1 200 Connection established\r\n\r\n"])
+    _live.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.1/32,gone.example.test")
+    tls_names = _stop_at_tls(_live)
+    api_client = _api_client("https://gone.example.test")
+    try:
+        await check_api_client_dials(api_client)
+        with pytest.raises(_TlsStoppedError):
+            await _get_through_proxy(api_client, "https://gone.example.test/api", port)
+    finally:
+        await api_client.close()
+        proxy.close()
+        await proxy.wait_closed()
+    assert heads[0].startswith(b"CONNECT gone.example.test:443 HTTP/1.1\r\n")
+    assert tls_names == ["gone.example.test"]
 
 
 @pytest.mark.asyncio

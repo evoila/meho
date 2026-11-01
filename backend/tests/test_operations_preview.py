@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from multidict import CIMultiDict, CIMultiDictProxy
 
@@ -887,10 +888,10 @@ async def test_permission_preflight_is_fail_soft() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _park_ctx(op_id: str) -> PreviewContext:
+def _park_ctx(op_id: str, connector_instance: Any = None) -> PreviewContext:
     return PreviewContext(
         descriptor=_FakeDescriptor(op_id=op_id),  # type: ignore[arg-type]
-        connector_instance=None,
+        connector_instance=connector_instance,
         operator=_operator(),
         target=_FakeTarget(),
         params={"inputs": {"bootstrap": "<not-a-real-value>"}},
@@ -929,6 +930,89 @@ async def test_park_check_that_raises_refuses_the_park() -> None:
     assert "RuntimeError" in reason
     assert "call the operation again" in reason
     assert "<not-a-real-value>" not in reason
+
+
+def _status_error(status_code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", "https://vendor.test.invalid/catalog/api/items/ci-1")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError(f"status {status_code}", request=request, response=response)
+
+
+class _SessionConnector:
+    """A connector stand-in with the dispatcher's session-eviction hook."""
+
+    def __init__(self) -> None:
+        self.invalidate_session = AsyncMock(return_value=None)
+
+
+def _rejecting_check(statuses: list[int]) -> tuple[Any, list[int]]:
+    """A check that answers each of *statuses* in turn, then passes; counts its runs."""
+    runs: list[int] = []
+
+    async def _check(_ctx: PreviewContext) -> str | None:
+        runs.append(1)
+        if statuses:
+            raise _status_error(statuses.pop(0))
+        return None
+
+    return _check, runs
+
+
+@pytest.mark.asyncio
+async def test_park_check_drops_a_rejected_session_and_runs_once_more() -> None:
+    """An expired cached token (401) is dropped through the hook; the second run passes."""
+    check, runs = _rejecting_check([401])
+    register_park_check("test.park.session", check)
+    connector = _SessionConnector()
+    ctx = _park_ctx("test.park.session", connector)
+
+    assert await run_park_check(ctx) is None
+    assert len(runs) == 2
+    connector.invalidate_session.assert_awaited_once()
+    args, kwargs = connector.invalidate_session.await_args
+    assert args == (ctx.target,)
+    assert isinstance(kwargs["rejected"], httpx.Request)
+
+
+@pytest.mark.asyncio
+async def test_park_check_refuses_when_the_fresh_session_is_rejected_too() -> None:
+    """One retry only: a second 401 is the fail-closed refusal."""
+    check, runs = _rejecting_check([401, 401])
+    register_park_check("test.park.session.twice", check)
+    connector = _SessionConnector()
+    ctx = _park_ctx("test.park.session.twice", connector)
+
+    reason = await run_park_check(ctx)
+    assert reason is not None
+    assert "HTTPStatusError" in reason
+    assert len(runs) == 2
+    connector.invalidate_session.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_park_check_does_not_retry_a_status_that_is_not_an_auth_failure() -> None:
+    check, runs = _rejecting_check([404])
+    register_park_check("test.park.notfound", check)
+    connector = _SessionConnector()
+    ctx = _park_ctx("test.park.notfound", connector)
+
+    reason = await run_park_check(ctx)
+    assert reason is not None
+    assert "HTTPStatusError" in reason
+    assert len(runs) == 1
+    connector.invalidate_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_park_check_does_not_retry_without_a_session_hook() -> None:
+    """A connector without ``invalidate_session`` is not retried, as on the data path."""
+    check, runs = _rejecting_check([401])
+    register_park_check("test.park.nohook", check)
+    ctx = _park_ctx("test.park.nohook", object())
+
+    reason = await run_park_check(ctx)
+    assert reason is not None
+    assert len(runs) == 1
 
 
 # ---------------------------------------------------------------------------

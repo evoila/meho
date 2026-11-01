@@ -2031,6 +2031,17 @@ check guards what gets stored. The log line names the exception class
 only, not the traceback: the check talks to the vendor, and a traceback
 could show a login header.
 
+The check runs before the park, so the dispatcher's session-recovery arm
+(the data-path retry after a 401) does not cover it. `run_park_check`
+takes the same step itself: when the vendor answers an auth-class status
+(the connector's cached login token has expired) and the connector has
+the `invalidate_session(target, rejected=...)` hook, the token is dropped
+and the check runs once more, which logs in again. One retry only; a
+second rejection is the fail-closed refusal. A connector without the hook
+is not retried, as on the data path (VCF Automation logs in again inside
+its own request helper, so its form read recovers before the check sees
+the 401).
+
 Registered today: `vcfa.tenant.catalog.item.request` and
 `vcfa.vra8.catalog.item.request` (`vmware_shared/vra_catalog.py`,
 `catalog_item_request_park_check`). The check reads the item's request

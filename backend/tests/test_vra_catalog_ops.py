@@ -449,6 +449,28 @@ async def test_request_with_a_plain_secret_is_refused_before_approval(
     vault.assert_not_awaited()
 
 
+async def test_request_waits_for_approval_after_the_tenant_login_expired(
+    vcfa: VcfAutomationConnector, vault: AsyncMock
+) -> None:
+    """A 401 on the form read logs in again inside the connector; the request still waits."""
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        _, post, _ = _mount_request(mock)
+        form = mock.get(f"{_ITEMS}/ci-1").mock(
+            side_effect=[
+                httpx.Response(401),
+                httpx.Response(200, json={"id": "ci-1", "schema": _FORM}),
+            ]
+        )
+        result = await run("vcfa.tenant.catalog.item.request", _REQUEST_PARAMS, approved=False)
+    assert result["status"] == "awaiting_approval", result
+    assert form.call_count == 2
+    assert not post.called
+    (row,) = await _approval_rows("vcfa.tenant.catalog.item.request")
+    assert row.params["inputs"] == {"size": "small"}
+    vault.assert_not_awaited()
+
+
 async def test_request_is_refused_before_approval_when_the_form_cannot_be_read(
     vcfa: VcfAutomationConnector, vault: AsyncMock
 ) -> None:
@@ -793,6 +815,48 @@ async def test_vra8_request_with_a_plain_secret_is_refused_before_approval(
     assert not post.called
     assert await _approval_rows("vcfa.vra8.catalog.item.request") == []
     assert "<not-a-real-value>" not in json.dumps(result.model_dump(mode="json"))
+    vault.assert_not_awaited()
+
+
+async def test_vra8_request_waits_for_approval_after_the_cached_token_expired(
+    vra8: Vra8Connector, vault: AsyncMock
+) -> None:
+    """An expired cached bearer does not refuse the park: the check logs in again.
+
+    The first form read carries the stale bearer and answers 401. The check
+    before the wait for approval drops the token through the connector's
+    ``invalidate_session`` hook and reads the form once more with a fresh
+    login. The request then waits for approval; nothing is sent.
+    """
+    async with respx.mock(base_url=_VRA_BASE_URL, assert_all_called=False) as mock:
+        csp = mock.post("/csp/gateway/am/api/login").mock(
+            side_effect=[
+                httpx.Response(200, json={"refresh_token": "rt-1"}),
+                httpx.Response(200, json={"refresh_token": "rt-2"}),
+            ]
+        )
+        iaas = mock.post("/iaas/api/login").mock(
+            side_effect=[
+                httpx.Response(200, json={"token": "bt-stale"}),
+                httpx.Response(200, json={"token": "bt-fresh"}),
+            ]
+        )
+        _, post, _ = _mount_request(mock)
+        form = mock.get(f"{_ITEMS}/ci-1").mock(
+            side_effect=[
+                httpx.Response(401),
+                httpx.Response(200, json={"id": "ci-1", "schema": _FORM}),
+            ]
+        )
+        result = await _vra_run("vcfa.vra8.catalog.item.request", _REQUEST_PARAMS, approved=False)
+    assert result.status == "awaiting_approval", result.error
+    assert csp.call_count == 2 and iaas.call_count == 2
+    assert form.call_count == 2
+    assert form.calls[0].request.headers["Authorization"] == "Bearer bt-stale"
+    assert form.calls[1].request.headers["Authorization"] == "Bearer bt-fresh"
+    assert not post.called
+    (row,) = await _approval_rows("vcfa.vra8.catalog.item.request")
+    assert row.params["inputs"] == {"size": "small"}
     vault.assert_not_awaited()
 
 

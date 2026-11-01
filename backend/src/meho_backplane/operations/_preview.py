@@ -88,9 +88,11 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
+import httpx
 import structlog
 
 from meho_backplane.broadcast.events import classify_op, is_secret_param_name
+from meho_backplane.operations._errors import is_auth_failed_status
 from meho_backplane.redaction import apply_connector_boundary_redaction, get_default_policy, redact
 
 if TYPE_CHECKING:
@@ -459,19 +461,55 @@ def park_check_registered(op_id: str) -> bool:
     return op_id in _PARK_CHECKS
 
 
+async def _refresh_rejected_session(ctx: PreviewContext, exc: httpx.HTTPStatusError) -> bool:
+    """Drop the session the vendor rejected; ``True`` when the check can run again.
+
+    A check reads the vendor with the connector's cached login token. When
+    that token has expired, the read answers an auth-class status (a 401).
+    The data path recovers from it in the dispatcher's session-recovery arm
+    (``_retry_after_session_invalidation``), but the check runs before the
+    park, outside that arm. So the same step is taken here: the connector's
+    ``invalidate_session(target, rejected=...)`` hook drops the rejected
+    token, and the caller runs the check once more, which logs in again. A
+    connector without the hook (no cached session, or one that already
+    logs in again by itself) is not retried, as on the data path.
+    """
+    if not is_auth_failed_status(exc.response.status_code):
+        return False
+    invalidate_session = getattr(ctx.connector_instance, "invalidate_session", None)
+    if not callable(invalidate_session):
+        return False
+    _log.info(
+        "park_check_session_refreshed",
+        op_id=ctx.descriptor.op_id,
+        status_code=exc.response.status_code,
+    )
+    await invalidate_session(ctx.target, rejected=exc.request)
+    return True
+
+
 async def run_park_check(ctx: PreviewContext) -> str | None:
     """Run the op's check before the wait for approval, if one is registered.
 
     Returns ``None`` when no check is registered or the check passes, else
-    the reason the park must be refused. A check that raises counts as a
-    refusal (fail-closed): the reason names the exception class only, so
-    no param value and no vendor text reaches the caller through it.
+    the reason the park must be refused. When the vendor rejects the
+    connector's cached session during the check, the session is dropped and
+    the check runs once more with a fresh login
+    (:func:`_refresh_rejected_session`); the park still waits for approval
+    after that. A check that raises counts as a refusal (fail-closed): the
+    reason names the exception class only, so no param value and no vendor
+    text reaches the caller through it.
     """
     op_id = ctx.descriptor.op_id
     check = _PARK_CHECKS.get(op_id)
     if check is None:
         return None
     try:
+        try:
+            return await check(ctx)
+        except httpx.HTTPStatusError as exc:
+            if not await _refresh_rejected_session(ctx, exc):
+                raise
         return await check(ctx)
     except Exception as exc:
         # The class name only: the check talks to the vendor, so a traceback

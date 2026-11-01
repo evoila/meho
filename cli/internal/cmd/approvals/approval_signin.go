@@ -29,11 +29,17 @@ import (
 //
 // The token lives in this struct only, for this one run. It is never
 // written to the token store, a file, an environment variable or the
-// output. When it expires, the token source renews it in memory; the
-// renewal keeps the time of the sign-in, so the window does not grow.
+// output. The approval client of MEHO's realm gives no refresh token, so
+// when the token runs out, the person signs in again in the browser.
+// Where the identity provider gives a refresh token, the token source
+// renews the token in memory; the renewal keeps the time of the
+// sign-in, so the window does not grow.
 type approvalSignIn struct {
 	client *api.AuthedClient
 	src    oauth2.TokenSource
+	// notice gets one line when the sign-in has run out and a new one
+	// starts. nil writes nothing.
+	notice io.Writer
 	// used: the current sign-in approved at least one request.
 	used bool
 	// spent: the current sign-in approved a destructive request, so it
@@ -41,8 +47,8 @@ type approvalSignIn struct {
 	spent bool
 }
 
-func newApprovalSignIn(client *api.AuthedClient) *approvalSignIn {
-	return &approvalSignIn{client: client}
+func newApprovalSignIn(client *api.AuthedClient, notice io.Writer) *approvalSignIn {
+	return &approvalSignIn{client: client, notice: notice}
 }
 
 // bearer returns the token for one approve. It opens a new browser
@@ -56,8 +62,11 @@ func (s *approvalSignIn) bearer(ctx context.Context, destructive bool) (string, 
 	}
 	tok, err := s.src.Token()
 	if err != nil {
-		// The renewal failed, for example because the sign-in session
-		// ended. A new sign-in is the only way on.
+		// The token ran out, or the renewal failed, for example because
+		// the sign-in session ended. A new sign-in is the only way on.
+		if errors.Is(err, auth.ErrFreshSignInExpired) && s.notice != nil {
+			fmt.Fprintln(s.notice, "\nThe approval sign-in has run out. Sign in again in the browser.")
+		}
 		if err := s.signIn(ctx); err != nil {
 			return "", err
 		}

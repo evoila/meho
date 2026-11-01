@@ -252,3 +252,30 @@ func TestFreshSignInTokenSourceRenewsInMemory(t *testing.T) {
 		t.Errorf("refreshes = %d, want 1 (the renewed token is reused)", refreshes)
 	}
 }
+
+// TestFreshSignInTokenSourceWithoutARefreshToken checks that a sign-in
+// token without a refresh token is used until it runs out, and that the
+// source then asks for a new sign-in instead of calling the identity
+// provider (#5515).
+func TestFreshSignInTokenSourceWithoutARefreshToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected call to the identity provider: %s %s", r.Method, r.URL.Path)
+	}))
+	t.Cleanup(srv.Close)
+	doc := &DiscoveryDocument{Issuer: srv.URL, AuthorizationEndpoint: srv.URL + "/auth", TokenEndpoint: srv.URL + "/token"}
+
+	valid := &oauth2.Token{AccessToken: "first", Expiry: time.Now().Add(15 * time.Minute)}
+	tok, err := FreshSignInTokenSource(context.Background(), doc, "meho-cli-approve", valid, srv.Client()).Token()
+	if err != nil || tok.AccessToken != "first" {
+		t.Fatalf("Token = %v, %v; want the first token", tok, err)
+	}
+
+	expired := &oauth2.Token{AccessToken: "first", Expiry: time.Now().Add(-time.Minute)}
+	_, err = FreshSignInTokenSource(context.Background(), doc, "meho-cli-approve", expired, srv.Client()).Token()
+	if !errors.Is(err, ErrFreshSignInExpired) {
+		t.Fatalf("err = %v, want ErrFreshSignInExpired", err)
+	}
+	if !strings.Contains(err.Error(), "sign in again") {
+		t.Errorf("message %q does not say to sign in again", err.Error())
+	}
+}

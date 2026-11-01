@@ -511,3 +511,33 @@ func TestApproveSeveralIDsSkipsARequestWithoutYes(t *testing.T) {
 		t.Errorf("stdout:\n%s", stdout)
 	}
 }
+
+// When the token of the approval sign-in has run out and there is no
+// refresh token, the CLI says so in one line and asks for a new sign-in.
+func TestApprovalSignInThatRanOutAsksForANewSignIn(t *testing.T) {
+	count := 0
+	old := startApprovalSignIn
+	startApprovalSignIn = func(context.Context, *api.AuthedClient) (oauth2.TokenSource, error) {
+		count++
+		expiry := time.Now().Add(15 * time.Minute)
+		if count == 1 {
+			expiry = time.Now().Add(-time.Minute)
+		}
+		tok := &oauth2.Token{AccessToken: fmt.Sprintf("sign-in-%d", count), Expiry: expiry}
+		return auth.FreshSignInTokenSource(context.Background(), &auth.DiscoveryDocument{}, approveClient, tok, nil), nil
+	}
+	t.Cleanup(func() { startApprovalSignIn = old })
+
+	var notice bytes.Buffer
+	s := newApprovalSignIn(nil, &notice)
+	token, err := s.bearer(context.Background(), false)
+	if err != nil {
+		t.Fatalf("bearer: %v", err)
+	}
+	if token != "sign-in-2" || count != 2 {
+		t.Errorf("token = %q after %d sign-ins; want sign-in-2 after 2", token, count)
+	}
+	if !strings.Contains(notice.String(), "The approval sign-in has run out. Sign in again in the browser.") {
+		t.Errorf("notice = %q, want the sign-in-again line", notice.String())
+	}
+}

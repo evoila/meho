@@ -56,7 +56,7 @@ func runApproveMany(cmd *cobra.Command, idArgs []string, reason string, jsonOut 
 	}
 
 	ctx := cmd.Context()
-	signIn := newApprovalSignIn(client)
+	signIn := newApprovalSignIn(client, cmd.ErrOrStderr())
 	in := bufio.NewReader(cmd.InOrStdin())
 	body := api.DecideRequestBody{Decision: "approved"}
 	if reason != "" {

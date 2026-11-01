@@ -258,7 +258,7 @@ func postDecision(
 	}
 	var signIn *approvalSignIn
 	if decision == "approved" {
-		signIn = newApprovalSignIn(client)
+		signIn = newApprovalSignIn(client, nil)
 	}
 	if _, err := sendDecide(ctx, client, requestID, body, signIn, false); err != nil {
 		return nil, err

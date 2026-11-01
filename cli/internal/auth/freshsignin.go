@@ -140,17 +140,40 @@ func RunFreshSignIn(ctx context.Context, doc *DiscoveryDocument, clientID string
 	return tok, nil
 }
 
+// ErrFreshSignInExpired means the token of a fresh sign-in has run out
+// and cannot be renewed, because the identity provider gave no refresh
+// token. The person must sign in again in the browser.
+var ErrFreshSignInExpired = errors.New("meho: the approval sign-in has run out; sign in again in the browser")
+
 // FreshSignInTokenSource returns a token source that starts with tok, a
-// token from RunFreshSignIn, and renews it in memory with its refresh
-// token when it expires (#5515). The renewed token is never stored. The
+// token from RunFreshSignIn (#5515). The token stays in memory and is
+// never stored.
+//
+// The approval client of MEHO's realm gives no refresh token: its access
+// token lasts as long as the approval window. When that token runs out,
+// Token returns ErrFreshSignInExpired. When the identity provider did
+// give a refresh token, the source renews the token with it. The
 // identity provider keeps the auth_time of the sign-in on a renewal, so
 // renewing does not make the sign-in any newer.
 func FreshSignInTokenSource(ctx context.Context, doc *DiscoveryDocument, clientID string, tok *oauth2.Token, httpClient *http.Client) oauth2.TokenSource {
+	if tok.RefreshToken == "" {
+		return noRenewalSource{tok: tok}
+	}
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
 	return freshSignInConfig(doc, clientID, "").TokenSource(ctx, tok)
+}
+
+// noRenewalSource hands out one token until it runs out.
+type noRenewalSource struct{ tok *oauth2.Token }
+
+func (s noRenewalSource) Token() (*oauth2.Token, error) {
+	if !s.tok.Valid() {
+		return nil, ErrFreshSignInExpired
+	}
+	return s.tok, nil
 }
 
 type callbackResult struct {

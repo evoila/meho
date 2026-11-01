@@ -158,7 +158,7 @@ func runInOrder(cmd *cobra.Command, opts inOrderOpts) error {
 	}
 	r := &inOrderRunner{
 		cmd: cmd, client: client, opts: opts, in: bufio.NewReader(cmd.InOrStdin()),
-		total: len(items), signIn: newApprovalSignIn(client),
+		total: len(items), signIn: newApprovalSignIn(client, cmd.ErrOrStderr()),
 	}
 	var stop *stepStop
 	for i := range items {

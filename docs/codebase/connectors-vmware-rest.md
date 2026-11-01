@@ -2880,9 +2880,13 @@ no version stops early.
 - **Screenshot.** The VM must be powered on. The task result is the datastore
   path of the PNG (`[datastore] folder/file.png`); vCenter keeps the file in
   the VM's folder. vCenter's datastore file access takes a vim SOAP session
-  cookie, not the REST token, so the read logs in over SOAP first
-  (`_vcenter_soap_login`, the same login the vSAN and storage-policy calls
-  use). The `dcPath` is the datacenter's folder path. The read is streamed
+  cookie, not the REST token. The connector keeps one such session per target
+  (`_ensure_file_access_session`, the same login the vSAN and storage-policy
+  calls use) and every file read reuses it, so repeated screenshots do not
+  each open a vCenter session. An HTTP 401 on the read means the session
+  expired: the connector drops it, logs in again and reads once more.
+  `invalidate_session` drops it too. The `dcPath` is the datacenter's folder
+  path. The read is streamed
   with a byte cap (`max_bytes`, default 2 MiB, at most 8 MiB): a larger file
   is refused, not cut. A file with a `Content-Encoding` is refused too. The
   PNG comes back as base64 rows (`content_lines`), so a long image becomes a

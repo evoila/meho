@@ -108,6 +108,8 @@ _HID_USAGE_PAGE: Final = 7
 _PATH_SAFE: Final = "/"
 #: The vim SOAP session cookie that vCenter's datastore file access reads.
 _SOAP_SESSION_COOKIE: Final = "vmware_soap_session"
+#: vCenter's answer to a file read with an expired or unknown session cookie.
+_SESSION_EXPIRED_STATUS: Final = 401
 #: Most folders between a datacenter and the root folder.
 _MAX_FOLDER_HOPS: Final = 32
 _BASE64_LINE_WIDTH: Final = 4096
@@ -137,7 +139,7 @@ async def _powered_on_vm(
         connector, target, operator, mo_type=_VIRTUAL_MACHINE_MO_TYPE, moid=vm, props=props
     )
     if found is None:
-        guidance = f"no VM {vm!r}; pass a VM id such as 'vm-42' (vmware.vm.list finds it)"
+        guidance = f"no VM {vm!r}; pass a VM id of the shape vm-<number> (vmware.vm.list finds it)"
         return _envelope("not_found", vm, guidance=guidance), {}
     name = found.get("name") if isinstance(found.get("name"), str) else None
     power = found.get(_PROP_POWER)
@@ -198,24 +200,17 @@ def _too_large(size: int, max_bytes: int) -> RuntimeError:
     )
 
 
-async def _read_datastore_file(
+async def _get_file_once(
     connector: VmwareRestConnector,
     target: Any,
-    operator: Operator,
     *,
+    cookie: str,
     datastore_path: tuple[str, str],
     dc_path: str,
     max_bytes: int,
-) -> bytes:
-    """GET one datastore file through vCenter, streamed and capped at *max_bytes*.
-
-    vCenter's datastore file access (``/folder``) takes a vim SOAP session
-    cookie, not the token of the REST and VI-JSON calls. So this logs in over
-    SOAP the way the vSAN and storage-policy calls do and sends the cookie with
-    the request. The answer body is never put into an error.
-    """
+) -> bytes | None:
+    """One ``GET /folder/...`` with *cookie*; ``None`` when vCenter answers HTTP 401."""
     datastore, rel = datastore_path
-    cookie = await connector._vcenter_soap_login(target, operator, service="screenshot")
     client = await connector._http_client(target)
     async with client.stream(
         "GET",
@@ -224,6 +219,8 @@ async def _read_datastore_file(
         headers={"Cookie": f"{_SOAP_SESSION_COOKIE}={cookie}", "Accept-Encoding": "identity"},
         extensions=connector._request_extensions(target),
     ) as response:
+        if response.status_code == _SESSION_EXPIRED_STATUS:
+            return None
         if not response.is_success:
             raise RuntimeError(
                 f"{OP_ID_VM_SCREENSHOT}: vCenter answered HTTP {response.status_code} to the "
@@ -246,6 +243,49 @@ async def _read_datastore_file(
                 raise _too_large(total, max_bytes)
             chunks.append(chunk)
     return b"".join(chunks)
+
+
+async def _read_datastore_file(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    datastore_path: tuple[str, str],
+    dc_path: str,
+    max_bytes: int,
+) -> bytes:
+    """GET one datastore file through vCenter, streamed and capped at *max_bytes*.
+
+    vCenter's datastore file access (``/folder``) takes a vim SOAP session
+    cookie, not the token of the REST and VI-JSON calls. The connector keeps
+    one such session per target and reuses it for every file read
+    (``_ensure_file_access_session``), so repeated screenshots do not each
+    open a vCenter session. An HTTP 401 means that session expired: it is
+    dropped, the connector logs in again, and the file is read once more.
+    The answer body is never put into an error.
+    """
+
+    async def _read_once() -> bytes | None:
+        cookie = await connector._ensure_file_access_session(target, operator)
+        return await _get_file_once(
+            connector,
+            target,
+            cookie=cookie,
+            datastore_path=datastore_path,
+            dc_path=dc_path,
+            max_bytes=max_bytes,
+        )
+
+    content = await _read_once()
+    if content is None:
+        connector._drop_file_access_session(target)
+        content = await _read_once()
+    if content is None:
+        raise RuntimeError(
+            f"{OP_ID_VM_SCREENSHOT}: vCenter answered HTTP 401 to the screenshot file read "
+            "right after a fresh login"
+        )
+    return content
 
 
 def _max_bytes(raw: Any) -> int:

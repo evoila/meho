@@ -20,6 +20,7 @@ Two layers:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import copy
 import json
@@ -150,8 +151,15 @@ class PciConsoleFake(VimFake):
         self.file_requests: list[httpx.Request] = []
         self.file_body = _PNG
         self.file_status = 200
+        #: Statuses of the next file reads, in order; then ``file_status``.
+        self.file_statuses: list[int] = []
         self.file_headers: dict[str, str] = {}
         self.soap_logins = 0
+        # The connector's own session cache for the datastore file access,
+        # keyed by the target: one fake is one vCenter with one target.
+        self.target = _FakeTarget()
+        self._file_access_cookies: dict[tuple[str, str], str] = {}
+        self._file_access_lock = asyncio.Lock()
 
     def vm(self, power: str = "poweredOff", devices: list[dict[str, Any]] | None = None) -> None:
         self.add(
@@ -218,15 +226,19 @@ class PciConsoleFake(VimFake):
                 devices[:] = [d for d in devices if d["key"] != device["key"]]
 
     # -- the screenshot file read ----------------------------------------------
+    _ensure_file_access_session = VmwareRestConnector._ensure_file_access_session
+    _drop_file_access_session = VmwareRestConnector._drop_file_access_session
+
     async def _vcenter_soap_login(self, target: Any, operator: Operator, *, service: str) -> str:
         self.soap_logins += 1
-        return '"<soap-session>"'
+        return f'"<soap-session-{self.soap_logins}>"'
 
     async def _http_client(self, target: Any) -> httpx.AsyncClient:
         def handler(request: httpx.Request) -> httpx.Response:
             self.file_requests.append(request)
+            status = self.file_statuses.pop(0) if self.file_statuses else self.file_status
             return httpx.Response(
-                self.file_status,
+                status,
                 stream=httpx.ByteStream(self.file_body),
                 headers=self.file_headers,
             )
@@ -249,7 +261,7 @@ def gate(monkeypatch: pytest.MonkeyPatch) -> GateRecorder:
 async def _run(handler: Any, conn: PciConsoleFake, **params: Any) -> Any:
     return await handler(
         operator=operator(),
-        target=object(),
+        target=conn.target,
         params={"vm": _VM, **params},
         connector=conn,
     )
@@ -506,7 +518,7 @@ async def test_screenshot_reads_the_png_through_the_datastore_file_access(
     assert request.url.path == "/folder/app-vm/app-vm-1.png"
     assert request.url.params["dcPath"] == "region/dc-a"
     assert request.url.params["dsName"] == "ds-a"
-    assert request.headers["cookie"] == 'vmware_soap_session="<soap-session>"'
+    assert request.headers["cookie"] == 'vmware_soap_session="<soap-session-1>"'
     assert conn.soap_logins == 1
     assert out["file"] == _SCREENSHOT_PATH
     assert out["size_bytes"] == len(_PNG)
@@ -548,6 +560,87 @@ async def test_screenshot_file_read_error_names_the_status(gate: GateRecorder) -
     conn.file_status = 404
     with pytest.raises(RuntimeError, match="HTTP 404"):
         await _run(vm_screenshot_composite, conn)
+
+
+async def test_screenshot_reuses_one_vcenter_session_for_repeated_calls(
+    gate: GateRecorder,
+) -> None:
+    conn = PciConsoleFake()
+    conn.vm(power="poweredOn")
+    for _ in range(3):
+        out = await _run(vm_screenshot_composite, conn)
+        assert out["status"] == "taken"
+    assert conn.soap_logins == 1
+    assert [r.headers["cookie"] for r in conn.file_requests] == [
+        'vmware_soap_session="<soap-session-1>"'
+    ] * 3
+
+
+async def test_screenshot_failed_download_keeps_the_session(gate: GateRecorder) -> None:
+    conn = PciConsoleFake()
+    conn.vm(power="poweredOn")
+    conn.file_statuses = [404]
+    with pytest.raises(RuntimeError, match="HTTP 404"):
+        await _run(vm_screenshot_composite, conn)
+    conn.file_body = b"\x00" * 200
+    with pytest.raises(RuntimeError, match="over the limit"):
+        await _run(vm_screenshot_composite, conn, max_bytes=100)
+    conn.file_body = _PNG
+    out = await _run(vm_screenshot_composite, conn)
+    assert out["status"] == "taken"
+    assert conn.soap_logins == 1
+    assert len(conn.file_requests) == 3
+
+
+async def test_screenshot_logs_in_again_once_when_the_session_expired(
+    gate: GateRecorder,
+) -> None:
+    conn = PciConsoleFake()
+    conn.vm(power="poweredOn")
+    conn.file_statuses = [401]
+    out = await _run(vm_screenshot_composite, conn)
+    assert out["status"] == "taken"
+    assert conn.soap_logins == 2
+    assert [r.headers["cookie"] for r in conn.file_requests] == [
+        'vmware_soap_session="<soap-session-1>"',
+        'vmware_soap_session="<soap-session-2>"',
+    ]
+    # One CreateScreenshot_Task: the retry is only the file read.
+    assert len(conn.calls_to("CreateScreenshot_Task")) == 1
+
+
+async def test_screenshot_refused_right_after_a_fresh_login_is_an_error(
+    gate: GateRecorder,
+) -> None:
+    conn = PciConsoleFake()
+    conn.vm(power="poweredOn")
+    conn.file_statuses = [401, 401]
+    with pytest.raises(RuntimeError, match=r"HTTP 401.*right after a fresh login"):
+        await _run(vm_screenshot_composite, conn)
+    assert conn.soap_logins == 2
+    assert len(conn.file_requests) == 2
+
+
+async def test_the_file_access_session_is_per_target_and_dropped_on_invalidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logins: list[str] = []
+
+    async def fake_login(target: Any, operator: Operator, *, service: str) -> str:
+        logins.append(service)
+        return f"cookie-{len(logins)}"
+
+    connector = VmwareRestConnector(session_loader=AsyncMock())
+    monkeypatch.setattr(connector, "_vcenter_soap_login", fake_login)
+    first, second = _FakeTarget(), _FakeTarget()
+    assert await connector._ensure_file_access_session(first, operator()) == "cookie-1"
+    assert await connector._ensure_file_access_session(first, operator()) == "cookie-1"
+    assert await connector._ensure_file_access_session(second, operator()) == "cookie-2"
+    connector._drop_file_access_session(first)
+    assert await connector._ensure_file_access_session(first, operator()) == "cookie-3"
+    await connector.invalidate_session(second)
+    assert await connector._ensure_file_access_session(second, operator()) == "cookie-4"
+    assert logins == ["datastore file access"] * 4
 
 
 async def test_screenshot_task_fault_reaches_the_answer(gate: GateRecorder) -> None:

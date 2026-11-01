@@ -6317,7 +6317,8 @@ GUEST_ENV_READ_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": (
                 "Guest environment as ``NAME=value`` strings (whole environment "
-                "when ``names`` was omitted, else the requested names). "
+                "when ``names`` was omitted, else the requested names). The "
+                "value part is hidden unless a person passed ``reveal_secret``. "
                 "Set-shaped -- JSONFlux-wrapped over threshold."
             ),
         },

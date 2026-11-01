@@ -516,6 +516,94 @@ Limit: an op of a package whose handler lives outside the package's own
 folders (for example in a built-in shared module) is recorded as built
 in.
 
+## The connector kit
+
+A connector package imports MEHO only through one module:
+`meho_connector_kit`, from the package `meho-connector-kit`. The names in
+its `__all__` are the promise to package authors. Every other MEHO module is
+private to the core and can change in any release. The design is in
+[the decision record](../decisions/2026-11-01-connector-kit.md).
+
+Where it lives and how it ships:
+
+- The code is in `backend/connector-kit/`: `pyproject.toml` and the module
+  `meho_connector_kit/__init__.py`. The module imports the names from the
+  core modules and adds one of its own: `Target`, a typed class with the six
+  target fields a connector may read (`name`, `host`, `extras`,
+  `auth_model`, `verify_tls`, `secret_ref`). The fields are read-only. A
+  `Target` fits every kit function that takes a target. The kit's
+  `target_cache_key` takes a `Target` and makes the key from the target's
+  tenant and row id inside the core, so those two fields stay private.
+- The image build makes the kit's wheel next to MEHO's own
+  (`backend/Dockerfile`, stage `wheelbuilder`), installs both, and checks
+  that every kit name imports.
+- In a checkout, `uv sync` installs the kit as an editable package (it is in
+  the `dev` group of `backend/pyproject.toml`).
+- The kit is never published on a public package index. It has no
+  dependencies of its own: it only works next to MEHO.
+
+The kit has its own version, starting at 1.0. It is not the MEHO release
+number. A package states the kit versions it fits in its `pyproject.toml`,
+for example `dependencies = ["meho-connector-kit>=1.0,<2"]`.
+
+- The **first** number goes up when a name is removed or its inputs change.
+  A package may break.
+- The **second** number goes up when names are only added, or a name is
+  marked as old.
+
+For three classes, the kit also promises some of their insides:
+`HttpConnector` (`__init__`, `auth_headers`, `aclose`,
+`trace_response_body`, `_get_json`, `_post_json`), `PreviewContext`
+(`target`, `operator`, `params`, `connector_instance`, `connector_id`) and
+`Target` (its six fields). The list is `_PROMISED_PARTS` in the kit module.
+For every other class the kit promises only the name.
+
+### How a kit change is noticed
+
+1. **The list file.** `backend/connector-kit/kit-names.json` lists every
+   kit name: whether it is a class or a function, its inputs with their
+   types and defaults, its answer type, and the promised parts of a class.
+   It also holds the kit version.
+2. **The test.** `backend/tests/test_connector_kit.py` builds the same list
+   from the code and fails when the two differ. The message names each
+   change, says which number of the kit version must go up, and names the
+   command. The test also checks that the kit version is the same in the
+   list file, the kit's `pyproject.toml` and `backend/uv.lock`, and that
+   both kinds of target MEHO hands a connector (the database row in
+   `db/models.py` and the read model in `targets/schemas.py`) still have
+   every field of `Target`. It also runs mypy on a small connector written
+   only with the kit's types, so the kit's types keep fitting each other,
+   and checks that reading a private target field is a type error.
+3. **The command.** In `backend/`, run
+   `uv run python -m scripts.write_connector_kit_names`, then `uv lock`.
+   The command writes the list file again, raises the right number of the
+   kit version, and writes the version into the kit's `pyproject.toml`.
+4. **The owner.** `.github/CODEOWNERS` names the kit owner for
+   `backend/connector-kit/`, so the pull request asks the kit owner to
+   review the changed list file. It is a required review only when the
+   rules of `main` ask for a code owner's review.
+5. **The release.** Step 2 of [RELEASING.md](../RELEASING.md) runs
+   `scripts/release/check_connector_kit_release.py`. When the kit changed
+   since the last release tag, the release notes need a `### Connector kit`
+   section that names the new kit version, and the kit version must have
+   gone up far enough. Pull requests add no CHANGELOG lines; the release
+   pull request writes this section.
+
+### Old names
+
+A name is not removed at once. First it is marked as old: add it to
+`_OLD_NAMES` in the kit module, with what to use instead, and run the
+command. The list file then says `"old"` for that name, and the second
+number goes up. In a later kit version the name may go: the command and
+the test refuse to remove a name that the list file did not mark as old.
+
+### `Connector.execute`
+
+MEHO never calls `Connector.execute`. The dispatcher runs the handler that
+`register_typed_operation` recorded. So `execute` has a default that raises
+`NotImplementedError` with a message to use a registered operation, and a
+connector package does not write its own.
+
 ## Key types
 
 - `ConnectorPackageError` — raised when the start must stop. The message
@@ -576,6 +664,9 @@ answer".
 - `backend/src/meho_backplane/connectors/phpipam/` — a small typed connector to copy from
 - `backend/tests/test_connector_packages.py`
 - `backend/tests/test_connector_package_owner.py`
+- `backend/connector-kit/`, `backend/scripts/write_connector_kit_names.py`,
+  `backend/tests/test_connector_kit.py` and
+  `scripts/release/check_connector_kit_release.py` — the connector kit
 - `deploy/connector-overlay/` and `backend/tests/test_connector_overlay_build.py`
 - `backend/tests/test_connector_overlay_review.py` — the review record
   check and `build.sh --sign`

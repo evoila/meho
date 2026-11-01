@@ -29,10 +29,14 @@ Secrets:
   values too, so it can replace them in what it records.
 * An input in ``inputs`` is refused when its name is a secret name or when
   the form marks its field as a secret (``encrypted``, ``format: password``
-  or ``writeOnly``), at any depth: also inside an object or a list.
+  or ``writeOnly``), at any depth: also inside an object or a list. The
+  check runs twice: before the request is stored in the approval queue
+  (:func:`catalog_item_request_park_check`, so a plain secret is never
+  stored there) and again when the approved call runs.
 * Results: the default of a secret form field (also inside an object or a
   list default), and secret-named values in request inputs, outputs, event
-  details and log lines, are replaced with a marker.
+  details and log lines, are replaced with a marker. A connector's trace
+  of a form read gets the same clean-up (:func:`clean_form_defaults`).
 
 An upstream 4xx/5xx raises :exc:`httpx.HTTPStatusError`; the dispatcher
 turns it into ``connector_error`` with the vendor's message.
@@ -57,6 +61,7 @@ from meho_backplane.redaction.secret_fields import SECRET_FIELD_MARKER, scrub_se
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
+    from meho_backplane.operations._preview import PreviewContext
 
 __all__ = [
     "CATALOG_ITEMS_PATH",
@@ -72,6 +77,9 @@ __all__ = [
     "catalog_item_get",
     "catalog_item_list",
     "catalog_item_request",
+    "catalog_item_request_check",
+    "catalog_item_request_park_check",
+    "clean_form_defaults",
     "parse_secret_ref",
     "replace_secret_values",
     "request_events",
@@ -217,6 +225,16 @@ def _clean_schema(schema: Any) -> Any:
     if "default" in cleaned:
         cleaned["default"] = _clean_value("", cleaned["default"], cleaned)
     return cleaned
+
+
+def clean_form_defaults(payload: Any) -> Any:
+    """*payload* (any JSON data) with the default of each secret form field replaced.
+
+    For the trace a connector records of a vendor answer: a catalog item or
+    item version answer carries its request form, and a secret field of the
+    form may carry a default. Any other data comes back as a copy.
+    """
+    return _clean_schema(payload)
 
 
 def _input_rows(schema: Any) -> list[dict[str, Any]]:
@@ -450,6 +468,42 @@ async def _new_request(calls: VraCalls, deployment_id: str) -> dict[str, Any] | 
     return {key: last.get(key) for key in ("id", "name", "status")}
 
 
+async def catalog_item_request_check(calls: VraCalls, params: Mapping[str, Any]) -> str | None:
+    """The reason a request must not go on, or ``None`` when its inputs are fine.
+
+    Refuses a secret-named value in ``inputs`` at any depth, a bad
+    ``secret_inputs`` reference, and a plain value for a field the item's
+    form (or the requested ``version``'s form) marks as a secret. The form
+    is read for the last check; nothing is sent. The dispatcher runs it
+    before the request is stored in the approval queue
+    (:func:`catalog_item_request_park_check`), and
+    :func:`catalog_item_request` runs it again when the approved call runs.
+    """
+    _, problem = _check_inputs(params)
+    if problem is not None:
+        return problem
+    flagged = _secret_input_paths(params.get("inputs") or {}, await _form(calls, params), "", "")
+    return _secrets_guidance(flagged) if flagged else None
+
+
+async def catalog_item_request_park_check(ctx: PreviewContext) -> str | None:
+    """The check ``<prefix>.catalog.item.request`` runs before it waits for approval.
+
+    Each connector registers it for its op id
+    (:func:`~meho_backplane.operations._preview.register_park_check`). It
+    needs the connector's ``_vra_calls`` to read the form. Without a
+    resolved connector the request is refused: the inputs cannot be
+    checked, so nothing is stored.
+    """
+    make_calls = getattr(ctx.connector_instance, "_vra_calls", None)
+    if make_calls is None or ctx.target is None:
+        return (
+            "the item's request form could not be read, so the inputs could not be "
+            "checked for secrets; make sure the target resolves and call the operation again"
+        )
+    return await catalog_item_request_check(make_calls(ctx.operator, ctx.target), ctx.params)
+
+
 async def catalog_item_request(calls: VraCalls, params: Mapping[str, Any]) -> dict[str, Any]:
     """``<prefix>.catalog.item.request`` — ``POST /catalog/api/items/{id}/request``.
 
@@ -458,12 +512,10 @@ async def catalog_item_request(calls: VraCalls, params: Mapping[str, Any]) -> di
     a deployment with this name, nothing is requested and the answer is
     ``unchanged``.
     """
-    refs, problem = _check_inputs(params)
+    problem = await catalog_item_request_check(calls, params)
     if problem is not None:
         return _invalid(problem)
-    flagged = _secret_input_paths(params.get("inputs") or {}, await _form(calls, params), "", "")
-    if flagged:
-        return _invalid(_secrets_guidance(flagged))
+    refs, _ = _check_inputs(params)
     name, project_id = str(params["deployment_name"]), str(params["project_id"])
     existing = await _existing_deployment(calls, name, project_id)
     if existing is not None:

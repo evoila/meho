@@ -85,6 +85,7 @@ __all__ = [
     "result_invalid_params",
     "result_no_connector",
     "result_no_target",
+    "result_park_check_refused",
     "result_preview_changed_since_approval",
     "result_rate_limited",
     "result_receipt_too_large",
@@ -1039,6 +1040,30 @@ def result_blast_radius_required(op_id: str, reason: str, duration_ms: float) ->
         error=f"denied: destructive op requires a blast-radius statement — {reason}",
         duration_ms=duration_ms,
         extras={"error_code": "blast_radius_required", "reason": reason},
+    )
+
+
+def result_park_check_refused(op_id: str, reason: str, duration_ms: float) -> OperationResult:
+    """Park refused: the op's check before the wait for approval said no.
+
+    The op needs approval, and its registered check
+    (:func:`~meho_backplane.operations._preview.run_park_check`) found
+    something in the params that must not be stored in an approval row --
+    for example a secret given as a plain value. MEHO writes no approval
+    row; the caller fixes the call and sends it again. ``status`` is
+    ``"denied"`` with a distinct ``error_code``. *reason* can carry an
+    exception class name, so it goes through :func:`_sanitize_free_text`.
+    """
+    reason = _sanitize_free_text(reason)
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=(
+            f"denied: {reason}. MEHO did not create an approval request; "
+            "fix the call and send it again"
+        ),
+        duration_ms=duration_ms,
+        extras={"error_code": "refused_before_approval", "reason": reason},
     )
 
 

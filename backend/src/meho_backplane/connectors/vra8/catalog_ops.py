@@ -18,8 +18,12 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_shared.vra_catalog import (
+    catalog_item_request_park_check,
+)
 from meho_backplane.connectors.vmware_shared.vra_catalog_ops import catalog_op_specs
 from meho_backplane.connectors.vra8.typed_ops import Vra8TypedOp
+from meho_backplane.operations._preview import register_park_check
 
 __all__ = ["CATALOG_GROUP", "CATALOG_PREFIX", "VRA8_CATALOG_OPS"]
 
@@ -43,3 +47,7 @@ VRA8_CATALOG_OPS: Final[tuple[Vra8TypedOp, ...]] = tuple(
     )
     for spec in catalog_op_specs(CATALOG_PREFIX)
 )
+
+# Before a request waits for approval, its inputs are checked for a plain
+# secret, so none is stored in the approval queue.
+register_park_check(f"{CATALOG_PREFIX}.catalog.item.request", catalog_item_request_park_check)

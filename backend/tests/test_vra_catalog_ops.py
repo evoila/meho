@@ -42,7 +42,13 @@ from meho_backplane.connectors.vra8 import (
 )
 from meho_backplane.connectors.vra8.catalog_ops import VRA8_CATALOG_OPS
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import DispatchTrace, DispatchTraceSpan, EndpointDescriptor, Tenant
+from meho_backplane.db.models import (
+    ApprovalRequest,
+    DispatchTrace,
+    DispatchTraceSpan,
+    EndpointDescriptor,
+    Tenant,
+)
 from meho_backplane.flight_recorder.config import reset_flight_recorder_config_cache_for_testing
 from meho_backplane.operations import (
     PassThroughReducer,
@@ -122,6 +128,16 @@ async def vcfa() -> AsyncIterator[VcfAutomationConnector]:
 
 def _body(route: respx.Route) -> Any:
     return json.loads(route.calls.last.request.content)
+
+
+async def _approval_rows(op_id: str) -> list[ApprovalRequest]:
+    async with get_sessionmaker()() as session:
+        rows = await session.execute(select(ApprovalRequest).where(ApprovalRequest.op_id == op_id))
+        return list(rows.scalars().all())
+
+
+def _read_the_form(mock: respx.MockRouter) -> bool:
+    return any(call.request.url.path == f"{_ITEMS}/ci-1" for call in mock.calls)
 
 
 # ---------------------------------------------------------------------------
@@ -384,13 +400,71 @@ def _mount_request(mock: respx.MockRouter, *, existing: list[dict[str, Any]] | N
 
 
 async def test_request_waits_for_approval(vcfa: VcfAutomationConnector, vault: AsyncMock) -> None:
+    """The form is read before the request is stored, and the stored inputs hold no secret."""
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         mount_logins(mock)
         _, post, _ = _mount_request(mock)
         result = await run("vcfa.tenant.catalog.item.request", _REQUEST_PARAMS, approved=False)
-    assert result["status"] != "ok"
-    assert "approval" in json.dumps(result).lower()
+        read_the_form = _read_the_form(mock)
+    assert result["status"] == "awaiting_approval", result
+    assert read_the_form
     assert not post.called
+    vault.assert_not_awaited()
+    (row,) = await _approval_rows("vcfa.tenant.catalog.item.request")
+    assert row.params["inputs"] == {"size": "small"}
+    assert row.params["secret_inputs"] == {"adminPassword": "<vault-path>#password"}
+
+
+@pytest.mark.parametrize(
+    ("inputs", "named", "reads_the_form"),
+    [
+        ({"password": "<not-a-real-value>"}, "['password']", False),
+        ({"config": {"apiKey": "<not-a-real-value>"}}, "['config.apiKey']", False),
+        ({"bootstrap": "<not-a-real-value>"}, "['bootstrap']", True),
+        ({"disks": [{"size": 1, "key": "<not-a-real-value>"}]}, "['disks[0].key']", True),
+    ],
+    ids=["secret-name", "secret-name-in-object", "form-flag", "form-flag-in-list"],
+)
+async def test_request_with_a_plain_secret_is_refused_before_approval(
+    vcfa: VcfAutomationConnector,
+    vault: AsyncMock,
+    inputs: dict[str, Any],
+    named: str,
+    reads_the_form: bool,
+) -> None:
+    """A plain secret, by name or by the form's flag, is never stored in the approval queue."""
+    params = {**_REQUEST_PARAMS, "inputs": inputs}
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        lookup, post, _ = _mount_request(mock)
+        result = await run("vcfa.tenant.catalog.item.request", params, approved=False)
+        read_the_form = _read_the_form(mock)
+    assert result["status"] == "denied", result
+    assert result["extras"]["error_code"] == "refused_before_approval"
+    assert named in result["error"]
+    assert "<not-a-real-value>" not in json.dumps(result)
+    assert read_the_form is reads_the_form
+    assert not lookup.called and not post.called
+    assert await _approval_rows("vcfa.tenant.catalog.item.request") == []
+    vault.assert_not_awaited()
+
+
+async def test_request_is_refused_before_approval_when_the_form_cannot_be_read(
+    vcfa: VcfAutomationConnector, vault: AsyncMock
+) -> None:
+    """Without the form the inputs cannot be checked, so nothing is stored (fail-closed)."""
+    params = {**_REQUEST_PARAMS, "inputs": {"bootstrap": "<not-a-real-value>"}}
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        _, post, _ = _mount_request(mock)
+        mock.get(f"{_ITEMS}/ci-1").mock(return_value=httpx.Response(404))
+        result = await run("vcfa.tenant.catalog.item.request", params, approved=False)
+    assert result["status"] == "denied", result
+    assert result["extras"]["error_code"] == "refused_before_approval"
+    assert "call the operation again" in result["error"]
+    assert "<not-a-real-value>" not in json.dumps(result)
+    assert not post.called
+    assert await _approval_rows("vcfa.tenant.catalog.item.request") == []
     vault.assert_not_awaited()
 
 
@@ -652,14 +726,14 @@ def _mount_vra_logins(mock: respx.MockRouter) -> None:
     mock.post("/iaas/api/login").respond(200, json={"token": "vra-bt"})
 
 
-async def _vra_run(op_id: str, params: dict[str, Any]) -> Any:
+async def _vra_run(op_id: str, params: dict[str, Any], *, approved: bool = True) -> Any:
     return await dispatch(
         operator=_VRA_OPERATOR,
         connector_id=VRA8_CONNECTOR_ID,
         op_id=op_id,
         target=_Vra8Target(),
         params=params,
-        _approved=True,
+        _approved=approved,
     )
 
 
@@ -700,6 +774,26 @@ async def test_vra8_request_submitted(vra8: Vra8Connector, vault: AsyncMock) -> 
     assert "vcfa.vra8.request.get" in result.result["guidance"]
     assert post.calls.last.request.headers["Authorization"] == "Bearer vra-bt"
     assert _body(post)["inputs"]["adminPassword"] == _SECRET
+
+
+async def test_vra8_request_with_a_plain_secret_is_refused_before_approval(
+    vra8: Vra8Connector, vault: AsyncMock
+) -> None:
+    """The vRA 8 op registers the same check before the wait for approval."""
+    params = {**_REQUEST_PARAMS, "inputs": {"bootstrap": "<not-a-real-value>"}}
+    async with respx.mock(base_url=_VRA_BASE_URL, assert_all_called=False) as mock:
+        _mount_vra_logins(mock)
+        _, post, _ = _mount_request(mock)
+        result = await _vra_run("vcfa.vra8.catalog.item.request", params, approved=False)
+        read_the_form = _read_the_form(mock)
+    assert result.status == "denied", result.error
+    assert result.extras["error_code"] == "refused_before_approval"
+    assert "['bootstrap']" in result.error
+    assert read_the_form
+    assert not post.called
+    assert await _approval_rows("vcfa.vra8.catalog.item.request") == []
+    assert "<not-a-real-value>" not in json.dumps(result.model_dump(mode="json"))
+    vault.assert_not_awaited()
 
 
 async def test_vra8_request_without_a_readable_request_still_answers(
@@ -775,3 +869,55 @@ async def test_vra8_trace_holds_no_secret_input_with_an_ordinary_name(
     }
     assert _SECRET not in json.dumps([[s.name, s.attributes] for s in spans], default=str)
     assert _SECRET not in json.dumps(result.result or result.extras)
+
+
+#: A form whose secret fields carry defaults: by flag, by name, and inside an object.
+_FORM_WITH_SECRET_DEFAULTS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "size": {"type": "string", "default": "small"},
+        "bootstrap": {"type": "string", "encrypted": True, "default": _SECRET},
+        "adminPassword": {"type": "string", "default": _SECRET},
+        "config": {
+            "type": "object",
+            "properties": {"pin": {"type": "string", "writeOnly": True}},
+            "default": {"zone": "a", "pin": _SECRET},
+        },
+    },
+}
+
+
+async def test_vra8_trace_holds_no_secret_default_of_the_form(vra8: Vra8Connector) -> None:
+    """The form read's trace span records the form with each secret default replaced."""
+    await _turn_on_the_flight_recorder()
+    async with respx.mock(base_url=_VRA_BASE_URL, assert_all_called=False) as mock:
+        _mount_vra_logins(mock)
+        mock.get(f"{_ITEMS}/ci-1").respond(
+            200, json={"id": "ci-1", "schema": _FORM_WITH_SECRET_DEFAULTS}
+        )
+        result = await _vra_run("vcfa.vra8.catalog.item.get", {"id": "ci-1"})
+    assert result.status == "ok", result.error
+    assert result.audit_id is not None
+    spans = await _spans(result.audit_id)
+    (span,) = [s for s in spans if s.span_kind == "vendor_call" and s.name.endswith("/ci-1")]
+    assert span.attributes["body_recorded"] is True
+    recorded = span.attributes["response_body"]["schema"]["properties"]
+    assert recorded["size"]["default"] == "small"
+    assert recorded["bootstrap"]["default"] == SECRET_FIELD_MARKER
+    assert recorded["config"]["default"] == {"zone": "a", "pin": SECRET_FIELD_MARKER}
+    # ``adminPassword`` is a secret by name: the shared trace redaction masks the field.
+    assert _SECRET not in json.dumps(recorded["adminPassword"])
+    assert _SECRET not in json.dumps([[s.name, s.attributes] for s in spans], default=str)
+
+
+async def test_trace_response_body_cleans_the_form_on_both_connectors(
+    vcfa: VcfAutomationConnector, vra8: Vra8Connector
+) -> None:
+    """Both connectors hand the trace a cleaned form; a non-JSON answer stays as it is."""
+    form = httpx.Response(200, json={"id": "ci-1", "schema": _FORM_WITH_SECRET_DEFAULTS})
+    text = httpx.Response(200, content=b"<html>not json</html>")
+    for connector in (vcfa, vra8):
+        cleaned = connector.trace_response_body(form)
+        assert cleaned["schema"]["properties"]["bootstrap"]["default"] == SECRET_FIELD_MARKER
+        assert _SECRET not in json.dumps(cleaned)
+        assert connector.trace_response_body(text) is None

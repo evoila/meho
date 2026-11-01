@@ -68,6 +68,14 @@ Design contract
   classify-op gate is defence-in-depth for the generic path, not the
   only guard.
 
+* **Check before the wait, fail-closed.** A third, opt-in registry
+  (:func:`register_park_check` / :func:`run_park_check`) lets an op
+  check its params before they are stored in the approval queue, so a
+  value that must not sit there (a secret given as a plain value) is
+  refused instead of stored. Unlike the two hooks above, a check that
+  raises refuses the park: the check guards what gets stored, so an
+  unknown state must not let the store happen.
+
 The k8s.apply builder is wired here (the only op in scope per #1437);
 additional ops register their own builders as the need arises (argocd
 writes are the separate follow-up #1452).
@@ -101,9 +109,12 @@ __all__ = [
     "build_permission_preflight",
     "build_proposed_effect",
     "describe_preview_provenance",
+    "park_check_registered",
     "preview_failure_reason",
+    "register_park_check",
     "register_permission_preflight",
     "register_preview_builder",
+    "run_park_check",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -389,8 +400,27 @@ class PermissionPreflight(Protocol):
     async def __call__(self, ctx: PreviewContext) -> dict[str, Any] | None: ...
 
 
+class ParkCheck(Protocol):
+    """An op's opt-in check of its params before they wait for approval.
+
+    Runs before an approval row is written, with the same
+    :class:`PreviewContext` the preview hooks get. Returns the reason the
+    park is refused -- a text that names no param value -- or ``None`` to
+    let the park proceed. The reason reaches the caller as the
+    ``refused_before_approval`` result. Unlike a preview or a permission
+    preflight, the check is **fail-closed**: :func:`run_park_check` turns
+    a raise into a refusal, because the check guards what gets stored.
+    """
+
+    async def __call__(self, ctx: PreviewContext) -> str | None: ...
+
+
 #: ``op_id`` -> registered preview builder. Opt-in: absence ⇒ no preview.
 _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {}
+
+#: ``op_id`` -> registered check before the wait for approval. Opt-in:
+#: absence ⇒ the park stores the params as they are.
+_PARK_CHECKS: dict[str, ParkCheck] = {}
 
 #: ``op_id`` -> registered permission preflight. Opt-in: absence ⇒ no
 #: preflight (and no entry in the approval row's ``permission_preflight``).
@@ -413,6 +443,49 @@ def register_permission_preflight(op_id: str, preflight: PermissionPreflight) ->
     import time so a re-import (test reload) is a no-op-equivalent.
     """
     _PERMISSION_PREFLIGHTS[op_id] = preflight
+
+
+def register_park_check(op_id: str, check: ParkCheck) -> None:
+    """Register *check* as the check *op_id* runs before its params wait for approval.
+
+    Idempotent re-registration overwrites -- registration happens at
+    import time so a re-import (test reload) is a no-op-equivalent.
+    """
+    _PARK_CHECKS[op_id] = check
+
+
+def park_check_registered(op_id: str) -> bool:
+    """Whether *op_id* has a check before the wait for approval."""
+    return op_id in _PARK_CHECKS
+
+
+async def run_park_check(ctx: PreviewContext) -> str | None:
+    """Run the op's check before the wait for approval, if one is registered.
+
+    Returns ``None`` when no check is registered or the check passes, else
+    the reason the park must be refused. A check that raises counts as a
+    refusal (fail-closed): the reason names the exception class only, so
+    no param value and no vendor text reaches the caller through it.
+    """
+    op_id = ctx.descriptor.op_id
+    check = _PARK_CHECKS.get(op_id)
+    if check is None:
+        return None
+    try:
+        return await check(ctx)
+    except Exception as exc:
+        # The class name only: the check talks to the vendor, so a traceback
+        # with locals could show the login header or a vendor text.
+        _log.warning(
+            "park_check_failed",
+            op_id=op_id,
+            operator_sub=getattr(ctx.operator, "sub", None),
+            error_type=type(exc).__name__,
+        )
+        return (
+            f"the check that runs before the wait for approval failed "
+            f"({type(exc).__name__}); call the operation again"
+        )
 
 
 async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:

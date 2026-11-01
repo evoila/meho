@@ -45,8 +45,10 @@ from meho_backplane.operations._preview import (
     PreviewContext,
     build_permission_preflight,
     build_proposed_effect,
+    register_park_check,
     register_permission_preflight,
     register_preview_builder,
+    run_park_check,
 )
 from meho_backplane.settings import get_settings
 
@@ -878,6 +880,55 @@ async def test_permission_preflight_is_fail_soft() -> None:
         params={},
     )
     assert await build_permission_preflight(ctx) is None
+
+
+# ---------------------------------------------------------------------------
+# Check before the wait for approval
+# ---------------------------------------------------------------------------
+
+
+def _park_ctx(op_id: str) -> PreviewContext:
+    return PreviewContext(
+        descriptor=_FakeDescriptor(op_id=op_id),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params={"inputs": {"bootstrap": "<not-a-real-value>"}},
+    )
+
+
+@pytest.mark.asyncio
+async def test_park_check_none_without_registration() -> None:
+    """An op with no registered check parks as before."""
+    assert await run_park_check(_park_ctx("some.unregistered.op")) is None
+
+
+@pytest.mark.asyncio
+async def test_park_check_returns_the_reason_of_the_registered_check() -> None:
+    seen: list[dict[str, Any]] = []
+
+    async def _check(ctx: PreviewContext) -> str | None:
+        seen.append(ctx.params)
+        return "inputs ['bootstrap'] are secrets"
+
+    register_park_check("test.park.check", _check)
+    assert await run_park_check(_park_ctx("test.park.check")) == "inputs ['bootstrap'] are secrets"
+    assert seen == [{"inputs": {"bootstrap": "<not-a-real-value>"}}]
+
+
+@pytest.mark.asyncio
+async def test_park_check_that_raises_refuses_the_park() -> None:
+    """Fail-closed: a raise is a refusal that names only the exception class."""
+
+    async def _boom(_ctx: PreviewContext) -> str | None:
+        raise RuntimeError("the form read answered with <not-a-real-value>")
+
+    register_park_check("test.park.boom", _boom)
+    reason = await run_park_check(_park_ctx("test.park.boom"))
+    assert reason is not None
+    assert "RuntimeError" in reason
+    assert "call the operation again" in reason
+    assert "<not-a-real-value>" not in reason
 
 
 # ---------------------------------------------------------------------------

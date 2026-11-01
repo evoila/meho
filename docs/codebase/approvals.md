@@ -2002,6 +2002,39 @@ MCP-tool ops such as `meho_broadcast_overrides_set` from `other` to
 `topology.refresh` at render time. Exact-pinning the dotted argocd op-ids
 avoids both collisions. See [`events.md`](events.md).
 
+## Check before the wait for approval
+
+A parked request stores its params as they are, so a reviewer can read
+them and the approved call can run with them. Some values must never be
+stored there: a secret that the caller gave as a plain value, for
+example a catalog request input that the item's form marks as
+`encrypted`. The name-based redaction of the approval display does not
+know such a field, so the value would stay readable.
+
+`_preview.py` has a third, opt-in registry for this:
+`register_park_check(op_id, check)` + `run_park_check`. A check gets the
+same `PreviewContext` as a preview builder and answers with the reason
+the park must be refused, or `None`. The dispatcher runs it first at both
+park points (`_handle_needs_approval` and the composite sub-op gate),
+through `dispatcher._park_check_refusal`, before the preview and before
+any approval row exists. A refusal answers `status="denied"` with
+`error_code="refused_before_approval"` and the reason in `extras`, writes
+one `denied` audit row through `_audit_denied_and_return` like the other
+park refusals, and stores nothing. Unlike a preview or a permission
+preflight, the check is **fail-closed**: when it raises, the park is
+refused with a reason that names only the exception class, because the
+check guards what gets stored. The log line names the exception class
+only, not the traceback: the check talks to the vendor, and a traceback
+could show a login header.
+
+Registered today: `vcfa.tenant.catalog.item.request` and
+`vcfa.vra8.catalog.item.request` (`vmware_shared/vra_catalog.py`,
+`catalog_item_request_park_check`). The check reads the item's request
+form and refuses a plain value for a secret-named field or for a field
+the form marks as a secret, at any depth. The handler runs the same check
+again when the approved call runs, so a call that skipped the queue (an
+auto-execute grant) is checked too.
+
 ## Permission preflight hook (#1504)
 
 The generic `proposed_effect` *preview* above is suppressed for

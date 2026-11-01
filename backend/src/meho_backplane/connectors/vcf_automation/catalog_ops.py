@@ -17,7 +17,11 @@ from __future__ import annotations
 from typing import Final
 
 from meho_backplane.connectors.vcf_automation.typed_ops import VcfaTypedOp, validate_typed_ops
+from meho_backplane.connectors.vmware_shared.vra_catalog import (
+    catalog_item_request_park_check,
+)
 from meho_backplane.connectors.vmware_shared.vra_catalog_ops import catalog_op_specs
+from meho_backplane.operations._preview import register_park_check
 
 __all__ = ["CATALOG_GROUP", "CATALOG_PREFIX", "VCFA_CATALOG_OPS"]
 
@@ -46,3 +50,7 @@ VCFA_CATALOG_OPS: Final[tuple[VcfaTypedOp, ...]] = tuple(
 
 
 validate_typed_ops(VCFA_CATALOG_OPS)
+
+# Before a request waits for approval, its inputs are checked for a plain
+# secret, so none is stored in the approval queue.
+register_park_check(f"{CATALOG_PREFIX}.catalog.item.request", catalog_item_request_park_check)

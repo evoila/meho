@@ -330,6 +330,7 @@ from meho_backplane.operations._errors import (
     result_invalid_op_schema,
     result_invalid_params,
     result_no_connector,
+    result_park_check_refused,
     result_preview_binding_required,
     result_preview_hash_mismatch,
     result_rate_limited,
@@ -358,6 +359,8 @@ from meho_backplane.operations._preview import (
     build_permission_preflight,
     build_proposed_effect,
     describe_preview_provenance,
+    park_check_registered,
+    run_park_check,
 )
 from meho_backplane.operations._request_preview import (
     compute_preview_hash,
@@ -3102,6 +3105,48 @@ async def destructive_binding_evidence(
     return {"preview_hash": preview_hash, BLAST_RADIUS_KEY: proposed_effect[BLAST_RADIUS_KEY]}
 
 
+async def _park_check_refusal(
+    *,
+    op_id: str,
+    connector_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    duration_ms: float,
+) -> OperationResult | None:
+    """Refuse a park when the op's check before the wait for approval says no.
+
+    Runs the op's registered
+    :class:`~meho_backplane.operations._preview.ParkCheck` with the same
+    context the preview hooks get, before any approval row exists, so a
+    param value the check refuses (a secret given as a plain value) is
+    never stored. Returns the ``refused_before_approval`` result, or
+    ``None`` when no check is registered or the check passes. Both park
+    points (:func:`_handle_needs_approval` and the composite sub-op gate)
+    call it first. A connector that does not resolve reaches the check as
+    ``connector_instance=None``; the check decides what that means.
+    """
+    if not park_check_registered(descriptor.op_id):
+        return None
+    connector_instance, resolution_error, _ = await _resolve_connector_instance(descriptor, target)
+    if resolution_error is not None:
+        connector_instance = None
+    reason = await run_park_check(
+        PreviewContext(
+            descriptor=descriptor,
+            connector_instance=connector_instance,
+            operator=operator,
+            target=target,
+            params=params,
+            connector_id=connector_id,
+        )
+    )
+    if reason is None:
+        return None
+    return result_park_check_refused(op_id, reason, duration_ms)
+
+
 def _preflight_denied_refusal(
     *, op_id: str, proposed_effect: dict[str, Any] | None, duration_ms: float
 ) -> OperationResult | None:
@@ -3232,6 +3277,31 @@ async def _handle_needs_approval(
     )
 
     run_id = current_agent_run_id_var.get()
+
+    # An op may register a check that runs before its params are stored
+    # in the approval queue (``register_park_check``). It refuses a value
+    # that must not sit in an approval row, for example a secret given as
+    # a plain value. It runs first, so nothing of the call is kept when it
+    # says no. The attempt is audited as a denial, like the refusals below.
+    refusal = await _park_check_refusal(
+        op_id=op_id,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+        duration_ms=duration_ms,
+    )
+    if refusal is not None:
+        return await _audit_denied_and_return(
+            refusal,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
 
     # G11.7 follow-up (#1437): give an op that can compute a
     # side-effect-free preview (notably ``k8s.apply``'s server-dry-run) a

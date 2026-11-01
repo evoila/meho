@@ -678,6 +678,7 @@ async def enforce_subop_policy(
         _audit_denied_and_return,
         _build_proposed_effect,
         _destructive_binding_refusal,
+        _park_check_refusal,
         _preflight_denied_refusal,
     )
 
@@ -793,6 +794,30 @@ async def enforce_subop_policy(
                     composite_op_id=composite_op_id,
                     approved_op_id=approved_op_id,
                     blocked_op_id=op_id,
+                    duration_ms=duration_ms,
+                )
+
+            # The step's own check before the wait for approval, the same as
+            # at the dispatcher park: a param value that must not be stored
+            # (a secret given as a plain value) refuses the park before any
+            # row exists. Audited on the step's path like the refusals below.
+            refusal = await _park_check_refusal(
+                op_id=op_id,
+                connector_id=connector_id,
+                descriptor=descriptor,
+                operator=operator,
+                target=target,
+                params=params,
+                duration_ms=duration_ms,
+            )
+            if refusal is not None:
+                return await _audit_denied_and_return(
+                    refusal,
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    params=params,
+                    params_hash=params_hash,
                     duration_ms=duration_ms,
                 )
 

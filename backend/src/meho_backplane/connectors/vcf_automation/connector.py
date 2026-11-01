@@ -1286,6 +1286,25 @@ class VcfAutomationConnector(HttpConnector):
 
         return VraCalls(get=get, post=post, prefix=CATALOG_PREFIX, operator=operator, target=target)
 
+    def trace_response_body(self, response: httpx.Response) -> Any:
+        """The vendor answer for the trace, with the default of each secret form field replaced.
+
+        A catalog item or item version answer carries its request form, and
+        a secret field of the form (``encrypted``, ``format: password``,
+        ``writeOnly`` or a secret name) may carry a default. The shared
+        trace redaction knows neither the flags nor a default under an
+        ordinary name, so the answer is cleaned here before the span
+        records it. A JSON answer is recorded as parsed data; any other
+        answer as it is.
+        """
+        from meho_backplane.connectors.vmware_shared.vra_catalog import clean_form_defaults
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        return clean_form_defaults(payload)
+
     async def vra_catalog_item_list(
         self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:

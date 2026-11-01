@@ -435,11 +435,17 @@ tenant login, like `/deployment/api/*`.
   `secret_inputs`: top-level input name → `"<vault-path>#<field>"`. The
   value is read from Vault under the caller's identity only when the
   approved call runs, and goes only into the request body. An input in
-  `inputs` is refused (`invalid_request`) when its name is a secret name,
-  or when the item's form marks its field as a secret (`encrypted`,
-  `format: password` or `writeOnly`). Both checks look inside objects and
-  lists too (`config.password`, `disks[0].key`); the form check reads the
-  item, or the requested `version`, before anything is sent. When the
+  `inputs` is refused when its name is a secret name, or when the item's
+  form marks its field as a secret (`encrypted`, `format: password` or
+  `writeOnly`). Both checks look inside objects and lists too
+  (`config.password`, `disks[0].key`); the form check reads the item, or
+  the requested `version`, before anything is sent. The checks run twice:
+  before the request is stored in the approval queue (a check registered
+  with `register_park_check`; the answer is `denied` with
+  `error_code: refused_before_approval`, and nothing is stored, also when
+  the form cannot be read), and again when the approved call runs (the
+  answer is `invalid_request`). See
+  [approvals.md](approvals.md) "Check before the wait for approval". When the
   vendor's error text repeats a secret value, the value is replaced with a
   marker, also when the text is JSON that escapes the value; the rest of
   the error text reaches the answer. In results, the default of a secret
@@ -449,7 +455,10 @@ tenant login, like `/deployment/api/*`.
   (flight recorder) records the request and response bodies with each
   secret value replaced, so a secret input with an ordinary name (one the
   trace redaction knows neither by name nor by shape) never reaches a
-  stored trace.
+  stored trace. On both connectors the trace of a form read (the item or
+  an item version) records the form with the default of each secret field
+  replaced (`trace_response_body`), so a secret default under an ordinary
+  name never reaches a stored trace either.
 - **Request id.** The vendor answers the request with only the deployment
   id. The op then reads the deployment with `expand=lastRequest` to get the
   request id. When that read fails, the op still answers `submitted`, with

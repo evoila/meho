@@ -20,9 +20,12 @@ parsed YAML, for two reasons:
 What is replaced:
 
 * A flow map or list (``{user: a, password: b}``, also a template written
-  as one line of JSON) that holds such a key, at any depth: the whole
-  value. A flow map that runs over several lines is read as one value and
-  replaced as one.
+  as one line of JSON, with or without spaces) that holds such a key, at
+  any depth: the whole value. A flow map that runs over several lines is
+  read as one value and replaced as one. A map that a bare ``{`` or ``[``
+  opens (a template written as multi-line JSON) keeps its lines: each is
+  checked on its own, and only when a secret is still left after that (a
+  row such as ``encrypted: true, default: x``) the whole value is replaced.
 * The value of every key with a secret name
   (:func:`~meho_backplane.broadcast.events.is_secret_param_name`), and of
   the ``list`` part of the cloud-init key ``chpasswd`` (it holds plain
@@ -79,12 +82,13 @@ SECRET_MARKER: Final[str] = "[REDACTED:param_name]"
 #: The line put in place of a PEM private key block.
 PRIVATE_KEY_MARKER: Final[str] = "[REDACTED:private_key]"
 
-#: A ``key: value`` line. A line that starts with ``{`` or ``[`` is a flow map
-#: or list, not a key line (see :data:`_FLOW_LINE`).
+#: A ``key: value`` line. A quoted or flow value may follow the ``:`` at once
+#: (``"key":"value"``, JSON without spaces). A line that starts with ``{`` or
+#: ``[`` is a flow map or list, not a key line (see :data:`_FLOW_LINE`).
 _KEY_LINE: Final[re.Pattern[str]] = re.compile(
     r"^(?P<lead>[ \t]*(?:-[ \t]+)*)"
     r"(?P<key>\"[^\"\n]*\"|'[^'\n]*'|[^\s#'\"\-:{\[][^:#\n]*?|-[^\s:#][^:#\n]*?)"
-    r"[ \t]*:(?:[ \t]+(?P<value>.*?))?[ \t\r]*$"
+    r"[ \t]*:(?:(?:[ \t]+|(?=[\"'{\[]))(?P<value>.*?))?[ \t\r]*$"
 )
 _PEM_BEGIN: Final[re.Pattern[str]] = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----")
 _PEM_END: Final[re.Pattern[str]] = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----")
@@ -104,8 +108,13 @@ _DEFINITION_VALUE_KEYS: Final[frozenset[str]] = _SCHEMA_VALUE_KEYS | {"value"}
 #: The characters that open and close a flow map or list.
 _FLOW_OPEN: Final[str] = "{["
 _FLOW_CLOSE: Final[str] = "}]"
-#: What may follow the ``:`` of a key inside a flow map.
-_AFTER_FLOW_COLON: Final[tuple[str, ...]] = ("", " ", "\t", "\r", "\n", ",", "{", "[", "}", "]")
+#: What may follow the ``:`` of a key inside a flow map (a quote: JSON
+#: without spaces, ``{"password":"x"}``).
+_AFTER_FLOW_COLON: Final[tuple[str, ...]] = (
+    *("", " ", "\t", "\r", "\n", ",", "{", "[", "}", "]"),
+    '"',
+    "'",
+)
 #: A line that is (a list item holding) a flow map or list, or a double-quoted
 #: value on its own.
 _FLOW_LINE: Final[re.Pattern[str]] = re.compile(
@@ -214,22 +223,32 @@ class _Scrub:
         self.inputs = _input_column(self.lines)
 
     def run(self) -> str:
-        index = 0
-        while index < len(self.lines):
+        self._run_range(0, len(self.lines))
+        return "\n".join(self.out)
+
+    def _run_range(self, start: int, stop: int) -> int:
+        """Scrub the lines from *start* to *stop*; return the index after the last one read."""
+        index = start
+        while index < stop:
             self.definitions = [scope for scope in self.definitions if scope[0] > index]
             self.chpasswd = [scope for scope in self.chpasswd if scope[0] > index]
             following = self._key_line(index)
             if following is None:
                 following = _scrub_pem(self.lines, index, self.out)
+                if following is not None:
+                    self.count += 1
             if following is None:
-                following = _scrub_flow_line(self.lines, index, self.out)
+                following = self._flow_line(index)
             if following is None:
                 self.out.append(self.lines[index])
                 index += 1
                 continue
-            self.count += 1
             index = following
-        return "\n".join(self.out)
+        return index
+
+    def _hide(self, hidden: str) -> None:
+        self.out.append(hidden)
+        self.count += 1
 
     def _secret_key(self, key: str, key_col: int) -> bool:
         if is_secret_param_name(key):
@@ -284,9 +303,13 @@ class _Scrub:
         line_end = "\r" if self.lines[index].endswith("\r") else ""
         hidden = f"{match['lead']}{match['key']}: '{SECRET_MARKER}'{line_end}"
         span = _flow_span(self.lines, index, value)
-        if span is not None and _flow_has_secret_key(span[0], root=key):
-            self.out.append(hidden)
-            return span[1]
+        if span is not None:
+            if value in ("{", "["):
+                return self._bare_flow(index, span, key, key_col, hidden)
+            if self._secret_key(key, key_col) or _flow_has_secret_key(span[0], root=key):
+                self._hide(hidden)
+                return span[1]
+            return None
         secret = (
             self._secret_key(key, key_col)
             or _flow_has_secret_key(value, root=key)
@@ -297,8 +320,59 @@ class _Scrub:
         end = _value_lines_end(self.lines, index + 1, key_col, nested=not value)
         if not value and end == index + 1:
             return None
-        self.out.append(hidden)
+        self._hide(hidden)
         return end
+
+    def _bare_flow(
+        self, index: int, span: tuple[str, int], key: str, key_col: int, hidden: str
+    ) -> int:
+        """Scrub a flow map or list that a bare ``{`` or ``[`` opens at *index*.
+
+        A template written as multi-line JSON has this shape. Its lines are
+        first checked one by one, like block YAML, so every line without a
+        secret stays as written. When a secret is still left after that (a
+        row such as ``encrypted: true, default: x`` or ``"password":"x"``),
+        or when *key* itself is secret, the whole value becomes the marker.
+        Returns the index after the closing bracket.
+        """
+        text, end = span
+        opening = text.split("\n", 1)[0]
+        mark, count = len(self.out), self.count
+        if not self._secret_key(key, key_col):
+            self.out.append(self.lines[index])
+            end = max(end, self._run_range(index + 1, end))
+            if not _flow_has_secret_key("\n".join([opening, *self.out[mark + 1 :]]), root=key):
+                return end
+            del self.out[mark:]
+            self.count = count
+        self._hide(hidden)
+        return end
+
+    def _flow_line(self, index: int) -> int | None:
+        """Replace a flow map, list or quoted line with a secret; return the next index.
+
+        Such a line has no key of its own: a list item ``- {password: x}``, a
+        template written as one line of JSON, or a double-quoted cloud-init
+        text with ``\\n`` escapes.
+        """
+        match = _FLOW_LINE.match(self.lines[index])
+        if match is None:
+            return None
+        flow = match["flow"]
+        line_end = "\r" if self.lines[index].endswith("\r") else ""
+        hidden = f"{match['lead']}'{SECRET_MARKER}'{line_end}"
+        span = _flow_span(self.lines, index, flow)
+        if span is not None:
+            if flow in ("{", "["):
+                return self._bare_flow(index, span, "", len(match["lead"]), hidden)
+            if _flow_has_secret_key(span[0]):
+                self._hide(hidden)
+                return span[1]
+            return None
+        if not (_flow_has_secret_key(flow) or _escaped_text_has_secret(flow)):
+            return None
+        self._hide(hidden)
+        return index + 1
 
 
 def _inside(key_col: int, scopes: list[tuple[int, int]]) -> bool:
@@ -355,12 +429,19 @@ def _flow_skip(text: str, index: int) -> int:
 
 
 def _flow_token(text: str, index: int) -> tuple[str, int, bool]:
-    """The scalar at *index* of a flow map: (text, next index, True when it is a key)."""
+    """The scalar at *index* of a flow map: (text, next index, True when it is a key).
+
+    A quoted scalar followed by ``:`` is a key whatever comes next (JSON
+    without spaces: ``"encrypted":true``). A plain one needs a space, a
+    comma, a bracket or a quote after the ``:``; ``http://x`` is a value.
+    """
     end = max(_flow_scalar_end(text, index), index + 1)
     colon = end
     while colon < len(text) and text[colon] in " \t":
         colon += 1
-    if text[colon : colon + 1] == ":" and text[colon + 1 : colon + 2] in _AFTER_FLOW_COLON:
+    if text[colon : colon + 1] == ":" and (
+        text[index] in "\"'" or text[colon + 1 : colon + 2] in _AFTER_FLOW_COLON
+    ):
         return _key_name(text[index:end]), colon + 1, True
     return text[index:end], end, False
 
@@ -448,11 +529,10 @@ def _flow_span(lines: list[str], index: int, opening: str) -> tuple[str, int] | 
     """The lines of a flow map or list that *opening* starts and does not close.
 
     Returns the joined text and the index after its last line, or ``None``
-    when *opening* is no flow value or closes on its own line. A bare ``{``
-    or ``[`` is left to the block rules (a template written as multi-line
-    JSON). The text is read until every bracket is closed, or to the end.
+    when *opening* is no flow value or closes on its own line. The text is
+    read until every bracket is closed, or to the end.
     """
-    if not opening or opening[0] not in _FLOW_OPEN or opening in ("{", "["):
+    if not opening or opening[0] not in _FLOW_OPEN:
         return None
     depth = _flow_depth(opening)
     if depth <= 0:
@@ -470,29 +550,6 @@ def _escaped_text_has_secret(value: str) -> bool:
         return False
     inner = _ESCAPE.sub(lambda found: _ESCAPED_CHARS.get(found[1], found[1]), value[1:-1])
     return scrub_template_yaml(inner)[1] > 0
-
-
-def _scrub_flow_line(lines: list[str], index: int, out: list[str]) -> int | None:
-    """Replace a flow map, list or quoted line with a secret; return the next index.
-
-    Such a line has no key of its own: a list item ``- {password: x}``, a
-    template written as one line of JSON, or a double-quoted cloud-init
-    text with ``\\n`` escapes.
-    """
-    match = _FLOW_LINE.match(lines[index])
-    if match is None:
-        return None
-    flow = match["flow"]
-    line_end = "\r" if lines[index].endswith("\r") else ""
-    hidden = f"{match['lead']}'{SECRET_MARKER}'{line_end}"
-    span = _flow_span(lines, index, flow)
-    if span is not None and _flow_has_secret_key(span[0]):
-        out.append(hidden)
-        return span[1]
-    if not (_flow_has_secret_key(flow) or _escaped_text_has_secret(flow)):
-        return None
-    out.append(hidden)
-    return index + 1
 
 
 def _scrub_pem(lines: list[str], index: int, out: list[str]) -> int | None:

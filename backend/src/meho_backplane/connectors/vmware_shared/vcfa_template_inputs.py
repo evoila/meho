@@ -11,11 +11,14 @@ the vendor. Two rules say which inputs are secret:
 * the name is a secret name
   (:func:`~meho_backplane.broadcast.events.is_secret_param_name`);
 * the template marks the input ``encrypted: true``. For YAML given in
-  ``content``, :func:`encrypted_inputs_schema` reads that mark. For a
-  stored template, the handler reads the vendor's inputs schema.
+  ``content``, :func:`encrypted_inputs_schema` reads that mark, also from
+  the ``properties`` of an object input and the ``items`` of a list input,
+  at any depth. For a stored template, the handler reads the vendor's
+  inputs schema.
 
 :func:`refuse_secret_input_values` applies both rules to the values, also
-inside an object input, and raises before any vendor call.
+inside an object input and in each item of a list input, and raises
+before any vendor call.
 """
 
 from __future__ import annotations
@@ -42,7 +45,8 @@ def refuse_secret_input_values(inputs: Mapping[str, Any], schema: Mapping[str, A
     An input is secret when its name is a secret name, or when *schema*
     (the template's inputs schema, a JSON schema) marks it ``encrypted``.
     The values of an object input are checked the same way, against its
-    ``properties``. Raises :exc:`ValueError` naming the inputs.
+    ``properties``, and each item of a list input against its ``items``.
+    Raises :exc:`ValueError` naming the inputs (``login.pin``, ``logins[0].pin``).
     """
     literal = _literal_secret_inputs(inputs, schema, secret=False)
     if literal:
@@ -70,6 +74,13 @@ def _literal_secret_inputs(
                 f"{name}.{inner}"
                 for inner in _literal_secret_inputs(value, child, secret=child_secret)
             )
+        elif isinstance(value, list) and all(isinstance(item, Mapping) for item in value):
+            items = child.get("items") if isinstance(child, Mapping) else None
+            found.extend(
+                f"{name}[{position}].{inner}"
+                for position, item in enumerate(value)
+                for inner in _literal_secret_inputs(item, items, secret=child_secret)
+            )
         elif child_secret and not is_reference(value):
             found.append(str(name))
     return sorted(found)
@@ -86,12 +97,36 @@ def encrypted_inputs_schema(content: str) -> dict[str, Any]:
         root = yaml.compose(content, Loader=yaml.SafeLoader)
     except yaml.YAMLError:
         return {}
-    inputs = _mapping_value(root, "inputs")
+    return _encrypted_schema(_mapping_value(root, "inputs"), set())
+
+
+def _encrypted_schema(node: Any, seen: set[int]) -> dict[str, Any]:
+    """The inputs schema of one map of input definitions.
+
+    Each definition keeps its ``encrypted`` mark, its nested ``properties``
+    (an object input) and its ``items`` (a list input), read the same way.
+    *seen* holds the nodes on the way down: an alias that points back up
+    is not followed twice.
+    """
     properties: dict[str, Any] = {}
-    for name, definition in _mapping_pairs(inputs):
+    if id(node) in seen:
+        return {"properties": properties}
+    seen = seen | {id(node)}
+    for name, definition in _mapping_pairs(node):
+        entry: dict[str, Any] = {}
         encrypted = _mapping_value(definition, "encrypted")
         if isinstance(encrypted, yaml.ScalarNode) and _TRUE_SCALAR.fullmatch(encrypted.value):
-            properties[name] = {"encrypted": True}
+            entry["encrypted"] = True
+        nested = _encrypted_schema(_mapping_value(definition, "properties"), seen)
+        if nested["properties"]:
+            entry["properties"] = nested["properties"]
+        items = _encrypted_schema(
+            _mapping_value(_mapping_value(definition, "items"), "properties"), seen
+        )
+        if items["properties"]:
+            entry["items"] = {"properties": items["properties"]}
+        if entry:
+            properties[name] = entry
     return {"properties": properties}
 
 

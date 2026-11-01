@@ -460,12 +460,16 @@ registered on both connectors:
   with `encrypted: true`, also as a flow map and with quoted keys) keeps
   its lines; only its `default`, `const`, `enum`, `example` and
   `examples` become a marker, in the YAML and in `inputs_schema` alike
-  (`vcfa_yaml_secrets.scrub_inputs_schema`). A flow map (`{a: 1, b: 2}`)
-  is read as one value, also when it runs over several lines and at any
-  depth of nesting (a `chpasswd` map inside another map); when it holds a
-  secret, the whole map becomes one marker. A double-quoted value whose
-  `\n` escapes hold more YAML lines (a `cloudConfig` written on one
-  line) is checked like a block. `secrets_replaced` counts all markers.
+  (`vcfa_yaml_secrets.scrub_inputs_schema`). A flow map (`{a: 1, b: 2}`,
+  also JSON without spaces such as `{"password":"x"}`) is read as one
+  value, also when it runs over several lines and at any depth of nesting
+  (a `chpasswd` map inside another map); when it holds a secret, the
+  whole map becomes one marker. A map that a bare `{` opens (a template
+  written as multi-line JSON) keeps its lines: each is checked on its
+  own, and only when a secret is still left after that (a row such as
+  `encrypted: true, default: x`) the whole value becomes one marker. A
+  double-quoted value whose `\n` escapes hold more YAML lines (a
+  `cloudConfig` written on one line) is checked like a block. `secrets_replaced` counts all markers.
   References such as `${secret.<name>}` or `${input.<name>}` stay. Every
   other line comes back as written.
 - **No secret value is sent.** `blueprint.create`, `blueprint.update`
@@ -479,8 +483,10 @@ registered on both connectors:
   loaded, so an alias cannot blow up the parse); for a stored template it
   reads the vendor's inputs schema first (`GET …/{blueprintId}/inputs-schema`,
   or `…/versions/{version}/inputs-schema` when a version is named). An
-  object input is checked the same way, against its `properties`. A
-  reference such as `${secret.<name>}` passes. A template takes a password
+  object input is checked the same way, against its `properties`, and
+  each item of a list input against its `items`; the YAML is read to the
+  same depth (`inputs.login.properties.pin.encrypted` marks `login.pin`).
+  A reference such as `${secret.<name>}` passes. A template takes a password
   through `${secret.<name>}` or an `encrypted: true` input without a
   default; the request fills it in. The approval card of a create or
   update (`vcfa_templates.blueprint_write_preview`, registered for both

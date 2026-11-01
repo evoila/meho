@@ -5223,6 +5223,87 @@ live vCenter) and `tests/test_connectors_vmware_rest_network_list_reconcile.py`
 vCenter 8.0 U3 and 9.0 `vcenter.yaml`; the vim read, the `backingType`
 field and its `standard` / `nsx` values against the pinned VI/JSON files).
 
+### Move a VM to another vCenter (`vm.migrate_cross_vcenter`)
+
+An agent or an operator can move a VM, also while it runs, to another
+vCenter (advanced cross vCenter vMotion), for example before a vCenter is
+retired. The change is typed (hand-written) and needs no spec ingest. It is
+on both catalogs, `vmware-rest-8.0` and `vmware-rest-9.0`, in the group `vm`,
+and waits until a second person approves. An agent needs a grant for it.
+
+| Operation | What it does | What it returns | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.composite.vm.migrate_cross_vcenter` | Moves one VM to a host, resource pool, datastore and VM folder of another vCenter, and moves each network card to a network there (`network` for all cards, `nics` per card). | `status` (`accepted`, `already_running`, `not_found`, `invalid_request`, `certificate_mismatch`, `destination_unreachable`, `destination_login_failed`), `task`, `status_read`, `requested`, `missing` | `dangerous`, waits for approval | 8.0, 9.x |
+
+Vendor call: VIM `VirtualMachine.RelocateVM_Task` on the source vCenter,
+with a `ServiceLocator` of the other vCenter in `spec.service`. The reads
+are `PropertyCollector.RetrievePropertiesEx` on both vCenters and
+`ServiceInstance.RetrieveServiceContent` on the other one. vCenter 8.0 U1,
+U2, U3 and 9.0, 9.1, 9.1.1 all have them, so no version check is needed.
+
+**The other vCenter is its own MEHO target.** The call names it with
+`destination_target` (the target name). MEHO takes from that target:
+
+- the address for `ServiceLocator.url` (`https://<fqdn or host>`, plus the
+  port when it is not 443);
+- `extras.ssl_thumbprint`: the SHA-1 hash of its certificate (40 hex
+  digits, colons allowed). MEHO sends it as `sslThumbprint` in the form
+  `AB:CD:...`. Without it the call is `invalid_request`;
+- the login, read from Vault with the target's `secret_ref` (the same
+  reader the connector logs in with). The login goes only into the
+  `RelocateVM_Task` request body. It is never in the call, the answer, the
+  approval request or the broadcast. The op is pinned `credential_write`
+  in `broadcast/events.py`, so the flight recorder does not keep that body.
+
+**Checks before the start.** Nothing is sent when one fails.
+
+1. Every moid has the right shape. The other target exists, is a vCenter
+   target, is not the call's own target, and has a valid `ssl_thumbprint`.
+2. The VM exists (`not_found` when not). Every network card has a network
+   (`invalid_request` when not).
+3. A move of the VM (`VirtualMachine.relocate`) that is `queued` or
+   `running` gives `already_running` with its task id. This check is a
+   help, not a lock: two callers can both look before either starts.
+4. MEHO opens its own TLS connection to the other vCenter (one GET of
+   `/sdk/vimServiceVersions.xml`, with the target's TLS settings) and
+   hashes the certificate it shows. A hash that is not the
+   `ssl_thumbprint` gives `certificate_mismatch`, before any login.
+5. MEHO reads the login from Vault and logs in to read `instanceUuid`
+   (sent in upper case). A failed Vault read or login gives
+   `destination_login_failed`; a connection failure gives
+   `destination_unreachable`.
+6. The host, pool, datastore, folder and networks exist in the other
+   vCenter (`not_found` lists the missing ones in `missing`). A
+   distributed port group becomes a `DistributedVirtualSwitchPortConnection`
+   backing (port group key and switch uuid); a standard network becomes a
+   `VirtualEthernetCardNetworkBackingInfo` backing.
+
+**A vendor job.** The start returns as soon as vCenter took the task:
+`status: accepted` with the task id in `task`, and `status_read: {op_id:
+vmware.task.info, params: {task}}` on the source vCenter's target. It never
+says the move is done. `vmware.task.info` is the status read the VM move
+and copy work adds; this op only names it.
+
+- After a lost reply, do not start again blindly. Read `vmware.tasks.recent`
+  or the VM first: a move that still runs comes back as `already_running`.
+- Use MEHO's async mode (`async: true`, `docs/codebase/async-governed-dispatch.md`)
+  for the start, so a lost reply does not lose the task id.
+- It is one vendor call, so no step can fail part-way. A start the vendor
+  refuses (for example `InvalidArgument`) fails the call with the vendor's
+  fault.
+
+Code: `composites/_vm_cross_vcenter.py` (the handler and its checks),
+`composites/_vm_cross_vcenter_schemas.py` (schemas and agent guidance) and
+`composites/_vm_cross_vcenter_ops.py` (registry row, approval card and
+child-op list). Tests:
+`tests/test_connectors_vmware_rest_vm_cross_vcenter.py` (handler against a
+two-vCenter fake), `tests/test_connectors_vmware_rest_vm_cross_vcenter_dispatch.py`
+(approval, an agent without a grant, both catalogs, the vCenter 8.0.3 and
+9.0 VI-JSON paths over mocked HTTP, a failed login, the certificate read)
+and `tests/test_connectors_vmware_rest_vm_cross_vcenter_reconcile.py`
+(methods, fields and enums against the pinned 9.0 and 8.0 U1, U2, U3
+`vi-json` files).
+
 ### Port group settings (`vmware.network.portgroup.show`)
 
 A typed read that shows all settings of one distributed port group. It is

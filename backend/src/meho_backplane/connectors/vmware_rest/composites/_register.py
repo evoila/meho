@@ -196,6 +196,9 @@ from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_library_iso impo
 from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_tools import (
     VM_CDROM_TOOLS_COMPOSITES,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_cross_vcenter_ops import (
+    VM_CROSS_VCENTER_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._vm_llm_instructions import (
     VM_LLM_INSTRUCTIONS,
 )
@@ -531,7 +534,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "host (vm.migrate, dangerous); take a snapshot (vm.snapshot.create, "
         "caution), revert to one (vm.snapshot.revert, dangerous) or delete one "
         "(vm.snapshot.delete, destructive); delete a powered-off VM and its "
-        "disks (vm.destroy, destructive); create a VM folder (folder.create, "
+        "disks (vm.destroy, destructive); move a VM to another vCenter "
+        "(vm.migrate_cross_vcenter, dangerous); create a VM folder (folder.create, "
         "dangerous) or delete an empty one (folder.delete, destructive). Pair "
         "with 'storage', 'networking' or 'cluster' for the reads a create or a "
         "move needs."
@@ -2139,6 +2143,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # Install a new vCenter (#4394), dangerous / approval; the rows live in
     # their own module.
     *(_CompositeSpec(**row) for row in VCENTER_INSTALL_COMPOSITES),
+    # Move a VM to another vCenter, dangerous / approval; the row lives in
+    # its own module.
+    *(_CompositeSpec(**row) for row in VM_CROSS_VCENTER_COMPOSITES),
 )
 
 

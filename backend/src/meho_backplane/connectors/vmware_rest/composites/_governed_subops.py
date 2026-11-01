@@ -56,6 +56,9 @@ from meho_backplane.connectors.vmware_rest.composites import (
 from meho_backplane.connectors.vmware_rest.composites._vcenter_install_ops import (
     VCENTER_INSTALL_GOVERNED_SUBOPS,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_cross_vcenter_ops import (
+    VM_CROSS_VCENTER_GOVERNED_SUBOPS,
+)
 
 #: Default connector of the step list when the caller names none. A write
 #: step is checked under the connector the target resolves to (#4991), so the
@@ -195,6 +198,8 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,
     # #4394 vCenter install: the deploy, the setup start and the answer.
     **VCENTER_INSTALL_GOVERNED_SUBOPS,
+    # Move a VM to another vCenter: one VirtualMachine task after the reads.
+    **VM_CROSS_VCENTER_GOVERNED_SUBOPS,
 }
 
 

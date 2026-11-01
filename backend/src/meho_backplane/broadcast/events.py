@@ -480,6 +480,11 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # of the broadcast.
         "vmware.composite.vcenter.appliance.deploy",
         "vmware.composite.vcenter.install",
+        # The move of a VM to another vCenter. Its params carry only the other
+        # vCenter's target name; MEHO reads that vCenter's login from Vault and
+        # sends it only in the RelocateVM_Task request BODY. The pin keeps that
+        # body out of the flight recorder and the params out of the broadcast.
+        "vmware.composite.vm.migrate_cross_vcenter",
         # The Keycloak login test. Its params carry only a Vault *path*
         # (``password_secret_ref``); the password is read in-process and sent
         # only in the token request BODY, and the token answer carries an

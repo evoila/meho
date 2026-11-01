@@ -45,12 +45,10 @@ import (
 )
 
 // defaultCLIOfflineSessionIdleSeconds is the offline-session idle
-// timeout (48h) applied to the CLI device-code client when an operator
-// passes a bare `--cli-offline-access`. 48h means daily use never
-// re-prompts while a weekend gap costs at most one Monday device dance
-// — far tighter than the weeks-long gcloud / kubectl offline-token
-// norm, directly answering the RDC Wall W7 blast-radius concern
-// (#2902).
+// timeout (48h) set on the CLI device-code client by default, so a
+// `meho login` renews itself. Daily use never asks for a new login; a
+// weekend without use costs one new login on Monday.
+// `--cli-offline-access=0` turns the long CLI login off.
 const defaultCLIOfflineSessionIdleSeconds = 172800
 
 // NewRootCmd returns the `meho admin keycloak` parent command, ready
@@ -122,6 +120,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 			"  * 8 protocol mappers on each client (audience-meho-backplane, meho-mcp-audience, groups-claim, and the User Attribute mappers tenant-id, tenant-role, approver, platform-admin and meho-tenants)\n" +
 			"  * 4 default client scopes on each client (basic, roles, web-origins, acr) — including the load-bearing `basic` scope that carries the `sub` claim in Keycloak 25+\n" +
 			"  * the `mcp:read`, `mcp:execute` and `mcp:admin` client scopes, plus `offline_access`, as optional scopes on the MCP client — MEHO's MCP clients ask for them at login, and Keycloak refuses a login that asks for a scope the client does not offer\n" +
+			"  * `offline_access` as an optional scope on the CLI client, with a 48-hour idle limit, so `meho login` gets a login that renews itself (`--cli-offline-access=0` turns it off)\n" +
 			"  * the five MEHO role groups, each with a `tenant_id`, a `tenant_role` and a `meho_tenant` attribute:\n" +
 			"      MEHO-Readers (read_only), MEHO-Operators (operator), MEHO-SA-Operators (operator),\n" +
 			"      MEHO-Admins (tenant_admin), MEHO-Approvers (read_only, plus approver=true)\n" +
@@ -312,28 +311,29 @@ func newBootstrapClientsCmd() *cobra.Command {
 			"connection; prints a loud warning). Prefer --keycloak-ca-bundle")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"print what would be provisioned without making any API calls")
-	cmd.Flags().IntVar(&cliOfflineSessionIdle, "cli-offline-access", 0,
-		"opt the device-code CLI client into the long-lived offline-token "+
-			"path (#2902): assign `offline_access` as an optional client "+
-			"scope and bound its per-client offline-session idle timeout to "+
-			"the given number of seconds. Off by default. A bare "+
-			"`--cli-offline-access` uses "+strconv.Itoa(defaultCLIOfflineSessionIdleSeconds)+
-			" seconds (48h); to pass a custom value use the equals form, "+
-			"e.g. `--cli-offline-access=86400`. Pairs with `meho login "+
-			"--offline`. Security: this enables a long-lived refresh token "+
-			"on the operator's disk — keep the bound tight and prefer the "+
-			"OS keyring for storage")
+	cmd.Flags().IntVar(&cliOfflineSessionIdle, "cli-offline-access",
+		defaultCLIOfflineSessionIdleSeconds,
+		"how many seconds an unused CLI login stays valid: assigns "+
+			"`offline_access` as an optional client scope on the device-code "+
+			"CLI client and sets its `client.offline.session.idle.timeout` "+
+			"attribute, so `meho login` gets a login that renews itself. "+
+			"Default "+strconv.Itoa(defaultCLIOfflineSessionIdleSeconds)+
+			" seconds (48h). Use the equals form for another value, e.g. "+
+			"`--cli-offline-access=86400`. `--cli-offline-access=0` turns "+
+			"the long CLI login off. The refresh token is a long-lived "+
+			"secret on the operator's disk (OS keyring first)")
 	cmd.Flags().IntVar(&mcpOfflineSessionIdle, "mcp-offline-session-idle",
 		defaultMCPOfflineSessionIdleSeconds,
 		"how many seconds an unused MCP login stays valid: sets the "+
 			"`client.offline.session.idle.timeout` attribute on the MCP "+
 			"browser-flow client. Default 48h. Without it the realm's "+
 			"Offline Session Idle applies (30 days by default)")
-	// Optional-value flag: a bare `--cli-offline-access` yields the 48h
-	// default; a custom value MUST use the equals form
-	// (`--cli-offline-access=SECONDS`). pflag's NoOptDefVal treats a
-	// space-separated value as a positional arg, which the cobra.NoArgs
-	// guard above then rejects rather than silently dropping.
+	// Optional-value flag: a bare `--cli-offline-access` also yields the
+	// 48h default, so older scripts keep working; a custom value MUST
+	// use the equals form (`--cli-offline-access=SECONDS`). pflag's
+	// NoOptDefVal treats a space-separated value as a positional arg,
+	// which the cobra.NoArgs guard above then rejects rather than
+	// silently dropping.
 	cmd.Flags().Lookup("cli-offline-access").NoOptDefVal =
 		strconv.Itoa(defaultCLIOfflineSessionIdleSeconds)
 

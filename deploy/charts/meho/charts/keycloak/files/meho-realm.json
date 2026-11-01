@@ -164,7 +164,8 @@
         "pkce.code.challenge.method": "S256",
         "oauth2.device.authorization.grant.enabled": "true",
         "use.refresh.tokens": "true",
-        "client.use.lightweight.access.token.enabled": "false"
+        "client.use.lightweight.access.token.enabled": "false",
+        "client.offline.session.idle.timeout": "172800"
       },
       "redirectUris": [
         "http://127.0.0.1:*"
@@ -178,7 +179,9 @@
         "profile",
         "email"
       ],
-      "optionalClientScopes": [],
+      "optionalClientScopes": [
+        "offline_access"
+      ],
       "protocolMappers": [
         {
           "name": "audience-meho-backplane",

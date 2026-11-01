@@ -898,14 +898,12 @@ func TestBootstrap_AllFourDefaultScopesApplied(t *testing.T) {
 	}
 }
 
-// TestBootstrap_CLIOfflineAccessOptInAssignsScopeAndIdle is the opt-in
-// contract for #2902: when a deployment sets
-// CLIOfflineSessionIdleSeconds (the `--cli-offline-access` flag), the
-// device-code CLI client gains `offline_access` as an OPTIONAL scope
-// (never default) plus a bounded `client.offline.session.idle.timeout`
-// attribute — the same opt-in shape #912 gave the MCP client, but off
-// by default for the CLI.
-func TestBootstrap_CLIOfflineAccessOptInAssignsScopeAndIdle(t *testing.T) {
+// TestBootstrap_CLIOfflineAccessAssignsScopeAndIdle: with
+// CLIOfflineSessionIdleSeconds set (the `--cli-offline-access` flag,
+// 48h by default), the device-code CLI client gains `offline_access`
+// as an OPTIONAL scope (never default) plus a bounded
+// `client.offline.session.idle.timeout` attribute.
+func TestBootstrap_CLIOfflineAccessAssignsScopeAndIdle(t *testing.T) {
 	fake := newFakeKeycloak()
 	opts := fullOpts()
 	opts.CLIOfflineSessionIdleSeconds = 172800
@@ -934,12 +932,12 @@ func TestBootstrap_CLIOfflineAccessOptInAssignsScopeAndIdle(t *testing.T) {
 		}
 	}
 	if !foundOptional {
-		t.Errorf("meho-cli missing optional scope offline_access when "+
-			"opted in; got optionalScopes=%v", fake.optionalScopes[cliUUID])
+		t.Errorf("meho-cli missing optional scope offline_access; "+
+			"got optionalScopes=%v", fake.optionalScopes[cliUUID])
 	}
 
 	// ...and NOT as a default scope (else every device login would mint
-	// a refresh token even without --offline).
+	// an offline token even with --offline=false).
 	for _, sid := range fake.defaultScopes[cliUUID] {
 		if sid == "scope-offline-access" {
 			t.Errorf("meho-cli has offline_access as DEFAULT — must be " +
@@ -954,12 +952,11 @@ func TestBootstrap_CLIOfflineAccessOptInAssignsScopeAndIdle(t *testing.T) {
 	}
 }
 
-// TestBootstrap_DefaultRunLeavesCLIOfflineAccessOff is the
-// off-by-default contract for #2902: a bootstrap run that does NOT opt
-// in must leave the CLI client exactly as before — no offline_access
-// scope and no offline-session-idle attribute — so existing
-// deployments are unaffected.
-func TestBootstrap_DefaultRunLeavesCLIOfflineAccessOff(t *testing.T) {
+// TestBootstrap_ZeroLeavesCLIOfflineAccessOff: with
+// `--cli-offline-access=0` (CLIOfflineSessionIdleSeconds = 0) the CLI
+// client gets no offline_access scope and no offline-session-idle
+// attribute.
+func TestBootstrap_ZeroLeavesCLIOfflineAccessOff(t *testing.T) {
 	fake := newFakeKeycloak()
 	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
@@ -977,13 +974,41 @@ func TestBootstrap_DefaultRunLeavesCLIOfflineAccessOff(t *testing.T) {
 	}
 	for _, sid := range fake.optionalScopes[cliUUID] {
 		if sid == "scope-offline-access" {
-			t.Errorf("default run assigned offline_access to meho-cli; " +
-				"must be opt-in via --cli-offline-access")
+			t.Errorf("--cli-offline-access=0 assigned offline_access " +
+				"to meho-cli")
 		}
 	}
 	if _, ok := cliClient.Attributes["client.offline.session.idle.timeout"]; ok {
-		t.Errorf("default run set client.offline.session.idle.timeout on " +
-			"meho-cli; must be opt-in only")
+		t.Errorf("--cli-offline-access=0 set " +
+			"client.offline.session.idle.timeout on meho-cli")
+	}
+}
+
+// TestBootstrapClientsCmd_CLIOfflineAccessFlagDefault: the CLI client
+// gets the long login by default (48h); a bare flag means the same.
+func TestBootstrapClientsCmd_CLIOfflineAccessFlagDefault(t *testing.T) {
+	f := newBootstrapClientsCmd().Flags().Lookup("cli-offline-access")
+	if f == nil {
+		t.Fatalf("--cli-offline-access flag not registered")
+	}
+	if f.DefValue != "172800" {
+		t.Errorf("--cli-offline-access default = %q, want 172800", f.DefValue)
+	}
+	if f.NoOptDefVal != "172800" {
+		t.Errorf("bare --cli-offline-access = %q, want 172800", f.NoOptDefVal)
+	}
+}
+
+// TestBootstrapClientsCmd_CLIOfflineAccessZeroParses: `=0` is accepted
+// and turns the long CLI login off.
+func TestBootstrapClientsCmd_CLIOfflineAccessZeroParses(t *testing.T) {
+	cmd := newBootstrapClientsCmd()
+	if err := cmd.Flags().Parse([]string{"--cli-offline-access=0"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got, err := cmd.Flags().GetInt("cli-offline-access")
+	if err != nil || got != 0 {
+		t.Errorf("--cli-offline-access=0 parsed as %d (err %v), want 0", got, err)
 	}
 }
 

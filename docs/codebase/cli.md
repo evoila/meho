@@ -524,12 +524,17 @@ Authorization Grant (RFC 8628). End-to-end shape:
    `Config.DeviceAuth`, the CLI POSTs `client_id` + `scope` (default
    `openid`) to the device-authorization endpoint and receives a
    `device_code`, `user_code`, `verification_uri`, and `interval`.
-   `--offline` appends the OIDC `offline_access` scope (ensuring
-   `openid` alongside) so Keycloak mints a long-lived refresh token
-   that survives the SSO idle timeout — requires the `meho-cli` client
-   to allow `offline_access` (see `bootstrap-clients
-   --cli-offline-access`), else the request fails with `invalid_scope`
-   (#2902).
+   `--offline` (on by default since #5516) appends the OIDC
+   `offline_access` scope (ensuring `openid` alongside) so Keycloak
+   mints a long-lived refresh token that survives the SSO idle timeout.
+   `deviceLogin` in `cmd/login.go` does this. When the login server
+   answers `invalid_scope` (a realm whose `meho-cli` does not offer the
+   scope; `auth.IsInvalidScope` reads it from the error body), the CLI
+   prints one line (`offlineFallbackNote`) to stderr and runs the
+   device request again without the scope. The prompt appears only
+   after a request is accepted, so the person sees one prompt. A scope
+   the person named in `--scope` is never dropped. `--offline=false`
+   asks for the short login.
 4. **Prompt.** The CLI prints the verification URL and `user_code` to
    stdout. The operator opens the URL on any device with a browser,
    signs in, and approves the request. (Browser auto-launch is
@@ -696,8 +701,8 @@ still holds for the same `(service, user)` — a smaller earlier
 login that fit under the cap — so it can't linger as a stale shadow
 (#3320).
 
-An `offline_access` refresh token (from `meho login --offline`, #2902)
-is not time-boxed and rides in the same bundle, so on macOS it makes
+An `offline_access` refresh token (from `meho login`, the default
+since #5516) is not time-boxed and rides in the same bundle, so on macOS it makes
 the ~4 KiB Keychain cap — and therefore the 0600 credentials-file
 fallback above — the likely storage backend; the CLI's on-disk posture
 then converges with gcloud's long-lived-refresh-token model. Keep the
@@ -734,7 +739,7 @@ the still-valid refresh token is preserved and the command surfaces
 a `meho login` prompt. When the IdP rejects the refresh as
 `invalid_grant` (session expired / ended), `meho status` exits
 `auth_expired` with a "session expired, rerun `meho login`" message
-(and a `--offline` hint) rather than the misleading `unreachable`;
+rather than the misleading `unreachable`;
 when no refresh token is present, the remediation also names the
 `MEHO_KEYRING_DISABLE=1` escape hatch for the keyring/file-mismatch
 case.
@@ -2771,12 +2776,12 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      client (`meho-mcp`) as **optional** (not default — only flows
      that ask for a refresh token mint one); this closes the W7 wall
      of `deploy/values-examples/README.md` (#912). The CLI device-code
-     client (`meho-cli`) gets the same optional scope only when a
-     deployment opts in via `--cli-offline-access` (off by default,
-     #2902): the flag assigns `offline_access` as optional AND sets the
-     per-client `client.offline.session.idle.timeout` attribute
-     (default 48h = 172800s) so an idle offline token expires fast.
-     Operators then request it per-login with `meho login --offline`.
+     client (`meho-cli`) gets the same optional scope by default
+     (#5516): `--cli-offline-access` (default 48h = 172800s) assigns
+     `offline_access` as optional AND sets the per-client
+     `client.offline.session.idle.timeout` attribute so an idle offline
+     token expires fast. `--cli-offline-access=0` leaves the CLI client
+     without it. `meho login` asks for the scope by default.
      The MCP client always gets `client.offline.session.idle.timeout`
      (default 48h = 172800s, change it with
      `--mcp-offline-session-idle=<seconds>`, #4001). Without it an MCP

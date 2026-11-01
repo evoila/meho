@@ -85,19 +85,15 @@ type BootstrapOptions struct {
 	MCPRedirectURIs []string
 	MCPWebOrigins   []string
 
-	// CLIOfflineSessionIdleSeconds opts the device-code CLI client into
-	// the long-lived offline-token path (#2902). When > 0, bootstrap
-	// assigns the realm-built-in `offline_access` scope to the CLI
-	// client as an *optional* scope (so `meho login --offline` can mint
-	// a refresh token that survives the SSO idle timeout) and sets the
-	// per-client `client.offline.session.idle.timeout` attribute to
-	// this many seconds, bounding how long an unused offline token
-	// stays valid. Zero (the default) preserves the historical posture:
-	// no offline_access on the CLI client at all — a stolen device-code
-	// refresh token has worse blast-radius than re-running the device
-	// dance, so the offline path is strictly opt-in and off by default.
-	// Mirrors the opt-in shape #912 gave the MCP client, bounded for
-	// CLI use.
+	// CLIOfflineSessionIdleSeconds gives the device-code CLI client a
+	// long login. When > 0, bootstrap assigns the realm-built-in
+	// `offline_access` scope to the CLI client as an *optional* scope
+	// (so `meho login` can get a refresh token that outlives the SSO
+	// idle timeout) and sets the per-client
+	// `client.offline.session.idle.timeout` attribute to this many
+	// seconds, which bounds how long an unused login stays valid. Zero
+	// means no offline_access on the CLI client. The
+	// `--cli-offline-access` flag defaults to 48h; `=0` turns it off.
 	CLIOfflineSessionIdleSeconds int
 
 	// MCPOfflineSessionIdleSeconds sets the per-client
@@ -219,9 +215,8 @@ func (o BootstrapOptions) validate() error {
 	}
 	if o.CLIOfflineSessionIdleSeconds < 0 {
 		return errors.New(
-			"--cli-offline-access seconds must be a positive number of " +
-				"seconds (omit the flag to leave the CLI client " +
-				"offline-token-free)")
+			"--cli-offline-access must be a positive number of " +
+				"seconds, or 0 to turn the long CLI login off")
 	}
 	if o.MCPOfflineSessionIdleSeconds < 0 {
 		return errors.New(
@@ -413,15 +408,11 @@ func mcpClientScopes() []clientScopeRep {
 // `offline_access` in their scope parameter should mint a refresh
 // token. Listing it as a default would mint refresh tokens into every
 // browser-flow login regardless of whether the client asked for one.
-// The CLI device-code client (`meho-cli`) gets `offline_access` only
-// when a deployment opts in via
-// BootstrapOptions.CLIOfflineSessionIdleSeconds (the
-// `--cli-offline-access` flag) — off by default, and paired with a
-// tight per-client offline-session idle timeout when on (#2902). A
-// stolen device-code refresh token has worse blast-radius than a fresh
-// dance prompt, so the offline path stays opt-in and bounded rather
-// than the always-on default; see requiredCLIOptionalScopes and
-// desiredCLIClient.
+// The CLI device-code client (`meho-cli`) gets `offline_access` when
+// BootstrapOptions.CLIOfflineSessionIdleSeconds is > 0 (the
+// `--cli-offline-access` flag, 48h by default), always paired with a
+// per-client offline-session idle timeout; see
+// requiredCLIOptionalScopes and desiredCLIClient.
 func requiredMCPOptionalScopes() []string {
 	scopes := []string{"offline_access"}
 	for _, s := range mcpClientScopes() {
@@ -431,13 +422,12 @@ func requiredMCPOptionalScopes() []string {
 }
 
 // requiredCLIOptionalScopes returns the optional client-scopes pinned
-// on the device-code CLI client. Empty unless the deployment opted
-// into the offline-token path (CLIOfflineSessionIdleSeconds > 0), in
-// which case it is the realm-built-in `offline_access` scope — the
-// same opt-in shape #912 gave the MCP client, but off by default for
-// the CLI and paired with a bounded offline-session idle timeout (see
-// desiredCLIClient). Optional, never default: a refresh token is
-// minted only when `meho login --offline` explicitly requests it.
+// on the device-code CLI client: the realm-built-in `offline_access`
+// scope when CLIOfflineSessionIdleSeconds > 0, paired with a bounded
+// offline-session idle timeout (see desiredCLIClient), else none.
+// Optional, never default: a refresh token that outlives the SSO idle
+// timeout is minted only when `meho login` asks for `offline_access`
+// (it does by default; `--offline=false` stops it).
 func (o BootstrapOptions) requiredCLIOptionalScopes() []string {
 	if o.CLIOfflineSessionIdleSeconds > 0 {
 		return []string{"offline_access"}
@@ -488,10 +478,9 @@ func (o BootstrapOptions) desiredCLIClient() *clientRep {
 		WebOrigins:          []string{},
 		DefaultClientScopes: append([]string{"profile", "email"}, requiredDefaultScopes()...),
 	}
-	// Opt-in offline-token path (#2902): assign offline_access as an
-	// OPTIONAL scope on the CLI client and bound the per-client
-	// offline-session idle timeout. Off by default — see
-	// requiredCLIOptionalScopes. The actual scope assignment is done by
+	// Long CLI login: assign offline_access as an OPTIONAL scope on the
+	// CLI client and bound the per-client offline-session idle timeout.
+	// On by default through the flag — see requiredCLIOptionalScopes. The actual scope assignment is done by
 	// reconcileOptionalScopes in Bootstrap; setting the field here keeps
 	// the representation consistent with a subsequent GET/PUT.
 	if scopes := o.requiredCLIOptionalScopes(); len(scopes) > 0 {
@@ -571,9 +560,8 @@ type Result struct {
 //     `offline_access`, `mcp:read`, `mcp:execute` and `mcp:admin` as
 //     *optional* client scopes (the three `mcp:*` scopes are created in
 //     the realm first if missing). The CLI
-//     device-code client gets the same optional scope only when a
-//     deployment opts in via --cli-offline-access (off by default,
-//     #2902); see RDC Wall W7 in deploy/values-examples/README.md.
+//     device-code client gets `offline_access` too, with a 48h idle
+//     limit, unless --cli-offline-access=0.
 //     The MCP client also gets `client.offline.session.idle.timeout`
 //     (48h unless --mcp-offline-session-idle says otherwise).
 //  6. The five MEHO role groups with their attributes (roleGroups),
@@ -651,10 +639,8 @@ func Bootstrap(
 		return nil, fmt.Errorf("reconcile CLI default scopes: %w", err)
 	}
 	res.MapperEventsLog = append(res.MapperEventsLog, scopeEvents...)
-	// Opt-in only (#2902): the CLI client gets offline_access as an
-	// optional scope solely when a deployment set --cli-offline-access.
-	// When off (the default) this call is skipped entirely, so the
-	// default provisioning path makes no extra Keycloak API calls.
+	// The CLI client gets offline_access as an optional scope unless
+	// --cli-offline-access=0. When off, this call is skipped entirely.
 	if cliOptional := opts.requiredCLIOptionalScopes(); len(cliOptional) > 0 {
 		cliOptionalEvents, oerr := reconcileOptionalScopes(
 			ctx, c, cliUUID, cliOptional)
@@ -789,14 +775,14 @@ func dryRunSummary(
 		opts.MCPOfflineSessionIdleSeconds)
 	if cliOptional := opts.requiredCLIOptionalScopes(); len(cliOptional) > 0 {
 		fmt.Fprintf(out, "==> optional client scopes on the CLI device-code "+
-			"client (--cli-offline-access opt-in; offline idle bound %ds):\n",
+			"client (offline idle bound %ds; --cli-offline-access=0 turns it off):\n",
 			opts.CLIOfflineSessionIdleSeconds)
 		for _, s := range cliOptional {
 			fmt.Fprintf(out, "    - %s\n", s)
 		}
 	} else {
 		fmt.Fprintln(out, "==> CLI device-code client: offline_access not "+
-			"assigned (opt in with --cli-offline-access)")
+			"assigned (--cli-offline-access=0)")
 	}
 	if !opts.SkipUserProvisioning {
 		fmt.Fprintf(out, "==> admin user: %s (member of %s and %s)\n",

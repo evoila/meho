@@ -179,7 +179,7 @@ at session start; restart the session after edits:
       "oauth": {
         "clientId": "meho-mcp",
         "callbackPort": 8456,
-        "scopes": "mcp:read mcp:execute"
+        "scopes": "mcp:read mcp:execute offline_access"
       }
     }
   }
@@ -193,6 +193,11 @@ at session start; restart the session after edits:
 - **`callbackPort`** fixes the loopback port the authorization-code
   callback returns to. It must match a registered redirect URI on the
   `meho-mcp` client (next section).
+- **`offline_access`** in `scopes` gives a long login that renews
+  itself: it ends after 48 hours without use, or after 7 days at most.
+  Without it, the login ends after 30 minutes without use (the realm's
+  default). See
+  [How long each login lasts](../install/keycloak-realm.md#how-long-each-login-lasts).
 
 ## Work in one tenant
 

@@ -7089,7 +7089,9 @@ type OperationRunStatus string
 // “result“ carries the full persisted “OperationResult“ envelope once
 // the run reaches “succeeded“ (the dropped-response-class fix); “error“
 // carries the run-crash / reaper reason on a “failed“ run. Both are
-// “None“ while the run is still “pending“ / “running“.
+// “None“ while the run is still “pending“ / “running“. “result“ is
+// also “None“ for anyone but the person who started the run
+// (:func:`~meho_backplane.operations.operation_run_service.run_result_visible_to`).
 type OperationRunStatusResponse struct {
 	ApprovalRequestId *openapi_types.UUID     `json:"approval_request_id"`
 	ConnectorId       string                  `json:"connector_id"`
@@ -12152,6 +12154,7 @@ type UiAuthCallbackUiAuthCallbackGetParams struct {
 // UiAuthLoginUiAuthLoginGetParams defines parameters for UiAuthLoginUiAuthLoginGet.
 type UiAuthLoginUiAuthLoginGetParams struct {
 	ReturnTo *string `form:"return_to,omitempty" json:"return_to,omitempty"`
+	Reason   *string `form:"reason,omitempty" json:"reason,omitempty"`
 }
 
 // UiBroadcastFeedUiBroadcastGetParams defines parameters for UiBroadcastFeedUiBroadcastGet.
@@ -38666,6 +38669,22 @@ func NewUiAuthLoginUiAuthLoginGetRequest(server string, params *UiAuthLoginUiAut
 		if params.ReturnTo != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "return_to", runtime.ParamLocationQuery, *params.ReturnTo); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Reason != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "reason", runtime.ParamLocationQuery, *params.Reason); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

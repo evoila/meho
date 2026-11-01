@@ -3,13 +3,17 @@
 
 """Typed-op metadata + registrar for :class:`SrmConnector`.
 
-Two reads ship here, on SRM 8.8, Live Site Recovery 9.0 and VCF 9.1
-Protection and Recovery:
+Two reads are defined here, on SRM 8.8, Live Site Recovery 9.0 and VCF
+9.1 Protection and Recovery:
 
 * ``srm.about`` -- ``GET /api/rest/srm/v2/server/info``: the server's
   name, status, version, build and paired vCenter;
 * ``srm.api_file.get`` -- ``GET`` one of the two API files the appliance
   serves; the body lives in :mod:`meho_backplane.connectors.vmware_shared.dr_api_file`.
+
+The pairing, recovery plan, protection group, issue and history reads are
+defined in :mod:`meho_backplane.connectors.srm.recovery_ops` and joined
+into :data:`SRM_TYPED_OPS` here.
 
 The appliance setup operations (``srm.appliance.*`` and
 ``srm.storage_adapter.install``) are defined in
@@ -31,6 +35,10 @@ from meho_backplane.connectors.srm.appliance_ops import (
     SETUP_WHEN_TO_USE_BY_GROUP,
 )
 from meho_backplane.connectors.srm.appliance_ops_more import APPLIANCE_MORE_TYPED_OPS
+from meho_backplane.connectors.srm.recovery_ops import (
+    RECOVERY_TYPED_OPS,
+    RECOVERY_WHEN_TO_USE_BY_GROUP,
+)
 from meho_backplane.connectors.vmware_shared.dr_rest_schemas import (
     API_FILE_NEXT_STEP,
     API_FILE_OUTPUT_SHAPE,
@@ -53,7 +61,6 @@ __all__ = [
 _GROUP_SERVER = "srm-server"
 _GROUP_API_DOCS = "srm-api-docs"
 
-
 #: Curated ``when_to_use`` text per group. Says what the group holds; it
 #: makes no claim about the safety of the whole group.
 SRM_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
@@ -69,6 +76,7 @@ SRM_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "its size, SHA-256 and the SRM version, with the text in parts behind a "
         "result handle, so a vendor API file can be pinned and compared. One read."
     ),
+    **RECOVERY_WHEN_TO_USE_BY_GROUP,
     **SETUP_WHEN_TO_USE_BY_GROUP,
 }
 
@@ -153,6 +161,7 @@ _API_FILE_GET = SrmTypedOp(
 SRM_TYPED_OPS: tuple[SrmTypedOp, ...] = (
     _ABOUT,
     _API_FILE_GET,
+    *RECOVERY_TYPED_OPS,
     *APPLIANCE_TYPED_OPS,
     *APPLIANCE_MORE_TYPED_OPS,
 )

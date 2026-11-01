@@ -491,7 +491,7 @@ async def test_completed_handler_reducer_failure_keeps_committed_audit_receipt(
 
     The reducer cannot change the completed upstream action into a caller
     error. The response is unavailable, while its one committed audit row
-    retains the raw payload and redaction provenance needed to investigate.
+    keeps the stored payload and redaction provenance needed to investigate.
     """
     raw_payload = {"credential": "raw-delivery-secret", "state": "complete"}
     expected_raw, expected_manifest, expected_policy = _install_preserved_redaction(
@@ -538,7 +538,10 @@ async def test_completed_handler_reducer_failure_keeps_committed_audit_receipt(
     assert row.id == result.audit_id
     assert row.status_code == 200
     assert row.payload["result_status"] == "ok"
-    assert row.raw_payload == expected_raw
+    # The value the redaction hid is stored as a keyed fingerprint.
+    assert row.raw_payload["state"] == expected_raw["state"]
+    assert row.raw_payload["credential"].startswith("[FINGERPRINT:hmac-sha256:")
+    assert "raw-delivery-secret" not in str(row.raw_payload)
     assert row.redaction_manifest == expected_manifest
     assert row.payload["redaction_policy_id"] == expected_policy
 

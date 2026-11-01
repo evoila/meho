@@ -10,11 +10,12 @@ library back. Settings that are already so give ``unchanged``.
 
 Passwords come only as Vault references (``password_ref``,
 ``current_password_ref``). MEHO reads them under the caller's identity just
-before the call. The step check and an approval request name the
-references, never the values, and no answer holds a password. The
-operation's ``password`` tag keeps the vendor request bodies out of the
-flight recorder. The change goes through the shared write check
-(:func:`._library_capture.governed_send`).
+after the shared write check (:func:`._library_capture.check_step`) passes,
+just before the call. The step check and an approval request name the
+references, never the values, and no answer holds a password: a failed
+change keeps only the HTTP status and vCenter's error type, not its error
+text. The operation's ``password`` tag keeps the vendor request bodies out
+of the flight recorder.
 """
 
 from __future__ import annotations
@@ -29,9 +30,10 @@ from meho_backplane.connectors._shared.vault_creds import (
     strip_credential_value,
 )
 from meho_backplane.connectors.vmware_rest.composites._library_capture import (
+    check_step,
     failed_answer,
-    governed_send,
     local_library,
+    send_step,
 )
 from meho_backplane.connectors.vmware_rest.composites._library_checks import (
     OP_GET_LIBRARY,
@@ -224,37 +226,45 @@ async def content_library_publish_set_composite(
     if stop is not None or plan is None:
         return stop or answer
     library_id = str(answer["library_id"])
+    gate = await check_step(
+        connector,
+        target,
+        operator,
+        OP_UPDATE_LOCAL_LIBRARY,
+        params=plan.check_params(library_id),
+    )
+    if gate is not None:
+        return gate
+    # The passwords are read only now, after the check passed, and leave the
+    # body dict when the call ends.
     info = plan.info()
-    if plan.password_ref is not None:
-        info["password"] = await _read_password(target, operator, plan.password_ref, "password_ref")
-    if plan.current_password_ref is not None:
-        info["current_password"] = await _read_password(
-            target, operator, plan.current_password_ref, "current_password_ref"
-        )
     try:
-        gate, _ = await governed_send(
+        if plan.password_ref is not None:
+            info["password"] = await _read_password(
+                target, operator, plan.password_ref, "password_ref"
+            )
+        if plan.current_password_ref is not None:
+            info["current_password"] = await _read_password(
+                target, operator, plan.current_password_ref, "current_password_ref"
+            )
+        await send_step(
             connector,
             target,
             operator,
             OP_UPDATE_LOCAL_LIBRARY,
             path_params={"libraryId": library_id},
             body={"publish_info": info},
-            check_params=plan.check_params(library_id),
         )
     except httpx.HTTPError as exc:
+        # vCenter's error text can repeat what was sent, so it is not kept.
+        failed = failed_answer(answer, exc, "The change", withhold=True)
         status, _ = _parse_vsphere_error(exc)
         if status == 400:
-            return {
-                **failed_answer(answer, exc, "The change"),
-                "status": "refused",
-                "issues": [],
-            }
-        return failed_answer(answer, exc, "The change")
+            return {**failed, "status": "refused", "issues": []}
+        return failed
     finally:
         info.pop("password", None)
         info.pop("current_password", None)
-    if gate is not None:
-        return gate
     local = await get_or_none(
         connector, target, operator, OP_GET_LOCAL_LIBRARY, {"libraryId": library_id}
     )

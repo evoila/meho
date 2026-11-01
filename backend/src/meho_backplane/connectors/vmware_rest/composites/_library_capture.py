@@ -18,7 +18,9 @@ comes again with the same token. The VM-template create takes no such token.
 :func:`governed_send` is the write step of the capture, the publish change
 (:mod:`._library_publish`) and the VM export (:mod:`._library_export`): the
 shared write check of the composites, plus request headers and check
-parameters that differ from the body.
+parameters that differ from the body. :func:`check_step` and
+:func:`send_step` are its two halves, for a change that must read a secret
+only after the check passes.
 """
 
 from __future__ import annotations
@@ -64,6 +66,7 @@ from meho_backplane.operations._preview import (
     preview_failure_reason,
     register_preview_builder,
 )
+from meho_backplane.operations._vendor_text import VENDOR_TEXT_WITHHELD
 from meho_backplane.operations.composite import enforce_subop_policy
 
 if TYPE_CHECKING:
@@ -75,12 +78,14 @@ __all__ = [
     "CAPTURE_COMPOSITE",
     "OP_CAPTURE_OVF",
     "capture_ovf",
+    "check_step",
     "failed_answer",
     "governed_send",
     "item_answer",
     "item_named",
     "local_library",
     "ovf_messages",
+    "send_step",
     "vm_capture_to_library_composite",
 ]
 
@@ -107,6 +112,54 @@ _SUB_OPS_VM_CAPTURE_TO_LIBRARY: Final[tuple[str, ...]] = (
 )
 
 
+async def check_step(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    op_id: str,
+    *,
+    params: dict[str, Any],
+) -> OperationResult | None:
+    """Run the shared write check for one step; the gate, or ``None`` to go on.
+
+    *params* is what the check and an approval request show.
+    """
+    return await enforce_subop_policy(
+        operator=operator,
+        connector_id=_step_connector_id(connector),
+        op_id=op_id,
+        safety_level=_write._WRITE_SAFETY_LEVEL,
+        requires_approval=_write._WRITE_REQUIRES_APPROVAL,
+        target=target,
+        params=params,
+    )
+
+
+async def send_step(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    op_id: str,
+    *,
+    path_params: dict[str, Any],
+    body: dict[str, Any],
+    headers: dict[str, str] | None = None,
+    timeout: Any = httpx.USE_CLIENT_DEFAULT,
+) -> Any:
+    """Send one write step on the connector session, after :func:`check_step`."""
+    method, path, _ = _split_sub_op(op_id, path_params)
+    mounted = await connector.mount_op_path(target, path, operator)
+    return await connector._post_json(
+        target,
+        mounted,
+        operator=operator,
+        verb=method,
+        json=body,
+        extra_headers=headers,
+        timeout=timeout,
+    )
+
+
 async def governed_send(
     connector: VmwareRestConnector,
     target: Any,
@@ -123,31 +176,27 @@ async def governed_send(
 
     The same check as :func:`._write._write_sub_op`, with two more inputs:
     *check_params* is what the check and an approval request show (default:
-    the path parameters and the body), so a body that holds a password can
-    show its Vault reference instead; *headers* go to vCenter with the call
+    the path parameters and the body); *headers* go to vCenter with the call
     (the ``Client-Token``). Returns ``(gate, None)`` when the step waits for
     approval or is denied, else ``(None, payload)``.
     """
-    gate = await enforce_subop_policy(
-        operator=operator,
-        connector_id=_step_connector_id(connector),
-        op_id=op_id,
-        safety_level=_write._WRITE_SAFETY_LEVEL,
-        requires_approval=_write._WRITE_REQUIRES_APPROVAL,
-        target=target,
+    gate = await check_step(
+        connector,
+        target,
+        operator,
+        op_id,
         params=check_params if check_params is not None else {**path_params, **body},
     )
     if gate is not None:
         return gate, None
-    method, path, _ = _split_sub_op(op_id, path_params)
-    mounted = await connector.mount_op_path(target, path, operator)
-    payload = await connector._post_json(
+    payload = await send_step(
+        connector,
         target,
-        mounted,
-        operator=operator,
-        verb=method,
-        json=body,
-        extra_headers=headers,
+        operator,
+        op_id,
+        path_params=path_params,
+        body=body,
+        headers=headers,
         timeout=timeout,
     )
     return None, payload
@@ -166,9 +215,24 @@ def item_answer(item_id: str, model: dict[str, Any] | None) -> dict[str, Any] | 
     }
 
 
-def failed_answer(answer: dict[str, Any], exc: httpx.HTTPError, what: str) -> dict[str, Any]:
-    _status, error_type = _parse_vsphere_error(exc)
-    detail = _vsphere_fault_detail(exc)
+def failed_answer(
+    answer: dict[str, Any], exc: httpx.HTTPError, what: str, *, withhold: bool = False
+) -> dict[str, Any]:
+    """The ``failed`` answer for a vCenter fault.
+
+    With *withhold*, the vendor's text is replaced by
+    :data:`~meho_backplane.operations._vendor_text.VENDOR_TEXT_WITHHELD`, and
+    only the HTTP status and vCenter's error type stay. Use it for a step
+    that sends a secret.
+    """
+    status, error_type = _parse_vsphere_error(exc)
+    if withhold:
+        kind = f"HTTP {status}" if status is not None else type(exc).__name__
+        if error_type:
+            kind = f"{kind} ({error_type})"
+        detail = f"{kind}: {VENDOR_TEXT_WITHHELD}"
+    else:
+        detail = _vsphere_fault_detail(exc)
     return {
         **answer,
         "status": "failed",

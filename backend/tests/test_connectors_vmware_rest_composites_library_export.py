@@ -72,6 +72,7 @@ from meho_backplane.connectors.vmware_rest.composites._register import (
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
 from meho_backplane.operations._validate import validate_params
+from meho_backplane.operations._vendor_text import VENDOR_TEXT_WITHHELD
 
 _VC = "https://vc.example.test"
 _DEST = "https://store.example.test/exports/"
@@ -121,9 +122,11 @@ class _Target:
     host = "vc.example.test"
 
 
-def _http_error(status: int, error_type: str | None = None) -> httpx.HTTPStatusError:
+def _http_error(
+    status: int, error_type: str | None = None, message: str = "vCenter says no"
+) -> httpx.HTTPStatusError:
     request = httpx.Request("POST", f"{_VC}/api/x")
-    body = {"error_type": error_type, "messages": [{"default_message": "vCenter says no"}]}
+    body = {"error_type": error_type, "messages": [{"default_message": message}]}
     response = httpx.Response(status, json=body, request=request)
     return httpx.HTTPStatusError(f"HTTP {status}", request=request, response=response)
 
@@ -563,8 +566,63 @@ async def test_publish_vendor_fault(gate: _Gate, status: int, expected: str) -> 
     )
     assert out["status"] == expected
     assert out["error_type"] == "INVALID_ARGUMENT"
-    assert "vCenter says no" in out["guidance"]
+    assert f"HTTP {status} (INVALID_ARGUMENT)" in out["guidance"]
+    assert VENDOR_TEXT_WITHHELD in out["guidance"]
+    assert "vCenter says no" not in json.dumps(out)
     _check(PUBLISH_SET_RESPONSE_SCHEMA, out)
+
+
+@pytest.mark.parametrize(("status", "expected"), [(400, "refused"), (500, "failed")])
+async def test_publish_vendor_fault_keeps_no_password(
+    gate: _Gate, status: int, expected: str
+) -> None:
+    responses = _publish_responses(_ON_BASIC, _ON_BASIC)
+    responses[f"PATCH {_GET_LOCAL}"] = _http_error(
+        status, "INVALID_ARGUMENT", f"bad password {_PASSWORD}, current {_CURRENT}"
+    )
+    conn = _Connector(responses)
+    out = await _run(
+        content_library_publish_set_composite,
+        conn,
+        {
+            "library_id": _LIB,
+            "published": True,
+            "password_ref": "<vault-path-of-password>",
+            "current_password_ref": "<vault-path-of-current-password>",
+        },
+    )
+    assert out["status"] == expected
+    assert out["error_type"] == "INVALID_ARGUMENT"
+    assert f"HTTP {status}" in out["guidance"]
+    _no_secrets(out)
+    _check(PUBLISH_SET_RESPONSE_SCHEMA, out)
+
+
+async def test_publish_reads_no_password_when_the_step_waits(
+    gate: _Gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reads: list[str] = []
+
+    async def fake_password(target: Any, operator: Any, *, param: str) -> dict[str, Any]:
+        reads.append(param)
+        return {"password": _PASSWORD}
+
+    monkeypatch.setattr(_library_publish, "load_param_secret_data", fake_password)
+    gate.park = {"PATCH:/content/local-library/{libraryId}"}
+    conn = _Connector(_publish_responses(_OFF, _OFF))
+    out = await _run(
+        content_library_publish_set_composite,
+        conn,
+        {
+            "library_id": _LIB,
+            "published": True,
+            "authentication": "BASIC",
+            "password_ref": "<vault-path-of-password>",
+        },
+    )
+    assert isinstance(out, OperationResult)
+    assert reads == []
+    assert "PATCH" not in [c["method"] for c in conn.calls]
 
 
 # ===========================================================================

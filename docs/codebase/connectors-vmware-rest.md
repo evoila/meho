@@ -3477,17 +3477,21 @@ a version.
 | `vmware.composite.vm.export_ovf` | Captures a VM into a temporary OVF item (or uses an OVF item), copies its files like `item.export`, then deletes the temporary item. | same as `item.export`, plus `vm` and `temporary_item` | `dangerous`, approval | 8.0, 9.x |
 
 Code: the two lists are in `typed_ops_content_library_list.py`. The capture
-and the shared write step `governed_send` are in `composites/_library_capture.py`,
+and the shared write step `governed_send` (with its halves `check_step` and
+`send_step`) are in `composites/_library_capture.py`,
 the publish change in `composites/_library_publish.py`, the two exports in
 `composites/_library_export.py`, and the download session and clean-up in
 `composites/_library_export_session.py`. Schemas and AI guidance are in
 `composites/_library_export_schemas.py`.
 
-**Write check.** The capture and the publish change go through
-`governed_send`: the same step check as `_write_sub_op`, plus request
-headers (the `Client-Token`) and check parameters that differ from the body.
-The publish change shows the Vault references in the step check and in an
-approval request, never the passwords. Its `password` tag, and the `token`
+**Write check.** The capture goes through `governed_send`: the same step
+check as `_write_sub_op`, plus request headers (the `Client-Token`) and check
+parameters that differ from the body. The publish change uses its two halves,
+`check_step` and `send_step`, so it reads the passwords from Vault only after
+the step check passes. It shows the Vault references in the step check and in
+an approval request, never the passwords. When the change fails, its answer
+keeps the HTTP status and vCenter's error type, not vCenter's error text, like
+other operations that send a secret. Its `password` tag, and the `token`
 tag of the two exports, keep the vendor bodies out of the flight recorder.
 The download-session calls change no vCenter object, so they run without a
 step check, like the library import of `library_download.py`.

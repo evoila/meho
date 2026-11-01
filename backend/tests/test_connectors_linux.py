@@ -60,8 +60,10 @@ from meho_backplane.connectors.linux.ops import (
     normalise_json_rows,
 )
 from meho_backplane.connectors.linux.ops_file import (
+    ReadOutput,
     build_file_read_command,
     build_log_tail_command,
+    parse_read_output,
 )
 from meho_backplane.connectors.linux.ops_firewall import parse_firewall_output
 from meho_backplane.connectors.linux.ops_host import (
@@ -414,9 +416,18 @@ async def test_about_unreachable_raises_connector_error() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _hex_path(real_path: str) -> str:
+    """The opened file's path as the read command prints it: readlink's output in hex."""
+    return (real_path + "\n").encode("utf-8").hex()
+
+
 def _opened(real_path: str, content: str, size: int | str = -1) -> Any:
     """The answer of the read command: the opened file's path, its size, then the content."""
-    return _proc(stdout=f"{real_path}\n{size}\n===MEHO_CONTENT===\n{content}")
+    return _proc(stdout=f"{_hex_path(real_path)}\n{size}\n===MEHO_CONTENT===\n{content}")
+
+
+#: A symlink target that holds line breaks, a size line and the content marker.
+_PATH_WITH_MARKER_LINES = "/var/lib/app/public\n1\n===MEHO_CONTENT===\nprivate.key"
 
 
 @pytest.mark.asyncio
@@ -535,6 +546,23 @@ async def test_file_read_checks_the_file_it_opened_not_the_typed_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_file_read_refuses_a_real_path_with_line_breaks() -> None:
+    """A reported path is decoded whole; one with line breaks in it is refused.
+
+    The host prints the path of the opened file as one hex line, so a
+    path that holds line breaks, a size line and the content marker stays
+    one line. Decoded, it holds control characters and is refused; the
+    content the host sent never leaves the handler.
+    """
+    connector = LinuxSshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _opened(_PATH_WITH_MARKER_LINES, "key-body\n", 9)
+        with pytest.raises(PathConfinementError):
+            await connector.file_read(_TARGET, {"path": "/var/lib/app/link"})
+    assert mock_cmd.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_file_read_refuses_a_file_deleted_while_open() -> None:
     connector = LinuxSshConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
@@ -551,10 +579,31 @@ async def test_file_read_refuses_a_file_deleted_while_open() -> None:
         _proc(stdout=""),
         _proc(stdout="42\n===MEHO_CONTENT===\nbody\n"),
         _proc(stdout="\n42\n===MEHO_CONTENT===\nbody\n"),
-        _proc(stdout="/var/lib/a\n/var/lib/b\n42\n===MEHO_CONTENT===\nbody\n"),
-        _proc(stdout="/var/lib/a\n42\n===MEHO_CONTENT===\nbody\n", exit_status=1),
+        _proc(
+            stdout=f"{_hex_path('/var/lib/a')}\n{_hex_path('/var/lib/b')}\n42\n===MEHO_CONTENT===\nbody\n"
+        ),
+        _proc(stdout=f"{_hex_path('/var/lib/a')}\n42\n===MEHO_CONTENT===\nbody\n", exit_status=1),
+        _proc(stdout="/var/lib/a\n42\n===MEHO_CONTENT===\nbody\n"),
+        _proc(stdout=f"{b'/var/lib/a'.hex()}\n42\n===MEHO_CONTENT===\nbody\n"),
+        _proc(stdout=f"{_hex_path('')}\n42\n===MEHO_CONTENT===\nbody\n"),
+        _proc(stdout=f"{_hex_path('/var/lib/a\tb')}\n42\n===MEHO_CONTENT===\nbody\n"),
+        _proc(stdout=f"{_hex_path('/var/lib/a\x7fb')}\n42\n===MEHO_CONTENT===\nbody\n"),
+        _proc(stdout=f"{b'/var/lib/\xff\n'.hex()}\n42\n===MEHO_CONTENT===\nbody\n"),
     ],
-    ids=["error-exit", "empty", "no-path", "empty-path", "two-paths", "path-with-error-exit"],
+    ids=[
+        "error-exit",
+        "empty",
+        "no-path",
+        "empty-path",
+        "two-paths",
+        "path-with-error-exit",
+        "path-not-hex",
+        "path-without-newline",
+        "path-only-newline",
+        "path-with-tab",
+        "path-with-delete-char",
+        "path-not-utf8",
+    ],
 )
 async def test_file_read_refuses_when_the_opened_file_is_unclear(answer: Any) -> None:
     connector = LinuxSshConnector()
@@ -644,6 +693,32 @@ async def test_log_tail_refuses_a_real_path_outside_the_roots() -> None:
         with pytest.raises(PathConfinementError):
             await connector.log_tail(_TARGET, {"path": "/var/log/link.log"})
     assert mock_cmd.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_log_tail_refuses_a_real_path_with_line_breaks() -> None:
+    # The host opened a symlink whose target holds line breaks and the content marker.
+    connector = LinuxSshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _opened(_PATH_WITH_MARKER_LINES, "key line\n", 9)
+        with pytest.raises(PathConfinementError):
+            await connector.log_tail(_TARGET, {"path": "/var/log/link.log"})
+    assert mock_cmd.await_count == 1
+
+
+def test_parse_read_output_decodes_a_hex_path_whole() -> None:
+    stdout = f"{_hex_path('/var/log/a b.log')}\n7\n===MEHO_CONTENT===\nline\n"
+    output = parse_read_output(stdout, "/var/log/link.log")
+    assert output == ReadOutput(
+        exists=True, real_path="/var/log/a b.log", size_bytes=7, content="line\n"
+    )
+
+
+def test_parse_read_output_refuses_a_path_with_line_breaks() -> None:
+    # Hex keeps the path on one line, so the marker inside it is not the real one.
+    stdout = f"{_hex_path(_PATH_WITH_MARKER_LINES)}\n9\n===MEHO_CONTENT===\nkey line\n"
+    with pytest.raises(PathConfinementError):
+        parse_read_output(stdout, "/var/log/link.log")
 
 
 @pytest.mark.asyncio
@@ -1135,7 +1210,7 @@ def test_build_file_read_command_opens_once_and_reads_the_open_file() -> None:
     # The path is used for the existence test and the open, nowhere else.
     assert cmd.count(quoted) == 2
     assert f"3<{quoted}" in cmd
-    assert "readlink /proc/self/fd/3" in cmd
+    assert "readlink /proc/self/fd/3 | od -An -v -tx1 | tr -d ' \\n'; echo;" in cmd
     assert "stat -L -c %s /proc/self/fd/3" in cmd
     assert "head -c 100 <&3" in cmd
     assert "===MEHO_FILE_UNREADABLE===" in cmd

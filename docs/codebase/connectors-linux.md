@@ -227,9 +227,13 @@ The check runs twice:
 2. On the **path of the file the host opened**. The read is one command
    (`build_file_read_command` / `build_log_tail_command`): the shell opens
    the file once (`3<<path>`), prints the path the kernel reports for that
-   open file (`readlink /proc/self/fd/3`, every symlink followed) and its
-   size, then reads from the same open file (`head -c` or `tail -n` on
-   `<&3`). The handler runs `confine_read_path` on the reported path and
+   open file (`readlink /proc/self/fd/3`, every symlink followed) as one
+   line of hex digits (`od -An -v -tx1`) and its size, then reads from
+   the same open file (`head -c` or `tail -n` on `<&3`). The hex line
+   keeps a path with line breaks or marker text in it on one line, so
+   such a path cannot pose as the size line, the marker or the content;
+   the handler decodes it whole and refuses a path with a control
+   character. The handler runs `confine_read_path` on the reported path and
    returns the content only when it passes. Path and content come from
    one open file, so a change of the path or of a parent directory after
    the open cannot swap in another file, and a file swapped in before the
@@ -237,7 +241,8 @@ The check runs twice:
    that points at `/root/...`, at a `/proc/<pid>` file or at
    `/etc/shadow` is refused. A file deleted while open (the kernel marks
    its path `(deleted)`), an error exit and an unclear answer (no
-   reported path, more than one line) are refused too. A missing file
+   reported path, more than one line, a path that is not clean hex) are
+   refused too. A missing file
    gives `exists=false` (`file.read`) or no rows (`log.tail`); a file
    that exists but cannot be opened gives `exists=true` with no content.
 

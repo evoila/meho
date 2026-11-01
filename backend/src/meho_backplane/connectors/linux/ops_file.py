@@ -23,12 +23,15 @@ rejected before the host is touched.
 
 Then both run one command that opens the file once, reports the path of
 the file it opened (``readlink /proc/self/fd/3``, symlinks followed)
-and reads from that same open file. The handler runs
-:func:`confine_read_path` again on the reported path and returns the
-content only when it passes. Path and content come from one open file,
-so a symlink under an allowed root cannot point the read at a file
-outside the allowed roots or at a key file, and a change of the path or
-of a parent directory after the open cannot swap in another file.
+and reads from that same open file. The path is reported as one line of
+hex digits, so a path that itself holds line breaks or marker text is
+still one line and is decoded whole; a decoded path with a control
+character is refused. The handler runs :func:`confine_read_path` again
+on the reported path and returns the content only when it passes. Path
+and content come from one open file, so a symlink under an allowed root
+cannot point the read at a file outside the allowed roots or at a key
+file, and a change of the path or of a parent directory after the open
+cannot swap in another file.
 """
 
 from __future__ import annotations
@@ -106,10 +109,13 @@ def _opened_file_command(confined_path: str, reader: str) -> str:
     Prints the ``MISSING_MARKER`` when nothing exists at the path (also
     for a symlink whose target is gone). Otherwise the shell opens the
     file once (``3<``) and, on that open file: prints the path the kernel
-    reports for it (``readlink /proc/self/fd/3``, every symlink followed),
-    its size (``stat -L``), the ``CONTENT_MARKER``, and then the output
-    of *reader* on the same open file (``<&3``). When the open fails the
-    ``UNREADABLE_MARKER`` is printed instead.
+    reports for it (``readlink /proc/self/fd/3``, every symlink followed)
+    as one line of hex digits (``od -An -v -tx1``, so a path with line
+    breaks or marker text in it cannot pose as the size line, the
+    marker or the content), its size (``stat -L``), the
+    ``CONTENT_MARKER``, and then the output of *reader* on the same open
+    file (``<&3``). When the open fails the ``UNREADABLE_MARKER`` is
+    printed instead.
 
     The handler checks the reported path and returns the content only
     when it passes. Path and content come from the same open file, so
@@ -121,7 +127,7 @@ def _opened_file_command(confined_path: str, reader: str) -> str:
     quoted = shlex.quote(confined_path)
     return (
         f"if [ ! -e {quoted} ]; then printf '%s\\n' {shlex.quote(MISSING_MARKER)}; exit 0; fi; "
-        f"{{ readlink /proc/self/fd/3; "
+        f"{{ readlink /proc/self/fd/3 | od -An -v -tx1 | tr -d ' \\n'; echo; "
         f"stat -L -c %s /proc/self/fd/3 2>/dev/null || echo -1; "
         f"printf '%s\\n' {shlex.quote(CONTENT_MARKER)}; "
         f"{reader} <&3 2>/dev/null; true; }} 2>/dev/null 3<{quoted} "
@@ -164,12 +170,36 @@ class ReadOutput:
     content: str
 
 
+def _decode_reported_path(hex_line: str, confined_path: str) -> str:
+    """Decode the hex path line, or raise when it is not one clean path.
+
+    The line is the bytes of ``readlink``'s output in hex, including its
+    trailing newline. Anything that is not hex, not UTF-8, or that holds
+    a control character after the one trailing newline is removed (a
+    line break in the path, for example) raises
+    :class:`PathConfinementError`.
+    """
+    try:
+        raw = bytes.fromhex(hex_line)
+        if not raw.endswith(b"\n"):
+            raise ValueError("no trailing newline")
+        real_path = raw[:-1].decode("utf-8")
+    except ValueError as exc:
+        raise PathConfinementError(
+            f"could not tell which file was opened for {confined_path!r}"
+        ) from exc
+    if not real_path or any(ord(char) < 0x20 or ord(char) == 0x7F for char in real_path):
+        raise PathConfinementError(f"the file opened for {confined_path!r} has an unclear path")
+    return real_path
+
+
 def parse_read_output(stdout: str, confined_path: str) -> ReadOutput:
     """Parse the read command's output, or raise when it is unclear.
 
-    After the markers, the output is the reported path line, the size
-    line, the ``CONTENT_MARKER`` line and the content. Anything else (no
-    marker, a missing or extra line before it) raises
+    After the markers, the output is the reported path as one hex line,
+    the size line, the ``CONTENT_MARKER`` line and the content. Anything
+    else (no marker, a missing or extra line before it, a path that is
+    not clean hex or holds a control character) raises
     :class:`PathConfinementError`: content without a clear path is never
     returned. A ``stat`` failure (``-1``) leaves ``size_bytes=None``.
     """
@@ -182,7 +212,8 @@ def parse_read_output(stdout: str, confined_path: str) -> ReadOutput:
     header_lines = stdout[:marker_at].split("\n") if marker_at != -1 else []
     if len(header_lines) != 3 or header_lines[2] != "" or not header_lines[0]:
         raise PathConfinementError(f"could not tell which file was opened for {confined_path!r}")
-    real_path, size_line, _ = header_lines
+    hex_line, size_line, _ = header_lines
+    real_path = _decode_reported_path(hex_line, confined_path)
 
     content = stdout[marker_at + len(CONTENT_MARKER) :]
     content = content[1:] if content.startswith("\n") else content

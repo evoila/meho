@@ -164,7 +164,9 @@ The steps:
 
 Two credential-backend shapes are supported. Both use the same chart; they
 differ only in `config.credentialBackend` and the credential-store block
-the schema then requires. The recommended flow substitutes an example
+the schema then requires. For a test cluster, the chart can also bring
+its own PostgreSQL, Keycloak and Vault: see
+[A throwaway install with the built-in parts](#a-throwaway-install-with-the-built-in-parts). The recommended flow substitutes an example
 values file rather than long `--set` strings (the `--set` form is in
 [`codebase/devops.md`](codebase/devops.md#install--upgrade)).
 
@@ -327,6 +329,108 @@ Diagnostics: the `gsm_secret_accessed` structlog event carries an
 which identity served a given read. A read that could not resolve any
 identity fails with `connector_error: GcpSecretManagerReadError` — never a
 Vault-named error on a Vault-free deploy (#2642).
+
+### A throwaway install with the built-in parts
+
+Use this for a test cluster, for example [kind](https://kind.sigs.k8s.io/),
+when you need a real login, a real policy check and a real Vault. The chart
+brings its own PostgreSQL, Keycloak and OpenBao (an open-source Vault), so
+you need nothing outside the cluster. The kind example file
+(`values-kind.yaml`) is not enough for this: it runs with mocks only.
+
+1. **Install an ingress controller** in the cluster. kind has none; see
+   kind's Ingress guide.
+2. **Write a values file.** Start from
+   [`../deploy/linux-server/values-single-node.yaml`](../deploy/linux-server/values-single-node.yaml),
+   the values of the single-server install. It turns on `corePostgres`,
+   `coreKeycloak` and `coreVault`. Add the answers of your cluster:
+
+   ```yaml
+   image:
+     tag: <release tag>                # or your own image; see below
+   ingress:
+     className: nginx                  # your ingress controller's class
+     host: meho.example.com            # a name your browser reaches
+   networkPolicy:
+     ingressControllerNamespace: ingress-nginx
+     postgresCIDR: 10.244.0.0/16       # the pod range; kind's default
+     vaultCIDR: 10.244.0.0/16
+   coreKeycloak:
+     hostname: meho.example.com        # the same as ingress.host
+     firstTenantId: <a new UUID>
+     ci:                               # optional: a login for scripts
+       enabled: true
+       tenantId: <another new UUID>
+   ```
+
+   To test your own image, put its `image` block here in place of the
+   release tag: `repository`, `tag`, an empty `digest` and
+   `pullPolicy: Never`, as in
+   [`codebase/connector-packages.md`, "Try your image on a local kind cluster"](codebase/connector-packages.md#try-your-image-on-a-local-kind-cluster).
+   Do not pass a tag on the `helm` command line (`--set image.tag=...`):
+   it wins over the file and asks for an image the cluster does not have.
+
+3. **Keep the three keys at the end of `values-single-node.yaml`:**
+   `postgres.credentialsSecret`, `vault.address` and `config.vaultAddr`.
+   The chart needs them even with all built-in parts on, until it fills
+   them in itself (#4047). Without them, Helm refuses the values with
+   errors about empty or invalid fields, and does not say why.
+4. **Install and wait:**
+
+   ```bash
+   helm upgrade --install meho ./deploy/charts/meho/ \
+     --namespace meho --create-namespace --wait --wait-for-jobs --timeout 15m \
+     -f deploy/linux-server/values-single-node.yaml -f my-values.yaml
+   ```
+
+   Keep `--wait`: without it, Helm says `deployed` while a pod still fails.
+5. **Trust the certificate.** The install makes a certificate for
+   `ingress.host`, signed by a small CA it makes at the same time
+   ([`codebase/core-secrets.md`](codebase/core-secrets.md)). Your
+   workstation does not know this CA. So `meho login` stops with a
+   certificate error before the browser opens, and the browser warns.
+   Save the CA certificate from the TLS Secret and trust it:
+
+   ```bash
+   kubectl -n meho get secret meho-core-tls -o jsonpath='{.data.ca\.crt}' \
+     | base64 -d > meho-ca.crt
+   ```
+
+   - `meho login` and the browsers Chrome, Edge and Safari use the trust
+     store of the operating system. Add the file to it. On macOS:
+     `security add-trusted-cert -k ~/Library/Keychains/login.keychain-db meho-ca.crt`.
+     On Ubuntu and Debian: copy it to
+     `/usr/local/share/ca-certificates/meho-ca.crt` and run
+     `sudo update-ca-certificates`. On Windows, as administrator:
+     `certutil -addstore Root meho-ca.crt`.
+   - Firefox on Windows and macOS reads the system store too. On Linux it
+     has its own store: import the file under Settings, Privacy & Security,
+     Certificates.
+   - The Claude Code plugin and the Claude Desktop bundle take the file
+     through `MEHO_CA_CERT` or their CA bundle field. See
+     [`cross-repo/mcp-client-setup.md`](cross-repo/mcp-client-setup.md).
+
+   A new install, or a change of `ingress.host`, makes a new CA. Then trust
+   the new file and remove the old one.
+6. **Log in.** The install makes two people with temporary passwords. The
+   first login needs a browser: Keycloak asks for a new password, a name
+   and an email. See [`codebase/core-bootstrap.md`](codebase/core-bootstrap.md).
+   Give the people an email on a normal domain, such as `example.com`.
+   Today MEHO refuses a person whose email ends in `.local` or `.test`
+   (#5561).
+
+The CI login (`coreKeycloak.ci`) is a machine login. It cannot register an
+agent or create a grant; both answer 403 `human_principal_required`. A
+proof that uses an agent also needs a person's login. See
+[`codebase/core-bootstrap.md`, "The CI login"](codebase/core-bootstrap.md#the-ci-login-off-by-default).
+
+To test your own image on kind (`kind load docker-image` and
+`image.pullPolicy: Never`), see
+[`codebase/connector-packages.md`](codebase/connector-packages.md#try-your-image-on-a-local-kind-cluster).
+
+Throw the cluster away after the test. With `coreKeycloak.ci` on, the
+install has a login with fixed admin rights, so never use it for real
+work.
 
 ### Operator console (`/ui/*`) — optional, either backend
 

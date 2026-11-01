@@ -64,6 +64,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.disk.grow"],
         preview=_vm_disk_grow_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.disk.attach",
@@ -83,6 +84,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.disk.attach"],
         preview=_vm_disk_attach_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.resize",
@@ -101,6 +103,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.resize"],
         preview=_vm_resize_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.nic.repoint",
@@ -119,6 +122,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.nic.repoint"],
         preview=_vm_nic_repoint_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.device.cdrom",
@@ -137,5 +141,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.device.cdrom"],
         preview=_vm_device_cdrom_preview,
+        classifier_other=True,
     ),
 )

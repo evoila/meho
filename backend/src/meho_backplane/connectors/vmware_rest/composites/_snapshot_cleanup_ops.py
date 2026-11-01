@@ -51,6 +51,8 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.snapshot.delete_all"],
         # Destructive: the blast radius is the handler's plan (every snapshot of the VM).
         preview=vm_snapshot_delete_all_preview,
+        # ``.delete_all`` is not a classifier suffix -> ``other``.
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.disks.consolidate",
@@ -69,5 +71,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.disks.consolidate"],
         preview=vm_disks_consolidate_preview,
+        # ``.consolidate`` is not a classifier suffix -> ``other``.
+        classifier_other=True,
     ),
 )

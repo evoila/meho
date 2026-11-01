@@ -56,6 +56,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.datastore_mount_nfs"],
         preview=_host_datastore_mount_nfs_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.host.disk_mark_flash",
@@ -74,6 +75,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.disk_mark_flash"],
         preview=_host_disk_mark_flash_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.host.service_control",
@@ -92,5 +94,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.service_control"],
         preview=_host_service_control_preview,
+        classifier_other=True,
     ),
 )

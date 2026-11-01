@@ -54,6 +54,8 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _vm_boot,
     _vm_cdrom_library_iso,
     _vm_cdrom_tools,
+    _vm_instant_clone,
+    _vm_lifecycle,
     _vm_upgrade,
     _write,
 )
@@ -222,6 +224,16 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     # #4383 alarm changes: one AlarmManager write each, after two reads.
     "vmware.composite.alarm.acknowledge": _alarm._VIM_SUB_OPS_ALARM_ACKNOWLEDGE,
     "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,
+    # --- VM templates, register, instant clone (#4340): the VM read and one
+    # vendor call each.
+    "vmware.composite.vm.template.mark": _vm_lifecycle._VIM_SUB_OPS_VM_TEMPLATE_MARK,
+    "vmware.composite.vm.template.unmark": _vm_lifecycle._VIM_SUB_OPS_VM_TEMPLATE_UNMARK,
+    "vmware.composite.vm.register": _vm_lifecycle._VIM_SUB_OPS_VM_REGISTER,
+    "vmware.composite.vm.unregister": _vm_lifecycle._VIM_SUB_OPS_VM_UNREGISTER,
+    "vmware.composite.vm.instant_clone": (
+        _vm_instant_clone._SUB_OPS_VM_INSTANT_CLONE + _vm_lifecycle._VIM_SUB_OPS_VM_INSTANT_CLONE
+    ),
+    # --- end VM templates, register, instant clone (#4340)
     # #4394 vCenter install: the deploy, the setup start and the answer.
     **VCENTER_INSTALL_GOVERNED_SUBOPS,
     # Host local users and Active Directory join and leave.

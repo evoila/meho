@@ -2929,6 +2929,40 @@ Code: `composites/_drs_group.py` (shared group reads + `members.set`),
 manifests are in `_governed_subops.py`. All of them are on `vmware-rest-8.0` and
 `vmware-rest-9.0`.
 
+### VM templates, register and instant clone
+
+Five changes turn a VM into a template and back, add a VM to the inventory
+from its files or remove it, and make an instant clone of a running VM
+(`#4340`). They are on both catalogs (`vmware-rest-8.0` and
+`vmware-rest-9.0`), wait for approval, and need no catalog ingest. Every call
+exists on vCenter 8.0 U1 and newer, so none needs a version check. Each
+change reads the VM through VI-JSON (`RetrievePropertiesEx`) before and after
+its one vendor call, and returns the VM as `{vm, name, power_state,
+is_template, vmx_path, folder, resource_pool, host}`. A VM is named by its id
+only, so after approval the change runs on the VM the approver saw.
+
+| Operation | What it does | Returns | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.composite.vm.template.mark` | VIM `VirtualMachine.MarkAsTemplate`. The VM must be powered off; a template answers `unchanged`. | `status` (`marked`, `unchanged`, `precondition_failed`, `not_confirmed`, ...), `before`, `after` | `dangerous` | 8.0, 9.x |
+| `vmware.composite.vm.template.unmark` | VIM `VirtualMachine.MarkAsVirtualMachine` with a resource pool and an optional host. A VM that is no template answers `unchanged`. | `status` (`unmarked`, `unchanged`, `not_confirmed`, ...), `before`, `after` | `dangerous` | 8.0, 9.x |
+| `vmware.composite.vm.register` | VIM `Folder.RegisterVM_Task` with the `.vmx` (or `.vmtx`) datastore path, a VM folder and a resource pool, or `as_template` and a host. MEHO polls the task and reads the new VM. | `status` (`registered`, `timeout`, `not_confirmed`, ...), the new `vm` id, `after` | `caution` | 8.0, 9.x |
+| `vmware.composite.vm.unregister` | VIM `VirtualMachine.UnregisterVM`. The files stay on the datastore. A powered-on VM is refused before any write. | `status` (`unregistered`, `still_present`, `precondition_failed`, ...), `before` with the `vmx_path` and `folder` to register it again | `dangerous` | 8.0, 9.x |
+| `vmware.composite.vm.instant_clone` | REST `POST /api/vcenter/vm?action=instant-clone` with optional folder, resource pool and datastore and `disconnect_all_nics`. The source must be powered on. | `status` (`cloned`, `precondition_failed`, `not_confirmed`, ...), `source`, the new `vm` id, `after` | `dangerous` | 8.0, 9.x |
+
+Register uses the VIM method, not the REST `POST /api/vcenter/vm?action=register`,
+because only the VIM method can register a template. The MarkAs and Unregister
+calls are synchronous; a vendor fault (for example `InvalidPowerState`) fails
+the call with the fault type and text. Every change has an approval preview
+that shows the VM now and whether the call would stop before the change; the
+unregister preview also names what vCenter drops (statistics, permissions,
+alarms, resource pool settings). Code: `composites/_vm_lifecycle.py` (the VM
+read, the sub-operation lists and the gated call), `_vm_template.py`,
+`_vm_register.py`, `_vm_instant_clone.py` and `_vm_lifecycle_schemas.py`. The
+reconcile lane `test_connectors_vmware_rest_vm_lifecycle_reconcile.py` checks
+the VI-JSON methods and their request fields against the pinned 9.0
+`vi-json.yaml`, and the instant-clone path and body against the 9.0 and 8.0
+`vcenter.yaml`. Tests: `test_connectors_vmware_rest_composites_vm_lifecycle.py`.
+
 ### VM snapshot operations (`vmware.snapshot.list`, `vm.snapshot.create` / `.delete` / `.delete_all` / `.revert`, `vm.disks.consolidate`)
 
 These operations cover the snapshot work on one VM. vCenter's REST API has no

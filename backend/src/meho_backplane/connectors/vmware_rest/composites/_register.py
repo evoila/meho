@@ -196,8 +196,14 @@ from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_library_iso impo
 from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_tools import (
     VM_CDROM_TOOLS_COMPOSITES,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_cpu_memory_options import (
+    VM_CPU_MEMORY_OPTIONS_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._vm_llm_instructions import (
     VM_LLM_INSTRUCTIONS,
+)
+from meho_backplane.connectors.vmware_rest.composites._vm_nic_serial import (
+    VM_NIC_SERIAL_COMPOSITES,
 )
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
@@ -525,16 +531,18 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "vm.clone, vm.clone_from_template, vm.deploy_from_library, "
         "vm.import_from_library, dangerous); change CPU, memory, disks, NICs or "
         "CD drives (vm.resize, vm.disk.grow, vm.disk.attach, vm.nic.repoint, "
-        "vm.cdrom.add, vm.device.cdrom, dangerous); set CPU and memory limits "
-        "(vm.resource_allocation.set, caution); unmount the VMware Tools "
-        "installer (vm.tools.installer.unmount, caution); move a VM to another "
-        "host (vm.migrate, dangerous); take a snapshot (vm.snapshot.create, "
-        "caution), revert to one (vm.snapshot.revert, dangerous) or delete one "
-        "(vm.snapshot.delete, destructive); delete a powered-off VM and its "
-        "disks (vm.destroy, destructive); create a VM folder (folder.create, "
-        "dangerous) or delete an empty one (folder.delete, destructive). Pair "
-        "with 'storage', 'networking' or 'cluster' for the reads a create or a "
-        "move needs."
+        "vm.cdrom.add, vm.device.cdrom, dangerous); connect or disconnect a NIC "
+        "(vm.nic.connect, dangerous); add a serial port (vm.serial_port.add, "
+        "dangerous); set CPU and memory limits (vm.resource_allocation.set, "
+        "caution) or hot add and shares (vm.cpu_memory.options.set, caution); "
+        "unmount the VMware Tools installer (vm.tools.installer.unmount, "
+        "caution); move a VM to another host (vm.migrate, dangerous); take a "
+        "snapshot (vm.snapshot.create, caution), revert to one "
+        "(vm.snapshot.revert, dangerous) or delete one (vm.snapshot.delete, "
+        "destructive); delete a powered-off VM and its disks (vm.destroy, "
+        "destructive); create a VM folder (folder.create, dangerous) or delete "
+        "an empty one (folder.delete, destructive). Pair with 'storage', "
+        "'networking' or 'cluster' for the reads a create or a move needs."
     ),
     "host": (
         "Use for ESXi hosts. Reads: list hosts (GET:/api/vcenter/host). Changes: "
@@ -1409,11 +1417,11 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.vm.device.cdrom",
         handler=vm_device_cdrom_composite,
-        summary="Remove / update / disconnect a VM CD-ROM device.",
+        summary="Remove / update / connect / disconnect a VM CD-ROM device.",
         description=(
             "Removes a VM's CD-ROM drive, changes its backing (for example from a "
-            "host-local ISO to CLIENT_DEVICE) or disconnects it. The current "
-            "backing is read first, so the approver sees it."
+            "host-local ISO to CLIENT_DEVICE), or connects or disconnects it. The "
+            "current backing is read first, so the approver sees it."
         ),
         parameter_schema=VM_DEVICE_CDROM_PARAMETER_SCHEMA,
         response_schema=VM_DEVICE_CDROM_RESPONSE_SCHEMA,
@@ -2075,6 +2083,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # Mount and unmount a content-library ISO on a VM; the rows live in their
     # own module.
     *(_CompositeSpec(**row) for row in VM_CDROM_LIBRARY_ISO_COMPOSITES),
+    # Connect a network adapter, add a serial port, and set CPU and memory hot
+    # add and shares; the rows live in their own modules.
+    *(_CompositeSpec(**row) for row in VM_NIC_SERIAL_COMPOSITES),
+    *(_CompositeSpec(**row) for row in VM_CPU_MEMORY_OPTIONS_COMPOSITES),
     # ----------------------------------------------------------------
     # Licence write -- dangerous / approval. The full key never leaves
     # the handler; the license-key tag keeps the vCenter bodies out of

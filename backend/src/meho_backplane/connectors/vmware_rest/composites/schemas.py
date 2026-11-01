@@ -4382,10 +4382,11 @@ VM_NIC_REPOINT_PARAMETER_SCHEMA: dict[str, Any] = {
 #: ``vmware.composite.vm.device.cdrom`` parameter schema.
 #:
 #: Verb-driven CD-ROM edit: ``remove`` (DELETE the device), ``update``
-#: (PATCH its backing -- requires ``backing``), or ``disconnect`` (POST
-#: ``?action=disconnect``; the device stays but the guest sees it
-#: unplugged). The resolution read surfaces the current backing (the
-#: host-local ISO path the approver needs to see) into the preview.
+#: (PATCH its backing -- requires ``backing``), ``connect`` (POST
+#: ``?action=connect``) or ``disconnect`` (POST ``?action=disconnect``;
+#: the device stays but the guest sees it unplugged). The resolution read
+#: surfaces the current backing (the host-local ISO path the approver needs
+#: to see) into the preview.
 VM_DEVICE_CDROM_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -4401,12 +4402,13 @@ VM_DEVICE_CDROM_PARAMETER_SCHEMA: dict[str, Any] = {
         },
         "action": {
             "type": "string",
-            "enum": ["remove", "update", "disconnect"],
+            "enum": ["remove", "update", "connect", "disconnect"],
             "description": (
                 "``remove`` -> ``DELETE:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}``; "
                 "``update`` -> ``PATCH`` the backing (requires ``backing``); "
-                "``disconnect`` -> ``POST ?action=disconnect`` (the device "
-                "stays, the guest sees it unplugged)."
+                "``connect`` -> ``POST ?action=connect`` (plug the drive in, VM "
+                "powered on); ``disconnect`` -> ``POST ?action=disconnect`` (the "
+                "device stays, the guest sees it unplugged)."
             ),
         },
         "backing": {
@@ -4445,7 +4447,7 @@ VM_DEVICE_CDROM_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "New CD-ROM backing spec when ``action='update'`` (e.g. "
                 '``{"type": "CLIENT_DEVICE"}`` to un-pin a host-local '
-                "ISO backing). Ignored for ``remove`` / ``disconnect``."
+                "ISO backing). Ignored for ``remove`` / ``connect`` / ``disconnect``."
             ),
         },
     },
@@ -4613,10 +4615,18 @@ VM_DEVICE_CDROM_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "status": {
             "type": "string",
-            "enum": ["removed", "updated", "disconnected", "invalid_request", "result_unknown"],
+            "enum": [
+                "removed",
+                "updated",
+                "connected",
+                "disconnected",
+                "invalid_request",
+                "result_unknown",
+            ],
             "description": (
                 "``'removed'`` -- the device was deleted; ``'updated'`` -- "
-                "its backing was PATCHed; ``'disconnected'`` -- the device "
+                "its backing was PATCHed; ``'connected'`` -- the device was "
+                "connected; ``'disconnected'`` -- the device "
                 "was disconnected in-guest; ``'invalid_request'`` -- "
                 "``action='update'`` without a ``backing`` object (no write "
                 "issued); ``'result_unknown'`` -- the change timed out and "
@@ -4627,7 +4637,7 @@ VM_DEVICE_CDROM_RESPONSE_SCHEMA: dict[str, Any] = {
         "cdrom": {"type": "string", "description": "CD-ROM device id acted on."},
         "action": {
             "type": "string",
-            "enum": ["remove", "update", "disconnect"],
+            "enum": ["remove", "update", "connect", "disconnect"],
             "description": "The verb requested.",
         },
         "current_backing": {

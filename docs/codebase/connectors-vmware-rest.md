@@ -1979,7 +1979,7 @@ enum) are:
 | `network.portgroup.vlan.set` | `set`, `unchanged`, `invalid_vlan_spec`, `timeout` (vim `ReconfigureDVPortgroup_Task` polled; reconfigures an **existing** portgroup's `defaultPortConfig.vlan` to a trunk `NumericRange[]` or a single access VLAN — the given spec **replaces** the current config, there is no merge. Idempotent: the current VLAN is read + normalised (ranges sorted + merged-adjacent) first and a request that already matches returns `unchanged` with no write / no task; `invalid_vlan_spec` refuses both/neither VLAN mode (or `replace=false`) before any write; `timeout` when the poll gives up; a task *fault* raises `connector_error`. Carries normalised `before` / `after` VLAN views) |
 | `vm.resize` | `resized`, `requires_power_off`, `no_change`, `partial` |
 | `vm.nic.repoint` | `repointed`, `not_found`, `ambiguous`, `invalid_request` |
-| `vm.device.cdrom` | `removed`, `updated`, `disconnected`, `invalid_request`, `result_unknown` (the change timed out and may still run; carries `running_tasks`, `vm_question` and an `error` issue) |
+| `vm.device.cdrom` | `removed`, `updated`, `connected`, `disconnected`, `invalid_request`, `result_unknown` (the change timed out and may still run; carries `running_tasks`, `vm_question` and an `error` issue) |
 | `vm.resource_allocation.set` | `set`, `unchanged`, `invalid_request`, `vm_not_found`, `partial`, `timeout` (vim `ReconfigVM_Task` polled, #3880; `invalid_request` refuses an empty request, an out-of-range value (a limit of `0` included — `-1` clears) or a resulting limit below its reservation before any write; `unchanged` when the request already matches (no task); `partial` when the task succeeded but the re-read `after` does not match every requested field; `vm_not_found` on a promoted `ManagedObjectNotFound`; a task *fault* raises `connector_error` like `vm.disk.grow`. Carries `before` / `after` allocation views) |
 | `network.portgroup.delete` / `folder.delete` | `deleted`, `unchanged`, `precondition_failed`, `still_present`, `timeout` (#3339; vim `Destroy_Task` polled; `precondition_failed` before any write when something still uses the object -- listed in `blockers`; a task *fault* raises `connector_error`) |
 | `host.standard_portgroup.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present` (#3339; synchronous `RemovePortGroup` -- a vim fault raises) |
@@ -2053,8 +2053,10 @@ a host-pinning ISO:
   ISO path the approver needs to see), then dispatches the `action`:
   `remove` (`DELETE:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}`), `update`
   (`PATCH` the backing — requires a `backing` param, e.g.
-  `{type: CLIENT_DEVICE}` to un-pin a host-local ISO), or `disconnect`
-  (`POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=disconnect`).
+  `{type: CLIENT_DEVICE}` to un-pin a host-local ISO), `connect`
+  (`POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=connect`), or
+  `disconnect` (`POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=disconnect`).
+  `connect` and `disconnect` need a powered-on VM.
   When the write times out, the result is `result_unknown`, not a plain
   timeout: vCenter may still run the change, often because it waits on a
   question in the VM (for example a locked CD-ROM door). The result names
@@ -2382,6 +2384,64 @@ and `meho vmware vm cdrom unmount-library-iso <vm-name-or-id> --cdrom <id>`
 same dispatch path as MCP. The VM name is resolved to its id on the client
 through the typed `vmware.vm.info` read, so the commands work before the
 catalog is ingested, and the approval names the VM id.
+
+### VM device changes: network adapter connect, serial port, hot add and shares
+
+Three changes for the usual device work on a VM. All three wait for approval,
+take the VM id (`vm`) only and no VM name, and are on both catalogs
+(`vmware-rest-8.0` and `vmware-rest-9.0`). They need no catalog ingest. Their
+parameters, answers and AI guidance live in `composites/_vm_device_schemas.py`.
+
+| Operation | What it does | Vendor call | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.composite.vm.nic.connect` | Connect or disconnect a network adapter of a running VM. | REST `POST /vcenter/vm/{vm}/hardware/ethernet/{nic}?action=connect` or `?action=disconnect` | dangerous | 8.0, 9.x |
+| `vmware.composite.vm.cpu_memory.options.set` | Turn CPU and memory hot add on or off, and set CPU and memory shares. | VIM `ReconfigVM_Task` (VI-JSON) | caution | 8.0, 9.x |
+| `vmware.composite.vm.serial_port.add` | Add a serial port that writes to a datastore file or uses a network address. | REST `POST /vcenter/vm/{vm}/hardware/serial` | dangerous | 8.0, 9.x |
+| `vmware.composite.vm.device.cdrom` (`action=connect`) | Also connect a CD drive, not only disconnect it. | REST `POST /vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=connect` | dangerous | 8.0, 9.x |
+
+- **`vm.nic.connect`** (`composites/_vm_nic_serial.py`). Reads
+  `GET /vcenter/vm/{vm}/hardware/ethernet/{nic}` first. When the adapter is
+  already in the asked state, nothing is sent (`unchanged`), so it is safe to
+  run twice. Else the `connect` or `disconnect` action, then it reads the
+  adapter again. Answer: `before` and `after` with `label`, `mac_address`,
+  `state`, `start_connected`, `network`, `network_name`. vCenter refuses the
+  call for a VM that is not powered on (`refused`). A missing adapter gives
+  `not_found`.
+- **`vm.serial_port.add`** (same module). One `POST .../hardware/serial` with a
+  top-level `Serial.CreateSpec`: a `FILE` backing for `file`, or a
+  `NETWORK_SERVER` / `NETWORK_CLIENT` backing for `network_location`
+  (`network_role` picks server or client; default server). Exactly one of
+  `file` and `network_location`. It reads the new port back
+  (`GET .../serial/{port}`). vCenter refuses the call for a VM that is not
+  powered off (`refused`). Not safe to run twice: each call adds a port.
+- **`vm.cpu_memory.options.set`** (`composites/_vm_cpu_memory_options.py`).
+  The vSphere REST API has no field for shares, so this change uses the VIM
+  API for all four settings: one `RetrievePropertiesEx` read (`name`,
+  `runtime.powerState`, `config.cpuHotAddEnabled`,
+  `config.memoryHotAddEnabled`, `config.cpuAllocation`,
+  `config.memoryAllocation`), then one `ReconfigVM_Task` whose
+  `VirtualMachineConfigSpec` carries only the settings that change, a task
+  poll and a second read. One task means one approval and no half-done
+  state. A hot add change on a VM that is not powered off gives
+  `requires_power_off` and sends nothing; shares change on a running VM too.
+  A `custom` shares level needs the number of shares; a named level sends
+  `shares: 0`, which vSphere ignores. Answers: `set`, `unchanged`,
+  `requires_power_off`, `invalid_request`, `vm_not_found`, `partial`,
+  `timeout` (with an `error` issue). A failed task raises with the vim fault
+  class and text.
+
+When vCenter refuses a REST call with HTTP 400, the answer is `refused` with
+vCenter's error type and message, and nothing changed. Each change has an
+approval preview: the adapter and its state now; the port to add; the
+settings now, the settings asked for, and a power problem when there is one.
+`test_connectors_vmware_rest_vm_devices_reconcile.py` checks every REST call
+against the pinned `vcenter.yaml` of 8.0 and 9.0, the serial port body
+against `Serial.CreateSpec`, and every VIM type, `ConfigSpec` field and read
+property against the pinned `vi-json.yaml` (it skips without the vendor spec
+files). Tests use REST and VIM fakes
+(`test_connectors_vmware_rest_composites_vm_devices.py`) and real httpx with
+respx for the `/sdk/vim25/8.0.3.0` and `/sdk/vim25/9.0.0.0` paths
+(`test_connectors_vmware_rest_vm_devices_transport.py`).
 
 ### Shared disks for WSFC/FCI — bus-sharing, eagerzeroedthick, shared-attach (#3256)
 
@@ -4180,7 +4240,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `cluster.patch` | `{cluster, resolved, total_resolved}` | live read (`GET:/vcenter/host?clusters=...`) |
 | `vm.resize` | `{vm, name, power_state, current, requested}` sizing from->to | live read (`GET:/vcenter/vm/{vm}`) |
 | `vm.nic.repoint` | `{vm, name, nic, mac_address, current_backing, requested_backing}` network from->to (`requested_backing` carries `backing_type`, so distributed and standard previews are identical) | live read (`ethernet/{nic}` + `GET:/vcenter/network`) |
-| `vm.device.cdrom` | `{vm, name, cdrom, action, current_backing, state, requested_backing}` drive from->to: the current backing (with the host-local ISO path) and, for `update`, the new backing (`type` plus `iso_file`, `host_device` or `device_access_type` when given); `null` for `remove` / `disconnect` | live read (`cdrom/{cdrom}`) |
+| `vm.device.cdrom` | `{vm, name, cdrom, action, current_backing, state, requested_backing}` drive from->to: the current backing (with the host-local ISO path) and, for `update`, the new backing (`type` plus `iso_file`, `host_device` or `device_access_type` when given); `null` for `remove` / `connect` / `disconnect` | live read (`cdrom/{cdrom}`) |
 | `vm.resource_allocation.set` | `{vm, name, current: {cpu_allocation, memory_allocation}, requested}` limit / reservation from->to | live read (vim `RetrievePropertiesEx`) |
 | `network.portgroup.delete` / `host.standard_portgroup.delete` / `folder.delete` / `datastore.file.delete` / `content_library.delete` / `content_library.item.delete` | mandatory `blast_radius`: `{object: {..., present}, children, irreversibility, blockers?, refusal?}` -- the handler's own plan (#3339) | live read (vim `RetrievePropertiesEx` / browse, or REST GET) |
 | `datastore.dir.create` | `{action, datastore, path, create_parents}` | param echo, no I/O |

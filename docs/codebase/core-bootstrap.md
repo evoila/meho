@@ -259,8 +259,15 @@ Steps of the realm stage, in order:
    settings (`use.refresh.tokens`, `access.token.lifespan`) are set to the
    values of the file when they differ (output: `kept (token settings
    set)`); today only `meho-cli-approve` names a lifespan, and it gets no
-   refresh token. Nothing is deleted, and an existing mapper or scope is
-   not changed.
+   refresh token. It also gets the client attributes of
+   `ADDED_CLIENT_ATTRIBUTES` that it does not have yet (today only
+   `client.offline.session.idle.timeout`, the 48-hour idle limit of the
+   long login of `meho-cli` and `meho-mcp`, #5516); output `attribute
+   <name> added`. An attribute the client has already keeps its value,
+   because an admin may have set it. Nothing is deleted, and an existing
+   mapper or scope is not changed. So an upgrade gives `meho-cli` of an
+   older realm the scope `offline_access` and the idle limit, and `meho
+   login` gets a long login.
    Before the clients come the **login flows** of the realm file
    (`core/keycloak_flows.py`, #5515). Today that is one flow, `meho
    approval sign-in`: the password form, then the one-time code when the
@@ -326,7 +333,8 @@ when nothing is missing. The Secrets it makes carry only the label
 
 ## Known issues and limits
 
-- The stage adds, it never removes or rewrites. A changed group attribute,
+- The stage adds, it never removes or rewrites. Adding a missing client
+  attribute from `ADDED_CLIENT_ATTRIBUTES` keeps this rule. A changed group attribute,
   a changed mapper setting or a renamed client in a newer realm file does
   not reach a running realm; an operator changes it in Keycloak.
 - The `users` entry of the realm file (the roles of `meho-admin`'s service

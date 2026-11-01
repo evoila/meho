@@ -67,9 +67,17 @@ def test_realm_name_and_session_limits(realm: dict[str, Any]) -> None:
     assert realm["realm"] == "meho"
     assert realm["enabled"] is True
     assert realm["registrationAllowed"] is False
-    # An offline login (the MCP clients' long login) ends after 7 days at most.
+    # An offline login (the long login of the CLI and the MCP clients) ends
+    # after 7 days at most.
     assert realm["offlineSessionMaxLifespanEnabled"] is True
     assert realm["offlineSessionMaxLifespan"] == 7 * 24 * 3600
+
+
+def test_browser_session_limits_match_the_console(realm: dict[str, Any]) -> None:
+    # The login server keeps a browser session for 1 hour without use and
+    # 10 hours at most: the same as the console's own session (#5518).
+    assert realm["ssoSessionIdleTimeout"] == 3600
+    assert realm["ssoSessionMaxLifespan"] == 10 * 3600
 
 
 def test_no_company_login_yet(realm: dict[str, Any]) -> None:
@@ -209,7 +217,14 @@ def test_cli_client_uses_device_flow(realm: dict[str, Any]) -> None:
     assert client["publicClient"] is True
     assert client["directAccessGrantsEnabled"] is False
     assert client["attributes"]["oauth2.device.authorization.grant.enabled"] == "true"
-    assert client["optionalClientScopes"] == []
+
+
+def test_cli_client_offers_a_long_login(realm: dict[str, Any]) -> None:
+    """`meho login` asks for offline_access; it ends after 48 hours without use."""
+    client = _client(realm, "meho-cli")
+    assert client["optionalClientScopes"] == ["offline_access"]
+    assert "offline_access" not in client["defaultClientScopes"]
+    assert client["attributes"]["client.offline.session.idle.timeout"] == str(48 * 3600)
 
 
 def test_mcp_client_browser_login(realm: dict[str, Any]) -> None:

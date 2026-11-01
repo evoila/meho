@@ -573,6 +573,31 @@ func (c *adminClient) addClientOptionalScope(
 	return nil
 }
 
+// removeClientOptionalScope DELETEs /optional-client-scopes/{scopeId}
+// to take one optional scope off a client. Keycloak answers 204 also
+// when the scope was not assigned, so the caller does the
+// check-then-DELETE pattern only to report what it changed.
+func (c *adminClient) removeClientOptionalScope(
+	ctx context.Context, clientUUID, scopeID string,
+) error {
+	status, body, err := c.do(
+		ctx, http.MethodDelete,
+		"clients/"+clientUUID+"/optional-client-scopes/"+scopeID,
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusNoContent {
+		return &errKeycloakAPI{
+			method:     http.MethodDelete,
+			url:        "clients/" + clientUUID + "/optional-client-scopes/" + scopeID,
+			statusCode: status, body: string(body),
+		}
+	}
+	return nil
+}
+
 // clientScopeRep is the slice of ClientScopeRepresentation we send
 // when creating a realm-level client scope.
 type clientScopeRep struct {

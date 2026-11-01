@@ -859,7 +859,7 @@ on a person directly: the claim always comes from the group.
 | Client | Kind | Notes |
 | --- | --- | --- |
 | `meho-backplane` | confidential, no login flow | the token audience only |
-| `meho-cli` | public, device flow | `meho login`; no `offline_access` (as `bootstrap-clients` without `--cli-offline-access`) |
+| `meho-cli` | public, device flow | `meho login`; optional scope `offline_access`; offline login idle limit 48 hours (as `bootstrap-clients` with its default `--cli-offline-access`) |
 | `meho-mcp` | public, authorization code + PKCE (S256) | redirect URIs `http://localhost:*`, `http://127.0.0.1:*`; optional scopes `offline_access`, `mcp:read`, `mcp:execute`, `mcp:admin`; offline login idle limit 48 hours |
 | `meho-web` | confidential, authorization code + PKCE (S256) | redirect `https://<host>/ui/auth/callback`, after logout `https://<host>/ui/auth/login` |
 | `meho-admin` | confidential, service account | realm-management roles `manage-clients` and `manage-users`; with the company login on, the chart adds `manage-identity-providers` and `manage-realm` (#4592) |

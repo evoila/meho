@@ -987,9 +987,9 @@ class Settings(BaseModel):
         :func:`load_session` never extends ``expires_at`` past
         ``created_at + this cap``; once the cap is reached the session
         lapses on its next load and the operator re-authenticates.
-        Default 43200 (12 hours) -- one working day of continuous wall
-        display without forcing a mid-shift re-login, while still
-        guaranteeing a daily re-auth. Must exceed
+        Default 36000 (10 hours) -- the same as the shipped realm's
+        ``ssoSessionMaxLifespan``, so the console session ends with the
+        login server's session and not after it (#5518). Must exceed
         ``ui_session_sliding_extension_seconds`` for the sliding window
         to have any effect.
     ui_session_read_revalidation_seconds:
@@ -1879,7 +1879,7 @@ class Settings(BaseModel):
     # cannot create an immortal session. ``sliding=0`` disables the
     # extension. See the field docstrings above for the full rationale.
     ui_session_sliding_extension_seconds: int = Field(default=3600, ge=0)
-    ui_session_absolute_lifetime_seconds: int = Field(default=43200, gt=0)
+    ui_session_absolute_lifetime_seconds: int = Field(default=36000, gt=0)
     # BFF read-path revalidation drift threshold. The session
     # middleware re-presents the stored access token to the JWT chain
     # when a session has not been revalidated within this window, so a
@@ -2259,7 +2259,8 @@ class Settings(BaseModel):
     #: candidate and would deny every legitimate per-tenant call. A deploy
     #: still mid-migration (secrets under the retired per-``sub`` layout)
     #: opts **out** by setting ``VAULT_KV_TENANT_SCOPE_PREFIX=""`` until its
-    #: secrets are relocated. Pre-#1725 this defaulted empty (guard off).
+    #: secrets are relocated; a path with a ``.`` / ``..`` segment, a ``%``
+    #: or a backslash is refused even then. Earlier releases defaulted empty.
     #: Set via ``VAULT_KV_TENANT_SCOPE_PREFIX``.
     vault_kv_tenant_scope_prefix: str = "secret/tenants/{tenant_id}/"
 
@@ -3013,7 +3014,7 @@ def get_settings() -> Settings:
             os.environ.get("UI_SESSION_SLIDING_EXTENSION_SECONDS", "3600"),
         ),
         ui_session_absolute_lifetime_seconds=int(
-            os.environ.get("UI_SESSION_ABSOLUTE_LIFETIME_SECONDS", "43200"),
+            os.environ.get("UI_SESSION_ABSOLUTE_LIFETIME_SECONDS", "36000"),
         ),
         ui_session_read_revalidation_seconds=int(
             os.environ.get("UI_SESSION_READ_REVALIDATION_SECONDS", "300"),

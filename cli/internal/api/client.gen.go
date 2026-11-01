@@ -12155,6 +12155,7 @@ type UiAuthCallbackUiAuthCallbackGetParams struct {
 // UiAuthLoginUiAuthLoginGetParams defines parameters for UiAuthLoginUiAuthLoginGet.
 type UiAuthLoginUiAuthLoginGetParams struct {
 	ReturnTo *string `form:"return_to,omitempty" json:"return_to,omitempty"`
+	Reason   *string `form:"reason,omitempty" json:"reason,omitempty"`
 }
 
 // UiBroadcastFeedUiBroadcastGetParams defines parameters for UiBroadcastFeedUiBroadcastGet.
@@ -38669,6 +38670,22 @@ func NewUiAuthLoginUiAuthLoginGetRequest(server string, params *UiAuthLoginUiAut
 		if params.ReturnTo != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "return_to", runtime.ParamLocationQuery, *params.ReturnTo); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Reason != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "reason", runtime.ParamLocationQuery, *params.Reason); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

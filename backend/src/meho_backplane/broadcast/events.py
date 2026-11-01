@@ -488,6 +488,12 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # of the broadcast.
         "vmware.composite.vcenter.appliance.deploy",
         "vmware.composite.vcenter.install",
+        # Adding an ESXi host to vCenter (#4349): the params carry only a Vault
+        # path (``password_secret_ref``); the host password goes only into the
+        # ``AddHost_Task`` / ``AddStandaloneHost_Task`` request body. The pin
+        # keeps that body out of the flight recorder and the params out of the
+        # broadcast.
+        "vmware.composite.host.add",
         # The Keycloak login test. Its params carry only a Vault *path*
         # (``password_secret_ref``); the password is read in-process and sent
         # only in the token request BODY, and the token answer carries an

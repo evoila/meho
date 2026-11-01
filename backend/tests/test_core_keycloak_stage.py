@@ -787,6 +787,58 @@ async def test_without_the_right_to_change_login_flows_the_stage_goes_on(
     assert "client meho-cli-approve: created" in out
 
 
+_IDLE = "client.offline.session.idle.timeout"
+
+
+async def test_upgrade_gives_the_cli_client_a_long_login(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """An older realm has no long login on meho-cli and no idle limit on either client."""
+    old = _realm_as_imported()
+    clients = {c["clientId"]: c for c in old["clients"]}
+    clients["meho-cli"]["optionalClientScopes"] = []
+    del clients["meho-cli"]["attributes"][_IDLE]
+    del clients["meho-mcp"]["attributes"][_IDLE]
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(old)
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    cli = kc.clients["meho-cli"]
+    assert cli["optionalClientScopes"] == ["offline_access"]
+    assert cli["attributes"][_IDLE] == "172800"
+    assert cli["attributes"]["oauth2.device.authorization.grant.enabled"] == "true"
+    assert kc.clients["meho-mcp"]["attributes"][_IDLE] == "172800"
+    out = capfd.readouterr().out
+    assert (
+        f"client meho-cli: kept (optional scope offline_access added, attribute {_IDLE} added)"
+        in out
+    )
+    assert f"client meho-mcp: kept (attribute {_IDLE} added)" in out
+
+
+async def test_an_idle_limit_an_admin_set_stays(realm_file: Path) -> None:
+    kc = _fresh()
+    kc.clients["meho-cli"]["attributes"][_IDLE] = "3600"
+    kc.clients["meho-mcp"]["attributes"][_IDLE] = "86400"
+    store = FakeStore()
+    plan = _plan(realm_file)
+
+    await finish_realm(plan, _ENV, kc, store)
+    first = kc.state()
+    await finish_realm(plan, _ENV, kc, store)
+
+    assert kc.state() == first
+    assert kc.clients["meho-cli"]["attributes"][_IDLE] == "3600"
+    assert kc.clients["meho-mcp"]["attributes"][_IDLE] == "86400"
+    updated = {
+        kc._client_by_id(match.group(1))["clientId"]
+        for method, path in kc.calls
+        if method == "PUT" and (match := re.fullmatch(r"/admin/realms/meho/clients/([^/]+)", path))
+    }
+    assert "meho-cli" not in updated and "meho-mcp" not in updated
+
+
 async def test_output_never_contains_a_secret_value(
     realm_file: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:

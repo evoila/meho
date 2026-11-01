@@ -24,7 +24,10 @@ Today the connector ships:
 - **network extension**: one read of the extended networks and three
   changes that each wait for a person's approval: extend a network,
   unextend it, and set Mobility Optimized Networking (see "Network
-  extension" below).
+  extension" below), and
+- **seven migration operations**: validate, start, list and cancel
+  migrations, list and set mobility groups, and set the switchover window
+  (see "The migration operations").
 
 Why `hcx.api_file.get` came first: Broadcom publishes no file and no
 versioned reference of the main HCX API (`/hybridity/api/...`). Only a
@@ -66,6 +69,13 @@ Package: `backend/src/meho_backplane/connectors/hcx/`.
 | `hcx.network_extension.extend` | Extend a network to the other site. Starts a vendor job; returns `accepted` and the job id. | `POST /hybridity/api/l2Extensions` | change (`dangerous`, approval) | 4.11, 9.x |
 | `hcx.network_extension.unextend` | Unextend a network, and if asked connect the cloud network to its local router. Starts a vendor job; returns `accepted` and the job id. | `DELETE /hybridity/api/l2Extensions/{extensionId}?connectToLocalRouter=` | change (`dangerous`, approval) | 4.11, 9.x |
 | `hcx.network_extension.mon.set` | Turn Mobility Optimized Networking on or off, and set the policy routes. Two steps; lists what ran, what failed and what did not run. | `PUT /hybridity/api/networkExtensions/{extensionId}`, `PUT /hybridity/api/l2Extensions/policyRoutes` | change (`dangerous`, approval) | 4.11, 9.x |
+| `hcx.migration.validate` | Check a planned migration or a mobility group before it starts. Returns `valid` and HCX's errors and warnings for the group and each VM. Changes nothing. | `POST /hybridity/api/mobility/groups/validate` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.migration.start` | Start all migrations of a mobility group, or make a group for VMs (bulk, vMotion, replication-assisted vMotion, cold) and start it. Returns `accepted` with the ids and the status read; `failed` or `partial` when HCX rejects the start, also with HTTP 200. | `POST /hybridity/api/mobility/groups/start`, `POST /hybridity/api/mobility/groups`, `POST /hybridity/api/migrations?action=query` | change (`dangerous`, waits for approval) | 4.11, 9.x |
+| `hcx.migration.list` | The migrations with vendor state, outcome, progress, messages and times; filter by state, ids, VMs or group. | `POST /hybridity/api/migrations?action=query` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.migration.cancel` | Cancel migrations, or force-cancel a stuck one. Returns `accepted`; migrations that already ended are not sent. | `POST /hybridity/api/mobility/migrations/cancel`, `POST /hybridity/api/mobility/migrations/forceCancel`, `POST /hybridity/api/migrations?action=query` | change (`dangerous`, waits for approval) | 4.11, 9.x |
+| `hcx.mobility_group.list` | The mobility groups (migration waves) with state and configuration status, or the summary of one group. | `POST /hybridity/api/v2/mobility-groups/query`, `GET /hybridity/api/v2/mobility-groups/{mobilityGroupId}/summary` | read (`safe`, no approval) | 4.11, 9.x |
+| `hcx.mobility_group.set` | Make a mobility group, or replace the settings of one. Starts nothing. | `POST /hybridity/api/mobility/groups`, `PUT /hybridity/api/mobility/groups` | change (`caution`, waits for approval) | 4.11, 9.x |
+| `hcx.migration.schedule` | Set or clear the switchover window (and optionally the copy window) of a mobility group. | `POST /hybridity/api/mobility/groups/{mobilityGroupId}/schedule` | change (`dangerous`, waits for approval) | 4.11, 9.x |
 
 Every operation in the table exists on every version the connector
 covers, so none stops early with a version message.
@@ -107,6 +117,11 @@ covers, so none stops early with a version message.
   (`network_extension_ops.py`) -- the metadata and group text of the four
   network extension operations; their bodies, `VENDOR_CALLS` and the busy
   check `is_busy` are in `network_extension.py`.
+- `migration_ops.py`, `migration_schemas.py`, `migration_body.py`,
+  `migrations.py` -- the metadata, the shared schemas, the vendor body
+  builders (`group_item`, `migration_outcome`) and the bodies of the seven
+  migration operations, with `MIGRATION_VENDOR_CALLS` (the reconcile lane
+  checks them).
 
 ## Control flow
 
@@ -557,6 +572,133 @@ are still served, and they return the job id (`{"id": ...}`); the newer
 reference names for "enable or disable MON". The Task first named
 `PUT /hybridity/api/l2Extensions/{stretchId}`; the reference has no such
 call.
+### The migration operations
+
+A migration in HCX belongs to a **mobility group** (a migration wave): a
+named set of VM migrations with shared settings. The operations use the
+mobility group calls of the vendor reference. The older calls
+`POST /hybridity/api/migrations?action=validate|start|cancel` are marked
+deprecated there, so MEHO does not use them; the migration list uses
+`POST /hybridity/api/migrations?action=query`, which is not deprecated.
+
+All of them sit in the group `hcx-migration`.
+
+The `group` input (start, validate, `hcx.mobility_group.set`):
+
+| Field | Vendor field |
+|---|---|
+| `name` | `name` |
+| `migration_type`: `bulk`, `vmotion`, `rav`, `cold` | `transferParams.transferType` and `switchoverParams.switchoverType` (also each migration's `migrationType`): bulk `vSphereReplication`/`vSphereReplication`, vmotion `NO_OP`/`vMotion`, rav `vSphereReplication`/`RAV`, cold `NO_OP`/`ColdMigration` |
+| `service_mesh_id` | `servicemeshId` |
+| `source`, `destination` (`endpoint_id`, `resource_id`, names and types) | `source`, `destination` (`endpointType` and `resourceType` are `VC` when not given) |
+| `placement` (`id`, `name`, `type`) | `placement` |
+| `storage` (`datastore_id`, `datastore_name`, `disk_provision_type`) | `storage.defaultStorage` (`type: datastore`) |
+| `network_mappings` | `networkParams.defaultMappings` |
+| `switchover_options` | `switchoverParams.options` (`retainMac`, `forcePowerOffVm`, `upgradeHardware`, `upgradeVMTools`, `removeSnapshots`, `removeISOs`) |
+| `vms` (`vm_id`, `vm_name`) | `migrations[].entity` (`entityType: VirtualMachine`) |
+
+What each operation sends and returns:
+
+- `hcx.migration.validate` takes `mobility_group_id` or `group` (one of
+  them) and sends `{"items": [{"migrationGroupId": ...}]}` or
+  `{"items": [<group>]}`. HCX answers a failed check with HTTP 400 and the
+  same body; that is a result: `valid: false` with the errors.
+- `hcx.migration.start` takes the same input. With `mobility_group_id` it
+  sends `POST .../mobility/groups/start`. With `group` it has two steps:
+  `create_group` (`POST .../mobility/groups`) and `start_group`. The answer:
+  `status`, `mobility_group_id`, `migrations` (`migration_id`, `vm_id`,
+  errors, warnings), `running`, `errors`, `warnings`, `steps`,
+  `status_read` (`hcx.migration.list`) and `status_read_params`.
+  `status_read_params` holds only known values, never null: the
+  `mobility_group_id` when there is one, the `migration_ids` of the
+  running migrations for `already_running`, or the `vm_ids` when no
+  group was made. Passed as they are, `hcx.migration.list` accepts them.
+- `hcx.migration.list` sends `{"filter": {...}}` with `skipDrafts: true`
+  (unless `include_drafts`), and `state`, `migrationId`, `entityId`,
+  `migrationGroupId` from the inputs. Each row keeps the vendor fields and
+  adds `migration_id`, `mobility_group_id`, `vm_id`, `vm_name`, `outcome`,
+  `status_message`, `error_message`, `start_time`, `end_time`. `outcome`
+  comes from the vendor `progress` flags (`isCancelled`, `didFail`,
+  `isDone`), else from the state (`MIGRATED`, `MIGRATE_FAILED`,
+  `MIGRATE_CANCELED`), else `unknown`. Next to the rows: `reachable`,
+  `checked_at`, `migration_ids`, `mobility_group_id`.
+- `hcx.migration.cancel` takes `migrations` (`migration_id`, optional
+  `mobility_group_id`) and `force`. It reads the migrations first; those
+  that ended are listed under `already_ended` and not sent. It sends
+  `{"items": [{"migrationId", "migrationGroupId"}]}` to `cancel`, or to
+  `forceCancel` with `force: true`. `status` is `accepted`, or
+  `already_ended` when nothing was left to send.
+- `hcx.mobility_group.list` sends
+  `{"filter": {"mobilityGroupName", "mobilityGroupState"}}` (and
+  `pageParameters` when `page_size` or `page_number` is set). With
+  `mobility_group_id` it reads that group's summary instead. Rows:
+  `mobility_group_id`, `name`, `state`, `configuration_status`,
+  `is_archived`, the wave, pairing and service mesh, times and user;
+  `page` holds HCX's page fields.
+- `hcx.mobility_group.set` sends `POST .../mobility/groups` without
+  `mobility_group_id`, or `PUT .../mobility/groups` with the id in the
+  body. A change replaces the group's settings with the group given.
+- `hcx.migration.schedule` takes `mobility_group_id`, `switchover` and an
+  optional `transfer` window. A window is `start_time` and `end_time`
+  (ISO 8601 with a time zone; the end after the start), or `clear: true`.
+  It sends `{"mobilityGroupDefaults": {"switchover": {"startTime",
+  "expiryTime"}}}` (epoch milliseconds) or `{"clearSchedule": true}`.
+  The answer has the window sent, the counts of changed schedules and
+  HCX's errors as `[{scope, id, code, message}]`.
+
+#### Vendor jobs: start and cancel
+
+HCX does the migration after the start call returns. So:
+
+- A start or cancel returns as soon as HCX accepted it: `status:
+  accepted`, the ids, and `status_read: hcx.migration.list` with
+  `status_read_params`. It never says the work is done.
+- `hcx.migration.list` is the status read. It gives the vendor state, the
+  `outcome` and the vendor's error text. The caller reads it until every
+  outcome is `succeeded`, `failed` or `cancelled`.
+- Before a start, the operation lists the migrations of the same group or
+  VMs. If one runs, it returns `already_running` with those migrations
+  and starts nothing. Before a cancel, it lists the migrations and skips
+  those that ended. This is a help, not a lock: two callers can both
+  check before either starts.
+- After a lost reply, do not start again blindly. Read
+  `hcx.migration.list` with the `mobility_group_id` (or the VM ids) and
+  decide from what it shows.
+- Call the start and the cancel with MEHO's async mode (`async: true`,
+  `docs/codebase/async-governed-dispatch.md`). MEHO then keeps the answer
+  with the ids under a run handle, so a lost reply does not lose them.
+- When the login expired between the start and the status read, the read
+  gets a `401`; the dispatcher logs in again and runs the read once more.
+- When HCX does not answer (a connection error or time-out, for example
+  during its own upgrade), the status read returns `reachable: false`,
+  the ids it was given and `checked_at`, and no rows. It does not say
+  `failed`. A certificate MEHO does not trust, and an address MEHO refused,
+  are raised on, so the dispatcher names the real reason. MEHO keeps no
+  job state between calls.
+- A start of VMs that fails at `start_group` returns `status: failed`
+  (or `no_answer` when HCX did not reply), with `steps`: `create_group`
+  done, `start_group` failed with the vendor's error. The new group stays;
+  nothing is undone. Read `hcx.migration.list` with its
+  `mobility_group_id`, then start it by id. When `create_group` fails, the
+  vendor error comes back as the call's error and nothing ran.
+- HCX can answer a start with HTTP 200 and still reject it: the `errors`
+  of the group, or of each migration, are not empty. The operation reads
+  them before it sets the status. Errors on the group, or on every
+  migration, mean nothing started: `status: failed`, `start_group` failed
+  with the messages. Errors on some migrations mean HCX started the
+  others: `status: partial`, `start_group` partial, and the rejected
+  migrations are those with errors in `migrations`. A start of VMs keeps
+  its `create_group` done step in both cases; the group stays. An error
+  counts by its presence, not by its text: one with only a `code` is a
+  rejection too, and the code (else `rejected`) becomes the step's text.
+- The error text of a step has its secrets removed before it leaves the
+  connector: the value of each secret-named field of the vendor body
+  (`"password": "..."`) is replaced, then the default redaction policy
+  runs. The vendor's messages are kept; a body without messages becomes
+  text only after that scrub. The same scrub runs on every text in the
+  `errors` and `warnings` lists of an answer (the group's, and each
+  migration's), so the copies next to the step error hold no secret
+  either.
 
 ### Shutdown
 
@@ -582,6 +724,8 @@ is sent.
   https://github.com/vmware/terraform-provider-hcx): the inventory calls
   `cloud/list`, `vc/list`, `vc/datastores/query` and `networks`.
 - `settings.py`: the result-handle limits the read checks against.
+- VMware's PowerShell module for HCX (`VMware.HCX` on the PowerShell
+  Gallery): the migration state names the status read knows.
 
 ## Known issues
 
@@ -643,12 +787,32 @@ is sent.
   No vendor page names its path, so this read does not cover it yet.
 - `build` is derived from the version string when the appliance row has no
   `buildNumber`; the live pin confirms the row's field names.
+- The migration operations follow the vendor reference "HCX Workload
+  Migration APIs", which names no HCX version. Three calls differ from the
+  first plan of the Task: the start, validate and cancel of single
+  migrations use the mobility group calls, because the vendor marks
+  `/hybridity/api/migrations?action=validate|start|cancel` as deprecated;
+  and the reference changes a mobility group with
+  `PUT /hybridity/api/mobility/groups` (the id in the body), not with the
+  id in the path.
+- The reference lists no values for `migrationType`. MEHO sends the
+  switchover type (`RAV`, `vMotion`, `vSphereReplication`,
+  `ColdMigration`), the value public HCX examples use. The live proof
+  confirms it, and the epoch-millisecond unit of the schedule times.
+- The check for a running migration of the same VMs (before a start of
+  VMs) and the `vm_ids` filter of `hcx.migration.list` send an
+  `entityId` filter on the migration query. The reference does not show
+  that filter; the live proof must confirm that HCX accepts it.
+- The reference gives no list of migration states. `outcome` reads the
+  vendor progress flags first; the state names `MIGRATED`,
+  `MIGRATE_FAILED` and `MIGRATE_CANCELED` come from VMware's PowerShell
+  module for HCX.
 
 ## References
 
 - Task #4608 (this connector, login, version helper and the read);
   #4545 (the reads that build on it); #4548 (the service mesh changes);
-  #4547 (network extension); #4395 (the same read for NSX);
+  #4547 (network extension); #4546 (the migration operations); #4395 (the same read for NSX);
   #4505 (the same shape for Site Recovery Manager).
 - `docs/decisions/spec-reconcile-guards-standard.md` -- the waiting lane.
 - `docs/codebase/connectors-nsx.md` -- the sibling connector this one

@@ -364,7 +364,8 @@
       "attributes": {
         "pkce.code.challenge.method": "S256",
         "oauth2.device.authorization.grant.enabled": "false",
-        "use.refresh.tokens": "true",
+        "use.refresh.tokens": "false",
+        "access.token.lifespan": "900",
         "client.use.lightweight.access.token.enabled": "false"
       },
       "authenticationFlowBindingOverrides": {

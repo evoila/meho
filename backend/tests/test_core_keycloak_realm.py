@@ -25,6 +25,8 @@ from typing import Any
 
 import pytest
 
+from meho_backplane.settings import Settings
+
 _REALM_FILE = (
     Path(__file__).resolve().parents[2]
     / "deploy"
@@ -310,7 +312,8 @@ def test_approval_sign_in_client(realm: dict[str, Any]) -> None:
     """The fresh sign-in of ``meho approvals approve`` has its own client (#5515).
 
     Browser sign-in with PKCE on a 127.0.0.1 loopback redirect only, no
-    device login, no ``offline_access``. It has the claim mappers of
+    device login, no ``offline_access``, no refresh token. Its access token
+    lasts as long as the approval window. It has the claim mappers of
     ``meho-cli`` (so the token names the person, tenant and role) and the
     backplane audience, but not the MCP audience: the token is only for
     the approve call.
@@ -325,6 +328,10 @@ def test_approval_sign_in_client(realm: dict[str, Any]) -> None:
     assert client["attributes"]["oauth2.device.authorization.grant.enabled"] == "false"
     assert client["redirectUris"] == ["http://127.0.0.1:*"]
     assert client["webOrigins"] == []
+    # No refresh token; the access token lasts as long as the approval window.
+    assert client["attributes"]["use.refresh.tokens"] == "false"
+    window = Settings.model_fields["fresh_sign_in_max_age_seconds"].default
+    assert client["attributes"]["access.token.lifespan"] == str(window)
     assert client["optionalClientScopes"] == []
     assert "offline_access" not in client["defaultClientScopes"]
     cli_mappers = {

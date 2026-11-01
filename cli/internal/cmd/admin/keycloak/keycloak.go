@@ -119,7 +119,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 		Long: "bootstrap-clients provisions every realm resource " +
 			"`meho login` and the MCP browser-flow onramp need:\n\n" +
 			"  * the public device-code client (default name `meho-cli`)\n" +
-			"  * the public client of the fresh browser sign-in of `meho approvals approve` (default name `meho-cli-approve`): PKCE on a 127.0.0.1 loopback only, no device flow, no offline_access, and its own login flow `meho approval sign-in` that always asks for the password (made if missing). Only its tokens can approve on the command line\n" +
+			"  * the public client of the fresh browser sign-in of `meho approvals approve` (default name `meho-cli-approve`): PKCE on a 127.0.0.1 loopback only, no device flow, no offline_access, no refresh token (its access token lasts 15 minutes), and its own login flow `meho approval sign-in` that always asks for the password (made if missing). Only its tokens can approve on the command line\n" +
 			"  * the public authorization-code+PKCE MCP client (default name `meho-mcp`)\n" +
 			"  * 8 protocol mappers on the CLI and MCP clients (audience-meho-backplane, meho-mcp-audience, groups-claim, and the User Attribute mappers tenant-id, tenant-role, approver, platform-admin and meho-tenants); the approval client gets the same without meho-mcp-audience\n" +
 			"  * 4 default client scopes on each client (basic, roles, web-origins, acr) — including the load-bearing `basic` scope that carries the `sub` claim in Keycloak 25+\n" +

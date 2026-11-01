@@ -1719,6 +1719,12 @@ func TestBootstrap_ApproveClientShape(t *testing.T) {
 	if got := c.Attributes["pkce.code.challenge.method"]; got != "S256" {
 		t.Errorf("PKCE = %q, want S256", got)
 	}
+	if got := c.Attributes["use.refresh.tokens"]; got != "false" {
+		t.Errorf("refresh tokens = %q, want false", got)
+	}
+	if got := c.Attributes["access.token.lifespan"]; got != "900" {
+		t.Errorf("access token lifespan = %q, want 900 (the approval window)", got)
+	}
 	if !slices.Equal(c.RedirectURIs, []string{"http://127.0.0.1:*"}) {
 		t.Errorf("redirect URIs = %v", c.RedirectURIs)
 	}
@@ -1770,12 +1776,14 @@ func TestBootstrap_ApprovalFlowSteps(t *testing.T) {
 }
 
 // An existing flow is kept; an existing approval client without the
-// binding gets it.
+// binding gets it, and gets the token settings of the approval client.
 func TestBootstrap_ReRunKeepsFlowAndBindsExistingClient(t *testing.T) {
 	fake := newFakeKeycloak()
 	fake.flows[approvalFlowAlias] = &fakeFlow{ID: "flow-existing", TopLevel: true}
 	old := fullOpts().withDefaults().desiredCLIApproveClient()
 	old.ID = "uuid-existing-approve"
+	old.Attributes["use.refresh.tokens"] = "true"
+	delete(old.Attributes, "access.token.lifespan")
 	fake.clients[old.ID] = old
 
 	res, _, err := runBootstrapOnce(t, fake, fullOpts())
@@ -1784,6 +1792,9 @@ func TestBootstrap_ReRunKeepsFlowAndBindsExistingClient(t *testing.T) {
 	}
 	if got := fake.clients[old.ID].AuthenticationFlowBindingOverrides["browser"]; got != "flow-existing" {
 		t.Errorf("browser flow = %q, want flow-existing", got)
+	}
+	if got := fake.clients[old.ID].Attributes; got["use.refresh.tokens"] != "false" || got["access.token.lifespan"] != "900" {
+		t.Errorf("token settings of the existing approval client = %v, want no refresh token and 900", got)
 	}
 	if n := fake.calls["POST /authentication/flows..."]; n != 0 {
 		t.Errorf("POST to the flow API %d times, want 0", n)

@@ -18,6 +18,7 @@ import re
 import uuid
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 
@@ -250,8 +251,10 @@ async def _run(kc: CompanyKeycloak, *, store: FakeStore | None = None, **company
 async def test_off_by_default_touches_nothing_of_the_company_login() -> None:
     kc = _fresh()
     await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
-    # The realm stage lists the login flows for the realm file's own flows.
-    calls = [path for _, path in kc.calls if path != f"{_BASE}/authentication/flows"]
+    # The realm stage lists the login flows and reads the steps of the
+    # realm file's own flows.
+    own = f"{_BASE}/authentication/flows/{quote('meho approval sign-in', safe='')}/executions"
+    calls = [path for _, path in kc.calls if path not in (f"{_BASE}/authentication/flows", own)]
     assert not any(kc._company_path(path) for path in calls)
     assert CompanyLoginPlan().enabled is False
 

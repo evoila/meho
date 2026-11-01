@@ -530,11 +530,15 @@ func (o BootstrapOptions) desiredApproveMappers() []protocolMapperRep {
 	return mappers
 }
 
+// approvalTokenLifespan is how long, in seconds, the access token of the
+// approval sign-in lasts: the default approval window of 15 minutes.
+const approvalTokenLifespan = "900"
+
 // desiredCLIApproveClient builds the ClientRepresentation for the public
 // client of the approval sign-in (#5515): browser sign-in with PKCE on a
 // 127.0.0.1 loopback redirect only, no device flow and no
-// offline_access. MEHO accepts an approve on the command line or REST
-// only with a token made for this client.
+// offline_access, no refresh token. MEHO accepts an approve on the
+// command line or REST only with a token made for this client.
 func (o BootstrapOptions) desiredCLIApproveClient() *clientRep {
 	return &clientRep{
 		ClientID:                  o.CLIApproveClientID,
@@ -548,9 +552,12 @@ func (o BootstrapOptions) desiredCLIApproveClient() *clientRep {
 		ServiceAccountsEnabled:    boolPtr(false),
 		FrontchannelLogout:        boolPtr(false),
 		Attributes: map[string]string{
-			"pkce.code.challenge.method":                  "S256",
-			"oauth2.device.authorization.grant.enabled":   "false",
-			"use.refresh.tokens":                          "true",
+			"pkce.code.challenge.method":                "S256",
+			"oauth2.device.authorization.grant.enabled": "false",
+			// No refresh token: the access token from the sign-in is the
+			// only one. It lasts as long as the approval window.
+			"use.refresh.tokens":                          "false",
+			"access.token.lifespan":                       approvalTokenLifespan,
 			"client.use.lightweight.access.token.enabled": "false",
 		},
 		RedirectURIs:        append([]string{}, cliRedirectURIs...),

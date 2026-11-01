@@ -408,6 +408,9 @@ class FakeKeycloak:
                 known = {f["id"] for f in self.flows.values()}
                 assert set(overrides.values()) <= known, "Unable to resolve the flow binding"
                 client["authenticationFlowBindingOverrides"] = copy.deepcopy(overrides)
+            # Keycloak sets each attribute of the body and keeps the others.
+            if body.get("attributes"):
+                client.setdefault("attributes", {}).update(body["attributes"])
             return Reply(204, None)
         if match := re.fullmatch(
             r"/admin/realms/meho/authentication/flows/([^/]+)/executions", path
@@ -658,7 +661,47 @@ async def test_upgrade_binds_an_existing_approval_client_to_its_flow(
     kc.calls.clear()
     await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
     assert not [c for c in kc.calls if c[0] == "POST" and "authentication" in c[1]]
-    assert f"login flow {_APPROVAL_FLOW}: kept" in capfd.readouterr().out
+    assert f"login flow {_APPROVAL_FLOW}: kept\n" in capfd.readouterr().out
+
+
+async def test_a_kept_login_flow_with_other_steps_is_named(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """A login flow that differs from the realm file is kept, and the stage says so."""
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(_realm_as_imported())
+    kc.flows[_APPROVAL_FLOW]["executions"][0]["requirement"] = "DISABLED"
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    out = capfd.readouterr().out
+    assert f"login flow {_APPROVAL_FLOW}: kept, but its steps differ from the realm file" in out
+    assert kc.flows[_APPROVAL_FLOW]["executions"][0]["requirement"] == "DISABLED"
+
+
+async def test_upgrade_sets_the_token_settings_of_an_existing_approval_client(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """An approval client from an earlier build gets the token settings of the realm file."""
+    old = _realm_as_imported()
+    approve = next(c for c in old["clients"] if c["clientId"] == "meho-cli-approve")
+    approve["attributes"]["use.refresh.tokens"] = "true"
+    del approve["attributes"]["access.token.lifespan"]
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(old)
+    cli_before = dict(kc.clients["meho-cli"]["attributes"])
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    attributes = kc.clients["meho-cli-approve"]["attributes"]
+    assert attributes["use.refresh.tokens"] == "false"
+    assert attributes["access.token.lifespan"] == "900"
+    assert attributes["pkce.code.challenge.method"] == "S256"
+    assert kc.clients["meho-cli"]["attributes"] == cli_before
+    assert "client meho-cli-approve: kept (token settings set)" in capfd.readouterr().out
+    # The next run finds them in place.
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+    assert "client meho-cli-approve: kept\n" in capfd.readouterr().out
 
 
 async def test_without_the_right_to_change_login_flows_the_stage_goes_on(
@@ -672,6 +715,7 @@ async def test_without_the_right_to_change_login_flows_the_stage_goes_on(
 
     assert _APPROVAL_FLOW not in kc.flows
     assert "authenticationFlowBindingOverrides" not in kc.clients["meho-cli-approve"]
+    assert kc.clients["meho-cli-approve"]["attributes"]["use.refresh.tokens"] == "false"
     out = capfd.readouterr().out
     assert f"login flow {_APPROVAL_FLOW}: not checked (no right to read login flows)" in out
     assert "client meho-cli-approve: created" in out

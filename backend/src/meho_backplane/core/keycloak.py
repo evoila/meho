@@ -230,6 +230,23 @@ def load_realm_file(path: str, environ: Mapping[str, str]) -> dict[str, Any]:
     return realm
 
 
+#: Client attributes of the realm file that every run keeps in line on an
+#: existing client: whether the client gets a refresh token, and how long
+#: its access token lasts.
+_TOKEN_SETTINGS = ("use.refresh.tokens", "access.token.lifespan")
+
+
+def _token_settings(want: Mapping[str, Any], have: Mapping[str, Any]) -> dict[str, str]:
+    """The token settings of *want* that differ on the existing client *have*."""
+    wanted = want.get("attributes") or {}
+    current = have.get("attributes") or {}
+    return {
+        key: wanted[key]
+        for key in _TOKEN_SETTINGS
+        if key in wanted and current.get(key) != wanted[key]
+    }
+
+
 class _Realm:
     """One session on realm ``meho``, with the lookups the steps share."""
 
@@ -356,10 +373,16 @@ class _Realm:
         if any(bound.get(binding) != flow_id for binding, flow_id in overrides.items()):
             update[OVERRIDES] = {**bound, **overrides}
             changes.append("login flow set")
+        token_settings = _token_settings(want, found.data[0])
+        if token_settings:
+            update["attributes"] = token_settings
+            changes.append("token settings set")
         if update:
             current = expect(
                 await self.admin.call("GET", url), 200, what=f"cannot read client {client_id}"
             ).data
+            if "attributes" in update:
+                update["attributes"] = {**(current.get("attributes") or {}), **update["attributes"]}
             current.update(update)
             expect(
                 await self.admin.call("PUT", url, json=current),

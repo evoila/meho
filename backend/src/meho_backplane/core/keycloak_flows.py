@@ -6,7 +6,8 @@
 Keycloak makes the flows of the realm file at its first start. On a realm
 made before a flow was in the file, :func:`ensure_flows` makes it through
 the Admin REST API: the flow, its steps and their requirements. A flow the
-realm has already is kept as it is.
+realm has already is kept as it is; when its steps or their requirements
+differ from the realm file, the stage says so in one line.
 
 Reading and changing login flows needs the ``manage-realm`` role. The
 ``meho-admin`` account of the realm file has it only when the company login
@@ -81,6 +82,24 @@ async def _add_steps(admin: Admin, flow: Mapping[str, Any], by_alias: Mapping[st
             )
 
 
+def _step_name(step: Mapping[str, Any]) -> str:
+    """The name of a listed step: the alias of a sub-flow, else the step's provider."""
+    name = step.get("displayName") if step.get("authenticationFlow") else step.get("providerId")
+    return str(name)
+
+
+async def _same_steps(
+    admin: Admin, flow: Mapping[str, Any], by_alias: Mapping[str, Any]
+) -> bool | None:
+    """Whether the realm's *flow* has the steps of the realm file; ``None`` when unreadable."""
+    reply = await admin.call("GET", _flow_url(flow["alias"]))
+    if reply.status == 403:
+        return None
+    steps = expect(reply, 200, what=f"cannot list the steps of login flow {flow['alias']}").data
+    have = {_step_name(step): step.get("requirement") for step in steps}
+    return have == _requirements(flow, by_alias)
+
+
 async def _set_requirements(
     admin: Admin, flow: Mapping[str, Any], by_alias: Mapping[str, Any]
 ) -> None:
@@ -92,8 +111,8 @@ async def _set_requirements(
         what=f"cannot list the steps of login flow {alias}",
     ).data
     for step in steps:
-        name = step.get("displayName") if step.get("authenticationFlow") else step.get("providerId")
-        want = wanted.get(str(name))
+        name = _step_name(step)
+        want = wanted.get(name)
         if want is None or step.get("requirement") == want:
             continue
         expect(
@@ -146,7 +165,10 @@ async def ensure_flows(admin: Admin, flows: list[Mapping[str, Any]]) -> dict[str
     for flow in top:
         alias = flow["alias"]
         if alias in have:
-            _say(f"login flow {alias}: kept")
+            if await _same_steps(admin, flow, by_alias) is False:
+                _say(f"login flow {alias}: kept, but its steps differ from the realm file")
+            else:
+                _say(f"login flow {alias}: kept")
         else:
             made = await _make_flow(admin, flow, by_alias)
             if made is None:

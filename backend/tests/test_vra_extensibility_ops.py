@@ -289,6 +289,66 @@ async def test_run_card_refuses(
     assert "<not-a-real-value>" not in reason
 
 
+#: Inputs that hide a secret below the top level, and the path the refusal names.
+_NESTED_SECRET_INPUTS: list[tuple[dict[str, Any], str]] = [
+    ({"settings": {"password": "hunter2-not-real"}}, "settings.password"),
+    ({"hosts": [{"name": "<host>"}, {"apiKey": "k-not-real"}]}, "hosts[1].apiKey"),
+    ({"settings": {"ssh": {"private_key": "-----not-real-----"}}}, "settings.ssh.private_key"),
+    ({"config": '{"vm": "<vm>", "password": "hunter2-not-real"}'}, "config"),
+]
+
+
+@pytest.mark.parametrize(
+    ("inputs", "path"), _NESTED_SECRET_INPUTS, ids=[path for _, path in _NESTED_SECRET_INPUTS]
+)
+def test_secret_input_check_walks_objects_lists_and_text(inputs: dict[str, Any], path: str) -> None:
+    problem = vra_extensibility._secret_input_problem(inputs)
+    assert problem is not None
+    assert path in problem
+    assert "not-real" not in problem
+
+
+def test_secret_input_check_accepts_a_clean_nested_input() -> None:
+    inputs = {"settings": {"vmName": "<vm-name>", "disks": [{"sizeGb": 10}]}, "note": "ok"}
+    assert vra_extensibility._secret_input_problem(inputs) is None
+
+
+@pytest.mark.parametrize(
+    ("inputs", "path"), _NESTED_SECRET_INPUTS, ids=[path for _, path in _NESTED_SECRET_INPUTS]
+)
+async def test_run_card_refuses_a_nested_secret_input(
+    vcfa: VcfAutomationConnector, inputs: dict[str, Any], path: str
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        read = mock.get(f"{_ACTIONS}/act-1").respond(200, json=_action())
+        effect = await _card("vcfa.tenant.abx.action.run", {**_RUN_PARAMS, "inputs": inputs}, vcfa)
+    reason = blast_radius_missing_reason(effect)
+    assert reason is not None
+    assert path in reason
+    assert "not-real" not in json.dumps(effect)
+    assert not read.called
+
+
+@pytest.mark.parametrize(
+    ("inputs", "path"), _NESTED_SECRET_INPUTS, ids=[path for _, path in _NESTED_SECRET_INPUTS]
+)
+async def test_run_refuses_a_nested_secret_input_before_the_vendor_call(
+    vra8: Vra8Connector, inputs: dict[str, Any], path: str
+) -> None:
+    async with respx.mock(base_url=VRA_BASE_URL, assert_all_called=False) as mock:
+        mount_vra_logins(mock)
+        read = mock.get(f"{_ACTIONS}/act-1").respond(200, json=_action())
+        start = mock.post(f"{_ACTIONS}/act-1/action-runs").respond(200, json={"id": "run-1"})
+        result = await run_vra8("vcfa.vra8.abx.action.run", {**_RUN_PARAMS, "inputs": inputs})
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "invalid_request"
+    assert path in result.result["guidance"]
+    assert "not-real" not in json.dumps(result.result)
+    assert not read.called
+    assert not start.called
+
+
 async def test_run_without_preview_hash_is_refused(vcfa: VcfAutomationConnector) -> None:
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         mount_logins(mock)

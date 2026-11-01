@@ -23,8 +23,10 @@ Secrets:
 * The source code of an action (``source``, ``compressedContent``) and its
   ``configuration`` are never returned; the input defaults neither, only
   the input names.
-* A run input whose name is a secret name is refused. A script gets its
-  secrets from Automation itself (action constants), never from MEHO.
+* A run input that holds a secret is refused: a secret-named key at any
+  depth (also inside an object or a list), or a text that holds a
+  secret-named pair. A script gets its secrets from Automation itself
+  (action constants), never from MEHO.
 * The inputs, outputs, error text and log of a run go through the
   secret-name scrub (:func:`~meho_backplane.redaction.secret_fields.scrub_secret_fields`).
 
@@ -53,7 +55,10 @@ from meho_backplane.operations._preview import (
     approved_preview,
     register_preview_builder,
 )
-from meho_backplane.redaction.secret_fields import scrub_secret_fields
+from meho_backplane.redaction.secret_fields import (
+    scrub_secret_fields,
+    scrub_secret_fields_in_text,
+)
 
 __all__ = [
     "ABX_ACTIONS_PATH",
@@ -148,8 +153,30 @@ async def abx_action_list(calls: VraGovCalls, params: Mapping[str, Any]) -> dict
     }
 
 
+def _secret_input_paths(node: Any, trail: str) -> list[str]:
+    """The paths in *node* that hold a secret, at any depth.
+
+    A key with a secret name (``password``, ``apiKey``, ...) is one, inside
+    an object or a list as much as at the top. So is a string that holds a
+    secret-named pair, such as a JSON document passed as text.
+    """
+    found: list[str] = []
+    if isinstance(node, Mapping):
+        for key, value in node.items():
+            path = f"{trail}.{key}" if trail else str(key)
+            if is_secret_param_name(str(key)):
+                found.append(path)
+            found.extend(_secret_input_paths(value, path))
+    elif isinstance(node, (list, tuple)):
+        for index, value in enumerate(node):
+            found.extend(_secret_input_paths(value, f"{trail}[{index}]"))
+    elif isinstance(node, str) and scrub_secret_fields_in_text(node) != node:
+        found.append(trail)
+    return found
+
+
 def _secret_input_problem(inputs: Mapping[str, Any]) -> str | None:
-    named = sorted(str(name) for name in inputs if is_secret_param_name(str(name)))
+    named = sorted(set(_secret_input_paths(inputs, "")))
     if not named:
         return None
     return (

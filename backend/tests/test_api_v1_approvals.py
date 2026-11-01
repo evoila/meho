@@ -188,7 +188,7 @@ async def test_resume_refuses_when_pinned_target_no_longer_resolves(
         principal_kind=PrincipalKind.USER,
     )
     # Minimal stand-in for the ApprovalRequest ORM row: the resume helper
-    # reads id / target_id / op_id / connector_id / params / work_ref /
+    # reads id / target_id / op_id / connector_id / params / reveal_secret / work_ref /
     # agent_session_id / request_audit_id (#2086 lineage re-binds) off it.
     request = SimpleNamespace(
         id=uuid.uuid4(),
@@ -196,6 +196,7 @@ async def test_resume_refuses_when_pinned_target_no_longer_resolves(
         op_id="vault.kv.put",
         connector_id="vault-1.x",
         params={"path": "secret/x", "value": "s3cr3t"},
+        reveal_secret=False,
         work_ref=None,
         agent_session_id=None,
         request_audit_id=None,

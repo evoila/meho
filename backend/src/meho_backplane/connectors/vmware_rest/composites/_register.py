@@ -63,6 +63,10 @@ from meho_backplane.connectors.vmware_rest.composites._migration_inventory_schem
     MIGRATION_GROUP_WHEN_TO_USE,
 )
 from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
+from meho_backplane.connectors.vmware_rest.host_access import (
+    HOST_ACCESS_GROUP_KEY,
+    HOST_ACCESS_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.license_common import (
     LICENSE_GROUP_KEY,
     LICENSE_WHEN_TO_USE,
@@ -200,8 +204,11 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "vm.import_from_library, dangerous); change CPU, memory, disks, NICs or "
         "CD drives (vm.resize, vm.disk.grow, vm.disk.attach, vm.nic.repoint, "
         "vm.cdrom.add, vm.device.cdrom, dangerous); set CPU and memory limits "
-        "(vm.resource_allocation.set, caution); unmount the VMware Tools "
-        "installer (vm.tools.installer.unmount, caution); move a VM to another "
+        "(vm.resource_allocation.set, caution); change boot settings and boot "
+        "order (vm.boot.set, dangerous); upgrade the hardware version or VMware "
+        "Tools (vm.hardware.upgrade, vm.tools.upgrade, dangerous); set or remove "
+        "advanced settings (vm.advanced_settings.set, dangerous); unmount the "
+        "VMware Tools installer (vm.tools.installer.unmount, caution); move a VM to another "
         "host (vm.migrate, dangerous); take a snapshot (vm.snapshot.create, "
         "caution), revert to one (vm.snapshot.revert, dangerous) or delete one "
         "(vm.snapshot.delete, destructive); delete a powered-off VM and its "
@@ -272,6 +279,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "migration": MIGRATION_GROUP_WHEN_TO_USE,
     # #4394: shared with the typed read vmware.vcenter.deployment.status.
     INSTALL_GROUP_KEY: INSTALL_WHEN_TO_USE,
+    # Shared with the two typed host-access reads: the same key and text.
+    HOST_ACCESS_GROUP_KEY: HOST_ACCESS_WHEN_TO_USE,
 }
 
 

@@ -63,6 +63,7 @@ from meho_backplane.operations._audit import (
     run_id_var,
     step_id_var,
 )
+from meho_backplane.operations._secret_values import register_plain_fields
 from meho_backplane.operations.composite import (
     CompositeRecursionLimitExceeded,
     DispatchChild,
@@ -115,6 +116,7 @@ __all__ = [
     "operation_catalog_write",
     "parent_audit_id_var",
     "register_composite_operation",
+    "register_plain_fields",
     "register_typed_op_registrar",
     "register_typed_operation",
     "reset_dispatcher_caches",

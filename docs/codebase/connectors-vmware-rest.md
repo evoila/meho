@@ -491,11 +491,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   implied by the spec, not by global defaults; its preview builder
   (`preview`, registered at import on the per-op hook); and, when the
   composite is not on the vCenter 8.0 catalog, the reason (`not_on_8_0`).
+  Two flags on the row feed the coverage test
+  (`test_connectors_vmware_rest_composite_coverage.py`): `no_preview` (a
+  write that waits for approval with no preview of its effect, on
+  purpose) and `classifier_other` (the broadcast classifier `classify_op`
+  puts the op id in its generic `other` class, on purpose). The
+  registration test (`test_connectors_vmware_rest_composites_write_register.py`)
+  checks rules on every row, not a copy of every operation: each op id is
+  unique, each handler is a module-level `async def` whose path imports
+  back to it, each group key has a "when to use" text, and the risk level
+  fits the approval flag. So a new composite changes neither test file.
   The per-group "when to use" texts stay hand-written in `_register.py`.
   The AI guidance
   (`llm_instructions`) of the VM and folder writes and the VM allocation
   reads lives in `composites/_vm_llm_instructions.py`, one entry per op id;
-  their example calls sit under `examples` in each parameter schema. The derived registration-coverage guard uses explicit, closed exceptions only for write operations whose existing semantics intentionally omit a preview or governed-suboperation discovery entry; every other registry id must be represented. `test_reference_docs_drift.py` remains the single total-set drift gate for generated `docs-site/reference/connectors.md`; regenerate it with `cd backend && uv run python scripts/generate_reference_docs.py` when the registry changes. Idempotent on re-run via the body-hash skip path.
+  their example calls sit under `examples` in each parameter schema. The derived registration-coverage guard uses explicit, closed exceptions only for write operations whose existing semantics intentionally omit a preview (the `no_preview` row flag) or governed-suboperation discovery entry; every other registry id must be represented. `test_reference_docs_drift.py` remains the single total-set drift gate for generated `docs-site/reference/connectors.md`; regenerate it with `cd backend && uv run python scripts/generate_reference_docs.py` when the registry changes. Idempotent on re-run via the body-hash skip path.
 - **Typed ops** (`typed_ops.py`, `#2257`) — the first vmware
   `source_kind="typed"` op, `vmware.host.usage`. Unlike a composite, a
   typed op is a **bound method** on `VmwareRestConnector`

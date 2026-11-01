@@ -48,5 +48,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
             "vmware.composite.cluster.drs_group.members.set"
         ],
         preview=cluster_drs_group_members_set_preview,
+        classifier_other=True,
     ),
 )

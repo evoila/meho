@@ -105,6 +105,9 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         safety_level="safe",
         requires_approval=False,
         llm_instructions=GUEST_EVENT_PERF_LLM_INSTRUCTIONS["vmware.composite.vm.guest.net.show"],
+        # Unlike the other guest reads it sends no in-guest login, so it is not
+        # a credential_write op (#3717).
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.guest.file.read",

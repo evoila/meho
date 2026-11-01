@@ -3506,6 +3506,21 @@ class VmwareRestConnector(HttpConnector):
 
         return await object_collect_impl(self, operator, target, params)
 
+    async def task_info(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.task.info`` -- one vCenter task by id (#4349).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_task_info.task_info_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_task_info import task_info_impl
+
+        return await task_info_impl(self, operator, target, params)
+
     async def tasks_recent(
         self,
         operator: Operator,

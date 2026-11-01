@@ -105,6 +105,11 @@ _CLASSIFIER_OTHER = frozenset(
         # #4394: ``.answer`` is not a classifier suffix -> ``other``. The
         # deploy and the install send a password: they are credential_write.
         "vmware.composite.vcenter.deployment.answer",
+        # #4349: ``.move`` / ``.connect`` / ``.disconnect`` are not classifier
+        # suffixes -> ``other``. ``host.add`` sends a password: credential_write.
+        "vmware.composite.host.move",
+        "vmware.composite.host.connect",
+        "vmware.composite.host.disconnect",
         # ``.inventory`` is not a classifier suffix -> ``other``; a read.
         "vmware.migration.inventory",
     }

@@ -113,6 +113,9 @@ from meho_backplane.connectors.vmware_rest.composites._host_cluster_llm_instruct
 from meho_backplane.connectors.vmware_rest.composites._host_config_ops import (
     HOST_CONFIG_COMPOSITES,
 )
+from meho_backplane.connectors.vmware_rest.composites._host_membership_ops import (
+    HOST_MEMBERSHIP_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._library import (
     content_library_subscribed_create_composite,
     content_library_subscribed_items_list_composite,
@@ -2146,6 +2149,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # Install a new vCenter (#4394), dangerous / approval; the rows live in
     # their own module.
     *(_CompositeSpec(**row) for row in VCENTER_INSTALL_COMPOSITES),
+    # Host membership (#4349): add (a vendor job), move, connect, disconnect,
+    # remove; the rows live in their own module.
+    *(_CompositeSpec(**row) for row in HOST_MEMBERSHIP_COMPOSITES),
     # Set NTP, DNS and the syslog targets of one host, dangerous / approval;
     # the rows live in their own module.
     *(_CompositeSpec(**row) for row in HOST_CONFIG_COMPOSITES),

@@ -53,6 +53,9 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _vm_cdrom_tools,
     _write,
 )
+from meho_backplane.connectors.vmware_rest.composites._host_power_ops import (
+    HOST_POWER_GOVERNED_SUBOPS,
+)
 from meho_backplane.connectors.vmware_rest.composites._vcenter_install_ops import (
     VCENTER_INSTALL_GOVERNED_SUBOPS,
 )
@@ -195,6 +198,8 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,
     # #4394 vCenter install: the deploy, the setup start and the answer.
     **VCENTER_INSTALL_GOVERNED_SUBOPS,
+    # #4350 host maintenance-mode start, reboot, shut down and standby.
+    **HOST_POWER_GOVERNED_SUBOPS,
 }
 
 

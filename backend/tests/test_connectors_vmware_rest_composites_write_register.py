@@ -171,6 +171,26 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vcenter.appliance.deploy",
     "vmware.composite.vcenter.install",
     "vmware.composite.vcenter.deployment.answer",
+    # Host maintenance-mode start, reboot, shut down and standby (#4350):
+    # dangerous + approval; the wake from standby is caution + approval.
+    "vmware.composite.host.maintenance.enter",
+    "vmware.composite.host.reboot",
+    "vmware.composite.host.shutdown",
+    "vmware.composite.host.standby.enter",
+    "vmware.composite.host.standby.exit",
+)
+
+#: Every status of the four host changes that wait for their task (#4350).
+_HOST_POWER_STATUSES: frozenset[str] = frozenset(
+    {
+        "done",
+        "unchanged",
+        "not_in_maintenance",
+        "not_connected",
+        "not_found",
+        "invalid_request",
+        "timeout",
+    }
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -354,6 +374,21 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
         "meho_backplane.connectors.vmware_rest.composites._vcenter_answer."
         "vcenter_deployment_answer_composite"
     ),
+    "vmware.composite.host.maintenance.enter": (
+        "meho_backplane.connectors.vmware_rest.composites._host_maintenance_enter.host_maintenance_enter_composite"
+    ),
+    "vmware.composite.host.reboot": (
+        "meho_backplane.connectors.vmware_rest.composites._host_power.host_reboot_composite"
+    ),
+    "vmware.composite.host.shutdown": (
+        "meho_backplane.connectors.vmware_rest.composites._host_power.host_shutdown_composite"
+    ),
+    "vmware.composite.host.standby.enter": (
+        "meho_backplane.connectors.vmware_rest.composites._host_power.host_standby_enter_composite"
+    ),
+    "vmware.composite.host.standby.exit": (
+        "meho_backplane.connectors.vmware_rest.composites._host_power.host_standby_exit_composite"
+    ),
     "vmware.composite.guest.customization_spec.create": (
         "meho_backplane.connectors.vmware_rest.composites._write."
         "guest_customization_spec_create_composite"
@@ -475,6 +510,11 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vcenter.deployment.answer": "vcenter_install",
     "vmware.composite.host.evacuate": "host",
     "vmware.composite.host.maintenance.exit": "host",
+    "vmware.composite.host.maintenance.enter": "host",
+    "vmware.composite.host.reboot": "host",
+    "vmware.composite.host.shutdown": "host",
+    "vmware.composite.host.standby.enter": "host",
+    "vmware.composite.host.standby.exit": "host",
     "vmware.composite.host.detach_from_vds": "host",
     "vmware.composite.network.portgroup.create": "networking",
     "vmware.composite.network.portgroup.security.set": "networking",
@@ -691,6 +731,8 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
         "vmware.composite.vm.snapshot.create",
         "vmware.composite.content_library.create",
         "vmware.composite.content_library.item.upload",
+        # Waking a host from standby (#4350).
+        "vmware.composite.host.standby.exit",
     }
     for row in rows:
         if row.op_id in (
@@ -1191,6 +1233,21 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "answer_failed",
             "answer_unknown",
         },
+        # #4350: the maintenance-mode start answers at once (a vendor job); the
+        # other four wait for the task and read the host again.
+        "vmware.composite.host.maintenance.enter": {
+            "accepted",
+            "already_running",
+            "tasks_incomplete",
+            "unchanged",
+            "not_connected",
+            "not_found",
+            "invalid_request",
+        },
+        "vmware.composite.host.reboot": _HOST_POWER_STATUSES,
+        "vmware.composite.host.shutdown": _HOST_POWER_STATUSES,
+        "vmware.composite.host.standby.enter": _HOST_POWER_STATUSES,
+        "vmware.composite.host.standby.exit": _HOST_POWER_STATUSES,
     }
     for op_id, expected_values in expected_status_values.items():
         schema: dict[str, Any] = dict(by_op[op_id].response_schema)

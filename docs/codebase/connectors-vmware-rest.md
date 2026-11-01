@@ -588,6 +588,15 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     state (`queued`/`running`/`success`/`error`), progress, cancelled
     flag, the queue/start/complete timestamps, and the localized error
     message when a task faulted.
+  - **`vmware.task.info`** (`typed_ops_task_info.py`, handler
+    `task_info`, `#4350`) — one vCenter task by its id: the status read
+    of a change that answers with a task id (for example
+    `host.maintenance.enter`). One `RetrievePropertiesEx` of `Task.info`.
+    Returns the vendor state (`queued`/`running`/`success`/`error`),
+    `done`, progress, the fault type and text, the object and the times.
+    `not_found` when vCenter no longer knows the task; `not_reachable`
+    (with the reason and the read time, never `failed`) when vCenter does
+    not answer. An expired login is renewed by the VI-JSON seam.
   - **`vmware.tasks.history`** (`typed_ops_tasks_history.py`, handler
     `tasks_history`, `#3701`) — vCenter tasks in a past time window.
     Use it when a task has already left the recent list.
@@ -1964,6 +1973,8 @@ enum) are:
 | `vm.clone_from_template` | `cloned`, `template_not_found`, `ambiguous_template`, `not_a_template`, `timeout` (name-resolution refusals + the template assert are pre-write; `timeout` when the `CloneVM_Task` poll gives up; a task *fault* raises `connector_error`) |
 | `host.evacuate` | `evacuated`, `partial`, `aborted`, `timeout`, `not_in_cluster` (the maintenance-enter is the vim `EnterMaintenanceMode_Task`, polled; a task *fault* raises `connector_error`, #2970; a poll `timeout` is a status with the task id and a `warning` issue, not a failure, #4895; `not_in_cluster` is a pre-change refusal) |
 | `host.maintenance.exit` | `exited`, `unchanged`, `not_connected`, `timeout` (the exit is the vim `ExitMaintenanceMode_Task`, polled, #4967; `unchanged` and `not_connected` are pre-change refusals; a task *fault* raises `connector_error`; a poll `timeout` is a status with the task id and a `warning` issue, not a failure, and its host read is best effort) |
+| `host.maintenance.enter` | `accepted`, `already_running`, `tasks_incomplete`, `unchanged`, `not_connected`, `not_found`, `invalid_request` (a vendor job, #4350: answers at once with the task id and `status_read`; nothing is sent except on `accepted`; `tasks_incomplete` when vCenter did not give the state of every recent task, so a running start cannot be ruled out) |
+| `host.reboot`, `host.shutdown`, `host.standby.enter`, `host.standby.exit` | `done`, `unchanged`, `not_in_maintenance`, `not_connected`, `not_found`, `invalid_request`, `timeout` (#4350: the vim task is polled, then the host is read again, best effort; a task *fault* raises `connector_error` with the fault type and text; a poll `timeout` is a status with the task id and a `warning` issue) |
 | `host.detach_from_vds` | `detached`, `incomplete`, `timeout` (the detach is the vim `ReconfigureDvs_Task` host-member remove, polled, #2970) |
 | `cluster.patch` | `completed`, `stopped` (per-host vim maintenance `*_Task`s + the vLCM `software?action=apply&vmw-task=true` cis task, every task polled before the next step, #2970) |
 | `cluster.drs_rule.create` | `created`, `rule_exists`, `insufficient_vms`, `timeout` (idempotent on rule name — a duplicate `rule_exists` is refused before any write; `insufficient_vms` when fewer than two named VMs resolve to the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
@@ -4176,6 +4187,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.power.bulk` | `{action, filter, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `host.evacuate` | `{host, tolerate_partial_failure, vsan_mode, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `host.maintenance.exit` | `{host, name, connection_state, in_maintenance_mode, ha_state, resolved, total_resolved, what_happens_next, unavailable?}` | live read (vim `RetrievePropertiesEx` on the host + `GET:/vcenter/vm`); a failed read is listed under `unavailable`, never blocks the park |
+| `host.maintenance.enter`, `host.reboot`, `host.shutdown`, `host.standby.enter`, `host.standby.exit` | `{host, <the call's options>, name, connection_state, power_state, in_maintenance_mode, standby_mode, ha_state, vms, vm_count, what_happens_next, unavailable?}` | live read (vim `RetrievePropertiesEx` on the host + `GET:/vcenter/vm`); a failed read is listed under `unavailable`, never blocks the park (`composites/_host_power_ops.py`) |
 | `host.detach_from_vds` | `{host, dvs, fallback_network, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `cluster.patch` | `{cluster, resolved, total_resolved}` | live read (`GET:/vcenter/host?clusters=...`) |
 | `vm.resize` | `{vm, name, power_state, current, requested}` sizing from->to | live read (`GET:/vcenter/vm/{vm}`) |
@@ -4386,8 +4398,8 @@ puts `POST:/HostSystem/{moId}/ExitMaintenanceMode_Task` in the `dangerous`
 risk level with `requires_approval: true` on the 8.0 and 9.0 catalogs, with
 or without the `/api` mount and with any spelling of the path parameter. A
 floor only raises a level; a row that is already `destructive` stays
-`destructive`. The generic *enter* call keeps its level: it goes with the
-`host.maintenance.enter` row of the host power-state work.
+`destructive`. The generic *enter* call waits for approval too: see the host
+power-state section below (#4350).
 
 **Running installs.** Rows already in the database change only on the next
 ingest. To get the new level, run the catalog ingest again for `vmware/8.0`
@@ -4413,6 +4425,124 @@ checks the rule against the pinned `vi-json` files),
 body and the reads against the vendor files) and
 `test_connectors_vmware_rest_composites_write_e2e.py` (park → approve →
 resume for both operations, one approval row).
+
+### Host power states: maintenance mode, reboot, shut down and standby (#4350)
+
+An agent or an operator can put a host in maintenance mode with a vSAN data
+option, reboot or shut it down, and put it in standby and wake it. Every one
+waits until a second person approves. All are typed (hand-written) and need no
+spec ingest. They are on both catalogs, `vmware-rest-8.0` and
+`vmware-rest-9.0`, in the group `host`. Ending maintenance mode is
+`host.maintenance.exit` (#4967, above); moving VMs off first is
+`host.evacuate`.
+
+| Operation | What it does | What it returns | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.composite.host.maintenance.enter` | Starts maintenance mode with a vSAN data option (`vsan_mode`: `ensureObjectAccessibility`, `evacuateAllData`, `noAction`, the same values as `host.evacuate`) and a vendor timeout. It does not move VMs. | `status` (`accepted`, `already_running`, `unchanged`, ...), the host state, `task`, `status_read` | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.composite.host.reboot` | Reboots a host that is in maintenance mode (any host with `force`). | `status` (`done`, `not_in_maintenance`, ...), the host state after the task, `task` | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.composite.host.shutdown` | Shuts down a host that is in maintenance mode (any host with `force`). | as reboot | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.composite.host.standby.enter` | Puts a host in standby (power saving); vCenter moves its running VMs off first. | `status` (`done`, `unchanged`, ...), the host state after the task, `task` | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.composite.host.standby.exit` | Wakes a host from standby. | as standby enter | `caution`, waits for approval | 8.0, 9.x |
+| `vmware.task.info` | One vCenter task by its id: the status read of `host.maintenance.enter`. | `state` (`queued`, `running`, `success`, `error`, `not_found`, `not_reachable`), `done`, progress, fault type and text, object, times | `safe` | 8.0, 9.x |
+
+Vendor calls (VIM, sent as VI-JSON on vCenter): `HostSystem.EnterMaintenanceMode_Task`
+(`timeout`, `maintenanceSpec.vsanMode.objectAction`), `HostSystem.RebootHost_Task`
+and `HostSystem.ShutdownHost_Task` (`force`),
+`HostSystem.PowerDownHostToStandBy_Task` (`timeoutSec`,
+`evacuatePoweredOffVms`), `HostSystem.PowerUpHostFromStandBy_Task`
+(`timeoutSec`), and `PropertyCollector.RetrievePropertiesEx` for the host
+(`name`, `runtime.connectionState`, `runtime.powerState`,
+`runtime.inMaintenanceMode`, `runtime.standbyMode`, `runtime.dasHostState`,
+and `recentTask` for the enter) and for `Task.info` (with
+`ContinueRetrievePropertiesEx` for every page of the task answer). vCenter 8.0 U1 to U3 and
+9.0 to 9.1.1 all have them, so no version check stops a call. The step lists
+are the `_VIM_SUB_OPS_HOST_*` tuples in `composites/_host_maintenance_enter.py`
+and `composites/_host_power.py`, published through `_host_power_ops.py`.
+
+**Before any change.** Each operation reads the host first and sends nothing
+when the host does not exist (`not_found`), is not connected
+(`not_connected`), or is already in the state asked for (`unchanged`). A
+reboot or shut down of a host that is not in maintenance mode answers
+`not_in_maintenance` unless `force` is true. A host id with characters a
+moid cannot have answers `invalid_request`.
+
+**Maintenance mode is a vendor job.** It can take long (vSAN may move data),
+so `host.maintenance.enter` does not wait:
+
+- The start returns as soon as vCenter took the task: `status: accepted`, the
+  task id in `task`, and `status_read: {op_id: vmware.task.info, params:
+  {task}}`. It never says the host is in maintenance mode.
+- Before the start, it reads the host's `recentTask` and their `Task.info`,
+  every page of the answer (`read_many` with `all_pages=True`). A task with
+  `descriptionId` `HostSystem.enterMaintenanceMode` that is `queued` or
+  `running` is returned as `already_running` with its id, and nothing new is
+  started. When vCenter leaves a recent task, or its `info`, out of the
+  answer, the start is refused with `tasks_incomplete` and nothing is sent:
+  a running start cannot be ruled out, so MEHO does not start on a guess.
+  This check is a help, not a lock: two callers can both look before either
+  starts, and a task that just ended is no longer in the list.
+- `vmware.task.info` gives the vendor state, the progress and, on failure,
+  the fault type and text. The caller reads it until `done`, then reads the
+  host (`vmware.host.usage`).
+- After a lost reply, do not start again blindly. Read `vmware.tasks.recent`
+  or the host first; a new start on a host that is already in maintenance
+  mode answers `unchanged`, and one with a running start answers
+  `already_running`.
+- Use MEHO's async mode (`async: true`,
+  `docs/codebase/async-governed-dispatch.md`) for the start: MEHO keeps the
+  answer with the task id under a run handle, so a lost reply does not lose
+  it.
+- An expired vCenter login between the start and a status read is renewed by
+  the VI-JSON seam (`_post_vmomi_json` logs in again on `NotAuthenticated`).
+- When vCenter does not answer (for example during its own upgrade), the
+  status read says `not_reachable` with the task id, the reason and the time.
+  It does not say `failed`. MEHO keeps no job state between calls.
+
+**The other four wait.** They poll the task (600 s for reboot and shut down;
+the vendor `timeoutSec` plus 60 s for standby) and then read the host again.
+The read after the task is best effort: a host that restarts may not answer,
+so a failed read leaves the state fields `null` and adds a `warning` issue.
+A faulted task fails the call (`connector_error`) with the fault type and
+text. A poll timeout is `status: timeout` with the task id and a `warning`
+issue, not a failure; follow it with `vmware.task.info`.
+
+**The approval page.** `host_power_preview` (`composites/_host_power_ops.py`)
+shows the host state, the VMs on the host with their power state, the
+options of the call and what happens next. A failed read never blocks the
+approval.
+
+**The generic calls wait too.** `ingest_safety.py` gives the generic
+older-API calls the level of their typed op, with `requires_approval: true`,
+on the 8.0 and 9.0 catalogs, with or without the `/api` mount and with any
+spelling of the path parameter:
+
+- `VMWARE_VIM_HOST_POWER_WRITES` (`is_vmware_vim_host_power_write`):
+  `POST:/HostSystem/{moId}/EnterMaintenanceMode_Task`, `RebootHost_Task`,
+  `ShutdownHost_Task` and `PowerDownHostToStandBy_Task` are `dangerous`.
+- `VMWARE_VIM_HOST_WAKES` (`is_vmware_vim_host_wake`):
+  `PowerUpHostFromStandBy_Task` keeps `caution`, like the VI-JSON snapshot
+  create.
+
+A floor only raises a level. Rows already in the database change on the next
+catalog ingest of `vmware/8.0` and `vmware/9.0`, as for the exit above. The
+typed operations (and `host.evacuate` and `cluster.patch`) send these calls as
+governed sub-steps that do not read the generic row, so one approval is still
+enough.
+
+Tests: `test_connectors_vmware_rest_host_power.py` (each handler on a
+recording double: success, refusals, a faulted task, a poll timeout, the
+running-task check, also on a later page, and the refusal when a recent task
+cannot be read; the real connector over `respx` on the vCenter 8 and 9
+VI-JSON paths; the rows and the preview),
+`test_connectors_vmware_rest_host_power_approval.py` (a person's call waits
+for approval and sends nothing; one approval runs the call),
+`test_connectors_vmware_rest_typed_task_info.py` (the status read: each
+state, `not_found`, `not_reachable`, a new login),
+`test_connectors_vmware_rest_host_power_generic_approval.py` (the floor on the
+generic calls for 8.0 and 9.0; the shelf-gated lane checks it against the
+pinned `vi-json` files) and
+`test_connectors_vmware_rest_host_power_reconcile.py` (the methods and their
+request types against the pinned `vi-json` files).
 
 ### Appliance, permission, certificate and vSAN removal calls wait for approval (#4973)
 

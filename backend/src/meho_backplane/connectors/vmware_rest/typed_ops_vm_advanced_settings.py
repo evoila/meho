@@ -50,6 +50,7 @@ __all__ = [
     "ADVANCED_SETTINGS_REST_CALLS",
     "ADVANCED_SETTINGS_VIM_CALLS",
     "ADVANCED_SETTING_ROW_SCHEMA",
+    "TYPED_OPS",
     "VMWARE_VM_ADVANCED_SETTINGS_SHOW_OP",
     "is_secret_key",
     "read_extra_config",
@@ -206,3 +207,5 @@ VMWARE_VM_ADVANCED_SETTINGS_SHOW_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_VM_ADVANCED_SETTINGS_SHOW_OP,)

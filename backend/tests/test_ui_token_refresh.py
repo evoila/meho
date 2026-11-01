@@ -410,6 +410,7 @@ def _run_failed_refresh(
     *,
     token_mock: Any,
     accept: str,
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[httpx.Response, list[dict[str, Any]], _TokenEndpointStub]:
     """Drive one refresh failure; return (response, logs, token route)."""
     key = make_rsa_keypair("kid-refresh-fail")
@@ -421,7 +422,7 @@ def _run_failed_refresh(
         token_route = _mock_token_endpoint(token_mock)
         client = _client(_build_app(), session_id)
         with capture_logs() as captured:
-            response = client.get(_PROBE_PATH, headers={"accept": accept})
+            response = client.get(_PROBE_PATH, headers={"accept": accept, **(extra_headers or {})})
     return response, captured, token_route
 
 
@@ -445,6 +446,8 @@ def test_invalid_grant_redirects_html_to_login_and_clears_cookie() -> None:
     location = response.headers["location"]
     assert location.startswith("/ui/auth/login?return_to=")
     assert parse_qs(urlparse(location).query)["return_to"] == [_PROBE_PATH]
+    # The login page says the session ended before it starts the login.
+    assert parse_qs(urlparse(location).query)["reason"] == ["session_ended"]
     assert response.headers["cache-control"] == "no-store"
     # Cookie cleared: Max-Age=0 on the meho_session set-cookie.
     set_cookie = response.headers["set-cookie"]
@@ -466,6 +469,65 @@ def test_refresh_failure_keeps_json_shape_for_non_html_callers() -> None:
     # The dead cookie is still dropped on the JSON shape.
     assert "Max-Age=0" in response.headers["set-cookie"]
     assert _failed_reasons(captured) == ["invalid_grant"]
+
+
+_INVALID_GRANT = httpx2.Response(
+    400,
+    json={"error": "invalid_grant", "error_description": "Session not active"},
+)
+
+
+def test_refresh_failure_on_htmx_request_returns_hx_redirect_to_the_page() -> None:
+    """#5518: an htmx request gets the same answer as a missing session.
+
+    ``204`` + ``HX-Redirect`` to login (htmx follows a ``302`` silently),
+    with ``return_to`` set to the page the person is on (``HX-Current-URL``),
+    not the fragment URL, and ``reason=session_ended`` for the message.
+    """
+    response, captured, token_route = _run_failed_refresh(
+        token_mock=_INVALID_GRANT,
+        accept="*/*",
+        extra_headers={
+            "HX-Request": "true",
+            "HX-Current-URL": "https://console.example/ui/approvals?state=pending",
+        },
+    )
+    assert response.status_code == 204
+    assert "location" not in response.headers
+    hx_redirect = response.headers["hx-redirect"]
+    assert hx_redirect.startswith("/ui/auth/login?return_to=")
+    query = parse_qs(urlparse(hx_redirect).query)
+    assert query["return_to"] == ["/ui/approvals?state=pending"]
+    assert query["reason"] == ["session_ended"]
+    assert response.headers["cache-control"] == "no-store"
+    assert "Max-Age=0" in response.headers["set-cookie"]
+    assert token_route.call_count == 1
+    assert _failed_reasons(captured) == ["invalid_grant"]
+
+
+@pytest.mark.parametrize(
+    "current_url",
+    [
+        pytest.param(None, id="no-header"),
+        pytest.param("https://console.example/api/v1/status", id="outside-ui"),
+    ],
+)
+def test_refresh_failure_on_htmx_request_falls_back_to_the_request_path(
+    current_url: str | None,
+) -> None:
+    """Without a usable ``HX-Current-URL``, ``return_to`` is the request path."""
+    headers = {"HX-Request": "true"}
+    if current_url is not None:
+        headers["HX-Current-URL"] = current_url
+    response, _, _ = _run_failed_refresh(
+        token_mock=_INVALID_GRANT,
+        accept="*/*",
+        extra_headers=headers,
+    )
+    assert response.status_code == 204
+    query = parse_qs(urlparse(response.headers["hx-redirect"]).query)
+    assert query["return_to"] == [_PROBE_PATH]
+    assert query["reason"] == ["session_ended"]
 
 
 @pytest.mark.parametrize(

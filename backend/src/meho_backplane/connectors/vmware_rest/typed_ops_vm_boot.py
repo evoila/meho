@@ -55,6 +55,7 @@ __all__ = [
     "BOOT_ORDER_ENTRY_SCHEMA",
     "BOOT_REST_CALLS",
     "BOOT_VIM_CALLS",
+    "TYPED_OPS",
     "VMWARE_VM_BOOT_SHOW_OP",
     "read_boot_state",
     "vm_boot_show_impl",
@@ -228,3 +229,5 @@ VMWARE_VM_BOOT_SHOW_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_VM_BOOT_SHOW_OP,)

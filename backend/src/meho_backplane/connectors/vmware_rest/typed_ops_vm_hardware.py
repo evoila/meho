@@ -64,6 +64,7 @@ __all__ = [
     "CDROM_ROW_SCHEMA",
     "DISK_ROW_SCHEMA",
     "HARDWARE_REST_CALLS",
+    "TYPED_OPS",
     "VMWARE_VM_HARDWARE_SHOW_OP",
     "VM_HARDWARE_GROUP_KEY",
     "VM_HARDWARE_PARAMETER_SCHEMA",
@@ -71,6 +72,7 @@ __all__ = [
     "VM_HARDWARE_WHEN_TO_USE",
     "VM_MOID_PATTERN",
     "VM_SELECTOR_PROPERTIES",
+    "WHEN_TO_USE_BY_GROUP",
     "cdrom_view",
     "check_vm_moid",
     "read_cdrom_rows",
@@ -544,3 +546,6 @@ VMWARE_VM_HARDWARE_SHOW_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_VM_HARDWARE_SHOW_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {VM_HARDWARE_GROUP_KEY: VM_HARDWARE_WHEN_TO_USE}

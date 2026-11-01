@@ -1,4 +1,4 @@
-# Connector: vcf-installer (VCF Installer 9.0 and 9.1)
+# Connector: vcf-installer (VCF Installer 9.0 and 9.1, Cloud Builder 5.x)
 
 ## Overview
 
@@ -31,6 +31,10 @@ binds to these primitives, while the composite remains the one-shot governed
 validate-then-deploy unit for operators.
 
 Source: `backend/src/meho_backplane/connectors/vcf_installer/`.
+
+Cloud Builder 5.0 to 5.2 (the VCF 5.x bring-up appliance) is a second
+implementation of the same product, `installer-cb-5.0`. See
+[Cloud Builder 5.x](#cloud-builder-5x-installer-cb-50).
 
 ## Key types
 
@@ -528,6 +532,128 @@ What is different on 9.0 (from the two API files):
 
 A live bring-up of VCF 9.0 with Installer 9.0.2 through MEHO is a separate
 lab proof.
+
+## Cloud Builder 5.x (`installer-cb-5.0`)
+
+VCF 5.0, 5.1 and 5.2 are brought up with the Cloud Builder appliance, not the
+VCF Installer. Cloud Builder's API (`/v1/sddcs`) is the older form of the
+Installer API, so MEHO has a second implementation of the `installer`
+product for it.
+
+Source: `backend/src/meho_backplane/connectors/vcf_cloud_builder/`.
+
+- **Connector:** `CloudBuilderConnector`, connector id `installer-cb-5.0`
+  (`product="installer"`, `impl_id="installer-cb"`), version range
+  `>=5.0,<9.0`. It registers no wildcard: the `("installer", "", "")`
+  wildcard stays with `installer-rest`. So a target with no version goes to
+  the VCF Installer connector. Set the version of a Cloud Builder target
+  (for example `5.2`). A 5.x version resolves to Cloud Builder; a 9.x
+  version still resolves to `installer-rest-9.1`
+  (`tests/test_connectors_vcf_cloud_builder_resolution.py`).
+- **Login:** HTTP Basic with the Cloud Builder `admin` account on every call
+  (the vendor reference says so; there is no token call). The account comes
+  from the target's Vault path (`{username, password}`) and is kept in
+  memory. When Cloud Builder answers `401`, the connector reads the account
+  from Vault again and sends the call once more. A `401` means Cloud Builder
+  did nothing, so this is safe also for a start.
+- **Version detection:** `GET /v1/sddcs/about` (the bring-up service with its
+  `version`). The older Installer call `GET /v1/system/appliance-info` does
+  not exist on Cloud Builder 5.x.
+
+### Operations
+
+All seven are written by hand, so they work on a fresh install with no spec
+ingest. They share the group `installer-cb-bringup`.
+
+| Operation | What it does | What it returns | Risk | Versions |
+|---|---|---|---|---|
+| `installer.cb.about` | Cloud Builder version and build (also MEHO's version detection). `GET /v1/sddcs/about`. | `{id, name, version, status}` | `safe` | 5.x |
+| `installer.cb.validation.start` | Check a bring-up spec. `POST /v1/sddcs/validations`. | `accepted` with the validation id, or `already_running` with the id of the running one | `caution`, waits for approval | 5.x |
+| `installer.cb.validation.status` | One validation check by check (`GET /v1/sddcs/validations/{id}`), or all validations when no id is given (`GET /v1/sddcs/validations`). | state, vendor state, result, counts, failed-check errors, one row per check | `safe` | 5.x |
+| `installer.cb.sddc.start` | Start the bring-up from a checked spec. `POST /v1/sddcs`. | `accepted` with the bring-up id, or `already_running` | `dangerous`, waits for approval | 5.x |
+| `installer.cb.sddc.status` | One bring-up task by task (`GET /v1/sddcs/{id}`), or all bring-ups when no id is given (`GET /v1/sddcs`). | state, vendor state, task counts, the first failed task with the vendor's error, one row per task | `safe` | 5.x |
+| `installer.cb.sddc.retry` | Retry a failed bring-up, with a fixed spec or the stored one. `PATCH /v1/sddcs/{id}`. | `accepted`, or `already_running` when the bring-up still runs | `dangerous`, waits for approval | 5.x |
+| `installer.cb.sddc.report` | The bring-up detail report (`GET /v1/sddcs/{id}/detail-report?format=pdf` or `csv`) or the validation report (`GET /v1/sddcs/validations/{validationId}/report`). | a link to the stored file (result handle): format, size, SHA-256 and the base64 content | `safe` | 5.x |
+
+"5.x" means Cloud Builder 5.0, 5.1 and 5.2: every call is in the vendor's
+reference list of each version (5.0.0, 5.1.0, 5.1.1 and 5.2.0 to 5.2.4).
+
+### Passwords
+
+A bring-up spec holds passwords and licence keys. A call never sends them as
+values:
+
+- The `spec` parameter refuses text in a field whose name ends with
+  `password`, `passwd`, `secret`, `license`, `licenseKey`, `licenseFile`,
+  `privateKey` or `passphrase`. MEHO checks this before the call waits for
+  approval, so no password or licence key is stored with an approval request.
+- The caller names each such value in `secrets`: a JSON Pointer into the
+  spec and a Vault path (`secret_ref`, optional `secret_key` and
+  `secret_mount`). MEHO reads it under the caller's identity and puts it into
+  a copy of the spec just before it sends the spec.
+- A vendor error text that holds one of these values is replaced with a
+  note. The calls that send a spec carry the `credential` tag, so the flight
+  recorder keeps no request or answer body.
+- A later status read can get a check or task error that echoes a value of
+  the spec. The connector remembers, by the target's host, each start that
+  sent a spec: the values it read and the id of the job it created. A status
+  read of such a job, and the flight-recorder body of that answer, hide the
+  remembered values. A text shaped like a VMware licence key (five groups of
+  five letters or digits) is hidden by its shape in every case.
+- For a job this MEHO did not start with a spec it holds (one started before
+  a restart of MEHO, started by someone else, or retried without a spec after
+  a restart), the status read and the flight-recorder body show no vendor
+  error text at all. MEHO cannot know which values such a text may echo. The
+  state, the failed check or task and the counts stay visible, and each
+  hidden text says why and what to do: read the report, or start the job
+  again. Only the newest 64 starts per target are kept. A job's id and its
+  values share one entry, so when a job leaves the memory its vendor texts
+  are hidden again.
+- The reports are vendor files. MEHO does not change their content.
+
+### Vendor jobs
+
+Cloud Builder runs a validation and a bring-up by itself after the start
+call returns.
+
+- **Start.** `installer.cb.validation.start`, `installer.cb.sddc.start` and
+  `installer.cb.sddc.retry` return as soon as Cloud Builder accepted the job:
+  `status: accepted`, `job.id` and `status_read` (the status operation and
+  its parameters). The answer never says the job is done.
+- **Running job.** Before a start, the operation lists the jobs of the same
+  kind (for a retry: reads the bring-up). When one runs, it returns
+  `already_running` with that id and starts nothing. This is a help, not a
+  lock: two callers can both check before either starts.
+- **Steps.** Each start returns its three steps (`read_secrets`,
+  `check_running`, `start`) as `done`, `failed`, `unknown` or `not_run`.
+  Nothing is undone.
+- **Lost reply.** A start whose reply is lost returns `start_unknown`. Do
+  not start again blindly: read `installer.cb.sddc.status` (or
+  `installer.cb.validation.status`) without an id and look for a running
+  job. Better: call the start with `async: true`
+  ([async-governed-dispatch.md](async-governed-dispatch.md)), so MEHO keeps
+  the answer with the job id under a run handle.
+- **Status.** The status reads give MEHO's state word (`running`,
+  `succeeded`, `failed`, for a validation `cancelled`, and for a bring-up
+  `rolled_back`), the vendor state, the progress and the vendor's error
+  text. A validation whose cancel is still in progress
+  (`CANCELLATION_IN_PROGRESS`) is `running`: keep polling until it is
+  `cancelled`, and no second validation starts meanwhile. When Cloud Builder
+  does not answer, the state is `not_reachable`, with the id and the time; it
+  is never `failed`. MEHO keeps no job state between calls; the caller keeps
+  the id.
+- **Login.** When the stored login no longer works between a start and a
+  status read, the status read reads the account from Vault again and still
+  reads the job.
+
+### Reconcile lane
+
+Broadcom publishes no API file for Cloud Builder 5.x. The spec shelf pins
+one reference list per version, made from the vendor's API reference pages
+(section "Sddc" of the VMware Cloud Foundation API reference).
+`tests/test_connectors_vcf_cloud_builder_spec_reconcile.py` pins the exact
+set of calls (always) and checks each call against every list (when the
+shelf is there; CI checks out `docs/cloud-builder-5.0`, `-5.1` and `-5.2`).
 
 ## Spec-reconcile lane
 

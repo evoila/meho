@@ -2333,10 +2333,16 @@ def _apply_redaction_middleware(
     schema's ``Annotated[str | None]`` field). ``None`` tenant id
     (the chassis-era audit shape) flows through as ``None`` so the
     resolver only matches a non-tenant-scoped override.
+
+    For a ``credential_mint`` op (an op whose answer holds a new
+    credential, such as a Vault SecretID or a Harbor robot secret) the
+    ``raw`` copy that goes to the audit row gets the secret-named values
+    replaced (:func:`scrub_secret_named_values`). The caller-bound
+    ``redacted`` copy is unchanged.
     """
     tenant = str(operator.tenant_id) if operator.tenant_id is not None else None
     try:
-        return apply_connector_boundary_redaction(
+        redaction = apply_connector_boundary_redaction(
             raw,
             connector_id=connector_id,
             tenant=tenant,
@@ -2344,6 +2350,12 @@ def _apply_redaction_middleware(
         )
     except Exception as exc:
         return result_connector_error(op_id, exc, 0.0)
+    if classify_op(op_id) != "credential_mint":
+        return redaction
+    # An op that makes a new credential returns it to the caller, but the
+    # audit row's raw copy keeps only the other fields.
+    audit_raw, _ = scrub_secret_named_values(redaction.raw)
+    return redaction.model_copy(update={"raw": audit_raw})
 
 
 def _handle_metadata_for_audit(handle: ResultHandle | None) -> dict[str, Any] | None:

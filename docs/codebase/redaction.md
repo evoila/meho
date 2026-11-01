@@ -430,6 +430,13 @@ connector-boundary redaction (`dispatcher._protect_secret_values`):
   shadow-mode policy hides nothing, so its matches stay in the stored
   copy. Rows written before this change are not rewritten; they age off
   with the 90-day `raw_payload` retention.
+- **Credential mints.** An op that makes a new credential
+  (`classify_op(op_id) == "credential_mint"`, for example
+  `vault.auth.approle.generate_secret_id` or `harbor.robot.create`) is
+  the other way round. The caller gets the new secret, but
+  `dispatcher._apply_redaction_middleware` runs the key-name walk over
+  `redaction.raw`, so the audit `raw_payload` keeps only the other fields
+  (`[REDACTED:param_name]` in place of the secret).
 
 `secret.move` remains the recommended no-transit path for piping a
 credential onward; `vault.kv.versions` is the metadata-only browse.
@@ -1008,6 +1015,13 @@ depot password (`sddc.domain.validate` / `create`,
 `installer.sddc.spec.validate`, `installer.sddc.bringup.start` / `retry`,
 `installer.composite.sddc.bringup`, `installer.system.depot.set`) carry the
 tag `credential`, a secret tag word (`SECRET_FAMILY_TAGS`).
+The ingested (`METHOD:/path`) copies of the same VCF calls have no such tag.
+`SECRET_FAMILY_PATTERNS` names them, so their bodies are not recorded either:
+`POST:/v1/domains`, `POST:/v1/domains/validations`, `POST:/v1/sddcs`,
+`POST:/v1/sddcs/*` (validate, resource calculation, the discovery logins),
+`PATCH:/v1/sddcs/*` (retry), `GET:/v1/sddcs/*/spec`,
+`PUT:/v1/system/settings/depot` and `PATCH:/v1/system/proxy-configuration`.
+Status reads such as `GET:/v1/sddcs/{id}` keep their bodies.
 
 The dispatcher's error path uses the same secret check (#4854). For an
 operation that `classify_op` pins as `credential_write`, or whose tags

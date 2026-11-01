@@ -598,31 +598,7 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
     },
 )
 
-#: The typed ops :class:`VmwareRestConnector` registers at lifespan
-#: startup: ``vmware.host.usage`` (#2257); ``host.network_uplinks`` +
-#: ``host.vsan_health`` (#2258, re-shipped from the former composites);
-#: ``host.storage_devices`` (#3332, per-host raw SCSI devices, vCenter or
-#: standalone-ESXi); ``host.datastores`` (#3373, the datastores mounted on
-#: one host, vCenter or standalone-ESXi); and the incident-survival reads ``vm.info`` +
-#: ``object.collect`` + ``tasks.recent`` (#2300); ``tasks.history``
-#: (#3701, tasks older than the recent list); the SSO Admin API
-#: description read ``vcenter.sso_admin.api_file.get``; the snapshots of
-#: one VM, ``snapshot.list``; the two licence reads ``license.list`` +
-#: ``license.assigned.list`` (keys masked); the four
-#: ``vmware.appliance.local_account.*`` operations (two reads, two changes
-#: that wait for approval); the triggered-alarm list
-#: ``alarm.triggered.list`` (#4383); the VM question read and answer
-#: ``vm.question.get`` / ``vm.question.answer`` (the answer waits for
-#: approval); the cluster list ``cluster.list``; the resource pool list
-#: ``resource_pool.list``; the two content-library finds ``content_library.find``
-#: + ``content_library.item.find`` (#3550); the datacenter list
-#: ``datacenter.list``; the inventory folder list ``folder.list``; the
-#: six content-library reads (one library, one item, the files of an item,
-#: the OVF options of an item, the subscription URL check and the
-#: Supervisor library list); the install state of a new vCenter
-#: appliance, ``vcenter.deployment.status`` (#4394); and the settings of
-#: one distributed port group ``network.portgroup.show``. The tuple shape
-#: lets future typed ops join without touching the registrar.
+#: The typed ops :class:`VmwareRestConnector` registers at lifespan startup.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
     VMWARE_HOST_NETWORK_UPLINKS_OP,

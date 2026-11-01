@@ -220,6 +220,7 @@ func streamOnce(ctx context.Context, args streamArgs) error {
 	// The feed is an audited request. ctx is the command context, so
 	// the global --work-ref rides along on every connect and reconnect.
 	api.SetWorkRefHeader(req)
+	api.SetTenantHeader(req)
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Cache-Control", "no-cache")
 	if args.LastEventID != "" {

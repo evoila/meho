@@ -805,6 +805,11 @@ async def test_user_write_password_reader_dispatches_gsm_scheme(
         CREDENTIAL_BACKEND_REGISTRY,
     )
     from meho_backplane.connectors.keycloak.ops_write import _read_password_from_vault
+    from meho_backplane.settings import get_settings
+
+    # A gsm: secret named in a parameter must be in an allowed project.
+    monkeypatch.setenv("GSM_PARAM_ALLOWED_PROJECTS", "meho-prod")
+    get_settings.cache_clear()
 
     seen: dict[str, Any] = {}
 

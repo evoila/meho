@@ -6,7 +6,7 @@
 # this change (~1490 lines); splitting the metadata table is out of scope for
 # the #3349 governed-subop wiring.
 
-"""``register_vmware_composite_operations`` -- registrar for the 71 composites.
+"""``register_vmware_composite_operations`` -- registrar for the vmware-rest composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -26,64 +26,15 @@ the source_kind="composite" persistence.
 Mixed safety posture
 --------------------
 
-The 20 read composites (the five T5 / #508 reads + the datastore
-cache-refresh read ``datastore.refresh`` / #3789 + the datastore file list
-``datastore.file.list`` / #3432 + the vSAN folder list
-``datastore.vsan.folder.list`` / #4022 + the orphan folder check
-``datastore.orphan_dirs`` / #3814 + the VM allocation read
-``vm.resource_allocation.show`` / #3880 + the 4 guest-ops reads
-``vm.guest.process.list`` / ``vm.guest.env.read`` / ``vm.guest.net.show``
-/ ``vm.guest.file.read`` / #3100 + the Supervisor / namespace /
-storage-policy / content-library ``status`` + ``list`` reads) are
-read-only. 19 of them pass ``safety_level="safe"`` +
-``requires_approval=False`` -- overrides of T4's ``dangerous`` / ``True``
-defaults. The exception is ``vm.guest.file.read``, promoted to
-``caution`` in #3720 (it can fetch arbitrary guest bytes as the in-guest
-login), so it auto-parks for agent / service principals while a human
-seat still executes it immediately; see its caution row below. (The
-former ``host.network_uplinks`` and ``host.vsan_health`` reads were
-re-shipped as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 55 write
-composites (T6 / #509, single-VM ``vm.power`` / #2301, the guest-ops
-write ``vm.guest.file.write`` / #3100, the mutating
-VI-JSON ``vm.disk.grow`` / #2893, the folder-template
-``vm.clone_from_template`` / #2894, the vim cluster / inventory writes
-``cluster.drs_rule.create`` + ``folder.create`` / #2895, the #2891
-hardware writes -- ``vm.resize`` / ``vm.nic.repoint`` /
-``vm.device.cdrom``, the two GOSC composites
-``guest.customization_spec.create`` / ``vm.customize`` / #2892, the
-OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909 +
-``vm.import_from_library`` / #3229, the
-three host-domain writes ``host.datastore_mount_nfs`` /
-``host.disk_mark_flash`` / ``host.service_control`` / #3182, and the
-later Supervisor / #3281, storage-policy, content-library / #3495 and
-resource-pool / #3505 write families, the #3339 teardown deletes, the
-DRS rule delete ``cluster.drs_rule.delete``, the VM snapshot create +
-delete ``vm.snapshot.create`` / ``vm.snapshot.delete``, the licence assign
-``license.assign``, and the two alarm changes ``alarm.acknowledge`` /
-``alarm.reset`` / #4383) are all ``requires_approval=True``.
-33 pin ``safety_level="dangerous"`` (T4's default, passed explicitly for
-clarity at the call site; the helper would default to it anyway). 11 pin
-``safety_level="caution"`` -- the VM snapshot create ``vm.snapshot.create``,
-the two alarm changes ``alarm.acknowledge`` / ``alarm.reset`` / #4383 (they
-change only the state of alarms), the datastore directory create
-``datastore.dir.create`` / #3339, the reversible VM allocation write
-``vm.resource_allocation.set`` / #3880, the #3505 governed-allocation writes
-``resource_pool.create`` + the VM-Host affinity
-``cluster.drs_vm_host_rule.create``, plus ``namespace.create`` /
-``storage_policy.create`` / ``content_library.subscribed.create`` /
-``content_library.subscribed.sync`` (``resource_pool.delete`` is a
-``dangerous`` reparent, not a destroy). 11 pin
-``safety_level="destructive"`` -- ``vm.destroy`` / #3198 (the first
-destructive op -- the governed-delete tier, decision
-``docs/decisions/governed-delete-operations.md``), ``namespace.delete``,
-``storage_policy.delete``, the six #3339 teardown deletes
-(``network.portgroup.delete``, ``host.standard_portgroup.delete``,
-``folder.delete``, ``datastore.file.delete``, ``content_library.delete``,
-``content_library.item.delete``), ``cluster.drs_rule.delete`` and the VM
-snapshot delete ``vm.snapshot.delete``. (The
-``caution`` tier is not writes-only:
-``vm.guest.file.read`` above is a ``caution`` read / #3720.)
+Read composites pass ``safety_level="safe"`` + ``requires_approval=False``
+-- overrides of the ``dangerous`` / ``True`` defaults of
+:func:`register_composite_operation`. A read can still be ``caution``: for
+example ``vm.guest.file.read`` (#3720) can fetch any guest file as the
+in-guest login, so it waits for approval for agent / service principals
+while a human runs it at once. Write composites are all
+``requires_approval=True``, at the level ``dangerous``, ``caution`` (a
+change that is easy to undo) or ``destructive`` (a delete; see
+``docs/decisions/governed-delete-operations.md``).
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
 ``requires_approval`` so the policy posture is implied by the row,
 not by global state.
@@ -127,6 +78,12 @@ from meho_backplane.connectors.vmware_rest.composites._datastore_orphans import 
 )
 from meho_backplane.connectors.vmware_rest.composites._datastore_vsan import (
     datastore_vsan_folder_list_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_group import (
+    cluster_drs_group_members_set_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_group_delete import (
+    cluster_drs_group_delete_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
     cluster_drs_rule_delete_composite,
@@ -277,6 +234,10 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_snapshot_revert_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites.schemas import (
+    CLUSTER_DRS_GROUP_DELETE_PARAMETER_SCHEMA,
+    CLUSTER_DRS_GROUP_DELETE_RESPONSE_SCHEMA,
+    CLUSTER_DRS_GROUP_MEMBERS_SET_PARAMETER_SCHEMA,
+    CLUSTER_DRS_GROUP_MEMBERS_SET_RESPONSE_SCHEMA,
     CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA,
     CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA,
     CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA,
@@ -1259,8 +1220,8 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         summary="Add a DRS rule that runs a VM group on, or away from, a host group.",
         description=(
             "Creates a VM group, a host group and a DRS rule that keeps those VMs on those hosts, "
-            "or away from them, in one cluster change. A rule or group name that already exists "
-            "changes nothing. mandatory makes it a 'must' rule instead of a 'should' rule."
+            "or away from them, in one cluster change. With use_existing_groups it uses two "
+            "groups that exist and creates only the rule. A name already taken changes nothing."
         ),
         parameter_schema=CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA,
         response_schema=CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA,
@@ -1288,6 +1249,42 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="destructive",
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.cluster.drs_rule.delete"],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.cluster.drs_group.members.set",
+        handler=cluster_drs_group_members_set_composite,
+        summary="Add VMs or hosts to, or remove them from, an existing DRS group.",
+        description=(
+            "Adds VMs to, or removes VMs from, an existing DRS VM group, by name. Does the same "
+            "for hosts in a host group. The approval card shows what changes and which rules use "
+            "the group. Like 'govc cluster.group.change'."
+        ),
+        parameter_schema=CLUSTER_DRS_GROUP_MEMBERS_SET_PARAMETER_SCHEMA,
+        response_schema=CLUSTER_DRS_GROUP_MEMBERS_SET_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "write", "cluster", "drs", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS[
+            "vmware.composite.cluster.drs_group.members.set"
+        ],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.cluster.drs_group.delete",
+        handler=cluster_drs_group_delete_composite,
+        summary="Delete one DRS VM group or host group from a cluster, by name.",
+        description=(
+            "Deletes one DRS VM group or host group, found by name. The VMs and hosts stay. "
+            "Refused while a rule still uses the group. Destructive: a second person must always "
+            "approve it. Like 'govc cluster.group.remove'."
+        ),
+        parameter_schema=CLUSTER_DRS_GROUP_DELETE_PARAMETER_SCHEMA,
+        response_schema=CLUSTER_DRS_GROUP_DELETE_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "write", "cluster", "drs", "vi-json", "teardown", "destructive"],
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.cluster.drs_group.delete"],
     ),
     _CompositeSpec(
         op_id="vmware.composite.resource_pool.create",
@@ -1559,9 +1556,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         handler=guest_env_read_composite,
         summary="Read environment variables from a VM's guest OS (needs VMware Tools).",
         description=(
-            "Reads the guest user's environment variables as NAME=value strings "
-            "(ReadEnvironmentVariableInGuest). Omit names to read all of them. Uses the guest "
-            "login from the target's secret. Read-only."
+            "Reads the guest user's environment variables (ReadEnvironmentVariableInGuest). "
+            "Omit names to read all of them. Uses the guest login from the target's secret. "
+            "Returns the names; the values are hidden unless a person passes reveal_secret. "
+            "Read-only."
         ),
         parameter_schema=GUEST_ENV_READ_PARAMETER_SCHEMA,
         response_schema=GUEST_ENV_READ_RESPONSE_SCHEMA,

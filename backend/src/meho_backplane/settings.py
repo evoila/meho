@@ -442,6 +442,18 @@ class Settings(BaseModel):
         every existing token is unaffected unless a realm explicitly
         grants the claim. Override only when the realm exposes the flag
         under a different attribute.
+    jwt_self_approver_group:
+        Name of the login group whose members may approve their own
+        changes (#3327, the rules of #3325). Default
+        ``MEHO-SA-Operators``, the group the shipped login setup creates
+        (``docs/decisions/login-role-groups.md``). ``verify_jwt`` sets
+        :attr:`~meho_backplane.auth.operator.Operator.self_approver` when
+        the token's ``groups`` claim names this group. This is used only
+        when the token has no ``meho_tenants`` claim; with that claim, the
+        current tenant's ``SA-Operators`` entry decides. Off when the
+        group is missing; a machine login never gets the flag. Change it
+        only together with ``JWT_ROLE_GROUPS``, when the site renamed the
+        groups. A blank value keeps the default.
     jwt_runner_id_claim_name:
         Name of the JWT claim that carries a satellite runner principal's
         row UUID (Initiative #2415, #2502). Default ``runner_id`` matches
@@ -1360,6 +1372,7 @@ class Settings(BaseModel):
     jwt_platform_admin_claim_name: str = Field(default="platform_admin", min_length=1)
     jwt_platform_admin_role_name: str | None = None
     jwt_approver_claim_name: str = Field(default="approver", min_length=1)
+    jwt_self_approver_group: str = Field(default="MEHO-SA-Operators", min_length=1)
     jwt_runner_id_claim_name: str = Field(default="runner_id", min_length=1)
     keycloak_admin_url: str = ""
     keycloak_admin_client_id: str = ""
@@ -1479,6 +1492,15 @@ class Settings(BaseModel):
     gsm_wif_subject_token_type: str = Field(
         default="urn:ietf:params:oauth:token-type:jwt", min_length=1
     )
+    # Google Cloud projects whose Secret Manager secrets an operation may
+    # name in a parameter (for example ``password_secret_ref:
+    # gsm:<project>/<secret>``). Comma-separated project ids, whitespace
+    # ignored. Empty (the default) refuses every ``gsm:`` secret named in a
+    # parameter, and on a ``credentialBackend=gsm`` install every schemeless
+    # one too. A target's own ``secret_ref`` is not affected. Read through
+    # :attr:`gsm_param_allowed_project_set`. Set via
+    # ``GSM_PARAM_ALLOWED_PROJECTS``.
+    gsm_param_allowed_projects: str = Field(default="")
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -2012,10 +2034,11 @@ class Settings(BaseModel):
     # check-runner's background dispatch. Unset (the default) keeps every
     # Vault JWT login on ``vault_oidc_role`` byte-for-byte, so interactive
     # and background logins share one role exactly as they do today. Set it
-    # and only the check-runner's synthetic-operator logins
+    # and only the logins that present the check-runner's token
     # (``vault_client_for_operator`` when ``Operator.check_runner_dispatch``
-    # is set -- i.e. background Sensor dispatch) resolve *this* role, while
-    # interactive/operator logins keep ``vault_oidc_role``. That lets an
+    # is set -- background Sensor dispatch and the inbound event intake's
+    # secret read) resolve *this* role, while interactive/operator logins
+    # keep ``vault_oidc_role``. That lets an
     # operator provision a role bounded by ``bound_audiences`` +
     # ``bound_subject`` scoped to just the secrets Sensors read
     # (docs/cross-repo/vault-provisioning.md § "Bounding the check-runner
@@ -2223,6 +2246,13 @@ class Settings(BaseModel):
     #: refuses a ``keys`` list longer than this before it asks for approval.
     #: Set via ``VAULT_KV_FOLDER_MAX_KEYS``.
     vault_kv_folder_max_keys: int = Field(default=500, ge=1, le=10000)
+
+    @property
+    def gsm_param_allowed_project_set(self) -> frozenset[str]:
+        """The project ids in :attr:`gsm_param_allowed_projects`, as a set."""
+        return frozenset(
+            entry.strip() for entry in self.gsm_param_allowed_projects.split(",") if entry.strip()
+        )
 
     @property
     def keycloak_discovery_base(self) -> str:
@@ -2613,6 +2643,9 @@ def get_settings() -> Settings:
             "JWT_APPROVER_CLAIM_NAME",
             "approver",
         ),
+        jwt_self_approver_group=(
+            os.environ.get("JWT_SELF_APPROVER_GROUP", "").strip() or "MEHO-SA-Operators"
+        ),
         jwt_runner_id_claim_name=os.environ.get(
             "JWT_RUNNER_ID_CLAIM_NAME",
             "runner_id",
@@ -2679,6 +2712,7 @@ def get_settings() -> Settings:
             os.environ.get("GSM_WIF_SUBJECT_TOKEN_TYPE", "").strip()
             or "urn:ietf:params:oauth:token-type:jwt"
         ),
+        gsm_param_allowed_projects=os.environ.get("GSM_PARAM_ALLOWED_PROJECTS", "").strip(),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(

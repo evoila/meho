@@ -12,6 +12,7 @@ from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 
 __all__ = [
     "VMWARE_APPLIANCE_AND_ACCESS_WRITES",
+    "VMWARE_STOP_RESTART_AND_REMEDIATE_WRITES",
     "VMWARE_VIM_HOST_POWER_WRITES",
     "VMWARE_VIM_HOST_WAKES",
     "VMWARE_VIM_SNAPSHOT_CREATES",
@@ -19,6 +20,7 @@ __all__ = [
     "is_vmware_appliance_or_access_write",
     "is_vmware_host_maintenance_exit",
     "is_vmware_library_item_delete",
+    "is_vmware_stop_restart_or_remediate_write",
     "is_vmware_tagging_removal",
     "is_vmware_vim_host_power_write",
     "is_vmware_vim_host_wake",
@@ -99,6 +101,39 @@ VMWARE_APPLIANCE_AND_ACCESS_WRITES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/vcenter/certificate-management/vcenter/tls?action=replace-vmca-signed"),
         ("POST", "/vcenter/certificate-management/vcenter/vmca-root"),
         ("POST", "/esx/settings/inventory?action=apply&vmw-task=true"),
+    }
+)
+
+# Calls that stop, restart, disconnect, remediate or open access (#4328): guest
+# shutdown, reboot and standby; appliance power off and reboot; service stop
+# and restart; SSH, shell, console and DCUI access; host disconnect; turning
+# off a Supervisor; staging or applying a software image to a cluster or a
+# host; installing an appliance update. As generic writes they were
+# ``caution`` without approval, so a person's call ran at once. Each is
+# ``dangerous`` with approval on the 8.0 and 9.0 catalogs. Same key format as
+# :data:`VMWARE_APPLIANCE_AND_ACCESS_WRITES`; the query must match exactly.
+VMWARE_STOP_RESTART_AND_REMEDIATE_WRITES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("POST", "/vcenter/vm/{}/guest/power?action=shutdown"),
+        ("POST", "/vcenter/vm/{}/guest/power?action=reboot"),
+        ("POST", "/vcenter/vm/{}/guest/power?action=standby"),
+        ("POST", "/appliance/shutdown?action=poweroff"),
+        ("POST", "/appliance/shutdown?action=reboot"),
+        ("POST", "/appliance/services/{}?action=stop"),
+        ("POST", "/appliance/services/{}?action=restart"),
+        ("POST", "/vcenter/services/{}?action=stop"),
+        ("POST", "/vcenter/services/{}?action=restart"),
+        ("PUT", "/appliance/access/ssh"),
+        ("PUT", "/appliance/access/shell"),
+        ("PUT", "/appliance/access/consolecli"),
+        ("PUT", "/appliance/access/dcui"),
+        ("POST", "/vcenter/host/{}?action=disconnect"),
+        ("POST", "/vcenter/namespace-management/clusters/{}?action=disable"),
+        ("POST", "/esx/settings/clusters/{}/software?action=apply&vmw-task=true"),
+        ("POST", "/esx/settings/clusters/{}/software?action=stage&vmw-task=true"),
+        ("POST", "/esx/settings/hosts/{}/software?action=apply&vmw-task=true"),
+        ("POST", "/esx/settings/hosts/{}/software?action=stage&vmw-task=true"),
+        ("POST", "/appliance/update/pending/{}?action=install"),
     }
 )
 
@@ -253,6 +288,16 @@ def is_vmware_appliance_or_access_write(method: str, path: str) -> bool:
     return _operation_key(method, path) in VMWARE_APPLIANCE_AND_ACCESS_WRITES
 
 
+def is_vmware_stop_restart_or_remediate_write(method: str, path: str) -> bool:
+    """Return whether ``(method, path)`` is in :data:`VMWARE_STOP_RESTART_AND_REMEDIATE_WRITES`.
+
+    Matches like :func:`is_vmware_appliance_or_access_write`, so
+    ``POST /appliance/shutdown?action=cancel`` and
+    ``POST /vcenter/services/{service}?action=start`` do not count.
+    """
+    return _operation_key(method, path) in VMWARE_STOP_RESTART_AND_REMEDIATE_WRITES
+
+
 def is_vmware_vim_vm_state_write(method: str, path: str) -> bool:
     """Return whether ``(method, path)`` is in :data:`VMWARE_VIM_VM_STATE_WRITES`.
 
@@ -294,6 +339,7 @@ def _requires_vmware_safety_floor(method: str, path: str) -> bool:
         is_vmware_vm_relocate(method, path)
         or is_vmware_host_maintenance_exit(method, path)
         or is_vmware_appliance_or_access_write(method, path)
+        or is_vmware_stop_restart_or_remediate_write(method, path)
         or is_vmware_vim_vm_state_write(method, path)
         or is_vmware_vim_host_power_write(method, path)
     ):
@@ -320,7 +366,9 @@ def vmware_rest_safety_floor(
     The VM writes include the moves that copy disks (:func:`is_vmware_vm_relocate`)
     and the host maintenance-mode exit (:func:`is_vmware_host_maintenance_exit`).
     The appliance, permission, session, certificate and host-image writes are
-    :func:`is_vmware_appliance_or_access_write`. The older-API VM power,
+    :func:`is_vmware_appliance_or_access_write`. The stop, restart,
+    disconnect, remediate and access writes are
+    :func:`is_vmware_stop_restart_or_remediate_write`. The older-API VM power,
     terminate, clone, snapshot revert and migrate calls are
     :func:`is_vmware_vim_vm_state_write`. The older-API host maintenance-mode
     start, reboot, shut down and standby are :func:`is_vmware_vim_host_power_write`.

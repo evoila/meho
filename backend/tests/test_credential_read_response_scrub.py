@@ -10,20 +10,18 @@ The connector-boundary redaction engine cannot mask it: it matches only
 dict value passes through verbatim and lands in the ``call_operation``
 caller's response (and, for an agent caller, its model-API transcript).
 
-These tests pin the hardened contract:
+These tests pin the contract:
 
-* the caller-bound response of a ``credential_read`` op is key-name
-  scrubbed by default -- secret-named values are replaced, non-secret
-  siblings (``username``, ``version``) are preserved;
-* ``params.reveal_secret=true`` opts into the raw value AND stamps the
-  choice on the audit row (queryable), while ``reveal_secret`` never
-  reaches the op's ``parameter_schema`` (it is stripped as a dispatch
-  control) nor the ``params_hash``;
-* the audit row's ``raw_payload`` keeps the raw secret in BOTH cases --
-  the scrub only touches the transport response, mirroring the #2172
-  secret-handler posture;
-* a non-credential_read op is untouched and carries no ``reveal_secret``
-  stamp.
+* the caller-bound answer of ``vault.kv.read`` hides every value under
+  ``data`` by default and keeps the key names and ``version``;
+* ``params.reveal_secret=true`` from a person opts into the raw value AND
+  stamps the choice on the audit row (queryable), while ``reveal_secret``
+  never reaches the op's ``parameter_schema`` (it is stripped as a
+  dispatch control) nor the ``params_hash``;
+* the audit row's ``raw_payload`` stores a keyed fingerprint in place of
+  each hidden value in BOTH cases;
+* a non-credential_read op answer is untouched and carries no
+  ``reveal_secret`` stamp.
 """
 
 from __future__ import annotations
@@ -55,6 +53,8 @@ from meho_backplane.settings import get_settings
 # on the test source.
 _PASSWORD_SECRET = "hunter2" + "longenough"
 _REDACTED = "[REDACTED:param_name]"
+_HIDDEN = "[REDACTED:secret_value]"
+_FINGERPRINT = "[FINGERPRINT:hmac-sha256:"
 
 
 @pytest.fixture(autouse=True)
@@ -171,7 +171,7 @@ async def _audit_row(op_id: str) -> AuditLog:
 async def test_credential_read_response_scrubbed_by_default(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """No ``reveal_secret`` -> the secret value is replaced; siblings survive."""
+    """No ``reveal_secret`` -> every value under ``data`` is hidden; names stay."""
     await _register_vault_read(stub_embedding_service)
 
     result = await dispatch(
@@ -183,29 +183,30 @@ async def test_credential_read_response_scrubbed_by_default(
     )
     assert result.status == "ok", result.error
     assert isinstance(result.result, dict)
-    # Secret-named value replaced; non-secret siblings preserved.
-    assert result.result["data"]["password"] == _REDACTED
-    assert result.result["data"]["username"] == "root"
+    # Every value under data is hidden; the names and the version stay.
+    assert result.result["data"] == {"password": _HIDDEN, "username": _HIDDEN}
     assert result.result["version"] == 3
     # The raw secret never reaches the caller-bound envelope.
     assert _PASSWORD_SECRET not in result.model_dump_json()
 
-    # The audit row keeps the RAW secret (raw_payload), and stamps the
+    # The audit row stores fingerprints, not the values, and stamps the
     # scrubbed (reveal_secret=False) choice.
     row = await _audit_row("vault.kv.read")
     assert isinstance(row.raw_payload, dict)
-    assert row.raw_payload["data"]["password"] == _PASSWORD_SECRET
+    assert row.raw_payload["data"]["password"].startswith(_FINGERPRINT)
+    assert row.raw_payload["data"]["username"].startswith(_FINGERPRINT)
+    assert row.raw_payload["version"] == 3
+    assert _PASSWORD_SECRET not in str(row.raw_payload)
     assert row.payload["reveal_secret"] is False
 
 
 async def test_credential_read_scrub_is_principal_independent(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """The scrub keys on the op class, not the caller kind (product decision).
+    """The default hiding keys on the op, not the caller kind.
 
-    The reported incident's caller was a service-account token driven by an
-    agent, so caller-kind gating would have missed it. A ``USER`` principal
-    (default-allow) reaches execution and is scrubbed just the same.
+    A ``USER`` principal (default-allow) reaches execution and gets the
+    names without the values, like every other caller.
     """
     await _register_vault_read(stub_embedding_service)
 
@@ -217,7 +218,7 @@ async def test_credential_read_scrub_is_principal_independent(
         params={"path": "app/db"},
     )
     assert result.status == "ok", result.error
-    assert result.result["data"]["password"] == _REDACTED
+    assert result.result["data"]["password"] == _HIDDEN
 
 
 # ---------------------------------------------------------------------------
@@ -246,9 +247,10 @@ async def test_reveal_secret_true_returns_raw_and_stamps_audit(
     row = await _audit_row("vault.kv.read")
     # The reveal is queryable on the audit row.
     assert row.payload["reveal_secret"] is True
-    # raw_payload keeps the raw secret (unchanged posture).
+    # raw_payload stores a fingerprint, also when the caller got the value.
     assert isinstance(row.raw_payload, dict)
-    assert row.raw_payload["data"]["password"] == _PASSWORD_SECRET
+    assert row.raw_payload["data"]["password"].startswith(_FINGERPRINT)
+    assert _PASSWORD_SECRET not in str(row.raw_payload)
 
 
 async def test_reveal_secret_does_not_reach_op_schema_or_hash(
@@ -340,8 +342,9 @@ async def test_non_credential_read_op_is_not_scrubbed_or_stamped(
         params={"path": "app/db"},
     )
     assert result.status == "ok", result.error
-    # Not a credential_read op: the response is untouched by the #2467 scrub.
+    # Not a credential_read op: the answer is untouched by the scrub.
     assert result.result["password"] == _PASSWORD_SECRET
+    assert result.result["note"] == "not a credential_read op"
 
     row = await _audit_row("vault.kv.versions")
     assert "reveal_secret" not in row.payload

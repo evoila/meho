@@ -109,8 +109,8 @@ VMWARE_CUSTOMIZATION_SPEC_LIST_OP = VmwareTypedOp(
         "output_shape": "{specs: [{name, description, os_type, last_modified}]}.",
         "next_step": (
             "Read one spec in full with vmware.guest.customization_spec.get. Pass a name "
-            "as guest_customization_spec to vmware.composite.library.vm_template.deploy, "
-            "or as customization_spec_name to vmware.composite.vm.clone_from_template."
+            "as customization_spec_name to vmware.composite.library.vm_template.deploy "
+            "or vmware.composite.vm.clone_from_template."
         ),
     },
 )

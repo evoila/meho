@@ -88,7 +88,7 @@ DEPLOY_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
             ),
         },
         "powered_on": _POWERED_ON,
-        "guest_customization_spec": {
+        "customization_spec_name": {
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
@@ -112,7 +112,7 @@ DEPLOY_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
             "cluster": "<cluster-moid>",
             "folder": "<folder-moid>",
             "powered_on": True,
-            "guest_customization_spec": "<spec-name>",
+            "customization_spec_name": "<spec-name>",
         }
     ],
 }
@@ -288,7 +288,7 @@ DEPLOY_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     "parameter_hints": {
         "template_library_item": "The item id (UUID), not its name.",
         "cluster": "Give a cluster, a host or a resource pool: one is enough.",
-        "guest_customization_spec": "A name from vmware.guest.customization_spec.list.",
+        "customization_spec_name": "A name from vmware.guest.customization_spec.list.",
     },
     "output_shape": (
         "{status: deployed|refused|not_found, template_library_item, vm, vm_info: {name, "

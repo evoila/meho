@@ -257,7 +257,7 @@ async def test_deploy_sends_the_flat_deploy_spec_and_reads_the_vm_back(
         folder="group-v1",
         datastore="datastore-1",
         powered_on=True,
-        guest_customization_spec="<spec-name>",
+        customization_spec_name="<spec-name>",
     )
     assert conn.posts == [
         (

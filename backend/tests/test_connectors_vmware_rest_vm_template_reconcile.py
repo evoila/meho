@@ -185,7 +185,7 @@ async def _sent_bodies(monkeypatch: pytest.MonkeyPatch) -> dict[str, set[str]]:
             "description": "d",
             "datastore": "ds",
             "powered_on": True,
-            "guest_customization_spec": "s",
+            "customization_spec_name": "s",
             **placement,
         },
         **kwargs,

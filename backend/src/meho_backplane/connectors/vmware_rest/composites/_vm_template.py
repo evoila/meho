@@ -252,7 +252,7 @@ def _deploy_body(params: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(datastore, str):
         body["vm_home_storage"] = {"datastore": datastore}
         body["disk_storage"] = {"datastore": datastore}
-    spec_name = params.get("guest_customization_spec")
+    spec_name = params.get("customization_spec_name")
     if isinstance(spec_name, str):
         body["guest_customization"] = {"name": spec_name}
     return body
@@ -409,7 +409,7 @@ _ECHO_KEYS: Final[tuple[str, ...]] = (
     *_PLACEMENT_KEYS,
     "datastore",
     "powered_on",
-    "guest_customization_spec",
+    "customization_spec_name",
 )
 
 

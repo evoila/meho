@@ -99,7 +99,7 @@ but ``execute(target, op_id, ...)`` against any ``op_id`` resolves to
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
@@ -1367,6 +1367,95 @@ class VcfAutomationConnector(HttpConnector):
             self, operator, target, params, prefix="vcfa.tenant"
         )
 
+    # ------------------------------------------------------------------
+    # Catalog items and requests -- shared with the vRA 8 connector.
+    # Handlers in ``vmware_shared.vra_catalog``; metadata in :mod:`.catalog_ops`.
+    # ------------------------------------------------------------------
+
+    def _vra_calls(self, operator: Operator, target: VcfAutomationTargetLike) -> Any:
+        """The tenant-login GET and POST the shared catalog handlers use."""
+        from meho_backplane.connectors.vcf_automation.catalog_ops import CATALOG_PREFIX
+        from meho_backplane.connectors.vmware_shared.vra_catalog import VraCalls
+
+        async def get(path: str, params: Mapping[str, Any] | None) -> dict[str, Any]:
+            return await self._request_json(target, "GET", path, operator=operator, params=params)
+
+        async def post(path: str, body: Mapping[str, Any], secrets: Sequence[str]) -> Any:
+            # The request answer is a JSON list, which _post_json refuses. This
+            # send records no trace span, so the secret values are not needed.
+            del secrets
+            resp = await self._send_with_retry(target, "POST", path, operator=operator, json=body)
+            return json_payload_or_empty(resp)
+
+        return VraCalls(get=get, post=post, prefix=CATALOG_PREFIX, operator=operator, target=target)
+
+    def trace_response_body(self, response: httpx.Response) -> Any:
+        """The vendor answer for the trace, with the default of each secret form field replaced.
+
+        A catalog item or item version answer carries its request form, and
+        a secret field of the form (``encrypted``, ``format: password``,
+        ``writeOnly`` or a secret name) may carry a default. The shared
+        trace redaction knows neither the flags nor a default under an
+        ordinary name, so the answer is cleaned here before the span
+        records it. A JSON answer is recorded as parsed data; any other
+        answer as it is.
+        """
+        from meho_backplane.connectors.vmware_shared.vra_catalog import clean_form_defaults
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        return clean_form_defaults(payload)
+
+    async def vra_catalog_item_list(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.catalog.item.list``."""
+        from meho_backplane.connectors.vmware_shared.vra_catalog import catalog_item_list
+
+        return await catalog_item_list(self._vra_calls(operator, target), params)
+
+    async def vra_catalog_item_get(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.catalog.item.get``."""
+        from meho_backplane.connectors.vmware_shared.vra_catalog import catalog_item_get
+
+        return await catalog_item_get(self._vra_calls(operator, target), params)
+
+    async def vra_catalog_item_request(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.catalog.item.request``."""
+        from meho_backplane.connectors.vmware_shared.vra_catalog import catalog_item_request
+
+        return await catalog_item_request(self._vra_calls(operator, target), params)
+
+    async def vra_request_get(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.request.get``."""
+        from meho_backplane.connectors.vmware_shared.vra_catalog import request_get
+
+        return await request_get(self._vra_calls(operator, target), params)
+
+    async def vra_request_events(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.request.events``."""
+        from meho_backplane.connectors.vmware_shared.vra_catalog import request_events
+
+        return await request_events(self._vra_calls(operator, target), params)
+
+    async def vra_request_logs(
+        self, operator: Operator, target: VcfAutomationTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.request.logs``."""
+        from meho_backplane.connectors.vmware_shared.vra_catalog import request_logs
+
+        return await request_logs(self._vra_calls(operator, target), params)
+
     @classmethod
     async def register_typed_operations(cls) -> None:
         """Upsert every typed op (reads, provisioning, image, network, deploy) as a descriptor row.
@@ -1379,8 +1468,9 @@ class VcfAutomationConnector(HttpConnector):
         :data:`~meho_backplane.connectors.vcf_automation.image_ops.VCFA_IMAGE_OPS`,
         :data:`~meho_backplane.connectors.vcf_automation.network_ops.VCFA_NETWORK_OPS`,
         :data:`~meho_backplane.connectors.vcf_automation.deploy_ops.VCFA_DEPLOY_OPS`,
-        :data:`~meho_backplane.connectors.vcf_automation.feature_flag_ops.VCFA_FEATURE_FLAG_OPS`
-        and :data:`~meho_backplane.connectors.vcf_automation.day2_ops.VCFA_DAY2_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.feature_flag_ops.VCFA_FEATURE_FLAG_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.day2_ops.VCFA_DAY2_OPS` and
+        :data:`~meho_backplane.connectors.vcf_automation.catalog_ops.VCFA_CATALOG_OPS`,
         resolves each op's ``handler_attr`` to the bound method, looks the
         group's curated ``when_to_use`` up in
         :data:`~meho_backplane.connectors.vcf_automation.typed_ops.VCFA_TYPED_WHEN_TO_USE_BY_GROUP`,
@@ -1394,6 +1484,7 @@ class VcfAutomationConnector(HttpConnector):
         # Lazy import: the operations package pulls in the embedding
         # pipeline (ONNX runtime + model) which pure fingerprint/probe unit
         # tests should not pay. Lifespan callers have it warmed by now.
+        from meho_backplane.connectors.vcf_automation.catalog_ops import VCFA_CATALOG_OPS
         from meho_backplane.connectors.vcf_automation.day2_ops import VCFA_DAY2_OPS
         from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
         from meho_backplane.connectors.vcf_automation.feature_flag_ops import (
@@ -1418,6 +1509,7 @@ class VcfAutomationConnector(HttpConnector):
             *VCFA_DEPLOY_OPS,
             *VCFA_FEATURE_FLAG_OPS,
             *VCFA_DAY2_OPS,
+            *VCFA_CATALOG_OPS,
         )
         for op in all_ops:
             handler = getattr(cls, op.handler_attr, None)

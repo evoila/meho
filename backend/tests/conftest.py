@@ -771,7 +771,8 @@ def _isolate_global_registries() -> Iterator[None]:
     ``mcp.registry._TOOLS`` / ``_RESOURCES``,
     ``connectors.registry._REGISTRY`` / ``_REGISTRY_V2``,
     ``operations.typed_register._TYPED_OP_REGISTRARS``,
-    ``operations._preview._PREVIEW_BUILDERS`` / ``_PERMISSION_PREFLIGHTS``,
+    ``operations._preview._PREVIEW_BUILDERS`` / ``_PERMISSION_PREFLIGHTS`` /
+    ``_PARK_CHECKS``,
     and the dispatcher's per-process caches
     ``operations._handler_resolve._HANDLER_CACHE`` /
     ``_CONNECTOR_INSTANCE_CACHE``. None had a process-wide per-test
@@ -838,6 +839,7 @@ def _isolate_global_registries() -> Iterator[None]:
     # + restore them with the other process-global registries.
     preview_builders = dict(preview_reg._PREVIEW_BUILDERS)
     permission_preflights = dict(preview_reg._PERMISSION_PREFLIGHTS)
+    park_checks = dict(preview_reg._PARK_CHECKS)
     default_reducer = dispatcher._DEFAULT_REDUCER
     try:
         yield
@@ -859,6 +861,8 @@ def _isolate_global_registries() -> Iterator[None]:
         preview_reg._PREVIEW_BUILDERS.update(preview_builders)
         preview_reg._PERMISSION_PREFLIGHTS.clear()
         preview_reg._PERMISSION_PREFLIGHTS.update(permission_preflights)
+        preview_reg._PARK_CHECKS.clear()
+        preview_reg._PARK_CHECKS.update(park_checks)
         set_default_reducer(default_reducer)
 
 

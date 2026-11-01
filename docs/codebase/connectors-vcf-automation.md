@@ -98,9 +98,10 @@ flow only where a convertible OpenAPI 3.x spec is pinned — for VCFA only
 the 9.1 appliance-served IaaS document above would qualify, and none is
 pinned.
 
-**Operation contracts.** The 38 typed ops (the seven reads above, the
-ten provisioning ops, the four image ops, the nine network and deploy ops and
-the eight day-2 ops below) meet the VMware operation-contract check
+**Operation contracts.** The 46 typed ops (the seven reads above, the
+ten provisioning ops, the four image ops, the nine network and deploy ops,
+the two feature-flag ops, the eight day-2 ops and the six catalog and
+request ops below) meet the VMware operation-contract check
 (`backend/tests/test_operation_contracts.py`) and have no entry in its
 gap list:
 
@@ -402,6 +403,69 @@ handlers, the org-create check and the park-time preview are in
   (`change` / `unchanged` / `invalid_request`). Without a connector it shows
   `would: set_if_different` and no current state.
 
+**Catalog items and requests (shared with vRA 8).** An agent can list
+the catalog items a project can request, read one item with its request
+form, request an item into a project, and read the state, events and logs
+of a request. A VM Apps org of VCF Automation 9 serves the same catalog and
+request APIs as Aria Automation 8, so the six ops are written once in
+`connectors/vmware_shared/vra_catalog.py` (handlers) and
+`vra_catalog_ops.py` (metadata). This connector registers them as
+`vcfa.tenant.*` in the group `vcfa-tenant-catalog` (`catalog_ops.py`); the
+vRA 8 connector registers the same ops as `vcfa.vra8.*`
+([connectors-vra8.md](connectors-vra8.md)). `/catalog/api/*` rides the
+tenant login, like `/deployment/api/*`.
+
+| op_id (VCF Automation 9 / Aria Automation 8) | what it does and returns | risk level / approval | wire | versions |
+|---|---|---|---|---|
+| `vcfa.tenant.catalog.item.list` / `vcfa.vra8.catalog.item.list` | Catalog items a project can request: `{items: [flat rows: id, name, typeId, sourceName, projectIds, ...], totalElements}` | safe | `GET /catalog/api/items` (`projects`, `search`, `$top`, `$skip`) | 8.18, 9.x |
+| `vcfa.tenant.catalog.item.get` / `vcfa.vra8.catalog.item.get` | One item with its request form: `{item, version, inputs: [name, type, default, required, enum, secret], schema}` | safe | `GET /catalog/api/items/{id}`, with `version_id` also `GET …/versions/{versionId}` | 8.18, 9.x |
+| `vcfa.tenant.catalog.item.request` / `vcfa.vra8.catalog.item.request` | Requests the item into a project: `{status: submitted / unchanged / invalid_request, deployment, request, guidance}` | dangerous, approval | `GET /deployment/api/deployments?name&projects` (same name check), `POST /catalog/api/items/{id}/request`, `GET /deployment/api/deployments/{id}?expand=lastRequest` (the request id) | 8.18, 9.x |
+| `vcfa.tenant.request.get` / `vcfa.vra8.request.get` | State of a request (a deployment or a day-2 action): `status`, `details`, tasks done, inputs and outputs | safe | `GET /deployment/api/requests/{requestId}` | 8.18, 9.x |
+| `vcfa.tenant.request.events` / `vcfa.vra8.request.events` | Events oldest first as flat rows, the request state, and the last event (on a failed request, the step that failed) | safe | `GET /deployment/api/requests/{requestId}` and `…/events` | 8.18, 9.x |
+| `vcfa.tenant.request.logs` / `vcfa.vra8.request.logs` | Log lines of one event: `{lines: [rownum, timestamp, message], eof, next_since_row}` | safe | `GET /deployment/api/requests/{requestId}/events/{eventId}/logs` (`sinceRow`) | 8.18, 9.x |
+
+- **Versions.** Every op exists on Aria Automation 8.18 and on VCF
+  Automation 9.0, 9.1 and 9.1.1, so no op stops early with a version
+  message. "All Apps" orgs (Kubernetes-based) are out of scope.
+- **Safe to run twice.** The request first looks for a deployment with the
+  same name in the project. When it finds one, it answers `unchanged` and
+  sends nothing.
+- **Secrets.** A secret input is never a value. The caller gives
+  `secret_inputs`: top-level input name → `"<vault-path>#<field>"`. The
+  value is read from Vault under the caller's identity only when the
+  approved call runs, and goes only into the request body. An input in
+  `inputs` is refused when its name is a secret name, or when the item's
+  form marks its field as a secret (`encrypted`, `format: password` or
+  `writeOnly`). Both checks look inside objects and lists too
+  (`config.password`, `disks[0].key`); the form check reads the item, or
+  the requested `version`, before anything is sent. The checks run twice:
+  before the request is stored in the approval queue (a check registered
+  with `register_park_check`; the answer is `denied` with
+  `error_code: refused_before_approval`, and nothing is stored, also when
+  the form cannot be read), and again when the approved call runs (the
+  answer is `invalid_request`). See
+  [approvals.md](approvals.md) "Check before the wait for approval". When the
+  vendor's error text repeats a secret value, the value is replaced with a
+  marker, also when the text is JSON that escapes the value; the rest of
+  the error text reaches the answer. In results, the default of a secret
+  form field (also inside an object or a list default) and secret-named
+  values in request inputs, outputs, event details and log lines are
+  replaced with a marker. On the vRA 8 connector the request's trace span
+  (flight recorder) records the request and response bodies with each
+  secret value replaced, so a secret input with an ordinary name (one the
+  trace redaction knows neither by name nor by shape) never reaches a
+  stored trace. On both connectors the trace of a form read (the item or
+  an item version) records the form with the default of each secret field
+  replaced (`trace_response_body`), so a secret default under an ordinary
+  name never reaches a stored trace either.
+- **Request id.** The vendor answers the request with only the deployment
+  id. The op then reads the deployment with `expand=lastRequest` to get the
+  request id. When that read fails, the op still answers `submitted`, with
+  `request: null` and a note to read the deployment again.
+- **Spec check.** Both reconcile lanes (this connector's and vRA 8's) check
+  the shared paths against `vra-catalog-deployment.json` of the pinned
+  `vra-sdk-go` v0.6.5 shelf; CI requires that file.
+
 **Day-2 work: actions, lease, delete, machines and disks.** These ops are
 written once for VCF Automation 9 and Aria Automation 8.18, because both serve
 the same deployment API (`/deployment/api`) and IaaS API (`/iaas/api`). The
@@ -624,7 +688,7 @@ before resolving headers.
 
 Plane classification (`_plane_for_path`):
 
-- `/iaas/api/*`, `/blueprint/api/*`, `/deployment/api/*` → tenant plane.
+- `/iaas/api/*`, `/blueprint/api/*`, `/deployment/api/*`, `/catalog/api/*` → tenant plane.
 - Everything else (`/cloudapi/*`, `/api/*`) → provider plane.
 
 The provider plane Bearer JWT authenticates both `/cloudapi/*` and the

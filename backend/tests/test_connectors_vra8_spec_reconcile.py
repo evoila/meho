@@ -33,6 +33,11 @@ unconfigured (the default sweep), so the always-on manifest pin below is the tes
 guard. Full evidence + activation trigger live in the ``vcfa-vra8`` entry of the
 standard doc's Evidenced-exclusions section.
 
+**Shelf-armed: the shared catalog and request calls.** The calls this
+connector shares with VCF Automation (:mod:`tests._vra_catalog_paths`) are
+pinned here too, and checked against the pinned ``vra-catalog-deployment.json``
+of the shelf when it is set up.
+
 Dispatch-fidelity of each path is proven live-mocked in
 :mod:`tests.test_connectors_vra8_typed_reads` / :mod:`tests.test_connectors_vra8_auth`.
 """
@@ -48,10 +53,12 @@ from meho_backplane.connectors.vra8 import _paths as _paths_module
 from meho_backplane.connectors.vra8 import api_file as _api_file
 from meho_backplane.connectors.vra8 import connector as _connector
 from tests._spec_shelf import assert_op_ids_served, require_shelf_spec
-from tests.test_connectors_vcf_automation_spec_reconcile import (
-    _DAY2_PATHS_METHODS,
-    _swagger2_served_op_ids,
+from tests._vra_catalog_paths import (
+    EXPECTED_CATALOG_OP_IDS,
+    catalog_op_ids,
+    swagger2_served_op_ids,
 )
+from tests.test_connectors_vcf_automation_spec_reconcile import _DAY2_PATHS_METHODS
 
 #: The pinned ``vra-sdk-go`` v0.6.5 files on the spec shelf. The vRA 8 day-2 ops
 #: use the same deployment and IaaS APIs as VCF Automation 9, so they are checked
@@ -61,6 +68,9 @@ _DAY2_SPEC_FILES = (
     "swagger-vra-sdk-go-v0.6.5/vra-iaas.json",
     "swagger-vra-sdk-go-v0.6.5/vra-catalog-deployment.json",
 )
+#: The shelf file that holds the catalog and deployment API of vRA 8.
+_CATALOG_SPEC_DIR = _SPEC_DIR
+_CATALOG_SPEC_FILE = "swagger-vra-sdk-go-v0.6.5/vra-catalog-deployment.json"
 
 #: HTTP method per hand-coded path constant. The two login endpoints are POSTed
 #: (``._auth.vra8_login``); every read path (the ``/iaas/api/about`` fingerprint
@@ -170,7 +180,7 @@ def test_day2_paths_are_served_by_the_pinned_vra_files() -> None:
     """Every day-2 call is in the pinned ``vra-sdk-go`` files (skips without the shelf)."""
     served: set[str] = set()
     for spec_file in _DAY2_SPEC_FILES:
-        served |= _swagger2_served_op_ids(require_shelf_spec(_SPEC_DIR, spec_file))
+        served |= swagger2_served_op_ids(require_shelf_spec(_SPEC_DIR, spec_file))
     assert_op_ids_served(
         _day2_op_ids(), served, spec_label=f"{_SPEC_DIR} vra-iaas + vra-catalog-deployment"
     )
@@ -249,3 +259,21 @@ def test_probe_constant_links_to_about_path() -> None:
     """
     assert _paths_module._ABOUT_PATH == "/iaas/api/about"
     assert "/iaas/api/about" in _connector._VRA8_PROBE_METHOD
+
+
+def test_shared_catalog_op_id_manifest_is_pinned() -> None:
+    """Pin the catalog and request calls this connector shares with VCF Automation."""
+    assert catalog_op_ids() == EXPECTED_CATALOG_OP_IDS
+
+
+def test_shared_catalog_paths_are_served_by_the_pinned_catalog_spec() -> None:
+    """Every shared catalog and request call is in the pinned vRA catalog API file.
+
+    Skips when the spec shelf is not set up (``tests/_spec_shelf.py``); CI runs it.
+    """
+    spec = require_shelf_spec(_CATALOG_SPEC_DIR, _CATALOG_SPEC_FILE)
+    assert_op_ids_served(
+        catalog_op_ids(),
+        swagger2_served_op_ids(spec),
+        spec_label=f"{_CATALOG_SPEC_DIR}/{_CATALOG_SPEC_FILE}",
+    )

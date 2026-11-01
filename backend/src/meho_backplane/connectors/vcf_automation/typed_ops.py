@@ -98,6 +98,7 @@ from meho_backplane.connectors.vcf_automation._op_schemas import (
 )
 from meho_backplane.connectors.vcf_automation._routing import Plane, plane_for_path
 from meho_backplane.connectors.vcf_automation.session import VcfAutomationTargetLike
+from meho_backplane.connectors.vmware_shared.vra_catalog_ops import catalog_when_to_use
 
 __all__ = [
     "PROVIDER_ORGS_PATH",
@@ -282,6 +283,9 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "(vcfa.tenant.fabric_image.list), make it read new vCenter templates now "
         "(vcfa.tenant.cloud_account.enumerate_images), and add, re-point or remove one "
         "name (vcfa.tenant.image_profile.mapping.update; a person must approve it)."
+    ),
+    "vcfa-tenant-catalog": catalog_when_to_use(
+        "vcfa.tenant", "a VCF Automation 9 VM Apps org, on the tenant plane"
     ),
 }
 

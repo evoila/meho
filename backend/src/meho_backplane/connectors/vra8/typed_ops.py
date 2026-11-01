@@ -21,9 +21,10 @@ each callable from its persisted ``module.ClassName.method`` path.
 The dataclass + tuple + module-level registrar shape mirrors
 :mod:`meho_backplane.connectors.vcd.typed_ops` (#3057) and
 :mod:`meho_backplane.connectors.fleet_lcm.typed_ops` (#3047) — the Task #2358
-convention: typed ops own the curated read core. A write surface (create
-deployment / request catalog item) is deliberately out of scope — this is a read
-core for inventorying a migration source.
+convention: typed ops own the curated read core. The catalog and request ops
+(request a catalog item, read a request's state, events and logs) are shared with
+VCF Automation 9 and live in :mod:`.catalog_ops`; the same registrar below
+registers them.
 
 The day-2 ops (:data:`VRA8_DAY2_OPS`) are the exception: they are written once for
 both Automation generations in
@@ -46,6 +47,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import structlog
 
 from meho_backplane.connectors.vcf_automation.day2_ops import day2_specs
+from meho_backplane.connectors.vmware_shared.vra_catalog_ops import catalog_when_to_use
 from meho_backplane.connectors.vra8._llm_instructions import VRA8_READ_LLM_INSTRUCTIONS
 from meho_backplane.connectors.vra8._response_schemas import (
     ABOUT_RESPONSE,
@@ -79,6 +81,8 @@ _GROUP_INVENTORY = "vcfa-vra8-inventory"
 _GROUP_CONTENT = "vcfa-vra8-content"
 _GROUP_API_FILES = "vcfa-vra8-api-files"
 _GROUP_DAY2 = "vcfa-vra8-day2"
+#: The catalog and request ops (:mod:`.catalog_ops`).
+_GROUP_CATALOG = "vcfa-vra8-catalog"
 
 
 @dataclass(frozen=True)
@@ -146,6 +150,7 @@ VRA8_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "and delete a deployment (vcfa.vra8.deployment.delete; only a person can run it, "
         "after a preview)."
     ),
+    _GROUP_CATALOG: catalog_when_to_use("vcfa.vra8", "Aria Automation 8 (vRealize Automation 8)"),
 }
 
 
@@ -466,7 +471,7 @@ async def register_vra8_typed_operations(
     *,
     embedding_service: EmbeddingService | None = None,
 ) -> None:
-    """Upsert every op in :data:`VRA8_TYPED_OPS` and :data:`VRA8_DAY2_OPS` as descriptor rows.
+    """Upsert every op in :data:`VRA8_TYPED_OPS`, :data:`VRA8_DAY2_OPS` and the catalog ops.
 
     Queued onto the lifespan-driven registrar list via
     :func:`~meho_backplane.operations.typed_register.register_typed_op_registrar`
@@ -488,10 +493,11 @@ async def register_vra8_typed_operations(
     # Lazy imports: the operations package pulls in the embedding pipeline (ONNX
     # runtime + model), which pure connector/handler unit tests should not pay.
     # Lifespan callers have it warmed by the time this runs.
+    from meho_backplane.connectors.vra8.catalog_ops import VRA8_CATALOG_OPS
     from meho_backplane.connectors.vra8.connector import Vra8Connector
     from meho_backplane.operations.typed_register import register_typed_operation
 
-    all_ops = (*VRA8_TYPED_OPS, *VRA8_DAY2_OPS)
+    all_ops = (*VRA8_TYPED_OPS, *VRA8_DAY2_OPS, *VRA8_CATALOG_OPS)
     for op in all_ops:
         handler = getattr(Vra8Connector, op.handler_attr, None)
         if handler is None:

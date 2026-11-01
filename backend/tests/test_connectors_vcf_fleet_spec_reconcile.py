@@ -64,9 +64,9 @@ The declared set is introspected from the connector's live constants (the #2944
 pattern — never a hardcoded mirror): the three ``_FLEET_*_PATH`` module
 constants (probe / about / environments) plus the
 ``_FLEET_BROKEN_DIAGNOSTIC_ENDPOINTS`` tuple, all ``GET`` (HTTP Basic on every
-request, no session-establish POST), plus ``lifecycle.VENDOR_CALLS``, which
-carries its own methods (the request retry is a ``PATCH``, the inventory sync a
-``POST``).
+request, no session-establish POST), plus ``lifecycle.VENDOR_CALLS`` and
+``changes.VENDOR_CALLS``, which carry their own methods (the request retry is a
+``PATCH``, the inventory sync a ``POST``, the environment delete a ``DELETE``).
 
 The documentation pages and folders that ``fleet.api_file.get`` reads
 (``api_file.DOCS_PAGES`` and ``api_file.DOCS_FOLDERS``) are listed as ``GET``
@@ -77,6 +77,7 @@ served check: an API file never lists the path that serves it.
 from __future__ import annotations
 
 from meho_backplane.connectors.vcf_fleet import api_file as _api_file
+from meho_backplane.connectors.vcf_fleet import changes as _changes
 from meho_backplane.connectors.vcf_fleet import connector as _connector
 from meho_backplane.connectors.vcf_fleet import lifecycle as _lifecycle
 from meho_backplane.connectors.vcf_fleet import locker as _locker
@@ -116,12 +117,14 @@ def _declared_op_ids() -> set[str]:
     Sweeps the live module constants (never a hardcoded mirror): the
     ``_FLEET_*_PATH`` op/probe constants and the
     ``_FLEET_BROKEN_DIAGNOSTIC_ENDPOINTS`` known-issue tuple, all ``GET``, and
-    ``lifecycle.VENDOR_CALLS`` with their own methods.
+    ``lifecycle.VENDOR_CALLS`` and ``changes.VENDOR_CALLS`` with their own
+    methods.
     """
     paths = set(_path_constants().values())
     paths |= set(_connector._FLEET_BROKEN_DIAGNOSTIC_ENDPOINTS)
     declared = {f"GET:{path}" for path in paths}
-    return declared | {f"{method}:{path}" for method, path in _lifecycle.VENDOR_CALLS}
+    calls = (*_lifecycle.VENDOR_CALLS, *_changes.VENDOR_CALLS)
+    return declared | {f"{method}:{path}" for method, path in calls}
 
 
 def _write_op_ids() -> set[str]:
@@ -193,6 +196,15 @@ def test_hand_coded_path_surface_is_pinned() -> None:
         "GET:/lcm/lcops/api/v2/settings/system-details",
         "GET:/lcm/health/api/v2/status",
         "GET:/lcm/lcops/api/v2/datacenters/{dataCenterVmid}/vcenters",
+        "POST:/lcm/lcops/api/v2/environments/{environmentId}/products/{productId}/upgrade",
+        "POST:/lcm/lcops/api/v2/environments/{environmentId}/products/{productId}/upgrade"
+        "/pre-validate",
+        "GET:/lcm/lcops/api/v2/settings/product-binaries",
+        "POST:/lcm/lcops/api/v2/settings/product-binaries",
+        "POST:/lcm/lcops/api/v2/settings/product-binaries/download",
+        "POST:/lcm/lcops/api/v2/environments/pre-validate",
+        "POST:/lcm/lcops/api/v2/environments",
+        "DELETE:/lcm/lcops/api/v2/environments/{environmentId}",
     }
     assert {
         "GET:/api/swagger-ui.html",
@@ -201,6 +213,27 @@ def test_hand_coded_path_surface_is_pinned() -> None:
         "GET:/lcm/cms/api/swagger-ui/",
     } == _DOCUMENTATION_OP_IDS
     assert not _DOCUMENTATION_OP_IDS & _declared_op_ids()
+
+
+def test_change_calls_are_pinned() -> None:
+    """Guard: the upgrade, binary and environment calls the served check covers.
+
+    The upgrade pre-check path is not in the published 8.16 API reference; the
+    served check decides it the day the 8.18 file is on the shelf.
+    """
+    assert {
+        "POST:/lcm/lcops/api/v2/environments/{environmentId}/products/{productId}/upgrade",
+        "POST:/lcm/lcops/api/v2/environments/{environmentId}/products/{productId}/upgrade"
+        "/pre-validate",
+        "GET:/lcm/lcops/api/v2/settings/product-binaries",
+        "POST:/lcm/lcops/api/v2/settings/product-binaries",
+        "POST:/lcm/lcops/api/v2/settings/product-binaries/download",
+        "POST:/lcm/lcops/api/v2/environments/pre-validate",
+        "POST:/lcm/lcops/api/v2/environments",
+        "GET:/lcm/lcops/api/v2/environments/{environmentId}",
+        "DELETE:/lcm/lcops/api/v2/environments/{environmentId}",
+        "GET:/lcm/request/api/v2/requests",
+    } == {f"{method}:{path}" for method, path in _changes.VENDOR_CALLS}
 
 
 def test_declared_op_ids_are_served_by_the_pinned_vrslcm_spec() -> None:
@@ -212,4 +245,5 @@ def test_declared_op_ids_are_served_by_the_pinned_vrslcm_spec() -> None:
     """
     spec_path = require_shelf_spec(_SPEC_DIR, _SPEC_FILE)
     served = openapi_served_op_ids(spec_path)
-    assert_op_ids_served(_declared_op_ids() | _write_op_ids(), served, spec_label=_SPEC_LABEL)
+    declared = _declared_op_ids() | _write_op_ids()
+    assert_op_ids_served(declared, served, spec_label=_SPEC_LABEL)

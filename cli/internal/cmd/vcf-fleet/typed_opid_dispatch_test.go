@@ -65,6 +65,15 @@ var typedOpCLICoverage = map[string]string{
 	"fleet.health":                 "",
 	"fleet.request.retry":          "",
 	"fleet.product.inventory_sync": "",
+	// Upgrades, binaries and environments: changes that wait for approval.
+	// Agent surface only for now; run them with "meho operation call" or MCP call_operation.
+	"fleet.binary.list":              "",
+	"fleet.binary.map":               "",
+	"fleet.product.upgrade.precheck": "",
+	"fleet.product.upgrade":          "",
+	"fleet.environment.precheck":     "",
+	"fleet.environment.create":       "",
+	"fleet.environment.delete":       "",
 	// Locker and product-certificate ops: no CLI verb yet. They run through
 	// `meho operation call` and MCP call_operation like any other op.
 	"fleet.locker.password.list":        "",

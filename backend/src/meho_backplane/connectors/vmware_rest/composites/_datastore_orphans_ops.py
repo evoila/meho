@@ -45,5 +45,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         safety_level="safe",
         requires_approval=False,
         llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS["vmware.composite.datastore.orphan_dirs"],
+        classifier_other=True,
     ),
 )

@@ -9,6 +9,18 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.41.0](https://github.com/evoila/meho/releases/tag/v0.41.0) — 2026-11-01
+
+- **More vCenter 8.0 reads are guarded.** The reads of content
+  libraries and Supervisor image registries hide their secrets and wait
+  for approval, the same as on vCenter 9.0.
+- **The SA-Operators group is read from the login.** Approvals do not
+  use it yet.
+- **Small upgrade.** No database migration. After the upgrade, load the
+  vCenter 8.0 connector again with the same API files, and update the
+  Claude Desktop bundle and the Claude Code plugin, which ship a fixed
+  `qs` library.
+
 ## [v0.40.0](https://github.com/evoila/meho/releases/tag/v0.40.0) — 2026-11-01
 
 - **Secret values stay hidden.** Secret reads show names, not values. A

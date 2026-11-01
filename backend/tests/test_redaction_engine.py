@@ -179,6 +179,51 @@ def test_nested_dict_and_list_payload_walked() -> None:
     assert paths == ["items.0", "request.headers"]
 
 
+def test_string_rows_are_matched_as_one_text() -> None:
+    """A secret that spans rows is found whole; every row keeps its place."""
+    policy = _policy_with_rules(
+        textwrap.dedent(
+            """
+            - name: strip-key
+              pattern: pem_private_key
+              action: redact
+              reason: "key split over rows"
+            """,
+        ),
+    )
+    begin = "-----BEGIN " + "PRIVATE KEY-----"
+    end = "-----END " + "PRIVATE KEY-----"
+    rows = ["start", begin, "keybodyline", end, "finish"]
+    result = redact({"rows": rows, "total": 5}, policy)
+    hidden = "[REDACTED:pem_private_key]"
+    assert result.redacted == {"rows": ["start", hidden, hidden, hidden, "finish"], "total": 5}
+    assert [entry.path for entry in result.manifest] == ["rows.1", "rows.2", "rows.3"]
+    assert [entry.count for entry in result.manifest] == [1, 1, 1]
+    # Offsets are the row's own, as for a string leaf.
+    assert result.manifest[0].span == (0, len(begin))
+    assert result.manifest[1].span == (0, len("keybodyline"))
+
+
+def test_string_rows_keep_the_text_around_a_match_in_one_row() -> None:
+    """A match inside one row changes only that part of that row."""
+    policy = _policy_with_rules(
+        textwrap.dedent(
+            """
+            - name: strip-bearer
+              pattern: bearer_token
+              action: redact
+              reason: "token in a log row"
+            """,
+        ),
+    )
+    rows = ["plain row", "got Bearer abc123def456GHIJKL from client", "plain row"]
+    result = redact(rows, policy)
+    assert result.redacted == ["plain row", "got [REDACTED:bearer_token] from client", "plain row"]
+    assert len(result.manifest) == 1
+    assert result.manifest[0].path == "1"
+    assert result.manifest[0].span == (4, 4 + len("Bearer abc123def456GHIJKL"))
+
+
 def test_non_string_scalars_passed_through() -> None:
     """Numbers / booleans / None survive the walk verbatim."""
     policy = _policy_with_rules(

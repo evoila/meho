@@ -942,3 +942,28 @@ def test_default_policy_redacts_shadow_hash_and_keeps_the_other_columns() -> Non
     assert result.redacted == (
         "root:[REDACTED:password_hash]:19000:0:99999:7:::\ndaemon:*:19000:0:99999:7:::"
     )
+
+
+def test_default_policy_redacts_a_private_key_split_over_log_rows() -> None:
+    """``linux.log.tail`` returns one row per line; the key body rows are hidden too.
+
+    The result keeps its shape: the same number of rows, ``total`` and
+    ``path`` unchanged, the rows before and after the key untouched, and a
+    certificate next to the key still readable.
+    """
+    policy = load_policy_yaml(DEFAULT_POLICY_PACKAGE, DEFAULT_POLICY_RESOURCE)
+    certificate_rows = _CERTIFICATE_FIXTURE.split("\n")
+    key_rows = _PEM_PRIVATE_KEY_FIXTURE_POS.split("\n")
+    rows = ["before", *certificate_rows, *key_rows, "after"]
+    payload = {"rows": rows, "total": len(rows), "path": "/var/log/app.log"}
+    result = redact(payload, policy)
+    redacted = result.redacted
+    assert isinstance(redacted, dict)
+    assert redacted["total"] == len(rows)
+    assert redacted["path"] == "/var/log/app.log"
+    assert redacted["rows"] == [
+        "before",
+        *certificate_rows,
+        *(["[REDACTED:pem_private_key]"] * len(key_rows)),
+        "after",
+    ]

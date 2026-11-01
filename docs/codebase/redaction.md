@@ -46,7 +46,13 @@ rules in policy order, and returns:
   than `str` / `bytes` / `bytearray`) flatten to `list`. Only string
   leaves change content; everything else is structure. The result is
   always JSON-serialisable so the downstream JSONFlux reducer can
-  consume it without further shape-fixing.
+  consume it without further shape-fixing. A list whose items are all
+  strings (the `rows` of `linux.log.tail`, the lines of a ruleset) is
+  matched as one text, joined with newlines, so a secret that spans
+  rows (a PEM key: `BEGIN` row, body rows, `END` row) is found whole.
+  The list keeps its length and every row keeps its place; a row
+  inside a match loses only its part of the match. A match inside one
+  row gives the same result as matching that row alone.
 - `manifest` — a tuple of `RedactionManifestEntry` records, one per
   rule firing per leaf, carrying `rule`, `pattern`, `action`,
   `count`, `span`, `reason`, and `path`. C1-b will persist this

@@ -33,8 +33,9 @@ lane arms itself.
 
 The HCX Manager setup calls the appliance management API (port 9443), a
 second API with its own file. Its lane at the end of this module checks
-``manager_setup.APPLIANCE_VENDOR_CALLS`` the same way; the main-API call of
-the restart (the migration query) is pinned there too.
+``manager_setup.APPLIANCE_VENDOR_CALLS`` the same way. The main-API call of
+the restart (``manager_restart.MIGRATION_QUERY_CALL``, the migration query)
+is part of the main API set above.
 """
 
 from __future__ import annotations
@@ -71,7 +72,8 @@ def _declared_api_op_ids() -> set[str]:
     Every ``*_PATH`` constant of the connector module (``POST``), plus every
     ``(method, path)`` pair of ``typed_reads.VENDOR_CALLS``,
     ``service_mesh_writes.VENDOR_CALLS``, ``network_extension.VENDOR_CALLS``
-    and ``migrations.MIGRATION_VENDOR_CALLS``.
+    and ``migrations.MIGRATION_VENDOR_CALLS``, and the migration query of the
+    restart (``manager_restart.MIGRATION_QUERY_CALL``).
     """
     connector_calls = {
         f"POST:{value}"
@@ -86,7 +88,10 @@ def _declared_api_op_ids() -> set[str]:
     migration_calls = {
         f"{method}:{path}" for method, path in _migrations_module.MIGRATION_VENDOR_CALLS
     }
-    return connector_calls | read_calls | mesh_calls | extension_calls | migration_calls
+    restart_method, restart_path = _manager_restart_module.MIGRATION_QUERY_CALL
+    restart_calls = {f"{restart_method}:{restart_path}"}
+    main_api_calls = connector_calls | read_calls | mesh_calls | extension_calls
+    return main_api_calls | migration_calls | restart_calls
 
 
 def test_hcx_hand_coded_op_id_manifest_is_pinned() -> None:
@@ -178,7 +183,6 @@ def test_hcx_appliance_op_id_manifest_is_pinned() -> None:
         "POST:/components/appengine",
         "GET:/components/appengine/status",
     }
-    assert _manager_restart_module.MIGRATION_QUERY_CALL == ("POST", "/hybridity/api/migrations")
 
 
 @pytest.mark.parametrize("spec_dir", _SPEC_DIRS)

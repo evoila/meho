@@ -4,9 +4,11 @@
 """Abstract base class for all MEHO connectors.
 
 Every connector implementation (VaultConnector, HttpConnector, etc.) inherits
-from :class:`Connector` and provides the three async methods that constitute
-the v0.2 surface. The ``Target`` placeholder is replaced with a concrete import
-in T5 once G0.3 lands the Target model.
+from :class:`Connector` and provides the two abstract async methods
+(``fingerprint`` and ``probe``). ``execute`` has a default that refuses a
+direct call: operations run through the dispatcher. The ``Target``
+placeholder is replaced with a concrete import in T5 once G0.3 lands the
+Target model.
 """
 
 from abc import ABC, abstractmethod
@@ -114,8 +116,9 @@ class Connector(ABC):
 
     The defaults on the four new attributes are chosen so existing v1
     subclasses (VaultConnector — #244; KubernetesConnector skeleton —
-    #321) keep working without modification. Three required async methods
-    cover the v0.2 surface; v0.2.next may add streaming.
+    #321) keep working without modification. Two required async methods
+    (:meth:`fingerprint` and :meth:`probe`) cover the v0.2 surface;
+    :meth:`execute` has a default that refuses a direct call.
     """
 
     # Set on subclass: "vsphere", "vault", "bind9", etc.
@@ -197,32 +200,26 @@ class Connector(ABC):
     async def probe(self, target: Target) -> ProbeResult:
         """Lightweight reachability + auth-challenge check."""
 
-    @abstractmethod
     async def execute(
         self,
         target: Target,
         op_id: str,
         params: dict[str, Any],
     ) -> OperationResult:
-        """Run a typed operation.
+        """Refuse a direct call: an operation runs only as a registered operation.
 
-        op_id namespace varies by source_kind:
-
-        * ``'ingested'``  — ``"{METHOD}:{path}"``
-          (e.g. ``"GET:/repos/{owner}/{repo}/issues"``).
-        * ``'typed'``     — dotted shape per product
-          (e.g. ``"vault.kv.read"``).
-        * ``'composite'`` — dotted with ``.composite`` suffix
-          (e.g. ``"gh.composite.repo_create"``).
-
-        In v0.2.next post-G0.6, this method is typically called BY the
-        G0.6 dispatcher AFTER lookup + validation; subclasses don't
-        implement their own dispatch tables (``register_typed_operation()``
-        handles registration). Subclasses MAY still override ``execute()``
-        for special transport semantics (streaming, batching) but the
-        common path is "look up handler_ref from endpoint_descriptor,
-        call the handler".
+        MEHO never calls this method. The dispatcher runs the handler that
+        :func:`~meho_backplane.operations.typed_register.register_typed_operation`
+        recorded for the operation (or, for an operation from an API file,
+        its ``EndpointDescriptor`` row). So a connector, and a connector
+        package, does not write its own ``execute``.
         """
+        del target, params
+        raise NotImplementedError(
+            f"{type(self).__name__}.execute is not a way to run {op_id!r}. "
+            "Register the operation with register_typed_operation and run it "
+            "through MEHO: call_operation, or `meho operation call`."
+        )
 
     # G9.1-T2 (#449) — topology discovery hooks. Default no-op implementations
     # keep every shipped subclass compilable without modification; per-product

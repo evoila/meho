@@ -227,6 +227,24 @@ lines. The **Backfill** item below adds the lines for them.
    public "What's new" — it silently missed eight consecutive releases
    (v0.34.2 through v0.35.5, backfilled in #3782).
 
+5. **Check the connector kit.** The connector kit is the module
+   `meho_connector_kit`: the MEHO names a connector package may import.
+   It has its own version. When the kit changed since the last tag, the
+   `[X.Y.Z]` section needs a `### Connector kit` section that names the
+   new kit version. For a change in the first number, each line says the
+   smallest change a package must make, as the `Breaking changes` lines
+   do. Run, after the roll:
+
+   ```bash
+   python3 scripts/release/check_connector_kit_release.py --version X.Y.Z
+   ```
+
+   Exit 0 → proceed (the kit did not change, or it changed and the notes
+   say so). Exit 1 → the script lists each problem: the missing section,
+   a kit version that did not go up far enough, or a removed name that
+   was not marked as old at the last tag
+   ([`connector-packages.md`](codebase/connector-packages.md#the-connector-kit)).
+
 ### 3. Release-cutting PR → merge
 
 Open the PR (CHANGELOG roll + any release-only edits), get it reviewed,
@@ -939,7 +957,9 @@ follow-up task.
 [ ] 2. CHANGELOG: completeness audited, missing bullets backfilled,
        [Unreleased] rolled to [X.Y.Z] (post-tag work left behind);
        docs-site/reference/whats-new.md section added for [X.Y.Z]
-       (publishes with the v* tag — skipping it ships a stale What's new)
+       (publishes with the v* tag — skipping it ships a stale What's new);
+       connector kit check green
+       (scripts/release/check_connector_kit_release.py)
 [ ] 3. Release-body path-freshness gate green
        (scripts/release/check_release_body_paths.py — sister to #928);
        upgrade-relevant change → deploying.md version-specific notes row

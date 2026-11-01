@@ -1,0 +1,286 @@
+{
+  "kit_version": "1.0",
+  "names": {
+    "AuthModel": {
+      "kind": "class"
+    },
+    "Connector": {
+      "kind": "class"
+    },
+    "ConnectorAuthError": {
+      "kind": "class"
+    },
+    "ConnectorUpstreamError": {
+      "kind": "class"
+    },
+    "CredentialsReadError": {
+      "kind": "class"
+    },
+    "EmbeddingService": {
+      "kind": "class"
+    },
+    "FingerprintResult": {
+      "kind": "class"
+    },
+    "HttpConnector": {
+      "kind": "class",
+      "parts": {
+        "__init__": {
+          "inputs": [
+            "self"
+          ],
+          "kind": "method",
+          "returns": "None"
+        },
+        "_get_json": {
+          "inputs": [
+            "self",
+            "target: Target",
+            "path: str",
+            "*",
+            "operator: Operator",
+            "params: dict[str, Any] | None = None"
+          ],
+          "kind": "method",
+          "returns": "dict[str, Any]"
+        },
+        "_post_json": {
+          "inputs": [
+            "self",
+            "target: Target",
+            "path: str",
+            "*",
+            "operator: Operator",
+            "verb: str = 'POST'",
+            "params: dict[str, Any] | None = None",
+            "json: dict[str, Any] | None = None",
+            "data: dict[str, Any] | None = None",
+            "extra_headers: dict[str, str] | None = None",
+            "timeout: Any = <httpx._client.UseClientDefault object>"
+          ],
+          "kind": "method",
+          "returns": "dict[str, Any]"
+        },
+        "aclose": {
+          "inputs": [
+            "self"
+          ],
+          "kind": "method",
+          "returns": "None"
+        },
+        "auth_headers": {
+          "inputs": [
+            "self",
+            "target: Target",
+            "operator: Operator"
+          ],
+          "kind": "method",
+          "returns": "dict[str, str]"
+        },
+        "trace_response_body": {
+          "inputs": [
+            "self",
+            "response: httpx.Response"
+          ],
+          "kind": "method",
+          "returns": "Any"
+        }
+      }
+    },
+    "OperationResult": {
+      "kind": "class"
+    },
+    "Operator": {
+      "kind": "class"
+    },
+    "PermissionPreflight": {
+      "kind": "class"
+    },
+    "PreviewBuilder": {
+      "kind": "class"
+    },
+    "PreviewContext": {
+      "kind": "class",
+      "parts": {
+        "connector_id": {
+          "kind": "field",
+          "type": "str | None"
+        },
+        "connector_instance": {
+          "kind": "field",
+          "type": "Connector | None"
+        },
+        "operator": {
+          "kind": "field",
+          "type": "Operator"
+        },
+        "params": {
+          "kind": "field",
+          "type": "dict[str, Any]"
+        },
+        "target": {
+          "kind": "field",
+          "type": "Any"
+        }
+      }
+    },
+    "ProbeResult": {
+      "kind": "class"
+    },
+    "Target": {
+      "kind": "class",
+      "parts": {
+        "auth_model": {
+          "kind": "field",
+          "type": "str"
+        },
+        "extras": {
+          "kind": "field",
+          "type": "Mapping[str, Any]"
+        },
+        "host": {
+          "kind": "field",
+          "type": "str"
+        },
+        "name": {
+          "kind": "field",
+          "type": "str"
+        },
+        "secret_ref": {
+          "kind": "field",
+          "type": "str | None"
+        },
+        "verify_tls": {
+          "kind": "field",
+          "type": "bool"
+        }
+      }
+    },
+    "VaultClientError": {
+      "kind": "class"
+    },
+    "VaultCredentialsReadError": {
+      "kind": "class"
+    },
+    "compute_audit_digest_hash": {
+      "inputs": [
+        "value: str"
+      ],
+      "kind": "function",
+      "returns": "str"
+    },
+    "is_acceptable_auth_model": {
+      "inputs": [
+        "value: Any"
+      ],
+      "kind": "function",
+      "returns": "bool"
+    },
+    "is_system_operator": {
+      "inputs": [
+        "operator: Operator"
+      ],
+      "kind": "function",
+      "returns": "bool"
+    },
+    "load_param_secret_data": {
+      "inputs": [
+        "target: BasicCredentialsTargetLike",
+        "operator: Operator",
+        "*",
+        "param: str",
+        "mount: str = 'secret'"
+      ],
+      "kind": "function",
+      "returns": "dict[str, object]"
+    },
+    "load_vault_secret_data": {
+      "inputs": [
+        "target: BasicCredentialsTargetLike",
+        "operator: Operator",
+        "*",
+        "mount: str = 'secret'"
+      ],
+      "kind": "function",
+      "returns": "dict[str, object]"
+    },
+    "register_connector_v2": {
+      "inputs": [
+        "*",
+        "product: str",
+        "version: str",
+        "impl_id: str",
+        "cls: type[Connector]"
+      ],
+      "kind": "function",
+      "returns": "None"
+    },
+    "register_permission_preflight": {
+      "inputs": [
+        "op_id: str",
+        "preflight: PermissionPreflight"
+      ],
+      "kind": "function",
+      "returns": "None"
+    },
+    "register_preview_builder": {
+      "inputs": [
+        "op_id: str",
+        "builder: PreviewBuilder"
+      ],
+      "kind": "function",
+      "returns": "None"
+    },
+    "register_typed_op_registrar": {
+      "inputs": [
+        "registrar: TypedOpRegistrar"
+      ],
+      "kind": "function",
+      "returns": "None"
+    },
+    "register_typed_operation": {
+      "inputs": [
+        "*",
+        "product: str",
+        "version: str",
+        "impl_id: str",
+        "op_id: str",
+        "handler: TypedOpHandler",
+        "summary: str",
+        "description: str",
+        "parameter_schema: dict[str, Any]",
+        "when_to_use: str | None",
+        "response_schema: dict[str, Any] | None = None",
+        "group_key: str | None = None",
+        "tags: list[str] | None = None",
+        "safety_level: Literal['safe', 'caution', 'dangerous', 'destructive'] = 'safe'",
+        "requires_approval: bool = False",
+        "llm_instructions: dict[str, Any] | None = None",
+        "custom_description: str | None = None",
+        "session: AsyncSession | None = None",
+        "embedding_service: EmbeddingService | None = None"
+      ],
+      "kind": "function",
+      "returns": "None"
+    },
+    "strip_credential_value": {
+      "inputs": [
+        "value: object"
+      ],
+      "kind": "function",
+      "returns": "str"
+    },
+    "synthesise_system_operator": {
+      "inputs": [],
+      "kind": "function",
+      "returns": "Operator"
+    },
+    "target_cache_key": {
+      "inputs": [
+        "target: TenantScopedTargetLike"
+      ],
+      "kind": "function",
+      "returns": "tuple[str, str]"
+    }
+  }
+}

@@ -46,7 +46,8 @@ class Connector(ABC):
     @abstractmethod
     async def probe(self, target: Target) -> ProbeResult: ...
 
-    @abstractmethod
+    # Not abstract: the default refuses a direct call. MEHO runs an
+    # operation through the dispatcher, never through execute.
     async def execute(
         self, target: Target, op_id: str, params: dict[str, Any]
     ) -> OperationResult: ...
@@ -61,9 +62,9 @@ class Connector(ABC):
     ) -> list[CandidateHint]: ...
 ```
 
-Three required methods (`fingerprint` / `probe` / `execute`) plus two **non-abstract** topology hooks (G9.1-T2 #449). The topology hooks ship base-class defaults so every v1 subclass (VaultConnector #244, KubernetesConnector skeleton #321) keeps working without code change; per-product overrides land in the G3.x Initiatives.
+Two required methods (`fingerprint` / `probe`), a default `execute` that refuses a direct call (the dispatcher runs the handler that `register_typed_operation` recorded, so a connector does not write `execute`), plus two **non-abstract** topology hooks (G9.1-T2 #449). The topology hooks ship base-class defaults so every v1 subclass (VaultConnector #244, KubernetesConnector skeleton #321) keeps working without code change; per-product overrides land in the G3.x Initiatives.
 
-**Op-id namespace** depends on source kind: typed ops use `<product>.<resource>.<verb>` (e.g., `vault.kv.read`, `bind9.zone.create`), while ingested ops use `<METHOD>:<path>` (e.g., `GET:/api/vcenter/cluster`). The `Connector.execute` docstring at [`base.py`](../../backend/src/meho_backplane/connectors/base.py) is the source-of-truth contract.
+**Op-id namespace** depends on source kind: typed ops use `<product>.<resource>.<verb>` (e.g., `vault.kv.read`, `bind9.zone.create`), while ingested ops use `<METHOD>:<path>` (e.g., `GET:/api/vcenter/cluster`). The connector base class is in [`base.py`](../../backend/src/meho_backplane/connectors/base.py).
 
 The G9.1-T3 refresh service calls `discover_topology(target)` on demand + on schedule and diffs the returned `TopologyHints` against `graph_node` + `graph_edge` rows for the same `(tenant_id, target_id)`. The G9.1-T6 `meho targets discover` verb calls `list_candidates(seed_target, operator=...)` with the caller, so a connector can read the seed's secret as the caller, and surfaces candidates to the operator — auto-registration is intentionally out of scope; `--import-yaml` prints them as a file for `meho targets import`.
 

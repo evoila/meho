@@ -96,6 +96,7 @@ from meho_backplane.connectors.vault.ops_auth_schemas import (
     VAULT_AUTH_USERPASS_READ_RESPONSE_SCHEMA,
 )
 from meho_backplane.connectors.vault.target_auth import vault_client_for_target
+from meho_backplane.operations import register_plain_fields
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -468,3 +469,9 @@ async def register_vault_auth_operations(
             llm_instructions=spec["llm_instructions"],
             embedding_service=embedding_service,
         )
+
+
+# The AppRole's SecretID settings (a TTL, a use count, CIDR bounds), never a SecretID.
+register_plain_fields(
+    "vault.auth.approle.read", ("secret_id_ttl", "secret_id_num_uses", "secret_id_bound_cidrs")
+)

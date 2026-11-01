@@ -23,6 +23,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from meho_backplane.connectors.vcf_operations.fleet_secrets_checks import (
+    CA_TYPES,
+    CERTIFICATE_APPLIANCES,
+    CERTIFICATE_CATEGORIES,
+    CERTIFICATE_SORT_FIELDS,
+    PASSWORD_APPLIANCES,
+)
 from meho_backplane.connectors.vcf_operations.fleet_secrets_handlers import (
     FLEET_DEFAULT_PAGE_SIZE,
 )
@@ -60,23 +67,6 @@ _PAGE_PROPS: dict[str, Any] = {
         "description": "Sort direction.",
     },
 }
-
-_APPLIANCES: list[str] = [
-    "VCENTER",
-    "SDDC_MANAGER",
-    "NSXT_MANAGER",
-    "VCF_AUTOMATION",
-    "LOG_MANAGEMENT",
-    "VCF_OPERATIONS",
-    "VCF_OPS_NETWORK",
-    "IDENTITY_BROKER",
-    "VCF_OPS_HCX",
-    "ESX",
-    "VCF_SERVICES_RUNTIME",
-    "AVI_LOAD_BALANCER",
-]
-
-_CA_TYPES: list[str] = ["VMCA", "OPENSSL_CA", "MSCA", "EXTERNAL_CA"]
 
 _PREVIOUS_REQUEST_PROP: dict[str, Any] = {
     "type": "string",
@@ -228,14 +218,20 @@ VROPS_FLEET_CERTIFICATE_LIST_OP = VropsTypedOp(
             },
             "appliance": {
                 "type": "string",
-                "enum": _APPLIANCES,
-                "description": "Only this product type.",
+                "enum": CERTIFICATE_APPLIANCES,
+                "description": (
+                    "Only this product type. CLOUD_PROXY, LICENSE_SERVER and SUPERVISOR "
+                    "need VCF Operations 9.1.1 or newer."
+                ),
             },
             "applianceFqdn": _string("Only the certificates of this appliance address."),
             "category": {
                 "type": "string",
-                "enum": ["TLS_CERT", "ROOT_CERT", "INTERMEDIATE_CERT"],
-                "description": "Only this certificate category.",
+                "enum": CERTIFICATE_CATEGORIES,
+                "description": (
+                    "Only this certificate category. The values after INTERMEDIATE_CERT "
+                    "need VCF Operations 9.1.1 or newer."
+                ),
             },
             "status": {
                 "type": "string",
@@ -244,25 +240,18 @@ VROPS_FLEET_CERTIFICATE_LIST_OP = VropsTypedOp(
             },
             "type": {
                 "type": "string",
-                "enum": _CA_TYPES,
-                "description": "Only this signing CA type.",
+                "enum": CA_TYPES,
+                "description": (
+                    "Only this signing CA type. SELF_SIGNED_CA needs VCF Operations 9.1.1 or newer."
+                ),
             },
             "sortBy": {
                 "type": "string",
-                "enum": [
-                    "STATUS",
-                    "APPLIANCE",
-                    "CATEGORY",
-                    "TYPE",
-                    "APPLIANCE_FQDN",
-                    "VCF_COMPONENT_TYPE",
-                    "SDDC_DOMAIN_ID",
-                    "VCF_INSTANCE_ENDPOINT",
-                    "CERTIFICATE_COMMON_NAME",
-                    "EXPIRY_DATE",
-                    "AUTO_RENEW_STATUS",
-                ],
-                "description": "Sort field.",
+                "enum": CERTIFICATE_SORT_FIELDS,
+                "description": (
+                    "Sort field. The three CERTIFICATE_* fields after AUTO_RENEW_STATUS need "
+                    "VCF Operations 9.1.1 or newer."
+                ),
             },
             **_PAGE_PROPS,
         },
@@ -314,8 +303,11 @@ VROPS_FLEET_CERTIFICATE_REPLACE_OP = VropsTypedOp(
             },
             "caType": {
                 "type": "string",
-                "enum": _CA_TYPES,
-                "description": "Who signs the new certificate.",
+                "enum": CA_TYPES,
+                "description": (
+                    "Who signs the new certificate. SELF_SIGNED_CA needs VCF Operations "
+                    "9.1.1 or newer."
+                ),
             },
             "certificateChain": {
                 "type": "string",
@@ -378,8 +370,10 @@ VROPS_FLEET_PASSWORD_LIST_OP = VropsTypedOp(
         "properties": {
             "appliance": {
                 "type": "string",
-                "enum": [*_APPLIANCES, "NSXT_EDGE"],
-                "description": "Only this product type.",
+                "enum": PASSWORD_APPLIANCES,
+                "description": (
+                    "Only this product type. CLOUD_PROXY needs VCF Operations 9.1.1 or newer."
+                ),
             },
             "applianceFqdn": _string("Only the accounts of this appliance address."),
             "status": {

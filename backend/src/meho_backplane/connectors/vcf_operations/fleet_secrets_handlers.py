@@ -20,6 +20,10 @@ before any vendor call
   (``<vault-path>#<field>`` references); MEHO reads them only when the approved
   call runs.
 * ``vrops.fleet.request.get`` — ``GET /suite-api/api/workflows/requests/{requestId}``.
+  A failed password change can repeat the refused password in the vendor's
+  error text. For a password request the answer carries a fixed sentence and
+  the vendor's message ids instead, and the flight recorder gets the vendor
+  answer with those texts masked (:meth:`VropsFleetSecretsHandlers.trace_response_body`).
 
 The two changes are vendor jobs: the vendor answers with a workflow request
 and does the work after that. The start returns ``status: accepted`` with the
@@ -54,7 +58,10 @@ from meho_backplane.connectors.adapters.http import SsrfBlockedError
 from meho_backplane.connectors.base import ConnectorUpstreamError
 from meho_backplane.connectors.vcf_operations.fleet_secrets_checks import (
     ENDED_OUTCOMES,
+    error_cause_text,
+    masked_request_payload,
     parse_password_ref,
+    request_error_text,
     request_outcome,
     require_fleet_api,
 )
@@ -90,6 +97,7 @@ PASSWORD_ROTATE_PATH: Final = (
     f"{_FLEET}/password-management/accounts/{{passwordAccountKey}}/password"
 )
 WORKFLOW_REQUEST_PATH: Final = "/suite-api/api/workflows/requests/{requestId}"
+_WORKFLOW_REQUESTS_PREFIX: Final = WORKFLOW_REQUEST_PATH.rsplit("/", 1)[0] + "/"
 
 #: Every vendor call these handlers send, as ``METHOD:/path``. The reconcile
 #: lane checks each one against the pinned VCF Operations 9.1 API files.
@@ -212,23 +220,6 @@ def _total_count(payload: dict[str, Any], rows: list[dict[str, Any]]) -> Any:
     return len(rows)
 
 
-def _error_text(payload: dict[str, Any]) -> str | None:
-    """Join the vendor's error messages into one text, or ``None``."""
-    causes = payload.get("errorCause")
-    if not isinstance(causes, list):
-        return None
-    parts: list[str] = []
-    for cause in causes:
-        if not isinstance(cause, dict):
-            continue
-        message = cause.get("message")
-        detail = cause.get("exceptionMessage")
-        text = " — ".join(str(part) for part in (message, detail) if part)
-        if text:
-            parts.append(text)
-    return "; ".join(parts) or None
-
-
 def _vendor_messages(response: httpx.Response) -> list[str]:
     """The vendor's error texts (``message``, then the ``errorCause`` texts), each cut short."""
     try:
@@ -238,7 +229,7 @@ def _vendor_messages(response: httpx.Response) -> list[str]:
     if not isinstance(body, dict):
         return []
     message = body.get("message")
-    texts = [message if isinstance(message, str) else None, _error_text(body)]
+    texts = [message if isinstance(message, str) else None, error_cause_text(body)]
     return [text[:_MAX_VENDOR_TEXT] for text in texts if text][:_MAX_VENDOR_MESSAGES]
 
 
@@ -294,7 +285,7 @@ def _request_view(payload: dict[str, Any], *, request_id: Any, checked_at: str) 
         "request_type": payload.get("requestType"),
         "category": payload.get("category"),
         "duration": payload.get("duration"),
-        "error_text": _error_text(payload),
+        "error_text": request_error_text(payload),
         "checked_at": checked_at,
     }
 
@@ -325,6 +316,21 @@ def _accepted(payload: Any, *, op_id: str) -> dict[str, Any]:
 
 class VropsFleetSecretsHandlers(_Base):
     """The five fleet certificate and password handlers of the VCF Operations connector."""
+
+    def trace_response_body(self, response: httpx.Response) -> Any:
+        """Mask the error texts of a password request before the flight recorder records them.
+
+        Only for a workflow request answer (``GET .../workflows/requests/{id}``):
+        the shared redaction knows secrets by shape, and a password quoted in a
+        policy error has none. Every other answer is recorded as usual.
+        """
+        if not response.request.url.path.startswith(_WORKFLOW_REQUESTS_PREFIX):
+            return None
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        return masked_request_payload(payload)
 
     async def _fleet_query(
         self,
@@ -424,7 +430,7 @@ class VropsFleetSecretsHandlers(_Base):
         params: dict[str, Any],
     ) -> dict[str, Any]:
         """``vrops.fleet.certificate.list`` — the query, or one certificate by id."""
-        require_fleet_api(target, op_id="vrops.fleet.certificate.list")
+        require_fleet_api(target, op_id="vrops.fleet.certificate.list", params=params)
         certificate_id = params.get("certificateId")
         if certificate_id is not None:
             path = CERTIFICATE_PATH.format(certificateId=_segment("certificateId", certificate_id))
@@ -450,7 +456,7 @@ class VropsFleetSecretsHandlers(_Base):
     ) -> dict[str, Any]:
         """``vrops.fleet.certificate.replace`` — start the replacement; returns the request."""
         op_id = "vrops.fleet.certificate.replace"
-        require_fleet_api(target, op_id=op_id)
+        require_fleet_api(target, op_id=op_id, params=params)
         certificate_id = _segment("certificateId", params.get("certificateId"))
         chain = params.get("certificateChain")
         if isinstance(chain, str) and "PRIVATE KEY" in chain:
@@ -480,7 +486,7 @@ class VropsFleetSecretsHandlers(_Base):
         params: dict[str, Any],
     ) -> dict[str, Any]:
         """``vrops.fleet.password.list`` — the password accounts, never a value."""
-        require_fleet_api(target, op_id="vrops.fleet.password.list")
+        require_fleet_api(target, op_id="vrops.fleet.password.list", params=params)
         payload = await self._fleet_query(
             operator,
             target,
@@ -504,7 +510,7 @@ class VropsFleetSecretsHandlers(_Base):
         operator's identity, and go only into the request body.
         """
         op_id = "vrops.fleet.password.rotate"
-        require_fleet_api(target, op_id=op_id)
+        require_fleet_api(target, op_id=op_id, params=params)
         account_key = _segment("passwordAccountKey", params.get("passwordAccountKey"))
         parse_password_ref("current_password_ref", params.get("current_password_ref"))
         parse_password_ref("new_password_ref", params.get("new_password_ref"))

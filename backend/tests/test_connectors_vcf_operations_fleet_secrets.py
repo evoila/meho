@@ -6,15 +6,18 @@
 Checks, without a network call (respx, hand-written answers with made-up ids):
 
 * on a 9.0 target each operation stops early with the version message and
-  sends nothing; on 9.1.0 and 9.1.1 it runs;
+  sends nothing; on 9.1.0 and 9.1.1 it runs; a filter or input value that
+  only 9.1.1 knows stops on 9.1.0 the same way;
 * the lists send the vendor filters and paging, and return flat rows; the
   password list keeps only its known fields, so no password can come back;
 * the two changes send the vendor body, return ``accepted`` with the request
   id, start nothing when an earlier request still runs, and pass a vendor
   error on; the password change reads both passwords from the secret store;
-* the status read gives the state, the outcome and the vendor error text; it
-  logs in again after an expired login, and says ``not_reachable`` (not
-  ``failed``) when VCF Operations does not answer;
+* the status read gives the state, the outcome and the vendor error text; for
+  a failed password change it hides the vendor text (it can repeat the
+  password), also in the body the flight recorder records; it logs in again
+  after an expired login, and says ``not_reachable`` (not ``failed``) when
+  VCF Operations does not answer;
 * the metadata: reads are safe, changes wait for approval, only the 9.x
   registrar registers them, and the password change is a credential write.
 """
@@ -250,6 +253,62 @@ async def test_on_9_1_each_operation_runs(op_id: str, version: str, secrets: Asy
         )
     await connector.aclose()
     assert isinstance(result, dict)
+
+
+@pytest.mark.parametrize(
+    ("op_id", "params"),
+    [
+        (
+            "vrops.fleet.certificate.replace",
+            {"certificateId": "cert-1", "caType": "SELF_SIGNED_CA"},
+        ),
+        ("vrops.fleet.certificate.list", {"category": "STS_CERT"}),
+        (
+            "vrops.fleet.certificate.list",
+            {"type": "SELF_SIGNED_CA", "sortBy": "CERTIFICATE_PURPOSE"},
+        ),
+        ("vrops.fleet.certificate.list", {"appliance": "SUPERVISOR"}),
+        ("vrops.fleet.password.list", {"appliance": "CLOUD_PROXY"}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_9_1_1_value_validates_runs_on_9_1_1_and_stops_on_9_1_0(
+    op_id: str, params: dict[str, Any]
+) -> None:
+    schema = next(op for op in VROPS_FLEET_SECRETS_OPS if op.op_id == op_id).parameter_schema
+    assert validate_params(schema, params) == []
+
+    connector = VcfOperationsConnector(credentials_loader=_stub_loader)
+    async with respx.mock(base_url=_BASE_URL) as mock:
+        mock.post(_ACQUIRE_PATH).respond(200, json={"token": "tok"})
+        route = mock.route().respond(200, json=_ACCEPTED)
+        with pytest.raises(NotImplementedError) as info:
+            await _handler(op_id)(
+                connector, _operator(), _StubTarget(version="9.1.0"), dict(params)
+            )
+        assert route.call_count == 0
+        await _handler(op_id)(connector, _operator(), _StubTarget(version="9.1.1"), dict(params))
+        assert route.call_count == 1
+    await connector.aclose()
+
+    message = str(info.value)
+    assert message.startswith(f"{op_id}: ")
+    assert "needs VCF Operations 9.1.1 or newer; this target is 9.1.0." in message
+    (name, value), *_ = (
+        (name, value)
+        for name, value in params.items()
+        if value in checks.ADDED_IN_9_1_1.get(name, ())
+    )
+    assert f"{name} {value}" in message
+
+
+def test_the_9_1_1_table_names_only_values_the_schemas_accept() -> None:
+    accepted: dict[str, set[str]] = {}
+    for op in VROPS_FLEET_SECRETS_OPS:
+        for name, prop in op.parameter_schema["properties"].items():
+            accepted.setdefault(name, set()).update(prop.get("enum", []))
+    for name, values in checks.ADDED_IN_9_1_1.items():
+        assert values <= accepted[name], name
 
 
 def test_unknown_version_goes_on() -> None:
@@ -697,6 +756,91 @@ def test_request_outcome(state: Any, outcome: str) -> None:
     assert checks.request_outcome(state) == outcome
 
 
+@pytest.mark.parametrize(
+    "kind",
+    [
+        {"category": "VCF_PASSWORD_MANAGEMENT", "requestType": "UPDATE_PASSWORD"},
+        {"category": "PASSWORD"},
+        {"requestName": "Rotate password of svc-a"},
+        {},
+    ],
+    ids=["vcf-password-management", "password", "name-only", "no-kind"],
+)
+@pytest.mark.asyncio
+async def test_status_read_hides_the_vendor_text_of_a_failed_password_change(
+    kind: dict[str, Any],
+) -> None:
+    """The vendor's text can repeat the refused password, so the answer carries none of it."""
+    vendor = {
+        "requestId": "req-2",
+        "state": "FAILED",
+        **kind,
+        "errorCause": [
+            {
+                "messageId": "PWD-POLICY-1",
+                "message": "The password new-pass-2 does not meet the policy.",
+                "exceptionMessage": "value=new-pass-2",
+            },
+            {"message": "Rolled back."},
+        ],
+    }
+    connector = VcfOperationsConnector(credentials_loader=_stub_loader)
+    async with respx.mock(base_url=_BASE_URL) as mock:
+        mock.post(_ACQUIRE_PATH).respond(200, json={"token": "tok"})
+        mock.get(f"{_REQUESTS}/req-2").respond(200, json=vendor)
+        result = await connector.fleet_request_get(
+            _operator(), _StubTarget(), {"request_id": "req-2"}
+        )
+    await connector.aclose()
+
+    assert result["outcome"] == "failed"
+    assert result["error_text"] == (
+        f"{checks.PASSWORD_ERROR_TEXT_HIDDEN} Vendor message ids: PWD-POLICY-1."
+    )
+    assert "new-pass-2" not in json.dumps(result)
+
+
+def test_status_read_keeps_the_vendor_text_of_a_certificate_request() -> None:
+    payload = {
+        **_ACCEPTED,
+        "state": "FAILED",
+        "errorCause": [{"messageId": "C1", "message": "The appliance refused the chain."}],
+    }
+    assert checks.request_error_text(payload) == "The appliance refused the chain."
+    assert checks.masked_request_payload(payload) == payload
+
+
+def test_the_recorded_status_answer_of_a_password_request_has_no_vendor_text() -> None:
+    """What the flight recorder gets: the vendor answer with the error texts masked."""
+    vendor = {
+        "requestId": "req-2",
+        "state": "FAILED",
+        "category": "VCF_PASSWORD_MANAGEMENT",
+        "errorCause": [
+            {"messageId": "PWD-POLICY-1", "message": "new-pass-2 is too weak"},
+            "not an object",
+        ],
+    }
+    connector = VcfOperationsConnector(credentials_loader=_stub_loader)
+    request = httpx.Request("GET", f"{_BASE_URL}{_REQUESTS}/req-2")
+    recorded = connector.trace_response_body(httpx.Response(200, json=vendor, request=request))
+    assert "new-pass-2" not in json.dumps(recorded)
+    assert recorded["errorCause"][0]["messageId"] == "PWD-POLICY-1"
+    assert recorded["errorCause"][1] == "not an object"
+    assert recorded["state"] == "FAILED"
+
+    certificate = {**_ACCEPTED, "errorCause": [{"message": "chain refused"}]}
+    assert (
+        connector.trace_response_body(httpx.Response(200, json=certificate, request=request))
+        == certificate
+    )
+    assert (
+        connector.trace_response_body(httpx.Response(200, text="<html>", request=request)) is None
+    )
+    other = httpx.Request("POST", f"{_BASE_URL}{_ACCOUNTS}/query")
+    assert connector.trace_response_body(httpx.Response(200, json=vendor, request=other)) is None
+
+
 # --- previews ---------------------------------------------------------------
 
 
@@ -733,3 +877,18 @@ async def test_replace_preview_shows_the_certificate_not_the_chain() -> None:
     assert preview["certificateId"] == "cert-1"
     assert preview["certificate_chain_chars"] == 5
     assert "<pem>" not in json.dumps(preview)
+
+
+@pytest.mark.asyncio
+async def test_replace_preview_shows_a_9_1_1_value_problem_on_9_1_0() -> None:
+    builder = _PREVIEW_BUILDERS["vrops.fleet.certificate.replace"]
+    params = {"certificateId": "cert-1", "caType": "SELF_SIGNED_CA"}
+    preview = await builder(_preview_ctx("vrops.fleet.certificate.replace", params, "9.1.0"))
+    assert preview is not None
+    assert preview["version_problem"] == (
+        "vrops.fleet.certificate.replace: caType SELF_SIGNED_CA needs VCF Operations 9.1.1 "
+        "or newer; this target is 9.1.0."
+    )
+    preview = await builder(_preview_ctx("vrops.fleet.certificate.replace", params, "9.1.1"))
+    assert preview is not None
+    assert "version_problem" not in preview

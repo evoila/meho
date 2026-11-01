@@ -449,6 +449,17 @@ vendor's VCF Operations 9.1.0 and 9.1.1 API files (both have all six calls).
   `<op_id>: fleet certificates and passwords need VCF Operations 9.1 or newer;
   this target is 9.0.x.` A target with no known version goes on. The two
   approval previews show the same message as `version_problem`.
+- **Values of 9.1.0 and 9.1.1.** The filter and input value lists of the
+  schemas (`appliance`, `category`, `status`, `type`, `caType`, `sortBy`) are
+  the union of both vendor files, without the vendor's `UNKNOWN` placeholder.
+  The 9.1.1 file added some values: `SELF_SIGNED_CA` as a CA type, the
+  appliances `CLOUD_PROXY`, `LICENSE_SERVER` and `SUPERVISOR`, many
+  certificate categories (`STS_CERT`, `VMCA_ROOT`, ...) and three certificate
+  sort fields. They are listed in `ADDED_IN_9_1_1` (`fleet_secrets_checks.py`).
+  On a 9.1.0 target a handler stops before any vendor call with
+  `<op_id>: <param> <value> needs VCF Operations 9.1.1 or newer; this target is
+  9.1.0.`; the previews show it as `version_problem`. The reconcile lane
+  checks both lists against both vendor files.
 - **Lists.** Both lists send `page` (default 0) and `pageSize` (default 1000;
   the vendor default is 10) as query values, and the filters as the JSON body.
   Each row is flat: the certificate row lifts `autoRenewInfo.autoRenewStatus`
@@ -467,9 +478,17 @@ vendor's VCF Operations 9.1.0 and 9.1.1 API files (both have all six calls).
   change is handled like the other password changes in MEHO
   (`connectors/_shared/secret_echo.py`): the error keeps the status and the
   vendor's message, but no vendor message that holds one of the two passwords,
-  and no request body. The parameter schema of the certificate replacement
-  refuses a `certificateChain` that holds a private key, so the check runs
-  before the call waits for approval; the handler checks again.
+  and no request body. A failed password change can also repeat the password
+  in the error text of its workflow request (a password-policy error). So for
+  a password request (`category` `PASSWORD` or `VCF_PASSWORD_MANAGEMENT`, or
+  a request type or name with "password"; also when the vendor names no kind)
+  the status read puts a fixed sentence and the vendor's message ids into
+  `error_text` instead of the vendor's text, and the connector's
+  `trace_response_body` hands the flight recorder the vendor answer with
+  `message` and `exceptionMessage` of each `errorCause` masked. A certificate
+  request keeps the vendor's text. The parameter schema of the certificate
+  replacement refuses a `certificateChain` that holds a private key, so the
+  check runs before the call waits for approval; the handler checks again.
 - **Vendor jobs.** Both changes return as soon as the vendor accepted the
   request: `status: accepted`, the vendor `request_id`, and
   `status_read: vrops.fleet.request.get`. They never say the work is done.
@@ -490,7 +509,8 @@ vendor's VCF Operations 9.1.0 and 9.1.1 API files (both have all six calls).
   MEHO keeps its answer, with the request id, under a run handle.
 - **The status read.** It gives the vendor `state`, a plain `outcome`
   (`queued`, `running`, `succeeded`, `failed`, `canceled`, `unknown`), `ended`,
-  and `error_text` (the vendor's `errorCause` messages). The vendor gives no
+  and `error_text` (the vendor's `errorCause` messages; for a password request
+  a fixed sentence and the message ids, see above). The vendor gives no
   steps and no progress for these requests. After a `401` (the login expired
   since the start) it drops the session, logs in again and reads once more.
   When VCF Operations does not answer (no connection, or `502`/`503`/`504`,
@@ -501,9 +521,10 @@ vendor's VCF Operations 9.1.0 and 9.1.1 API files (both have all six calls).
   no partial multi-step failure to report. A `previous_request_id` read that
   fails stops the start before anything changed.
 - **Reconcile lane.** `tests/test_connectors_vcf_operations_fleet_spec_reconcile.py`
-  checks `VENDOR_CALLS` against both 9.1 files. The vendor files fail MEHO's
-  ingest check (empty `required` lists), so the lane reads the path keys from
-  the JSON directly.
+  checks `VENDOR_CALLS` and the value lists of the schemas against both 9.1
+  files, and that `ADDED_IN_9_1_1` is exactly what the 9.1.1 file added. The
+  vendor files fail MEHO's ingest check (empty `required` lists), so the lane
+  reads the path keys and the value lists from the JSON directly.
 
 ### Shutdown
 

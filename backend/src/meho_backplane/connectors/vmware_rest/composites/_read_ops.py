@@ -68,6 +68,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS[
             "vmware.composite.cluster.drs_recommendations"
         ],
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.event.tail",
@@ -86,6 +87,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         safety_level="safe",
         requires_approval=False,
         llm_instructions=GUEST_EVENT_PERF_LLM_INSTRUCTIONS["vmware.composite.event.tail"],
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.performance.summary",
@@ -119,6 +121,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         safety_level="safe",
         requires_approval=False,
         llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS["vmware.composite.datastore.usage"],
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.datastore.refresh",
@@ -156,5 +159,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS[
             "vmware.composite.network.portgroup.audit"
         ],
+        classifier_other=True,
     ),
 )

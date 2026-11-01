@@ -41,5 +41,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         safety_level="safe",
         requires_approval=False,
         llm_instructions=MIGRATION_INVENTORY_LLM_INSTRUCTIONS,
+        classifier_other=True,
     ),
 )

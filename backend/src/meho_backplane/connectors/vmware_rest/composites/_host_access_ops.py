@@ -138,6 +138,9 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions=AD_LEAVE_LLM_INSTRUCTIONS,
+        # ``.leave`` is not a classifier suffix. The user create, the password
+        # change and the join send a password: they are credential_write.
+        classifier_other=True,
     ),
 )
 

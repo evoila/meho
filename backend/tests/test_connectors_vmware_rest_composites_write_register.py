@@ -1238,6 +1238,7 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
         "vmware.composite.host.maintenance.enter": {
             "accepted",
             "already_running",
+            "tasks_incomplete",
             "unchanged",
             "not_connected",
             "not_found",

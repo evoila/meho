@@ -1973,7 +1973,7 @@ enum) are:
 | `vm.clone_from_template` | `cloned`, `template_not_found`, `ambiguous_template`, `not_a_template`, `timeout` (name-resolution refusals + the template assert are pre-write; `timeout` when the `CloneVM_Task` poll gives up; a task *fault* raises `connector_error`) |
 | `host.evacuate` | `evacuated`, `partial`, `aborted`, `timeout`, `not_in_cluster` (the maintenance-enter is the vim `EnterMaintenanceMode_Task`, polled; a task *fault* raises `connector_error`, #2970; a poll `timeout` is a status with the task id and a `warning` issue, not a failure, #4895; `not_in_cluster` is a pre-change refusal) |
 | `host.maintenance.exit` | `exited`, `unchanged`, `not_connected`, `timeout` (the exit is the vim `ExitMaintenanceMode_Task`, polled, #4967; `unchanged` and `not_connected` are pre-change refusals; a task *fault* raises `connector_error`; a poll `timeout` is a status with the task id and a `warning` issue, not a failure, and its host read is best effort) |
-| `host.maintenance.enter` | `accepted`, `already_running`, `unchanged`, `not_connected`, `not_found`, `invalid_request` (a vendor job, #4350: answers at once with the task id and `status_read`; nothing is sent except on `accepted`) |
+| `host.maintenance.enter` | `accepted`, `already_running`, `tasks_incomplete`, `unchanged`, `not_connected`, `not_found`, `invalid_request` (a vendor job, #4350: answers at once with the task id and `status_read`; nothing is sent except on `accepted`; `tasks_incomplete` when vCenter did not give the state of every recent task, so a running start cannot be ruled out) |
 | `host.reboot`, `host.shutdown`, `host.standby.enter`, `host.standby.exit` | `done`, `unchanged`, `not_in_maintenance`, `not_connected`, `not_found`, `invalid_request`, `timeout` (#4350: the vim task is polled, then the host is read again, best effort; a task *fault* raises `connector_error` with the fault type and text; a poll `timeout` is a status with the task id and a `warning` issue) |
 | `host.detach_from_vds` | `detached`, `incomplete`, `timeout` (the detach is the vim `ReconfigureDvs_Task` host-member remove, polled, #2970) |
 | `cluster.patch` | `completed`, `stopped` (per-host vim maintenance `*_Task`s + the vLCM `software?action=apply&vmw-task=true` cis task, every task polled before the next step, #2970) |
@@ -4453,7 +4453,8 @@ and `HostSystem.ShutdownHost_Task` (`force`),
 (`timeoutSec`), and `PropertyCollector.RetrievePropertiesEx` for the host
 (`name`, `runtime.connectionState`, `runtime.powerState`,
 `runtime.inMaintenanceMode`, `runtime.standbyMode`, `runtime.dasHostState`,
-and `recentTask` for the enter) and for `Task.info`. vCenter 8.0 U1 to U3 and
+and `recentTask` for the enter) and for `Task.info` (with
+`ContinueRetrievePropertiesEx` for every page of the task answer). vCenter 8.0 U1 to U3 and
 9.0 to 9.1.1 all have them, so no version check stops a call. The step lists
 are the `_VIM_SUB_OPS_HOST_*` tuples in `composites/_host_maintenance_enter.py`
 and `composites/_host_power.py`, published through `_host_power_ops.py`.
@@ -4471,12 +4472,15 @@ so `host.maintenance.enter` does not wait:
 - The start returns as soon as vCenter took the task: `status: accepted`, the
   task id in `task`, and `status_read: {op_id: vmware.task.info, params:
   {task}}`. It never says the host is in maintenance mode.
-- Before the start, it reads the host's `recentTask` and their `Task.info`. A
-  task with `descriptionId` `HostSystem.enterMaintenanceMode` that is
-  `queued` or `running` is returned as `already_running` with its id, and
-  nothing new is started. This check is a help, not a lock: two callers can
-  both look before either starts, and a task that just ended is no longer in
-  the list.
+- Before the start, it reads the host's `recentTask` and their `Task.info`,
+  every page of the answer (`read_many` with `all_pages=True`). A task with
+  `descriptionId` `HostSystem.enterMaintenanceMode` that is `queued` or
+  `running` is returned as `already_running` with its id, and nothing new is
+  started. When vCenter leaves a recent task, or its `info`, out of the
+  answer, the start is refused with `tasks_incomplete` and nothing is sent:
+  a running start cannot be ruled out, so MEHO does not start on a guess.
+  This check is a help, not a lock: two callers can both look before either
+  starts, and a task that just ended is no longer in the list.
 - `vmware.task.info` gives the vendor state, the progress and, on failure,
   the fault type and text. The caller reads it until `done`, then reads the
   host (`vmware.host.usage`).
@@ -4527,7 +4531,8 @@ enough.
 
 Tests: `test_connectors_vmware_rest_host_power.py` (each handler on a
 recording double: success, refusals, a faulted task, a poll timeout, the
-running-task check; the real connector over `respx` on the vCenter 8 and 9
+running-task check, also on a later page, and the refusal when a recent task
+cannot be read; the real connector over `respx` on the vCenter 8 and 9
 VI-JSON paths; the rows and the preview),
 `test_connectors_vmware_rest_host_power_approval.py` (a person's call waits
 for approval and sends nothing; one approval runs the call),

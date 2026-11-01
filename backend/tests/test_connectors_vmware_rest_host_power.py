@@ -148,8 +148,26 @@ def _task_info(
     return info
 
 
+def _task_object(moid: str, info: dict[str, Any] | None) -> dict[str, Any]:
+    """One ``ObjectContent`` of a task; ``info=None`` leaves ``info`` in ``missingSet``."""
+    if info is not None:
+        return _result("Task", moid, [{"name": "info", "val": info}])["objects"][0]
+    return {
+        "_typeName": "ObjectContent",
+        "obj": {"_typeName": "ManagedObjectReference", "type": "Task", "value": moid},
+        "propSet": [],
+        "missingSet": [{"_typeName": "MissingProperty", "path": "info"}],
+    }
+
+
 class _Conn:
-    """Recording double: host reads in order, task infos by id, task MoRefs for writes."""
+    """Recording double: host reads in order, task infos by id, task MoRefs for writes.
+
+    A task not in ``tasks`` is left out of the answer; a task whose info is
+    ``None`` comes back with ``info`` in ``missingSet``. With ``page_size``
+    the task answer is split into pages that ``ContinueRetrievePropertiesEx``
+    reads one by one.
+    """
 
     impl_id = "vmware-rest"
     version = "9.0"
@@ -158,13 +176,25 @@ class _Conn:
         self,
         host_reads: list[list[dict[str, Any]] | Exception | None],
         *,
-        tasks: dict[str, dict[str, Any]] | None = None,
+        tasks: dict[str, dict[str, Any] | None] | None = None,
         new_task: str = "task-91",
+        page_size: int | None = None,
     ) -> None:
         self.host_reads = list(host_reads)
         self.tasks = tasks or {}
         self.new_task = new_task
+        self.page_size = page_size
         self.writes: list[tuple[str, Any]] = []
+        self.continue_reads = 0
+        self._later_pages: list[dict[str, Any]] = []
+
+    def _page(self, objects: list[dict[str, Any]]) -> dict[str, Any]:
+        if self.page_size is not None and len(objects) > self.page_size:
+            self._later_pages = objects[self.page_size :]
+            objects = objects[: self.page_size]
+            return {"_typeName": "RetrieveResult", "objects": objects, "token": "next-page"}
+        self._later_pages = []
+        return {"_typeName": "RetrieveResult", "objects": objects}
 
     async def _post_vmomi_json(
         self,
@@ -174,8 +204,14 @@ class _Conn:
         operator: Operator,
         json: Any = None,
         promote_managed_object_not_found: bool = False,
+        session_used: Any = None,
+        session_token: str | None = None,
     ) -> Any:
-        del target, operator, promote_managed_object_not_found
+        del target, operator, promote_managed_object_not_found, session_used, session_token
+        if path.endswith("/ContinueRetrievePropertiesEx"):
+            assert json == {"token": "next-page"}
+            self.continue_reads += 1
+            return self._page(self._later_pages)
         if not path.endswith("/RetrievePropertiesEx"):
             self.writes.append((path, json))
             return {"_typeName": "ManagedObjectReference", "type": "Task", "value": self.new_task}
@@ -188,12 +224,7 @@ class _Conn:
                 raise read
             return {"objects": []} if read is None else _result("HostSystem", moids[0], read)
         assert mo_type == "Task"
-        objects = [
-            _result("Task", m, [{"name": "info", "val": self.tasks[m]}])["objects"][0]
-            for m in moids
-            if m in self.tasks
-        ]
-        return {"_typeName": "RetrieveResult", "objects": objects}
+        return self._page([_task_object(m, self.tasks[m]) for m in moids if m in self.tasks])
 
 
 async def _call(handler: Any, conn: _Conn, params: dict[str, Any]) -> Any:
@@ -276,6 +307,45 @@ async def test_enter_ignores_an_ended_start(gate: _Gate) -> None:
     out = await _call(host_maintenance_enter_composite, conn, {"host": "host-21"})
     assert out["status"] == "accepted"
     assert len(conn.writes) == 1
+
+
+async def test_enter_finds_a_running_start_on_a_later_page(gate: _Gate) -> None:
+    conn = _Conn(
+        [_host_props(maintenance=False, recent=["task-5", "task-6", "task-7"])],
+        tasks={
+            "task-5": _task_info("running", description_id="VirtualMachine.powerOn"),
+            "task-6": _task_info("success", description_id="HostSystem.enterMaintenanceMode"),
+            "task-7": _task_info("running", description_id="HostSystem.enterMaintenanceMode"),
+        },
+        page_size=1,
+    )
+    out = await _call(host_maintenance_enter_composite, conn, {"host": "host-21"})
+    assert out["status"] == "already_running"
+    assert out["task"] == "task-7"
+    assert conn.continue_reads == 2
+    assert conn.writes == []
+    assert gate.calls == []
+
+
+@pytest.mark.parametrize(
+    "tasks",
+    [
+        {"task-5": _task_info("running", description_id="VirtualMachine.powerOn")},
+        {"task-5": _task_info("running", description_id="VirtualMachine.powerOn"), "task-6": None},
+    ],
+    ids=["task-left-out", "info-unreadable"],
+)
+async def test_enter_refuses_when_a_recent_task_cannot_be_read(
+    gate: _Gate, tasks: dict[str, dict[str, Any] | None]
+) -> None:
+    conn = _Conn([_host_props(maintenance=False, recent=["task-5", "task-6"])], tasks=tasks)
+    out = await _call(host_maintenance_enter_composite, conn, {"host": "host-21"})
+    assert out["status"] == "tasks_incomplete"
+    assert out["task"] is None
+    assert out["status_read"] is None
+    assert out["name"] == "<host-name>"
+    assert conn.writes == []
+    assert gate.calls == []
 
 
 @pytest.mark.parametrize(

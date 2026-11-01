@@ -49,6 +49,7 @@ OP_STANDBY_EXIT: Final = _P + "standby.exit"
 MAINTENANCE_ENTER_STATUSES: Final[tuple[str, ...]] = (
     "accepted",
     "already_running",
+    "tasks_incomplete",
     "unchanged",
     "not_connected",
     "not_found",
@@ -207,8 +208,10 @@ _MAINTENANCE_ENTER_RESPONSE: Final[dict[str, Any]] = {
             "enum": list(MAINTENANCE_ENTER_STATUSES),
             "description": (
                 "accepted: vCenter took the job; it is not done yet. already_running: a "
-                "maintenance-mode task for this host runs; nothing sent. unchanged: already in "
-                "maintenance mode. not_connected, not_found, invalid_request: nothing sent."
+                "maintenance-mode task for this host runs; nothing sent. tasks_incomplete: "
+                "vCenter did not give the state of every recent task, so a running start "
+                "cannot be ruled out; nothing sent. unchanged: already in maintenance mode. "
+                "not_connected, not_found, invalid_request: nothing sent."
             ),
         },
         **_STATE_FIELDS,
@@ -286,7 +289,9 @@ HOST_POWER_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
         "preconditions": (
             "The host must be connected. Running VMs block maintenance mode unless DRS moves "
             "them. A host already in maintenance mode answers unchanged; a running "
-            "maintenance-mode task on the host answers already_running with its id."
+            "maintenance-mode task on the host answers already_running with its id. When "
+            "the state of a recent task cannot be read, the answer is tasks_incomplete and "
+            "nothing is sent."
         ),
         "parameter_hints": {
             "host": _HOST_HINT,
@@ -294,8 +299,8 @@ HOST_POWER_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
             "timeout_seconds": "0 means vCenter waits without limit.",
         },
         "output_shape": (
-            "{status: accepted|already_running|unchanged|not_connected|not_found|"
-            f"invalid_request, {_STATE_SHAPE}, vsan_mode, task, status_read: {{op_id, "
+            "{status: accepted|already_running|tasks_incomplete|unchanged|not_connected|"
+            f"not_found|invalid_request, {_STATE_SHAPE}, vsan_mode, task, status_read: {{op_id, "
             "params}}, guidance}. accepted means vCenter started the task, not that the host "
             "is in maintenance mode."
         ),

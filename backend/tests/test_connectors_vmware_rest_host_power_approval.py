@@ -78,8 +78,10 @@ class _Recorder(_RecordingVmwareConnector):
         operator: Operator,
         json: Any = None,
         promote_managed_object_not_found: bool = False,
+        session_used: Any = None,
+        session_token: str | None = None,
     ) -> Any:
-        del promote_managed_object_not_found
+        del promote_managed_object_not_found, session_used, session_token
         return await super()._post_vmomi_json(target, path, operator=operator, json=json)
 
 

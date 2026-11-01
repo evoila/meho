@@ -35,6 +35,8 @@ from tests.test_connectors_vmware_rest_host_evacuate_spec_reconcile import (
 )
 
 _READ = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+_CONTINUE_READ = "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx"
+_ENTER = "vmware.composite.host.maintenance.enter"
 
 #: The methods, and the request fields MEHO sends with their vendor types.
 _METHODS: dict[str, dict[str, str]] = {
@@ -53,8 +55,12 @@ def vi_json_text(request: pytest.FixtureRequest) -> str:
 
 
 def test_step_lists_are_pinned() -> None:
-    """Each operation reads with RetrievePropertiesEx and sends one HostSystem method."""
-    assert {op: steps[1] for op, steps in HOST_POWER_GOVERNED_SUBOPS.items()} == {
+    """Each operation reads with RetrievePropertiesEx and sends one HostSystem method.
+
+    The maintenance-mode start also reads every page of the task answer, so
+    its list carries the continue read between the first read and the write.
+    """
+    assert {op: steps[-1] for op, steps in HOST_POWER_GOVERNED_SUBOPS.items()} == {
         "vmware.composite.host.maintenance.enter": (
             "POST:/HostSystem/{moId}/EnterMaintenanceMode_Task"
         ),
@@ -67,9 +73,9 @@ def test_step_lists_are_pinned() -> None:
             "POST:/HostSystem/{moId}/PowerUpHostFromStandBy_Task"
         ),
     }
-    assert all(
-        steps[0] == _READ and len(steps) == 2 for steps in HOST_POWER_GOVERNED_SUBOPS.values()
-    )
+    for op, steps in HOST_POWER_GOVERNED_SUBOPS.items():
+        expected_reads = (_READ, _CONTINUE_READ) if op == _ENTER else (_READ,)
+        assert steps[:-1] == expected_reads, op
     assert _host_power_common.HOST_STATE_PROPS == (
         "name",
         "runtime.connectionState",

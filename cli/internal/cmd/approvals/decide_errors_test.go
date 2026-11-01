@@ -26,6 +26,7 @@ func runDecisionWithMock(t *testing.T, decideHandler mockHandler, verb, reason s
 		"POST /api/v1/approvals/" + stubID + "/decide": decideHandler,
 	})
 	t.Cleanup(srv.Close)
+	stubSignIn(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	store, err := auth.NewTokenStore()
 	if err != nil {

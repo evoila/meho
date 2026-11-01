@@ -67,6 +67,7 @@ from typing import TYPE_CHECKING, Any
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.vault_creds import (
     CredentialsReadError,
+    check_param_secret_ref,
     strip_credential_value,
 )
 from meho_backplane.connectors.linux._sudo import run_remote_bash_with_sudo
@@ -133,11 +134,11 @@ class LinuxWriteSafetyError(ValueError):
 
 #: The narrow allow-list of absolute POSIX roots ``linux.file.write`` confines
 #: its target path under -- the config / runtime-state trees a day-2
-#: remediation writes. Deliberately narrower than the *read* roots
+#: remediation writes. Separate from the *read* roots
 #: (:data:`~meho_backplane.connectors.linux.ops.LINUX_READ_ROOTS`): the read
-#: floor reads ``/proc`` / ``/sys`` / ``/var/log``, but writing there is a
-#: footgun (``/proc`` / ``/sys`` are the sysctl op's job; ``/var/log`` is not a
-#: config surface), so those are excluded here. Confinement is lexical (the
+#: floor reads ``/var/log`` and a few named ``/proc`` / ``/sys`` files, but
+#: writing there is a footgun (``/proc`` / ``/sys`` are the sysctl op's job;
+#: ``/var/log`` is not a config surface), so those are excluded here. Confinement is lexical (the
 #: bind9 mold): a resolved path must descend one of these roots.
 LINUX_WRITE_ROOTS: tuple[str, ...] = (
     "/etc",
@@ -630,6 +631,11 @@ async def _resolve_secret_env(
         secret_data = cache.get(path)
         if secret_data is None:
             stub = _VaultRefTarget(name=label, host=host, secret_ref=path)
+            # The path comes from the params: check it before the read. A
+            # refused path raises SecretRefScopeError unchanged, so the
+            # dispatcher answers vault_credentials_read_error with only the
+            # path's first segment.
+            check_param_secret_ref(operator, path, param="secret_env")
             try:
                 secret_data = await connector._resolve_secret(stub, operator)
             except (VaultClientError, CredentialsReadError) as exc:

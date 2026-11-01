@@ -80,8 +80,8 @@ VM_DISK_REMOVE_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "required": ["vm", "disk"],
     "additionalProperties": False,
     "examples": [
-        {"vm": "vm-42", "disk": "2001"},
-        {"vm": "vm-42", "disk": "2001", "delete_file": True},
+        {"vm": "<vm-id>", "disk": "<disk-id>"},
+        {"vm": "<vm-id>", "disk": "<disk-id>", "delete_file": True},
     ],
 }
 
@@ -201,7 +201,7 @@ VM_NIC_REMOVE_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     },
     "required": ["vm", "nic"],
     "additionalProperties": False,
-    "examples": [{"vm": "vm-42", "nic": "4000"}],
+    "examples": [{"vm": "<vm-id>", "nic": "<nic-id>"}],
 }
 
 _NIC_ROW_SCHEMA: Final[dict[str, Any]] = {
@@ -308,8 +308,8 @@ VM_CONTROLLER_ADD_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "required": ["vm", "type"],
     "additionalProperties": False,
     "examples": [
-        {"vm": "vm-42", "type": "PVSCSI"},
-        {"vm": "vm-42", "type": "NVME", "bus": 1},
+        {"vm": "<vm-id>", "type": "PVSCSI"},
+        {"vm": "<vm-id>", "type": "NVME", "bus": 1},
     ],
 }
 

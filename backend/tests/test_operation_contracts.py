@@ -17,7 +17,11 @@ registers at start-up, of every connector, against ten rules:
 4. ``llm_instructions`` -- ``when_to_call``, ``output_shape`` and
    ``next_step``; a change (not ``safe``) also has ``preconditions``.
 5. ``examples`` -- at least one entry under ``examples`` in the parameter
-   schema, and each one validates against the schema.
+   schema, and each one validates against the schema. One exception: a
+   placeholder such as ``<vm-id>`` may stand in a string field that has a
+   ``pattern``. An example must not show a value that looks real, or a
+   model copies it as a real choice; the pattern still checks every real
+   call.
 6. ``no_ticket_numbers`` -- no ticket number (``#1234``) in the summary,
    description or guidance.
 7. ``requires_approval`` -- every operation that is not ``safe`` has
@@ -209,6 +213,36 @@ def check_llm_instructions(op: OperationContract) -> list[str]:
     ]
 
 
+#: A neutral example value, such as ``<vm-id>``: no real-looking id.
+_PLACEHOLDER: Final = re.compile(r"^<[^<>]+>$")
+#: One step of a JSON path as :func:`validate_params` writes it: ``.key``,
+#: ``['key']`` or ``[0]``.
+_PATH_STEP: Final = re.compile(r"\.([^.\[]+)|\['((?:[^'\\]|\\.)*)'\]|\[(\d+)\]")
+
+
+def _value_at(example: Mapping[str, Any], path: str) -> Any:
+    """The value of *example* at *path* (``$.a[0].b``), or ``None`` when the path does not fit."""
+    value: Any = example
+    for step in _PATH_STEP.finditer(path[1:] if path.startswith("$") else path):
+        key, quoted, index = step.groups()
+        try:
+            if index is not None:
+                value = value[int(index)]
+            else:
+                value = value[key if key is not None else quoted.replace("\\'", "'")]
+        except (KeyError, IndexError, TypeError):
+            return None
+    return value
+
+
+def _placeholder_in_pattern_field(example: Mapping[str, Any], error: Mapping[str, Any]) -> bool:
+    """True for a ``pattern`` failure whose value is a placeholder such as ``<vm-id>``."""
+    if error.get("validator") != "pattern":
+        return False
+    value = _value_at(example, str(error.get("path", "")))
+    return isinstance(value, str) and _PLACEHOLDER.match(value) is not None
+
+
 def check_examples(op: OperationContract) -> list[str]:
     examples = op.parameter_schema.get("examples")
     if not isinstance(examples, list) or not examples:
@@ -219,6 +253,8 @@ def check_examples(op: OperationContract) -> list[str]:
             problems.append(f"example {index} is not an object")
             continue
         for error in validate_params(dict(op.parameter_schema), dict(example)):
+            if _placeholder_in_pattern_field(example, error):
+                continue
             problems.append(
                 f"example {index} does not validate: {error['path']} expects {error['expected']}"
             )

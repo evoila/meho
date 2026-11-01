@@ -272,7 +272,9 @@ The ten rules (the rule name is in brackets):
    A change (any operation that is not `safe`) also has `preconditions`.
    (`llm_instructions`)
 5. The parameter schema has at least one entry under `examples`, and each
-   example passes the same schema check a real call gets. (`examples`)
+   example passes the same schema check a real call gets. One exception: a
+   placeholder such as `<vm-id>` may stand in a string field that has a
+   `pattern`, so an example never shows a value that looks real. (`examples`)
 6. No ticket number (`#` and three or more digits) in the summary, the
    description or the guidance. (`no_ticket_numbers`)
 7. Every operation that is not `safe` has `requires_approval: true`.

@@ -205,6 +205,12 @@ async def _run(handler: Any, connector: Any, **params: Any) -> Any:
 # ===========================================================================
 
 
+#: The examples show neutral placeholders, never a real-looking id. The ids
+#: keep their strict patterns, so the test fills the placeholders with an id of
+#: the right shape before it validates an example.
+_PLACEHOLDER_IDS = {"<vm-id>": _VM, "<disk-id>": "2001", "<nic-id>": "4000"}
+
+
 def test_each_operation_has_its_risk_level_and_waits_for_approval() -> None:
     rows = {spec.op_id: spec for spec in _COMPOSITES}
     expected = {_DISK_OP: "destructive", _NIC_OP: "dangerous", _CONTROLLER_OP: "dangerous"}
@@ -215,7 +221,9 @@ def test_each_operation_has_its_risk_level_and_waits_for_approval() -> None:
         assert op_id not in COMPOSITES_NOT_ON_8_0
         assert op_id in _PREVIEW_BUILDERS
         for example in rows[op_id].parameter_schema["examples"]:
-            validate_params(rows[op_id].parameter_schema, example)
+            assert example["vm"] == "<vm-id>"
+            filled = {key: _PLACEHOLDER_IDS.get(value, value) for key, value in example.items()}
+            assert validate_params(rows[op_id].parameter_schema, filled) == []
 
 
 # ===========================================================================

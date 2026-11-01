@@ -222,8 +222,12 @@ async def vsan_maintenance_precheck_impl(
     if not isinstance(status, dict):
         raise RuntimeError("vSAN maintenance pre-check: vCenter sent no VsanResourceCheckStatus")
     check_status = as_text(status.get("status"))
-    if check_status == _STATUS_COMPLETED and not isinstance(status.get("result"), dict):
-        raise RuntimeError("vSAN maintenance pre-check: the check ended but sent no result")
+    if check_status == _STATUS_COMPLETED:
+        result = status.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("vSAN maintenance pre-check: the check ended but sent no result")
+        if as_text(result.get("status")) is None:
+            raise RuntimeError("vSAN maintenance pre-check: the result has no status")
     note = None
     if outcome.timed_out:
         note = (

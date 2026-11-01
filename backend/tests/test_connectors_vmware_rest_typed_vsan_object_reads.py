@@ -316,6 +316,48 @@ async def test_object_health_without_object_health_fails_loudly() -> None:
         await _run(fake, "vsan_object_health", {"cluster": _CLUSTER})
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("object_health", "message"),
+    [
+        ({"_typeName": "VsanObjectOverallHealth"}, "no objectHealthDetail"),
+        (
+            {"objectHealthDetail": [{"_typeName": "VsanObjectHealth", "health": "healthy"}]},
+            "no object count",
+        ),
+    ],
+)
+async def test_object_health_with_empty_object_health_fails_loudly(
+    object_health: dict[str, Any], message: str
+) -> None:
+    summary = {"_typeName": "VsanClusterHealthSummary", "objectHealth": object_health}
+    fake = FakeVcenter(RELEASE_91, {"VsanQueryVcClusterHealthSummary": summary})
+    with pytest.raises(RuntimeError, match=message):
+        await _run(fake, "vsan_object_health", {"cluster": _CLUSTER})
+
+
+@pytest.mark.asyncio
+async def test_object_health_reporting_zero_objects_is_a_valid_answer() -> None:
+    summary = {
+        "_typeName": "VsanClusterHealthSummary",
+        "objectHealth": {
+            "objectHealthDetail": [
+                {"_typeName": "VsanObjectHealth", "health": "healthy", "numObjects": 0}
+            ]
+        },
+    }
+    fake = FakeVcenter(RELEASE_91, {"VsanQueryVcClusterHealthSummary": summary})
+    result = await _run(fake, "vsan_object_health", {"cluster": _CLUSTER})
+
+    assert result["summary"] == {
+        "healthy": 0,
+        "reduced_redundancy": 0,
+        "inaccessible": 0,
+        "other": 0,
+    }
+    assert result["unhealthy_objects"] == []
+
+
 @pytest.mark.parametrize(
     ("state", "group"),
     [
@@ -540,6 +582,25 @@ async def test_precheck_completed_without_result_fails_loudly() -> None:
         _precheck_props("success"),
     )
     with pytest.raises(RuntimeError, match="sent no result"):
+        await _run(fake, "vsan_maintenance_precheck", {"host": "host-21"})
+
+
+@pytest.mark.asyncio
+async def test_precheck_completed_with_empty_result_fails_loudly() -> None:
+    completed = {
+        "_typeName": "VsanResourceCheckStatus",
+        "status": "resourceCheckCompleted",
+        "result": {},
+    }
+    fake = FakeVcenter(
+        RELEASE_91,
+        {
+            "VsanPerformResourceCheck": moref("Task", _TASK),
+            "VsanGetResourceCheckStatus": completed,
+        },
+        _precheck_props("success"),
+    )
+    with pytest.raises(RuntimeError, match="result has no status"):
         await _run(fake, "vsan_maintenance_precheck", {"host": "host-21"})
 
 

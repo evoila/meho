@@ -278,12 +278,16 @@ async def vsan_object_health_impl(
     object_health = summary.get("objectHealth") if isinstance(summary, dict) else None
     if not isinstance(object_health, dict):
         raise RuntimeError("vSAN object health: vCenter sent no objectHealth")
+    if "objectHealthDetail" not in object_health:
+        raise RuntimeError("vSAN object health: vCenter sent no objectHealthDetail")
     counts: dict[str, int] = {}
     states: dict[str, str | None] = {}
     rows: list[dict[str, Any]] = []
     for detail in dict_items(object_health.get("objectHealthDetail")):
         state = as_text(detail.get("health"))
-        number = as_int(detail.get("numObjects")) or 0
+        number = as_int(detail.get("numObjects"))
+        if number is None:
+            raise RuntimeError(f"vSAN object health: vCenter sent no object count for {state!r}")
         rows.append({"health": state, "health_group": health_group(state), "objects": number})
         counts[health_group(state)] = counts.get(health_group(state), 0) + number
         if health_group(state) != HEALTH_GROUP_HEALTHY:

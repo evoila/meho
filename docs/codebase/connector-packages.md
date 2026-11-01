@@ -357,12 +357,35 @@ bot does not count.
    Actions this is keyless signing with the workflow's identity, the same
    way the public image is signed (`image.yml`). The job needs
    `id-token: write`.
+
+   The overlay build signs with a key when one is given. Use
+   `--sign-key <key>` in place of `--sign`. `<key>` is a key file or
+   another key reference that cosign accepts. cosign reads the password
+   of a key file from the `COSIGN_PASSWORD` environment variable.
+   `--sign-key` needs `--push` and `--reviews`, the same as `--sign`. It
+   runs this on the pushed digest:
+
+   ```bash
+   cosign sign --yes --key <key> --tlog-upload=false --use-signing-config=false <image>@<digest>
+   ```
+
+   The signature goes to the registry, next to the image. It does not go
+   to a transparency log (a public list of signatures). This was tested
+   with cosign 3.0.6, the version that the cosign installer pinned in
+   this repo's workflows installs.
 3. Check the signature before deploying:
 
    ```bash
    cosign verify <image>@<digest> \
      --certificate-identity-regexp '^https://github.com/<org>/<repo>/' \
      --certificate-oidc-issuer https://token.actions.githubusercontent.com
+   ```
+
+   For an image signed with a key, check it with the public key. Turn the
+   log check off, because the signature has no log entry:
+
+   ```bash
+   cosign verify --key <public key> --insecure-ignore-tlog=true <image>@<digest>
    ```
 
 4. Deploy by digest, as for tier 1.
@@ -421,7 +444,8 @@ history of the release repository also names the reviewer.
     point is not `true`;
   - the reviewer name ends in `[bot]`.
 - Any record file in the folder that cannot be read also stops the check.
-- `--reviews` without `--sign` runs the same check as a dry run.
+- `--reviews` without `--sign` or `--sign-key` runs the same check as a
+  dry run.
 
 ## Control flow
 
@@ -578,7 +602,7 @@ answer".
 - `backend/tests/test_connector_package_owner.py`
 - `deploy/connector-overlay/` and `backend/tests/test_connector_overlay_build.py`
 - `backend/tests/test_connector_overlay_review.py` — the review record
-  check and `build.sh --sign`
+  check and `build.sh --sign` and `--sign-key`
 - Wheel file format (`RECORD`, `.data` folder):
   https://packaging.python.org/en/latest/specifications/binary-distribution-format/
 - `uv pip install`: https://docs.astral.sh/uv/reference/cli/#uv-pip-install

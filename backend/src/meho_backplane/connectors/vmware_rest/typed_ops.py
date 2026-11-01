@@ -419,6 +419,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_folder_list import (  # noq
     FOLDER_LIST_WHEN_TO_USE,
     VMWARE_FOLDER_LIST_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_host_config import (  # noqa: E402
+    HOST_CONFIG_GROUP_KEY,
+    HOST_CONFIG_WHEN_TO_USE,
+    VMWARE_HOST_CONFIG_SHOW_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_host_datastores import (  # noqa: E402
     HOST_DATASTORES_GROUP_KEY,
     HOST_DATASTORES_WHEN_TO_USE,
@@ -553,6 +558,7 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # Shared with the three install composites: the same key and text.
     DEPLOYMENT_STATUS_GROUP_KEY: DEPLOYMENT_STATUS_WHEN_TO_USE,
     PORTGROUP_SHOW_GROUP_KEY: PORTGROUP_SHOW_WHEN_TO_USE,
+    HOST_CONFIG_GROUP_KEY: HOST_CONFIG_WHEN_TO_USE,
     VSAN_GROUP_KEY: VSAN_WHEN_TO_USE,
 }
 
@@ -641,6 +647,7 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     *CONTENT_LIBRARY_OPS,
     VMWARE_VCENTER_DEPLOYMENT_STATUS_OP,
     VMWARE_NETWORK_PORTGROUP_SHOW_OP,
+    VMWARE_HOST_CONFIG_SHOW_OP,
     *VSAN_READ_OPS,
 )
 

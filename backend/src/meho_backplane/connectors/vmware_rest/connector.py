@@ -3335,6 +3335,24 @@ class VmwareRestConnector(HttpConnector):
 
         return await host_datastores_impl(self, operator, target, params)
 
+    async def host_config_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.config.show`` -- NTP, DNS, syslog and other settings of one host.
+
+        A ``source_kind="typed"`` read. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_config.host_config_show_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_config import (
+            host_config_show_impl,
+        )
+
+        return await host_config_show_impl(self, operator, target, params)
+
     async def vm_info(
         self,
         operator: Operator,

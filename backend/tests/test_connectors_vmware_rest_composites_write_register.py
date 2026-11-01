@@ -1,43 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Registration tests for the 32 vmware-rest write composites.
+"""Registration tests for the vmware-rest composites.
 
-Coverage matrix (G3.1-T6 / #509 acceptance criteria, plus single-VM
-``vm.power`` / #2301, the vim writes ``vm.disk.grow`` / #2893 +
-``cluster.drs_rule.create`` / ``folder.create`` / #2895, the #2891
-hardware writes ``vm.resize`` / ``vm.nic.repoint`` / ``vm.device.cdrom``,
-and the GOSC composites ``guest.customization_spec.create`` /
-``vm.customize`` / #2892):
+The tests check rules on the rows in ``_COMPOSITES``, not a copy of every
+operation. So a new composite changes nothing in this file. The rules:
 
-* All 32 expected write ``op_id`` rows land in ``endpoint_descriptor``
-  with ``source_kind="composite"``, ``requires_approval=True``, and
-  ``safety_level="dangerous"`` (T4's defaults intentionally inherited) —
-  except the destructive-tier ``vm.destroy`` / #3198, which is
-  ``safety_level="destructive"``.
-* Each row's ``handler_ref`` resolves to the module-level dotted path
-  in ``composites/_write``.
-* Each row's ``group_key`` resolves to ``vm`` / ``host`` / ``cluster`` /
-  ``guest`` / ``networking`` per the canary's stub-LLM taxonomy.
-* Combined with the 9 read composites (#508's 5 + the 4 guest-ops
-  reads / #3100), the registrar produces **41 rows** total. (The former
-  host.network_uplinks / host.vsan_health reads were re-shipped as typed
-  ops in #2258.)
-* Per-composite ``parameter_schema`` + ``response_schema`` persist
-  with the documented required keys.
-* Module-level handler shape (no closures / partials / lambdas).
-* Idempotent re-registration is a no-op on the embedding pipeline
-  (body-hash skip path).
+* Every op id is unique.
+* Every handler exists: a module-level ``async def`` whose dotted path
+  (``handler_ref``) imports back to the same function.
+* Every group key is known: it has a "when to use" text in
+  ``_WHEN_TO_USE_BY_GROUP``.
+* The risk level fits the approval flag: a ``safe`` op never waits for
+  approval, a ``dangerous`` or ``destructive`` op always does.
+* Every parameter schema refuses unknown keys
+  (``additionalProperties: false``).
+* Every row is tagged ``composite``; a row tagged ``write`` waits for
+  approval.
 
-Mirrors :mod:`tests.test_connectors_vmware_rest_composites_register`
-for the per-connector contract on the write side. Substrate-level
-coverage (composite recursion guard) lives in
-:mod:`tests.test_operations_composite`.
+The registrar must write each row to ``endpoint_descriptor`` as it is
+(handler path, group, risk level, approval flag, tags), and a second run
+must not embed again. ``test_each_rule_fails_on_a_row_that_breaks_it``
+proves each rule fails on a row that breaks it.
+
+The schema tests at the end still pin the schemas of some older
+composites. Pin a new composite's own schemas in its own feature test,
+not here.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterator
+import inspect
+from collections.abc import AsyncIterator, Iterable, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -47,517 +41,50 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.connectors.vmware_rest.composites import (
-    cluster_patch_composite,
-    guest_customization_spec_create_composite,
-    host_detach_from_vds_composite,
-    host_evacuate_composite,
-    host_maintenance_exit_composite,
     register_vmware_composite_operations,
-    vm_clone_composite,
-    vm_clone_from_template_composite,
-    vm_create_composite,
-    vm_customize_composite,
-    vm_deploy_from_library_composite,
-    vm_device_cdrom_composite,
-    vm_disk_attach_composite,
-    vm_disk_grow_composite,
-    vm_migrate_composite,
-    vm_nic_repoint_composite,
-    vm_power_bulk_composite,
-    vm_power_composite,
-    vm_resize_composite,
-    vm_snapshot_revert_composite,
 )
-from meho_backplane.connectors.vmware_rest.composites._register import _COMPOSITES
+from meho_backplane.connectors.vmware_rest.composites._register import (
+    _COMPOSITES,
+    _WHEN_TO_USE_BY_GROUP,
+)
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations._handler_resolve import import_handler
+from meho_backplane.operations.typed_register import HandlerRefError, derive_handler_ref
 from meho_backplane.settings import get_settings
 
-# 34 write composites (T6 / #509, single-VM vm.power / #2301, the #3505
-# governed-allocation writes resource_pool.create / .delete +
-# cluster.drs_vm_host_rule.create, the
-# mutating VI-JSON vm.disk.grow / #2893 + WSFC/FCI vm.disk.attach / #3256,
-# the folder-template
-# vm.clone_from_template / #2894, the vim cluster/inventory writes
-# cluster.drs_rule.create + folder.create / #2895, the #2891
-# hardware writes vm.resize / vm.nic.repoint / vm.device.cdrom, the
-# GOSC composites guest.customization_spec.create + vm.customize / #2892,
-# the destructive-tier vm.destroy / #3198, the vim distributed-portgroup
-# writes network.portgroup.create + network.portgroup.security.set / #3091,
-# the content-library import vm.import_from_library / #3229, the
-# guest-ops writes vm.guest.file.write / #3100 + vm.guest.program.run / #3255,
-# and the Supervisor (WCP) writes supervisor.enable + supervisor.disable / #3281).
-_WRITE_OP_IDS: tuple[str, ...] = (
-    "vmware.composite.vm.create",
-    "vmware.composite.vm.clone",
-    "vmware.composite.vm.deploy_from_library",
-    "vmware.composite.vm.import_from_library",
-    "vmware.composite.vm.clone_from_template",
-    "vmware.composite.vm.snapshot.revert",
-    # VM snapshot create (caution + approval) and delete (destructive).
-    "vmware.composite.vm.snapshot.create",
-    "vmware.composite.vm.snapshot.delete",
-    "vmware.composite.vm.destroy",
-    "vmware.composite.vm.migrate",
-    "vmware.composite.vm.power",
-    "vmware.composite.vm.power.bulk",
-    "vmware.composite.vm.disk.grow",
-    "vmware.composite.vm.disk.attach",
-    "vmware.composite.vm.resize",
-    "vmware.composite.vm.nic.repoint",
-    "vmware.composite.vm.device.cdrom",
-    # Add a CD drive (dangerous) and unmount the Tools installer (caution).
-    "vmware.composite.vm.cdrom.add",
-    "vmware.composite.vm.tools.installer.unmount",
-    # Mount and unmount a content-library ISO (both caution).
-    "vmware.composite.vm.cdrom.mount_library_iso",
-    "vmware.composite.vm.cdrom.unmount_library_iso",
-    # VM CPU / memory limit + reservation write (#3880) -- caution + approval.
-    "vmware.composite.vm.resource_allocation.set",
-    "vmware.composite.host.evacuate",
-    # Host maintenance-mode exit (#4967): dangerous + approval, like host.evacuate.
-    "vmware.composite.host.maintenance.exit",
-    "vmware.composite.host.detach_from_vds",
-    "vmware.composite.network.portgroup.create",
-    "vmware.composite.network.portgroup.security.set",
-    "vmware.composite.network.portgroup.vlan.set",
-    "vmware.composite.cluster.patch",
-    "vmware.composite.cluster.drs_rule.create",
-    "vmware.composite.cluster.drs_vm_host_rule.create",
-    "vmware.composite.resource_pool.create",
-    "vmware.composite.resource_pool.delete",
-    "vmware.composite.folder.create",
-    "vmware.composite.guest.customization_spec.create",
-    "vmware.composite.vm.customize",
-    "vmware.composite.host.datastore_mount_nfs",
-    "vmware.composite.host.disk_mark_flash",
-    "vmware.composite.host.service_control",
-    # Guest-ops channel writes (#3100 / #3255).
-    "vmware.composite.vm.guest.file.write",
-    "vmware.composite.vm.guest.program.run",
-    # Supervisor (WCP) namespace-management writes (#3281).
-    "vmware.composite.supervisor.enable",
-    "vmware.composite.supervisor.disable",
-    # Governed NFS tag-based SPBM storage-policy writes (#3494).
-    "vmware.composite.storage_policy.create",
-    "vmware.composite.storage_policy.delete",
-    # Governed vSphere Namespace create/delete (#3502). create is caution +
-    # approval, delete is destructive + approval; both live in _WRITE_OP_IDS and
-    # are special-cased in the tier assertion below (like storage_policy.*).
-    "vmware.composite.namespace.create",
-    "vmware.composite.namespace.delete",
-    # #3339 teardown: six destructive deletes + the caution paired
-    # datastore.dir.create; all special-cased in the tier assertion below.
-    "vmware.composite.network.portgroup.delete",
-    "vmware.composite.host.standard_portgroup.delete",
-    "vmware.composite.folder.delete",
-    "vmware.composite.datastore.file.delete",
-    "vmware.composite.datastore.dir.create",
-    "vmware.composite.content_library.delete",
-    "vmware.composite.content_library.item.delete",
-    # Local content-library create + add a file from a URL: caution + approval,
-    # special-cased in the tier assertion below.
-    "vmware.composite.content_library.create",
-    "vmware.composite.content_library.item.upload",
-    # The destructive DRS rule delete; special-cased in the tier assertion below.
-    "vmware.composite.cluster.drs_rule.delete",
-    # The DRS group ops: caution member change, destructive delete.
-    "vmware.composite.cluster.drs_group.members.set",
-    "vmware.composite.cluster.drs_group.delete",
-    # Licence assign: dangerous + approval (the default tier).
-    "vmware.composite.license.assign",
-    # Install a new vCenter (#4394): dangerous + approval.
-    "vmware.composite.vcenter.appliance.deploy",
-    "vmware.composite.vcenter.install",
-    "vmware.composite.vcenter.deployment.answer",
-    # Host membership (#4349): add / move / disconnect dangerous, connect
-    # caution, remove destructive; all wait for approval.
-    "vmware.composite.host.add",
-    "vmware.composite.host.move",
-    "vmware.composite.host.connect",
-    "vmware.composite.host.disconnect",
-    "vmware.composite.host.remove",
-    # Host NTP, DNS and syslog: dangerous + approval.
-    "vmware.composite.host.ntp.set",
-    "vmware.composite.host.dns.set",
-    "vmware.composite.host.syslog.set",
-)
-
-# 5 reads (T5 / #508) -- carried over so the combined-count assertion
-# does not have to import _read constants. (The former
-# host.network_uplinks / host.vsan_health reads were re-shipped as typed
-# ops in #2258.)
-_READ_OP_IDS: tuple[str, ...] = (
-    "vmware.composite.cluster.drs_recommendations",
-    "vmware.composite.event.tail",
-    "vmware.composite.performance.summary",
-    "vmware.composite.datastore.usage",
-    # Datastore cache refresh read (#3789).
-    "vmware.composite.datastore.refresh",
-    # Datastore file list read (#3432).
-    "vmware.composite.datastore.file.list",
-    # vSAN folder list read (#4022).
-    "vmware.composite.datastore.vsan.folder.list",
-    # Orphan folder check across datastores (#3814).
-    "vmware.composite.datastore.orphan_dirs",
-    "vmware.composite.network.portgroup.audit",
-    # VM CPU / memory limit + reservation read (#3880).
-    "vmware.composite.vm.resource_allocation.show",
-    # Guest-ops channel reads (#3100).
-    "vmware.composite.vm.guest.process.list",
-    "vmware.composite.vm.guest.env.read",
-    "vmware.composite.vm.guest.net.show",
-    "vmware.composite.vm.guest.file.read",
-    # Supervisor (WCP) status read (#3281).
-    "vmware.composite.supervisor.status",
-    # Governed vSphere Namespace status read (#3502) -- boot-enabled poll op.
-    "vmware.composite.namespace.status",
-    # Storage-policy list read (#3494).
-    "vmware.composite.storage_policy.list",
-    # Content-library SUBSCRIBED reads (#3495).
-    "vmware.composite.content_library.subscribed.status",
-    "vmware.composite.content_library.subscribed.items.list",
-    # Migration inventory read of one vCenter.
-    "vmware.migration.inventory",
-)
-
-# 2 caution + approval writes (#3495) -- the SUBSCRIBED content-library
-# create / sync. These are ``caution`` (a write that always needs an approval
-# decision, but not the ``dangerous`` intrinsic-risk of a VM/host mutation),
-# so they are deliberately NOT in ``_WRITE_OP_IDS`` (whose rows are asserted
-# ``dangerous``); they land in ``_ALL_OP_IDS`` via this bucket instead.
-_CAUTION_OP_IDS: tuple[str, ...] = (
-    "vmware.composite.content_library.subscribed.create",
-    "vmware.composite.content_library.subscribed.sync",
-    # The two alarm changes (#4383), caution + approval as well.
-    "vmware.composite.alarm.acknowledge",
-    "vmware.composite.alarm.reset",
-)
-
-# 54 total -- 14 read (T5 / #508 + 4 guest-ops reads / #3100 + the
-# supervisor status read / #3281 + the vSphere Namespace status read / #3502 +
-# storage_policy.list / #3494 + 2 SUBSCRIBED
-# content-library reads / #3495) + 2 caution content-library writes / #3495 + 38 write
-# (the two below + the governed vSphere Namespace create/delete / #3502)
-# (T6 / #509 + vm.power / #2301 + vm.disk.grow / #2893 +
-# vm.clone_from_template / #2894 + vim cluster/inventory writes
-# cluster.drs_rule.create + folder.create / #2895 + #2891 hardware
-# writes vm.resize / vm.nic.repoint / vm.device.cdrom + GOSC create/apply / #2892
-# + the destructive-tier vm.destroy / #3198 + the #3091 vim portgroup writes
-# network.portgroup.create + network.portgroup.security.set + the
-# content-library import vm.import_from_library / #3229 + the guest-ops
-# program-exec write vm.guest.program.run / #3255 + the WSFC/FCI shared-attach
-# vm.disk.attach / #3256 + the Supervisor writes supervisor.enable +
-# supervisor.disable / #3281 + the storage-policy writes storage_policy.create
-# + storage_policy.delete / #3494 + the #3505 governed-allocation writes
-# resource_pool.create + resource_pool.delete + cluster.drs_vm_host_rule.create).
-_ALL_OP_IDS: tuple[str, ...] = _READ_OP_IDS + _CAUTION_OP_IDS + _WRITE_OP_IDS
+_OP_IDS: tuple[str, ...] = tuple(spec.op_id for spec in _COMPOSITES)
 
 
-_EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
-    "vmware.composite.vm.create": (
-        "meho_backplane.connectors.vmware_rest.composites._write.vm_create_composite"
-    ),
-    "vmware.composite.vm.clone": (
-        "meho_backplane.connectors.vmware_rest.composites._write.vm_clone_composite"
-    ),
-    "vmware.composite.vm.deploy_from_library": (
-        "meho_backplane.connectors.vmware_rest.composites._write.vm_deploy_from_library_composite"
-    ),
-    "vmware.composite.vm.import_from_library": (
-        "meho_backplane.connectors.vmware_rest.composites._write.vm_import_from_library_composite"
-    ),
-    "vmware.composite.vm.clone_from_template": (
-        "meho_backplane.connectors.vmware_rest.composites._write.vm_clone_from_template_composite"
-    ),
-    "vmware.composite.vm.snapshot.revert": (
-        "meho_backplane.connectors.vmware_rest.composites._write.vm_snapshot_revert_composite"
-    ),
-    "vmware.composite.vm.snapshot.create": (
-        "meho_backplane.connectors.vmware_rest.composites._snapshot.vm_snapshot_create_composite"
-    ),
-    "vmware.composite.vm.snapshot.delete": (
-        "meho_backplane.connectors.vmware_rest.composites._snapshot.vm_snapshot_delete_composite"
-    ),
-    "vmware.composite.vm.destroy": (
-        "meho_backplane.connectors.vmware_rest.composites._write.vm_destroy_composite"
-    ),
-    "vmware.composite.vm.migrate": (
-        "meho_backplane.connectors.vmware_rest.composites._write.vm_migrate_composite"
-    ),
-    "vmware.composite.vm.power": (
-        "meho_backplane.connectors.vmware_rest.composites._write.vm_power_composite"
-    ),
-    "vmware.composite.vm.power.bulk": (
-        "meho_backplane.connectors.vmware_rest.composites._write.vm_power_bulk_composite"
-    ),
-    "vmware.composite.vm.disk.grow": (
-        "meho_backplane.connectors.vmware_rest.composites._write.vm_disk_grow_composite"
-    ),
-    "vmware.composite.vm.disk.attach": (
-        "meho_backplane.connectors.vmware_rest.composites._write.vm_disk_attach_composite"
-    ),
-    "vmware.composite.host.evacuate": (
-        "meho_backplane.connectors.vmware_rest.composites._write.host_evacuate_composite"
-    ),
-    "vmware.composite.host.maintenance.exit": (
-        "meho_backplane.connectors.vmware_rest.composites._write.host_maintenance_exit_composite"
-    ),
-    "vmware.composite.host.detach_from_vds": (
-        "meho_backplane.connectors.vmware_rest.composites._write.host_detach_from_vds_composite"
-    ),
-    "vmware.composite.network.portgroup.create": (
-        "meho_backplane.connectors.vmware_rest.composites._write.network_portgroup_create_composite"
-    ),
-    "vmware.composite.network.portgroup.security.set": (
-        "meho_backplane.connectors.vmware_rest.composites._write."
-        "network_portgroup_security_set_composite"
-    ),
-    "vmware.composite.network.portgroup.vlan.set": (
-        "meho_backplane.connectors.vmware_rest.composites._write."
-        "network_portgroup_vlan_set_composite"
-    ),
-    "vmware.composite.cluster.patch": (
-        "meho_backplane.connectors.vmware_rest.composites._write.cluster_patch_composite"
-    ),
-    "vmware.composite.cluster.drs_rule.create": (
-        "meho_backplane.connectors.vmware_rest.composites._write.cluster_drs_rule_create_composite"
-    ),
-    "vmware.composite.cluster.drs_vm_host_rule.create": (
-        "meho_backplane.connectors.vmware_rest.composites._write."
-        "cluster_drs_vm_host_rule_create_composite"
-    ),
-    "vmware.composite.resource_pool.create": (
-        "meho_backplane.connectors.vmware_rest.composites._write.resource_pool_create_composite"
-    ),
-    "vmware.composite.resource_pool.delete": (
-        "meho_backplane.connectors.vmware_rest.composites._write.resource_pool_delete_composite"
-    ),
-    "vmware.composite.folder.create": (
-        "meho_backplane.connectors.vmware_rest.composites._write.folder_create_composite"
-    ),
-    "vmware.composite.vm.resize": (
-        "meho_backplane.connectors.vmware_rest.composites._write.vm_resize_composite"
-    ),
-    "vmware.composite.vm.nic.repoint": (
-        "meho_backplane.connectors.vmware_rest.composites._write.vm_nic_repoint_composite"
-    ),
-    "vmware.composite.vm.device.cdrom": (
-        "meho_backplane.connectors.vmware_rest.composites._write.vm_device_cdrom_composite"
-    ),
-    "vmware.composite.vm.resource_allocation.set": (
-        "meho_backplane.connectors.vmware_rest.composites._vm_allocation."
-        "vm_resource_allocation_set_composite"
-    ),
-    "vmware.composite.license.assign": (
-        "meho_backplane.connectors.vmware_rest.composites._license.license_assign_composite"
-    ),
-    "vmware.composite.vcenter.appliance.deploy": (
-        "meho_backplane.connectors.vmware_rest.composites._vcenter_deploy."
-        "vcenter_appliance_deploy_composite"
-    ),
-    "vmware.composite.vcenter.install": (
-        "meho_backplane.connectors.vmware_rest.composites._vcenter_install."
-        "vcenter_install_composite"
-    ),
-    "vmware.composite.host.add": (
-        "meho_backplane.connectors.vmware_rest.composites._host_add.host_add_composite"
-    ),
-    "vmware.composite.host.move": (
-        "meho_backplane.connectors.vmware_rest.composites._host_membership.host_move_composite"
-    ),
-    "vmware.composite.host.connect": (
-        "meho_backplane.connectors.vmware_rest.composites._host_membership.host_connect_composite"
-    ),
-    "vmware.composite.host.disconnect": (
-        "meho_backplane.connectors.vmware_rest.composites._host_membership."
-        "host_disconnect_composite"
-    ),
-    "vmware.composite.host.remove": (
-        "meho_backplane.connectors.vmware_rest.composites._host_remove.host_remove_composite"
-    ),
-    "vmware.composite.vcenter.deployment.answer": (
-        "meho_backplane.connectors.vmware_rest.composites._vcenter_answer."
-        "vcenter_deployment_answer_composite"
-    ),
-    "vmware.composite.host.ntp.set": (
-        "meho_backplane.connectors.vmware_rest.composites._host_config_writes."
-        "host_ntp_set_composite"
-    ),
-    "vmware.composite.host.dns.set": (
-        "meho_backplane.connectors.vmware_rest.composites._host_config_writes."
-        "host_dns_set_composite"
-    ),
-    "vmware.composite.host.syslog.set": (
-        "meho_backplane.connectors.vmware_rest.composites._host_config_writes."
-        "host_syslog_set_composite"
-    ),
-    "vmware.composite.guest.customization_spec.create": (
-        "meho_backplane.connectors.vmware_rest.composites._write."
-        "guest_customization_spec_create_composite"
-    ),
-    "vmware.composite.vm.customize": (
-        "meho_backplane.connectors.vmware_rest.composites._write.vm_customize_composite"
-    ),
-    "vmware.composite.host.datastore_mount_nfs": (
-        "meho_backplane.connectors.vmware_rest.composites._host.datastore_mount_nfs_composite"
-    ),
-    "vmware.composite.host.disk_mark_flash": (
-        "meho_backplane.connectors.vmware_rest.composites._host.disk_mark_flash_composite"
-    ),
-    "vmware.composite.host.service_control": (
-        "meho_backplane.connectors.vmware_rest.composites._host.service_control_composite"
-    ),
-    "vmware.composite.vm.guest.file.write": (
-        "meho_backplane.connectors.vmware_rest.composites._guest.guest_file_write_composite"
-    ),
-    "vmware.composite.vm.guest.program.run": (
-        "meho_backplane.connectors.vmware_rest.composites._guest.guest_program_run_composite"
-    ),
-    "vmware.composite.supervisor.enable": (
-        "meho_backplane.connectors.vmware_rest.composites._supervisor.supervisor_enable_composite"
-    ),
-    "vmware.composite.supervisor.disable": (
-        "meho_backplane.connectors.vmware_rest.composites._supervisor.supervisor_disable_composite"
-    ),
-    "vmware.composite.storage_policy.create": (
-        "meho_backplane.connectors.vmware_rest.composites._storage_policy."
-        "storage_policy_create_composite"
-    ),
-    "vmware.composite.storage_policy.delete": (
-        "meho_backplane.connectors.vmware_rest.composites._storage_policy."
-        "storage_policy_delete_composite"
-    ),
-    "vmware.composite.namespace.create": (
-        "meho_backplane.connectors.vmware_rest.composites._namespace.namespace_create_composite"
-    ),
-    "vmware.composite.namespace.delete": (
-        "meho_backplane.connectors.vmware_rest.composites._namespace.namespace_delete_composite"
-    ),
-    "vmware.composite.network.portgroup.delete": (
-        "meho_backplane.connectors.vmware_rest.composites."
-        "_teardown_network.network_portgroup_delete_composite"
-    ),
-    "vmware.composite.host.standard_portgroup.delete": (
-        "meho_backplane.connectors.vmware_rest.composites."
-        "_teardown_network.host_standard_portgroup_delete_composite"
-    ),
-    "vmware.composite.folder.delete": (
-        "meho_backplane.connectors.vmware_rest.composites._teardown.folder_delete_composite"
-    ),
-    "vmware.composite.datastore.file.delete": (
-        "meho_backplane.connectors.vmware_rest.composites."
-        "_datastore_files.datastore_file_delete_composite"
-    ),
-    "vmware.composite.datastore.dir.create": (
-        "meho_backplane.connectors.vmware_rest.composites."
-        "_datastore_files.datastore_dir_create_composite"
-    ),
-    "vmware.composite.content_library.delete": (
-        "meho_backplane.connectors.vmware_rest.composites."
-        "_library_delete.content_library_delete_composite"
-    ),
-    "vmware.composite.content_library.item.delete": (
-        "meho_backplane.connectors.vmware_rest.composites."
-        "_library_delete.content_library_item_delete_composite"
-    ),
-    "vmware.composite.content_library.create": (
-        "meho_backplane.connectors.vmware_rest.composites."
-        "_library_local.content_library_create_composite"
-    ),
-    "vmware.composite.content_library.item.upload": (
-        "meho_backplane.connectors.vmware_rest.composites."
-        "_library_upload.content_library_item_upload_composite"
-    ),
-    "vmware.composite.cluster.drs_rule.delete": (
-        "meho_backplane.connectors.vmware_rest.composites."
-        "_drs_rule_delete.cluster_drs_rule_delete_composite"
-    ),
-    "vmware.composite.cluster.drs_group.members.set": (
-        "meho_backplane.connectors.vmware_rest.composites."
-        "_drs_group.cluster_drs_group_members_set_composite"
-    ),
-    "vmware.composite.cluster.drs_group.delete": (
-        "meho_backplane.connectors.vmware_rest.composites."
-        "_drs_group_delete.cluster_drs_group_delete_composite"
-    ),
-}
-
-
-_EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
-    "vmware.composite.vm.create": "vm",
-    "vmware.composite.vm.clone": "vm",
-    "vmware.composite.vm.deploy_from_library": "vm",
-    "vmware.composite.vm.import_from_library": "vm",
-    "vmware.composite.vm.clone_from_template": "vm",
-    "vmware.composite.vm.snapshot.revert": "vm",
-    "vmware.composite.vm.snapshot.create": "vm",
-    "vmware.composite.vm.snapshot.delete": "vm",
-    "vmware.composite.vm.destroy": "vm",
-    "vmware.composite.vm.migrate": "vm",
-    "vmware.composite.vm.power": "vm",
-    "vmware.composite.vm.power.bulk": "vm",
-    "vmware.composite.vm.disk.grow": "vm",
-    "vmware.composite.vm.disk.attach": "vm",
-    "vmware.composite.vm.resize": "vm",
-    "vmware.composite.vm.nic.repoint": "vm",
-    "vmware.composite.vm.device.cdrom": "vm",
-    "vmware.composite.vm.cdrom.add": "vm",
-    "vmware.composite.vm.tools.installer.unmount": "vm",
-    "vmware.composite.vm.cdrom.mount_library_iso": "vm",
-    "vmware.composite.vm.cdrom.unmount_library_iso": "vm",
-    "vmware.composite.vm.resource_allocation.set": "vm",
-    "vmware.composite.license.assign": "vmware-licensing",
-    "vmware.composite.vcenter.appliance.deploy": "vcenter_install",
-    "vmware.composite.vcenter.install": "vcenter_install",
-    "vmware.composite.vcenter.deployment.answer": "vcenter_install",
-    "vmware.composite.host.add": "host",
-    "vmware.composite.host.move": "host",
-    "vmware.composite.host.connect": "host",
-    "vmware.composite.host.disconnect": "host",
-    "vmware.composite.host.remove": "host",
-    "vmware.composite.host.evacuate": "host",
-    "vmware.composite.host.maintenance.exit": "host",
-    "vmware.composite.host.ntp.set": "host",
-    "vmware.composite.host.dns.set": "host",
-    "vmware.composite.host.syslog.set": "host",
-    "vmware.composite.host.detach_from_vds": "host",
-    "vmware.composite.network.portgroup.create": "networking",
-    "vmware.composite.network.portgroup.security.set": "networking",
-    "vmware.composite.network.portgroup.vlan.set": "networking",
-    "vmware.composite.cluster.patch": "cluster",
-    "vmware.composite.cluster.drs_rule.create": "cluster",
-    "vmware.composite.cluster.drs_vm_host_rule.create": "cluster",
-    "vmware.composite.resource_pool.create": "cluster",
-    "vmware.composite.resource_pool.delete": "cluster",
-    "vmware.composite.folder.create": "vm",
-    "vmware.composite.guest.customization_spec.create": "guest",
-    "vmware.composite.vm.customize": "guest",
-    "vmware.composite.host.datastore_mount_nfs": "host",
-    "vmware.composite.host.disk_mark_flash": "host",
-    "vmware.composite.host.service_control": "host",
-    "vmware.composite.vm.guest.file.write": "guest_ops",
-    "vmware.composite.vm.guest.program.run": "guest_ops",
-    "vmware.composite.supervisor.enable": "namespace_management",
-    "vmware.composite.supervisor.disable": "namespace_management",
-    "vmware.composite.storage_policy.create": "storage",
-    "vmware.composite.storage_policy.delete": "storage",
-    "vmware.composite.namespace.create": "namespace_management",
-    "vmware.composite.namespace.delete": "namespace_management",
-    "vmware.composite.network.portgroup.delete": "networking",
-    "vmware.composite.host.standard_portgroup.delete": "networking",
-    "vmware.composite.folder.delete": "vm",
-    "vmware.composite.datastore.file.delete": "storage",
-    "vmware.composite.datastore.dir.create": "storage",
-    "vmware.composite.content_library.delete": "content_library",
-    "vmware.composite.content_library.item.delete": "content_library",
-    "vmware.composite.content_library.create": "content_library",
-    "vmware.composite.content_library.item.upload": "content_library",
-    "vmware.composite.cluster.drs_rule.delete": "cluster",
-    "vmware.composite.cluster.drs_group.members.set": "cluster",
-    "vmware.composite.cluster.drs_group.delete": "cluster",
-}
+def _check_registration_rules(specs: Iterable[CompositeSpec]) -> None:
+    """Fail when a row breaks one of the registration rules."""
+    seen: set[str] = set()
+    for spec in specs:
+        assert spec.op_id not in seen, f"{spec.op_id}: op id is not unique"
+        seen.add(spec.op_id)
+        assert inspect.iscoroutinefunction(spec.handler), f"{spec.op_id}: handler is not async"
+        # derive_handler_ref refuses lambdas, closures and partials.
+        handler_ref = derive_handler_ref(spec.handler)
+        assert import_handler(handler_ref) is spec.handler, (
+            f"{spec.op_id}: {handler_ref} does not import back to the handler"
+        )
+        assert spec.group_key in _WHEN_TO_USE_BY_GROUP, (
+            f"{spec.op_id}: unknown group key {spec.group_key!r}"
+        )
+        if spec.safety_level == "safe":
+            assert not spec.requires_approval, f"{spec.op_id}: a safe op waits for approval"
+        if spec.safety_level in ("dangerous", "destructive"):
+            assert spec.requires_approval, (
+                f"{spec.op_id}: a {spec.safety_level} op must wait for approval"
+            )
+        assert spec.parameter_schema.get("additionalProperties") is False, (
+            f"{spec.op_id}: parameter_schema missing additionalProperties:False"
+        )
+        assert "composite" in spec.tags, f"{spec.op_id}: missing composite tag"
+        if "write" in spec.tags:
+            assert spec.requires_approval, f"{spec.op_id}: a write op must wait for approval"
 
 
 @pytest.fixture(autouse=True)
@@ -599,58 +126,156 @@ async def session() -> AsyncIterator[AsyncSession]:
         yield s
 
 
-# ---------------------------------------------------------------------------
-# 29 write composites land alongside the 9 reads (38 total)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_register_vmware_composite_operations_inserts_all_write_rows(
-    stub_embedding_service: AsyncMock,
-) -> None:
-    """Running the registrar lands all 32 write op_ids in ``endpoint_descriptor``."""
+async def _registered_rows(stub_embedding_service: AsyncMock) -> dict[str, EndpointDescriptor]:
+    """Run the registrar and return the composite rows by op id."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
         rows = (
             (
                 await fresh.execute(
-                    select(EndpointDescriptor).where(EndpointDescriptor.op_id.in_(_WRITE_OP_IDS))
+                    select(EndpointDescriptor).where(EndpointDescriptor.op_id.in_(_OP_IDS))
                 )
             )
             .scalars()
             .all()
         )
-    assert {row.op_id for row in rows} == set(_WRITE_OP_IDS)
+    return {row.op_id: row for row in rows}
+
+
+# ---------------------------------------------------------------------------
+# Rules on the rows
+# ---------------------------------------------------------------------------
+
+
+def test_every_composite_row_follows_the_registration_rules() -> None:
+    """Every row in ``_COMPOSITES`` follows the rules in the module docstring."""
+    assert _COMPOSITES
+    _check_registration_rules(_COMPOSITES)
+
+
+def _a_row(**changes: Any) -> CompositeSpec:
+    """A valid write row, with *changes* applied."""
+    row = next(spec for spec in _COMPOSITES if spec.op_id == "vmware.composite.vm.create")
+    return row._replace(**changes)
+
+
+def _closure_handler() -> Any:
+    async def inner() -> dict[str, Any]:
+        return {}
+
+    return inner
+
+
+def _handler_named(qualname: str) -> Any:
+    """A module-level handler whose dotted path points at *qualname* in the vm module."""
+
+    async def handler() -> dict[str, Any]:
+        return {}
+
+    handler.__module__ = _a_row().handler.__module__
+    handler.__qualname__ = qualname
+    return handler
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        pytest.param([_a_row(), _a_row()], id="op-id-not-unique"),
+        pytest.param([_a_row(handler=lambda: None)], id="handler-is-a-lambda"),
+        pytest.param([_a_row(handler=_closure_handler())], id="handler-is-a-closure"),
+        pytest.param([_a_row(handler=_COMPOSITES[0].op_id)], id="handler-is-not-a-function"),
+        pytest.param([_a_row(handler=_handler_named("no_such_handler"))], id="handler-not-found"),
+        pytest.param(
+            [_a_row(handler=_handler_named(_a_row().handler.__qualname__))],
+            id="handler-path-names-another-function",
+        ),
+        pytest.param([_a_row(group_key="no-such-group")], id="group-key-unknown"),
+        pytest.param([_a_row(safety_level="safe")], id="safe-op-waits-for-approval"),
+        pytest.param(
+            [_a_row(safety_level="dangerous", requires_approval=False, tags=["composite"])],
+            id="dangerous-op-without-approval",
+        ),
+        pytest.param(
+            [_a_row(safety_level="destructive", requires_approval=False, tags=["composite"])],
+            id="destructive-op-without-approval",
+        ),
+        pytest.param(
+            [_a_row(parameter_schema={"type": "object"})], id="schema-allows-unknown-keys"
+        ),
+        pytest.param([_a_row(tags=["write"])], id="composite-tag-missing"),
+        pytest.param(
+            [_a_row(safety_level="caution", requires_approval=False)],
+            id="write-tag-without-approval",
+        ),
+    ],
+)
+def test_each_rule_fails_on_a_row_that_breaks_it(rows: list[CompositeSpec]) -> None:
+    """Each registration rule is not empty: a row that breaks it fails."""
+    with pytest.raises((AssertionError, HandlerRefError, ImportError)):
+        _check_registration_rules(rows)
+
+
+# ---------------------------------------------------------------------------
+# The registrar writes each row as it is
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_full_registration_produces_thirty_three_composite_rows(
+async def test_registrar_writes_every_composite_row(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """9 reads (#508 + guest-ops reads #3100) + 29 writes (#509 + vm.power #2301 +
-    vm.disk.grow #2893 + vm.disk.attach #3256 + vm.clone_from_template #2894 +
-    cluster.drs_rule.create + folder.create #2895 + #2891 hardware writes
-    vm.resize / vm.nic.repoint / vm.device.cdrom + GOSC create/apply #2892 + OVF
-    deploy #2909 + host-domain writes #3182 + guest-ops writes
-    vm.guest.file.write #3100 + vm.guest.program.run #3255 + destructive-tier
-    vm.destroy #3198 + #3091 portgroup writes network.portgroup.create /
-    network.portgroup.security.set + content-library import
-    vm.import_from_library #3229 + Supervisor writes supervisor.enable /
-    supervisor.disable #3281 + SUBSCRIBED content-library reads/writes #3495) = 45 rows. DoD bar."""
-    await register_vmware_composite_operations(embedding_service=stub_embedding_service)
+    """Each row lands in ``endpoint_descriptor`` with the fields of its spec."""
+    by_op = await _registered_rows(stub_embedding_service)
+    assert set(by_op) == set(_OP_IDS)
+    for spec in _COMPOSITES:
+        row = by_op[spec.op_id]
+        assert row.source_kind == "composite"
+        assert row.tenant_id is None
+        assert row.is_enabled is True
+        assert row.method is None
+        assert row.path is None
+        assert row.handler_ref == derive_handler_ref(spec.handler), spec.op_id
+        assert row.safety_level == spec.safety_level, spec.op_id
+        assert row.requires_approval is spec.requires_approval, spec.op_id
+        assert list(row.tags) == list(spec.tags), spec.op_id
+
+
+@pytest.mark.asyncio
+async def test_registrar_puts_each_composite_in_the_group_of_its_row(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Each row's group is the row's ``group_key`` on the 9.0 catalog."""
+    by_op = await _registered_rows(stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
-        rows = (
-            (
-                await fresh.execute(
-                    select(EndpointDescriptor).where(EndpointDescriptor.op_id.in_(_ALL_OP_IDS))
-                )
-            )
-            .scalars()
-            .all()
+        group_rows = (await fresh.execute(select(OperationGroup))).scalars().all()
+    groups_by_id = {g.id: g for g in group_rows}
+    for spec in _COMPOSITES:
+        desc = by_op[spec.op_id]
+        assert desc.group_id is not None, f"{desc.op_id} has no group_id"
+        group = groups_by_id[desc.group_id]
+        assert group.group_key == spec.group_key, (
+            f"{desc.op_id}: expected {spec.group_key!r}, got {group.group_key!r}"
         )
-    assert {row.op_id for row in rows} == {spec.op_id for spec in _COMPOSITES}
+        assert group.product == "vmware"
+        assert group.version == "9.0"
+        assert group.impl_id == "vmware-rest"
+
+
+@pytest.mark.asyncio
+async def test_register_vmware_composite_operations_is_idempotent(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Running the registrar twice embeds each row once and keeps one row per op."""
+    await register_vmware_composite_operations(embedding_service=stub_embedding_service)
+    first_count = stub_embedding_service.encode_one.call_count
+    assert first_count == len(_COMPOSITES)
+
+    # Body-hash skip path -> the second run is a no-op for the embedding pipeline.
+    by_op = await _registered_rows(stub_embedding_service)
+    assert stub_embedding_service.encode_one.call_count == first_count
+    assert set(by_op) == set(_OP_IDS)
 
 
 @pytest.mark.asyncio
@@ -691,193 +316,11 @@ async def test_namespace_status_registration_preserves_poll_scalars_after_jsonfl
 
 
 @pytest.mark.asyncio
-async def test_every_write_composite_row_uses_dangerous_requires_approval(
-    stub_embedding_service: AsyncMock,
-) -> None:
-    """Each write row is approval-gated at its declared safety tier.
-
-    Load-bearing: write composites should pop the approval queue on
-    every dispatch. A misconfigured read-override would silently
-    permit unauthenticated mutation; pinning the policy here means CI
-    catches a regression before lifespan-startup.
-
-    Tiers other than the ``dangerous`` default: the destructive-tier
-    ``vm.destroy`` (#3198) is ``safety_level="destructive"`` (a strictly
-    harder tier); the #3505 governed-allocation writes
-    ``resource_pool.create`` and the VM-Host affinity
-    ``cluster.drs_vm_host_rule.create`` are ``caution`` (a softer tier —
-    an allocation carve-out / a placement hint, not a mutation of running
-    state). All rows stay ``requires_approval=True``.
-    """
-    await register_vmware_composite_operations(embedding_service=stub_embedding_service)
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as fresh:
-        rows = (
-            (
-                await fresh.execute(
-                    select(EndpointDescriptor).where(EndpointDescriptor.op_id.in_(_WRITE_OP_IDS))
-                )
-            )
-            .scalars()
-            .all()
-        )
-    # Prove the query actually returned all 32 write rows before iterating —
-    # otherwise the loop is vacuous when the set is empty / partial.
-    assert {row.op_id for row in rows} == set(_WRITE_OP_IDS)
-    caution_ops = {
-        "vmware.composite.vm.resource_allocation.set",
-        "vmware.composite.resource_pool.create",
-        "vmware.composite.cluster.drs_vm_host_rule.create",
-        "vmware.composite.cluster.drs_group.members.set",
-        "vmware.composite.storage_policy.create",
-        "vmware.composite.namespace.create",
-        "vmware.composite.datastore.dir.create",
-        "vmware.composite.vm.tools.installer.unmount",
-        "vmware.composite.vm.cdrom.mount_library_iso",
-        "vmware.composite.vm.cdrom.unmount_library_iso",
-        "vmware.composite.vm.snapshot.create",
-        "vmware.composite.content_library.create",
-        "vmware.composite.content_library.item.upload",
-        "vmware.composite.host.connect",
-    }
-    for row in rows:
-        if row.op_id in (
-            "vmware.composite.vm.destroy",
-            "vmware.composite.storage_policy.delete",
-            "vmware.composite.namespace.delete",
-            # #3339 teardown deletes.
-            "vmware.composite.network.portgroup.delete",
-            "vmware.composite.host.standard_portgroup.delete",
-            "vmware.composite.folder.delete",
-            "vmware.composite.datastore.file.delete",
-            "vmware.composite.content_library.delete",
-            "vmware.composite.content_library.item.delete",
-            # The DRS rule delete and the DRS group delete.
-            "vmware.composite.cluster.drs_rule.delete",
-            "vmware.composite.cluster.drs_group.delete",
-            # The VM snapshot delete.
-            "vmware.composite.vm.snapshot.delete",
-            # The host remove (#4349).
-            "vmware.composite.host.remove",
-        ):
-            expected_level = "destructive"
-        elif row.op_id in caution_ops:
-            expected_level = "caution"
-        else:
-            expected_level = "dangerous"
-        assert row.safety_level == expected_level, (
-            f"{row.op_id}: expected {expected_level}, got {row.safety_level!r}"
-        )
-        assert row.requires_approval is True, (
-            f"{row.op_id}: expected requires_approval=True, got {row.requires_approval!r}"
-        )
-
-
-@pytest.mark.asyncio
-async def test_every_write_composite_row_carries_composite_source_kind(
-    stub_embedding_service: AsyncMock,
-) -> None:
-    """Each row has ``source_kind="composite"`` and the expected enabled defaults."""
-    await register_vmware_composite_operations(embedding_service=stub_embedding_service)
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as fresh:
-        rows = (
-            (
-                await fresh.execute(
-                    select(EndpointDescriptor).where(EndpointDescriptor.op_id.in_(_WRITE_OP_IDS))
-                )
-            )
-            .scalars()
-            .all()
-        )
-    assert {row.op_id for row in rows} == set(_WRITE_OP_IDS)
-    for row in rows:
-        assert row.source_kind == "composite"
-        assert row.tenant_id is None
-        assert row.is_enabled is True
-        assert row.method is None
-        assert row.path is None
-
-
-@pytest.mark.asyncio
-async def test_write_handler_ref_round_trips_to_module_level_dotted_path(
-    stub_embedding_service: AsyncMock,
-) -> None:
-    """Each row's ``handler_ref`` is the canonical module-level dotted path."""
-    await register_vmware_composite_operations(embedding_service=stub_embedding_service)
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as fresh:
-        rows = (
-            (
-                await fresh.execute(
-                    select(EndpointDescriptor).where(EndpointDescriptor.op_id.in_(_WRITE_OP_IDS))
-                )
-            )
-            .scalars()
-            .all()
-        )
-    assert {row.op_id for row in rows} == set(_WRITE_OP_IDS)
-    by_op = {row.op_id: row for row in rows}
-    for op_id, expected_ref in _EXPECTED_HANDLER_REF_BY_OP.items():
-        assert by_op[op_id].handler_ref == expected_ref
-
-
-@pytest.mark.asyncio
-async def test_write_composites_land_in_vm_host_cluster_groups(
-    stub_embedding_service: AsyncMock,
-) -> None:
-    """Group distribution: ``vm.*`` + ``folder.create`` in ``vm``, the
-    ``host.*`` writes in ``host``, the ``cluster.*`` writes + the two
-    ``resource_pool.*`` allocation writes in ``cluster`` (5: patch,
-    drs_rule.create, drs_vm_host_rule.create, resource_pool.create,
-    resource_pool.delete), the GOSC + guest-ops writes in ``guest`` /
-    ``guest_ops``, and the three portgroup writes in ``networking``. Asserted
-    per-op against :data:`_EXPECTED_GROUP_KEY_BY_OP`.
-    """
-    await register_vmware_composite_operations(embedding_service=stub_embedding_service)
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as fresh:
-        descriptor_rows = (
-            (
-                await fresh.execute(
-                    select(EndpointDescriptor).where(EndpointDescriptor.op_id.in_(_WRITE_OP_IDS))
-                )
-            )
-            .scalars()
-            .all()
-        )
-        group_rows = (await fresh.execute(select(OperationGroup))).scalars().all()
-    groups_by_id = {g.id: g for g in group_rows}
-    for desc in descriptor_rows:
-        assert desc.group_id is not None, f"{desc.op_id} has no group_id"
-        group = groups_by_id[desc.group_id]
-        expected_key = _EXPECTED_GROUP_KEY_BY_OP[desc.op_id]
-        assert group.group_key == expected_key, (
-            f"{desc.op_id}: expected {expected_key!r}, got {group.group_key!r}"
-        )
-        assert group.product == "vmware"
-        assert group.version == "9.0"
-        assert group.impl_id == "vmware-rest"
-
-
-@pytest.mark.asyncio
 async def test_write_composite_parameter_schemas_persist_with_required_fields(
     stub_embedding_service: AsyncMock,
 ) -> None:
     """Each row's parameter_schema has the documented required keys + additionalProperties=False."""
-    await register_vmware_composite_operations(embedding_service=stub_embedding_service)
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as fresh:
-        rows = (
-            (
-                await fresh.execute(
-                    select(EndpointDescriptor).where(EndpointDescriptor.op_id.in_(_WRITE_OP_IDS))
-                )
-            )
-            .scalars()
-            .all()
-        )
-    by_op = {row.op_id: row for row in rows}
+    by_op = await _registered_rows(stub_embedding_service)
     # vm.create requires name / guest_os plus one of folder_name / folder
     # (the #3115 at-least-one-of anyOf shape).
     create_schema: dict[str, Any] = dict(by_op["vmware.composite.vm.create"].parameter_schema)
@@ -943,13 +386,6 @@ async def test_write_composite_parameter_schemas_persist_with_required_fields(
     cdrom_schema: dict[str, Any] = dict(by_op["vmware.composite.vm.device.cdrom"].parameter_schema)
     assert set(cdrom_schema["required"]) == {"vm", "cdrom", "action"}
 
-    # All write schemas pin additionalProperties=False.
-    for op_id in _WRITE_OP_IDS:
-        schema: dict[str, Any] = dict(by_op[op_id].parameter_schema)
-        assert schema["additionalProperties"] is False, (
-            f"{op_id}: parameter_schema missing additionalProperties:False"
-        )
-
 
 @pytest.mark.asyncio
 async def test_write_composite_response_schemas_persist_with_status_enums(
@@ -964,19 +400,7 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
     schema needs to update too, and that update should be visible in
     code review.
     """
-    await register_vmware_composite_operations(embedding_service=stub_embedding_service)
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as fresh:
-        rows = (
-            (
-                await fresh.execute(
-                    select(EndpointDescriptor).where(EndpointDescriptor.op_id.in_(_WRITE_OP_IDS))
-                )
-            )
-            .scalars()
-            .all()
-        )
-    by_op = {row.op_id: row for row in rows}
+    by_op = await _registered_rows(stub_embedding_service)
     # Every row has a non-empty response_schema with a status enum.
     expected_status_values: dict[str, set[str]] = {
         "vmware.composite.vm.create": {"created", "rolled_back"},
@@ -1271,100 +695,3 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
     bulk_resp: dict[str, Any] = dict(by_op["vmware.composite.vm.power.bulk"].response_schema)
     bulk_props = dict(bulk_resp["properties"])
     assert {"results", "summary", "aborted_on_failure"} <= set(bulk_props)
-
-
-@pytest.mark.asyncio
-async def test_write_composite_tags_include_composite_and_write(
-    stub_embedding_service: AsyncMock,
-) -> None:
-    """Every write composite row carries ``composite`` + ``write`` tags."""
-    await register_vmware_composite_operations(embedding_service=stub_embedding_service)
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as fresh:
-        rows = (
-            (
-                await fresh.execute(
-                    select(EndpointDescriptor).where(EndpointDescriptor.op_id.in_(_WRITE_OP_IDS))
-                )
-            )
-            .scalars()
-            .all()
-        )
-    assert {row.op_id for row in rows} == set(_WRITE_OP_IDS)
-    for row in rows:
-        assert "composite" in row.tags, f"{row.op_id}: missing composite tag"
-        assert "write" in row.tags, f"{row.op_id}: missing write tag"
-
-
-# ---------------------------------------------------------------------------
-# Idempotency
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_register_vmware_composite_operations_is_idempotent_across_thirty_three(
-    stub_embedding_service: AsyncMock,
-) -> None:
-    """Running the registrar twice -> 45 rows total, embedding called 45x once."""
-    await register_vmware_composite_operations(embedding_service=stub_embedding_service)
-    first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == len(_COMPOSITES)
-
-    await register_vmware_composite_operations(embedding_service=stub_embedding_service)
-    # Body-hash skip path -> second run is a no-op for the embedding
-    # pipeline; the row count stays at 45.
-    assert stub_embedding_service.encode_one.call_count == first_count
-
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as fresh:
-        rows = (
-            (
-                await fresh.execute(
-                    select(EndpointDescriptor).where(EndpointDescriptor.op_id.in_(_ALL_OP_IDS))
-                )
-            )
-            .scalars()
-            .all()
-        )
-    assert {row.op_id for row in rows} == {spec.op_id for spec in _COMPOSITES}
-
-
-# ---------------------------------------------------------------------------
-# Module-level handler identity (no closures, partials, lambdas)
-# ---------------------------------------------------------------------------
-
-
-def test_all_write_handlers_are_module_level_coroutine_functions() -> None:
-    """Each write handler is a plain module-level ``async def``.
-
-    ``derive_handler_ref()`` rejects closures / partials / lambdas at
-    registration time; a regression wrapping a handler in
-    ``functools.partial`` would surface here before the registrar
-    even runs.
-    """
-    import inspect
-
-    for handler in (
-        vm_create_composite,
-        vm_clone_composite,
-        vm_deploy_from_library_composite,
-        vm_clone_from_template_composite,
-        vm_snapshot_revert_composite,
-        vm_migrate_composite,
-        vm_power_composite,
-        vm_power_bulk_composite,
-        vm_disk_grow_composite,
-        vm_disk_attach_composite,
-        vm_resize_composite,
-        vm_nic_repoint_composite,
-        vm_device_cdrom_composite,
-        host_evacuate_composite,
-        host_maintenance_exit_composite,
-        host_detach_from_vds_composite,
-        cluster_patch_composite,
-        guest_customization_spec_create_composite,
-        vm_customize_composite,
-    ):
-        assert inspect.iscoroutinefunction(handler), f"{handler!r} is not a coroutine function"
-        assert "<locals>" not in handler.__qualname__
-        assert handler.__qualname__ != "<lambda>"

@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from collections.abc import Callable
 from typing import Any, Final
 
 import structlog
@@ -42,6 +43,7 @@ from meho_backplane.auth.permissions import _more_restrictive, resolve_verdict
 from meho_backplane.broadcast.events import scrub_secret_named_values
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+from meho_backplane.operations._errors import _sanitize_free_text
 from meho_backplane.operations._param_errors import describe_violation
 from meho_backplane.sandbox_mode import sandbox_mode_active
 from meho_backplane.settings import get_settings
@@ -56,15 +58,26 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "InvalidOpSchemaError",
+    "ParamsCheck",
     "compute_audit_digest_hash",
     "compute_audit_params_hash",
     "compute_params_hash",
     "ingested_schema_for_validation",
+    "params_check_errors",
     "params_hash_candidates",
     "params_hash_matches",
+    "params_problem",
     "policy_gate",
+    "register_params_check",
     "validate_params",
 ]
+
+#: A check of one op's params that its JSON schema cannot express. It gets
+#: the params and returns the entry of :func:`params_problem` for the first
+#: problem, or ``None`` when the params pass. It must not do I/O.
+ParamsCheck = Callable[[dict[str, Any]], dict[str, Any] | None]
+
+_PARAMS_CHECKS: dict[str, ParamsCheck] = {}
 
 #: Label for the key derivation in :func:`_params_hash_key`. It keeps this
 #: key different from any other key made from the same secret.
@@ -254,6 +267,41 @@ def validate_params(
         missing_ref = f"#{pointer}" if pointer.startswith("/") else pointer
         raise InvalidOpSchemaError(missing_ref) from exc
     return out
+
+
+def register_params_check(op_id: str, check: ParamsCheck) -> None:
+    """Register *check* for *op_id*.
+
+    The dispatcher runs it right after the schema check, on every call of the
+    op: before the policy gate, so before the call can wait for approval. A
+    problem is refused as ``invalid_params`` and nothing is stored.
+    ``preview_operation`` runs the same check. A connector registers its check
+    at import time, next to its preview builder.
+    """
+    _PARAMS_CHECKS[op_id] = check
+
+
+def params_problem(path: str, expected: str, remediation: str) -> dict[str, Any]:
+    """One ``validation_errors`` entry for a problem a params check found.
+
+    Same keys as :func:`~meho_backplane.operations._param_errors.describe_violation`;
+    the ``validator`` is ``params_check``. No field carries the rejected value.
+    """
+    return {
+        "path": _sanitize_free_text(path),
+        "validator": "params_check",
+        "expected": _sanitize_free_text(expected),
+        "remediation": _sanitize_free_text(remediation),
+    }
+
+
+def params_check_errors(op_id: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+    """The entries of the registered check of *op_id* for *params*; ``[]`` without one."""
+    check = _PARAMS_CHECKS.get(op_id)
+    if check is None:
+        return []
+    problem = check(params)
+    return [] if problem is None else [problem]
 
 
 def ingested_schema_for_validation(parameter_schema: dict[str, Any]) -> dict[str, Any]:

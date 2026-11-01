@@ -94,6 +94,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=DEPLOYMENT_ANSWER_LLM_INSTRUCTIONS,
         preview=_vcenter_answer.vcenter_deployment_answer_preview,
+        classifier_other=True,
     ),
 )
 

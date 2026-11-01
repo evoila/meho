@@ -285,10 +285,14 @@ func printListTable(w io.Writer, status string, r *connectorListEnvelope) {
 // operations all come from a connector package that is not installed
 // (`state="package_not_installed"`, #5560) shows "no-package"; its
 // `next_step` names the package. Every other row shows the review
-// rollup from deriveRollupLabel.
+// rollup from deriveRollupLabel. A connector whose code is not in this
+// MEHO (`state="code_not_installed"`, #5585) shows "no-code".
 func statusCell(c listEntry) string {
-	if c.State == "package_not_installed" {
+	switch c.State {
+	case "package_not_installed":
 		return "no-package"
+	case "code_not_installed":
+		return "no-code"
 	}
 	return deriveRollupLabel(c.StagedGroupCount, c.EnabledGroupCount, c.DisabledGroupCount)
 }

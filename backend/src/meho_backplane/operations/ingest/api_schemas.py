@@ -773,13 +773,19 @@ class IngestResponse(BaseModel):
 #:   is listed with zero counts, ``dispatchable=False`` and a ``next_step``
 #:   that names the package. Installing the package again brings the
 #:   connector back.
+#: * ``"code_not_installed"`` — the code of the connector is not in this
+#:   MEHO (#5585): its typed rows have no package name, none of their
+#:   handlers imports and no connector class resolves. Nothing can be
+#:   called. The row is listed with zero counts, ``dispatchable=False`` and
+#:   a ``next_step`` that says the code is missing. A MEHO with the code
+#:   brings the connector back.
 #:
 #: Rows whose ``connector_id`` round-trips through
 #: :func:`parse_connector_id` to a triple the dispatcher cannot resolve
 #: (stale-rename DB rows, class-side-only entries whose v2-registry
 #: product disagrees with the parser's derived product) are dropped
 #: before the listing returns — they have no operator-meaningful state.
-ConnectorState = Literal["ingested", "registered", "package_not_installed"]
+ConnectorState = Literal["ingested", "registered", "package_not_installed", "code_not_installed"]
 
 
 #: Operator-facing scope discriminator for a connector row.
@@ -927,6 +933,8 @@ class ConnectorListItem(BaseModel):
     marks a connector whose rows all come from a connector package that
     is not installed: it is listed so the operator sees why it cannot be
     used, with zero counts and ``dispatchable=False``.
+    ``"code_not_installed"`` (#5585) marks a connector whose code is not in
+    this MEHO, listed the same way.
 
     ``next_step`` (G0.13-T3 / #1133) is the self-describing hint that
     closes the workflow gap the v0.6.0 RDC dogfood surfaced (signal 11:

@@ -153,6 +153,7 @@ const (
 
 // Defines values for ConnectorListItemState.
 const (
+	ConnectorListItemStateCodeNotInstalled    ConnectorListItemState = "code_not_installed"
 	ConnectorListItemStateIngested            ConnectorListItemState = "ingested"
 	ConnectorListItemStatePackageNotInstalled ConnectorListItemState = "package_not_installed"
 	ConnectorListItemStateRegistered          ConnectorListItemState = "registered"
@@ -3751,6 +3752,8 @@ type ConfirmVerifyResponseAnswer string
 // marks a connector whose rows all come from a connector package that
 // is not installed: it is listed so the operator sees why it cannot be
 // used, with zero counts and “dispatchable=False“.
+// “"code_not_installed"“ (#5585) marks a connector whose code is not in
+// this MEHO, listed the same way.
 //
 // “next_step“ (G0.13-T3 / #1133) is the self-describing hint that
 // closes the workflow gap the v0.6.0 RDC dogfood surfaced (signal 11:

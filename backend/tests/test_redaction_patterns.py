@@ -45,6 +45,7 @@ _EXPECTED_NAMES = {
     "api_key",
     "kubeconfig",
     "pem_private_key",
+    "password_hash",
     "bind_key_secret",
     "uuid",
     "ipv4",
@@ -81,6 +82,25 @@ _PUNCT_DOLLAR_HASH_FIXTURE = "password" + ": " + "hunter2" + "$plus#tail"
 # BIND key block (#4617): ``secret "<base64>";`` inside a ``key`` statement.
 _BIND_KEY_SECRET_FIXTURE_POS = 'secret "' + "exampleTsig" + 'Value==";'
 _BIND_KEY_SECRET_FIXTURE_NEG = 'the secret is in the vault; key "rndc-key" { algorithm hmac-md5; };'
+# PEM blocks and crypt(3) hashes, built from fragments so secret scanners
+# do not flag this file.
+_PEM_DASHES = "-" * 5
+_CERTIFICATE_FIXTURE = (
+    _PEM_DASHES
+    + "BEGIN CERTIFICATE"
+    + _PEM_DASHES
+    + "\nMIIBszCCAVmgAwIBAgIU\n"
+    + _PEM_DASHES
+    + "END CERTIFICATE"
+    + _PEM_DASHES
+)
+_SHA512_HASH_FIXTURE = "$" + "6$" + "saltsalt$" + "abcdefghijklmnopqrstuvwxyz0123456789./ABCD"
+_SHADOW_LINE_FIXTURE = "root:" + _SHA512_HASH_FIXTURE + ":19000:0:99999:7:::"
+_BCRYPT_HASH_FIXTURE = "$" + "2b$" + "12$" + "abcdefghijklmnopqrstuvABCDEFGHIJKLMNOPQRSTUVWXYZ01234"
+_YESCRYPT_HASH_FIXTURE = "$" + "y$" + "j9T$" + "saltsaltsalt$" + "abcdefghijklmnopqrstuvwxyz012345"
+_ARGON2_HASH_FIXTURE = (
+    "$" + "argon2id$" + "v=19$" + "m=65536,t=3,p=4$" + "bXlzYWx0eHk$" + "aGFzaGhhc2hoYXNoaGFzaA"
+)
 
 
 # Assembled from fragments so secret scanners do not flag the test source.
@@ -701,6 +721,13 @@ def test_get_pattern_unknown_raises() -> None:
             "build_hash=abcdef0123456789 (16 hex, not uuid-shaped)",
             False,
         ),
+        # password_hash: crypt(3) hashes as in /etc/shadow
+        ("password_hash", _SHADOW_LINE_FIXTURE, True),
+        ("password_hash", _BCRYPT_HASH_FIXTURE, True),
+        ("password_hash", _YESCRYPT_HASH_FIXTURE, True),
+        ("password_hash", _ARGON2_HASH_FIXTURE, True),
+        ("password_hash", "daemon:*:19000:0:99999:7:::", False),
+        ("password_hash", 'echo "$1$2" costs $6 per month', False),
         # ipv4: dotted quad with valid 0-255 octets
         (
             "ipv4",
@@ -809,6 +836,8 @@ _PATTERN_TEST_ROWS: list[tuple[str, str, bool]] = [
     ("pem_private_key", _PEM_PUBLIC_KEY_FIXTURE_NEG, False),
     ("bind_key_secret", _BIND_KEY_SECRET_FIXTURE_POS, True),
     ("bind_key_secret", _BIND_KEY_SECRET_FIXTURE_NEG, False),
+    ("password_hash", _SHADOW_LINE_FIXTURE, True),
+    ("password_hash", "daemon:*:19000:0:99999:7:::", False),
     ("uuid", "tenant_id=12345678-1234-1234-1234-123456789abc", True),
     ("uuid", "build_hash=abcdef0123456789", False),
     ("ipv4", "192.168.1.42", True),
@@ -904,3 +933,46 @@ def test_complete_placeholder_keeps_its_label() -> None:
     result = redact(payload, _API_KEY_ONLY_POLICY)
     assert result.redacted == payload
     assert not result.manifest
+
+
+def test_default_policy_redacts_shadow_hash_and_keeps_the_other_columns() -> None:
+    """The default policy hides the hash; the user name and dates stay readable."""
+    policy = load_policy_yaml(DEFAULT_POLICY_PACKAGE, DEFAULT_POLICY_RESOURCE)
+    result = redact(_SHADOW_LINE_FIXTURE + "\ndaemon:*:19000:0:99999:7:::", policy)
+    assert result.redacted == (
+        "root:[REDACTED:password_hash]:19000:0:99999:7:::\ndaemon:*:19000:0:99999:7:::"
+    )
+
+
+def test_default_policy_redacts_a_private_key_split_over_log_rows() -> None:
+    """``linux.log.tail`` returns one row per line; the key body rows are hidden too.
+
+    The result keeps its shape: the same number of rows, ``total`` and
+    ``path`` unchanged, the rows before and after the key untouched, and a
+    certificate next to the key still readable.
+    """
+    policy = load_policy_yaml(DEFAULT_POLICY_PACKAGE, DEFAULT_POLICY_RESOURCE)
+    certificate_rows = _CERTIFICATE_FIXTURE.split("\n")
+    key_rows = _PEM_PRIVATE_KEY_FIXTURE_POS.split("\n")
+    rows = ["before", *certificate_rows, *key_rows, "after"]
+    payload = {"rows": rows, "total": len(rows), "path": "/var/log/app.log"}
+    result = redact(payload, policy)
+    redacted = result.redacted
+    assert isinstance(redacted, dict)
+    assert redacted["total"] == len(rows)
+    assert redacted["path"] == "/var/log/app.log"
+    assert redacted["rows"] == [
+        "before",
+        *certificate_rows,
+        *(["[REDACTED:pem_private_key]"] * len(key_rows)),
+        "after",
+    ]
+
+
+@pytest.mark.parametrize("resource", [DEFAULT_POLICY_RESOURCE, "example.yaml"])
+def test_packaged_policies_hide_a_labelled_private_key_whole(resource: str) -> None:
+    """``private_key: -----BEGIN ...`` loses the whole block, and the label stays."""
+    policy = load_policy_yaml(DEFAULT_POLICY_PACKAGE, resource)
+    text = "private_key: " + _PEM_PRIVATE_KEY_FIXTURE_POS + "\ntail"
+    result = redact(text, policy)
+    assert result.redacted == "private_key: [REDACTED:pem_private_key]\ntail"

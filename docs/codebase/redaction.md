@@ -46,7 +46,15 @@ rules in policy order, and returns:
   than `str` / `bytes` / `bytearray`) flatten to `list`. Only string
   leaves change content; everything else is structure. The result is
   always JSON-serialisable so the downstream JSONFlux reducer can
-  consume it without further shape-fixing.
+  consume it without further shape-fixing. A list whose items are all
+  strings (the `rows` of `linux.log.tail`, the lines of a ruleset) is
+  matched as one text, joined with newlines, so a secret that spans
+  rows (a PEM key: `BEGIN` row, body rows, `END` row) is found whole.
+  The list keeps its length and every row keeps its place; a row
+  inside a match loses only its part of the match. A match inside one
+  row gives the same result as matching that row alone. Rows and
+  matches are walked together once by index, so a long list with many
+  secrets in every row costs about the same as its rows one by one.
 - `manifest` — a tuple of `RedactionManifestEntry` records, one per
   rule firing per leaf, carrying `rule`, `pattern`, `action`,
   `count`, `span`, `reason`, and `path`. C1-b will persist this
@@ -125,6 +133,7 @@ production traffic cannot reach that branch.
 | `api_key` | Labelled credential pairs: `api_key`, `access_token`, `refresh_token`, `auth_token`, `session_token`, `token` (bare), `secret` / `secret_key` / `secret_id`, `private_key`, `password`, `passwd`, `pwd`, `client_secret` — each followed by `=` or `:` and an 8+ char value. The label may follow `_` or `-` (`DB_PASSWORD=...`, `GITHUB_TOKEN=...`); a label glued to letters (`mypassword=`) does not match |
 | `pem_private_key` | A PEM private key block, from the `BEGIN ... PRIVATE KEY` line to the matching `END` line (or to the end of the text when the `END` line is missing). Public keys and certificates do not match. Runs before `api_key` in the default policy, so a `private_key=-----BEGIN ...` pair loses the whole block |
 | `kubeconfig` | YAML kubeconfig blobs (`apiVersion: v1` + `kind: Config`) |
+| `password_hash` | A crypt(3) password hash as in `/etc/shadow`: `$1$`, `$2a$`/`$2b$`/`$2x$`/`$2y$`, `$5$`, `$6$`, `$7$`, `$y$`, `$gy$`, `$sha1$`, `$argon2id$`/`$argon2i$`/`$argon2d$`. The match stops at `:`, so the other `/etc/shadow` columns stay readable |
 | `bind_key_secret` | The value after the `secret` keyword in a BIND `key` block (`secret "<base64>";`, TSIG and rndc keys) and after `cookie-secret` in the `options` block, with or without quotes, also when BIND comments (`/* */`, `//`, `#`) sit between the keyword and the value; the keyword and the comments stay so the file stays readable. Not a regex: `bind_secret.py` first splits the text into comments, quoted strings and code the way BIND's lexer does, then reads the value only inside the same scope. So a `secret` word in a comment can never reach past that comment, a commented-out key block is still hidden, an old secret in a comment between the keyword and its value is hidden together with the value, a key *name* like `"transfer-secret"` or `"my secret"` is never the keyword, and a `#` or `//` inside a quoted string does not start a comment (#4617, #5342 review). A quoted value must be base64 or hex. A value without quotes must be followed by `;` or a comment |
 | `uuid` | RFC 4122 canonical 8-4-4-4-12 hex |
 | `ipv4` | Dotted-quad with 0-255 per-octet bounds |
@@ -324,7 +333,7 @@ falls through to the packaged **default-safe** policy
 The default-safe policy is the load-bearing guarantee: a connector
 landing without a registered override **still gets credentials
 stripped** (`authorization_header`, `bearer_token`, `jwt`, `api_key`,
-`kubeconfig`, `bind_key_secret`). Identifier patterns (`uuid` / `ipv4` / `ipv6` / `fqdn`)
+`pem_private_key`, `kubeconfig`, `password_hash`, `bind_key_secret`). Identifier patterns (`uuid` / `ipv4` / `ipv6` / `fqdn`)
 are deliberately not in the default — most connector responses are
 mostly identifiers, and a global default that redacts them would
 blank operator-facing summaries. Operators wanting them at the global

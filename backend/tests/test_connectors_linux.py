@@ -62,7 +62,6 @@ from meho_backplane.connectors.linux.ops import (
 from meho_backplane.connectors.linux.ops_file import (
     build_file_read_command,
     build_log_tail_command,
-    build_real_path_command,
 )
 from meho_backplane.connectors.linux.ops_firewall import parse_firewall_output
 from meho_backplane.connectors.linux.ops_host import (
@@ -415,27 +414,29 @@ async def test_about_unreachable_raises_connector_error() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _real(path: str) -> Any:
-    """The answer of the real-path command: one line with the real path."""
-    return _proc(stdout=path + "\n")
+def _opened(real_path: str, content: str, size: int | str = -1) -> Any:
+    """The answer of the read command: the opened file's path, its size, then the content."""
+    return _proc(stdout=f"{real_path}\n{size}\n===MEHO_CONTENT===\n{content}")
 
 
 @pytest.mark.asyncio
 async def test_file_read_returns_content_and_confines_path() -> None:
     connector = LinuxSshConnector()
-    stdout = "42\n===MEHO_CONTENT===\nsentinel-ok\n"
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
-        mock_cmd.side_effect = [_real("/var/lib/firstboot.done"), _proc(stdout=stdout)]
+        mock_cmd.return_value = _opened("/var/lib/firstboot.done", "sentinel-ok\n", 42)
         result = await connector.file_read(_TARGET, {"path": "/var/lib/firstboot.done"})
     assert result["path"] == "/var/lib/firstboot.done"
     assert result["content"] == "sentinel-ok\n"
     assert result["size_bytes"] == 42
     assert result["exists"] is True
     assert result["truncated"] is False
-    first, second = (call.args[1] for call in mock_cmd.await_args_list)
-    assert first == build_real_path_command("/var/lib/firstboot.done")
-    assert shlex.quote("/var/lib/firstboot.done") in second
-    assert "head -c 65536" in second
+    # One command: it opens the file, reports it and reads from the open file.
+    assert mock_cmd.await_count == 1
+    cmd = _cmd_of(mock_cmd)
+    assert cmd == build_file_read_command("/var/lib/firstboot.done", 65536)
+    assert f"3<{shlex.quote('/var/lib/firstboot.done')}" in cmd
+    assert "readlink /proc/self/fd/3" in cmd
+    assert "head -c 65536 <&3" in cmd
 
 
 @pytest.mark.asyncio
@@ -447,37 +448,45 @@ async def test_file_read_missing_file_reports_absent() -> None:
     assert result["exists"] is False
     assert result["content"] == ""
     assert result["size_bytes"] is None
-    # Nothing to read: only the real-path command ran.
+    assert result["truncated"] is False
     assert mock_cmd.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_file_read_unreadable_file_reports_present_without_content() -> None:
+    connector = LinuxSshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="===MEHO_FILE_UNREADABLE===\n")
+        result = await connector.file_read(_TARGET, {"path": "/var/lib/app/state"})
+    assert result == {
+        "path": "/var/lib/app/state",
+        "content": "",
+        "truncated": False,
+        "size_bytes": None,
+        "exists": True,
+    }
 
 
 @pytest.mark.asyncio
 async def test_file_read_truncated_when_size_exceeds_cap() -> None:
     connector = LinuxSshConnector()
-    stdout = "999999\n===MEHO_CONTENT===\nfirst-chunk"
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
-        mock_cmd.side_effect = [_real("/var/log/syslog"), _proc(stdout=stdout)]
+        mock_cmd.return_value = _opened("/var/log/syslog", "first-chunk", 999999)
         result = await connector.file_read(_TARGET, {"path": "/var/log/syslog", "max_bytes": 10})
     assert result["truncated"] is True
-    assert "head -c 10" in mock_cmd.await_args_list[1].args[1]
+    assert "head -c 10 <&3" in _cmd_of(mock_cmd)
 
 
 @pytest.mark.asyncio
-async def test_file_read_reads_the_real_path_of_a_symlink() -> None:
-    # /etc/resolv.conf is often a symlink into /run; the read uses the real path.
+async def test_file_read_reads_a_symlink_whose_target_passes_the_check() -> None:
+    # /etc/resolv.conf is often a symlink into /run; the host reports the opened file.
     connector = LinuxSshConnector()
-    stdout = "10\n===MEHO_CONTENT===\nnameserver\n"
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
-        mock_cmd.side_effect = [
-            _real("/run/systemd/resolve/stub-resolv.conf"),
-            _proc(stdout=stdout),
-        ]
+        mock_cmd.return_value = _opened("/run/systemd/resolve/stub-resolv.conf", "nameserver\n", 10)
         result = await connector.file_read(_TARGET, {"path": "/etc/resolv.conf"})
     assert result["path"] == "/etc/resolv.conf"
     assert result["content"] == "nameserver\n"
-    read_cmd = mock_cmd.await_args_list[1].args[1]
-    assert shlex.quote("/run/systemd/resolve/stub-resolv.conf") in read_cmd
-    assert "/etc/resolv.conf" not in read_cmd
+    assert f"3<{shlex.quote('/etc/resolv.conf')}" in _cmd_of(mock_cmd)
 
 
 @pytest.mark.asyncio
@@ -492,14 +501,46 @@ async def test_file_read_reads_the_real_path_of_a_symlink() -> None:
     ],
 )
 async def test_file_read_refuses_a_real_path_that_fails_the_check(real_path: str) -> None:
-    # The typed path is allowed, but the host says it is a symlink to real_path.
+    # The typed path is allowed, but the host opened a symlink to real_path.
     connector = LinuxSshConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
-        mock_cmd.return_value = _real(real_path)
+        mock_cmd.return_value = _opened(real_path, "file-body\n", 10)
         with pytest.raises(PathConfinementError):
             await connector.file_read(_TARGET, {"path": "/var/lib/app/link"})
-    # Only the real-path command ran; the file itself was never read.
     assert mock_cmd.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_file_read_checks_the_file_it_opened_not_the_typed_path() -> None:
+    """The typed path passes the check, but the file behind it was swapped.
+
+    Models a path that was changed into a symlink to a refused file right
+    before the host opened it. The command opens the file once, reports
+    the file it opened and reads from that same open file, so there is no
+    second lookup a later change could redirect. The reported path fails
+    the check, and the content the host already sent never leaves the
+    handler.
+    """
+    connector = LinuxSshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _opened("/etc/shadow", "hash-body\n", 10)
+        with pytest.raises(PathConfinementError):
+            await connector.file_read(_TARGET, {"path": "/var/lib/app/current.log"})
+    assert mock_cmd.await_count == 1
+    cmd = _cmd_of(mock_cmd)
+    assert "readlink /proc/self/fd/3" in cmd
+    assert "head -c 65536 <&3" in cmd
+    # The path is looked up only to open the file; the read never names it again.
+    assert cmd.count(shlex.quote("/var/lib/app/current.log")) == 2
+
+
+@pytest.mark.asyncio
+async def test_file_read_refuses_a_file_deleted_while_open() -> None:
+    connector = LinuxSshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _opened("/var/lib/app/state (deleted)", "body\n", 5)
+        with pytest.raises(PathConfinementError):
+            await connector.file_read(_TARGET, {"path": "/var/lib/app/state"})
 
 
 @pytest.mark.asyncio
@@ -507,12 +548,15 @@ async def test_file_read_refuses_a_real_path_that_fails_the_check(real_path: str
     "answer",
     [
         _proc(stdout="", exit_status=1),
-        _proc(stdout="/var/lib/a\n/var/lib/b\n"),
-        _proc(stdout="/var/lib/a\n", exit_status=1),
+        _proc(stdout=""),
+        _proc(stdout="42\n===MEHO_CONTENT===\nbody\n"),
+        _proc(stdout="\n42\n===MEHO_CONTENT===\nbody\n"),
+        _proc(stdout="/var/lib/a\n/var/lib/b\n42\n===MEHO_CONTENT===\nbody\n"),
+        _proc(stdout="/var/lib/a\n42\n===MEHO_CONTENT===\nbody\n", exit_status=1),
     ],
-    ids=["error-exit", "two-lines", "line-with-error-exit"],
+    ids=["error-exit", "empty", "no-path", "empty-path", "two-paths", "path-with-error-exit"],
 )
-async def test_file_read_refuses_when_the_real_path_is_unclear(answer: Any) -> None:
+async def test_file_read_refuses_when_the_opened_file_is_unclear(answer: Any) -> None:
     connector = LinuxSshConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.return_value = answer
@@ -559,26 +603,26 @@ async def test_file_read_rejects_path_outside_allowlist(path: str) -> None:
 async def test_log_tail_returns_rows_total_envelope() -> None:
     connector = LinuxSshConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
-        mock_cmd.side_effect = [
-            _real("/var/log/cloud-init.log"),
-            _proc(stdout="line1\nline2\nline3\n"),
-        ]
+        mock_cmd.return_value = _opened("/var/log/cloud-init.log", "line1\nline2\nline3\n", 18)
         result = await connector.log_tail(_TARGET, {"path": "/var/log/cloud-init.log", "lines": 3})
     assert result["rows"] == ["line1", "line2", "line3"]
     assert result["total"] == 3
     assert result["path"] == "/var/log/cloud-init.log"
-    cmd = mock_cmd.await_args_list[1].args[1]
-    assert "tail -n 3" in cmd
-    assert shlex.quote("/var/log/cloud-init.log") in cmd
+    assert mock_cmd.await_count == 1
+    cmd = _cmd_of(mock_cmd)
+    assert cmd == build_log_tail_command("/var/log/cloud-init.log", 3)
+    assert "tail -n 3 <&3" in cmd
+    assert f"3<{shlex.quote('/var/log/cloud-init.log')}" in cmd
 
 
 @pytest.mark.asyncio
 async def test_log_tail_default_lines_and_confinement() -> None:
     connector = LinuxSshConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
-        mock_cmd.side_effect = [_real("/var/log/syslog"), _proc(stdout="")]
-        await connector.log_tail(_TARGET, {"path": "/var/log/syslog"})
-    assert "tail -n 200" in mock_cmd.await_args_list[1].args[1]
+        mock_cmd.return_value = _opened("/var/log/syslog", "", 0)
+        result = await connector.log_tail(_TARGET, {"path": "/var/log/syslog"})
+    assert result == {"rows": [], "total": 0, "path": "/var/log/syslog"}
+    assert "tail -n 200 <&3" in _cmd_of(mock_cmd)
 
 
 @pytest.mark.asyncio
@@ -593,9 +637,10 @@ async def test_log_tail_missing_file_gives_no_rows() -> None:
 
 @pytest.mark.asyncio
 async def test_log_tail_refuses_a_real_path_outside_the_roots() -> None:
+    # The host opened a symlink to a file outside the roots; its rows are never returned.
     connector = LinuxSshConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
-        mock_cmd.return_value = _real("/root/.bash_history")
+        mock_cmd.return_value = _opened("/root/.bash_history", "history line\n", 13)
         with pytest.raises(PathConfinementError):
             await connector.log_tail(_TARGET, {"path": "/var/log/link.log"})
     assert mock_cmd.await_count == 1
@@ -1083,15 +1128,17 @@ def test_confine_read_path_keeps_public_files_near_the_refused_ones() -> None:
         assert confine_read_path(path) == path
 
 
-def test_build_real_path_command_quotes_the_path() -> None:
-    cmd = build_real_path_command("/var/log/a b;x.log")
-    assert f"realpath -- {shlex.quote('/var/log/a b;x.log')}" in cmd
-    assert "===MEHO_FILE_MISSING===" in cmd
-
-
-# ---------------------------------------------------------------------------
-# injection safety -- every parameterized command shlex-quotes its value
-# ---------------------------------------------------------------------------
+def test_build_file_read_command_opens_once_and_reads_the_open_file() -> None:
+    confined = confine_read_path("/var/log/a b.log")
+    cmd = build_file_read_command(confined, 100)
+    quoted = shlex.quote(confined)
+    # The path is used for the existence test and the open, nowhere else.
+    assert cmd.count(quoted) == 2
+    assert f"3<{quoted}" in cmd
+    assert "readlink /proc/self/fd/3" in cmd
+    assert "stat -L -c %s /proc/self/fd/3" in cmd
+    assert "head -c 100 <&3" in cmd
+    assert "===MEHO_FILE_UNREADABLE===" in cmd
 
 
 def test_build_file_read_command_quotes_metacharacter_path() -> None:
@@ -1107,6 +1154,7 @@ def test_build_log_tail_command_quotes_path() -> None:
     confined = confine_read_path("/var/log/a b.log")
     cmd = build_log_tail_command(confined, 50)
     assert shlex.quote(confined) in cmd
+    assert "tail -n 50 <&3" in cmd
 
 
 def test_build_service_status_command_quotes_unit() -> None:

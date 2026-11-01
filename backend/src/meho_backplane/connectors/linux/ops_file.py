@@ -21,15 +21,20 @@ and ``shlex.quote`` the confined path into a fixed command shape. No
 operator value reaches the shell unquoted; a traversal attempt is
 rejected before the host is touched.
 
-Then both ask the host for the real path (``realpath``, which follows
-every symlink), run :func:`confine_read_path` again on that real path,
-and read only the real path. So a symlink under an allowed root cannot
-point the read at a file outside the allowed roots or at a key file.
+Then both run one command that opens the file once, reports the path of
+the file it opened (``readlink /proc/self/fd/3``, symlinks followed)
+and reads from that same open file. The handler runs
+:func:`confine_read_path` again on the reported path and returns the
+content only when it passes. Path and content come from one open file,
+so a symlink under an allowed root cannot point the read at a file
+outside the allowed roots or at a key file, and a change of the path or
+of a parent directory after the open cannot swap in another file.
 """
 
 from __future__ import annotations
 
 import shlex
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.auth.operator import Operator
@@ -52,21 +57,26 @@ __all__ = [
     "CONTENT_MARKER",
     "FILE_OPS",
     "MISSING_MARKER",
+    "UNREADABLE_MARKER",
+    "ReadOutput",
     "build_file_read_command",
     "build_log_tail_command",
-    "build_real_path_command",
     "linux_file_read",
     "linux_log_tail",
-    "parse_file_read_output",
+    "parse_read_output",
 ]
 
-#: Sentinel the ``file.read`` command prints when the confined path does
-#: not exist -- distinguishing "file absent" (the first-boot sentinel was
+#: Sentinel the read command prints when the confined path does not
+#: exist -- distinguishing "file absent" (the first-boot sentinel was
 #: never written) from "file present but empty" honestly.
 MISSING_MARKER: str = "===MEHO_FILE_MISSING==="
 
-#: Separates the ``stat`` size line from the file content in the
-#: ``file.read`` command's single-round-trip output.
+#: Sentinel the read command prints when the file exists but could not be
+#: opened for reading. Nothing was read, so there is no path to check.
+UNREADABLE_MARKER: str = "===MEHO_FILE_UNREADABLE==="
+
+#: Separates the opened file's path and size from the content in the
+#: read command's single-round-trip output.
 CONTENT_MARKER: str = "===MEHO_CONTENT==="
 
 
@@ -90,103 +100,90 @@ def _bounded_lines(raw: Any) -> int:
     return min(value, MAX_TAIL_LINES)
 
 
-def build_real_path_command(confined_path: str) -> str:
-    """Build the command that prints the real path of *confined_path*.
+def _opened_file_command(confined_path: str, reader: str) -> str:
+    """Build the one command that opens *confined_path*, reports it and reads it.
 
-    Prints the ``MISSING_MARKER`` when nothing exists at the path (also for
-    a symlink whose target is gone), otherwise the output of ``realpath``,
-    which follows every symlink. *confined_path* is already checked by
-    :func:`confine_read_path`; it is ``shlex.quote``d here too.
+    Prints the ``MISSING_MARKER`` when nothing exists at the path (also
+    for a symlink whose target is gone). Otherwise the shell opens the
+    file once (``3<``) and, on that open file: prints the path the kernel
+    reports for it (``readlink /proc/self/fd/3``, every symlink followed),
+    its size (``stat -L``), the ``CONTENT_MARKER``, and then the output
+    of *reader* on the same open file (``<&3``). When the open fails the
+    ``UNREADABLE_MARKER`` is printed instead.
+
+    The handler checks the reported path and returns the content only
+    when it passes. Path and content come from the same open file, so
+    there is no second lookup of the path that a change of the path or
+    of a parent directory could redirect. *confined_path* is already
+    checked by :func:`confine_read_path` and is ``shlex.quote``d here;
+    *reader* is a fixed command with numeric arguments only.
     """
     quoted = shlex.quote(confined_path)
     return (
-        f"if [ -e {quoted} ]; then realpath -- {quoted}; "
-        f"else printf '%s\\n' {shlex.quote(MISSING_MARKER)}; fi"
+        f"if [ ! -e {quoted} ]; then printf '%s\\n' {shlex.quote(MISSING_MARKER)}; exit 0; fi; "
+        f"{{ readlink /proc/self/fd/3; "
+        f"stat -L -c %s /proc/self/fd/3 2>/dev/null || echo -1; "
+        f"printf '%s\\n' {shlex.quote(CONTENT_MARKER)}; "
+        f"{reader} <&3 2>/dev/null; true; }} 2>/dev/null 3<{quoted} "
+        f"|| printf '%s\\n' {shlex.quote(UNREADABLE_MARKER)}"
     )
-
-
-async def _real_read_path(
-    connector: LinuxSshConnector,
-    target: Target,
-    confined_path: str,
-    operator: Operator | None,
-) -> str | None:
-    """Return the checked real path of *confined_path*, or ``None`` when it is missing.
-
-    Asks the host for the real path and runs :func:`confine_read_path` on
-    it, so the file that is read is the file that was checked. Any doubt
-    (an error exit, no line, more than one line) raises
-    :class:`PathConfinementError`.
-    """
-    proc = await connector._run_command(
-        target, build_real_path_command(confined_path), operator=operator
-    )
-    stdout = getattr(proc, "stdout", None)
-    lines = stdout.splitlines() if isinstance(stdout, str) else []
-    if lines == [MISSING_MARKER]:
-        return None
-    if getattr(proc, "exit_status", None) != 0 or len(lines) != 1:
-        raise PathConfinementError(f"could not resolve the real path of {confined_path!r}")
-    return confine_read_path(lines[0])
 
 
 def build_file_read_command(confined_path: str, max_bytes: int) -> str:
     """Build the fixed single-round-trip ``file.read`` command.
 
-    Emits the ``MISSING_MARKER`` when the path is absent, otherwise the
-    file size (``stat -c %s``) then the ``CONTENT_MARKER`` then the first
-    *max_bytes* bytes (``head -c``). *confined_path* is the real path,
-    already checked by :func:`confine_read_path`; it is ``shlex.quote``d
-    here defensively.
-    *max_bytes* is an ``int`` (bounded by :func:`_bounded_max_bytes`), so
-    it is interpolated as a number -- no operator string reaches the shell.
+    See :func:`_opened_file_command`; the reader is ``head -c``, so the
+    content is capped at *max_bytes*. *max_bytes* is an ``int`` (bounded
+    by :func:`_bounded_max_bytes`), so it is interpolated as a number --
+    no operator string reaches the shell.
     """
-    quoted = shlex.quote(confined_path)
-    return (
-        f"if [ ! -e {quoted} ]; then printf '%s\\n' {shlex.quote(MISSING_MARKER)}; exit 0; fi; "
-        f"stat -c %s {quoted} 2>/dev/null || echo -1; "
-        f"printf '%s\\n' {shlex.quote(CONTENT_MARKER)}; "
-        f"head -c {int(max_bytes)} {quoted} 2>/dev/null"
-    )
+    return _opened_file_command(confined_path, f"head -c {int(max_bytes)}")
 
 
 def build_log_tail_command(confined_path: str, lines: int) -> str:
-    """Build the fixed ``tail -n <lines>`` command for a confined log path."""
-    quoted = shlex.quote(confined_path)
-    return f"tail -n {int(lines)} {quoted} 2>/dev/null"
+    """Build the fixed single-round-trip ``log.tail`` command.
+
+    See :func:`_opened_file_command`; the reader is ``tail -n <lines>``.
+    """
+    return _opened_file_command(confined_path, f"tail -n {int(lines)}")
 
 
-def parse_file_read_output(stdout: str, confined_path: str, max_bytes: int) -> dict[str, Any]:
-    """Parse the ``file.read`` command output into the response dict.
+@dataclass(frozen=True)
+class ReadOutput:
+    """The parsed output of the read command.
 
-    Returns ``{path, content, truncated, size_bytes, exists}``:
-    ``exists=False`` (with empty content) when the ``MISSING_MARKER`` was
-    printed; otherwise the ``stat`` size and the ``head -c`` content.
-    ``truncated`` is ``True`` when the on-disk size exceeds the byte budget
-    (the content was capped). A ``stat`` failure (``-1``) leaves
-    ``size_bytes=None`` and ``truncated`` decided by the content length.
+    ``exists`` is ``False`` when the ``MISSING_MARKER`` was printed.
+    ``real_path`` is the path of the opened file as the host reported it,
+    or ``None`` when nothing was opened (missing or unreadable file);
+    then ``content`` is empty and ``size_bytes`` is ``None``.
+    """
+
+    exists: bool
+    real_path: str | None
+    size_bytes: int | None
+    content: str
+
+
+def parse_read_output(stdout: str, confined_path: str) -> ReadOutput:
+    """Parse the read command's output, or raise when it is unclear.
+
+    After the markers, the output is the reported path line, the size
+    line, the ``CONTENT_MARKER`` line and the content. Anything else (no
+    marker, a missing or extra line before it) raises
+    :class:`PathConfinementError`: content without a clear path is never
+    returned. A ``stat`` failure (``-1``) leaves ``size_bytes=None``.
     """
     if stdout.startswith(MISSING_MARKER):
-        return {
-            "path": confined_path,
-            "content": "",
-            "truncated": False,
-            "size_bytes": None,
-            "exists": False,
-        }
+        return ReadOutput(exists=False, real_path=None, size_bytes=None, content="")
+    if stdout.startswith(UNREADABLE_MARKER):
+        return ReadOutput(exists=True, real_path=None, size_bytes=None, content="")
 
     marker_at = stdout.find(CONTENT_MARKER)
-    if marker_at == -1:
-        # No content marker -- the command failed before emitting it.
-        return {
-            "path": confined_path,
-            "content": "",
-            "truncated": False,
-            "size_bytes": None,
-            "exists": True,
-        }
+    header_lines = stdout[:marker_at].split("\n") if marker_at != -1 else []
+    if len(header_lines) != 3 or header_lines[2] != "" or not header_lines[0]:
+        raise PathConfinementError(f"could not tell which file was opened for {confined_path!r}")
+    real_path, size_line, _ = header_lines
 
-    size_line = stdout[:marker_at].strip()
     content = stdout[marker_at + len(CONTENT_MARKER) :]
     content = content[1:] if content.startswith("\n") else content
 
@@ -196,19 +193,35 @@ def parse_file_read_output(stdout: str, confined_path: str, max_bytes: int) -> d
         size_bytes = parsed if parsed >= 0 else None
     except ValueError:
         size_bytes = None
+    return ReadOutput(exists=True, real_path=real_path, size_bytes=size_bytes, content=content)
 
-    if size_bytes is not None:
-        truncated = size_bytes > max_bytes
-    else:
-        truncated = len(content.encode("utf-8", "replace")) >= max_bytes
 
-    return {
-        "path": confined_path,
-        "content": content,
-        "truncated": truncated,
-        "size_bytes": size_bytes,
-        "exists": True,
-    }
+async def _read_opened_file(
+    connector: LinuxSshConnector,
+    target: Target,
+    cmd: str,
+    confined_path: str,
+    operator: Operator | None,
+) -> ReadOutput:
+    """Run the read command and return its output once the opened file passed the check.
+
+    The path the host reports for the opened file goes through
+    :func:`confine_read_path`, so the file that is returned is the file
+    that was checked. A file deleted while it was open (the kernel marks
+    its path ``(deleted)``), an error exit or an unclear answer raise
+    :class:`PathConfinementError`, and the content never leaves this
+    function.
+    """
+    proc = await connector._run_command(target, cmd, operator=operator)
+    if getattr(proc, "exit_status", 0) != 0:
+        raise PathConfinementError(f"the read of {confined_path!r} did not finish cleanly")
+    stdout = getattr(proc, "stdout", None)
+    output = parse_read_output(stdout if isinstance(stdout, str) else "", confined_path)
+    if output.real_path is not None:
+        if output.real_path.endswith(" (deleted)"):
+            raise PathConfinementError(f"the file opened for {confined_path!r} was deleted")
+        confine_read_path(output.real_path)
+    return output
 
 
 async def linux_file_read(
@@ -220,22 +233,28 @@ async def linux_file_read(
     """Handler for ``linux.file.read`` -- read an allow-listed file's content.
 
     Confines the operator-named ``path`` under the read-root allow-list
-    (traversal rejected before any SSH), checks the real path the host
-    reports, then ``head -c``-caps the content of the real path at
-    ``max_bytes`` (default 64 KiB, hard cap 1 MiB). Returns a scalar dict;
+    (traversal rejected before any SSH), then runs one command that opens
+    the file, reports the path of the opened file and ``head -c``-caps its
+    content at ``max_bytes`` (default 64 KiB, hard cap 1 MiB). The content
+    is returned only when the reported path passes the same check. Returns a scalar dict;
     a missing file is reported with ``exists=False`` rather than an error,
     so a missing first-boot sentinel is a legible day-0 signal.
     """
     confined = confine_read_path(params["path"])
     max_bytes = _bounded_max_bytes(params.get("max_bytes"))
-    real_path = await _real_read_path(connector, target, confined, operator)
-    if real_path is None:
-        return parse_file_read_output(MISSING_MARKER, confined, max_bytes)
-    cmd = build_file_read_command(real_path, max_bytes)
-    proc = await connector._run_command(target, cmd, operator=operator)
-    raw = (proc.stdout or "") if hasattr(proc, "stdout") else ""
-    stdout = raw if isinstance(raw, str) else ""
-    return parse_file_read_output(stdout, confined, max_bytes)
+    cmd = build_file_read_command(confined, max_bytes)
+    output = await _read_opened_file(connector, target, cmd, confined, operator)
+    if output.size_bytes is not None:
+        truncated = output.size_bytes > max_bytes
+    else:
+        truncated = len(output.content.encode("utf-8", "replace")) >= max_bytes
+    return {
+        "path": confined,
+        "content": output.content,
+        "truncated": truncated if output.real_path is not None else False,
+        "size_bytes": output.size_bytes,
+        "exists": output.exists,
+    }
 
 
 async def linux_log_tail(
@@ -247,22 +266,18 @@ async def linux_log_tail(
     """Handler for ``linux.log.tail`` -- tail an allow-listed log file.
 
     Confines the operator-named ``path`` under the read-root allow-list,
-    checks the real path the host reports, then runs ``tail -n <lines>``
-    (default 200, hard cap 10000) on the real path. Returns
+    then runs one command that opens the file, reports the path of the
+    opened file and runs ``tail -n <lines>`` (default 200, hard cap 10000)
+    on it. The rows are returned only when the reported path passes the
+    same check. Returns
     ``{rows, total, path}``; a missing file gives no rows. The row list
     spills to a ``result_query`` handle above the JSONFlux threshold.
     """
     confined = confine_read_path(params["path"])
     lines = _bounded_lines(params.get("lines"))
-    real_path = await _real_read_path(connector, target, confined, operator)
-    if real_path is None:
-        return {**normalise_json_rows([]), "path": confined}
-    cmd = build_log_tail_command(real_path, lines)
-    proc = await connector._run_command(target, cmd, operator=operator)
-    raw = (proc.stdout or "") if hasattr(proc, "stdout") else ""
-    stdout = raw if isinstance(raw, str) else ""
-    rows = stdout.splitlines()
-    return {**normalise_json_rows(rows), "path": confined}
+    cmd = build_log_tail_command(confined, lines)
+    output = await _read_opened_file(connector, target, cmd, confined, operator)
+    return {**normalise_json_rows(output.content.splitlines()), "path": confined}
 
 
 _FILE_READ_OP = LinuxOp(
@@ -274,9 +289,9 @@ _FILE_READ_OP = LinuxOp(
         "the read-root allow-list (``/etc``, ``/var/log``, ``/var/lib``, "
         "``/run``, plus a few named ``/proc`` and ``/sys`` files such as "
         "``/proc/meminfo``); a path outside every root, or one using ``..`` "
-        "traversal, is rejected before any SSH command runs. The real path "
-        "the host reports (symlinks followed) must pass the same check, and "
-        "files that hold keys, tokens or password hashes are refused. "
+        "traversal, is rejected before any SSH command runs. The path of the "
+        "file the host opened (symlinks followed) must pass the same check, "
+        "and files that hold keys, tokens or password hashes are refused. "
         "Content is capped at ``max_bytes`` (default 65536, hard cap "
         "1048576) via ``head -c``. Returns ``{path, content, truncated, "
         "size_bytes, exists}``; a missing file reports ``exists=false`` "
@@ -348,7 +363,7 @@ _LOG_TAIL_OP = LinuxOp(
         "Runs ``tail -n <lines>`` (default 200, hard cap 10000) over a log "
         "file whose path is confined under the read-root allow-list; a path "
         "outside every root, or using ``..`` traversal, is rejected before "
-        "any SSH command runs. The real path the host reports (symlinks "
+        "any SSH command runs. The path of the file the host opened (symlinks "
         "followed) must pass the same check, and files that hold keys, "
         "tokens or password hashes are refused. Returns ``{rows, total, path}`` where each "
         "row is one log line. Above the JSONFlux threshold (50 rows / 4 KB) "

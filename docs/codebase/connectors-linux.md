@@ -224,15 +224,22 @@ The check runs twice:
 
 1. On the typed path, **before any SSH command is constructed**. A refused
    path never reaches the host.
-2. On the **real path** the host reports. The handler first runs
-   `if [ -e <path> ]; then realpath -- <path>; else <missing marker>; fi`
-   (`build_real_path_command`). `realpath` follows every symlink. The real
-   path goes through `confine_read_path` again, and the read then runs on
-   the real path only. So a symlink under `/var/lib` that points at
-   `/root/...`, at a `/proc/<pid>` file or at `/etc/shadow` is refused.
-   An unclear answer (error exit, no line, more than one line) is refused
-   too. A missing file gives `exists=false` (`file.read`) or no rows
-   (`log.tail`) without a second command.
+2. On the **path of the file the host opened**. The read is one command
+   (`build_file_read_command` / `build_log_tail_command`): the shell opens
+   the file once (`3<<path>`), prints the path the kernel reports for that
+   open file (`readlink /proc/self/fd/3`, every symlink followed) and its
+   size, then reads from the same open file (`head -c` or `tail -n` on
+   `<&3`). The handler runs `confine_read_path` on the reported path and
+   returns the content only when it passes. Path and content come from
+   one open file, so a change of the path or of a parent directory after
+   the open cannot swap in another file, and a file swapped in before the
+   open is reported under its own path. So a symlink under `/var/lib`
+   that points at `/root/...`, at a `/proc/<pid>` file or at
+   `/etc/shadow` is refused. A file deleted while open (the kernel marks
+   its path `(deleted)`), an error exit and an unclear answer (no
+   reported path, more than one line) are refused too. A missing file
+   gives `exists=false` (`file.read`) or no rows (`log.tail`); a file
+   that exists but cannot be opened gives `exists=true` with no content.
 
 Every refusal raises `PathConfinementError`. A root that is itself a
 symlink on a host (for example `/var/log` pointing elsewhere) is refused

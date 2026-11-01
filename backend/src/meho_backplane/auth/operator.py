@@ -95,9 +95,12 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
   only fetch its own assignment and submit its own results.
 * ``check_runner_dispatch`` — internal-only marker that this operator is the
   in-process check-runner's synthetic *background-dispatch* identity
-  (#2757). Set to ``True`` **solely** by
-  :func:`~meho_backplane.checks.runner._sensor_operator`; defaults ``False``
-  for every other construction site (fail-closed). It selects the dedicated
+  (#2757). Set to ``True`` by
+  :func:`~meho_backplane.checks.runner._sensor_operator` and by the inbound
+  event intake's :func:`~meho_backplane.events.ingest.service._build_ingest_operator`
+  (both present the check runner's token, so both log in under its role);
+  defaults ``False`` for every other construction site (fail-closed). It
+  selects the dedicated
   :attr:`~meho_backplane.settings.Settings.vault_check_runner_role`, when one
   is configured, at the single Vault JWT-login site
   (:func:`~meho_backplane.auth.vault.vault_client_for_operator`) so an

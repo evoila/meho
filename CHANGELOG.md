@@ -247,13 +247,20 @@ first.
 - Operations that name `gsm:` secrets in parameters: list the allowed
   Google projects in `GSM_PARAM_ALLOWED_PROJECTS`, comma-separated
   (#5511).
-- Existing Keycloak realm: run `meho admin keycloak bootstrap-clients`
-  again, or turn on the standard flow, PKCE `S256` and the redirect
-  address `http://127.0.0.1:*` on the `meho-cli` client by hand. Until
-  then, approve in the web interface (#5399).
-- Run the catalog ingest of `vmware/9.0` and `vmware/8.0` again, so the
-  new approval levels of generic vCenter calls take effect (#5441,
-  #5525).
+- Existing Keycloak realm: on each client that people use for
+  `meho login` (`meho-cli` by default), turn on the standard flow, PKCE
+  `S256` and the redirect address `http://127.0.0.1:*`, for example
+  with the operation `keycloak.client.update`. Do not run
+  `meho admin keycloak bootstrap-clients` for this: on an existing
+  realm it also rewrites the `meho-cli` and `meho-mcp` clients and
+  their tenant and role mappers. Until then, approve in the web
+  interface (#5399, #5538).
+- Load the generic vCenter connectors `vmware-rest-9.0` and
+  `vmware-rest-8.0` again with `meho connector ingest` and the same API
+  files you used before, so the new approval levels of generic vCenter
+  calls take effect. `--catalog vmware/9.0` and `--catalog vmware/8.0`
+  load only a small API file that ships with MEHO: use them only if you
+  loaded that file before (#5441, #5525).
 - Built-in OpenBao (`coreVault.enabled: true`) that you set up by hand:
   first put a root token into the Secret `<release>-core-vault-init`
   (key `token`). The new setup Job takes OpenBao over with it and then

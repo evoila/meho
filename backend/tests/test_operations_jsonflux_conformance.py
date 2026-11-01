@@ -464,6 +464,9 @@ _PARTS_HELD_BACK: dict[str, str] = {
     "installer.cb.sddc.retry": "credential_write: the request carries bring-up passwords.",
     "installer.cb.sddc.start": "credential_write: the request carries bring-up passwords.",
     "installer.cb.validation.start": "credential_write: the request carries bring-up passwords.",
+    "fleet.locker.certificate.import": (
+        "credential_write: the request carries the private key; the answer is one certificate."
+    ),
     "sddc.credential.list": "credential_read: the page lists stored passwords.",
     "sddc.host.commission": "credential_write: the request carries host passwords.",
     "installer.sddc.resources.calculate": (

@@ -469,6 +469,17 @@ def _pod_volume_row(volume: Any) -> dict[str, Any]:
     return {"name": volume.name, "source": source_label}
 
 
+def _image_pull_secret_names(pod_spec: Any) -> list[str]:
+    """Return the names of the Secrets a pod spec pulls its images with.
+
+    Names only: the Secret objects are never read, so no secret content
+    can reach the response.
+    """
+    if pod_spec is None:
+        return []
+    return [ref.name for ref in (pod_spec.image_pull_secrets or []) if ref.name]
+
+
 def pod_info(pod: V1Pod, *, now: datetime | None = None) -> dict[str, Any]:
     """Project a :class:`V1Pod` into the ``k8s.pod.info`` full-detail shape.
 
@@ -526,6 +537,7 @@ def pod_info(pod: V1Pod, *, now: datetime | None = None) -> dict[str, Any]:
         "containers": containers,
         "init_containers": init_containers,
         "volumes": volumes,
+        "image_pull_secrets": _image_pull_secret_names(spec),
         "container_statuses": container_statuses,
         "init_container_statuses": init_container_statuses,
         "conditions": conditions,
@@ -607,8 +619,10 @@ def deployment_info(deployment: V1Deployment, *, now: datetime | None = None) ->
     status = deployment.status
 
     containers: list[dict[str, Any]] = []
+    image_pull_secrets: list[str] = []
     if spec is not None and spec.template is not None and spec.template.spec is not None:
         containers = [_container_row(c) for c in (spec.template.spec.containers or [])]
+        image_pull_secrets = _image_pull_secret_names(spec.template.spec)
 
     strategy_block: dict[str, Any] = {}
     if spec is not None and spec.strategy is not None:
@@ -666,6 +680,7 @@ def deployment_info(deployment: V1Deployment, *, now: datetime | None = None) ->
         "labels": (metadata.labels or {}) if metadata is not None else {},
         "strategy": strategy_block,
         "containers": containers,
+        "image_pull_secrets": image_pull_secrets,
         "status": status_block,
         "conditions": conditions,
     }
@@ -1059,8 +1074,10 @@ K8S_POD_INFO_LLM_INSTRUCTIONS: dict[str, Any] = {
     "output_shape": (
         "Flat dict: {name, namespace, status, node, ip, host_ip, "
         "qos_class, age_seconds, labels, containers, init_containers, "
-        "volumes, container_statuses, init_container_statuses, "
-        "conditions}. ``container_statuses`` carries per-container "
+        "volumes, image_pull_secrets, container_statuses, "
+        "init_container_statuses, conditions}. ``image_pull_secrets`` "
+        "lists the names of the Secrets used to pull the images (names "
+        "only, never the content). ``container_statuses`` carries per-container "
         "{name, image, image_id, ready, restart_count, state, reason, "
         "message, exit_code, last_state, last_reason, last_exit_code} "
         "for unhealthy-container diagnosis. ``image_id`` is the digest "
@@ -1152,7 +1169,10 @@ K8S_DEPLOYMENT_INFO_LLM_INSTRUCTIONS: dict[str, Any] = {
     },
     "output_shape": (
         "Flat dict: {name, namespace, replicas_desired, age_seconds, "
-        "labels, strategy, containers, status, conditions}. ``status`` "
+        "labels, strategy, containers, image_pull_secrets, status, "
+        "conditions}. ``image_pull_secrets`` lists the names of the "
+        "Secrets the pod template pulls its images with (names only, "
+        "never the content). ``status`` "
         "is the live replica breakdown (replicas / ready / available / "
         "updated / unavailable / observed_generation). ``containers`` has "
         "the same per-container shape as k8s.pod.info: each ``env`` entry "
@@ -1286,7 +1306,7 @@ WORKLOAD_OPS: tuple[KubernetesOp, ...] = (
             "habit reads: containers (image / ports / env with its Secret "
             "/ ConfigMap / field source, env_from, resources / volume "
             "mounts), init containers, volumes (name + source "
-            "type), per-container statuses (ready / restart_count / "
+            "type), image pull secret names, per-container statuses (ready / restart_count / "
             "state / running image digest / waiting or terminated "
             "reason, message and exit code), conditions, node "
             "assignment, QoS class. Ambiguous "
@@ -1330,7 +1350,7 @@ WORKLOAD_OPS: tuple[KubernetesOp, ...] = (
             "returns the full template + rollout status: pod-template "
             "containers (image / ports / env with its Secret / ConfigMap "
             "/ field source, env_from, resources / volume mounts), "
-            "strategy block (RollingUpdate's maxSurge / "
+            "image pull secret names, strategy block (RollingUpdate's maxSurge / "
             "maxUnavailable when present), live replica breakdown "
             "(replicas / ready / available / updated / unavailable / "
             "observed_generation), and deployment conditions "

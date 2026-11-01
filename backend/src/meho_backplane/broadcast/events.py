@@ -264,6 +264,12 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # aggregate-only rather than shipping it on the feed.
         "keycloak.user.create",
         "keycloak.user.reset_password",
+        # The AD password set. Same shape as the Keycloak pair: the password
+        # comes from Vault at run time, and params carry only the
+        # ``password_ref`` reference. The pin keeps even that off the feed and
+        # stores the approval input encrypted, and the flight recorder keeps
+        # no body for it.
+        "msad.user.set-password",
         # G-Node/RKE2-T3 #2430 — the RKE2 node-config write op. Its ``patch``
         # param carries key -> value edits, and an RKE2 ``config.yaml`` body
         # holds ``token:`` / ``agent-token:`` join credentials, so a plain
@@ -417,6 +423,22 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # ``vmware.appliance.local_account.policy.set`` sends only expiry
         # numbers and flags, so it is NOT pinned.
         "vmware.appliance.local_account.password.set",
+        # The VCF Installer proxy change and resource calculation. Like
+        # ``vcfa.provider.user.create``, their params carry only Vault paths
+        # (``password_secret_ref`` / ``password_refs``); the passwords are read
+        # in-process and sent only in the request BODY. The pin keeps those
+        # bodies out of traces and collapses the broadcast to aggregate-only.
+        "installer.system.proxy.set",
+        "installer.sddc.resources.calculate",
+        # The two steps of a new vCenter install that send a password (#4394):
+        # the appliance import (the root password, ``root_password_secret_ref``)
+        # and the setup start (the SSO password,
+        # ``sso_admin_password_secret_ref``). The params carry only Vault
+        # paths; the passwords go only into the vCenter request bodies. The
+        # pin keeps those bodies out of the flight recorder and the params out
+        # of the broadcast.
+        "vmware.composite.vcenter.appliance.deploy",
+        "vmware.composite.vcenter.install",
         # The Keycloak login test. Its params carry only a Vault *path*
         # (``password_secret_ref``); the password is read in-process and sent
         # only in the token request BODY, and the token answer carries an
@@ -424,6 +446,14 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # flight-recorder spans, collapses the broadcast to aggregate-only and
         # keeps a waiting approval's params in the encrypted handoff store.
         "keycloak.user.check_login",
+        # The three Cloud Builder changes that send a bring-up spec. Their
+        # params carry only Vault paths (``secrets``); the passwords are read
+        # in-process and go only into the Cloud Builder request BODY. The pin
+        # keeps those bodies out of the flight recorder and the params out of
+        # the broadcast.
+        "installer.cb.validation.start",
+        "installer.cb.sddc.start",
+        "installer.cb.sddc.retry",
     }
 )
 
@@ -1337,7 +1367,7 @@ def is_secret_param_name_lowercased(name: str) -> bool:
     )
 
 
-def _scrub_secret_named_keys(node: Any) -> tuple[Any, bool]:
+def _scrub_secret_named_keys(node: Any, *, hide_numbers: bool = False) -> tuple[Any, bool]:
     """Replace values of secret-named keys; report whether any were found.
 
     The Tier-1 engine matches *labelled* secret shapes inside string
@@ -1354,16 +1384,19 @@ def _scrub_secret_named_keys(node: Any) -> tuple[Any, bool]:
     never ``bind_secret_id=true`` or ``secret_id_ttl=3600`` -- the
     Vault AppRole config attributes that would otherwise collapse a
     vetted full-detail write broadcast to aggregate on every dispatch.
+    With *hide_numbers* a number under a secret-shaped key is replaced
+    too (a PIN or a password stored as a number); booleans and ``None``
+    still pass through.
     """
     if isinstance(node, Mapping):
         found = False
         scrubbed: dict[str, Any] = {}
         for key, value in node.items():
-            if _is_secret_param_name(str(key)) and isinstance(value, (str, Mapping, Sequence)):
+            if _is_secret_param_name(str(key)) and _is_secret_value(value, hide_numbers):
                 scrubbed[str(key)] = _REDACTED_PARAM
                 found = True
                 continue
-            child, child_found = _scrub_secret_named_keys(value)
+            child, child_found = _scrub_secret_named_keys(value, hide_numbers=hide_numbers)
             scrubbed[str(key)] = child
             found = found or child_found
         return scrubbed, found
@@ -1371,14 +1404,21 @@ def _scrub_secret_named_keys(node: Any) -> tuple[Any, bool]:
         items: list[Any] = []
         found = False
         for item in node:
-            child, child_found = _scrub_secret_named_keys(item)
+            child, child_found = _scrub_secret_named_keys(item, hide_numbers=hide_numbers)
             items.append(child)
             found = found or child_found
         return items, found
     return node, False
 
 
-def scrub_secret_named_values(node: Any) -> tuple[Any, bool]:
+def _is_secret_value(value: Any, hide_numbers: bool) -> bool:
+    """True when *value* under a secret-shaped key is replaced."""
+    if isinstance(value, (str, Mapping, Sequence)):
+        return True
+    return hide_numbers and isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def scrub_secret_named_values(node: Any, *, hide_numbers: bool = False) -> tuple[Any, bool]:
     """Key-name-aware secret scrub for a caller-bound dispatch response.
 
     Public entry to :func:`_scrub_secret_named_keys` (the same walk the
@@ -1394,14 +1434,16 @@ def scrub_secret_named_values(node: Any) -> tuple[Any, bool]:
     caller-bound response of a ``credential_read``-classified op by
     default (#2467) so the raw value never reaches the ``call_operation``
     caller / agent transcript; ``params.reveal_secret=true`` opts out.
-    The audit row keeps the raw result regardless (the raw payload is
-    captured before this scrub runs), mirroring the #2172 secret-handler
-    posture. Unlike :func:`scrub_broadcast_params` this does **not** run
-    the Tier-1 engine pass -- the boundary middleware already applied it
-    to the response, so this layer is only the structured-dict
-    key-name complement.
+    The audit row stores a keyed fingerprint in place of each value this
+    scrub hides (:mod:`meho_backplane.operations._secret_values`). Unlike
+    :func:`scrub_broadcast_params` this does **not** run the Tier-1 engine
+    pass -- the boundary middleware already applied it to the response,
+    so this layer is only the structured-dict key-name complement.
+    *hide_numbers* also replaces a number under a secret-shaped key; the
+    dispatch answer and the stored audit copy use it, the params hash and
+    the broadcast params scrub do not.
     """
-    return _scrub_secret_named_keys(node)
+    return _scrub_secret_named_keys(node, hide_numbers=hide_numbers)
 
 
 def scrub_broadcast_params(params: dict[str, Any]) -> tuple[dict[str, Any], bool]:

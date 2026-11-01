@@ -110,6 +110,9 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     # Add a CD drive (dangerous) and unmount the Tools installer (caution).
     "vmware.composite.vm.cdrom.add",
     "vmware.composite.vm.tools.installer.unmount",
+    # Mount and unmount a content-library ISO (both caution).
+    "vmware.composite.vm.cdrom.mount_library_iso",
+    "vmware.composite.vm.cdrom.unmount_library_iso",
     # VM CPU / memory limit + reservation write (#3880) -- caution + approval.
     "vmware.composite.vm.resource_allocation.set",
     "vmware.composite.host.evacuate",
@@ -159,8 +162,15 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.content_library.item.upload",
     # The destructive DRS rule delete; special-cased in the tier assertion below.
     "vmware.composite.cluster.drs_rule.delete",
+    # The DRS group ops: caution member change, destructive delete.
+    "vmware.composite.cluster.drs_group.members.set",
+    "vmware.composite.cluster.drs_group.delete",
     # Licence assign: dangerous + approval (the default tier).
     "vmware.composite.license.assign",
+    # Install a new vCenter (#4394): dangerous + approval.
+    "vmware.composite.vcenter.appliance.deploy",
+    "vmware.composite.vcenter.install",
+    "vmware.composite.vcenter.deployment.answer",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -178,6 +188,8 @@ _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.datastore.file.list",
     # vSAN folder list read (#4022).
     "vmware.composite.datastore.vsan.folder.list",
+    # Orphan folder check across datastores (#3814).
+    "vmware.composite.datastore.orphan_dirs",
     "vmware.composite.network.portgroup.audit",
     # VM CPU / memory limit + reservation read (#3880).
     "vmware.composite.vm.resource_allocation.show",
@@ -330,6 +342,18 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     "vmware.composite.license.assign": (
         "meho_backplane.connectors.vmware_rest.composites._license.license_assign_composite"
     ),
+    "vmware.composite.vcenter.appliance.deploy": (
+        "meho_backplane.connectors.vmware_rest.composites._vcenter_deploy."
+        "vcenter_appliance_deploy_composite"
+    ),
+    "vmware.composite.vcenter.install": (
+        "meho_backplane.connectors.vmware_rest.composites._vcenter_install."
+        "vcenter_install_composite"
+    ),
+    "vmware.composite.vcenter.deployment.answer": (
+        "meho_backplane.connectors.vmware_rest.composites._vcenter_answer."
+        "vcenter_deployment_answer_composite"
+    ),
     "vmware.composite.guest.customization_spec.create": (
         "meho_backplane.connectors.vmware_rest.composites._write."
         "guest_customization_spec_create_composite"
@@ -411,6 +435,14 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
         "meho_backplane.connectors.vmware_rest.composites."
         "_drs_rule_delete.cluster_drs_rule_delete_composite"
     ),
+    "vmware.composite.cluster.drs_group.members.set": (
+        "meho_backplane.connectors.vmware_rest.composites."
+        "_drs_group.cluster_drs_group_members_set_composite"
+    ),
+    "vmware.composite.cluster.drs_group.delete": (
+        "meho_backplane.connectors.vmware_rest.composites."
+        "_drs_group_delete.cluster_drs_group_delete_composite"
+    ),
 }
 
 
@@ -434,8 +466,13 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.device.cdrom": "vm",
     "vmware.composite.vm.cdrom.add": "vm",
     "vmware.composite.vm.tools.installer.unmount": "vm",
+    "vmware.composite.vm.cdrom.mount_library_iso": "vm",
+    "vmware.composite.vm.cdrom.unmount_library_iso": "vm",
     "vmware.composite.vm.resource_allocation.set": "vm",
     "vmware.composite.license.assign": "vmware-licensing",
+    "vmware.composite.vcenter.appliance.deploy": "vcenter_install",
+    "vmware.composite.vcenter.install": "vcenter_install",
+    "vmware.composite.vcenter.deployment.answer": "vcenter_install",
     "vmware.composite.host.evacuate": "host",
     "vmware.composite.host.maintenance.exit": "host",
     "vmware.composite.host.detach_from_vds": "host",
@@ -471,6 +508,8 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.content_library.create": "content_library",
     "vmware.composite.content_library.item.upload": "content_library",
     "vmware.composite.cluster.drs_rule.delete": "cluster",
+    "vmware.composite.cluster.drs_group.members.set": "cluster",
+    "vmware.composite.cluster.drs_group.delete": "cluster",
 }
 
 
@@ -642,10 +681,13 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
         "vmware.composite.vm.resource_allocation.set",
         "vmware.composite.resource_pool.create",
         "vmware.composite.cluster.drs_vm_host_rule.create",
+        "vmware.composite.cluster.drs_group.members.set",
         "vmware.composite.storage_policy.create",
         "vmware.composite.namespace.create",
         "vmware.composite.datastore.dir.create",
         "vmware.composite.vm.tools.installer.unmount",
+        "vmware.composite.vm.cdrom.mount_library_iso",
+        "vmware.composite.vm.cdrom.unmount_library_iso",
         "vmware.composite.vm.snapshot.create",
         "vmware.composite.content_library.create",
         "vmware.composite.content_library.item.upload",
@@ -662,8 +704,9 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
             "vmware.composite.datastore.file.delete",
             "vmware.composite.content_library.delete",
             "vmware.composite.content_library.item.delete",
-            # The DRS rule delete.
+            # The DRS rule delete and the DRS group delete.
             "vmware.composite.cluster.drs_rule.delete",
+            "vmware.composite.cluster.drs_group.delete",
             # The VM snapshot delete.
             "vmware.composite.vm.snapshot.delete",
         ):
@@ -1079,6 +1122,24 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "still_present",
             "timeout",
         },
+        # DRS group delete: the same statuses as the rule delete.
+        "vmware.composite.cluster.drs_group.delete": {
+            "deleted",
+            "unchanged",
+            "invalid_request",
+            "precondition_failed",
+            "still_present",
+            "timeout",
+        },
+        "vmware.composite.cluster.drs_group.members.set": {
+            "updated",
+            "unchanged",
+            "invalid_request",
+            "group_not_found",
+            "names_not_found",
+            "mismatch",
+            "timeout",
+        },
         # Local content-library create + add a file from a URL.
         "vmware.composite.content_library.create": {
             "created",
@@ -1107,6 +1168,28 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "license_not_found",
             "license_ambiguous",
             "asset_not_found",
+        },
+        # Install a new vCenter (#4394): the start answers accepted at once.
+        "vmware.composite.vcenter.install": {
+            "accepted",
+            "already_running",
+            "waiting_for_answer",
+            "already_done",
+            "failed_before",
+            "not_ready",
+            "unknown_state",
+            "not_reachable",
+            "check_failed",
+            "start_failed",
+            "start_unknown",
+        },
+        "vmware.composite.vcenter.deployment.answer": {
+            "accepted",
+            "no_question",
+            "unknown_question",
+            "answer_not_allowed",
+            "answer_failed",
+            "answer_unknown",
         },
     }
     for op_id, expected_values in expected_status_values.items():

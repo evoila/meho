@@ -76,6 +76,7 @@ if TYPE_CHECKING:
 __all__ = [
     "VCENTER_SSO_ADMIN_API_FILE_GET_OP",
     "VMWARE_ALARM_TRIGGERED_LIST_OP",
+    "VMWARE_CLUSTER_LIST_OP",
     "VMWARE_DATACENTER_LIST_OP",
     "VMWARE_FOLDER_LIST_OP",
     "VMWARE_HOST_DATASTORES_OP",
@@ -85,6 +86,8 @@ __all__ = [
     "VMWARE_HOST_VSAN_HEALTH_OP",
     "VMWARE_LICENSE_ASSIGNED_LIST_OP",
     "VMWARE_LICENSE_LIST_OP",
+    "VMWARE_NETWORK_LIST_OP",
+    "VMWARE_NETWORK_PORTGROUP_SHOW_OP",
     "VMWARE_OBJECT_COLLECT_OP",
     "VMWARE_RESOURCE_POOL_LIST_OP",
     "VMWARE_SNAPSHOT_LIST_OP",
@@ -392,9 +395,17 @@ from meho_backplane.connectors.vmware_rest.typed_ops_appliance_local_accounts im
     APPLIANCE_LOCAL_ACCOUNTS_OPS,
     APPLIANCE_LOCAL_ACCOUNTS_WHEN_TO_USE,
 )
-from meho_backplane.connectors.vmware_rest.typed_ops_content_library_find import (  # noqa: E402
+from meho_backplane.connectors.vmware_rest.typed_ops_cluster_list import (  # noqa: E402
+    CLUSTER_LIST_GROUP_KEY,
+    CLUSTER_LIST_WHEN_TO_USE,
+    VMWARE_CLUSTER_LIST_OP,
+)
+from meho_backplane.connectors.vmware_rest.typed_ops_content_library import (  # noqa: E402
     CONTENT_LIBRARY_GROUP_KEY,
+    CONTENT_LIBRARY_OPS,
     CONTENT_LIBRARY_WHEN_TO_USE,
+)
+from meho_backplane.connectors.vmware_rest.typed_ops_content_library_find import (  # noqa: E402
     VMWARE_CONTENT_LIBRARY_FIND_OP,
     VMWARE_CONTENT_LIBRARY_ITEM_FIND_OP,
 )
@@ -434,10 +445,20 @@ from meho_backplane.connectors.vmware_rest.typed_ops_license import (  # noqa: E
     VMWARE_LICENSE_ASSIGNED_LIST_OP,
     VMWARE_LICENSE_LIST_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_network_list import (  # noqa: E402
+    NETWORK_LIST_GROUP_KEY,
+    NETWORK_LIST_WHEN_TO_USE,
+    VMWARE_NETWORK_LIST_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_object_collect import (  # noqa: E402
     OBJECT_COLLECT_GROUP_KEY,
     OBJECT_COLLECT_WHEN_TO_USE,
     VMWARE_OBJECT_COLLECT_OP,
+)
+from meho_backplane.connectors.vmware_rest.typed_ops_portgroup_show import (  # noqa: E402
+    PORTGROUP_SHOW_GROUP_KEY,
+    PORTGROUP_SHOW_WHEN_TO_USE,
+    VMWARE_NETWORK_PORTGROUP_SHOW_OP,
 )
 from meho_backplane.connectors.vmware_rest.typed_ops_resource_pool_list import (  # noqa: E402
     RESOURCE_POOL_LIST_GROUP_KEY,
@@ -463,6 +484,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent import (  # no
     TASKS_RECENT_GROUP_KEY,
     TASKS_RECENT_WHEN_TO_USE,
     VMWARE_TASKS_RECENT_OP,
+)
+from meho_backplane.connectors.vmware_rest.typed_ops_vcenter_deployment_status import (  # noqa: E402
+    DEPLOYMENT_STATUS_GROUP_KEY,
+    DEPLOYMENT_STATUS_WHEN_TO_USE,
+    VMWARE_VCENTER_DEPLOYMENT_STATUS_OP,
 )
 from meho_backplane.connectors.vmware_rest.typed_ops_vm_hardware import (  # noqa: E402
     VM_HARDWARE_GROUP_KEY,
@@ -512,11 +538,16 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     LICENSE_GROUP_KEY: LICENSE_WHEN_TO_USE,
     APPLIANCE_LOCAL_ACCOUNTS_GROUP_KEY: APPLIANCE_LOCAL_ACCOUNTS_WHEN_TO_USE,
     ALARM_TRIGGERED_GROUP_KEY: ALARM_TRIGGERED_WHEN_TO_USE,
+    CLUSTER_LIST_GROUP_KEY: CLUSTER_LIST_WHEN_TO_USE,
     RESOURCE_POOL_LIST_GROUP_KEY: RESOURCE_POOL_LIST_WHEN_TO_USE,
+    NETWORK_LIST_GROUP_KEY: NETWORK_LIST_WHEN_TO_USE,
     FOLDER_LIST_GROUP_KEY: FOLDER_LIST_WHEN_TO_USE,
     # Shared with the content-library composites: the same key and text.
     CONTENT_LIBRARY_GROUP_KEY: CONTENT_LIBRARY_WHEN_TO_USE,
     DATACENTER_LIST_GROUP_KEY: DATACENTER_LIST_WHEN_TO_USE,
+    # Shared with the three install composites: the same key and text.
+    DEPLOYMENT_STATUS_GROUP_KEY: DEPLOYMENT_STATUS_WHEN_TO_USE,
+    PORTGROUP_SHOW_GROUP_KEY: PORTGROUP_SHOW_WHEN_TO_USE,
 }
 
 VMWARE_HOST_USAGE_OP = VmwareTypedOp(
@@ -574,26 +605,7 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
     },
 )
 
-#: The typed ops :class:`VmwareRestConnector` registers at lifespan
-#: startup: ``vmware.host.usage`` (#2257); ``host.network_uplinks`` +
-#: ``host.vsan_health`` (#2258, re-shipped from the former composites);
-#: ``host.storage_devices`` (#3332, per-host raw SCSI devices, vCenter or
-#: standalone-ESXi); ``host.datastores`` (#3373, the datastores mounted on
-#: one host, vCenter or standalone-ESXi); and the incident-survival reads ``vm.info`` +
-#: ``object.collect`` + ``tasks.recent`` (#2300); ``tasks.history``
-#: (#3701, tasks older than the recent list); the SSO Admin API
-#: description read ``vcenter.sso_admin.api_file.get``; the snapshots of
-#: one VM, ``snapshot.list``; the two licence reads ``license.list`` +
-#: ``license.assigned.list`` (keys masked); the four
-#: ``vmware.appliance.local_account.*`` operations (two reads, two changes
-#: that wait for approval); the triggered-alarm list
-#: ``alarm.triggered.list`` (#4383); the VM question read and answer
-#: ``vm.question.get`` / ``vm.question.answer`` (the answer waits for
-#: approval); the resource pool list ``resource_pool.list``; the two
-#: content-library finds ``content_library.find`` + ``content_library.item.find``
-#: (#3550); the datacenter list ``datacenter.list``; and the inventory
-#: folder list ``folder.list``. The tuple shape lets future typed ops
-#: join without touching the registrar.
+#: The typed ops :class:`VmwareRestConnector` registers at lifespan startup.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
@@ -614,10 +626,15 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_VM_QUESTION_GET_OP,
     VMWARE_VM_QUESTION_ANSWER_OP,
     VMWARE_RESOURCE_POOL_LIST_OP,
+    VMWARE_NETWORK_LIST_OP,
     VMWARE_CONTENT_LIBRARY_FIND_OP,
     VMWARE_CONTENT_LIBRARY_ITEM_FIND_OP,
+    VMWARE_CLUSTER_LIST_OP,
     VMWARE_DATACENTER_LIST_OP,
     VMWARE_FOLDER_LIST_OP,
+    *CONTENT_LIBRARY_OPS,
+    VMWARE_VCENTER_DEPLOYMENT_STATUS_OP,
+    VMWARE_NETWORK_PORTGROUP_SHOW_OP,
 )
 
 

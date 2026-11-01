@@ -115,6 +115,7 @@ def _make_entry(**overrides: object) -> AuditEntry:
         "work_ref": None,
         "policy_decision": None,
         "event_class": "legacy_request",
+        "sandbox_mode": False,
         "broadcast_event_id": None,
     }
     defaults.update(overrides)

@@ -89,6 +89,7 @@ from typing import Any, Final
 from sqlalchemy import event, inspect
 from sqlalchemy.orm import Session
 
+from meho_backplane.auth.current_tenant import tenant_role_source_from_context
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.operations._audit import (
@@ -281,13 +282,35 @@ def _fill_request_lineage(kwargs: dict[str, Any]) -> None:
             kwargs[column] = value
 
 
+def _fill_tenant_role_source(kwargs: dict[str, Any]) -> None:
+    """Add the role-source marker of the request to a payload that lacks it.
+
+    A platform admin working in a tenant without a role group there has
+    the marker bound for the whole request (#5239). The wrapper writers
+    read it themselves; a writer that composes its own payload gets it
+    here, so the marker is on the record also when its row is the only one
+    (the wrapper row retired). A value the writer set is kept. The payload
+    is copied, not changed in place: the writer may still hold it.
+    """
+    marker = tenant_role_source_from_context()
+    if not marker:
+        return
+    payload = kwargs.get("payload")
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict) or any(key in payload for key in marker):
+        return
+    kwargs["payload"] = {**payload, **marker}
+
+
 @event.listens_for(AuditLog, "init")
 def _note_classified_record(_target: AuditLog, _args: Any, kwargs: dict[str, Any]) -> None:
     """Record whose row it is when a row with a non-legacy class is built.
 
-    After the cutover the row also inherits the request's lineage (see the
-    module docstring). SQLAlchemy passes ``kwargs`` so that the listener
-    may change it in place before ``__init__`` runs.
+    The row also gets the request's role-source marker when its writer
+    left it out, and after the cutover it inherits the request's lineage
+    (see the module docstring). SQLAlchemy passes ``kwargs`` so that the
+    listener may change it in place before ``__init__`` runs.
     """
     scope = _current_scope.get()
     if scope is None:
@@ -301,6 +324,7 @@ def _note_classified_record(_target: AuditLog, _args: Any, kwargs: dict[str, Any
     ):
         return
     scope.built[_target] = (operator_sub, event_class == AuditEventClass.OPERATION_EXECUTION)
+    _fill_tenant_role_source(kwargs)
     if wrapper_rows_retired():
         _fill_request_lineage(kwargs)
 

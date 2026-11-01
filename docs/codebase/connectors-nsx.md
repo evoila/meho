@@ -3,8 +3,42 @@
 ## Overview
 
 The `nsx` connector is the hand-rolled `HttpConnector` subclass that
-dispatches NSX REST operations under the
-`(product="nsx", version="9.0", impl_id="nsx-rest")` registry triple.
+dispatches NSX REST operations. It has **two implementations**, one per
+NSX API generation (#4396):
+
+| Connector id | Class | Serves | Version band |
+|---|---|---|---|
+| `nsx-rest-9.0` | `NsxConnector` (`connector.py`) | NSX 9.x (VCF 9) | `>=9.0,<10.0` |
+| `nsx-rest-4.2` | `Nsx4Connector` (`connector_4x.py`) | NSX 4.0, 4.1, 4.2 | `>=4.0,<9.0` |
+
+**Which one a target gets.** The resolver reads the target's detected
+version (the `node_version` that `GET /api/v1/node` reports, or a version
+the operator set on the target) and picks the class whose band holds it:
+
+- NSX 4.1 or 4.2 (for example `4.2.1.0.0.24304122`) -> `nsx-rest-4.2`.
+- NSX 9.0 or 9.1 (for example `9.1.0.0.25318225`) -> `nsx-rest-9.0`.
+- No detected version yet -> `nsx-rest-9.0`. Only the 9.x class
+  registers the `("nsx", "", "")` wildcard.
+
+The bands do not overlap, so a versioned target always matches exactly
+one class. The dispatcher picks the class by the target's version, **not**
+by the connector id the caller names: calling `nsx-rest-9.0` against a 4.2
+target runs on `Nsx4Connector`. Both share `product="nsx"` and
+`impl_id="nsx-rest"`, the same shape as `vmware-rest-8.0` /
+`vmware-rest-9.0`.
+
+**Why two.** The API differs by generation: transit gateways came with
+NSX 9.0 and the Virtual Network Appliance with 9.1, and many paths changed
+shape (VPCs already exist in 4.2). One implementation per generation lets
+each one get its own operations and its own spec reconcile lane, per
+`docs/decisions/versioned-connector-dual-impl.md`. Today `Nsx4Connector`
+is a thin subclass: the session login, the fingerprint and the ten typed
+reads use the same paths on NSX 4.1, 4.2 and 9.x, so it changes only the
+version identity and the band. Both classes register the same ten typed
+reads (same op ids) under their own triple, so both dispatch on a fresh
+boot. The dispatcher binds the inherited handlers to the resolved
+`Nsx4Connector` instance, which has its own session cache.
+
 G3.5-T1 (#613) shipped the skeleton -- session-cookie / XSRF auth,
 fingerprint, probe, and the G0.6 dispatch shim. G3.5-T2 (#614) added an
 ingested read-enable surface for the NSX read core. T7 (#2358, Initiative
@@ -81,26 +115,26 @@ probe path (which the dispatcher does not drive).
 **VCF-9 version renumber (#1530).** NSX-T 4.x was renumbered onto the
 VCF train at VCF 9.0 -- a live VCF-9 appliance reports NSX 9.0.x and
 the vendor spec carries `info.version` in the 9.x scheme (observed
-`9.1.0.0`). The class pin tracks the VCF-9-aligned `"9.0"` line and
-`supported_version_range` was widened to `">=4.0,<10.0"` so a single
-class covers both the standalone NSX-T 4.x line and the VCF-9 9.x
-line. Dispatch and the ingest version-range pre-flight key on the
-`SpecifierSet`, not the class pin, so the one class resolves every
-label in the band. Same renumber posture `VmwareRestConnector` took
-for the vSphere 8.x -> 9.0 jump.
+`9.1.0.0`). The 9.x class pin tracks the VCF-9-aligned `"9.0"` line.
+Until #4396 one class covered `">=4.0,<10.0"`; now the 4.x line has its
+own class (see the table above). The ingest version-range pre-flight
+takes the union of every class with `impl_id="nsx-rest"`, so an ingest
+label anywhere in `>=4.0,<10.0` is still accepted.
 
 Source: `backend/src/meho_backplane/connectors/nsx/`.
 
 ## Key types
 
-- **`NsxConnector`** (`connector.py`) -- `HttpConnector` subclass.
-  Class attributes: `product="nsx"`, `version="9.0"`,
-  `impl_id="nsx-rest"`, `supported_version_range=">=4.0,<10.0"`,
-  `priority=1`. The version pin tracks the VCF-9-aligned product line
-  (#1530); the widened range keeps the standalone NSX-T 4.x line
-  dispatchable through the same class. The priority outranks a future
-  `GenericRestConnector` auto-shim (priority=0) defensively if both
-  somehow register for the same triple.
+- **`NsxConnector`** (`connector.py`) -- `HttpConnector` subclass, the
+  NSX 9.x implementation. Class attributes: `product="nsx"`,
+  `version="9.0"`, `impl_id="nsx-rest"`,
+  `supported_version_range=">=9.0,<10.0"`, `priority=1`. The version
+  pin tracks the VCF-9-aligned product line (#1530). The priority
+  outranks a future `GenericRestConnector` auto-shim (priority=0)
+  defensively if both somehow register for the same triple.
+- **`Nsx4Connector`** (`connector_4x.py`) -- the NSX 4.x implementation,
+  a thin subclass of `NsxConnector` with `version="4.2"` and
+  `supported_version_range=">=4.0,<9.0"`. Everything else is inherited.
 - **`NsxTargetLike`** (`session.py`) -- runtime-checkable Protocol
   capturing the minimum target shape the connector reads: `name`,
   `host`, `port`, `secret_ref`, `auth_model`. Replaced by the
@@ -122,7 +156,12 @@ Source: `backend/src/meho_backplane/connectors/nsx/`.
   plus the derived `connector_id` slug (`"nsx-rest-9.0"`). `NsxConnector`
   pins the same triple as class attributes; the constants give acceptance /
   typed-read / VCF-9-ingest tests one importable source of truth. Relocated
-  here from the retired `core_ops` module in #2358.
+  here from the retired `core_ops` module in #2358. `NSX4_VERSION` /
+  `NSX4_CONNECTOR_ID` (`"4.2"` / `"nsx-rest-4.2"`) are the 4.x pair.
+- **`register_nsx_typed_operations` / `register_nsx4_typed_operations`**
+  (`typed_ops.py`) -- the two typed-op registrars. Both upsert every op in
+  `NSX_TYPED_OPS`, under `nsx-rest-9.0` and `nsx-rest-4.2`. A new op added
+  to `NSX_TYPED_OPS` lands on both implementations.
 - **Ingested browse breadth** -- the reads outside the typed set
   (tier-0 gateways, distributed-firewall
   policies + rules, and the wider NSX catalog) land as ordinary
@@ -141,16 +180,17 @@ Source: `backend/src/meho_backplane/connectors/nsx/`.
 1. Lifespan calls `_eager_import_connectors()` in
    `meho_backplane/connectors/registry.py`, which walks every
    `connectors/<product>/` subpackage in name-sorted order.
-2. Importing `meho_backplane.connectors.nsx` triggers the
-   module-level
-   `register_connector_v2(product="nsx", version="9.0", impl_id="nsx-rest", cls=NsxConnector)`
-   call.
-3. The registry's v2 table now resolves `("nsx", "9.0", "nsx-rest")`
-   to `NsxConnector`. The G0.7 auto-shim's idempotency check (in
-   `ensure_connector_class_registered`, once #408's pipeline lands
-   in main) no-ops on subsequent ingests against the same triple.
-   The resolver binds a target by `supported_version_range`
-   membership, so a 4.x or 9.x fingerprinted target both bind here.
+2. Importing `meho_backplane.connectors.nsx` registers three keys:
+   `("nsx", "9.0", "nsx-rest")` -> `NsxConnector`,
+   `("nsx", "4.2", "nsx-rest")` -> `Nsx4Connector`, and the
+   `("nsx", "", "")` wildcard -> `NsxConnector`. It also queues both
+   typed-op registrars.
+3. The G0.7 auto-shim's idempotency check (in
+   `ensure_connector_class_registered`) no-ops on subsequent ingests
+   against the same triple. The resolver binds a target by
+   `supported_version_range` membership: a 4.x target binds to
+   `Nsx4Connector`, a 9.x target to `NsxConnector`. Pinned by
+   `backend/tests/test_connectors_nsx_dual_impl_resolution.py`.
 
 ### Per-target session
 
@@ -224,7 +264,7 @@ instead of hammering NSX's audit log.
 `execute(target, op_id, params)` synthesises a minimal `Operator`
 (nil-UUID tenant_id + `sub="system:nsx-rest-connector-shim"`) and
 delegates to `meho_backplane.operations.dispatch` with
-`connector_id="nsx-rest-9.0"`. Pre-G0.6 chassis routes that still
+`connector_id="nsx-rest-9.0"` (`"nsx-rest-4.2"` on `Nsx4Connector`). Pre-G0.6 chassis routes that still
 invoke `Connector.execute` directly reach the dispatcher through
 this shim; post-G0.6 callers (the `/api/v1/operations/call` route,
 MCP `call_operation`, the CLI verbs once #615 lands) construct a
@@ -354,7 +394,11 @@ The hand-curated ingested-enable apparatus (the `core_ops.py` module with its
   op is translated to the spec's under-basePath modeling via the
   lane's `_SPEC_MODELED_OP_IDS` map. Activation record + first-run
   findings: the `nsx-9.0` entry of
-  `docs/decisions/spec-reconcile-guards-standard.md`.
+  `docs/decisions/spec-reconcile-guards-standard.md`. The same file has
+  a second lane for `nsx-rest-4.2` (#4396): it checks the same paths
+  against `nsx-4.2/` and `nsx-4.1/` on the shelf (same file names). Those
+  files are not pinned yet, so that lane skips; CI's spec-shelf checkout
+  and required-file list gain them when they are pinned.
 - Precedent: `connectors/vmware_rest/connector.py` (session auth +
   fingerprint + probe + dispatch shim);
   `connectors/vmware_rest/__init__.py` (registration);

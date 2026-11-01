@@ -300,6 +300,14 @@ class MsadConnector(SshConnector):
 
         return await _h(self, target, params, operator)
 
+    async def msad_user_set_password(
+        self, target: Target, params: dict[str, Any], operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``msad.user.set-password``."""
+        from meho_backplane.connectors.msad.ops_password import msad_user_set_password as _h
+
+        return await _h(self, target, params, operator)
+
     async def msad_user_create(
         self, target: Target, params: dict[str, Any], operator: Operator | None = None
     ) -> dict[str, Any]:

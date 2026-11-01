@@ -219,7 +219,7 @@ func newLoginCmd() *cobra.Command {
 			// hard error: the token is already safely stored, and
 			// the operator can supply --backplane explicitly on the
 			// next invocation.
-			if err := auth.SaveConfig(auth.Config{BackplaneURL: backplaneURL}); err != nil {
+			if err := auth.SaveConfig(configAfterLogin(backplaneURL)); err != nil {
 				fmt.Fprintf(errOut,
 					"warning: failed to persist backplane URL to config file: %v\n", err)
 			}
@@ -512,4 +512,16 @@ func humanWriter(stdout, stderr io.Writer, printToken bool) io.Writer {
 // scope so a unit test can pin the exact stdout shape.
 func printAccessToken(w io.Writer, tok string) {
 	fmt.Fprintln(w, tok)
+}
+
+// configAfterLogin is the config `meho login` writes: the backplane
+// URL, plus the tenant chosen with `meho tenants use` when the login
+// is for the same backplane. A new login keeps that choice, because
+// the token still lists all of the person's tenants (#5241).
+func configAfterLogin(backplaneURL string) auth.Config {
+	cfg := auth.Config{BackplaneURL: backplaneURL}
+	if prev, err := auth.LoadConfig(); err == nil && prev.Tenant != nil && sameBackplane(prev.BackplaneURL, backplaneURL) {
+		cfg.Tenant = prev.Tenant
+	}
+	return cfg
 }

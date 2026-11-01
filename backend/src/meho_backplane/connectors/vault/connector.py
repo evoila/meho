@@ -30,7 +30,8 @@ advertising ``extras["vault_role"]`` (and optionally
 governed teardown's ``vault.kv.delete`` runs under a narrow role
 (``meho-teardown``) instead of the shared ``meho-mcp`` identity; a
 target naming neither key keeps today's settings-global role byte-for-
-byte. The KV/auth handlers resolve this off the threaded ``Target`` via
+byte. The KV, auth, policy, identity and token handlers resolve this off
+the threaded ``Target`` via
 :func:`~meho_backplane.connectors.vault.target_auth.vault_client_for_target`.
 ``probe``/``fingerprint`` still accept ``Target | None`` and ignore the
 value entirely — ``/sys/health`` is unauthenticated, so no role

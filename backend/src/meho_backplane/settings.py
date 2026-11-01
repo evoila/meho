@@ -329,9 +329,10 @@ class Settings(BaseModel):
         ``3f0c...:lab-a:Operators``; ``verify_jwt`` reads the list into
         :attr:`~meho_backplane.auth.operator.Operator.tenants`. The claim
         is optional: no claim means an empty list. Bad entries are left
-        out and logged. Nothing uses the list yet; the current tenant
-        still comes from ``jwt_tenant_claim_name``. See
-        ``docs/decisions/2026-10-28-several-tenants-per-person.md``.
+        out and logged. When the list is not empty, the current tenant is
+        picked from it per request (``Meho-Tenant`` header, #5239) and
+        ``jwt_tenant_claim_name`` / ``jwt_tenant_role_claim_name`` are not
+        used. See ``docs/decisions/2026-10-28-several-tenants-per-person.md``.
     jwt_tenant_role_claim_name:
         Name of the JWT claim that carries the operator's
         :class:`~meho_backplane.auth.operator.TenantRole`. Default
@@ -349,7 +350,9 @@ class Settings(BaseModel):
         claim and refuses a token that names two or more of these
         groups with ``401 multiple_role_groups`` (#4594). A token with
         no ``groups`` claim (service accounts, agents, check runners) is
-        not checked. A name with and without a leading ``/`` is the
+        not checked, and neither is a token with a ``meho_tenants`` list:
+        that token gets the one-group-per-tenant check instead (#5239).
+        A name with and without a leading ``/`` is the
         same group, because the group-membership mapper can send full
         group paths. Override with ``JWT_ROLE_GROUPS`` (comma-separated)
         when a site renames the groups; a blank value keeps the default.
@@ -1159,10 +1162,19 @@ class Settings(BaseModel):
         pending request is never a privilege escalation.
     fresh_sign_in_max_age_seconds:
         How old a person's sign-in may be for an action that needs a
-        fresh sign-in (#4711): turning approval off for an operation over
-        REST. The check reads the token's ``auth_time`` claim; see
+        fresh sign-in: turning approval off for an operation over REST
+        (#4711), and approving a waiting change on the command line or
+        REST (#3979). The check reads the token's ``auth_time`` claim; see
         :mod:`meho_backplane.auth.fresh_sign_in`. Default ``300`` (five
         minutes). Set via ``FRESH_SIGN_IN_MAX_AGE_SECONDS``.
+    approval_one_time_code_acr_values:
+        The ``acr`` values that mean "the person entered a one-time code
+        from their authenticator app" (#3979). An approve whose token
+        carries one of them, with a recent ``auth_time``, is recorded as a
+        one-time code approval. Empty by default (off): then every approve
+        on the command line or REST counts as a fresh sign-in. An ``acr``
+        alone never replaces a recent ``auth_time``. Comma-separated, via
+        ``APPROVAL_ONE_TIME_CODE_ACR_VALUES``.
     approval_allow_delegated_decision:
         Lab-class switch for **delegated** approval decisions (#3693).
         A delegated decision is an approve or reject whose ``reason``
@@ -1467,6 +1479,15 @@ class Settings(BaseModel):
     gsm_wif_subject_token_type: str = Field(
         default="urn:ietf:params:oauth:token-type:jwt", min_length=1
     )
+    # Google Cloud projects whose Secret Manager secrets an operation may
+    # name in a parameter (for example ``password_secret_ref:
+    # gsm:<project>/<secret>``). Comma-separated project ids, whitespace
+    # ignored. Empty (the default) refuses every ``gsm:`` secret named in a
+    # parameter, and on a ``credentialBackend=gsm`` install every schemeless
+    # one too. A target's own ``secret_ref`` is not affected. Read through
+    # :attr:`gsm_param_allowed_project_set`. Set via
+    # ``GSM_PARAM_ALLOWED_PROJECTS``.
+    gsm_param_allowed_projects: str = Field(default="")
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -1665,8 +1686,11 @@ class Settings(BaseModel):
     # False is fail-closed: production refuses them.
     approval_allow_delegated_decision: bool = False
     # #4711 -- how old a sign-in may be for an action that needs a person
-    # with a fresh sign-in (turning approval off over REST).
+    # with a fresh sign-in (turning approval off over REST, and with #3979
+    # an approve on the command line or REST).
     fresh_sign_in_max_age_seconds: int = Field(default=300, ge=30, le=3600)
+    # #3979 -- the acr values that mean a one-time code step. Empty = off.
+    approval_one_time_code_acr_values: tuple[str, ...] = ()
     # #4622 -- sandbox mode: a standing grant may also cover deletes, only
     # on an instance for disposable test systems. Both read at boot only.
     sandbox_mode: bool = False
@@ -2210,6 +2234,13 @@ class Settings(BaseModel):
     vault_kv_folder_max_keys: int = Field(default=500, ge=1, le=10000)
 
     @property
+    def gsm_param_allowed_project_set(self) -> frozenset[str]:
+        """The project ids in :attr:`gsm_param_allowed_projects`, as a set."""
+        return frozenset(
+            entry.strip() for entry in self.gsm_param_allowed_projects.split(",") if entry.strip()
+        )
+
+    @property
     def keycloak_discovery_base(self) -> str:
         """Realm base URL for discovery and token calls, without a trailing slash.
 
@@ -2664,6 +2695,7 @@ def get_settings() -> Settings:
             os.environ.get("GSM_WIF_SUBJECT_TOKEN_TYPE", "").strip()
             or "urn:ietf:params:oauth:token-type:jwt"
         ),
+        gsm_param_allowed_projects=os.environ.get("GSM_PARAM_ALLOWED_PROJECTS", "").strip(),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(
@@ -2834,6 +2866,12 @@ def get_settings() -> Settings:
         # #4711 -- how old a sign-in may be for an action that needs a person.
         fresh_sign_in_max_age_seconds=int(
             os.environ.get("FRESH_SIGN_IN_MAX_AGE_SECONDS", "300"),
+        ),
+        # #3979 -- which acr values mean a one-time code step.
+        approval_one_time_code_acr_values=tuple(
+            chunk.strip()
+            for chunk in os.environ.get("APPROVAL_ONE_TIME_CODE_ACR_VALUES", "").split(",")
+            if chunk.strip()
         ),
         # #4622 -- sandbox mode is off unless both settings are set; the
         # boot guards in ``meho_backplane.sandbox_mode`` check them.

@@ -172,3 +172,25 @@ def test_unknown_keyword_falls_back_to_schema_hint() -> None:
     assert entry["expected"] == "value that satisfies the schema keyword 'contains'"
     assert "search_operations" in entry["remediation"]
     assert _SECRET not in json.dumps(entry)
+
+
+def test_pattern_hint_carries_the_field_description_not_the_value() -> None:
+    description = "Switch moid, like 'dvs-31'. Not the name. Read the id with some.read.op."
+    schema = {
+        "type": "object",
+        "properties": {
+            "dvs": {"type": "string", "pattern": "^dvs-[0-9]+$", "description": description}
+        },
+    }
+    (entry,) = validate_params(schema, {"dvs": _BAD})
+    assert entry["validator"] == "pattern"
+    assert entry["remediation"] == (
+        "change the value so it matches the pattern. Field: " + description
+    )
+    assert _SECRET not in json.dumps(entry)
+
+
+def test_pattern_hint_without_description_stays_fixed() -> None:
+    schema = {"type": "object", "properties": {"f": {"type": "string", "pattern": "^x$"}}}
+    (entry,) = validate_params(schema, {"f": _BAD})
+    assert entry["remediation"] == "change the value so it matches the pattern"

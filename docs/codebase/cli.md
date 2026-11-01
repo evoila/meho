@@ -180,6 +180,7 @@ cli/
     │   ├── client.go          # auth-aware wrapper; NewAuthedClient + GetHealth.
     │   ├── validation_error.go # HTTPValidationError.UnmarshalJSON: a 422 `detail` may be a string or a list (#5134).
     │   ├── workref.go         # Meho-Work-Ref header + MEHO_WORK_REF env names, work-ref shape check, context helpers (#3804).
+    │   ├── tenant.go          # Meho-Tenant header + MEHO_TENANT env names, context helpers (#5241).
     │   └── refresh.go         # lazy 401-retry refresh via x/oauth2.
     ├── auth/
     │   ├── devicecode.go      # OAuth 2.0 device-code flow + OIDC discovery.
@@ -188,10 +189,11 @@ cli/
     │   ├── resolver_test.go   # parse matrix + pinned-dial proof + AC#2 device-auth-POST honours-pin test.
     │   ├── store.go           # TokenStore interface + keyring/file backends.
     │   ├── store_test.go      # file-fallback round-trip + 0600-mode test.
-    │   ├── config.go          # backplane-URL config file ($XDG/meho/config.json).
+    │   ├── config.go          # config file ($XDG/meho/config.json): backplane URL + the tenant from `meho tenants use` (#5241).
     │   └── config_test.go     # roundtrip + 0600/0700 mode test.
     ├── cmd/
     │   ├── root.go            # cobra root + dynamic-discovery hook + global --work-ref pre-run (#3804).
+    │   ├── tenant_header.go   # root pre-run that picks the tenant (MEHO_TENANT, else the stored choice) for the Meho-Tenant header (#5241).
     │   ├── root_test.go       # built-in command surface + dynamic-graft test.
     │   ├── version.go         # `meho version` subcommand.
     │   ├── version_test.go    # output-contract test.
@@ -359,6 +361,7 @@ cli/
     ├── output/
     │   ├── audit_receipt.go   # Meho-Audit-Id header reader + the `audit receipt: <id>` line (#4976).
     │   ├── format.go          # human + JSON formatters + structured exit codes.
+    │   ├── tenant.go          # RenderError turns a tenant_not_chosen answer into the plain "pick one" message (#5241).
     │   └── format_test.go     # human/JSON/exit-code pinning.
     └── version/
         ├── version.go         # build-time identity (Version/Commit/Date).
@@ -775,6 +778,20 @@ the operator's preferred backplane URL:
 { "backplane_url": "https://meho.evba.lab" }
 ```
 
+After `meho tenants use <name>` (#5241) the file also holds the chosen
+tenant. A login in one tenant never has the key:
+
+```json
+{
+  "backplane_url": "https://meho.example.test",
+  "tenant": { "id": "3f0c5a52-…", "name": "lab-b" }
+}
+```
+
+`meho login` keeps the `tenant` key when it logs in to the same
+backplane again (`configAfterLogin`), and drops it for another
+backplane.
+
 `meho login` writes this file at the end of a successful flow;
 `meho status` reads it to learn which backplane to query. The file
 contains no secrets, but it lives in the same directory as
@@ -1074,7 +1091,74 @@ that header from one place, so every verb gets it without its own flag.
   that is not a tag; `TestFilterWorkRefOnReadCommands` checks the
   header and the filter on the wire for all six commands.
 - No PersistentPreRun hooks exist below the root. If one is added, it
-  must call `applyWorkRef` too (cobra runs only the nearest hook).
+  must call `applyRequestContext` too (cobra runs only the nearest hook).
+  That root hook runs `applyWorkRef` and then `applyTenant`.
+
+## Current tenant (`meho tenants use`, `MEHO_TENANT`, #5241)
+
+One login can list several tenants. The backplane works in one current
+tenant per request, named by the `Meho-Tenant` header (a tenant name or
+ID). With several tenants and no header it answers `400
+tenant_not_chosen`; a tenant outside the login's list gets `403
+tenant_not_member` (#5239, `docs/codebase/backend.md`). The CLI side:
+
+- `meho tenants use <name|id>` (`internal/cmd/tenants/use.go`) reads the
+  person's tenants from `GET /api/v1/health` **without** the header (the
+  backplane answers it with the list and does no tenant work), checks the
+  argument against that list, and stores `{id, name}` in `config.json`.
+  A login in one tenant is always in that tenant, and the deep check
+  then needs the operator role; on a `403` the list is read from
+  `GET /api/v1/health/live` instead (`AuthedClient.GetLiveness`), which
+  every role may read and which carries the same tenant list. So a
+  read_only login can list and choose its tenant, also when the stored
+  tenant is one it has left.
+  An unknown name exits 1 (`usage_error`) and lists the tenants with the
+  role in each. A login without a tenant list has nothing to choose and
+  gets the same exit code with a plain message.
+- `meho tenants use` without a name lists the tenants and marks the one
+  commands work in now. `--json` prints the `TenantEntry` rows.
+- The root pre-run `applyTenant` (`internal/cmd/tenant_header.go`) puts
+  the tenant into the command context: `MEHO_TENANT` when set, else the
+  stored ID. The stored ID applies only to the backplane it was chosen
+  on: a `--backplane` flag that names another backplane sends none. The
+  commands that send no backplane request (help, completion, version,
+  `doctor --no-network`) skip it.
+- `api.SetTenantHeader` adds the header. The `AuthedClient` request
+  editor calls it for every generated-client call, and the hand-rolled
+  requests (`status --watch`, the online doctor, `event-source`,
+  `targets import`, `broadcast watch`) call it next to
+  `SetWorkRefHeader`. `api.WithTenant(ctx, "")` clears the tenant for
+  one call.
+- `output.RenderError` rewrites any error whose detail carries
+  `tenant_not_chosen` to the code `tenant_not_chosen` and the message
+  "You are in several tenants. Pick one with `meho tenants use <name>`."
+  plus the tenant names. The exit code stays the one the command chose.
+  Every command renders backplane errors through `RenderError`, so one
+  place covers all of them.
+- `meho status` prints the tenant list with the role in each and marks
+  the current one (`formatTenants`, #5239). A stored tenant the person
+  has left gives a `403 tenant_not_member`; status prints the
+  backplane's reason and how to pick another tenant (exit 4). With the
+  read_only role in the current tenant the deep check answers `403
+  insufficient_role`; status then reads `GET /api/v1/health/live` and
+  prints the identity, the tenants, the database state and a note that
+  the other checks need the operator role (`output.PrintLiveness`,
+  exit 0; `--json` prints the `LivenessResponse`). The deep check stays
+  behind the operator role on the backplane.
+- The stored login is unchanged: one token holds all of the person's
+  tenants, so a switch needs no new login. There is no global
+  `--tenant` flag: several commands already use `--tenant` for "a
+  platform admin acts on another tenant". A platform admin who wants a
+  tenant outside their list sets `MEHO_TENANT`; `meho tenants use`
+  accepts only listed tenants.
+- Tests: `internal/cmd/tenant_header_test.go` runs the real root command
+  against a fake backplane with two tenants (read in one tenant, switch,
+  read again with the same token), plus the unknown name, the list, the
+  `MEHO_TENANT` override, another `--backplane`, a person in one
+  tenant, a stale tenant on `meho status` and the switch away from it,
+  `meho status` in a tenant with the read_only role, a read_only person
+  in one tenant, and the login that keeps the choice. The fake backplane
+  refuses the deep check for the read_only role, as the real one does.
 
 ## Audit receipt on writes with no body (#4976)
 
@@ -2616,8 +2700,11 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
 - `meho admin keycloak bootstrap-clients` — idempotently reconcile a
   realm against the recipe:
   1. Public device-code client (default name `meho-cli`,
-     `publicClient=true`, `oauth2DeviceAuthorizationGrantEnabled=true`,
-     every other flow off).
+     `publicClient=true`, `oauth2DeviceAuthorizationGrantEnabled=true`).
+     The standard flow is on too, with `pkce.code.challenge.method=S256`
+     and the one redirect URI `http://127.0.0.1:*`: `meho approvals
+     approve` uses it for the fresh browser sign-in an approval needs
+     (#3979). Implicit, password and service-account flows stay off.
   2. Public authorization-code+PKCE MCP client (default name
      `meho-mcp`, `standardFlowEnabled=true`,
      `pkce.code.challenge.method=S256`, default redirect URIs for the

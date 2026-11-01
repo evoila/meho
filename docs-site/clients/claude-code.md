@@ -135,6 +135,9 @@ The realm still needs the public `meho-mcp` client and its loopback
 redirect URI, exactly as the manual path below (see
 [Keycloak realm setup](../install/keycloak-realm.md)).
 
+If your login has several tenants, also set `MEHO_TENANT` — see
+[Work in one tenant](#work-in-one-tenant).
+
 ### How long the plugin login lasts
 
 The plugin asks for `offline_access` by default (default scopes:
@@ -190,6 +193,36 @@ at session start; restart the session after edits:
 - **`callbackPort`** fixes the loopback port the authorization-code
   callback returns to. It must match a registered redirect URI on the
   `meho-mcp` client (next section).
+
+## Work in one tenant
+
+A Claude Code session works in one MEHO tenant from start to end. If your
+login has only one tenant, set nothing. If it has several, name the tenant
+before the session starts. MEHO reads it from the `Meho-Tenant` header (a
+tenant name or ID). Without it, the session may only call `meho_status`,
+which lists your tenants.
+
+- **With the plugin:** set `MEHO_TENANT` in your shell profile or in the
+  plugin config file. The plugin sends it as the `Meho-Tenant` header.
+
+    ```bash
+    # ~/.config/meho/plugin.env
+    MEHO_TENANT="tenant-b"
+    ```
+
+- **Without the plugin:** add the header to the `meho` server in
+  `.mcp.json`, next to `oauth`:
+
+    ```json
+    "headers": {
+      "Meho-Tenant": "tenant-b"
+    }
+    ```
+
+To work in another tenant, change the value and start a new Claude Code
+session. The first session in a tenant opens a browser login once more.
+More in
+[MCP surface and scopes](mcp-surface-and-scopes.md#which-tenant-a-session-works-in).
 
 ## One-time realm redirect URI
 

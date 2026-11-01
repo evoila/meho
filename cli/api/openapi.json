@@ -12252,7 +12252,7 @@
           "discovery"
         ],
         "summary": "Protected Resource Metadata",
-        "description": "Return the RFC 9728 protected-resource metadata document.\n\nFields per RFC 9728 \u00a73:\n\n* ``resource`` (REQUIRED) \u2014 the canonical MCP server URI clients\n  pass as the ``resource`` parameter in OAuth requests per RFC 8707.\n  Resolved via :func:`~meho_backplane.mcp.auth.mcp_resource_uri`,\n  which prefers an explicit ``MCP_RESOURCE_URI`` setting and falls\n  back to ``f\"{backplane_url}/mcp\"``.\n* ``authorization_servers`` \u2014 the issuer URL exactly as configured\n  in ``KEYCLOAK_ISSUER_URL``. MCP 2025-06-18 \u00a7Authorization Server\n  Discovery requires this to be non-empty. The value is not\n  trailing-slash-normalised: RFC 8414 \u00a73.3 makes clients compare\n  it byte-for-byte with the ``issuer`` in the discovery document,\n  and providers such as authentik publish theirs with a ``/``.\n* ``scopes_supported`` \u2014 v0.2 ships two scopes that downstream\n  Tasks (T3 RBAC filter, T4 reference tool, T5 audit) consume.\n  Conservative: clients that request only ``mcp:read`` can list /\n  inspect but not invoke side-effecting tools.\n* ``bearer_methods_supported`` \u2014 ``[\"header\"]`` only. MCP transport\n  forbids tokens in the URI query (see \u00a7\"Access Token Usage\").\n\nNo authentication is enforced on this endpoint by design: RFC 9728\ndiscovery is the bootstrap step that lets unauthenticated clients\nlearn how to obtain a token. The chassis middleware chain still\nruns \u2014 the request_id stays bound for log correlation, and\nAuditMiddleware skips the row because no ``operator_sub`` is bound\n(the standard unauthenticated-route path).",
+        "description": "Return the RFC 9728 protected-resource metadata document.\n\nFields per RFC 9728 \u00a73:\n\n* ``resource`` (REQUIRED) \u2014 the canonical MCP server URI clients\n  pass as the ``resource`` parameter in OAuth requests per RFC 8707.\n  Resolved via :func:`~meho_backplane.mcp.auth.mcp_resource_uri`,\n  which prefers an explicit ``MCP_RESOURCE_URI`` setting and falls\n  back to ``f\"{backplane_url}/mcp\"``.\n* ``authorization_servers`` \u2014 the issuer URL exactly as configured\n  in ``KEYCLOAK_ISSUER_URL``. MCP 2025-06-18 \u00a7Authorization Server\n  Discovery requires this to be non-empty. The value is not\n  trailing-slash-normalised: RFC 8414 \u00a73.3 makes clients compare\n  it byte-for-byte with the ``issuer`` in the discovery document,\n  and providers such as authentik publish theirs with a ``/``.\n* ``scopes_supported`` \u2014 :data:`~meho_backplane.mcp.auth.MCP_SCOPES_SUPPORTED`:\n  ``mcp:read`` and ``mcp:execute`` for the working surface, plus\n  ``offline_access`` so a client that asks for every listed scope\n  gets a login that renews itself. Clients that request only\n  ``mcp:read`` can list / inspect but not invoke side-effecting\n  tools. ``mcp:admin`` is not listed; a client asks for it on purpose.\n* ``bearer_methods_supported`` \u2014 ``[\"header\"]`` only. MCP transport\n  forbids tokens in the URI query (see \u00a7\"Access Token Usage\").\n\nNo authentication is enforced on this endpoint by design: RFC 9728\ndiscovery is the bootstrap step that lets unauthenticated clients\nlearn how to obtain a token. The chassis middleware chain still\nruns \u2014 the request_id stays bound for log correlation, and\nAuditMiddleware skips the row because no ``operator_sub`` is bound\n(the standard unauthenticated-route path).",
         "operationId": "protected_resource_metadata__well_known_oauth_protected_resource_get",
         "responses": {
           "200": {
@@ -12318,7 +12318,7 @@
           "ui-auth"
         ],
         "summary": "Ui Auth Login",
-        "description": "Mint a PKCE authorization URL and 302 the browser to Keycloak.\n\n``?return_to=<path>`` is the originally-requested path the\noperator was bounced from (the middleware writes it). Declared as\na typed FastAPI ``Query`` parameter so the OpenAPI document\nreflects the real query-string contract; the value is validated\nvia :func:`_safe_return_to` to block open-redirect abuse.",
+        "description": "Mint a PKCE authorization URL and 302 the browser to Keycloak.\n\n``?return_to=<path>`` is the originally-requested path the\noperator was bounced from (the middleware writes it). Declared as\na typed FastAPI ``Query`` parameter so the OpenAPI document\nreflects the real query-string contract; the value is validated\nvia :func:`_safe_return_to` to block open-redirect abuse.\n\n``?reason=session_ended`` is set when a session the browser still\nheld has ended. Then the route answers with a small page: one plain\nline (\"Your session ended. Please sign in again.\") and a \"Sign in\"\nbutton that starts the normal login with the same ``return_to``.\nAny other ``reason`` value is ignored.",
         "operationId": "ui_auth_login_ui_auth_login_get",
         "parameters": [
           {
@@ -12329,6 +12329,16 @@
               "type": "string",
               "nullable": true,
               "title": "Return To"
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Reason"
             }
           }
         ],
@@ -32752,7 +32762,7 @@
           "ended_at"
         ],
         "title": "OperationRunStatusResponse",
-        "description": "Poll response for ``GET /operations/runs/{handle}``.\n\n``result`` carries the full persisted ``OperationResult`` envelope once\nthe run reaches ``succeeded`` (the dropped-response-class fix); ``error``\ncarries the run-crash / reaper reason on a ``failed`` run. Both are\n``None`` while the run is still ``pending`` / ``running``."
+        "description": "Poll response for ``GET /operations/runs/{handle}``.\n\n``result`` carries the full persisted ``OperationResult`` envelope once\nthe run reaches ``succeeded`` (the dropped-response-class fix); ``error``\ncarries the run-crash / reaper reason on a ``failed`` run. Both are\n``None`` while the run is still ``pending`` / ``running``. ``result`` is\nalso ``None`` for anyone but the person who started the run\n(:func:`~meho_backplane.operations.operation_run_service.run_result_visible_to`)."
       },
       "OperationRunSummaryResponse": {
         "properties": {

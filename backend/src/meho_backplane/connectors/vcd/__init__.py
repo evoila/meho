@@ -31,15 +31,16 @@ that ``product`` equals the first hyphen-segment of ``impl_id`` — a hyphenated
 product token would crash the round-trip check at boot.
 
 This package registers a curated **7-op typed read core** (#3057, :mod:`.typed_ops`)
-via :func:`register_typed_op_registrar`, so a vCD target dispatches a
-migration-inventory read on a fresh boot with zero catalog ingest. Because vCD
-publishes no committable OpenAPI (typed, not ingested), a wider ingested breadth
-surface is not a follow-up here — the read core is the connector's surface.
+plus the organisation ops (read one, create, change, delete; :mod:`.org_ops`)
+via :func:`register_typed_op_registrar`, so a vCD target dispatches them on a
+fresh boot with zero catalog ingest. VMware ops are typed by rule, so no
+ingested surface is planned.
 """
 
 from typing import Final
 
 from meho_backplane.connectors.registry import register_connector_v2
+from meho_backplane.connectors.vcd import org_handlers as _org_handlers  # noqa: F401
 from meho_backplane.connectors.vcd.connector import VcloudDirectorConnector
 from meho_backplane.connectors.vcd.session import (
     VcloudDirectorCredentialsLoader,
@@ -87,6 +88,8 @@ register_connector_v2(
 # typed descriptor rows land before the first dispatch — the vCD read core
 # dispatches on a fresh boot with zero catalog ingest (#3057).
 register_typed_op_registrar(register_vcd_typed_operations)
+# ``org_handlers`` is imported above for its side effect: importing it registers
+# the vcd.org.delete preview builder (the approval card of the delete).
 
 __all__ = [
     "VCD_CONNECTOR_ID",

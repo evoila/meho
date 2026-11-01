@@ -21,6 +21,7 @@ the end, then return to the trail.
 | 8 protocol mappers | On both public clients | Make issued tokens carry the claims the backplane validates |
 | 4 default client scopes | On both public clients | Including the `basic` scope that carries the mandatory `sub` claim |
 | `mcp:read`, `mcp:execute`, `mcp:admin` | Client scopes, optional on `meho-mcp` | The scopes MEHO's MCP clients ask for at login |
+| `offline_access` | Built-in client scope, optional on both public clients | The long login that renews itself |
 | `MEHO-Readers`, `MEHO-Operators`, `MEHO-SA-Operators`, `MEHO-Admins`, `MEHO-Approvers` | Top-level groups with attributes | Give each person their tenant and their role |
 | `MEHO-Platform-Admins` | Top-level group with one attribute | Rights across all tenants, for the people who run MEHO |
 | A user in `MEHO-Admins` and `MEHO-Platform-Admins` | Realm user | The first admin: approves device-code logins and operates MEHO |
@@ -74,6 +75,8 @@ In the realm that hosts `meho-backplane`, create a client with:
 | **OAuth 2.0 Device Authorization Grant** | **On** | This *is* `meho login` ([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)). |
 | Valid redirect URIs | `http://127.0.0.1:*` | Only for the fresh sign-in. The CLI listens on 127.0.0.1 with a random port ([RFC 8252](https://www.rfc-editor.org/rfc/rfc8252#section-7.3)). Do not add other addresses. |
 | Web origins | (none) | The CLI is not a web page. |
+| `offline_access` client scope | Assign as **Optional** | `meho login` asks for it by default, so the login renews itself. See [How long each login lasts](#how-long-each-login-lasts). |
+| Client Offline Session Idle (attribute `client.offline.session.idle.timeout`) | **`172800`** seconds (48 hours) | The login ends after 48 hours without use. Without it, the realm's Offline Session Idle applies (30 days by default). Set it on the **Advanced** tab of the client. |
 
 ### Why approve needs a fresh sign-in
 
@@ -270,13 +273,42 @@ differences:
 | Device grant | Off | Not used by MCP clients. |
 | Valid redirect URIs | **Loopback only** — `http://localhost:<port>/callback` (Claude Code) plus `http://localhost:<port>/oauth/callback` and its `http://127.0.0.1:<port>/oauth/callback` twin (the `mcp-remote` shim) | MEHO is internal-only, so there is **no** public `claude.ai` Custom-Connector redirect. `<port>` matches the client's configured callback port; the exact per-client values are in [Connect clients](../clients/index.md). |
 | PKCE challenge method | `S256` | Spec-required for public clients. |
-| `offline_access` client scope | Assign as **Optional** | The MEHO Claude Code plugin, the Claude Desktop bundle, and Claude Code's own HTTP client ask for it, so the login lasts past the realm's SSO idle limit. Keycloak refuses a login that asks for a scope the client does not offer: it answers `invalid_scope` and issues no token. `meho-cli` does not get this scope by default. |
+| `offline_access` client scope | Assign as **Optional** | The MEHO Claude Code plugin, the Claude Desktop bundle, and Claude Code's own HTTP client ask for it, so the login lasts past the realm's SSO idle limit. Keycloak refuses a login that asks for a scope the client does not offer: it answers `invalid_scope` and issues no token. |
 | `mcp:read`, `mcp:execute`, `mcp:admin` client scopes | Create each, then assign as **Optional** | The Claude Code plugin and the Claude Desktop bundle ask for `mcp:read mcp:execute` at every login, and for `mcp:admin` when you turn on the operator tools. Keycloak does not ship these scopes. Create each one under **Client scopes → Create client scope**: protocol **OpenID Connect**, **Include in token scope** On. Then add all three to `meho-mcp` as **Optional**. If one is missing, Keycloak refuses the login with `invalid_scope`. `meho-cli` does not get them. |
 | Client Offline Session Idle (attribute `client.offline.session.idle.timeout`) | **`172800`** seconds (48 hours) | Sets how long the MCP login lasts with no use. Without it, the realm's Offline Session Idle applies (30 days by default). If you set up the client by hand, set it on the **Advanced** tab of the client, or with `kcadm.sh update clients/<client-uuid> -r <realm> -s 'attributes."client.offline.session.idle.timeout"=172800'`. |
 
 The eight mappers and four default scopes apply identically. Which MCP
 client uses which flow — and everything else client-side — is the
 [Connect clients](../clients/index.md) section's territory.
+
+## How long each login lasts
+
+| Client | Who uses it | Login | It ends |
+|---|---|---|---|
+| `meho-cli` | `meho login` (the default) | Long login (`offline_access`). It renews itself. | After 48 hours without use, or after 7 days at most. |
+| `meho-cli` | `meho login --offline=false` | Short login | At the realm's SSO Session Idle limit (30 minutes by default). |
+| `meho-mcp` | The Claude Code plugin, the Claude Desktop bundle, a plain HTTP entry in Claude Code's `.mcp.json` | Long login (`offline_access`). It renews itself. | After 48 hours without use, or after 7 days at most. |
+| `meho-web` | The web console | Browser session | At the realm's SSO Session limits. |
+
+The 7-day maximum is set in MEHO's built-in login setup (realm setting
+**Offline Session Max Limited** On, **Offline Session Max** 7 days). On
+your own Keycloak, turn on **Offline Session Max Limited** to get a
+maximum; Keycloak's default is 60 days.
+
+**To end a person's long login:** in the Keycloak admin console, open
+**Users**, then the person, then the **Consents** tab, and revoke the
+client (`meho-cli` or `meho-mcp`). The next renewal fails, and the CLI
+asks the person to run `meho login` again. With the Admin REST API:
+`DELETE /admin/realms/<realm>/users/<user-id>/consents/<client-id>`.
+The **Offline Access** tab of each client lists all long logins of
+that client.
+
+If the realm does not offer `offline_access` to `meho-cli` (an older
+realm), `meho login` logs in without it. It prints one line: the login
+ends after a short time without use, and how to fix the realm. MEHO's
+built-in login setup gets the scope at the next upgrade. On your own
+Keycloak, assign it as described in Step 2, or run
+`meho admin keycloak bootstrap-clients`.
 
 ### How long an MCP login lasts
 
@@ -302,6 +334,61 @@ Two more things must be true:
   `--mcp-offline-session-idle=<seconds>`. Each run sets the value again,
   so a value changed by hand goes back to 48 hours unless you pass the
   flag.
+- The same command also gives `meho-cli` the scope `offline_access` and a
+  48-hour offline idle limit. Pass `--cli-offline-access=<seconds>` for
+  another limit, or `--cli-offline-access=0` to leave `meho-cli` without
+  a long login. The `=0` run also removes a long login an earlier run
+  gave `meho-cli`; logins that ask for `offline_access` are then refused.
+
+## The web console session
+
+The web console keeps its own session on the MEHO server. It ends after
+**1 hour without use**, and after **10 hours** at most. The console
+renews its login at Keycloak in the background. If Keycloak has ended
+its own session earlier, the renewal fails and the console session ends
+too. So set the realm's SSO session to the same values:
+
+| Realm setting | Value | Where |
+|---|---|---|
+| SSO Session Idle (`ssoSessionIdleTimeout`) | **`3600`** seconds (1 hour) | **Realm settings → Sessions** |
+| SSO Session Max (`ssoSessionMaxLifespan`) | **`36000`** seconds (10 hours) | **Realm settings → Sessions** |
+
+Keycloak's defaults are 30 minutes and 10 hours. With them, the console
+session ends after 30 minutes without use.
+
+When the session ends, the console shows "Your session ended. Please
+sign in again." and a **Sign in** button. After the login, the person is
+back on the same page.
+
+The two MEHO settings are `UI_SESSION_SLIDING_EXTENSION_SECONDS`
+(default `3600`) and `UI_SESSION_ABSOLUTE_LIFETIME_SECONDS` (default
+`36000`). If you change them, change the realm values to match.
+
+**Why the console has no long login.** The console does not ask for
+`offline_access`:
+
+- The console session lives on the MEHO server, not in the browser.
+- A long login would still work after the person logs out in the
+  browser.
+- When the login server remembers the browser, a new login is quick.
+
+**On an existing realm, set the two values once.** The Keycloak that
+ships with the MEHO chart reads the realm file only when it creates the
+realm. Its setup job adds clients and groups, but it does not change
+realm settings. So on a running realm, do one of these:
+
+- In the Keycloak admin console, open **Realm settings → Sessions** and
+  set **SSO Session Idle** to 1 hour and **SSO Session Max** to 10
+  hours.
+- Or use the MEHO Keycloak connector (`keycloak.realm.update`). It asks
+  for an approval. Put the two values in a file and run:
+
+  ```bash
+  cat > realm-sessions.json <<'JSON'
+  {"ssoSessionIdleTimeout": 3600, "ssoSessionMaxLifespan": 36000}
+  JSON
+  meho keycloak realm update --target <your-keycloak-target> -f realm-sessions.json
+  ```
 
 ## Approve-only principal
 
@@ -323,6 +410,124 @@ token. Its **Token Claim Name** must match the backplane's
 `JWT_APPROVER_CLAIM_NAME` (default `approver`). The person keeps a low
 tenant role (`read_only`), so the capability adds approval power
 without adding dispatch power.
+
+## Remember the browser, and passkeys
+
+Two realm settings make a login rare for a person:
+
+- **Remember the browser for 30 days.** The login page shows a
+  **Remember me** box. When the person ticks it, Keycloak keeps the
+  login in that browser for 30 days. A new `meho login`, a Claude Code
+  login or a console login in that browser then asks no password and no
+  code.
+- **Passkeys.** A passkey is a login key kept on the device, for example
+  Touch ID, Windows Hello or a security key. A login with a passkey asks
+  no password and no one-time code. It is faster, and it does not work
+  on a fake login page.
+
+The Keycloak that ships with the MEHO chart has both settings in new
+installs. On your own Keycloak, or on a built-in realm that already runs,
+set them once (see [A realm that already runs](#a-realm-that-already-runs)).
+
+| Where in the Keycloak admin console | Setting | Value |
+|---|---|---|
+| Realm settings → **Login** | Remember me | On |
+| Realm settings → **Sessions** | SSO Session Idle Remember Me | 30 days |
+| Realm settings → **Sessions** | SSO Session Max Remember Me | 30 days |
+| Authentication → Policies → **Webauthn Passwordless Policy** | Enable Passkeys | On |
+| Authentication → Policies → **Webauthn Passwordless Policy** | User verification requirement | Required (the device asks for a PIN or a fingerprint) |
+| Authentication → Policies → **Webauthn Passwordless Policy** | Require discoverable credential | Yes |
+
+### What stays strict
+
+- **Approvals on the command line and through REST still ask every
+  time.** The fresh sign-in for an approval
+  (see [Why approve needs a fresh sign-in](#why-approve-needs-a-fresh-sign-in))
+  sends `prompt=login` and `max_age=0`. Keycloak then asks again, also in
+  a remembered browser: password and code, or a passkey. MEHO also checks
+  the sign-in time in the token. A token from a remembered browser keeps
+  the time of the first sign-in, so a browser cookie alone cannot approve
+  on the command line or through REST.
+- **Approvals in the console accept a click.** In the web interface the
+  click of the signed-in person is the proof. MEHO asks for no new
+  sign-in there. So whoever uses a remembered browser can also approve in
+  the console. See the next section for how to end such a login.
+- **The console keeps its own limit.** MEHO ends a console session after
+  `UI_SESSION_ABSOLUTE_LIFETIME_SECONDS` (12 hours by default). The longer
+  Keycloak login does not make it longer. After that limit the console
+  sends the person to the login page. In a remembered browser, that login
+  asks nothing.
+
+### The risk, and how to end a login
+
+Whoever uses the unlocked computer has the person's login for up to 30
+days. So lock the computer when you leave it. To end a remembered login:
+
+- **The person** logs out in that browser: **Log out** in the MEHO
+  console, or **Sign out** on the Keycloak account page.
+- **An admin** ends all sessions of the person: in the Keycloak admin
+  console, open the person under **Users**, tab **Sessions**, and sign
+  out each session. Or through MEHO with `keycloak.user.logout`
+  (`meho keycloak user logout --username <name>`; it waits for approval).
+
+The next login then asks for the password and the code again.
+
+### Add a passkey
+
+A person adds a passkey on the Keycloak account page
+(`<keycloak-url>/realms/meho/account`), under **Account security →
+Signing in**. On the next login, the person
+clicks **Sign in with Passkey**, or picks the passkey that the browser
+offers in the user name field. When a passkey was used, Keycloak skips the
+one-time code.
+
+A passkey also works for the fresh sign-in of an approval: the password
+page shows **Sign in with Passkey** too. If you set
+`APPROVAL_ONE_TIME_CODE_ACR_VALUES`, MEHO records a passkey approval as a
+normal fresh sign-in, because the code step did not run.
+
+**Lost passkey.** The person logs in with password and code, as before.
+Or an admin removes the passkey in the Keycloak admin console (Users → the
+person → **Credentials** → delete the passkey), and the person adds a new
+one.
+
+### A realm that already runs
+
+Keycloak reads the chart's realm file only at its first start. The
+chart's realm finishing job cannot change realm settings either: its
+account `meho-admin` may only manage clients and users. So a realm that
+already runs gets these settings once, in one of two ways:
+
+- **Through MEHO**, with `keycloak.realm.update` (it waits for
+  approval). Put the values in a file, for example `realm-login.json`:
+
+    ```json
+    {
+      "rememberMe": true,
+      "ssoSessionIdleTimeoutRememberMe": 2592000,
+      "ssoSessionMaxLifespanRememberMe": 2592000,
+      "webAuthnPolicyPasswordlessPasskeysEnabled": true,
+      "webAuthnPolicyPasswordlessUserVerificationRequirement": "required",
+      "webAuthnPolicyPasswordlessRequireResidentKey": "Yes"
+    }
+    ```
+
+    Then run `meho keycloak realm update --target <keycloak-target>
+    --realm meho -f realm-login.json`. MEHO reads the realm, changes only
+    these fields, and writes it back.
+
+- **By hand**, in the Keycloak admin console, with the table above.
+
+**A realm made before Keycloak 26.4.** Keycloak 26.4 added a step to the
+browser flow of new realms: **Condition - credential**, in the sub-flow
+**Browser - Conditional 2FA**. It skips the one-time code after a passkey
+login. An upgrade does not add it to an older realm. Without it, a passkey
+login still asks for the code. Check the browser flow under
+**Authentication**. If the step is missing, add it as Keycloak's
+[passkeys guide](https://www.keycloak.org/docs/latest/server_admin/index.html#passkeys_server_administration_guide)
+shows: a **Condition - credential** step, **Required**, for the credential
+type `webauthn-passwordless`. The built-in Keycloak of the chart started
+with a newer version, so its realm has the step.
 
 ## Wire it into Helm
 

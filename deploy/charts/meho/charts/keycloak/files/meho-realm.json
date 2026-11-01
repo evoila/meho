@@ -5,10 +5,17 @@
   "sslRequired": "external",
   "registrationAllowed": false,
   "resetPasswordAllowed": false,
-  "rememberMe": false,
+  "rememberMe": true,
+  "ssoSessionIdleTimeoutRememberMe": 2592000,
+  "ssoSessionMaxLifespanRememberMe": 2592000,
   "bruteForceProtected": true,
+  "ssoSessionIdleTimeout": 3600,
+  "ssoSessionMaxLifespan": 36000,
   "offlineSessionMaxLifespanEnabled": true,
   "offlineSessionMaxLifespan": 604800,
+  "webAuthnPolicyPasswordlessPasskeysEnabled": true,
+  "webAuthnPolicyPasswordlessUserVerificationRequirement": "required",
+  "webAuthnPolicyPasswordlessRequireResidentKey": "Yes",
   "attributes": {
     "CreateDefaultClientScopes": "true"
   },
@@ -164,7 +171,8 @@
         "pkce.code.challenge.method": "S256",
         "oauth2.device.authorization.grant.enabled": "true",
         "use.refresh.tokens": "true",
-        "client.use.lightweight.access.token.enabled": "false"
+        "client.use.lightweight.access.token.enabled": "false",
+        "client.offline.session.idle.timeout": "172800"
       },
       "redirectUris": [
         "http://127.0.0.1:*"
@@ -178,7 +186,9 @@
         "profile",
         "email"
       ],
-      "optionalClientScopes": [],
+      "optionalClientScopes": [
+        "offline_access"
+      ],
       "protocolMappers": [
         {
           "name": "audience-meho-backplane",

@@ -53,6 +53,12 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _vm_cdrom_tools,
     _write,
 )
+from meho_backplane.connectors.vmware_rest.composites._host_config_ops import (
+    HOST_CONFIG_GOVERNED_SUBOPS,
+)
+from meho_backplane.connectors.vmware_rest.composites._host_membership_ops import (
+    HOST_MEMBERSHIP_GOVERNED_SUBOPS,
+)
 from meho_backplane.connectors.vmware_rest.composites._host_security_ops import (
     HOST_SECURITY_GOVERNED_SUBOPS,
 )
@@ -200,6 +206,10 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,
     # #4394 vCenter install: the deploy, the setup start and the answer.
     **VCENTER_INSTALL_GOVERNED_SUBOPS,
+    # #4349 host membership: add, move, connect, disconnect, remove.
+    **HOST_MEMBERSHIP_GOVERNED_SUBOPS,
+    # Set NTP, DNS and the syslog targets of one host.
+    **HOST_CONFIG_GOVERNED_SUBOPS,
 }
 
 

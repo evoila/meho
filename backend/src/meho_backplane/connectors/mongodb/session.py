@@ -32,11 +32,14 @@ op surface:
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Any
 
 from pymongo import AsyncMongoClient
+from pymongo.errors import ConnectionFailure
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.dial_guard import connect_checked
 from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
 
 __all__ = [
@@ -121,6 +124,21 @@ def assert_read_command(command: str) -> None:
         )
 
 
+def _host_for_pymongo(dial: str) -> str:
+    """Put a checked IPv6 address in brackets, the form pymongo expects."""
+    try:
+        if ipaddress.ip_address(dial).version == 6:
+            return f"[{dial}]"
+    except ValueError:
+        pass
+    return dial
+
+
+async def _ping(client: AsyncMongoClient[dict[str, Any]]) -> None:
+    """Make the lazy client connect now, so a dead address shows up here."""
+    await client.get_database("admin").command("ping")
+
+
 async def connect_client(
     target: Any,
     operator: Operator | None,
@@ -132,8 +150,8 @@ async def connect_client(
     ``directConnection=True`` triages the single addressed node rather than
     resolving a replica-set topology from it, so a read is served by exactly the
     member the operator named (a secondary is not silently redirected to the
-    primary). The client is lazy — no I/O happens until the first command — so
-    the credential read is the only awaited work here.
+    primary). The client is lazy, so it is pinged once here: a dead address
+    shows up now, and the next checked address is tried.
 
     Auth is optional:
 
@@ -150,9 +168,24 @@ async def connect_client(
 
     The resolved password is passed only to the client constructor; it is never
     logged, returned, or placed on an :class:`OperationResult`.
+
+    The client reaches exactly one host, and that host passed the
+    connect-time address check:
+
+    * The target address is checked again here, and the client is given one
+      checked IP address; when that address does not answer, a client for the
+      next checked address is built
+      (:func:`~meho_backplane.connectors._shared.dial_guard.connect_checked`).
+      An IP address is never read as a ``mongodb+srv://`` name, so the driver
+      makes no SRV lookup of its own.
+    * ``directConnection=True`` keeps the client on that one node. The driver
+      does not add replica-set members it learns from the server.
+    * A host name trusted verbatim on the allowlist is dialed by name, so it
+      must be one plain host: a connection string or a seed list is refused.
+    * pymongo does not take a bare IPv6 address, so a checked IPv6 address
+      is given in brackets.
     """
     connect_kwargs: dict[str, Any] = {
-        "host": target.host,
         "port": getattr(target, "port", None) or DEFAULT_PORT,
         "serverSelectionTimeoutMS": timeout_ms,
         "connectTimeoutMS": timeout_ms,
@@ -175,4 +208,20 @@ async def connect_client(
         connect_kwargs["password"] = creds["password"]
         connect_kwargs["authSource"] = DEFAULT_AUTH_SOURCE
 
-    return AsyncMongoClient(**connect_kwargs)
+    async def _open(dial: str) -> AsyncMongoClient[dict[str, Any]]:
+        if "/" in dial or "," in dial:
+            raise ValueError(
+                f"mongodb target {getattr(target, 'name', target)!r}: host must be one "
+                "host name or IP address, not a connection string or a list of hosts"
+            )
+        client: AsyncMongoClient[dict[str, Any]] = AsyncMongoClient(
+            host=_host_for_pymongo(dial), **connect_kwargs
+        )
+        try:
+            await _ping(client)
+        except BaseException:
+            await client.close()
+            raise
+        return client
+
+    return await connect_checked(target.host, _open, retry_on=(ConnectionFailure,))

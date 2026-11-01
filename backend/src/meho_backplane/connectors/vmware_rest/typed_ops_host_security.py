@@ -25,6 +25,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vmware_rest.host_security import (
     HIDDEN_VALUE,
     HOST_SECURITY_GROUP_KEY,
+    HOST_SECURITY_WHEN_TO_USE,
     HostSettingReadError,
     firewall_state,
     is_secret_key,
@@ -43,11 +44,12 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_POLICY",
     "HOST_PARAMETER",
-    "HOST_SECURITY_TYPED_OPS",
     "KEY_PATTERN",
     "RULESET_ROW",
+    "TYPED_OPS",
     "VMWARE_HOST_ADVANCED_SETTINGS_SHOW_OP",
     "VMWARE_HOST_FIREWALL_SHOW_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "advanced_settings_show_impl",
     "firewall_show_impl",
 ]
@@ -418,7 +420,8 @@ VMWARE_HOST_FIREWALL_SHOW_OP = VmwareTypedOp(
     },
 )
 
-HOST_SECURITY_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_ADVANCED_SETTINGS_SHOW_OP,
     VMWARE_HOST_FIREWALL_SHOW_OP,
 )
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {HOST_SECURITY_GROUP_KEY: HOST_SECURITY_WHEN_TO_USE}

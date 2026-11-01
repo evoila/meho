@@ -3,8 +3,7 @@
 
 """Registry rows, approval previews and grant sets of the six host security changes.
 
-``_register.py`` splats :data:`HOST_SECURITY_COMPOSITES` into its
-``_COMPOSITES`` table, and ``_governed_subops.py`` reads
+``_register.py`` collects :data:`COMPOSITES`, and ``_governed_subops.py`` reads
 :data:`HOST_SECURITY_GOVERNED_SUBOPS`. All six changes are ``dangerous`` with
 ``requires_approval=True`` and sit in the ``vmware-host-security`` group with
 the two reads.
@@ -58,19 +57,20 @@ from meho_backplane.connectors.vmware_rest.composites._host_security_writes impo
     read_ruleset,
     read_settings,
 )
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.host_security import (
     HIDDEN_VALUE,
     HOST_SECURITY_GROUP_KEY,
     is_secret_key,
 )
-from meho_backplane.operations._preview import PreviewBuilder, register_preview_builder
+from meho_backplane.operations._preview import PreviewBuilder
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
     from meho_backplane.operations._preview import PreviewContext
 
-__all__ = ["HOST_SECURITY_COMPOSITES", "HOST_SECURITY_GOVERNED_SUBOPS"]
+__all__ = ["COMPOSITES", "HOST_SECURITY_GOVERNED_SUBOPS"]
 
 #: composite op id -> the vim calls it may make.
 HOST_SECURITY_GOVERNED_SUBOPS: Final[dict[str, tuple[str, ...]]] = {
@@ -142,34 +142,26 @@ def _fields(*names: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
     return lambda params: {name: params[name] for name in names if name in params}
 
 
-register_preview_builder(
-    OP_ID_ADVANCED_SETTINGS_SET,
-    _builder(
-        "advancedOption",
-        _advanced_settings_reader,
-        lambda p: {"settings": _advanced_settings_requested(p)},
-    ),
+_advanced_settings_preview = _builder(
+    "advancedOption",
+    _advanced_settings_reader,
+    lambda p: {"settings": _advanced_settings_requested(p)},
 )
-register_preview_builder(
-    OP_ID_FIREWALL_RULESET_SET,
-    _builder("firewallSystem", _ruleset_reader, _fields("ruleset", "enabled", "allowed")),
+_firewall_ruleset_preview = _builder(
+    "firewallSystem", _ruleset_reader, _fields("ruleset", "enabled", "allowed")
 )
-register_preview_builder(
-    OP_ID_LOCKDOWN_SET, _builder("hostAccessManager", _fixed(read_lockdown), _fields("mode"))
+_lockdown_preview = _builder("hostAccessManager", _fixed(read_lockdown), _fields("mode"))
+_lockdown_exceptions_preview = _builder(
+    "hostAccessManager", _fixed(read_exceptions), _fields("users")
 )
-register_preview_builder(
-    OP_ID_LOCKDOWN_EXCEPTIONS_SET,
-    _builder("hostAccessManager", _fixed(read_exceptions), _fields("users")),
-)
-register_preview_builder(OP_ID_SNMP_SET, _builder("snmpSystem", _fixed(read_snmp), snmp_plan))
-register_preview_builder(
-    OP_ID_COREDUMP_SET,
-    _builder("diagnosticSystem", _fixed(read_coredump), _fields("disk_name", "partition")),
+_snmp_preview = _builder("snmpSystem", _fixed(read_snmp), snmp_plan)
+_coredump_preview = _builder(
+    "diagnosticSystem", _fixed(read_coredump), _fields("disk_name", "partition")
 )
 
 
 # ---------------------------------------------------------------------------
-# Registration rows (``_CompositeSpec`` keyword arguments)
+# Registration rows
 # ---------------------------------------------------------------------------
 
 
@@ -180,21 +172,23 @@ def _row(
     summary: str,
     description: str,
     tags: list[str],
-) -> dict[str, Any]:
-    return {
-        "op_id": op_id,
-        "handler": handler,
-        "summary": summary,
-        "description": description,
+    preview: PreviewBuilder,
+) -> CompositeSpec:
+    return CompositeSpec(
+        op_id=op_id,
+        handler=handler,
+        summary=summary,
+        description=description,
         **parts,
-        "group_key": HOST_SECURITY_GROUP_KEY,
-        "tags": ["composite", "write", "host", *tags, "vi-json"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-    }
+        group_key=HOST_SECURITY_GROUP_KEY,
+        tags=["composite", "write", "host", *tags, "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        preview=preview,
+    )
 
 
-HOST_SECURITY_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
     _row(
         OP_ID_ADVANCED_SETTINGS_SET,
         host_advanced_settings_set_composite,
@@ -203,6 +197,7 @@ HOST_SECURITY_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
         "Sets advanced settings of one host. Checks each key, its type and range before "
         "sending; sends only the values that differ and reads them back. Waits for approval.",
         ["advanced-settings"],
+        _advanced_settings_preview,
     ),
     _row(
         OP_ID_FIREWALL_RULESET_SET,
@@ -213,6 +208,7 @@ HOST_SECURITY_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
         "required rule set is never turned off. Reads the rule set first and back after. "
         "Waits for approval.",
         ["firewall"],
+        _firewall_ruleset_preview,
     ),
     _row(
         OP_ID_LOCKDOWN_SET,
@@ -223,6 +219,7 @@ HOST_SECURITY_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
         "reach the host; strict also stops the host console. Reads the mode back. Waits for "
         "approval.",
         ["lockdown", "security"],
+        _lockdown_preview,
     ),
     _row(
         OP_ID_LOCKDOWN_EXCEPTIONS_SET,
@@ -232,6 +229,7 @@ HOST_SECURITY_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
         "Replaces the lockdown exception users of one host: the users who keep access when "
         "lockdown mode is on. Reads the list first and back after. Waits for approval.",
         ["lockdown", "security"],
+        _lockdown_exceptions_preview,
     ),
     _row(
         OP_ID_SNMP_SET,
@@ -241,6 +239,7 @@ HOST_SECURITY_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
         "Sets the SNMP agent of one host. The community comes from a Vault path and is never "
         "shown; fields left out keep their value. Reads the agent back. Waits for approval.",
         ["snmp", "monitoring"],
+        _snmp_preview,
     ),
     _row(
         OP_ID_COREDUMP_SET,
@@ -251,5 +250,6 @@ HOST_SECURITY_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
         "partition that is not free is refused and the free ones are listed. Waits for "
         "approval.",
         ["coredump", "diagnostics"],
+        _coredump_preview,
     ),
 )

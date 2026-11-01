@@ -255,8 +255,15 @@ Steps of the realm stage, in order:
    existing group gets the attributes the file (or the tenant) names, when
    a value differs; its other attributes stay (output: `kept (attributes
    set)`). An existing client gets the mappers and the scope assignments
-   it lacks, and its secret is set when the file names one. Nothing is
-   deleted, and an existing mapper or scope is not changed.
+   it lacks, and its secret is set when the file names one. It also gets
+   the client attributes of `ADDED_CLIENT_ATTRIBUTES` that it does not
+   have yet (today only `client.offline.session.idle.timeout`, the
+   48-hour idle limit of the long login of `meho-cli` and `meho-mcp`,
+   #5516); output `attribute <name> added`. An attribute the client has
+   already keeps its value, because an admin may have set it. Nothing is
+   deleted, and an existing mapper or scope is not changed. So an
+   upgrade gives `meho-cli` of an older realm the scope `offline_access`
+   and the idle limit, and `meho login` gets a long login.
 4. **CI login**, when on.
    Then the **company login**, when on (see "The company login").
 5. **First login.** Read `<release>-core-first-login`; make it when missing
@@ -302,11 +309,22 @@ when nothing is missing. The Secrets it makes carry only the label
 
 ## Known issues and limits
 
-- The stage adds, it never removes or rewrites. A changed group attribute,
+- The stage adds, it never removes or rewrites. Adding a missing client
+  attribute from `ADDED_CLIENT_ATTRIBUTES` keeps this rule. A changed group attribute,
   a changed mapper setting or a renamed client in a newer realm file does
   not reach a running realm; an operator changes it in Keycloak.
 - The `users` entry of the realm file (the roles of `meho-admin`'s service
   account) is applied at the first start only.
+- Realm settings at the top of the realm file reach a new realm only.
+  Today these are the remember-me login (`rememberMe`, and
+  `ssoSessionIdleTimeoutRememberMe` and `ssoSessionMaxLifespanRememberMe`
+  at 30 days) and the passkey policy
+  (`webAuthnPolicyPasswordlessPasskeysEnabled`, user verification
+  `required`, discoverable credential `Yes`). The stage cannot set them:
+  `meho-admin` has no `manage-realm` right (unless the company login is on).
+  A running realm gets them once with `keycloak.realm.update` or by hand;
+  see `docs-site/install/keycloak-realm.md`, "Remember the browser, and
+  passkeys".
 - A person who exists is never touched: not their groups, not their
   password. To start over for one person, delete the person in Keycloak;
   the Job makes them again from the Secret.

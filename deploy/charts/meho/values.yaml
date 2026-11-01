@@ -902,6 +902,10 @@ gsm:
 # `docs/cross-repo/vault-provisioning.md` § "Bounding the check-runner
 # principal".
 #
+# On a Vault install the backplane enforces the first option: the check
+# runner does not start unless `VAULT_CHECK_RUNNER_ROLE` (set it through
+# `extraEnv`) names a Vault role of its own, not `config.vaultOidcRole`.
+#
 # `clientId` is non-secret operator config; `clientSecret` is wired
 # exclusively as a `secretKeyRef` — never a plaintext chart value. Default
 # `enabled: false` renders nothing and keeps today's behaviour exactly:

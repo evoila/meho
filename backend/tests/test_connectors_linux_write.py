@@ -91,7 +91,9 @@ _ENV_VALUE_CANARY = "MEHO_ENV_VALUE_CANARY_zzq"
 # in the clear, in params, in the result, or in a preview.
 _SECRET_ENV_VALUE_CANARY = "MEHO_SECRETENV_VALUE_CANARY_zzq"  # gitleaks:allow -- synthetic
 # The non-secret Vault reference (logical KV-v2 path # field) secret_env carries.
-_SECRET_ENV_PATH = "kv/app/db"
+# It sits in the tenant subtree of ``_OPERATOR`` (below), as a path named in a
+# parameter must.
+_SECRET_ENV_PATH = "tenants/00000000-0000-0000-0000-000000003361/app/db"
 _SECRET_ENV_FIELD = "cred"
 _SECRET_ENV_REF = f"{_SECRET_ENV_PATH}#{_SECRET_ENV_FIELD}"
 

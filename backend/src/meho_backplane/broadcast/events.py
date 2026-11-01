@@ -146,15 +146,16 @@ _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
 )
 
 #: Op ids of core connectors that classify as ``credential_write``
-#: (G11.7-T1 #1401). Unlike :data:`_CREDENTIAL_MINT_OPS` (secret in the
-#: *response*), these ops carry the secret in their *request params*, or
-#: send a secret read from Vault in the request body — the broadcast
-#: publisher ships ``params`` (request-side), so a plain ``write``
-#: classification would leak the written credential to every operator on
-#: the feed. Collapsing them to aggregate-only keeps the team-coordination
-#: signal ("someone wrote a credential at 14:23") without the secret
-#: material. The explicit pin comes before the ``.write`` / ``.create`` /
-#: ``.update`` suffix branch so these win over the plain ``write`` class.
+#: (G11.7-T1 #1401). A credential-writing operation must be classed so
+#: that its written value stays hidden from other operators: the broadcast
+#: publisher ships ``params`` (request-side), and these ops carry the
+#: secret in their *request params*, or send a secret read from Vault in
+#: the request body. Unlike :data:`_CREDENTIAL_MINT_OPS` (secret in the
+#: *response*), the secret is on the way in. Collapsing them to
+#: aggregate-only keeps the team-coordination signal ("someone wrote a
+#: credential at 14:23") without the secret material. The explicit pin
+#: comes before the ``.write`` / ``.create`` / ``.update`` suffix branch so
+#: these win over the plain ``write`` class.
 #: Other connectors declare theirs in their own package (for example
 #: ``k8s.secret.create`` in ``connectors/kubernetes/op_classes.py``).
 #:

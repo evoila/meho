@@ -395,7 +395,20 @@ All paths start with `/suite-api/api/fleet-management/iam/`.
   For users it counts only roles given to the user directly
   (`roleAssignmentTypes` holds `DIRECT`). A user who has the role only
   through a group does not count, because that group may be the one being
-  changed. The group itself counts on its own row.
+  changed. The group itself counts on its own row. The changed user or group
+  is left out by its id in any letter case: the vendor may answer a UUID in
+  lower case while the caller wrote it in upper case.
+- **One change at a time per realm.** Two changes that read the same
+  assignments and each send the whole set back would drop each other's
+  role, and two removals could each still see the other administrator. So
+  the change handler holds a lock for the SSO realm from the read to the
+  write (`fleet_iam_lock.py`): an `asyncio.Lock` for calls in this process
+  and a PG advisory lock
+  (`db/advisory.py`, keyed by tenant, target and realm) for calls in other
+  workers. A second call waits up to 30 seconds for the lock, then fails
+  without writing (`another role change in SSO realm ... is still running`).
+  The wait covers only taking the lock; a call that holds it runs its reads
+  and its write to the end.
 - **Safety.** The two reads are `safe`. `vrops.fleet.role.assign` is
   `dangerous` with `requires_approval=True`: it waits until a person approves
   it, and an agent needs a grant for it.

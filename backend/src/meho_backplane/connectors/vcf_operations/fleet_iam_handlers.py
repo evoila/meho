@@ -21,6 +21,18 @@ when the merged set is empty it sends ``DELETE`` on the same path. It
 refuses a change that would leave the realm without any user or group
 holding the VCF Administrator role.
 
+Two changes in the same realm at the same time would each read the
+assignments, add their own role and send the whole set back, so the second
+write would drop the first role; two removals of the administrator role could
+each still see the other administrator and both go through. The change
+handler therefore holds a lock for the realm from the read to the write: an
+``asyncio.Lock`` for calls in this process and a PG advisory lock
+(:func:`meho_backplane.db.advisory.advisory_lock`) for calls in other
+workers (:mod:`~meho_backplane.connectors.vcf_operations.fleet_iam_lock`). A
+second call waits; after
+:data:`~meho_backplane.connectors.vcf_operations.fleet_iam_lock.CHANGE_LOCK_WAIT_SECONDS`
+it fails instead of writing a stale set.
+
 The handlers sit on a mixin so the connector module stays small (the same
 pattern as :mod:`~meho_backplane.connectors.vcf_operations.licensing_handlers`).
 The op metadata lives in
@@ -31,6 +43,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import quote
@@ -41,6 +54,7 @@ from packaging.version import Version
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.resolver import resolve_target_version
+from meho_backplane.connectors.vcf_operations.fleet_iam_lock import change_lock
 
 __all__ = [
     "FLEET_IAM_DECLARED_OP_IDS",
@@ -250,6 +264,14 @@ def _wire_new(entry: Mapping[str, Any]) -> dict[str, Any]:
     return wire
 
 
+def _same_id(left: Any, right: Any) -> bool:
+    """Are both ids the same principal? UUIDs match in any letter case."""
+    try:
+        return uuid.UUID(str(left)) == uuid.UUID(str(right))
+    except ValueError:
+        return str(left) == str(right)
+
+
 def _holds_admin_label(role_labels: Sequence[Any]) -> bool:
     return any(str(label).lower() in _ADMIN_ROLE_LABELS for label in role_labels)
 
@@ -428,7 +450,7 @@ class VropsFleetIamHandlers(_Base):
                     _ADMIN_SCAN_PAGE_SIZE,
                 )
                 for row in rows:
-                    if str(row.get("principalId")) == principal_id:
+                    if _same_id(row.get("principalId"), principal_id):
                         continue
                     # 9.1 user rows also list roles a user gets through a
                     # group, maybe the very group being changed. Count only
@@ -543,33 +565,34 @@ class VropsFleetIamHandlers(_Base):
         await self._require_realm(operator, target, realm_id)
         known = {str(r.get("roleName")) for r in await self._fleet_roles(operator, target)}
         _require_known_roles({entry["roleName"] for entry in add} - known)
-        current = await self._principal_assignments(operator, target, realm_id, principal_id)
-        held = {str(a.get("roleName")) for a in current}
-        _require_known_roles(set(remove) - known - held)
+        async with change_lock(target, realm_id):
+            current = await self._principal_assignments(operator, target, realm_id, principal_id)
+            held = {str(a.get("roleName")) for a in current}
+            _require_known_roles(set(remove) - known - held)
 
-        after = merge_role_assignments(current, add, remove)
-        result: dict[str, Any] = {
-            "ssoRealmId": realm_id,
-            "principalId": principal_id,
-            "before": [_assignment_row(a) for a in current],
-            "after": [_assignment_row(a) for a in after],
-        }
-        if _same_assignments(after, [_wire_current(a) for a in current]):
-            return {**result, "changed": False, "vendorCall": None}
-        if _holds_admin(current) and not _holds_admin(after):
-            await self._refuse_last_admin(operator, target, realm_id, principal_id)
+            after = merge_role_assignments(current, add, remove)
+            result: dict[str, Any] = {
+                "ssoRealmId": realm_id,
+                "principalId": principal_id,
+                "before": [_assignment_row(a) for a in current],
+                "after": [_assignment_row(a) for a in after],
+            }
+            if _same_assignments(after, [_wire_current(a) for a in current]):
+                return {**result, "changed": False, "vendorCall": None}
+            if _holds_admin(current) and not _holds_admin(after):
+                await self._refuse_last_admin(operator, target, realm_id, principal_id)
 
-        path = _path(_PRINCIPAL_ROLES_PATH, ssoRealmId=realm_id, principalId=principal_id)
-        if after:
-            await self._post_json(
-                target,
-                path,
-                operator=operator,
-                verb="PUT",
-                json={"vcfRoleAssignments": after},
-            )
-            vendor_call = "PUT"
-        else:
-            await self._post_json(target, path, operator=operator, verb="DELETE")
-            vendor_call = "DELETE"
+            path = _path(_PRINCIPAL_ROLES_PATH, ssoRealmId=realm_id, principalId=principal_id)
+            if after:
+                await self._post_json(
+                    target,
+                    path,
+                    operator=operator,
+                    verb="PUT",
+                    json={"vcfRoleAssignments": after},
+                )
+                vendor_call = "PUT"
+            else:
+                await self._post_json(target, path, operator=operator, verb="DELETE")
+                vendor_call = "DELETE"
         return {**result, "changed": True, "vendorCall": vendor_call}

@@ -15,6 +15,12 @@ Checks, without a network call (respx, hand-written answers with made-up ids):
   them all), uses DELETE when no role is left, refuses an unknown role, and
   refuses to remove the last VCF Administrator; a vendor error reaches the
   caller;
+* two changes in one realm at the same time run one after the other: both
+  keep their role, and two removals cannot take the role from both
+  administrators; the change holds the cross-worker lock of the realm and
+  fails without writing when the lock stays busy;
+* the last-administrator check leaves out the changed user or group by its
+  id in any letter case;
 * the metadata: reads are safe, the change waits for approval, and only the
   9.x registrar registers the operations;
 * through the dispatcher: the change waits for approval, and 9.0 answers
@@ -23,9 +29,11 @@ Checks, without a network call (respx, hand-written answers with made-up ids):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock
@@ -41,6 +49,8 @@ from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vcf_operations import VROPS_TYPED_OPS, VcfOperationsConnector
+from meho_backplane.connectors.vcf_operations import fleet_iam_handlers as fleet_iam_module
+from meho_backplane.connectors.vcf_operations import fleet_iam_lock as lock_module
 from meho_backplane.connectors.vcf_operations.fleet_iam_handlers import (
     LastFleetAdministratorError,
     merge_role_assignments,
@@ -66,6 +76,11 @@ _REALM = "11111111-1111-4111-8111-111111111111"
 _USER = "22222222-2222-4222-8222-222222222222"
 _OTHER_USER = "33333333-3333-4333-8333-333333333333"
 _GROUP = "44444444-4444-4444-8444-444444444444"
+_OTHER_REALM = "55555555-5555-4555-8555-555555555555"
+#: Ids with hex letters, so upper and lower case differ.
+_MIXED_USER = "abcdef01-2345-4678-8abc-def012345678"
+_MIXED_GROUP = "fedcba98-7654-4321-8fed-cba987654321"
+_TARGET_ID = UUID("66666666-6666-4666-8666-666666666666")
 _PRINCIPAL_ROLES = f"{_IAM}/ssorealms/{_REALM}/principals/{_USER}/roles"
 _USERS_QUERY = f"{_IAM}/ssorealms/{_REALM}/users/query"
 _GROUPS_QUERY = f"{_IAM}/ssorealms/{_REALM}/groups/query"
@@ -141,6 +156,18 @@ def _mount_basics(mock: respx.MockRouter) -> None:
     mock.post(_ACQUIRE_PATH).respond(200, json={"token": _OPS_TOKEN})
     mock.get(f"{_IAM}/ssorealms").respond(200, json=_REALMS_ANSWER)
     mock.get(f"{_IAM}/roles").respond(200, json=_ROLES_ANSWER)
+
+
+@pytest.fixture(autouse=True)
+def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    # The cross-worker lock of a role change reads the database engine, and
+    # the engine reads the settings.
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 async def _run(handler: str, params: dict[str, Any], **target: Any) -> Any:
@@ -619,6 +646,238 @@ async def test_removing_an_administrator_is_allowed_when_another_user_has_it_dir
             {"ssoRealmId": _REALM, "principalId": _USER, "remove": ["vcf_administrator"]},
         )
     assert delete.called
+
+
+@pytest.mark.parametrize("principal_type", ["USER", "GROUP"])
+@pytest.mark.asyncio
+async def test_the_changed_principal_is_left_out_of_the_admin_count_in_any_letter_case(
+    principal_type: str,
+) -> None:
+    # The caller writes the id in upper case; the vendor answers it in lower
+    # case. The changed user or group must not count as another administrator.
+    principal = _MIXED_USER if principal_type == "USER" else _MIXED_GROUP
+    assert principal.upper() != principal
+    roles_path = f"{_IAM}/ssorealms/{_REALM}/principals/{principal.upper()}/roles"
+    admin = {"roleName": "vcf_administrator", "roleAssignmentTypes": ["DIRECT"]}
+    viewer = {"roleName": "vcf_viewer", "roleAssignmentTypes": ["DIRECT"]}
+    users = (
+        [{"userId": principal, "roles": [admin]}, {"userId": _OTHER_USER, "roles": [viewer]}]
+        if principal_type == "USER"
+        else [{"userId": _OTHER_USER, "roles": [viewer]}]
+    )
+    groups = (
+        [{"groupId": principal, "roles": ["vcf_administrator"]}]
+        if principal_type == "GROUP"
+        else []
+    )
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mount_basics(mock)
+        mock.get(roles_path).respond(
+            200, json={"vcfRoleAssignments": [_assignment("vcf_administrator")]}
+        )
+        mock.post(_USERS_QUERY).respond(200, json={"vidbUsers": users})
+        mock.post(_GROUPS_QUERY).respond(200, json={"vidbGroups": groups})
+        delete = mock.delete(roles_path).respond(204)
+        with pytest.raises(LastFleetAdministratorError, match="last user or group"):
+            await _run(
+                "fleet_role_assign",
+                {
+                    "ssoRealmId": _REALM,
+                    "principalId": principal.upper(),
+                    "remove": ["vcf_administrator"],
+                },
+            )
+    assert not delete.called
+
+
+def test_same_id_matches_uuids_in_any_letter_case_and_other_ids_as_text() -> None:
+    assert fleet_iam_module._same_id(_MIXED_USER.upper(), _MIXED_USER)
+    assert not fleet_iam_module._same_id(_USER, _OTHER_USER)
+    assert fleet_iam_module._same_id("alice", "alice")
+    assert not fleet_iam_module._same_id("alice", "Alice")
+
+
+# ---------------------------------------------------------------------------
+# Two changes in one realm at the same time
+# ---------------------------------------------------------------------------
+
+
+class _Realm:
+    """A stateful fake of one SSO realm: the role assignments of each user."""
+
+    def __init__(self, assignments: dict[str, list[dict[str, Any]]]) -> None:
+        self.assignments = assignments
+        self.writes: list[tuple[str, str]] = []
+
+    @staticmethod
+    def _user_id(request: httpx.Request) -> str:
+        return request.url.path.rsplit("/", 2)[-2]
+
+    def get_roles(self, request: httpx.Request) -> httpx.Response:
+        held = self.assignments.get(self._user_id(request), [])
+        return httpx.Response(200, json={"vcfRoleAssignments": held})
+
+    def put_roles(self, request: httpx.Request) -> httpx.Response:
+        user = self._user_id(request)
+        self.assignments[user] = json.loads(request.content)["vcfRoleAssignments"]
+        self.writes.append(("PUT", user))
+        return httpx.Response(200)
+
+    def delete_roles(self, request: httpx.Request) -> httpx.Response:
+        user = self._user_id(request)
+        self.assignments[user] = []
+        self.writes.append(("DELETE", user))
+        return httpx.Response(204)
+
+    def users_query(self, request: httpx.Request) -> httpx.Response:
+        rows = [
+            {
+                "userId": user,
+                "roles": [
+                    {"roleName": a["roleName"], "roleAssignmentTypes": ["DIRECT"]} for a in held
+                ],
+            }
+            for user, held in self.assignments.items()
+            if held
+        ]
+        return httpx.Response(200, json={"vidbUsers": rows})
+
+    def roles(self, user: str) -> set[str]:
+        return {a["roleName"] for a in self.assignments[user]}
+
+
+def _mount_realm(mock: respx.MockRouter, realm: _Realm) -> None:
+    roles = rf"{_IAM}/ssorealms/{_REALM}/principals/[^/]+/roles$"
+    mock.get(path__regex=roles).mock(side_effect=realm.get_roles)
+    mock.put(path__regex=roles).mock(side_effect=realm.put_roles)
+    mock.delete(path__regex=roles).mock(side_effect=realm.delete_roles)
+    mock.post(_USERS_QUERY).mock(side_effect=realm.users_query)
+    mock.post(_GROUPS_QUERY).respond(200, json={"vidbGroups": []})
+
+
+def _pause_after_assignments_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After the assignments read, wait a moment for the other call to read too.
+
+    Without the lock both calls read the same assignments and the barrier
+    opens at once; with the lock the second read cannot happen before the
+    first call wrote, so the wait runs out and the call goes on.
+    """
+    read = fleet_iam_module.VropsFleetIamHandlers._principal_assignments
+    reads = 0
+    both_read = asyncio.Event()
+
+    async def paused(self: Any, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        nonlocal reads
+        rows = await read(self, *args, **kwargs)
+        reads += 1
+        if reads >= 2:
+            both_read.set()
+        with suppress(TimeoutError):
+            await asyncio.wait_for(both_read.wait(), 0.5)
+        return rows
+
+    monkeypatch.setattr(fleet_iam_module.VropsFleetIamHandlers, "_principal_assignments", paused)
+
+
+def _change(principal_id: str, **change: Any) -> Any:
+    params = {"ssoRealmId": _REALM, "principalId": principal_id, **change}
+    return _run("fleet_role_assign", params, id=_TARGET_ID)
+
+
+@pytest.mark.asyncio
+async def test_two_grants_to_one_user_at_the_same_time_both_keep_their_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: two calls that each give a role must both keep their role.
+    _pause_after_assignments_read(monkeypatch)
+    realm = _Realm({_USER: [_assignment("vcf_viewer")]})
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mount_basics(mock)
+        _mount_realm(mock, realm)
+        results = await asyncio.gather(
+            _change(_USER, add=[{"roleName": "vcf_administrator"}]),
+            _change(_USER, add=[{"roleName": "custom_ops"}]),
+        )
+    assert [r["changed"] for r in results] == [True, True]
+    assert realm.roles(_USER) == {"vcf_viewer", "vcf_administrator", "custom_ops"}
+    assert len(realm.writes) == 2
+    assert lock_module.held_locks == {}
+
+
+@pytest.mark.asyncio
+async def test_two_administrator_removals_at_the_same_time_leave_one_administrator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: each removal alone is allowed because the other user still
+    # has the role. Run at the same time, only the first may go through.
+    _pause_after_assignments_read(monkeypatch)
+    realm = _Realm(
+        {_USER: [_assignment("vcf_administrator")], _OTHER_USER: [_assignment("vcf_administrator")]}
+    )
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mount_basics(mock)
+        _mount_realm(mock, realm)
+        results = await asyncio.gather(
+            _change(_USER, remove=["vcf_administrator"]),
+            _change(_OTHER_USER, remove=["vcf_administrator"]),
+            return_exceptions=True,
+        )
+    refused = [r for r in results if isinstance(r, LastFleetAdministratorError)]
+    assert len(refused) == 1, results
+    assert len(realm.writes) == 1
+    admins = [u for u in (_USER, _OTHER_USER) if "vcf_administrator" in realm.roles(u)]
+    assert len(admins) == 1
+    assert lock_module.held_locks == {}
+
+
+def _record_advisory_lock(
+    monkeypatch: pytest.MonkeyPatch, *, locked: bool
+) -> list[tuple[int, dict[str, Any]]]:
+    calls: list[tuple[int, dict[str, Any]]] = []
+
+    @asynccontextmanager
+    async def fake(key: int, **kwargs: Any) -> AsyncIterator[bool]:
+        calls.append((key, kwargs))
+        yield locked
+
+    monkeypatch.setattr(lock_module, "advisory_lock", fake)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_assign_holds_the_cross_worker_lock_of_the_realm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_advisory_lock(monkeypatch, locked=True)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mount_basics(mock)
+        mock.get(_PRINCIPAL_ROLES).respond(200, json={"vcfRoleAssignments": []})
+        put = mock.put(_PRINCIPAL_ROLES).respond(200)
+        await _change(_USER, add=[{"roleName": "vcf_viewer"}])
+    assert put.called
+    target: Any = _StubTarget(id=_TARGET_ID)
+    other_target: Any = _StubTarget()
+    key, kwargs = calls[0]
+    assert key == lock_module.lock_key(target, _REALM)
+    assert key == lock_module.lock_key(target, _REALM.upper())
+    assert key != lock_module.lock_key(target, _OTHER_REALM)
+    assert key != lock_module.lock_key(other_target, _REALM)
+    assert kwargs["wait_seconds"] == lock_module.CHANGE_LOCK_WAIT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_assign_fails_without_writing_when_the_lock_stays_busy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record_advisory_lock(monkeypatch, locked=False)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mount_basics(mock)
+        mock.get(_PRINCIPAL_ROLES).respond(200, json={"vcfRoleAssignments": []})
+        put = mock.put(_PRINCIPAL_ROLES).respond(200)
+        with pytest.raises(RuntimeError, match="still running"):
+            await _change(_USER, add=[{"roleName": "vcf_viewer"}])
+    assert not put.called
+    assert lock_module.held_locks == {}
 
 
 @pytest.mark.asyncio

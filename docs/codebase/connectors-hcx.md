@@ -785,14 +785,18 @@ The restart (`manager_restart.py`) is a vendor job with no job id:
 1. `GET /components/appengine/status`. `STARTING` or `STOPPING` means a
    restart already runs: the answer is `already_running` and nothing
    starts. This check is a help, not a lock.
-2. The migration check: skipped when no vCenter is registered (then no
-   migration can run) or when `skip_migration_check` is true; else
+2. The migration check: skipped when the service is `STOPPED` (its main
+   API cannot answer, and no migration moves while it is down) or when no
+   vCenter is registered (then no migration can run); else
    `POST /hybridity/api/migrations?action=query` with
    `{"filter": {"skipDrafts": true}}` on the main API. A row with
    `progress.isDone: false` (and not failed or cancelled) refuses the
-   restart. If the check cannot run (for example because the SSO login does
-   not work yet on a new Manager), the restart is refused and names
-   `skip_migration_check`.
+   restart. If the check cannot run, the restart is refused. One case has
+   a way out: when the main API refused MEHO's login (the state of a new
+   Manager whose single sign-on does not work before its first restart),
+   `skip_migration_check: true` lets the restart go on. The flag does
+   nothing else: a check that answers and shows a running migration refuses
+   the restart in every case, and so does any other failure of the check.
 3. `POST /components/appengine?action=stop` (skipped when the service is
    `STOPPED`), then `?action=start`. Each call waits until HCX is done, up
    to 300 seconds.
@@ -802,7 +806,8 @@ The answer: `status` (`accepted`, `already_running`, `failed`, `no_answer`),
 `status_read: hcx.manager.service.status`. `accepted` never means HCX is
 ready: follow `hcx.manager.service.status` until `running` is true, then
 `hcx.about` until it answers. A failure after the stop leaves the service
-stopped; a new `hcx.manager.restart` then only starts it.
+stopped; a new `hcx.manager.restart` with no parameters then only starts
+it (step 2 skips the migration check on a stopped service).
 
 After a lost reply, do not start again blindly: read
 `hcx.manager.service.status` (and `hcx.manager.config.show` for the other

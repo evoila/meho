@@ -13,10 +13,16 @@ for a restart; the caller follows it with ``hcx.manager.service.status``
 
 Before the stop, the restart reads the service state: a service that is
 starting or stopping means a restart already runs, so it returns that and
-starts nothing. Then it asks the main HCX API (port 443, the connector's own
-login) for migrations that have not ended
+starts nothing. A service that is stopped (for example after a failed
+start) cannot answer on the main API and moves no migration, so the restart
+only starts it. Otherwise it asks the main HCX API (port 443, the
+connector's own login) for migrations that have not ended
 (``POST /hybridity/api/migrations?action=query``) and refuses while one
-runs. Both checks are a help, not a lock.
+runs. ``skip_migration_check`` does not skip that check: it only lets the
+restart go on when the main API refused MEHO's login, the state of a new
+Manager whose single sign-on does not work before its first restart. A
+check that answers and shows a running migration refuses the restart in
+every case. Both checks are a help, not a lock.
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ import httpx
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.adapters.http import SsrfBlockedError
 from meho_backplane.connectors.hcx.appliance_api import (
     ApplianceApi,
@@ -76,6 +83,18 @@ _CHECK_ERRORS: Final = (
     VaultClientError,
 )
 
+#: The next step when the main API refused the login of the migration check.
+_LOGIN_REMEDIATION: Final = (
+    "Fix the HCX login of the target and run again. Only on a new HCX Manager whose "
+    "single sign-on does not work before its first restart, set skip_migration_check: "
+    "true; it applies only to this refused login."
+)
+
+#: Why the migration check was skipped on a stopped service.
+_STOPPED_REASON: Final = (
+    "the application service is stopped: the main API cannot answer and no migration moves"
+)
+
 _RUNNING: Final = "RUNNING"
 _STOPPED: Final = "STOPPED"
 _IN_PROGRESS: Final[frozenset[str]] = frozenset({"STARTING", "STOPPING"})
@@ -101,9 +120,14 @@ async def _migration_check(
     api: ApplianceApi,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    """Refuse when a migration runs. Skipped when asked, or when no vCenter is registered."""
-    if params.get("skip_migration_check"):
-        return {"state": "skipped", "reason": "skip_migration_check was set"}
+    """Refuse when a migration runs.
+
+    Skipped when no vCenter is registered (then no migration can run), or
+    when the main API refused MEHO's login and ``skip_migration_check`` is
+    set: the state of a new Manager whose single sign-on does not work
+    before its first restart. Every other failure of the check refuses the
+    restart, and so does a check that shows a running migration.
+    """
     if not _configs(await api.get_or_none(_VCENTER_PATH)):
         return {"state": "skipped", "reason": "no vCenter is registered, so no migration can run"}
     try:
@@ -114,13 +138,23 @@ async def _migration_check(
             params={"action": "query"},
             json={"filter": {"skipDrafts": True}},
         )
+    except ConnectorAuthError as exc:
+        if params.get("skip_migration_check"):
+            return {
+                "state": "skipped",
+                "reason": (
+                    "the main API refused the HCX login (single sign-on does not work "
+                    "yet) and skip_migration_check was set"
+                ),
+            }
+        raise HcxManagerSetupError(
+            "MEHO could not check for running migrations: the main API refused the HCX login",
+            remediation=_LOGIN_REMEDIATION,
+        ) from exc
     except _CHECK_ERRORS as exc:
         raise HcxManagerSetupError(
             f"MEHO could not check for running migrations: {type(exc).__name__}",
-            remediation=(
-                "Fix the HCX login of the target and run again. Only on a new HCX Manager "
-                "whose single sign-on does not work yet, set skip_migration_check: true."
-            ),
+            remediation="Make the main API of the HCX Manager answer, then run again.",
         ) from exc
     rows = rows_of(payload)
     if not rows and isinstance(payload, dict) and isinstance(payload.get("rows"), list):
@@ -180,12 +214,17 @@ async def hcx_manager_restart_impl(
     stopping, ``accepted`` when the start was taken (HCX needs several
     minutes before it is usable), and ``failed`` or ``no_answer`` with the
     steps when the stop or the start failed. Refuses while migrations run.
+    A stopped service (after a failed start) is only started: its main API
+    cannot answer the migration check, and nothing moves while it is down.
     """
     async with appliance_session(connector, operator, target) as api:
         state = _service_state(await api.get(_APPENGINE_STATUS_PATH))
         if state in _IN_PROGRESS:
             return _restart_answer("already_running", state, {"state": "not_run"}, [])
-        check = await _migration_check(connector, operator, target, api, params)
+        if state == _STOPPED:
+            check: dict[str, Any] = {"state": "skipped", "reason": _STOPPED_REASON}
+        else:
+            check = await _migration_check(connector, operator, target, api, params)
         steps: list[dict[str, Any]] = []
         try:
             if state == _STOPPED:

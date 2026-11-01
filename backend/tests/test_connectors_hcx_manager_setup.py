@@ -803,16 +803,73 @@ async def test_restart_that_cannot_check_migrations_is_refused(hcx: HcxConnector
     assert not action.called
 
 
+async def test_skip_migration_check_does_not_skip_the_check_on_an_active_manager(
+    hcx: HcxConnector,
+) -> None:
+    async with respx.mock(assert_all_called=False) as mock:
+        _login(mock)
+        _with_vcenter(mock)
+        mock.get(_a(_APPENGINE_STATUS)).respond(200, json={"result": "RUNNING"})
+        query = mock.post(f"{_MAIN}{_MIGRATIONS}").respond(
+            200, json={"items": [{"migrationId": "<migration-1>", "progress": {"isDone": False}}]}
+        )
+        action = mock.post(_a(_APPENGINE)).respond(200, json={"result": "STOPPED"})
+        result = await _run("hcx.manager.restart", {"skip_migration_check": True})
+    assert result.status == "error"
+    assert "<migration-1>" in result.extras["exception_message"]
+    assert query.called
+    assert not action.called
+
+
+@pytest.mark.parametrize("failure", [httpx.ConnectError("refused"), httpx.Response(500)])
+async def test_skip_migration_check_covers_only_a_refused_login(
+    hcx: HcxConnector, failure: Any
+) -> None:
+    async with respx.mock(assert_all_called=False) as mock:
+        mock.post(f"{_MAIN}/hybridity/api/sessions").mock(side_effect=failure)
+        _with_vcenter(mock)
+        mock.get(_a(_APPENGINE_STATUS)).respond(200, json={"result": "RUNNING"})
+        action = mock.post(_a(_APPENGINE)).respond(200, json={})
+        result = await _run("hcx.manager.restart", {"skip_migration_check": True})
+    assert result.status == "error"
+    assert "could not check" in result.extras["exception_message"]
+    assert not action.called
+
+
+async def test_skip_migration_check_lets_a_new_manager_with_a_refused_login_restart(
+    hcx: HcxConnector,
+) -> None:
+    async with respx.mock(assert_all_called=False) as mock:
+        mock.post(f"{_MAIN}/hybridity/api/sessions").respond(401)
+        _with_vcenter(mock)
+        mock.get(_a(_APPENGINE_STATUS)).respond(200, json={"result": "RUNNING"})
+        action = mock.post(_a(_APPENGINE)).mock(
+            side_effect=[
+                httpx.Response(200, json={"result": "STOPPED", "operationStatus": "SUCCESS"}),
+                httpx.Response(200, json={"result": "STARTING", "operationStatus": "SUCCESS"}),
+            ]
+        )
+        result = await _run("hcx.manager.restart", {"skip_migration_check": True})
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "accepted"
+    assert result.result["migration_check"]["state"] == "skipped"
+    assert "refused the HCX login" in result.result["migration_check"]["reason"]
+    assert [c.request.url.params["action"] for c in action.calls] == ["stop", "start"]
+
+
 async def test_restart_failing_at_the_start_lists_the_steps(hcx: HcxConnector) -> None:
     async with respx.mock(assert_all_called=False) as mock:
+        _login(mock)
+        _with_vcenter(mock)
         mock.get(_a(_APPENGINE_STATUS)).respond(200, json={"result": "RUNNING"})
+        mock.post(f"{_MAIN}{_MIGRATIONS}").respond(200, json={"items": []})
         mock.post(_a(_APPENGINE)).mock(
             side_effect=[
                 httpx.Response(200, json={"result": "STOPPED", "operationStatus": "SUCCESS"}),
                 httpx.Response(500, json={"errors": [{"message": "appengine did not start"}]}),
             ]
         )
-        result = await _run("hcx.manager.restart", {"skip_migration_check": True})
+        result = await _run("hcx.manager.restart")
     assert result.status == "ok", result.error
     assert result.result["status"] == "failed"
     assert result.result["steps"] == [
@@ -821,11 +878,37 @@ async def test_restart_failing_at_the_start_lists_the_steps(hcx: HcxConnector) -
     ]
 
 
+async def test_a_plain_restart_after_a_failed_start_only_starts_the_stopped_service(
+    hcx: HcxConnector,
+) -> None:
+    """After a failed start the main API is down; a retry with no parameters starts it."""
+    async with respx.mock(assert_all_called=False) as mock:
+        login = mock.post(f"{_MAIN}/hybridity/api/sessions").mock(
+            side_effect=httpx.ConnectError("refused")
+        )
+        _with_vcenter(mock)
+        mock.get(_a(_APPENGINE_STATUS)).respond(200, json={"result": "STOPPED"})
+        query = mock.post(f"{_MAIN}{_MIGRATIONS}").respond(200, json={"items": []})
+        action = mock.post(_a(_APPENGINE)).respond(
+            200, json={"result": "STARTING", "operationStatus": "SUCCESS"}
+        )
+        result = await _run("hcx.manager.restart")
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "accepted"
+    assert result.result["migration_check"]["state"] == "skipped"
+    assert "stopped" in result.result["migration_check"]["reason"]
+    assert not login.called
+    assert not query.called
+    assert [c.request.url.params["action"] for c in action.calls] == ["start"]
+    assert [s["state"] for s in result.result["steps"]] == ["skipped", "done"]
+
+
 async def test_restart_without_an_answer_at_the_stop_says_no_answer(hcx: HcxConnector) -> None:
     async with respx.mock(assert_all_called=False) as mock:
+        mock.get(_a(_VCENTER)).respond(200, json={"data": {"items": []}})
         mock.get(_a(_APPENGINE_STATUS)).respond(200, json={"result": "RUNNING"})
         mock.post(_a(_APPENGINE)).mock(side_effect=httpx.ReadTimeout("timed out"))
-        result = await _run("hcx.manager.restart", {"skip_migration_check": True})
+        result = await _run("hcx.manager.restart")
     assert result.status == "ok", result.error
     assert result.result["status"] == "no_answer"
     assert [s["state"] for s in result.result["steps"]] == ["unknown", "not_run"]

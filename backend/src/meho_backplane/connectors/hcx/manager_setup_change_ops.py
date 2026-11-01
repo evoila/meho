@@ -157,8 +157,10 @@ _RESTART = HcxTypedOp(
             "skip_migration_check": {
                 "type": "boolean",
                 "description": (
-                    "Skip the check for running migrations. Default false. Set it only "
-                    "on a new HCX Manager whose SSO login does not work yet."
+                    "Go on when the main API refuses the HCX login of the migration "
+                    "check: the state of a new HCX Manager whose SSO login does not work "
+                    "before its first restart. Default false. A check that answers and "
+                    "shows a running migration still refuses the restart."
                 ),
             },
         },

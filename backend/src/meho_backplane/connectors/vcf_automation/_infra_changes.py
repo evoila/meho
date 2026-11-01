@@ -14,6 +14,13 @@ Project members are changed with ``PATCH /iaas/api/projects/{id}`` (the role
 lists of the ``ProjectSpecification``). That call is in the pinned
 ``vra-iaas.json``; the project service call ``/project-service/api/...`` is
 not in a pinned file, so the reconcile lanes could not check it.
+
+Each change of an existing object builds the new whole from what it read
+(the flavor mapping, the member lists, the zone fields). Two such changes
+at the same time would undo each other, so each holds the object's lock
+(:func:`._resource_lock.resource_lock`) from the read to the write: calls
+in this process and in other workers run one after the other, and a call
+that cannot get the lock in time fails instead of writing a stale whole.
 """
 
 from __future__ import annotations
@@ -42,6 +49,7 @@ from meho_backplane.connectors.vcf_automation._infra_paths import (
 from meho_backplane.connectors.vcf_automation._lookups import find_by_odata_name, password_ref
 from meho_backplane.connectors.vcf_automation._provisioning import project_create_body
 from meho_backplane.connectors.vcf_automation._provisioning_preview import _existence
+from meho_backplane.connectors.vcf_automation._resource_lock import resource_lock
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 __all__ = [
@@ -120,9 +128,19 @@ async def _find_zone(
 async def zone_set(
     connector: Any, operator: Any, target: Any, params: dict[str, Any], *, prefix: str
 ) -> dict[str, Any]:
-    """Create a cloud zone (``POST /iaas/api/zones``) or change one (``PATCH .../{id}``)."""
+    """Create a cloud zone (``POST /iaas/api/zones``) or change one (``PATCH .../{id}``).
+
+    The change holds the zone's lock from the read to the write.
+    """
     if not params.get("id"):
         return await _zone_create(connector, operator, target, params, prefix)
+    async with resource_lock(target, "cloud zone", str(params["id"])):
+        return await _zone_update(connector, operator, target, params, prefix)
+
+
+async def _zone_update(
+    connector: Any, operator: Any, target: Any, params: dict[str, Any], prefix: str
+) -> dict[str, Any]:
     path = ZONE_PATH.format(id=segment(params["id"]))
     current = await connector._request_json(
         target, "GET", path, operator=operator, params=API_VERSION
@@ -223,9 +241,20 @@ def _profile_view(row: Mapping[str, Any]) -> dict[str, Any]:
 async def flavor_profile_set(
     connector: Any, operator: Any, target: Any, params: dict[str, Any], *, prefix: str
 ) -> dict[str, Any]:
-    """Create a flavor profile (``POST``) or change its flavors (``PATCH .../{id}``)."""
+    """Create a flavor profile (``POST``) or change its flavors (``PATCH .../{id}``).
+
+    The change holds the profile's lock from the read to the write: the
+    ``PATCH`` replaces the whole flavor mapping.
+    """
     if not params.get("id"):
         return await _flavor_profile_create(connector, operator, target, params, prefix)
+    async with resource_lock(target, "flavor profile", str(params["id"])):
+        return await _flavor_profile_update(connector, operator, target, params, prefix)
+
+
+async def _flavor_profile_update(
+    connector: Any, operator: Any, target: Any, params: dict[str, Any], prefix: str
+) -> dict[str, Any]:
     path = FLAVOR_PROFILE_PATH.format(id=segment(params["id"]))
     current = await connector._request_json(
         target, "GET", path, operator=operator, params=API_VERSION
@@ -345,9 +374,20 @@ def _members_view(project: Mapping[str, Any], lists: Mapping[str, Any]) -> dict[
 async def project_members_set(
     connector: Any, operator: Any, target: Any, params: dict[str, Any], *, prefix: str
 ) -> dict[str, Any]:
-    """Add or remove project members: ``GET``, then ``PATCH /iaas/api/projects/{id}``."""
+    """Add or remove project members: ``GET``, then ``PATCH /iaas/api/projects/{id}``.
+
+    The change holds the project's lock from the read to the write: the
+    ``PATCH`` replaces each role list it names.
+    """
     if not params.get("add") and not params.get("remove"):
         return _invalid("project", "give add, remove or both")
+    async with resource_lock(target, "project", str(params["project_id"])):
+        return await _project_members_update(connector, operator, target, params, prefix)
+
+
+async def _project_members_update(
+    connector: Any, operator: Any, target: Any, params: dict[str, Any], prefix: str
+) -> dict[str, Any]:
     path = PROJECT_PATH.format(id=segment(params["project_id"]))
     current = await connector._request_json(
         target, "GET", path, operator=operator, params=API_VERSION

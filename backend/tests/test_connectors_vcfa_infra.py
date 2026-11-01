@@ -7,15 +7,18 @@ Drives each op through the real dispatcher against a respx-mocked appliance.
 Pins the wire calls (path, ``apiVersion``, body), the flat rows of the reads,
 the "safe to run twice" answers, the approval wait of every change, the vendor
 error text in the answer, the Vault read of the cloud account password (never
-in a result), and the preview of the cloud account remove. The handlers are
+in a result), the preview of the cloud account remove, and that two changes to
+one object run one after the other. The handlers are
 shared with Aria Automation 8 (``test_connectors_vra8_infra.py``). All names
 and ids are made up.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, suppress
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -38,6 +41,7 @@ from meho_backplane.connectors.vcf_automation import (
     _infra_changes,
 )
 from meho_backplane.connectors.vcf_automation import _lookups as lookups_module
+from meho_backplane.connectors.vcf_automation import _resource_lock as lock_module
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations import (
@@ -863,3 +867,206 @@ async def test_members_set_waits_for_approval(vcfa: VcfAutomationConnector) -> N
         result = await run("vcfa.tenant.project.members.set", params, approved=False)
     assert result["status"] == "awaiting_approval", result
     assert not patch.called
+
+
+# ---------------------------------------------------------------------------
+# Overlapping changes: one change at a time per object
+# ---------------------------------------------------------------------------
+
+_Apply = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
+
+
+def _merge(obj: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
+    return {**obj, **body}
+
+
+def _replace_flavors(obj: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
+    return {**obj, "flavorMappings": {"mapping": body["flavorMapping"]}}
+
+
+class _Stored:
+    """An object on the appliance that applies each ``PATCH`` and pauses after a read.
+
+    The read waits a moment for the other call to read too. Without the
+    lock both calls read the same object and the wait ends at once; with
+    the lock the second read cannot happen before the first call wrote, so
+    the wait runs out and the first call goes on.
+    """
+
+    def __init__(self, obj: dict[str, Any], apply: _Apply = _merge) -> None:
+        self.obj = obj
+        self.apply = apply
+        self.patch_bodies: list[dict[str, Any]] = []
+        self._reads = 0
+        self._both_read = asyncio.Event()
+
+    async def get(self, _request: httpx.Request) -> httpx.Response:
+        self._reads += 1
+        if self._reads >= 2:
+            self._both_read.set()
+        with suppress(TimeoutError):
+            await asyncio.wait_for(self._both_read.wait(), 0.3)
+        return httpx.Response(200, json=self.obj)
+
+    def patch(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        self.patch_bodies.append(body)
+        self.obj = self.apply(self.obj, body)
+        return httpx.Response(200, json=self.obj)
+
+
+async def _two_changes(
+    mock: respx.MockRouter, path: str, stored: _Stored, op_id: str, *params: dict[str, Any]
+) -> list[dict[str, Any]]:
+    mount_logins(mock)
+    mock.get(path).mock(side_effect=stored.get)
+    mock.patch(path).mock(side_effect=stored.patch)
+    results = await asyncio.gather(*(run(op_id, p) for p in params))
+    assert [r["result"]["status"] for r in results] == ["updated", "updated"], results
+    assert len(stored.patch_bodies) == 2
+    assert lock_module._locks == {}
+    return [r["result"] for r in results]
+
+
+async def test_an_overlapping_member_add_does_not_undo_a_member_remove(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    # Regression: a removal and an addition to the same role list at the same
+    # time must both hold. Each call sends the whole list.
+    stored = _Stored(dict(_PROJECT_ROW))
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        await _two_changes(
+            mock,
+            _PROJECT,
+            stored,
+            "vcfa.tenant.project.members.set",
+            {"project_id": "p-1", "remove": [{"email": "<member>"}]},
+            {"project_id": "p-1", "add": [{"email": "<new-member>", "role": "member"}]},
+        )
+    assert stored.obj["members"] == [{"email": "<new-member>", "type": "user"}]
+    assert stored.obj["administrators"] == _PROJECT_ROW["administrators"]
+
+
+async def test_overlapping_flavor_adds_both_keep_their_flavor(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    stored = _Stored(dict(_FLAVOR_PROFILE), apply=_replace_flavors)
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        await _two_changes(
+            mock,
+            f"{_FLAVORS}/fp-1",
+            stored,
+            "vcfa.tenant.flavor_profile.set",
+            {"id": "fp-1", "flavors": {"medium": {"cpu_count": 2, "memory_mb": 4096}}},
+            {"id": "fp-1", "flavors": {"xlarge": {"cpu_count": 16, "memory_mb": 65536}}},
+        )
+    assert set(stored.obj["flavorMappings"]["mapping"]) == {"small", "large", "medium", "xlarge"}
+    assert set(stored.patch_bodies[1]["flavorMapping"]) == {"small", "large", "medium", "xlarge"}
+
+
+async def test_overlapping_zone_changes_both_hold(vcfa: VcfAutomationConnector) -> None:
+    # Each change sends the zone's name and placement policy back, so the
+    # second one must read what the first one wrote.
+    stored = _Stored(dict(_ZONE))
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        await _two_changes(
+            mock,
+            f"{_ZONES}/z-1",
+            stored,
+            "vcfa.tenant.zone.set",
+            {"id": "z-1", "name": "<new-name>"},
+            {"id": "z-1", "placement_policy": "BINPACK"},
+        )
+    assert stored.obj["name"] == "<new-name>"
+    assert stored.obj["placementPolicy"] == "BINPACK"
+
+
+def _record_advisory_lock(
+    monkeypatch: pytest.MonkeyPatch, *, locked: bool
+) -> list[tuple[int, dict[str, Any]]]:
+    calls: list[tuple[int, dict[str, Any]]] = []
+
+    @asynccontextmanager
+    async def fake(key: int, **kwargs: Any) -> AsyncIterator[bool]:
+        calls.append((key, kwargs))
+        yield locked
+
+    monkeypatch.setattr(lock_module, "advisory_lock", fake)
+    return calls
+
+
+_LOCKED_CHANGES: list[tuple[str, dict[str, Any], str, str, str, dict[str, Any]]] = [
+    (
+        "vcfa.tenant.project.members.set",
+        {"project_id": "p-1", "remove": [{"email": "<member>"}]},
+        "project",
+        "p-1",
+        _PROJECT,
+        _PROJECT_ROW,
+    ),
+    (
+        "vcfa.tenant.flavor_profile.set",
+        {"id": "fp-1", "remove_flavors": ["small"]},
+        "flavor profile",
+        "fp-1",
+        f"{_FLAVORS}/fp-1",
+        _FLAVOR_PROFILE,
+    ),
+    (
+        "vcfa.tenant.zone.set",
+        {"id": "z-1", "description": "<new>"},
+        "cloud zone",
+        "z-1",
+        f"{_ZONES}/z-1",
+        _ZONE,
+    ),
+]
+
+
+@pytest.mark.parametrize(("op_id", "params", "kind", "object_id", "path", "row"), _LOCKED_CHANGES)
+async def test_a_change_holds_the_cross_worker_lock_of_its_object(
+    vcfa: VcfAutomationConnector,
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+    params: dict[str, Any],
+    kind: str,
+    object_id: str,
+    path: str,
+    row: dict[str, Any],
+) -> None:
+    calls = _record_advisory_lock(monkeypatch, locked=True)
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(path).respond(200, json=row)
+        mock.patch(path).respond(200, json=row)
+        result = await run(op_id, params)
+    assert result["result"]["status"] == "updated", result
+    target = await resolved_target()
+    key, kwargs = calls[0]
+    assert key == lock_module.lock_key(target, kind, object_id)
+    assert key != lock_module.lock_key(target, kind, "other")
+    assert kwargs["wait_seconds"] == lock_module.LOCK_WAIT_SECONDS
+
+
+@pytest.mark.parametrize(("op_id", "params", "kind", "object_id", "path", "row"), _LOCKED_CHANGES)
+async def test_a_change_fails_without_writing_when_the_lock_stays_busy(
+    vcfa: VcfAutomationConnector,
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+    params: dict[str, Any],
+    kind: str,
+    object_id: str,
+    path: str,
+    row: dict[str, Any],
+) -> None:
+    _record_advisory_lock(monkeypatch, locked=False)
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        get = mock.get(path).respond(200, json=row)
+        patch = mock.patch(path).respond(200, json=row)
+        result = await run(op_id, params)
+    assert result["status"] == "error", result
+    assert f"another change to {kind} {object_id!r} is still running" in json.dumps(result)
+    assert not get.called
+    assert not patch.called
+    assert lock_module._locks == {}

@@ -16,11 +16,9 @@ The image name change carries the two traps of the vendor API:
 
 Two changes to the same profile at the same time would each read the
 mapping, add their own name and send the whole mapping back, so the
-second write would drop the first name. The change op therefore holds a
-lock for the profile from the read to the write: an ``asyncio.Lock`` for
-calls in this process and a PG advisory lock
-(:func:`meho_backplane.db.advisory.advisory_lock`) for calls in other
-workers. A second call waits; after :data:`PROFILE_LOCK_WAIT_SECONDS` it
+second write would drop the first name. The change op therefore holds the
+profile's lock (:func:`._resource_lock.resource_lock`) from the read to
+the write. A second call waits; after :data:`PROFILE_LOCK_WAIT_SECONDS` it
 fails instead of writing a stale mapping.
 
 Every ``/iaas/api`` call pins ``apiVersion`` (:data:`._paths.TENANT_IAAS_API_VERSION`).
@@ -31,10 +29,7 @@ Path ids are percent-encoded with an empty safe set, like
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import time
-from collections.abc import AsyncIterator
-from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote
@@ -50,7 +45,7 @@ from meho_backplane.connectors.vcf_automation._paths import (
     TENANT_IMAGE_PROFILES_PATH,
     TENANT_REQUEST_TRACKER_PATH,
 )
-from meho_backplane.db.advisory import advisory_lock
+from meho_backplane.connectors.vcf_automation._resource_lock import resource_lock
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:
@@ -357,61 +352,6 @@ def _region_problem(profile: dict[str, Any], image: dict[str, Any]) -> str | Non
     return None
 
 
-@dataclass(slots=True)
-class _ProfileLock:
-    lock: asyncio.Lock
-    users: int = 0
-
-
-#: In-process locks by key; an entry lives while a call holds or waits for it.
-_profile_locks: dict[int, _ProfileLock] = {}
-
-
-def _lock_key(target: VcfAutomationTargetLike, profile_id: str) -> int:
-    """A stable signed-63-bit key for one profile of one target (a PG ``bigint``)."""
-    raw = f"{target.tenant_id}\0{target.id}\0{profile_id}".encode()
-    digest = hashlib.blake2b(raw, digest_size=8).digest()
-    return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
-
-
-@asynccontextmanager
-async def _profile_lock(target: VcfAutomationTargetLike, profile_id: str) -> AsyncIterator[None]:
-    """Hold the profile's lock in this process and across workers, or fail after the wait.
-
-    Only taking the locks is bounded by :data:`PROFILE_LOCK_WAIT_SECONDS`.
-    Once held, the locks stay for the whole block, however long the reads
-    and the write take: a timer over the write could cancel it while the
-    appliance still applies it, and then say that nothing was written.
-    """
-    key = _lock_key(target, profile_id)
-    held = _profile_locks.setdefault(key, _ProfileLock(asyncio.Lock()))
-    held.users += 1
-    try:
-        async with AsyncExitStack() as locks:
-            try:
-                async with asyncio.timeout(PROFILE_LOCK_WAIT_SECONDS):
-                    await locks.enter_async_context(held.lock)
-                    locked = await locks.enter_async_context(
-                        advisory_lock(
-                            key,
-                            subsystem="vcfa_image_profile",
-                            wait_seconds=PROFILE_LOCK_WAIT_SECONDS,
-                        )
-                    )
-                    if not locked:
-                        raise TimeoutError
-            except TimeoutError:
-                raise RuntimeError(
-                    f"another change to image profile {profile_id!r} is still running; "
-                    "nothing was written, run this op again in a minute"
-                ) from None
-            yield
-    finally:
-        held.users -= 1
-        if held.users == 0:
-            _profile_locks.pop(key, None)
-
-
 async def _resolve(
     connector: VcfAutomationConnector,
     operator: Operator,
@@ -445,14 +385,16 @@ async def tenant_image_profile_mapping_update(
 ) -> dict[str, Any]:
     """``vcfa.tenant.image_profile.mapping.update`` -- change one name, keep the others.
 
-    The profile is read and written under :func:`_profile_lock`, so two
+    The profile is read and written under :func:`._resource_lock.resource_lock`, so two
     changes to the same profile run one after the other and the second
     one reads the first one's result.
     """
     problem = _param_problem(params)
     if problem is not None:
         return {"status": "invalid_request", "guidance": f"{problem}; nothing was written"}
-    async with _profile_lock(target, str(params["profile_id"])):
+    async with resource_lock(
+        target, "image profile", str(params["profile_id"]), wait_seconds=PROFILE_LOCK_WAIT_SECONDS
+    ):
         plan, problem = await _resolve(connector, operator, target, params)
         if plan is None:
             return {"status": "invalid_request", "guidance": f"{problem}; nothing was written"}

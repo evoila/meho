@@ -32,6 +32,7 @@ from meho_backplane.connectors.vcf_automation import (
     VcfAutomationConnector,
 )
 from meho_backplane.connectors.vcf_automation import _images as images_module
+from meho_backplane.connectors.vcf_automation import _resource_lock as lock_module
 from meho_backplane.connectors.vcf_automation._images import plan_mapping_change
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
@@ -554,7 +555,7 @@ async def test_mapping_update_serializes_two_changes_to_one_profile(
     assert len(appliance.patch_bodies) == 2
     assert set(appliance.patch_bodies[1]["imageMapping"]) == appliance.names
     assert [r["result"]["guidance"] for r in results] == [None, None]
-    assert images_module._profile_locks == {}
+    assert lock_module._locks == {}
 
 
 class _SlowAppliance(_Appliance):
@@ -600,7 +601,7 @@ async def test_mapping_update_waits_for_a_slow_write_after_taking_the_lock(
         result = await _add_name("Rocky 9", "fi-rocky")
     assert result["result"]["status"] == "updated", result
     assert appliance.names == {"RHEL 9", "Rocky 9"}
-    assert images_module._profile_locks == {}
+    assert lock_module._locks == {}
 
 
 async def test_mapping_update_that_takes_the_lock_near_the_deadline_still_writes(
@@ -618,7 +619,7 @@ async def test_mapping_update_that_takes_the_lock_near_the_deadline_still_writes
         )
     assert [r["result"]["status"] for r in results] == ["updated", "updated"], results
     assert appliance.names == {"RHEL 9", "Rocky 9", "Debian 12"}
-    assert images_module._profile_locks == {}
+    assert lock_module._locks == {}
 
 
 def _record_advisory_lock(
@@ -631,7 +632,7 @@ def _record_advisory_lock(
         calls.append((key, kwargs))
         yield locked
 
-    monkeypatch.setattr(images_module, "advisory_lock", fake)
+    monkeypatch.setattr(lock_module, "advisory_lock", fake)
     return calls
 
 
@@ -648,8 +649,9 @@ async def test_mapping_update_holds_the_cross_worker_lock_of_the_profile(
     assert result["result"]["status"] == "updated"
     target = await resolved_target()
     key, kwargs = calls[0]
-    assert key == images_module._lock_key(target, "ip-1")
-    assert key != images_module._lock_key(target, "ip-2")
+    assert key == lock_module.lock_key(target, "image profile", "ip-1")
+    assert key != lock_module.lock_key(target, "image profile", "ip-2")
+    assert key != lock_module.lock_key(target, "flavor profile", "ip-1")
     assert kwargs["wait_seconds"] == images_module.PROFILE_LOCK_WAIT_SECONDS
 
 
@@ -666,7 +668,7 @@ async def test_mapping_update_fails_without_writing_when_the_lock_stays_busy(
     assert result["status"] == "error"
     assert "still running" in json.dumps(result)
     assert not patch.called
-    assert images_module._profile_locks == {}
+    assert lock_module._locks == {}
 
 
 async def test_mapping_update_unchanged_writes_nothing(vcfa: VcfAutomationConnector) -> None:

@@ -289,12 +289,13 @@ approval preview in `_images.py`, all on the tenant plane, in the group
 - **One change at a time per profile.** Two changes that read the same
   profile would each send the whole mapping back, and the second write
   would drop the first name. So the handler holds a lock for the profile
-  from the read to the write: an `asyncio.Lock` for calls in this
-  process and a PG advisory lock (`db/advisory.py`, keyed by tenant,
-  target and profile id) for calls in other workers. A second call waits
-  up to 30 seconds for the lock, then fails without writing. The wait
-  covers only taking the lock. A call that holds the lock runs its reads
-  and its write to the end, however long they take.
+  from the read to the write (`_resource_lock.py`, shared with the
+  infrastructure changes): an `asyncio.Lock` for calls in this process
+  and a PG advisory lock (`db/advisory.py`, keyed by tenant, target, kind
+  of object and id) for calls in other workers. A second call waits up to
+  30 seconds for the lock, then fails without writing. The wait covers
+  only taking the lock. A call that holds the lock runs its reads and its
+  write to the end, however long they take.
 - **Approval card.** The preview builder reads the profile and the fabric
   image at park time and shows the old and the new template plus the
   other names. Without a connector (`preview_operation`) it only echoes
@@ -463,6 +464,17 @@ connector covers, so no op needs a version check.
   that change (`administrators`, `members`, `viewers`, `supervisors`) and the
   project name. A user or group holds one role: adding it with a role takes it
   out of the other lists.
+- **One change at a time per object.** `zone.set`, `flavor_profile.set` and
+  `project.members.set` build the new whole from what they read: the zone
+  fields, the whole flavor mapping, the whole role list. Two such changes to
+  the same object at the same time would undo each other, and both would say
+  `updated`. So each change holds the object's lock from the read to the write
+  (`_resource_lock.py`, the same lock the image name change uses: an
+  `asyncio.Lock` in this process and a PG advisory lock across workers, keyed
+  by tenant, target, kind of object and id). A second call waits up to 30
+  seconds, then fails with "another change to ... is still running" without
+  reading or writing. The tests run two changes at once against a mocked
+  appliance that applies each `PATCH` and check that both changes hold.
 - **Reconcile.** Both lanes (`test_connectors_vcf_automation_spec_reconcile.py`
   and `test_connectors_vra8_spec_reconcile.py`) map each `_infra_paths`
   constant to its methods (`tests/_vra_infra_paths.py`) and check them against

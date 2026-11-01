@@ -70,8 +70,11 @@ in `connectors/vcf_automation/infra_ops.py`, `_infra.py` and
 `vcfa.vra8` prefix, and the connector has one shim per op. Every change waits for
 a person's approval; `cloud_account.delete` is destructive and needs a preview
 first. The cloud account password comes from Vault (`password_secret_ref`) and
-is never in a result. The table with each op, what it returns and its versions is
-in [connectors-vcf-automation.md](connectors-vcf-automation.md) ("Infrastructure").
+is never in a result. A change of an existing zone, flavor profile or project
+holds the object's lock from the read to the write, so two changes at the same
+time run one after the other. The table with each op, what it returns and its
+versions is in [connectors-vcf-automation.md](connectors-vcf-automation.md)
+("Infrastructure").
 The reconcile lane checks the shared paths against the pinned `vra-iaas.json`.
 
 Op ids are namespaced `vcfa.vra8.*` (distinct from the modern impl's

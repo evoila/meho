@@ -128,7 +128,12 @@ import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 
-from meho_backplane.auth.approval_sign_in import web_click_approval_auth
+from meho_backplane.auth.approval_sign_in import (
+    WEB_FRESH_SIGN_IN_REMEDIATION,
+    check_fresh_web_approval_sign_in,
+    has_fresh_web_approval_sign_in,
+)
+from meho_backplane.auth.fresh_sign_in import fresh_sign_in_challenge
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
@@ -142,6 +147,8 @@ from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ApprovalRequestExpiredError,
+    ApprovalSignInReusedError,
+    ApprovalSignInTooOldError,
     ChainPosition,
     DelegatedDecisionForbiddenError,
     DelegatedReasonInvalidError,
@@ -165,6 +172,7 @@ from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
 )
+from meho_backplane.ui.auth.routes import login_location
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.routes.approvals.render import (
     RESULT_STATE_PILL,
@@ -250,6 +258,9 @@ _SINGLE_OPERATOR_DOCS_URL: Final[str] = (
 #: parse against a paste-from-clipboard accident. Shared with the REST
 #: bodies so both surfaces accept the same reasons (#3692).
 _MAX_REASON_LENGTH: Final[int] = MAX_REASON_LENGTH
+
+#: Where a new sign-in for an approval brings the person back to.
+_APPROVALS_PATH: Final[str] = "/ui/approvals"
 
 #: Module-level ``Depends`` closure for the operator-session gate. Built
 #: once (rather than inline) to satisfy ruff B008, matching the convention
@@ -720,6 +731,7 @@ async def _render_detail_modal(
     error_status: int | None = None,
     error_message: str | None = None,
     self_approval_error: bool = False,
+    fresh_sign_in_error: bool = False,
 ) -> HTMLResponse:
     """Render the request-detail modal with Approve / Deny.
 
@@ -731,7 +743,15 @@ async def _render_detail_modal(
     ``error_*`` arguments let the decision handlers re-render this modal
     with a typed banner (e.g. a server-side self-approval 403) without a
     second round-trip; ``self_approval_error`` promotes that banner from a
-    bare error to the actionable single-operator guidance (#2669).
+    bare error to the actionable single-operator guidance (#2669), and
+    ``fresh_sign_in_error`` to the "sign in again" guidance with the link
+    to a new sign-in.
+
+    An approve needs a recent sign-in that asked for the credentials
+    (:func:`~meho_backplane.auth.approval_sign_in.check_fresh_web_approval_sign_in`).
+    When the session's sign-in is already too old for any approval, the
+    modal offers the sign-in link in place of the Approve button
+    (``approve_needs_sign_in``); the POST checks again either way.
     """
     operator = await _resolve_operator(session)
     approval, reviewer_context, delegation, chain = await _get_request_with_context_or_404(
@@ -739,6 +759,7 @@ async def _render_detail_modal(
     )
 
     self_approval_blocked = _is_self_approval_blocked(operator, approval)
+    approve_needs_sign_in = not has_fresh_web_approval_sign_in(operator, get_settings())
     csrf_token = mint_csrf_token(str(session.session_id))
     context: dict[str, object] = {
         "request": project_request_to_view(approval, delegation, chain),
@@ -751,6 +772,9 @@ async def _render_detail_modal(
         "self_approval_setting": "APPROVAL_ALLOW_SELF_APPROVAL",
         "self_approval_docs_url": _SINGLE_OPERATOR_DOCS_URL,
         "self_approval_error": self_approval_error,
+        "fresh_sign_in_error": fresh_sign_in_error,
+        "approve_needs_sign_in": approve_needs_sign_in,
+        "sign_in_url": login_location(_APPROVALS_PATH, fresh_sign_in=True),
         "operator_sub": operator.sub,
         "status_pill_class": STATUS_PILL_CLASS,
         "result_state_pill": RESULT_STATE_PILL,
@@ -782,8 +806,9 @@ async def _decide(
     helper (the existing approve path), exactly as the REST route does.
 
     A recoverable decision failure (self-approval 403, already-decided 409,
-    role 403, not-found 404) re-renders the detail modal with a typed banner
-    rather than tearing the operator out of the flow.
+    role 403, not-found 404, a sign-in too old to approve 401) re-renders
+    the detail modal with a typed banner rather than tearing the operator
+    out of the flow.
     """
     operator = await _resolve_operator(session)
     try:
@@ -807,6 +832,12 @@ async def _decide(
         self_approval_error = exc.status_code == status.HTTP_403_FORBIDDEN and detail.startswith(
             "self_approval_forbidden"
         )
+        # The session's sign-in is too old to approve, or it already
+        # approved a destructive operation: the banner carries the link to
+        # a new sign-in. Keyed on the machine-readable prefix of the 401.
+        fresh_sign_in_error = detail.startswith(
+            ("fresh_sign_in_required", "fresh_sign_in_already_used")
+        )
         return await _render_detail_modal(
             request,
             session,
@@ -814,6 +845,7 @@ async def _decide(
             error_status=exc.status_code,
             error_message=detail,
             self_approval_error=self_approval_error,
+            fresh_sign_in_error=fresh_sign_in_error,
         )
 
     # Approve re-dispatches the parked op (the committed approval is the
@@ -855,8 +887,13 @@ async def _commit_decision(
 ) -> ApprovalRequest:
     """Run approve/reject in one transaction + publish; map errors to HTTP.
 
-    The self-approval guard, role gate, tenant-isolation 404, and
-    already-decided 409 all live in the service
+    An approve first needs the console session's sign-in to be recent and
+    to have asked for the credentials
+    (:func:`~meho_backplane.auth.approval_sign_in.check_fresh_web_approval_sign_in`,
+    the same checks as REST). A reject needs no new sign-in. The
+    self-approval guard, role gate, tenant-isolation 404, already-decided
+    409 and the sign-in age and one-use rules of the request's risk level
+    all live in the service
     (:func:`~meho_backplane.operations.approval_queue.approve_request` /
     :func:`reject_request`); this projects each onto the same HTTP status
     the REST surface uses so the modal can render a consistent banner. The
@@ -867,14 +904,14 @@ async def _commit_decision(
     try:
         async with sessionmaker() as db_session:
             if decision == "approved":
-                # The click is the proof that a person is present (#3979).
+                approval_auth = check_fresh_web_approval_sign_in(operator, get_settings())
                 request = await approve_request(
                     db_session,
                     request_id,
                     operator=operator,
                     params=None,
                     reason=reason,
-                    approval_auth=web_click_approval_auth(operator),
+                    approval_auth=approval_auth,
                 )
             else:
                 request = await reject_request(
@@ -916,6 +953,17 @@ async def _commit_decision(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"This request was already {exc.status}.",
+        ) from exc
+    except ApprovalSignInTooOldError as exc:
+        # The same 401 challenge as REST; the modal shows the sign-in link.
+        raise fresh_sign_in_challenge(
+            f"fresh_sign_in_required: {WEB_FRESH_SIGN_IN_REMEDIATION}",
+            max_age_seconds=exc.max_age_seconds,
+        ) from exc
+    except ApprovalSignInReusedError as exc:
+        raise fresh_sign_in_challenge(
+            f"fresh_sign_in_already_used: {WEB_FRESH_SIGN_IN_REMEDIATION}",
+            max_age_seconds=get_settings().per_action_sign_in_max_age_seconds,
         ) from exc
     except ApprovalRequestExpiredError as exc:
         # F12 / #274: the request's deadline lapsed — refuse the approval at

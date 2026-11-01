@@ -94,12 +94,16 @@ You can also approve several requests by id in one run:
 the risk level and the parameters) and asks you to type `yes` for each
 one. Anything else skips that request.
 
-**Approving on the command line asks you to sign in again.** An approval
-must come from a person who is present. In the console your click is the
-proof. On the command line and REST, MEHO needs a fresh sign-in made only
-for approvals. So `meho approvals approve` opens your browser and asks
-for your password (and your authenticator code, if your realm asks for
-one).
+**Approving asks you to sign in again.** An approval must come from a
+person who is present, so MEHO checks the sign-in behind every approval.
+In the console, your sign-in must be at most 15 minutes old and must
+have asked for your password. When it is older, the request shows **Sign
+in to approve** instead of **Approve**: click it, sign in with your
+password (and your authenticator code or passkey), then open the request
+again and approve. On the command line and REST, MEHO needs a fresh
+sign-in made only for approvals. So `meho approvals approve` opens your
+browser and asks for your password (and your authenticator code, if your
+realm asks for one).
 
 - The browser always asks for your password, even when you are signed in
   to the console in the same browser.
@@ -111,7 +115,9 @@ one).
   stores it.
 - Your normal `meho login` stays as it is, but it never approves. An MCP
   token or an agent token never approves either.
-- Reject needs no new sign-in.
+- Reject needs no new sign-in, in the console or on the command line.
+- The same limits hold in the console: 15 minutes for one sign-in, and a
+  sign-in of its own for a `destructive` operation.
 
 Without a browser (for example over SSH), the command prints the sign-in
 link and stops. Approve in the console instead: it is the normal place to

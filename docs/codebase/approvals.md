@@ -2188,8 +2188,9 @@ only machine kinds: the `approver` capability model (#3243) and the seniority
 self-approval rules are preserved unchanged for **human** principals.
 
 **Approve needs a fresh approval sign-in (#3979, #5515).** An approval is
-a person's decision. In the console the click is the proof. On REST (and
-so on the CLI) the token must prove it:
+a person's decision. On every surface the sign-in behind the approve must
+be recent and must have asked for the credentials. On REST (and so on the
+CLI) the token must prove it:
 
 - `POST /approve`, and `POST /decide` with `decision=approved`, run
   `check_fresh_approval_sign_in` (`auth/approval_sign_in.py`; on
@@ -2269,11 +2270,34 @@ so on the CLI) the token must prove it:
   `WWW-Authenticate: Bearer error="insufficient_user_authentication",
   max_age=<N>` (the shared `fresh_sign_in_challenge`, RFC 9470 §3). The
   request stays pending.
+- **In the web interface the console session's own sign-in is the
+  proof.** `POST /ui/approvals/{id}/approve` runs
+  `check_fresh_web_approval_sign_in` (`auth/approval_sign_in.py`) on the
+  operator the console builds from the session's access token: the same
+  `acr` check and the same age limits as REST, without the client check
+  (the console got the token from its own `meho-web` login, and the
+  browser never holds it). `approve_request` then applies the limit of
+  the request's risk level and the destructive one-use rule, exactly as
+  for REST (`ApprovalSignInTooOldError` / `ApprovalSignInReusedError`,
+  mapped to 401 in `ui/routes/approvals/routes.py`). A refusal re-renders
+  the detail modal with the banner "Sign in again to approve" and a link
+  to `/ui/auth/login?return_to=/ui/approvals&fresh_sign_in=1`. That login
+  carries `prompt=login` and `max_age=0` (`build_authorization_request`
+  in `ui/auth/flow.py`), so Keycloak asks for the credentials also in a
+  remembered browser; the new console session's token then has a fresh
+  `auth_time` and `acr` `"1"`. When the session's sign-in is already too
+  old for any approval, the modal shows "Sign in to approve" (the same
+  link) in place of the Approve button (`approve_needs_sign_in` in
+  `_render_detail_modal`); the POST checks again either way. Deny needs
+  no new sign-in. The audit row carries `"channel": "web"`. The console
+  session itself is unchanged: it ends after its own limits, and a plain
+  console login still sends no `prompt`.
 - Every approve writes `payload["approval_auth"]` on its
   `approval.decision` row: `{"channel": "rest" | "web", "method":
-  "fresh_sign_in" | "one_time_code" | "web_click", "auth_time": <int|null>,
-  "acr": <str|null>}` plus `sign_in_key` for a token approve, plus
-  `"single_use": true` for a destructive token approve.
+  "fresh_sign_in" | "one_time_code", "auth_time": <int>, "acr":
+  <str|null>, "sign_in_key": <hash>}` plus `"single_use": true` for a
+  destructive approve. Rows written before this rule carry `"method":
+  "web_click"` with no `sign_in_key`.
 - The window never covers turning approval off or lowering a risk level
   (it uses `PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`, see above), and the
   login and permission changes do not read it.
@@ -2442,7 +2466,7 @@ no new gate, service call, route, or migration.
 | `GET` | `/ui/approvals` | Content-negotiated. A normal navigation (no `HX-Request`) → the **full-page console**: status tabs (Pending / Approved / Rejected / Expired / All), a `work_ref` filter, an oldest/newest toggle (`order`, #3596), and the decision-history list. The bell's `hx-get` (`HX-Request: true`) → the pending **panel** modal fragment, oldest first with step numbers when a change ticket has two or more pending requests (#3596). (G10.8-T #1827) |
 | `GET` | `/ui/approvals/list` | Decision-history partial — the HTMX swap target for the status tabs / `work_ref` filter / oldest-newest toggle / "Load more" offset pager. Reuses `list_pending(status=…, work_ref=…, offset=…, order=…)`; `tab=all` passes `status=None`. `order` is `oldest`, `newest`, or empty (the default rule in "Chains of requests under one change ticket" below); any other value is a 422. Pages with a real offset, not the badge's 50-row glance cap. (G10.8-T #1827) |
 | `GET` | `/ui/approvals/{id}` | Request-detail modal. A pending row offers Approve/Deny; a **decided** row renders read-only with a decision banner ("Approved/Rejected by X at T"). An approved row also shows how its run ended; a failed run turns the banner red (#3543). The `proposed_effect` envelope renders **structurally** (#2447), not as raw JSON (below). |
-| `POST` | `/ui/approvals/{id}/approve` | Approve in-process + re-dispatch the parked op + the fail-open `approval.approved` add-on step event. |
+| `POST` | `/ui/approvals/{id}/approve` | Approve in-process + re-dispatch the parked op + the fail-open `approval.approved` add-on step event. Needs a recent console sign-in that asked for the credentials (the fresh approval sign-in rule above); otherwise the modal re-renders with the sign-in link. |
 | `POST` | `/ui/approvals/{id}/reject` | Reject in-process + the `approval.rejected` add-on step event; the op never runs. |
 | `GET` | `/ui/approvals/in-order?work_ref=` | The "Approve group in order" modal: the change ticket's requests oldest first and a Start button (#3597). |
 | `POST` | `/ui/approvals/in-order` | Runs the steps in order (form: `work_ref`, `reason`, `confirm_id`); renders what happened to each step (#3597). |

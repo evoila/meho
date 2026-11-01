@@ -933,6 +933,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `folder_list`) — the inventory folders of a vCenter, one flat row each, with
   the datacenter and the parent. `safe`, in its own group `vmware-folders`, on
   both catalogs. See **Folder list** under Control flow.
+- **`vmware.host.advanced_settings.show`** and **`vmware.host.firewall.show`**
+  (`typed_ops_host_security.py`, handlers `host_advanced_settings_show` and
+  `host_firewall_show`) — the advanced settings of one host (with the ones
+  that differ from the default marked) and its firewall rule sets. `safe`, in
+  the group `vmware-host-security` with the six host security changes, on
+  both catalogs. See **Host security settings** under Control flow.
 - **`vmware.network.portgroup.show`** (`typed_ops_portgroup_show.py`,
   handler `network_portgroup_show`) — all settings of one distributed port
   group, by id or name. `safe`, in its own group `vmware-portgroup-settings`,
@@ -5837,8 +5843,8 @@ early with the version message.
 - **Syslog reload.** The vSphere API has no call to reload syslog. The host
   applies a new `Syslog.global.logHost` itself, as for a change in the
   vSphere Client. For `udp` or `tcp` targets on the usual ports, the host's
-  `syslog` firewall rule set must be on (the firewall operations come with
-  the next host task).
+  `syslog` firewall rule set must be on (`vmware.composite.host.firewall.ruleset.set`,
+  see **Host security settings** below).
 - **Secrets.** SNMP community strings are passwords: `host.config.show`
   only counts them and never returns them.
 - **Core dump.** `core_dump` shows the active diagnostic partition only. A
@@ -5872,6 +5878,105 @@ read-back, faults, previews, schema checks),
 vCenter 8.0.3 and 9.0 VI-JSON paths; approval through the dispatcher; both
 catalogs) and `tests/test_connectors_vmware_rest_host_config_reconcile.py`
 (every vim method, property and body field against the pinned 9.0
+`vi-json.yaml` and the 8.0 U1, U2 and U3 files).
+
+### Host security settings (advanced settings, firewall, lockdown, SNMP, core dump)
+
+Two reads and six changes for the hardening settings of one ESXi host,
+through vCenter. All are written by hand, so they work on a fresh install
+with no spec ingest. All eight are in the group `vmware-host-security`
+(the typed reads and the multi-step changes share the key and the text).
+
+| Operation | What it does | Vendor calls | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.host.advanced_settings.show` | One row per advanced setting: `key`, `value`, `default`, `is_default`, `value_type`, `read_only`, `label`. Filter by a key or a prefix that ends with a dot (`prefix`), or only the changed ones (`changed_only`). About 1000 rows for all settings, so a long list comes back as a result handle. | VIM `OptionManager.QueryOptions`; `RetrievePropertiesEx` of `OptionManager.supportedOption` (type, default, read-only flag) | `safe` | 8.0, 9.x |
+| `vmware.host.firewall.show` | The default policy and one row per rule set: on or off, required, service, ports (`rules`), allowed IP addresses (`allowed`). Filter by one rule set or `enabled_only`. | VIM `RetrievePropertiesEx` of `HostFirewallSystem.firewallInfo` | `safe` | 8.0, 9.x |
+| `vmware.composite.host.advanced_settings.set` | Sets up to 20 settings. Checks first that each key exists, is not read-only, and that the value has the setting's type and is in its range or choices; then sends only the values that differ, with the type vSphere expects (`int`, `long`, `boolean`, `float`, `string`). Each setting takes `value` or `value_secret_ref`, one of them (the schema says so with `oneOf`). A setting that holds a secret takes its value from Vault (`value_secret_ref`); a plain `value` for it is refused (`secret_value_required`). A setting holds a secret when its key names a password, secret, token or community, it is not a password policy setting (`Security.PasswordHistory`, `Security.PasswordQualityControl`), and it is free text: a number, a switch or a choice never does. | VIM `OptionManager.UpdateOptions` | `dangerous`; waits for approval | 8.0, 9.x |
+| `vmware.composite.host.firewall.ruleset.set` | Turns one rule set on or off and sets who may connect (`allowed`: `all_ip`, `ip_addresses`, `networks`). A required rule set is never turned off. The allowed list is sent before the rule set is turned on. | VIM `HostFirewallSystem.UpdateRuleset`, `EnableRuleset`, `DisableRuleset` | `dangerous`; waits for approval | 8.0, 9.x |
+| `vmware.composite.host.lockdown.set` | Sets lockdown mode: `disabled`, `normal` or `strict`. | VIM `HostAccessManager.ChangeLockdownMode` | `dangerous`; waits for approval | 8.0, 9.x |
+| `vmware.composite.host.lockdown.exceptions.set` | Replaces the users who keep access in lockdown mode; `[]` removes all. | VIM `HostAccessManager.QueryLockdownExceptions`, `UpdateLockdownExceptions` | `dangerous`; waits for approval | 8.0, 9.x |
+| `vmware.composite.host.snmp.set` | Sets the SNMP agent: on or off, port, the read-only community (from Vault, `community_secret_ref`) and trap targets. Fields left out keep their value. | VIM `RetrievePropertiesEx` of `HostSnmpSystem.configuration`, `HostSnmpSystem.ReconfigureSnmpAgent` | `dangerous`; waits for approval | 8.0, 9.x |
+| `vmware.composite.host.coredump.set` | Makes one free diagnostic partition the core dump partition. A partition that is not free gives `partition_not_available` with the free ones in `before.available`. | VIM `HostDiagnosticSystem.QueryAvailablePartition`, `SelectActivePartition` | `dangerous`; waits for approval | 8.0, 9.x |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 U1, U2, U3 | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+Every call exists in the pinned VI-JSON files of 8.0 U1, U2, U3 and 9.0, so
+no operation stops early with the version message. One difference: the 8.0
+U1 file has no `userControllable` and `ipListUserConfigurable` on a rule set.
+When they are missing, MEHO treats the rule set as changeable, and vSphere
+refuses a change it does not allow (the answer is `failed` with the fault).
+
+- **How it calls vCenter.** On the connector's own session, through
+  `_post_vmomi_json` on the VI-JSON path of the target's release
+  (`/sdk/vim25/{release}`). The host is a display name (tried first) or a
+  moid; two hosts with the same name answer `ambiguous_host` with
+  `candidate_hosts`. Each setting sits on one of the host's config managers
+  (`advancedOption`, `firewallSystem`, `hostAccessManager`, `snmpSystem`,
+  `diagnosticSystem`), so each call first reads that
+  `HostSystem.configManager` entry. A host whose vCenter does not offer the
+  manager answers `config_manager_unreadable`. A single ESXi host target
+  answers `needs_vcenter`: its SOAP path has no builder for these methods
+  yet (the single-host work adds it).
+- **Safe to run twice.** Each change reads the setting first. When the host
+  already has it, the answer is `unchanged` and nothing is sent. Otherwise
+  only the calls that change something are sent. After the calls, each change
+  reads the setting back (`after`). When the read-back does not show the
+  change, or cannot be read, the answer is `not_verified` with an `error`
+  issue.
+- **Faults.** The calls are synchronous (no vCenter task). A vim fault (HTTP
+  500 with the fault object) gives `failed` with the fault class and text in
+  `fault`, the calls that ran before in `applied_steps`, and an `error`
+  issue, so the call is recorded as failed. Other HTTP errors are passed on
+  to the dispatcher unchanged.
+- **Secrets.** The SNMP community is read from Vault under the caller's
+  identity (after an approval: the approver) and goes only into the
+  `ReconfigureSnmpAgent` request body. `host.snmp.set` is pinned
+  `credential_write` in `broadcast/events.py`, so the flight recorder keeps
+  no body, the broadcast keeps no params, and a waiting approval keeps its
+  params in the encrypted handoff store. Answers and previews count the
+  communities and never show one; a fault text that holds any community of
+  the request is replaced. The read-back after the change is compared with
+  the communities it holds, so a host that keeps the old community answers
+  `not_verified`; the answer still shows counts only. An advanced setting
+  whose key names a password, secret, token or community takes its value
+  only from Vault (`value_secret_ref`, with `value_secret_mount` and
+  `value_secret_key`, default key `value`); a plain `value` for it is
+  refused before anything is read. Any string setting may take its value
+  from Vault this way. Such a value goes only into the `UpdateOptions`
+  request body and shows `<hidden>` in every answer and preview, and a
+  fault text that holds it is replaced. `host.advanced_settings.set` is
+  pinned `credential_write` too, because the `QueryOptions` read-back
+  answers hold the value as well: no body of the change is recorded.
+- **SNMP fields left out.** MEHO reads the current agent settings and sends
+  them back with only the asked fields changed, so a call that only turns
+  the agent on keeps the port, communities, trap targets and options. A new
+  community also goes to the trap targets that are kept. New trap targets
+  use the new community, or the first current one; with none, the answer is
+  `community_required`. To start the `snmpd` service, use
+  `host.service_control`.
+- **Approval card.** Each change has a preview that shows the host, its
+  current setting and what is asked.
+- **Size.** Each change returns one small object. The settings read can be
+  long; MEHO stores a long list behind a result handle.
+
+Code: `host_security.py` (shared host lookup, reads and parsers, the group
+text), `typed_ops_host_security.py` (the two reads),
+`composites/_host_security_flow.py` (the shared change flow and preview),
+`composites/_host_security_writes.py` (advanced settings, firewall),
+`composites/_host_access_writes.py` (lockdown, exception users, SNMP, core
+dump), `composites/_host_security_schemas.py` and
+`composites/_host_snmp_coredump_schemas.py` (parameters, answers, AI guidance),
+`composites/_host_security_ops.py` (registry rows, previews, the vim calls
+for the grant set). Tests: `tests/test_connectors_vmware_rest_host_security.py`
+(a fake vCenter: bodies, read-back, refusals, faults, secrets, previews),
+`tests/test_connectors_vmware_rest_host_security_flow.py` (real HTTP on the
+vCenter 8.0.3 and 9.0 VI-JSON paths; approval through the dispatcher; both
+catalogs and the contract check) and
+`tests/test_connectors_vmware_rest_host_security_reconcile.py` (every vim
+method, property, manager and body field against the pinned 9.0
 `vi-json.yaml` and the 8.0 U1, U2 and U3 files).
 
 ## Dependencies

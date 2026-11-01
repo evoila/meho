@@ -68,6 +68,9 @@ from meho_backplane.connectors.vmware_rest.composites._host_config_ops import (
 from meho_backplane.connectors.vmware_rest.composites._host_membership_ops import (
     HOST_MEMBERSHIP_GOVERNED_SUBOPS,
 )
+from meho_backplane.connectors.vmware_rest.composites._host_security_ops import (
+    HOST_SECURITY_GOVERNED_SUBOPS,
+)
 from meho_backplane.connectors.vmware_rest.composites._vcenter_install_ops import (
     VCENTER_INSTALL_GOVERNED_SUBOPS,
 )
@@ -211,6 +214,8 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
         _library_upload._SUB_OPS_CONTENT_LIBRARY_ITEM_UPLOAD
     ),
     "vmware.composite.license.assign": _license._VIM_SUB_OPS_LICENSE_ASSIGN,
+    # The six host security changes: the reads, then the one write each.
+    **HOST_SECURITY_GOVERNED_SUBOPS,
     # #4383 alarm changes: one AlarmManager write each, after two reads.
     "vmware.composite.alarm.acknowledge": _alarm._VIM_SUB_OPS_ALARM_ACKNOWLEDGE,
     "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,

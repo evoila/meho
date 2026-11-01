@@ -97,6 +97,8 @@ _VMWARE_COMPOSITE_GROUPS: Final[frozenset[str]] = frozenset(
         "alarms",
         # The migration inventory read.
         "migration",
+        # The host security changes; shared with the two typed reads.
+        "vmware-host-security",
         # Install a new vCenter; shared with the typed status read.
         "vcenter_install",
         # Host certificate changes; shared with the certificate and TPM reads.

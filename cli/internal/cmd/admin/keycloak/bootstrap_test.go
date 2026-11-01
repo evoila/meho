@@ -48,6 +48,7 @@ type fakeKeycloak struct {
 	users          map[string]*userRep            // keyed by UUID
 	userGroups     map[string][]string            // user UUID -> group UUIDs
 	passwords      map[string]string              // user UUID -> last reset password
+	flows          map[string]*fakeFlow           // login flows, keyed by alias
 
 	// Counts requests per (method, path-template) so tests can assert
 	// idempotency: a re-run must not increment "POST /clients".
@@ -76,8 +77,111 @@ func newFakeKeycloak() *fakeKeycloak {
 		users:      map[string]*userRep{},
 		userGroups: map[string][]string{},
 		passwords:  map[string]string{},
+		flows:      map[string]*fakeFlow{},
 		calls:      map[string]int{},
 	}
+}
+
+// fakeFlow is one login flow of the fake realm with its steps.
+type fakeFlow struct {
+	ID       string
+	TopLevel bool
+	Steps    []*fakeFlowStep
+}
+
+type fakeFlowStep struct {
+	ID          string
+	Provider    string
+	Subflow     string
+	Requirement string
+}
+
+// flowSteps lists a flow's steps the way Keycloak does: the steps of a
+// sub-flow follow the sub-flow.
+func (f *fakeKeycloak) flowSteps(alias string, level int) []map[string]any {
+	var out []map[string]any
+	for _, s := range f.flows[alias].Steps {
+		if s.Subflow != "" {
+			out = append(out, map[string]any{
+				"id": s.ID, "displayName": s.Subflow, "authenticationFlow": true,
+				"requirement": s.Requirement, "level": level,
+			})
+			out = append(out, f.flowSteps(s.Subflow, level+1)...)
+			continue
+		}
+		out = append(out, map[string]any{
+			"id": s.ID, "displayName": "display of " + s.Provider, "providerId": s.Provider,
+			"authenticationFlow": false, "requirement": s.Requirement, "level": level,
+		})
+	}
+	return out
+}
+
+// handleFlows serves the login flow endpoints; false when sub is not one.
+func (f *fakeKeycloak) handleFlows(w http.ResponseWriter, r *http.Request, sub string) bool {
+	const prefix = "authentication/flows"
+	if !strings.HasPrefix(sub, prefix) {
+		return false
+	}
+	f.calls[r.Method+" /authentication/flows..."]++
+	rest := strings.TrimPrefix(strings.TrimPrefix(sub, prefix), "/")
+	switch {
+	case rest == "" && r.Method == http.MethodGet:
+		var list []flowRep
+		for alias, fl := range f.flows {
+			if fl.TopLevel {
+				list = append(list, flowRep{ID: fl.ID, Alias: alias})
+			}
+		}
+		writeJSON(w, http.StatusOK, list)
+	case rest == "" && r.Method == http.MethodPost:
+		var rep flowRep
+		_ = json.NewDecoder(r.Body).Decode(&rep)
+		if _, ok := f.flows[rep.Alias]; ok || !rep.TopLevel || rep.BuiltIn {
+			w.WriteHeader(http.StatusConflict)
+			return true
+		}
+		f.flows[rep.Alias] = &fakeFlow{ID: f.mintID(), TopLevel: true}
+		w.WriteHeader(http.StatusCreated)
+	default:
+		alias, tail, _ := strings.Cut(rest, "/")
+		parent, ok := f.flows[alias]
+		if !ok {
+			http.Error(w, "Parent flow doesn't exist", http.StatusBadRequest)
+			return true
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		switch {
+		case tail == "executions/execution" && r.Method == http.MethodPost:
+			provider, _ := body["provider"].(string)
+			parent.Steps = append(parent.Steps, &fakeFlowStep{
+				ID: f.mintID(), Provider: provider, Requirement: "DISABLED"})
+			w.WriteHeader(http.StatusCreated)
+		case tail == "executions/flow" && r.Method == http.MethodPost:
+			name, _ := body["alias"].(string)
+			f.flows[name] = &fakeFlow{ID: f.mintID()}
+			parent.Steps = append(parent.Steps, &fakeFlowStep{
+				ID: f.mintID(), Subflow: name, Requirement: "DISABLED"})
+			w.WriteHeader(http.StatusCreated)
+		case tail == "executions" && r.Method == http.MethodGet:
+			writeJSON(w, http.StatusOK, f.flowSteps(alias, 0))
+		case tail == "executions" && r.Method == http.MethodPut:
+			for _, fl := range f.flows {
+				for _, s := range fl.Steps {
+					if s.ID == body["id"] {
+						s.Requirement, _ = body["requirement"].(string)
+						w.WriteHeader(http.StatusNoContent)
+						return true
+					}
+				}
+			}
+			http.Error(w, "Illegal execution", http.StatusNotFound)
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (f *fakeKeycloak) mintID() string {
@@ -121,6 +225,9 @@ func (f *fakeKeycloak) handler() http.HandlerFunc {
 			return
 		}
 		sub := rest[slash+1:]
+		if f.handleFlows(w, r, sub) {
+			return
+		}
 
 		switch {
 		case sub == "clients" && r.Method == http.MethodGet:
@@ -785,16 +892,9 @@ func TestBootstrap_MapperShapeMatchesReferenceScript(t *testing.T) {
 	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
-	// Pull any client's mappers (both have the same set).
-	var mappers []protocolMapperRep
-	for _, m := range fake.mappers {
-		mappers = m
-		break
-	}
-	byName := map[string]protocolMapperRep{}
-	for _, m := range mappers {
-		byName[m.Name] = m
-	}
+	// The CLI client has the full set (the approval client has no
+	// meho-mcp-audience).
+	byName := fake.clientMappers(t, "meho-cli")
 
 	// audience-meho-backplane — emits into `aud`.
 	bp := byName["audience-meho-backplane"]
@@ -1627,5 +1727,68 @@ func TestBootstrap_ApproveClientShape(t *testing.T) {
 	}
 	if got := fake.defaultScopes[c.ID]; len(got) != 4 {
 		t.Errorf("default scopes = %v, want the four", got)
+	}
+	flow := fake.flows[approvalFlowAlias]
+	if flow == nil {
+		t.Fatalf("login flow %q not created", approvalFlowAlias)
+	}
+	if got := c.AuthenticationFlowBindingOverrides["browser"]; got != flow.ID {
+		t.Errorf("browser flow of the approval client = %q, want %q", got, flow.ID)
+	}
+}
+
+// The approval client's login flow has the password form and the
+// one-time code step, and nothing else.
+func TestBootstrap_ApprovalFlowSteps(t *testing.T) {
+	fake := newFakeKeycloak()
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	var got []string
+	for _, s := range fake.flowSteps(approvalFlowAlias, 0) {
+		name, _ := s["providerId"].(string)
+		if s["authenticationFlow"] == true {
+			name = s["displayName"].(string)
+		}
+		got = append(got, fmt.Sprintf("%d %s %s", s["level"], name, s["requirement"]))
+	}
+	want := []string{
+		"0 auth-username-password-form REQUIRED",
+		"0 " + approvalCodeFlowAlias + " CONDITIONAL",
+		"1 conditional-user-configured REQUIRED",
+		"1 auth-otp-form REQUIRED",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("steps = %v, want %v", got, want)
+	}
+	// Only the approval client is bound to a flow of its own.
+	for _, c := range fake.clients {
+		if c.ClientID != "meho-cli-approve" && len(c.AuthenticationFlowBindingOverrides) > 0 {
+			t.Errorf("client %s has a login flow binding", c.ClientID)
+		}
+	}
+}
+
+// An existing flow is kept; an existing approval client without the
+// binding gets it.
+func TestBootstrap_ReRunKeepsFlowAndBindsExistingClient(t *testing.T) {
+	fake := newFakeKeycloak()
+	fake.flows[approvalFlowAlias] = &fakeFlow{ID: "flow-existing", TopLevel: true}
+	old := fullOpts().withDefaults().desiredCLIApproveClient()
+	old.ID = "uuid-existing-approve"
+	fake.clients[old.ID] = old
+
+	res, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if got := fake.clients[old.ID].AuthenticationFlowBindingOverrides["browser"]; got != "flow-existing" {
+		t.Errorf("browser flow = %q, want flow-existing", got)
+	}
+	if n := fake.calls["POST /authentication/flows..."]; n != 0 {
+		t.Errorf("POST to the flow API %d times, want 0", n)
+	}
+	if !slices.Contains(res.MapperEventsLog, `[skip] login flow "meho approval sign-in" exists`) {
+		t.Errorf("events miss the kept flow line: %v", res.MapperEventsLog)
 	}
 }

@@ -623,7 +623,9 @@ type Result struct {
 //  3. 4 default client scopes (basic / roles / web-origins / acr)
 //     3a. Public approval sign-in client (`meho-cli-approve`, #5515) with
 //     the same mappers minus `meho-mcp-audience` and the same 4 default
-//     scopes
+//     scopes, bound to its own login flow `meho approval sign-in`
+//     (password form, then the one-time code when the person has one;
+//     made when missing)
 //  4. Public MCP browser-flow client (`meho-mcp`)
 //  5. Same 8 mappers + 4 default scopes on the MCP client, **plus**
 //     `offline_access`, `mcp:read`, `mcp:execute` and `mcp:admin` as
@@ -724,7 +726,14 @@ func Bootstrap(
 
 	// --- Approval sign-in client (#5515) ------------------------------------
 
-	approveUUID, approveEvents, err := reconcileClient(ctx, c, opts.desiredCLIApproveClient())
+	flowID, flowEvents, err := reconcileApprovalFlow(ctx, c)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile login flow %q: %w", approvalFlowAlias, err)
+	}
+	res.MapperEventsLog = append(res.MapperEventsLog, flowEvents...)
+	desiredApprove := opts.desiredCLIApproveClient()
+	desiredApprove.AuthenticationFlowBindingOverrides = map[string]string{"browser": flowID}
+	approveUUID, approveEvents, err := reconcileClient(ctx, c, desiredApprove)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"reconcile approval client %q: %w", opts.CLIApproveClientID, err)
@@ -836,6 +845,8 @@ func dryRunSummary(
 	fmt.Fprintf(out, "==> approval sign-in client: %s (the mappers below "+
 		"without meho-mcp-audience; no device flow, no offline_access)\n",
 		opts.CLIApproveClientID)
+	fmt.Fprintf(out, "==> login flow of the approval sign-in client: %q "+
+		"(always asks for the password; made if missing)\n", approvalFlowAlias)
 	fmt.Fprintf(out, "==> MCP browser-flow client: %s\n", opts.MCPClientID)
 	fmt.Fprintln(out, "==> protocol mappers (each on the CLI and MCP clients):")
 	for _, m := range opts.desiredMappers() {

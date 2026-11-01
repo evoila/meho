@@ -89,6 +89,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.dial_guard import dial_host
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import (
     load_vault_secret_data,
@@ -401,13 +402,21 @@ class SshConnector(Connector):
             # silently disable verification.
             if "known_hosts" not in auth_kwargs:
                 raise SshHostKeyUnpinnedError(getattr(target, "name", "?"))
+            # Check the address now and dial the checked IP. When that IP
+            # differs from the target's host name, the host key is still
+            # matched against the name (host_key_alias).
+            dial = await dial_host(target.host)
+            alias_kwargs: dict[str, Any] = (
+                {"host_key_alias": target.host} if dial != target.host else {}
+            )
             conn = await asyncssh.connect(
-                target.host,
+                dial,
                 port=target.port or 22,
                 username=auth_kwargs["username"],
                 client_keys=auth_kwargs.get("client_keys"),
                 password=auth_kwargs.get("password"),
                 known_hosts=auth_kwargs["known_hosts"],
+                **alias_kwargs,
             )
             if self._pool_generations.get(cache_key, 0) != generation:
                 # The target was changed while this login ran: the secret

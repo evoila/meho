@@ -63,6 +63,7 @@ from typing import Any
 import pytds
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.dial_guard import dial_host
 from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
 
 __all__ = [
@@ -345,7 +346,7 @@ async def fetch_rows(
     creds = await resolve_sql_credentials(target, operator)
     return await asyncio.to_thread(
         _blocking_fetch,
-        host=target.host,
+        host=await dial_host(target.host),
         port=getattr(target, "port", None) or DEFAULT_PORT,
         database=database or DEFAULT_DATABASE,
         creds=creds,
@@ -373,7 +374,7 @@ async def execute_statement(
     creds = await resolve_sql_credentials(target, operator)
     await asyncio.to_thread(
         _blocking_execute,
-        host=target.host,
+        host=await dial_host(target.host),
         port=getattr(target, "port", None) or DEFAULT_PORT,
         database=database or DEFAULT_DATABASE,
         creds=creds,

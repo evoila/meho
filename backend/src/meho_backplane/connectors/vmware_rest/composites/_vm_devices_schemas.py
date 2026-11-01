@@ -98,6 +98,13 @@ _DISK_OBJECT_SCHEMA: Final[dict[str, Any]] = {
         "label": {**_NULLABLE_STR, "description": "Device label, such as 'Hard disk 2'."},
         "capacity_bytes": {**_NULLABLE_INT, "description": "Disk size in bytes."},
         "vmdk_file": {**_NULLABLE_STR, "description": "Datastore path of the VMDK file."},
+        "disk_uuid": {
+            **_NULLABLE_STR,
+            "description": (
+                "UUID of the disk (VIM backing.uuid). The approved run checks it, so the "
+                "removal runs on the disk the approver saw."
+            ),
+        },
         "sharing": {**_NULLABLE_STR, "description": "VIM sharing mode of the disk file."},
         "controller_key": {**_NULLABLE_INT, "description": "Key of the disk's controller."},
         "unit_number": {**_NULLABLE_INT, "description": "Unit number on that controller."},
@@ -111,6 +118,7 @@ _DISK_ROW_SCHEMA: Final[dict[str, Any]] = {
         "label": {**_NULLABLE_STR, "description": "Device label."},
         "capacity_bytes": {**_NULLABLE_INT, "description": "Disk size in bytes."},
         "vmdk_file": {**_NULLABLE_STR, "description": "Datastore path of the VMDK file."},
+        "disk_uuid": {**_NULLABLE_STR, "description": "UUID of the disk (VIM backing.uuid)."},
     },
     "required": ["disk"],
 }
@@ -172,8 +180,8 @@ VM_DISK_REMOVE_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     "output_shape": (
         "{status: removed|not_found|invalid_request|precondition_failed|still_present|"
         "timeout, object: {vm, vm_name, power_state, disk, label, capacity_bytes, "
-        "vmdk_file, sharing, delete_file, ...}, blockers, task, task_state, "
-        "remaining_disks: [{disk, label, capacity_bytes, vmdk_file}], guidance}."
+        "vmdk_file, disk_uuid, sharing, delete_file, ...}, blockers, task, task_state, "
+        "remaining_disks: [{disk, label, capacity_bytes, vmdk_file, disk_uuid}], guidance}."
     ),
     "next_step": (
         "Not to be run twice blindly: after removed, a second call answers not_found. "

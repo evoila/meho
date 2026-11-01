@@ -21,9 +21,14 @@ returns the disks the VM has left.
 
 The approved run checks the disk again. vCenter can give a new disk the key
 of a removed one, so a disk added while the request waited could carry the
-approved key. The handler compares the live disk (its file, label and size)
-with the preview the approver saw (:func:`~meho_backplane.operations._preview.approved_preview`)
-and refuses before any change when they differ.
+approved key, and even the same file path, label and size. The disk's own
+UUID (``backing.uuid`` of the VIM device) is the identity that a replacement
+cannot copy. The preview stores it, and the handler compares the live disk's
+UUID and file with the preview the approver saw
+(:func:`~meho_backplane.operations._preview.approved_preview`). It refuses
+before any change when they differ, or when the preview holds no UUID. A disk
+whose backing has no UUID (a raw device mapping in physical mode, or a very old
+file format) is refused at plan time: MEHO cannot check it after approval.
 """
 
 from __future__ import annotations
@@ -98,9 +103,10 @@ _FILE_KEPT: Final = "reversible-file-kept"
 STATUS_REMOVED: Final = "removed"
 STATUS_NOT_FOUND: Final = "not_found"
 
-#: The fields of the plan's ``object`` that say which disk it is. The approved
-#: run compares them with the approval preview.
-_DISK_IDENTITY_FIELDS: Final[tuple[str, ...]] = ("vmdk_file", "label", "capacity_bytes")
+#: The fields of the plan's ``object`` that say which disk it is: the disk's
+#: UUID (``backing.uuid``) and its file. The approved run compares them with
+#: the approval preview.
+_DISK_IDENTITY_FIELDS: Final[tuple[str, ...]] = ("disk_uuid", "vmdk_file")
 
 #: Wall-clock bound for the task poll -- the 600 s convention; module-global so
 #: tests can zero it.
@@ -128,6 +134,7 @@ def _disk_row(device: dict[str, Any]) -> dict[str, Any]:
         "label": _str(info.get("label")) if isinstance(info, dict) else None,
         "capacity_bytes": _coerce_int(device.get("capacityInBytes")),
         "vmdk_file": _str(backing.get("fileName")) if isinstance(backing, dict) else None,
+        "disk_uuid": _str(backing.get("uuid")) if isinstance(backing, dict) else None,
     }
 
 
@@ -141,8 +148,10 @@ async def plan_disk_remove(
 
     Both ids are checked before they reach a VIM path. An unknown VM or disk is
     a ``not_found`` refusal. With ``delete_file`` the VMDK file is the one child
-    that goes with the disk. A shared (multi-writer) disk is refused with
-    ``delete_file``: other VMs may still use the file.
+    that goes with the disk. A disk without a UUID is refused: the approved run
+    could not check that it is still the disk the approver saw. A shared
+    (multi-writer) disk is refused with ``delete_file``: other VMs may still
+    use the file.
     """
     vm = params["vm"]
     disk = str(params["disk"])
@@ -172,11 +181,20 @@ async def plan_disk_remove(
         label=row["label"],
         capacity_bytes=row["capacity_bytes"],
         vmdk_file=row["vmdk_file"],
+        disk_uuid=row["disk_uuid"],
         sharing=sharing,
         controller_key=_coerce_int(device.get("controllerKey")),
         unit_number=_coerce_int(device.get("unitNumber")),
     )
     plan = TeardownPlan(object=obj, present=True, context={"device": device})
+    if row["disk_uuid"] is None:
+        plan.blockers = [{"kind": "disk_without_uuid"}]
+        plan.refusal = (
+            STATUS_PRECONDITION_FAILED,
+            f"disk {disk!r} of VM {vm!r} has no UUID, so MEHO could not check after approval "
+            "that it is still the disk the approver saw; remove it in the vSphere Client",
+        )
+        return plan
     if delete_file:
         plan.children = [
             {"kind": "vmdk_file", "file": row["vmdk_file"], "capacity_bytes": row["capacity_bytes"]}
@@ -194,10 +212,10 @@ async def plan_disk_remove(
 def _approved_disk_blocker(plan: TeardownPlan) -> dict[str, Any] | None:
     """The blocker when the live disk is not the one the approver saw, else ``None``.
 
-    ``None`` on an ordinary dispatch (no approval involved) and when the file,
-    label and size of the disk match the approval preview. An approval whose
-    preview shows no disk counts as changed: nothing is removed on a preview
-    MEHO cannot check.
+    ``None`` on an ordinary dispatch (no approval involved) and when the UUID
+    and the file of the disk match the approval preview. An approval whose
+    preview shows no disk, or a disk without a UUID, counts as changed: nothing
+    is removed on a preview MEHO cannot check.
     """
     preview = approved_preview(OP_ID_VM_DISK_REMOVE)
     if preview is None:
@@ -232,11 +250,12 @@ def _result(plan: TeardownPlan, status: str, **fields: Any) -> dict[str, Any]:
 def _disk_changed_result(plan: TeardownPlan, blocker: dict[str, Any]) -> dict[str, Any]:
     """The refusal of an approved run whose disk is not the one the approver saw."""
     plan.blockers = [blocker]
-    approved_file = (blocker["approved"] or {}).get("vmdk_file")
+    approved = blocker["approved"] or {}
     guidance = (
         f"disk {plan.object['disk']!r} of VM {plan.object['vm']!r} is not the disk the approver "
-        f"saw (approved file {approved_file!r}, now {plan.object['vmdk_file']!r}); nothing was "
-        "sent. Preview the call again and ask for a new approval."
+        f"saw (approved UUID {approved.get('disk_uuid')!r} and file {approved.get('vmdk_file')!r}, "
+        f"now UUID {plan.object['disk_uuid']!r} and file {plan.object['vmdk_file']!r}); nothing "
+        "was sent. Preview the call again and ask for a new approval."
     )
     return _result(plan, STATUS_PRECONDITION_FAILED, guidance=guidance)
 
@@ -251,8 +270,8 @@ async def vm_disk_remove_composite(
     """Remove one disk from a VM, and its file when asked.
 
     Op-id: ``vmware.composite.vm.disk.remove``. Plans first: a refusal
-    (bad id, unknown VM or disk, shared disk with ``delete_file``) returns
-    before any change. On the approved run, a disk that is not the one the
+    (bad id, unknown VM or disk, disk without a UUID, shared disk with
+    ``delete_file``) returns before any change. On the approved run, a disk that is not the one the
     approver saw is refused too (``precondition_failed``, blocker
     ``disk_changed``). Then the gated ``ReconfigVM_Task`` (a parked or denied
     gate is returned as is), polled to its end. A task fault raises with the
@@ -321,8 +340,9 @@ async def vm_disk_remove_composite(
 async def vm_disk_remove_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Blast radius of ``vm.disk.remove`` from the handler's own plan.
 
-    Raises when the plan refuses (unknown VM or disk, bad id, shared disk with
-    ``delete_file``), so such a call never waits for approval. Declines
+    Raises when the plan refuses (unknown VM or disk, bad id, disk without a
+    UUID, shared disk with ``delete_file``), so such a call never waits for
+    approval. Declines
     (``None``) without a live connector.
     """
     if ctx.connector_instance is None:

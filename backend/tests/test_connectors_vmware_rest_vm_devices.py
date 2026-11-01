@@ -122,6 +122,11 @@ def _devices(*devices: dict[str, Any]) -> dict[str, Any]:
     return {"_typeName": "ArrayOfVirtualDevice", "_value": list(devices)}
 
 
+def _disk_uuid(key: int, generation: int = 0) -> str:
+    """The ``backing.uuid`` of a test disk; *generation* tells one disk from its replacement."""
+    return f"6000C290-0000-0000-{generation:04x}-{key:012x}"
+
+
 def _disk(key: int, label: str, *, sharing: str = "sharingNone") -> dict[str, Any]:
     return {
         "_typeName": "VirtualDisk",
@@ -132,6 +137,7 @@ def _disk(key: int, label: str, *, sharing: str = "sharingNone") -> dict[str, An
             "fileName": f"[<datastore>] app-vm/app-vm_{key}.vmdk",
             "diskMode": "persistent",
             "sharing": sharing,
+            "uuid": _disk_uuid(key),
         },
         "controllerKey": 1000,
         "unitNumber": key - 2000,
@@ -258,6 +264,7 @@ async def test_disk_remove_keeps_the_file_and_reads_back(
             "label": "Hard disk 1",
             "capacity_bytes": _TEN_GIB,
             "vmdk_file": "[<datastore>] app-vm/app-vm_2000.vmdk",
+            "disk_uuid": _disk_uuid(2000),
         }
     ]
     assert retrieve.call_count == 4
@@ -341,6 +348,7 @@ def _approved_disk_preview(disk: dict[str, Any]) -> dict[str, Any]:
                 "label": disk["deviceInfo"]["label"],
                 "capacity_bytes": disk["capacityInBytes"],
                 "vmdk_file": disk["backing"]["fileName"],
+                "disk_uuid": disk["backing"]["uuid"],
                 "present": True,
             },
             "children": [],
@@ -349,19 +357,54 @@ def _approved_disk_preview(disk: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _replacement(key: int, label: str, *, file_name: str | None = None) -> dict[str, Any]:
+    """A new disk on *key*: its UUID differs; its file, label and size may not."""
+    disk = _disk(key, label)
+    disk["backing"]["uuid"] = _disk_uuid(key, generation=1)
+    if file_name is not None:
+        disk["backing"]["fileName"] = file_name
+    return disk
+
+
+def _preview_without_uuid(disk: dict[str, Any]) -> dict[str, Any]:
+    """A stored preview from before the disk UUID was part of it."""
+    preview = _approved_disk_preview(disk)
+    del preview["blast_radius"]["object"]["disk_uuid"]
+    return preview
+
+
 @pytest.mark.parametrize(
-    "approved",
+    ("approved", "live"),
     [
-        pytest.param(_approved_disk_preview(_disk(2001, "Hard disk 2")), id="replaced-disk"),
-        pytest.param({}, id="no-preview-stored"),
+        pytest.param(
+            _approved_disk_preview(_disk(2001, "Hard disk 2")),
+            _replacement(
+                2001, "Hard disk 3", file_name="[<datastore>] app-vm/app-vm_2001_new.vmdk"
+            ),
+            id="replaced-disk-other-file",
+        ),
+        pytest.param(
+            _approved_disk_preview(_disk(2001, "Hard disk 2")),
+            _replacement(2001, "Hard disk 2"),
+            id="replaced-disk-same-file-label-and-size",
+        ),
+        pytest.param(
+            _preview_without_uuid(_disk(2001, "Hard disk 2")),
+            _disk(2001, "Hard disk 2"),
+            id="preview-without-uuid",
+        ),
+        pytest.param({}, _disk(2001, "Hard disk 2"), id="no-preview-stored"),
     ],
 )
 async def test_an_approved_remove_refuses_a_disk_that_is_not_the_one_approved(
-    gate: GateRecorder, approved: dict[str, Any]
+    gate: GateRecorder, approved: dict[str, Any], live: dict[str, Any]
 ) -> None:
-    """While the approval waited, another disk took the key the approver saw."""
-    live = _disk(2001, "Hard disk 3")
-    live["backing"]["fileName"] = "[<datastore>] app-vm/app-vm_2001_new.vmdk"
+    """While the approval waited, another disk took the key the approver saw.
+
+    The replacement can copy the file path, the label and the size, but not
+    the disk UUID. A preview that holds no UUID cannot be checked, so it is
+    refused too.
+    """
     token = approved_preview_var.set((_DISK_OP, approved))
     try:
         async with _vcenter("9.0.0") as (conn, mock):
@@ -379,9 +422,30 @@ async def test_an_approved_remove_refuses_a_disk_that_is_not_the_one_approved(
 
     assert out["status"] == "precondition_failed"
     assert out["blockers"][0]["kind"] == "disk_changed"
-    assert out["blockers"][0]["now"]["vmdk_file"] == "[<datastore>] app-vm/app-vm_2001_new.vmdk"
+    assert out["blockers"][0]["now"]["disk_uuid"] == live["backing"]["uuid"]
+    assert out["blockers"][0]["now"]["vmdk_file"] == live["backing"]["fileName"]
     assert "not the disk the approver saw" in out["guidance"]
     assert out["remaining_disks"] is None
+    assert not reconfig.called
+    assert gate.calls == []
+
+
+async def test_disk_remove_refuses_a_disk_without_a_uuid(gate: GateRecorder) -> None:
+    """A disk MEHO could not check after approval is refused, and never waits."""
+    disk = _disk(2001, "Hard disk 2")
+    del disk["backing"]["uuid"]
+    async with _vcenter("9.0.0") as (conn, mock):
+        _retrieve(mock, "/sdk/vim25/9.0.0.0", _vm_with(disk), _vm_with(disk))
+        reconfig = mock.post(f"/sdk/vim25/9.0.0.0/VirtualMachine/{_VM}/ReconfigVM_Task")
+        out = await _run(_vm_disk_remove.vm_disk_remove_composite, conn, vm=_VM, disk="2001")
+        with pytest.raises(ValueError, match="has no UUID"):
+            await _vm_disk_remove.vm_disk_remove_preview(
+                preview_ctx({"vm": _VM, "disk": "2001"}, conn)
+            )
+
+    assert out["status"] == "precondition_failed"
+    assert out["blockers"] == [{"kind": "disk_without_uuid"}]
+    assert "has no UUID" in out["guidance"]
     assert not reconfig.called
     assert gate.calls == []
 
@@ -476,6 +540,7 @@ async def test_disk_remove_preview_fills_the_blast_radius(
     block = preview["blast_radius"]
     assert block["object"]["label"] == "Hard disk 2"
     assert block["object"]["vmdk_file"] == "[<datastore>] app-vm/app-vm_2001.vmdk"
+    assert block["object"]["disk_uuid"] == _disk_uuid(2001)
     assert block["object"]["present"] is True
     assert block["irreversibility"] == irreversibility
     assert len(block["children"]) == children

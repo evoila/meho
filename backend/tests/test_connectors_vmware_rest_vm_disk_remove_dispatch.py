@@ -6,10 +6,10 @@
 The disk removal is ``destructive``. A call without a matching ``preview_hash``
 is refused and nothing waits. With the hash it waits for a second person, the
 approval card shows the disk, and it runs once after approval. A disk that
-another disk replaced (same key, other file) while the request waited is not
-removed. An agent is refused. A preview of a disk that does not exist is
-refused too, so nothing waits. vCenter is the shared VIM fake, extended here
-with ``ReconfigVM_Task``.
+another disk replaced (same key, even the same file, label and size) while the
+request waited is not removed: the disk UUID tells them apart. An agent is
+refused. A preview of a disk that does not exist is refused too, so nothing
+waits. vCenter is the shared VIM fake, extended here with ``ReconfigVM_Task``.
 """
 
 from __future__ import annotations
@@ -48,7 +48,8 @@ _TENANT_ID = UUID("00000000-0000-0000-0000-000000004335")
 _TARGET_NAME = "example-vcenter"
 
 
-def _disk(key: int, label: str) -> dict[str, Any]:
+def _disk(key: int, label: str, *, generation: int = 0) -> dict[str, Any]:
+    """A test disk; *generation* gives a replacement on the same key its own UUID."""
     return {
         "_typeName": "VirtualDisk",
         "key": key,
@@ -57,6 +58,7 @@ def _disk(key: int, label: str) -> dict[str, Any]:
             "_typeName": "VirtualDiskFlatVer2BackingInfo",
             "fileName": f"[<datastore>] app-vm/app-vm_{key}.vmdk",
             "sharing": "sharingNone",
+            "uuid": f"6000C290-0000-0000-{generation:04x}-{key:012x}",
         },
         "controllerKey": 1000,
         "unitNumber": key - 2000,
@@ -107,11 +109,16 @@ class _DiskVimFake(VimFake):
             d for d in props["config.hardware.device"] if d["key"] not in keys
         ]
 
-    def replace_disk(self, key: int, label: str, file_name: str) -> None:
-        """Another disk takes *key*: what a remove-then-add while the request waits looks like."""
+    def replace_disk(self, key: int, label: str, file_name: str | None = None) -> None:
+        """Another disk takes *key*: what a remove-then-add while the request waits looks like.
+
+        The new disk has its own UUID. Without *file_name* it keeps the file
+        path of the disk it replaces.
+        """
         props = self.objects[("VirtualMachine", _VM)]
-        new = _disk(key, label)
-        new["backing"]["fileName"] = file_name
+        new = _disk(key, label, generation=1)
+        if file_name is not None:
+            new["backing"]["fileName"] = file_name
         props["config.hardware.device"] = [
             new if d["key"] == key else d for d in props["config.hardware.device"]
         ]
@@ -256,6 +263,7 @@ async def test_remove_needs_a_preview_then_a_second_person() -> None:
         effect = dict(row.proposed_effect)
     assert effect["safety_level"] == "destructive"
     assert effect["blast_radius"]["object"]["label"] == "Hard disk 2"
+    assert effect["blast_radius"]["object"]["disk_uuid"] == _disk(2001, "")["backing"]["uuid"]
     assert effect["blast_radius"]["object"]["vm_name"] == "app-vm"
     assert effect["blast_radius"]["children"] == []
     assert effect["blast_radius"]["irreversibility"] == "reversible-file-kept"
@@ -283,6 +291,27 @@ async def test_a_disk_replaced_while_the_request_waits_is_not_removed() -> None:
     assert blocker["kind"] == "disk_changed"
     assert blocker["approved"]["vmdk_file"] == "[<datastore>] app-vm/app-vm_2001.vmdk"
     assert blocker["now"]["vmdk_file"] == "[<datastore>] app-vm/app-vm_2001_new.vmdk"
+    assert conn.calls_to("ReconfigVM_Task") == []
+    assert conn.disk_keys() == [2000, 2001]
+
+
+@pytest.mark.usefixtures("_dispatch_env")
+async def test_a_replacement_with_the_same_file_label_and_size_is_not_removed() -> None:
+    """Only the disk UUID tells the replacement from the disk the approver saw."""
+    conn = _DiskVimFake()
+    await _bootstrap(conn)
+    args = {**_args("2001"), "params": {"vm": _VM, "disk": "2001", "delete_file": True}}
+    request_id = await _park(_person("op-requester"), args)
+    conn.replace_disk(2001, "Hard disk 2")
+
+    resume = await _approve_and_run(request_id)
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "precondition_failed"
+    blocker = resume.result["blockers"][0]
+    assert blocker["kind"] == "disk_changed"
+    assert blocker["approved"]["vmdk_file"] == blocker["now"]["vmdk_file"]
+    assert blocker["approved"]["disk_uuid"] == _disk(2001, "")["backing"]["uuid"]
+    assert blocker["now"]["disk_uuid"] == _disk(2001, "", generation=1)["backing"]["uuid"]
     assert conn.calls_to("ReconfigVM_Task") == []
     assert conn.disk_keys() == [2000, 2001]
 

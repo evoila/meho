@@ -2376,16 +2376,21 @@ vendor call exists in the pinned vCenter 8.0 U1, U2, U3 and 9.0 API files.
   `precondition_failed` (a shared multi-writer disk with `delete_file`: other
   VMs may use the file), `still_present`, `timeout`. A task fault raises with
   the fault type and text (`connector_error`). The preview fills the
-  `blast_radius` block: `object` (VM, disk label, size, VMDK file, sharing,
-  controller and unit), `children` (the VMDK file when `delete_file`, else
-  none) and `irreversibility` (`permanent` with `delete_file`, else
-  `reversible-file-kept`). It raises when the VM or the disk does not exist,
-  so such a call never waits for approval. The approved run checks the disk
-  again: vCenter can give a new disk the key of a removed one, so the handler
-  compares the live disk (file, label, size) with the preview the approver saw
-  (`approved_preview` in `operations/_preview.py`) and answers
-  `precondition_failed` with a `disk_changed` blocker when they differ.
-  Nothing is sent then.
+  `blast_radius` block: `object` (VM, disk label, size, VMDK file, disk UUID,
+  sharing, controller and unit), `children` (the VMDK file when
+  `delete_file`, else none) and `irreversibility` (`permanent` with
+  `delete_file`, else `reversible-file-kept`). It raises when the VM or the
+  disk does not exist, so such a call never waits for approval. The approved
+  run checks the disk again: vCenter can give a new disk the key of a removed
+  one, and the new disk can even carry the same file path, label and size. So
+  the identity is the disk UUID (`backing.uuid` of the VIM device). The
+  handler compares the live disk's UUID and file with the preview the approver
+  saw (`approved_preview` in `operations/_preview.py`) and answers
+  `precondition_failed` with a `disk_changed` blocker when they differ, or
+  when the stored preview holds no UUID. Nothing is sent then. A disk whose
+  backing has no UUID (a raw device mapping in physical mode, or a very old
+  file format) is refused at plan time with a `disk_without_uuid` blocker:
+  MEHO could not check it after approval, so it never waits for one.
 - **Network adapter remove** (`composites/_vm_nic_remove.py`). Reads the
   adapter first: a 404 gives `not_found` and nothing is sent, so it is safe to
   run twice. HTTP 400 gives `refused` with vCenter's reason. After the

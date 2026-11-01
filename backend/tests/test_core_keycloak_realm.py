@@ -86,6 +86,13 @@ def test_passkeys_are_on_and_need_user_verification(realm: dict[str, Any]) -> No
     assert realm["webAuthnPolicyPasswordlessRequireResidentKey"] == "Yes"
 
 
+def test_browser_session_limits_match_the_console(realm: dict[str, Any]) -> None:
+    # The login server keeps a browser session for 1 hour without use and
+    # 10 hours at most: the same as the console's own session (#5518).
+    assert realm["ssoSessionIdleTimeout"] == 3600
+    assert realm["ssoSessionMaxLifespan"] == 10 * 3600
+
+
 def test_no_company_login_yet(realm: dict[str, Any]) -> None:
     # A later Task adds the company login (Active Directory, Entra ID).
     assert realm["identityProviders"] == []

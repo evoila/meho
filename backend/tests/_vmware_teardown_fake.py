@@ -162,15 +162,15 @@ class VimFake(PagedVim):
         path_set = spec["propSet"][0]["pathSet"]
         moids = [o["obj"]["value"] for o in spec["objectSet"]]
         if mo_type == "Task":
-            return {
-                "objects": [
+            return self._serve_objects(
+                [
                     {
                         "obj": {"type": "Task", "value": m},
                         "propSet": [{"name": "info", "val": self._tasks[m]}],
                     }
                     for m in moids
                 ]
-            }
+            )
         objects = []
         for moid in moids:
             if moid in self.omitted:

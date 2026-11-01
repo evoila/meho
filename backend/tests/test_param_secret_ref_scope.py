@@ -156,6 +156,17 @@ def test_vault_ref_in_own_tenant_passes(ref: str) -> None:
     check_param_secret_ref(_operator(), ref, param="password_secret_ref")
 
 
+_REFS_THAT_COULD_MOVE = [
+    f"{_OWN}/../{_TENANT_B}/app",
+    f"{_OWN}/app/../../{_TENANT_B}/app",
+    f"{_OWN}/./app",
+    f"{_OWN}/%2e%2e/{_TENANT_B}/app",
+    f"{_OWN}/%2E%2E%2F{_TENANT_B}/app",
+    f"{_OWN}%2f..%2f{_TENANT_B}/app",
+    f"{_OWN}/..\\{_TENANT_B}\\app",
+]
+
+
 @pytest.mark.parametrize(
     "ref",
     [
@@ -163,13 +174,6 @@ def test_vault_ref_in_own_tenant_passes(ref: str) -> None:
         f"vault:{_OTHER}/app/db",
         "meho/shared/app",
         f"{_OWN}-sibling/app",
-        f"{_OWN}/../{_TENANT_B}/app",
-        f"{_OWN}/app/../../{_TENANT_B}/app",
-        f"{_OWN}/./app",
-        f"{_OWN}/%2e%2e/{_TENANT_B}/app",
-        f"{_OWN}/%2E%2E%2F{_TENANT_B}/app",
-        f"{_OWN}%2f..%2f{_TENANT_B}/app",
-        f"{_OWN}/..\\{_TENANT_B}\\app",
     ],
 )
 def test_vault_ref_outside_own_tenant_is_refused(ref: str) -> None:
@@ -182,6 +186,17 @@ def test_vault_ref_outside_own_tenant_is_refused(ref: str) -> None:
     assert "outside the caller's tenant" in str(exc.value)
 
 
+@pytest.mark.parametrize("ref", _REFS_THAT_COULD_MOVE)
+def test_vault_ref_that_could_move_is_refused(ref: str) -> None:
+    """A ``.`` / ``..`` segment, a ``%`` or a backslash is refused, and the reason says so."""
+    with pytest.raises(SecretRefScopeError) as exc:
+        check_param_secret_ref(_operator(), ref, param="password_secret_ref")
+    assert exc.value.param == "password_secret_ref"
+    assert str(_TENANT_B) not in str(exc.value)
+    assert "a '.' or '..' segment, a '%' or a backslash" in str(exc.value)
+    assert "outside the caller's tenant" not in str(exc.value)
+
+
 @pytest.mark.parametrize("mount", ["other-mount", f"secret/{_OWN}/..", "secret%2f"])
 def test_vault_mount_outside_own_tenant_is_refused(mount: str) -> None:
     with pytest.raises(SecretRefScopeError):
@@ -191,9 +206,21 @@ def test_vault_mount_outside_own_tenant_is_refused(mount: str) -> None:
 def test_vault_ref_is_not_checked_when_the_tenant_prefix_is_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``VAULT_KV_TENANT_SCOPE_PREFIX=""`` turns the tenant path check off, as before."""
+    """``VAULT_KV_TENANT_SCOPE_PREFIX=""`` turns the tenant prefix check off: a plain ref passes."""
     _set_env(monkeypatch, VAULT_KV_TENANT_SCOPE_PREFIX="")
     check_param_secret_ref(_operator(), f"{_OTHER}/app/db", param="password_secret_ref")
+
+
+@pytest.mark.parametrize("ref", _REFS_THAT_COULD_MOVE)
+def test_vault_ref_that_could_move_is_refused_when_the_tenant_prefix_is_off(
+    monkeypatch: pytest.MonkeyPatch, ref: str
+) -> None:
+    """With an empty prefix, a ``.`` / ``..`` segment, a ``%`` or a backslash is still refused."""
+    _set_env(monkeypatch, VAULT_KV_TENANT_SCOPE_PREFIX="")
+    with pytest.raises(SecretRefScopeError) as exc:
+        check_param_secret_ref(_operator(), ref, param="password_secret_ref")
+    assert "a '.' or '..' segment, a '%' or a backslash" in str(exc.value)
+    assert "outside the caller's tenant" not in str(exc.value)
 
 
 def test_empty_ref_and_system_operator_pass() -> None:
@@ -630,4 +657,63 @@ def test_target_secret_ref_with_dot_segments_is_refused(ref: str) -> None:
     assert exc.value.status_code == 422
     detail: Any = exc.value.detail
     assert detail["kind"] == "secret_ref_outside_tenant_scope"
+    assert "a '.' or '..' segment, a '%' or a backslash" in detail["message"]
     _enforce_secret_ref_tenant_scope(f"{_OWN}/vc-01", _operator(), "vc-01")
+
+
+@pytest.mark.parametrize("ref", ["vault:../vc-01", "vault:./vc-01", f"vault:{_OWN}/../vc-01"])
+def test_target_secret_ref_with_vault_scheme_and_dot_segment_is_refused(ref: str) -> None:
+    """The gate checks the path after the ``vault:`` scheme, as the credential read does."""
+    from meho_backplane.api.v1.targets import _enforce_secret_ref_tenant_scope
+
+    with pytest.raises(HTTPException) as exc:
+        _enforce_secret_ref_tenant_scope(ref, _operator(), "vc-01")
+    assert exc.value.status_code == 422
+    detail: Any = exc.value.detail
+    assert detail["kind"] == "secret_ref_outside_tenant_scope"
+    assert "a '.' or '..' segment, a '%' or a backslash" in detail["message"]
+    _enforce_secret_ref_tenant_scope(f"vault:{_OWN}/vc-01", _operator(), "vc-01")
+
+
+@pytest.mark.parametrize(
+    "ref", ["vault:../vc-01", "vault:./vc-01", " vault:../vc-01", " vault:./vc-01"]
+)
+def test_target_secret_ref_with_vault_scheme_and_dot_segment_is_refused_when_the_prefix_is_off(
+    monkeypatch: pytest.MonkeyPatch, ref: str
+) -> None:
+    """With an empty prefix, a ``vault:`` scheme does not hide a ``.`` or ``..`` segment.
+
+    Nor does a leading blank before the scheme: the gate cuts surrounding
+    whitespace first, as the credential read does.
+    """
+    from meho_backplane.api.v1.targets import _enforce_secret_ref_tenant_scope
+
+    _set_env(monkeypatch, VAULT_KV_TENANT_SCOPE_PREFIX="")
+    with pytest.raises(HTTPException) as exc:
+        _enforce_secret_ref_tenant_scope(ref, _operator(), "vc-01")
+    assert exc.value.status_code == 422
+    detail: Any = exc.value.detail
+    assert detail["kind"] == "secret_ref_outside_tenant_scope"
+    assert detail["tenant_prefix"] == ""
+    assert "a '.' or '..' segment, a '%' or a backslash" in detail["message"]
+    _enforce_secret_ref_tenant_scope("vault:vc-01", _operator(), "vc-01")
+
+
+@pytest.mark.parametrize(
+    "ref", [f"{_OWN}/../{_TENANT_B}/vc-01", f"{_OWN}/%2e%2e/{_TENANT_B}/vc-01", f"{_OWN}\\vc-01"]
+)
+def test_target_secret_ref_that_could_move_is_refused_when_the_tenant_prefix_is_off(
+    monkeypatch: pytest.MonkeyPatch, ref: str
+) -> None:
+    """With an empty prefix, the target write gate still refuses such a ref; a plain one passes."""
+    from meho_backplane.api.v1.targets import _enforce_secret_ref_tenant_scope
+
+    _set_env(monkeypatch, VAULT_KV_TENANT_SCOPE_PREFIX="")
+    with pytest.raises(HTTPException) as exc:
+        _enforce_secret_ref_tenant_scope(ref, _operator(), "vc-01")
+    assert exc.value.status_code == 422
+    detail: Any = exc.value.detail
+    assert detail["kind"] == "secret_ref_outside_tenant_scope"
+    assert detail["tenant_prefix"] == ""
+    assert "a '.' or '..' segment, a '%' or a backslash" in detail["message"]
+    _enforce_secret_ref_tenant_scope(f"{_OTHER}/vc-01", _operator(), "vc-01")

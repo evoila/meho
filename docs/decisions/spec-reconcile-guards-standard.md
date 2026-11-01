@@ -1,6 +1,6 @@
-# Spec-reconcile guards as standard — every hand-coded vendor path asserts against a pinned spec (decision)
+# Spec-reconcile guards as standard — hand-coded vendor paths are checked against a vendor spec when one is pinned (decision)
 
-**Status:** accepted
+**Status:** accepted; changed on 2026-10-30 (see "The standard")
 **Date:** 2026-08-17
 **Task:** [#2980](https://github.com/evoila/meho/issues/2980) (initiative
 [#2979](https://github.com/evoila/meho/issues/2979), wave 3 of the guard
@@ -10,9 +10,27 @@ rollout; mechanics precedent
 
 ## The standard
 
-**Every hand-coded vendor-API path literal in a typed connector or
-composite MUST be asserted against a pinned vendor spec in CI, wherever
-such a spec exists or can be pinned.**
+**Since 2026-10-30: a CI guard checks the hand-coded vendor-API paths of
+a typed connector or composite only against a vendor spec file that is
+already pinned (on the spec shelf, or as test data in this repo). A
+pinned file is not a step before coding.**
+
+- A build Task may add such a file as test data when it helps. No Task
+  waits for one.
+- The agent may use any source: vendor documents, published API files,
+  internet research, and live exploration in the sandbox or the lab.
+- A live test is the proof that a path works.
+- The guards that exist stay as they are. CI keeps its list of required
+  spec files for the files that exist.
+
+Why it changed: the old rule made a pinned file a step before coding, so
+build Tasks waited for separate file Tasks. Now one Task per capability
+reads the docs, explores the API, builds, tests live, and fixes what it
+finds. The old rule said: "Every hand-coded vendor-API path literal in a
+typed connector or composite MUST be asserted against a pinned vendor
+spec in CI, wherever such a spec exists or can be pinned." The rest of
+this file is the record of how the guards work. Where it says a Task
+must pin a file, that is now optional.
 
 The determination of record behind it (#2979, grounded 2026-08-17): *if
 we have the spec, we do not risk hallucinating an endpoint.* #2970
@@ -33,7 +51,7 @@ Scope boundaries:
 - **Generic (ingested) connectors are immune by construction** and need
   no lane: their op_ids are emitted *from* the spec by the ingest
   pipeline, so an unserved path cannot exist.
-- **Where no spec exists or can be pinned**, the lane still ships and
+- **Where no spec is pinned**, the lane still ships and
   skips uniformly; it arms itself the day the spec lands on the shelf.
   A task that proves a spec is unobtainable records the evidenced
   exclusion instead (#2993's contract; the entries live in the
@@ -160,7 +178,9 @@ starts from this pattern; per-test ingest is only acceptable while
 
 ## Extension mechanics (per new vendor lane)
 
-Each lane task (#2981-#2993) ships all of:
+Each lane task (#2981-#2993) ships all of the steps below. Since
+2026-10-30, steps 2 to 4 are optional: a build Task runs them only when
+it chooses to add a spec file.
 
 1. **The lane** — a `backend/tests/` module using the harness;
    declared set introspected from the connector's live constants.
@@ -357,7 +377,31 @@ split.
   instead of skipping. The other provider op_ids stay in the exclusion
   above; this change checks only the region path.
 
-### vcd — fully excluded, all-typed (no pinnable spec) (#3057)
+### vcd — CloudAPI paths ARMED 2026-10-31 (#4519); `/api` paths pinned only
+
+**Update 2026-10-31 (#4519).** A running Cloud Director cell serves its own
+`/cloudapi` file: `GET /api-explorer/provider/cloudapi.json`, Swagger 2.0, no
+session needed. The spec shelf pins it as
+`vmware-cloud-director-10.6/cloudapi-39.2.json` (API 39.2, from a 10.6.2
+cell, 646 paths, `basePath` `/cloudapi`; provenance in the shelf's
+`MANIFEST.md`). This replaces the `/cloudapi` half of the exclusion below.
+
+- **Armed (every `/cloudapi` op_id):** `GET` and `POST /cloudapi/1.0.0/orgs`,
+  `GET`, `PUT` and `DELETE /cloudapi/1.0.0/orgs/{orgUrn}`, and
+  `POST /cloudapi/1.0.0/sessions/provider`. The lane
+  (`backend/tests/test_connectors_vcd_spec_reconcile.py`) reads the Swagger
+  2.0 file itself (MEHO's spec ingest reads OpenAPI 3 only), adds the
+  `basePath`, and ignores path parameter names. CI checks the folder out and
+  requires the file, so the check fails instead of skipping when it is
+  missing.
+- **Still pinned only (2 op_ids: `GET:/api/query`, `GET:/api/versions`).** The
+  vendor publishes no API file for the older `/api` surface. Both paths are in
+  the vendor's API 39.0 reference
+  (<https://developer.broadcom.com/xapis/vmware-cloud-director-api/39.0/>,
+  operations `GET-ExecuteQuery` and `GET-SupportedVersions`); the lane names
+  that link and keeps them in the manifest pin.
+
+The original exclusion (#3057) is kept below as history.
 
 The `vcd` (VMware Cloud Director) connector is a **net-new typed**
 connector for the legacy standalone product (initiative
@@ -664,6 +708,34 @@ API with eleven hand-written path constants (thirteen `METHOD:/path` pairs).
 - **Activation:** phpIPAM publishing an API description file. Then the file
   goes on the shelf, the check gets a compare test, and this entry is
   withdrawn.
+
+### installer-cb-5.0 — no API file for Cloud Builder 5.x; the check uses the reference lists (#4469)
+
+The `installer-cb-5.0` connector (Cloud Builder 5.0 to 5.2, product
+`installer`) sends ten `METHOD:/path` calls under `/v1/sddcs`.
+
+- **Check file:** `backend/tests/test_connectors_vcf_cloud_builder_spec_reconcile.py`.
+  It reads the call sets of `vcf_cloud_builder/typed_reads.py` and
+  `typed_writes.py` live and pins them (always runs). When the shelf is
+  there, it checks every call against the reference list of each version:
+  `cloud-builder-5.0` (5.0.0), `cloud-builder-5.1` (5.1.0, 5.1.1) and
+  `cloud-builder-5.2` (5.2.0 to 5.2.4). CI checks out the three folders and
+  fails when a list is missing.
+- **What was checked (2026-10-19, on the shelf).** Broadcom publishes no
+  OpenAPI or Swagger file for VCF 5.x: the "Related Resources" page of each
+  version of the VMware Cloud Foundation API reference
+  (<https://developer.broadcom.com/xapis/vmware-cloud-foundation-api/5.2.0/>)
+  offers no download, and `vmware/vcf-api-specs` has 9.x tags only. The
+  shelf lists are made from the vendor's operation index and operation
+  pages, section "Sddc" (the Cloud Builder calls). One finding changed the
+  connector: `GET /v1/system/appliance-info` (the Installer's version call)
+  is in no 5.x list, so the connector reads the version from
+  `GET /v1/sddcs/about`.
+- **Residual risk, named.** The lists hold paths, not schemas. A field that
+  differs by patch release shows up only in a live call (the separate lab
+  proof).
+- **Activation:** Broadcom publishing a 5.x API file. Then the file goes on
+  the shelf next to the lists and the check compares against it.
 
 ## Red lane = finding (the protocol)
 

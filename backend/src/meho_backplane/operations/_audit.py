@@ -34,7 +34,7 @@ import structlog
 
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
-from meho_backplane.broadcast.events import resolve_op_class
+from meho_backplane.broadcast.events import resolve_operation_op_class
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor
@@ -48,6 +48,7 @@ __all__ = [
     "agent_session_id_var",
     "audit_rejection_safe",
     "audit_safe",
+    "descriptor_op_class",
     "parent_audit_id_var",
     "policy_decision_var",
     "resolve_agent_session_id",
@@ -337,6 +338,23 @@ def _resolve_audit_extras_from_contextvars() -> dict[str, Any]:
     return out
 
 
+def descriptor_op_class(descriptor: EndpointDescriptor) -> str:
+    """Return the op class of one run of *descriptor*.
+
+    The audit row stores this class, and the dispatcher hands the same
+    value to the announce gate, the announce reminder and the target
+    activity warning. See
+    :func:`~meho_backplane.broadcast.events.resolve_operation_op_class`.
+    A descriptor stand-in without a ``safety_level`` gets the class from
+    its op id alone.
+    """
+    return resolve_operation_op_class(
+        descriptor.op_id,
+        source_kind=descriptor.source_kind,
+        safety_level=getattr(descriptor, "safety_level", None),
+    )
+
+
 def _build_audit_payload(
     descriptor: EndpointDescriptor,
     params_hash: str,
@@ -429,7 +447,7 @@ def _build_audit_payload(
     # so this layering is the explicit knob, not an accidental coupling.
     payload.update(_resolve_audit_extras_from_contextvars())
     # The op that ran, not a route's own label (e.g. agent.run) still bound.
-    payload.update(op_id=descriptor.op_id, op_class=resolve_op_class(descriptor.op_id))
+    payload.update(op_id=descriptor.op_id, op_class=descriptor_op_class(descriptor))
     # #2680: the structured error envelope is authoritative for an error
     # row, so it lands last -- after the handler-extras merge -- under a
     # dedicated ``error`` key that cannot collide with the structural /

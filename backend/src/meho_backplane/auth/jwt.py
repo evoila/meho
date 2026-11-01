@@ -88,6 +88,11 @@ from authlib.jose.errors import (
 )
 from fastapi import Header, HTTPException, status
 
+from meho_backplane.auth.current_tenant import (
+    TENANT_HEADER,
+    reject_duplicate_tenants,
+    select_current_tenant,
+)
 from meho_backplane.auth.operator import (
     MACHINE_PRINCIPAL_KINDS,
     Operator,
@@ -878,9 +883,9 @@ def _extract_tenants(
     when its token carries the claim: a machine stays in its one tenant.
 
     The entries come from the trusted issuer's signed token, so they are
-    safe to log. Only :func:`_extract_self_approver` reads the result so
-    far; the current tenant still comes from :func:`_extract_tenant_id`
-    and :func:`_extract_tenant_role`.
+    safe to log. When the result is not empty, :func:`_operator_from_claims`
+    takes the tenant, role, ``approver`` and ``self_approver`` from it
+    instead of the flat claims (#5239, #3327).
     """
     if principal_kind in MACHINE_PRINCIPAL_KINDS:
         return ()
@@ -1428,19 +1433,33 @@ def _extract_approver(claims: Any, settings: Settings) -> bool:
     return False
 
 
+def _tenants_claim_malformed(claims: Any, settings: Settings) -> bool:
+    """Return ``True`` when the ``meho_tenants`` claim is there but not all good.
+
+    A value that is not a list, or a list with any entry that
+    :func:`_parse_tenant_entry` refuses, counts as malformed;
+    :func:`_extract_tenants` already logged that claim or entry and kept
+    the good entries for :attr:`Operator.tenants`. The SA-Operators flag
+    does not trust such a claim: it stays off in every tenant, also after
+    :func:`~meho_backplane.auth.current_tenant.select_current_tenant`
+    switches the tenant. No claim gives ``False``.
+    """
+    if settings.jwt_tenants_claim_name not in claims:
+        return False
+    raw = claims[settings.jwt_tenants_claim_name]
+    return not isinstance(raw, list) or any(_parse_tenant_entry(entry) is None for entry in raw)
+
+
 def _self_approver_from_tenants(
-    raw: object, tenants: tuple[TenantMembership, ...], tenant_id: UUID
+    claims: Any, settings: Settings, tenants: tuple[TenantMembership, ...], tenant_id: UUID
 ) -> bool:
     """Decide the SA-Operators flag from the ``meho_tenants`` claim as sent.
 
-    The whole claim must be good. A value that is not a list, or a list
-    with any entry that :func:`_parse_tenant_entry` refuses, gives
-    ``False``; :func:`_extract_tenants` already logged that claim or
-    entry. *tenants* holds the good entries of the same claim. Exactly one
-    of them must name *tenant_id*, and its group must give
-    ``self_approval``.
+    The whole claim must be good (:func:`_tenants_claim_malformed`).
+    *tenants* holds the good entries of the claim. Exactly one of them
+    must name *tenant_id*, and its group must give ``self_approval``.
     """
-    if not isinstance(raw, list) or any(_parse_tenant_entry(entry) is None for entry in raw):
+    if _tenants_claim_malformed(claims, settings):
         return False
     current = [t for t in tenants if t.tenant_id == tenant_id]
     return len(current) == 1 and group_grant(current[0].group).self_approval
@@ -1461,14 +1480,18 @@ def _extract_self_approver(
     * A machine login (agent, service, runner) always gets ``False``,
       even when its token carries the group. Agents never approve.
     * The token has a ``meho_tenants`` claim (``JWT_TENANTS_CLAIM_NAME``):
-      only the list counts. The flag is on when the list has exactly
-      one entry for *tenant_id* and that entry's group gives
+      only the list counts. *tenant_id* is the tenant the Operator starts
+      in (the first entry, :func:`_start_tenant`). The flag is on when
+      the list has exactly one entry for it and that entry's group gives
       ``self_approval`` (:func:`~meho_backplane.auth.operator.group_grant`).
       An entry of another tenant never counts. The whole claim must be
       good: a claim that is not a list, has any bad entry (also one of
       another tenant), or has no good entry for *tenant_id*, gives
       ``False``. :func:`_extract_tenants` keeps the good entries of such
-      a list for :attr:`Operator.tenants`; this flag does not.
+      a list for :attr:`Operator.tenants`; this flag does not. When the
+      request then names another tenant of the list,
+      :func:`~meho_backplane.auth.current_tenant.with_membership` reads
+      the flag again from that tenant's entry, under the same rule.
     * The token has no ``meho_tenants`` claim (a site with one tenant
       and the older mappers): the flag is on when the ``groups`` claim
       names the group ``JWT_SELF_APPROVER_GROUP`` (default
@@ -1485,8 +1508,7 @@ def _extract_self_approver(
     if principal_kind in MACHINE_PRINCIPAL_KINDS:
         return False
     if settings.jwt_tenants_claim_name in claims:
-        raw_tenants = claims[settings.jwt_tenants_claim_name]
-        return _self_approver_from_tenants(raw_tenants, tenants, tenant_id)
+        return _self_approver_from_tenants(claims, settings, tenants, tenant_id)
     raw = claims.get(_GROUPS_CLAIM_NAME)
     if raw is None:
         return False
@@ -1541,6 +1563,88 @@ def _extract_runner_id(claims: Any, settings: Settings) -> UUID | None:
         raise _http_401("malformed_runner_id_claim") from exc
 
 
+def _extract_sign_in_claims(claims: Any) -> tuple[int | None, str | None, str | None]:
+    """Read ``auth_time``, ``acr`` and ``sid``: when and how the person signed in.
+
+    The fresh sign-in check (#4711) and the approve check (#3979) need
+    them. A value of the wrong type reads as missing, so the check refuses
+    (fail closed). ``auth_time`` must be a whole number (OIDC Core §2 says
+    NumericDate; Keycloak sends an integer). A bool is not a time, even
+    though Python counts it as an ``int``.
+    """
+    raw_time = claims.get("auth_time")
+    auth_time = raw_time if isinstance(raw_time, int) and not isinstance(raw_time, bool) else None
+    acr = claims.get("acr")
+    sid = claims.get("sid")
+    return (
+        auth_time,
+        acr if isinstance(acr, str) and acr else None,
+        sid if isinstance(sid, str) and sid else None,
+    )
+
+
+def _start_tenant(
+    claims: Any, settings: Settings, tenants: tuple[TenantMembership, ...]
+) -> tuple[UUID, TenantRole, bool]:
+    """Return the tenant, role and ``approver`` flag the Operator starts with.
+
+    A token with a tenant list (#5239): one role group per tenant, and the
+    first entry is the start value; the flat claims are not used.
+    :func:`~meho_backplane.auth.current_tenant.select_current_tenant` then
+    picks the tenant the request names. A token without a list: today's
+    one-group check and the flat claims.
+    """
+    if tenants:
+        reject_duplicate_tenants(tenants)
+        grant = group_grant(tenants[0].group)
+        return tenants[0].tenant_id, grant.role, grant.approver
+    _reject_multiple_role_groups(claims, settings)
+    return (
+        _extract_tenant_id(claims, settings),
+        _extract_tenant_role(claims, settings),
+        _extract_approver(claims, settings),
+    )
+
+
+def _cap_agent_role(principal_kind: PrincipalKind, tenant_role: TenantRole) -> TenantRole:
+    """Return the role an agent login acts with: at most ``operator``.
+
+    An agent acts with operator rights in its tenant. Tenant-admin work
+    (connectors, targets, conventions, grants, tenant policies) is for
+    people. MEHO registers new agents with ``tenant_role=operator``. An
+    agent registered earlier still has ``tenant_admin`` in its token, so
+    MEHO reads that value as ``operator`` here. People, service logins
+    and runners keep the role their token carries.
+    """
+    if principal_kind is PrincipalKind.AGENT and tenant_role is TenantRole.TENANT_ADMIN:
+        return TenantRole.OPERATOR
+    return tenant_role
+
+
+def _extract_sub(claims: Any) -> str:
+    """Return the ``sub`` claim, or raise 401 ``missing_sub``.
+
+    ``sub`` is mandated by OIDC core §2 / RFC 9068 §2.2.1. The primary
+    enforcement point is the ``sub: essential: True`` entry in
+    :func:`_decode_with_jwks`'s ``claims_options`` — a token without
+    ``sub`` raises ``MissingClaimError('sub')`` during decode, which
+    :func:`_classify_decode_error` surfaces as the ``missing_sub`` code.
+    This defensive check covers the one residual edge case authlib
+    doesn't catch: a ``sub`` that is *present but not a non-empty string*
+    (e.g. ``{"sub": null}`` or ``{"sub": ""}`` — neither violates
+    "essential" in authlib 1.7's ``_validate_essential_claims`` quite the
+    way intuition suggests; ``null`` passes the ``k in self`` check).
+    Surface the same ``missing_sub`` code so on-call telemetry sees one
+    event class regardless of which mode fired.
+    """
+    sub = claims.get("sub")
+    if not isinstance(sub, str) or not sub:
+        log = structlog.get_logger(__name__)
+        log.warning("missing_sub", claim_name="sub", reason="empty_or_non_string")
+        raise _http_401("missing_sub")
+    return sub
+
+
 def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Operator:
     """Project the validated claims into the public :class:`Operator` shape.
 
@@ -1560,9 +1664,16 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     / ``missing_tenant_role_claim`` / ``unknown_tenant_role``) so the
     bare ``invalid_token`` fallback is reserved for unexpected
     pydantic validation failures (the malformed-email regression case).
-    The one-group check (``multiple_role_groups``, #4594) runs first:
-    a person in two login groups carries a ``tenant_role`` Keycloak
+    The one-group check (``multiple_role_groups``, #4594) runs before
+    them: a person in two login groups carries a ``tenant_role`` Keycloak
     picked at random, so the tenant extractors would accept it.
+
+    A token with a ``meho_tenants`` list (#5239) skips the flat
+    ``tenant_id`` / ``tenant_role`` / ``approver`` claims and the
+    ``groups`` check. The rule becomes one role group per tenant
+    (:func:`~meho_backplane.auth.current_tenant.reject_duplicate_tenants`),
+    and the Operator starts in the first entry's tenant. The caller
+    (:func:`verify_jwt_for_audience`) then picks the current tenant.
 
     ``principal_kind`` extraction is graceful only for the **absent**
     claim (→ ``user`` default, the pre-G11.2 legacy contract); a
@@ -1570,38 +1681,21 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     token (``unknown_principal_kind``), matching the tenant-claim
     extractors above.
     """
-    sub = claims.get("sub")
-    if not isinstance(sub, str) or not sub:
-        # ``sub`` is mandated by OIDC core §2 / RFC 9068 §2.2.1. The
-        # primary enforcement point is the ``sub: essential: True``
-        # entry in :func:`_decode_with_jwks`'s ``claims_options`` —
-        # a token without ``sub`` raises ``MissingClaimError('sub')``
-        # during decode, which :func:`_classify_decode_error` surfaces
-        # as the ``missing_sub`` code. This defensive check covers the
-        # one residual edge case authlib doesn't catch: a ``sub`` that
-        # is *present but not a non-empty string* (e.g. ``{"sub": null}``
-        # or ``{"sub": ""}`` — neither violates "essential" in authlib
-        # 1.7's ``_validate_essential_claims`` quite the way intuition
-        # suggests; ``null`` passes the ``k in self`` check). Surface
-        # the same ``missing_sub`` code so on-call telemetry sees one
-        # event class regardless of which mode fired.
-        log = structlog.get_logger(__name__)
-        log.warning("missing_sub", claim_name="sub", reason="empty_or_non_string")
-        raise _http_401("missing_sub")
+    sub = _extract_sub(claims)
     name = claims.get("name")
     email = claims.get("email")
-    _reject_multiple_role_groups(claims, settings)
-    tenant_id = _extract_tenant_id(claims, settings)
-    tenant_role = _extract_tenant_role(claims, settings)
     principal_kind = _extract_principal_kind(claims, settings)
+    tenants = _extract_tenants(claims, settings, principal_kind)
+    tenant_id, tenant_role, approver = _start_tenant(claims, settings, tenants)
+    tenant_role = _cap_agent_role(principal_kind, tenant_role)
     client_id = _extract_client_id(claims, settings, principal_kind)
     capabilities = _extract_capabilities(claims, settings)
     scopes = _extract_scopes(claims, settings)
     platform_admin = _extract_platform_admin(claims, settings)
-    approver = _extract_approver(claims, settings)
     runner_id = _extract_runner_id(claims, settings)
-    tenants = _extract_tenants(claims, settings, principal_kind)
+    tenants_claim_malformed = _tenants_claim_malformed(claims, settings)
     self_approver = _extract_self_approver(claims, settings, principal_kind, tenant_id, tenants)
+    auth_time, acr, sid = _extract_sign_in_claims(claims)
     if principal_kind is PrincipalKind.RUNNER and runner_id is None:
         # Fail-closed pairing (Initiative #2415, #2502): a runner-kind
         # token with no ``runner_id`` cannot be scoped by the gateway
@@ -1629,6 +1723,10 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             runner_id=runner_id,
             tenants=tenants,
             self_approver=self_approver,
+            tenants_claim_malformed=tenants_claim_malformed,
+            auth_time=auth_time,
+            acr=acr,
+            sid=sid,
         )
     except pydantic.ValidationError as exc:
         raise _http_401("invalid_token") from exc
@@ -1638,6 +1736,8 @@ async def verify_jwt_for_audience(
     authorization: str | None,
     *,
     expected_audience: str,
+    requested_tenant: str | None = None,
+    allow_unchosen: bool = False,
 ) -> Operator:
     """Validate a Bearer token against an explicit ``aud`` claim value.
 
@@ -1682,6 +1782,13 @@ async def verify_jwt_for_audience(
     assumption against any real Keycloak deployment but one external
     invariant away from a bypass. Failing the check locally to the
     verifier makes the property auditable in one place.
+
+    Current tenant (#5239): *requested_tenant* is the value of the
+    ``Meho-Tenant`` header (or the web session's tenant). The last step,
+    :func:`~meho_backplane.auth.current_tenant.select_current_tenant`,
+    picks the tenant the request works in and may raise 400
+    ``tenant_not_chosen`` or 403 ``tenant_not_member`` /
+    ``tenant_not_found``. *allow_unchosen* is for the status answers only.
     """
     if not expected_audience or not expected_audience.strip():
         raise _http_401(AUDIENCE_NOT_CONFIGURED_REMEDIATION)
@@ -1692,10 +1799,42 @@ async def verify_jwt_for_audience(
         settings,
         expected_audience=expected_audience,
     )
-    return _operator_from_claims(claims, token, settings)
+    operator = _operator_from_claims(claims, token, settings)
+    return await select_current_tenant(operator, requested_tenant, allow_unchosen=allow_unchosen)
 
 
-async def verify_jwt(authorization: str | None = Header(default=None)) -> Operator:
+def header_value(value: object) -> str | None:
+    """Return *value* when it is a header string, else ``None``.
+
+    A dependency called as a plain function (not through FastAPI) gets
+    the ``Header(...)`` default object instead of a string.
+    """
+    return value if isinstance(value, str) else None
+
+
+async def verify_jwt_allow_unchosen(
+    authorization: str | None = Header(default=None),
+    meho_tenant: str | None = Header(default=None, alias=TENANT_HEADER, include_in_schema=False),
+) -> Operator:
+    """Like :func:`verify_jwt`, but a login with several tenants needs no header.
+
+    Only for the status answer behind ``meho status`` (#5239). The
+    result may have ``tenant_chosen=False``; the caller must then answer
+    with the person's tenants and do no tenant work.
+    """
+    settings = get_settings()
+    return await verify_jwt_for_audience(
+        authorization,
+        expected_audience=settings.keycloak_audience,
+        requested_tenant=header_value(meho_tenant),
+        allow_unchosen=True,
+    )
+
+
+async def verify_jwt(
+    authorization: str | None = Header(default=None),
+    meho_tenant: str | None = Header(default=None, alias=TENANT_HEADER, include_in_schema=False),
+) -> Operator:
     """FastAPI dependency: validate the Bearer token and return an Operator.
 
     Raises 401 on every failure mode — missing header, malformed
@@ -1716,11 +1855,15 @@ async def verify_jwt(authorization: str | None = Header(default=None)) -> Operat
     on the canonical "Key not found" ValueError from authlib, the JWKS
     cache is refreshed exactly once and the verify is retried. A
     second miss is a hard 401 ``invalid_token``.
+
+    The ``Meho-Tenant`` header names the current tenant (#5239); see
+    :mod:`meho_backplane.auth.current_tenant` for the rules.
     """
     settings = get_settings()
     return await verify_jwt_for_audience(
         authorization,
         expected_audience=settings.keycloak_audience,
+        requested_tenant=header_value(meho_tenant),
     )
 
 

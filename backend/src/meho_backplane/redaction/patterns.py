@@ -33,10 +33,11 @@ the engine then redacts the full match span (group 0). Patterns capture
 the *value* shape, not the surrounding context, except for
 ``authorization_header`` where the redacted span is the whole
 ``Authorization: ...`` line because the header name itself is the
-operator-facing signal. A pattern that must look past variable-width
-context (which a Python look-behind cannot do) names the secret part
-``value``: the engine then replaces only that group and keeps the rest
-of the match in the output (``bind_key_secret``).
+operator-facing signal. One named pattern, ``bind_key_secret``, is
+not a regex: it is a :class:`SecretFinder` (see :mod:`.bind_secret`)
+that reads BIND config text the way BIND does and reports only the
+value spans, so the keyword and the comments around them stay
+readable.
 
 **False-positive posture.** Tier-1 is the cheap layer. It will
 *occasionally* over-redact a benign UUID-shaped or FQDN-shaped string,
@@ -49,13 +50,28 @@ trust boundary is the API surface, per the parent goal (#800).
 from __future__ import annotations
 
 import re
-from typing import Final
+from typing import Final, Protocol
+
+from meho_backplane.redaction.bind_secret import BIND_KEY_SECRET
 
 __all__ = [
     "NAMED_PATTERNS",
     "PATTERN_NAMES",
+    "SecretFinder",
     "get_pattern",
+    "secret_spans",
 ]
+
+
+class SecretFinder(Protocol):
+    """A named pattern that is code, not a regex.
+
+    The engine replaces every span the finder reports and leaves the
+    rest of the text as it is.
+    """
+
+    def secret_spans(self, text: str) -> list[tuple[int, int]]:
+        """Return ``(start, end)`` of every secret in *text*, left to right."""
 
 
 # Secret-*value* character class shared by the labelled-secret patterns
@@ -156,9 +172,15 @@ _JWT = re.compile(
 # blob). A value that only starts like one (``[REDACTED:made-up``) or
 # that goes on after the ``]`` (``[REDACTED:x]made-up``) is a value
 # like any other and is redacted whole.
+#
+# The label may follow ``_`` or ``-`` (``DB_PASSWORD=...``,
+# ``GITHUB_TOKEN=...``, ``x-api-key: ...``), so the start is "no letter or
+# digit before the label" instead of ``\b``: ``_`` is a word character,
+# and ``\b`` would see no boundary between ``DB_`` and ``PASSWORD``. A
+# label glued to letters (``mypassword=``) still does not match.
 _NOT_A_PLACEHOLDER: Final[str] = r"(?!\[REDACTED:[^\]\s'\"]+\](?!" + _VALUE_CHARS + "))"
 _API_KEY = re.compile(
-    r"\b(?:"
+    r"(?<![A-Za-z0-9])(?:"
     r"api[_-]?key"
     r"|access[_-]?token"
     r"|refresh[_-]?token"
@@ -174,6 +196,17 @@ _API_KEY = re.compile(
     re.IGNORECASE,
 )
 
+# PEM private keys: the whole block from the ``BEGIN`` line to the
+# matching ``END`` line (``RSA PRIVATE KEY``, ``EC PRIVATE KEY``,
+# ``ENCRYPTED PRIVATE KEY``, ``OPENSSH PRIVATE KEY``, plain ``PRIVATE
+# KEY``). A block cut off before its ``END`` line is redacted to the end
+# of the text. Public keys and certificates do not match.
+_PEM_PRIVATE_KEY = re.compile(
+    r"-----BEGIN ((?:[A-Z0-9]+ )*)PRIVATE KEY-----"
+    r".*?(?:-----END \1PRIVATE KEY-----|\Z)",
+    re.DOTALL,
+)
+
 # Kubeconfig: the giveaway is ``apiVersion: v1`` + ``kind: Config``
 # nearby in the same blob. We match the whole document by locking onto
 # the YAML preamble and then sweeping until the next blank line OR end
@@ -185,40 +218,24 @@ _KUBECONFIG = re.compile(
     re.IGNORECASE,
 )
 
-# BIND key secrets (#4617). A ``named.conf`` ``key`` block carries the
-# shared secret of a TSIG or rndc key as ``secret "<base64>";``. The
-# keyword is followed by whitespace, not ``=`` / ``:``, so ``api_key``
-# does not see it. BIND also allows comments (``/* */``, ``//``, ``#``)
-# between the keyword and the value. A look-behind cannot skip them
-# (it must be fixed-width), so the match covers the keyword, any
-# comments, and the quoted value, and the ``value`` group marks the
-# part the engine replaces. The keyword and the comments stay in the
-# output, so the file stays readable.
-#
-# Two guards keep a key *name* that ends in ``secret`` (``key
-# "transfer-secret"``, ``key "secret"``, ``key "my secret"``) from
-# matching the wrong pair of quotes: the keyword may not sit directly
-# after a quote, a hyphen, or another word character, and the value
-# must be base64 (BIND lets whitespace split it). The text from a
-# name's closing quote to the real value's opening quote holds ``{``
-# and ``;``, so it never passes as a value.
-#
-# The gap between the keyword and the value is matched once and never
-# re-tried (possessive ``*+``). A line comment runs to the end of its
-# line, so a value on the same line after ``#`` or ``//`` is commented
-# out in BIND and is not matched. Without the possessive quantifier a
-# run of ``#`` characters with no quoted value after it could be split
-# into comments in exponentially many ways, and one short payload kept
-# the middleware busy for seconds (#4620 review).
-_BIND_COMMENT = r"(?:/\*[^*]*(?:\*(?!/)[^*]*)*\*/|//[^\n]*|#[^\n]*)"
-_BIND_KEY_SECRET = re.compile(
-    r"(?<![\w\"'-])secret(?:\s|"
-    + _BIND_COMMENT
-    + r')*+(?P<value>"[A-Za-z0-9+/=\s]{1,'
-    + str(_VALUE_MAX)
-    + r'}")',
-    re.IGNORECASE,
+# crypt(3) password hashes as in ``/etc/shadow``: ``$<id>$`` then one to
+# four ``$``-ended fields (salt, cost, parameters) then the hash itself.
+# Covers MD5 (``$1$``), bcrypt (``$2a$`` / ``$2b$`` / ``$2x$`` / ``$2y$``),
+# SHA-256 / SHA-512 (``$5$`` / ``$6$``), scrypt (``$7$``), yescrypt
+# (``$y$``), gost-yescrypt (``$gy$``), SHA-1 (``$sha1$``) and Argon2.
+# Fields stop at ``:`` so the other ``/etc/shadow`` columns stay readable.
+# The look-behind keeps ``a$1$b`` style text in the middle of a word out.
+_PASSWORD_HASH = re.compile(
+    r"(?<![A-Za-z0-9$])\$(?:1|2[abxy]|5|6|7|y|gy|sha1|argon2(?:id|i|d))\$"
+    r"(?:[^\s$:'\"]{1,256}\$){1,4}"
+    r"[./A-Za-z0-9+=]{8,4096}",
 )
+
+# BIND key secrets (#4617) are not a regex. A ``secret`` word inside a
+# comment or a quoted key name looks like the keyword, and a regex
+# cannot tell the two apart; one review found a comment that let the
+# old rule run over a real key block. :mod:`.bind_secret` reads the
+# text the way BIND does and reports only the value spans.
 
 # UUIDs (RFC 4122 canonical 8-4-4-4-12 hex). UUIDs in operator-facing
 # payloads are often resource identifiers (tenant id, agent run id) --
@@ -273,18 +290,20 @@ _FQDN = re.compile(
 )
 
 
-#: Frozen mapping from pattern name to compiled regex. Insertion order is
+#: Frozen mapping from pattern name to compiled regex or secret finder. Insertion order is
 #: the canonical evaluation order (engine iterates rules, not patterns,
 #: so this is documentation rather than a contract -- the engine applies
 #: rules in policy order). Names match the catalogue called out in the
 #: task body (#1070).
-NAMED_PATTERNS: Final[dict[str, re.Pattern[str]]] = {
+NAMED_PATTERNS: Final[dict[str, re.Pattern[str] | SecretFinder]] = {
     "authorization_header": _AUTHORIZATION_HEADER,
     "bearer_token": _BEARER_TOKEN,
     "jwt": _JWT,
     "api_key": _API_KEY,
     "kubeconfig": _KUBECONFIG,
-    "bind_key_secret": _BIND_KEY_SECRET,
+    "pem_private_key": _PEM_PRIVATE_KEY,
+    "password_hash": _PASSWORD_HASH,
+    "bind_key_secret": BIND_KEY_SECRET,
     "uuid": _UUID,
     "ipv4": _IPV4,
     "ipv6": _IPV6,
@@ -297,8 +316,8 @@ NAMED_PATTERNS: Final[dict[str, re.Pattern[str]]] = {
 PATTERN_NAMES: Final[tuple[str, ...]] = tuple(sorted(NAMED_PATTERNS))
 
 
-def get_pattern(name: str) -> re.Pattern[str]:
-    """Return the compiled regex for *name*.
+def get_pattern(name: str) -> re.Pattern[str] | SecretFinder:
+    """Return the compiled regex or the secret finder for *name*.
 
     Raises :class:`KeyError` with the known-names list when *name* is
     unknown -- the policy schema rejects unknown names at parse time
@@ -311,3 +330,15 @@ def get_pattern(name: str) -> re.Pattern[str]:
         raise KeyError(
             f"unknown named pattern {name!r}; known patterns: {', '.join(PATTERN_NAMES)}",
         ) from exc
+
+
+def secret_spans(pattern: re.Pattern[str] | SecretFinder, text: str) -> list[tuple[int, int]]:
+    """Return the spans *pattern* finds in *text*, left to right, never overlapping.
+
+    A regex reports its whole matches. A :class:`SecretFinder`
+    (``bind_key_secret``) reports only the secret part, so the text
+    around it stays readable. The engine replaces exactly these spans.
+    """
+    if isinstance(pattern, re.Pattern):
+        return [match.span() for match in pattern.finditer(text)]
+    return pattern.secret_spans(text)

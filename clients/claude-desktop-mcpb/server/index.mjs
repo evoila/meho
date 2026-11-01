@@ -27,7 +27,7 @@
 // guard and reads `process.argv.slice(2)` at module top level, so importing
 // it runs its `main` against the argv set below.
 //
-// It adds four things over invoking mcp-remote directly:
+// It adds five things over invoking mcp-remote directly:
 //
 //  1. Internal-CA trust. The optional `ca_cert` user_config (a PEM file
 //     path) arrives as argv[3], and the launcher appends its certificates to
@@ -57,6 +57,9 @@
 //     within MEHO_MCP_LOGIN_TIMEOUT seconds (default 300), which frees the
 //     login port, and it answers a call whose login has expired with a
 //     clear message instead of no answer.
+//  5. The current tenant (#5242). The optional `tenant` user_config
+//     (delivered as MEHO_TENANT) is sent as the Meho-Tenant header on every
+//     request, so the session works in that tenant.
 
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -154,6 +157,19 @@ const scopes =
   "mcp:read mcp:execute offline_access";
 delete process.env.MEHO_MCP_SCOPES;
 
+// The current tenant (#5242). A login can list several tenants, and MEHO
+// works in one of them per request: the one the Meho-Tenant header names (a
+// tenant name or ID). The optional `tenant` user_config (delivered as
+// MEHO_TENANT) sets it for every request of this session. Empty, whitespace,
+// or an unsubstituted `${user_config.tenant}` placeholder sends no header, so
+// a person with one tenant needs no setting. mcp-remote keeps a separate saved
+// login per header value, so the first session in a new tenant asks for a
+// browser login. Scrubbed from process.env like the client id.
+const tenantValue = (process.env.MEHO_TENANT ?? "").trim();
+const tenant = /^\$\{[^}]*\}$/.test(tenantValue) ? "" : tenantValue;
+delete process.env.MEHO_TENANT;
+const tenantArgs = tenant ? ["--header", `Meho-Tenant: ${tenant}`] : [];
+
 // Resolve the vendored mcp-remote CLI entry from the bundle's node_modules
 // (populated by `npm ci --omit=dev` at pack time). Read the package's own
 // `bin` mapping rather than hardcoding a path, so a future pinned version
@@ -174,7 +190,8 @@ const loginGuard = fileURLToPath(new URL("./login-guard.mjs", import.meta.url));
 // reads process.argv.slice(2): the mcp-remote entry first, then the
 // arguments for mcp-remote. It sets process.argv to [node, entry, ...args]
 // before it imports mcp-remote, which reads process.argv.slice(2), so
-// mcp-remote gets the URL and the static-OAuth contract. Present the static
+// mcp-remote gets the URL, the static-OAuth contract, and the Meho-Tenant
+// header when a tenant is set. Present the static
 // `meho-mcp` client via --static-oauth-client-info so the shim skips the
 // DCR the realm blocks; the scope metadata matches what the backplane's
 // token audience mappers expect.
@@ -187,6 +204,7 @@ process.argv = [
   JSON.stringify({ client_id: clientId }),
   "--static-oauth-client-metadata",
   JSON.stringify({ scope: scopes }),
+  ...tenantArgs,
 ];
 
 // One sign-in at a time (#3857): Claude Desktop can start this extension

@@ -9,7 +9,7 @@
 #
 #   Python (ruff + mypy + pytest) on backend/ — SHARDED (#3251) into:
 #     python-lint       : ruff check + ruff format --check + mypy (once)
-#     python-unit-shard : the pytest unit sweep as a 4-way matrix; test files
+#     python-unit-shard : the pytest unit sweep as a 5-way matrix; test files
 #                         are split by measured time (#4809)
 #     python-unit-lane  : fan-in carrying the branch-protection required
 #                         context `Python (ruff + mypy + pytest)`
@@ -39,7 +39,7 @@
 #
 # Docs-only fast path (#3252): the `changes` detector also classifies a PR
 # whose diff is PURELY documentation (every path under `docs/` or ending in
-# `.md`). On such a PR the heavy Python lanes — `python-lint`, the four
+# `.md`). On such a PR the heavy Python lanes — `python-lint`, the five
 # `python-unit-shard` legs, and the four `python-integration-shard` legs —
 # skip via their own job-level `if:` (skipped-by-`if:` == Success per
 # #2140), so a changelog roll / guide edit / README fix finishes CI in
@@ -158,11 +158,12 @@ on:
   # the SonarCloud coverage artifact: the 8 `python-coverage` shards and
   # `python-coverage-combine` run here and on a PR with the
   # `ci-coverage-validate` label, not after every merge. quality-gate.yml
-  # analyzes only this run. 06:00-07:00 UTC is the quietest hour for
-  # merges; minute 17, not 0, because GitHub delays scheduled runs at the
-  # start of every hour.
+  # analyzes only this run. It starts at 02:17 UTC (#5429): between 00:00
+  # and 04:59 UTC a job waits about 0.2 min for a heavy runner, between
+  # 05:00 and 08:00 UTC it waits 7-12 min. Minute 17, not 0, because
+  # GitHub delays scheduled runs at the start of every hour.
   schedule:
-    - cron: '17 6 * * *'
+    - cron: '17 2 * * *'
 
 permissions:
   contents: read
@@ -227,6 +228,15 @@ jobs:
     # batch may mix docs + code; a push to `main` must always run the full
     # matrix) — they emit `docs_only=false` unconditionally.
     #
+    #   single_connector — the connector name when a PR changes only one
+    #                connector folder (plus its tests and docs), else empty
+    #                (#5297). The `python-unit-shard` matrix then runs ONE
+    #                job with that connector's tests and a fixed contract
+    #                set instead of the five shards. Same fail-closed rule as
+    #                docs_only: backend/tests/_unit_connector_select.py says
+    #                which diffs qualify, and any doubt, any error, and every
+    #                merge_group / push run give empty (the full run).
+    #
     # Same fork-PR guard as the other jobs; the dependent jobs re-check
     # head.repo in their own `if:`.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -236,6 +246,7 @@ jobs:
       migrations: ${{ steps.detect.outputs.migrations }}
       docs_only: ${{ steps.detect.outputs.docs_only }}
       backend_python: ${{ steps.detect.outputs.backend_python }}
+      single_connector: ${{ steps.detect.outputs.single_connector }}
     steps:
       - name: Checkout
         # On a PR, HEAD is the test merge: the PR on top of the newest
@@ -253,6 +264,7 @@ jobs:
           migrations=true
           docs_only=false
           backend_python=true
+          single_connector=
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             # push / merge_group: never fast-path; always the full matrix.
             echo "non-PR event (${{ github.event_name }}) -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python} (full run)"
@@ -321,11 +333,18 @@ jobs:
               backend_python=false
               echo "no backend/ change -> backend_python=false (only the tests that read outside backend/)"
             fi
+            # --- one-connector classification (#5297) ---
+            # An error in the tool leaves single_connector empty (full run).
+            if [ "${docs_only}" = "false" ]; then
+              single_connector="$(printf '%s\n' "${changed}" | python3 backend/tests/_unit_connector_select.py detect)" || single_connector=
+              echo "single_connector=${single_connector:-<empty>} (empty -> five unit shards)"
+            fi
           fi
           {
             echo "migrations=${migrations}"
             echo "docs_only=${docs_only}"
             echo "backend_python=${backend_python}"
+            echo "single_connector=${single_connector}"
           } >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------
@@ -338,10 +357,10 @@ jobs:
   #   python-lint       — ruff check + ruff format --check + mypy. Whole-tree,
   #                       unshardable-by-file, ~1-2 min; runs ONCE on the light
   #                       pool. Non-required check.
-  #   python-unit-shard — the pytest unit sweep as a 4-way matrix; the test
+  #   python-unit-shard — the pytest unit sweep as a 5-way matrix; the test
   #                       files are split by measured time so every shard
   #                       takes about as long (heavy pool, in parallel).
-  #                       Non-required checks (`Python unit shard N/4`).
+  #                       Non-required checks (`Python unit shard N/5`).
   #   python-unit-lane  — FAN-IN carrying the EXACT branch-protection required
   #                       context `Python (ruff + mypy + pytest)`; fails iff
   #                       python-lint or ANY shard did not pass. Branch
@@ -430,21 +449,27 @@ jobs:
         run: uv run mypy src/
 
   python-unit-shard:
-    name: Python unit shard ${{ matrix.shard }}/4
-    # Non-required checks (one per matrix leg: `Python unit shard 1/4`,
-    # `.../2/4`, `.../3/4`, `.../4/4`) — the required context is carried by
+    name: ${{ needs.changes.outputs.single_connector != '' && format('Python unit tests for connector {0}', needs.changes.outputs.single_connector) || format('Python unit shard {0}/5', matrix.shard) }}
+    # One-connector run (#5297): when `changes` sets single_connector, the
+    # matrix below has ONE leg, and the pytest step runs that connector's
+    # tests plus the contract set (tests/_unit_connector_select.py) instead
+    # of a quarter of the suite. Only a pull request can get there; the
+    # merge queue and pushes to `main` always run the five shards.
+    #
+    # Non-required checks (one per matrix leg: `Python unit shard 1/5`
+    # to `.../5/5`) — the required context is carried by
     # the python-unit-lane fan-in below. This is the pytest half of the old
-    # required lane, split into a deterministic 4-way file-level matrix
+    # required lane, split into a deterministic 5-way file-level matrix
     # (#3251, 3 shards; #4655 raised it to 4 when the 3 shards reached the
     # 660 s budget; #4809 split by measured file time instead of every
-    # 4th file) so its serial wall runs as parallel shards.
+    # 4th file; #5433 raised it to 5) so its serial wall runs as parallel shards.
     #
     # Fork-PR guard: never execute project code from a fork on the self-hosted
     # runner pool. Same stance as the old lane — job-level so no step ever
-    # starts on a fork PR. On a fork PR all four legs skip (→ reported
+    # starts on a fork PR. On a fork PR all five legs skip (→ reported
     # Success), which the fan-in's own fork guard mirrors. Plus the #3252
     # docs-only skip (identical shape to python-lint): a proven docs-only PR
-    # skips all four legs → the fan-in reports success-by-skip. `needs:
+    # skips all five legs → the fan-in reports success-by-skip. `needs:
     # changes` makes `docs_only` readable; a detect-job failure skip-cascades
     # these legs and the fan-in fails the required context CLOSED. The legs
     # also skip when `backend_python` is `false` (#5296); the job
@@ -460,9 +485,11 @@ jobs:
     # ruff/mypy run once in python-lint on a GitHub-hosted runner.
     runs-on: meho-runners-ci-heavy
     strategy:
-      # 4 shards (#3251 started with 3; #4655 raised it to 4 after the
-      # slowest shard reached the 660 s budget — measure, then rebalance, do
-      # not raise the budget). fail-fast: false — one shard's red tests must NOT
+      # 5 shards (#3251 started with 3; #4655 raised it to 4 after the
+      # slowest shard reached the 660 s budget; #5433 raised it to 5 when all
+      # four shards took 780-930 s on busy runners, and fresh file times
+      # alone would still leave them near 850 s — measure, then rebalance,
+      # do not raise the budget). fail-fast: false — one shard's red tests must NOT
       # cancel the others, so a broad breakage surfaces every failing shard in
       # one run (the fan-in still fails if ANY leg fails). To change the shard
       # count, edit BOTH the matrix and the `TOTAL` in the pytest step, in
@@ -470,7 +497,7 @@ jobs:
       # (tests/_unit_shard_durations.json, see tests/_unit_shard_split.py).
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: ${{ fromJSON(needs.changes.outputs.single_connector != '' && '[1]' || '[1, 2, 3, 4, 5]') }}
     # 20-min cap: hang backstop only. Expected job wall is ~8 min (setup ~2 min
     # + pytest ~6 min); the perf-budget step below is the PR-level early-warning
     # gate that fires well before this cap. The pre-shard lane's 25-min cap
@@ -629,6 +656,7 @@ jobs:
           # Cone-mode sparse checkout of the shelf directories only +
           # lazy blob filter: the runner materialises just the pinned
           # spec files (~0.4 MB argocd-3.3 + ~9.8 MB azure-arm-2026.10 +
+          # ~0.1 MB cloud-builder-5.0 / -5.1 / -5.2 +
           # ~13 MB esxi-9.0 + ~0.2 MB
           # hetzner-robot-2026-04 + ~33 MB nsx-9.0 +
           # ~0.1 MB salt-raas-8.18 + ~2 MB sddc-manager-9.0 +
@@ -638,7 +666,7 @@ jobs:
           # vcf-installer-9.0 + ~0.4 MB vcf-installer-9.1 + ~5 MB
           # vcf-operations-9.0 + ~0.1 MB vcf-operations-orchestrator-9.0
           # / -9.1 + ~1.3 MB vcf-protection-and-recovery-9.1
-          # + ~0.4 MB vks-9.0), not the
+          # + ~0.4 MB vks-9.0 + ~6 MB vmware-cloud-director-10.6), not the
           # whole consumer repo. No
           # `ref:` pin — the shelf's default branch IS the
           # operator-curated pin (the directories are version-named),
@@ -648,6 +676,9 @@ jobs:
           sparse-checkout: |
             docs/argocd-3.3
             docs/azure-arm-2026.10
+            docs/cloud-builder-5.0
+            docs/cloud-builder-5.1
+            docs/cloud-builder-5.2
             docs/esxi-9.0
             docs/fleet-lcm-9.0
             docs/harbor-2.12
@@ -673,6 +704,7 @@ jobs:
             docs/vcf-operations-orchestrator-9.1
             docs/vcf-protection-and-recovery-9.1
             docs/vks-9.0
+            docs/vmware-cloud-director-10.6
           filter: blob:none
           # Read-only consumer; never pushes. Don't leave the token in
           # the shelf clone's local git config after checkout.
@@ -693,6 +725,14 @@ jobs:
           for f in \
             spec-shelf/docs/argocd-3.3/argocd-swagger.json \
             spec-shelf/docs/azure-arm-2026.10/specification/resources/resource-manager/Microsoft.Resources/subscriptions/stable/2022-12-01/subscriptions.json \
+            spec-shelf/docs/cloud-builder-5.0/cloud-builder-5.0.0-reference-operations.tsv \
+            spec-shelf/docs/cloud-builder-5.1/cloud-builder-5.1.0-reference-operations.tsv \
+            spec-shelf/docs/cloud-builder-5.1/cloud-builder-5.1.1-reference-operations.tsv \
+            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.0-reference-operations.tsv \
+            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.1-reference-operations.tsv \
+            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.2-reference-operations.tsv \
+            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.3-reference-operations.tsv \
+            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.4-reference-operations.tsv \
             spec-shelf/docs/esxi-9.0/wsdl/vim/vim.wsdl \
             spec-shelf/docs/fleet-lcm-9.0/fleet-lcm-openapi.yaml \
             spec-shelf/docs/harbor-2.12/harbor-swagger.yaml \
@@ -727,13 +767,14 @@ jobs:
             spec-shelf/docs/vcf-operations-orchestrator-9.1/vcf-operations-orchestrator-9.1-reference-operations.tsv \
             spec-shelf/docs/vcf-protection-and-recovery-9.1/recovery-srm-v2.yaml \
             spec-shelf/docs/vcf-protection-and-recovery-9.1/replication-vr-v2.yaml \
-            spec-shelf/docs/vks-9.0/vks-paths-from-vcenter.txt; do
+            spec-shelf/docs/vks-9.0/vks-paths-from-vcenter.txt \
+            spec-shelf/docs/vmware-cloud-director-10.6/cloudapi-39.2.json; do
             if [ ! -f "$f" ]; then
               echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
               exit 1
             fi
           done
-          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; the Azure Resource Manager specs (subscriptions.json and the rest) present under spec-shelf/docs/azure-arm-2026.10/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; salt-raas-8.18-reference-operations.tsv present under spec-shelf/docs/salt-raas-8.18/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis reference list present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; the Azure Resource Manager specs (subscriptions.json and the rest) present under spec-shelf/docs/azure-arm-2026.10/; the Cloud Builder reference lists present under spec-shelf/docs/cloud-builder-5.0/ + spec-shelf/docs/cloud-builder-5.1/ + spec-shelf/docs/cloud-builder-5.2/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; salt-raas-8.18-reference-operations.tsv present under spec-shelf/docs/salt-raas-8.18/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis reference list present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/; cloudapi-39.2.json present under spec-shelf/docs/vmware-cloud-director-10.6/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -786,7 +827,7 @@ jobs:
         # locks a uv.lock, not a requirements.txt). enable-cache: true
         # opts into the action's built-in cache for the uv download
         # cache directory, keyed by uv.lock — repeat installs on the
-        # same lockfile are near-instant, so the four shards share one
+        # same lockfile are near-instant, so the five shards share one
         # warm uv cache. `version` pins uv; see the python-lint job for
         # why, and for where the Python version comes from.
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
@@ -810,7 +851,7 @@ jobs:
         # pinned there, so a fastembed bump (which can remap the HF
         # source/filename) misses the cache and the model re-downloads
         # exactly once, then re-saves. restore-keys lets an unrelated
-        # lock change still reuse the prior model blob. All four shards
+        # lock change still reuse the prior model blob. All five shards
         # share this one cache entry (same key), so steady-state only the
         # first cold run pays the download.
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -911,7 +952,7 @@ jobs:
           sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends php-cli
           php --version | head -1
 
-      - name: Pytest (unit shard ${{ matrix.shard }}/4)
+      - name: Pytest (unit shard ${{ matrix.shard }}/5)
         # `shell: bash` for `mapfile` + arrays (and the pipefail/-e the
         # default self-hosted shell does not enable — #2865). Under -e a
         # failing `uv run pytest` exits the step immediately, so the
@@ -952,6 +993,8 @@ jobs:
           # canary module lands in exactly one shard, so this opt-out
           # must stay on every shard.
           MEHO_SKIP_SPEC_INGEST_TESTS: "1"
+          # #5297: set only on a pull request that changes one connector.
+          SINGLE_CONNECTOR: ${{ needs.changes.outputs.single_connector }}
         # PARALLELIZED two ways now (#3251): by test FILE across shards
         # (this matrix) AND pytest-xdist WITHIN each shard. #585 unblocked
         # xdist by adding process-wide global-registry snapshot/restore +
@@ -998,15 +1041,23 @@ jobs:
           # the seconds in tests/_unit_shard_durations.json; a file without
           # a measurement counts as the median. File-level split keeps
           # conftest / loadscope semantics identical to a full run, and the
-          # four shards partition the full set exactly (every file lands in
+          # five shards partition the full set exactly (every file lands in
           # one shard; tests/test_unit_shard_split.py pins that).
           # tests/integration stays out (→ python-integration-shard) and
           # tests/migrations stays out (→ python-migration-tests), matching
           # the pre-shard lane's `--ignore` of both. The splitter prints
           # the file count and the predicted seconds per shard on stderr.
-          TOTAL=4
+          TOTAL=5
           SHARD="${{ matrix.shard }}"
-          mapfile -t SHARD_FILES < <(find tests -name 'test_*.py' -not -path 'tests/integration/*' -not -path 'tests/migrations/*' | sort | uv run python tests/_unit_shard_split.py --shard "${SHARD}" --total "${TOTAL}")
+          if [ -n "${SINGLE_CONNECTOR}" ]; then
+            # One-connector run (#5297): one job, no split. The tool exits
+            # non-zero (and fails this step) if the short run is not safe.
+            TOTAL=1
+            find tests -name 'test_*.py' -not -path 'tests/integration/*' -not -path 'tests/migrations/*' | sort | uv run python tests/_unit_connector_select.py select --connector "${SINGLE_CONNECTOR}" > "${RUNNER_TEMP}/unit-files.txt"
+          else
+            find tests -name 'test_*.py' -not -path 'tests/integration/*' -not -path 'tests/migrations/*' | sort | uv run python tests/_unit_shard_split.py --shard "${SHARD}" --total "${TOTAL}" > "${RUNNER_TEMP}/unit-files.txt"
+          fi
+          mapfile -t SHARD_FILES < "${RUNNER_TEMP}/unit-files.txt"
           echo "shard ${SHARD}/${TOTAL}: ${#SHARD_FILES[@]} test files"
           if [ "${#SHARD_FILES[@]}" -eq 0 ]; then
             echo "::error::shard ${SHARD} selected 0 test files — shard split broken"
@@ -1028,6 +1079,9 @@ jobs:
           # measured file times are stale — refresh tests/_unit_shard_durations.json
           # (see tests/_unit_shard_split.py) rather than bumping only this budget.
           # Add a shard (matrix + TOTAL) only when all shards are near the budget.
+          # #5433 did both: on busy runners all four shards took 780-930 s, and
+          # fresh file times alone would still leave them near 850 s, so the
+          # matrix went from 4 to 5 shards.
           # 900 s (was 660 s): when every heavy runner is busy (2 jobs per
           # node), shards that pass every test can take 674-710 s, and 660 s
           # dropped good pull requests from the merge queue.
@@ -1068,7 +1122,9 @@ jobs:
         # a shard that ran over the budget still shows where the time went.
         # continue-on-error + timeout-minutes: a failed or hung upload must
         # never fail or hold the shard.
-        if: always() && hashFiles('backend/pytest-unit-shard.xml') != ''
+        # Not on a one-connector run (#5297): its times cover only some
+        # files, so they must not be mixed into a refresh.
+        if: always() && hashFiles('backend/pytest-unit-shard.xml') != '' && needs.changes.outputs.single_connector == ''
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -1128,14 +1184,14 @@ jobs:
           if [ -r "${cg}/cpu.max" ]; then
             echo "- CPU limit: $(awk '{ if ($1 == "max") print "none"; else printf "%.1f CPUs", $1 / $2 }' "${cg}/cpu.max")."
           fi
-          echo "::notice title=Peak memory (unit shard ${{ matrix.shard }}/4)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
+          echo "::notice title=Peak memory (unit shard ${{ matrix.shard }}/5)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
           exit 0
 
   python-outside-backend:
     name: Python tests that read files outside backend
     # #5296. Runs only on a pull request that changes no file under backend/
     # (`backend_python` is `false`) and is not docs-only. On such a pull
-    # request python-lint, the four unit shards and python-integration skip.
+    # request python-lint, the five unit shards and python-integration skip.
     # Some backend tests still read files outside backend/: the Helm chart,
     # the Go CLI, the workflows, the docs and the examples. This job runs
     # exactly those test files, from the list in
@@ -1275,7 +1331,8 @@ jobs:
           outside='${{ needs.python-outside-backend.result }}'
           echo "changes (detect): result=${detect}, docs_only=${docs_only}, backend_python=${backend_python}"
           echo "python-lint (ruff + ruff format + mypy): ${lint}"
-          echo "python-unit-shard (aggregate of all 4 shard legs): ${shards}"
+          echo "python-unit-shard (aggregate of all 5 shard legs, or the one connector leg): ${shards}"
+          echo "single_connector='${{ needs.changes.outputs.single_connector }}' (empty = five shards)"
           echo "python-outside-backend (tests that read outside backend/): ${outside}"
 
           # The detect job MUST have succeeded for its docs_only classification
@@ -1332,16 +1389,16 @@ jobs:
           fi
 
           if [ "${fail}" -ne 0 ]; then
-            echo "::error title=Python unit lane red::ruff / ruff format / mypy, one or more pytest shards, or the tests that read files outside backend did not pass. This fan-in carries the branch-protection required context 'Python (ruff + mypy + pytest)'; open the 'Python lint + typecheck (ruff + mypy)' / 'Python unit shard N/4' / 'Python tests that read files outside backend' jobs above for the failing detail."
+            echo "::error title=Python unit lane red::ruff / ruff format / mypy, one or more pytest shards, or the tests that read files outside backend did not pass. This fan-in carries the branch-protection required context 'Python (ruff + mypy + pytest)'; open the 'Python lint + typecheck (ruff + mypy)' / 'Python unit shard N/5' / 'Python tests that read files outside backend' jobs above for the failing detail."
             exit 1
           fi
 
           if [ "${docs_only}" = "true" ]; then
-            echo "Unit lane GREEN (docs-only fast path #3252) — lint + all 4 pytest shards skipped-by-detect; nothing to test for a pure docs/*.md diff."
+            echo "Unit lane GREEN (docs-only fast path #3252) — lint + all 5 pytest shards skipped-by-detect; nothing to test for a pure docs/*.md diff."
           elif [ "${backend_python}" = "false" ]; then
-            echo "Unit lane GREEN (no backend change, #5296) — lint + all 4 pytest shards skipped; the tests that read files outside backend/ passed."
+            echo "Unit lane GREEN (no backend change, #5296) — lint + all 5 pytest shards skipped; the tests that read files outside backend/ passed."
           else
-            echo "Unit lane GREEN — ruff + ruff format + mypy + all 4 pytest shards passed."
+            echo "Unit lane GREEN — ruff + ruff format + mypy + all 5 pytest shards passed."
           fi
 
   python-coverage:
@@ -2090,6 +2147,9 @@ jobs:
           sparse-checkout: |
             docs/argocd-3.3
             docs/azure-arm-2026.10
+            docs/cloud-builder-5.0
+            docs/cloud-builder-5.1
+            docs/cloud-builder-5.2
             docs/esxi-9.0
             docs/fleet-lcm-9.0
             docs/harbor-2.12
@@ -2115,6 +2175,7 @@ jobs:
             docs/vcf-operations-orchestrator-9.1
             docs/vcf-protection-and-recovery-9.1
             docs/vks-9.0
+            docs/vmware-cloud-director-10.6
           filter: blob:none
           persist-credentials: false
 
@@ -2128,6 +2189,14 @@ jobs:
           for f in \
             spec-shelf/docs/argocd-3.3/argocd-swagger.json \
             spec-shelf/docs/azure-arm-2026.10/specification/resources/resource-manager/Microsoft.Resources/subscriptions/stable/2022-12-01/subscriptions.json \
+            spec-shelf/docs/cloud-builder-5.0/cloud-builder-5.0.0-reference-operations.tsv \
+            spec-shelf/docs/cloud-builder-5.1/cloud-builder-5.1.0-reference-operations.tsv \
+            spec-shelf/docs/cloud-builder-5.1/cloud-builder-5.1.1-reference-operations.tsv \
+            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.0-reference-operations.tsv \
+            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.1-reference-operations.tsv \
+            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.2-reference-operations.tsv \
+            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.3-reference-operations.tsv \
+            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.4-reference-operations.tsv \
             spec-shelf/docs/esxi-9.0/wsdl/vim/vim.wsdl \
             spec-shelf/docs/fleet-lcm-9.0/fleet-lcm-openapi.yaml \
             spec-shelf/docs/harbor-2.12/harbor-swagger.yaml \
@@ -2162,13 +2231,14 @@ jobs:
             spec-shelf/docs/vcf-operations-orchestrator-9.1/vcf-operations-orchestrator-9.1-reference-operations.tsv \
             spec-shelf/docs/vcf-protection-and-recovery-9.1/recovery-srm-v2.yaml \
             spec-shelf/docs/vcf-protection-and-recovery-9.1/replication-vr-v2.yaml \
-            spec-shelf/docs/vks-9.0/vks-paths-from-vcenter.txt; do
+            spec-shelf/docs/vks-9.0/vks-paths-from-vcenter.txt \
+            spec-shelf/docs/vmware-cloud-director-10.6/cloudapi-39.2.json; do
             if [ ! -f "$f" ]; then
               echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
               exit 1
             fi
           done
-          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; the Azure Resource Manager specs (subscriptions.json and the rest) present under spec-shelf/docs/azure-arm-2026.10/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; salt-raas-8.18-reference-operations.tsv present under spec-shelf/docs/salt-raas-8.18/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis reference list present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/"
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; the Azure Resource Manager specs (subscriptions.json and the rest) present under spec-shelf/docs/azure-arm-2026.10/; the Cloud Builder reference lists present under spec-shelf/docs/cloud-builder-5.0/ + spec-shelf/docs/cloud-builder-5.1/ + spec-shelf/docs/cloud-builder-5.2/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; salt-raas-8.18-reference-operations.tsv present under spec-shelf/docs/salt-raas-8.18/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis reference list present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/; cloudapi-39.2.json present under spec-shelf/docs/vmware-cloud-director-10.6/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-unit-shard's login step — the

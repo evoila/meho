@@ -18,6 +18,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/cmd/workref"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -27,14 +28,17 @@ func newRecentCmd() *cobra.Command {
 		Use:   "recent",
 		Short: "Read recent agent announcements for the operator's tenant",
 		Args:  cobra.NoArgs, SilenceUsage: true, SilenceErrors: true,
-		RunE: func(cmd *cobra.Command, _ []string) error { return runRecent(cmd, opts) },
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			opts.WorkRef = workref.Filter(cmd, opts.WorkRef)
+			return runRecent(cmd, opts)
+		},
 	}
 	cmd.Flags().StringVar(&opts.Cursor, "cursor", "", "ISO-8601 window start, or next_cursor from a previous page")
 	cmd.Flags().StringVar(&opts.OpClass, "op-class", "", "exact op class filter")
 	cmd.Flags().StringVar(&opts.Principal, "principal", "", "exact principal filter")
 	cmd.Flags().StringVar(&opts.Target, "target", "", "exact target filter")
 	cmd.Flags().StringVar(&opts.ActorSub, "actor-sub", "", "exact delegated-agent filter")
-	cmd.Flags().StringVar(&opts.WorkRef, "work-ref", "", "exact work-reference filter")
+	cmd.Flags().StringVar(&opts.WorkRef, workref.FilterFlag, "", "exact work-reference filter")
 	cmd.Flags().BoolVar(&opts.ActiveOnly, "active-only", false, "exclude expired TTL claims")
 	cmd.Flags().IntVar(&opts.Limit, "limit", 100, "maximum events (1-1000)")
 	cmd.Flags().BoolVar(&opts.JSONOut, "json", false, "emit JSON")
@@ -313,6 +317,7 @@ func runBroadcastWatch(cmd *cobra.Command, opts watchOptions) error {
 	req.Header.Set("Authorization", "Bearer "+client.AccessToken())
 	req.Header.Set("Accept", "text/event-stream")
 	api.SetWorkRefHeader(req)
+	api.SetTenantHeader(req)
 	resp, err := client.HTTPClient().Do(req)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)), opts.JSONOut)

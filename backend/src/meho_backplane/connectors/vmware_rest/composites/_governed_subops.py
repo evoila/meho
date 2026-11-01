@@ -33,10 +33,14 @@ from typing import Final
 from meho_backplane.connectors.vmware_rest.composites import (
     _alarm,
     _datastore_files,
+    _drs_group,
+    _drs_group_delete,
     _drs_rule_delete,
     _host,
     _library,
     _library_delete,
+    _library_local,
+    _library_upload,
     _license,
     _namespace,
     _snapshot,
@@ -45,8 +49,12 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _teardown,
     _teardown_network,
     _vm_allocation,
+    _vm_cdrom_library_iso,
     _vm_cdrom_tools,
     _write,
+)
+from meho_backplane.connectors.vmware_rest.composites._vcenter_install_ops import (
+    VCENTER_INSTALL_GOVERNED_SUBOPS,
 )
 
 #: Default connector of the step list when the caller names none. A write
@@ -107,6 +115,13 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.cluster.drs_rule.delete": (
         _drs_rule_delete._VIM_SUB_OPS_CLUSTER_DRS_RULE_DELETE
     ),
+    # The DRS group ops: the same reconfigure, with a groupSpec edit or remove.
+    "vmware.composite.cluster.drs_group.members.set": (
+        _drs_group._VIM_SUB_OPS_CLUSTER_DRS_GROUP_MEMBERS_SET
+    ),
+    "vmware.composite.cluster.drs_group.delete": (
+        _drs_group_delete._VIM_SUB_OPS_CLUSTER_DRS_GROUP_DELETE
+    ),
     "vmware.composite.resource_pool.create": (
         _write._SUB_OPS_RESOURCE_POOL_CREATE + _write._VIM_SUB_OPS_RESOURCE_POOL_CREATE
     ),
@@ -118,6 +133,12 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.vm.cdrom.add": _vm_cdrom_tools.SUB_OPS_VM_CDROM_ADD,
     "vmware.composite.vm.tools.installer.unmount": (
         _vm_cdrom_tools.SUB_OPS_VM_TOOLS_INSTALLER_UNMOUNT
+    ),
+    "vmware.composite.vm.cdrom.mount_library_iso": (
+        _vm_cdrom_library_iso.SUB_OPS_MOUNT_LIBRARY_ISO
+    ),
+    "vmware.composite.vm.cdrom.unmount_library_iso": (
+        _vm_cdrom_library_iso.SUB_OPS_UNMOUNT_LIBRARY_ISO
     ),
     "vmware.composite.guest.customization_spec.create": (
         _write._SUB_OPS_GUEST_CUSTOMIZATION_SPEC_CREATE
@@ -163,10 +184,17 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
         _library_delete._SUB_OPS_CONTENT_LIBRARY_ITEM_DELETE
         + _library_delete._VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK
     ),
+    # Local content-library create + add a file from a URL (caution writes).
+    "vmware.composite.content_library.create": _library_local._SUB_OPS_CONTENT_LIBRARY_CREATE,
+    "vmware.composite.content_library.item.upload": (
+        _library_upload._SUB_OPS_CONTENT_LIBRARY_ITEM_UPLOAD
+    ),
     "vmware.composite.license.assign": _license._VIM_SUB_OPS_LICENSE_ASSIGN,
     # #4383 alarm changes: one AlarmManager write each, after two reads.
     "vmware.composite.alarm.acknowledge": _alarm._VIM_SUB_OPS_ALARM_ACKNOWLEDGE,
     "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,
+    # #4394 vCenter install: the deploy, the setup start and the answer.
+    **VCENTER_INSTALL_GOVERNED_SUBOPS,
 }
 
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -29,6 +30,10 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import OperationRun, OperationRunOrigin, OperationRunStatus
 from meho_backplane.mcp import registry as mcp_registry
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
+from meho_backplane.operations.operation_run_service import (
+    MAX_RUN_WAIT_SECONDS,
+    OperationRunService,
+)
 from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -93,6 +98,7 @@ async def _insert_run(
     error: str | None = None,
     result: dict[str, Any] | None = None,
     tenant_id: uuid.UUID = OPERATOR_TENANT_ID,
+    identity_sub: str = "op-test",
 ) -> uuid.UUID:
     now = datetime.now(UTC)
     ended = status in (OperationRunStatus.FAILED, OperationRunStatus.SUCCEEDED)
@@ -100,7 +106,7 @@ async def _insert_run(
         run = OperationRun(
             id=uuid.uuid4(),
             tenant_id=tenant_id,
-            identity_sub="op-1",
+            identity_sub=identity_sub,
             origin=OperationRunOrigin.DIRECT.value,
             connector_id=_CONNECTOR,
             op_id=op_id,
@@ -266,8 +272,13 @@ async def test_unknown_mismatched_or_foreign_run_is_unknown_run(
     base = {"connector_id": _CONNECTOR, "op_id": _OP}
     other_op_run = await _insert_run(status=OperationRunStatus.RUNNING, op_id="topology.other")
     foreign_run = await _insert_run(status=OperationRunStatus.RUNNING, tenant_id=uuid.uuid4())
+    other_person_run = await _insert_run(
+        status=OperationRunStatus.SUCCEEDED,
+        identity_sub="someone-else",
+        result={"status": "ok", "op_id": _OP, "result": {"secret": "fake-value"}},
+    )
 
-    for run_id in (uuid.uuid4(), other_op_run, foreign_run):
+    for run_id in (uuid.uuid4(), other_op_run, foreign_run, other_person_run):
         response = _call(client, {**base, "run_id": str(run_id)})
         assert _invalid_params_reason(response) == "unknown_run"
 
@@ -291,4 +302,134 @@ def test_async_controls_are_declared_on_the_input_schema() -> None:
     schema = entry[0].inputSchema
     assert schema["properties"]["async"]["type"] == "boolean"
     assert schema["properties"]["run_id"]["format"] == "uuid"
+    wait = schema["properties"]["wait_seconds"]
+    assert wait["type"] == "integer"
+    assert wait["minimum"] == 0
+    assert wait["maximum"] == MAX_RUN_WAIT_SECONDS
     assert schema["required"] == ["connector_id", "op_id"]
+
+
+# ---------------------------------------------------------------------------
+# wait_seconds -- a check that waits for the run to end (#5264)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_one_waiting_check_gets_the_result_of_a_run_that_ends_during_the_wait(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Start a real governed write, then one check with ``wait_seconds`` gets its result."""
+    # A large recheck interval: only the end of the local task can wake the wait.
+    monkeypatch.setattr(OperationRunService, "wait_recheck_seconds", 30.0)
+    client, _op = client_with_operator
+    base = {"connector_id": _CONNECTOR, "op_id": _OP}
+    started = _structured(
+        _call(
+            client, {**base, "params": {"kind": "vault-role", "name": "wait-node"}, "async": True}
+        )
+    )
+    run_id = started["extras"]["run_id"]
+
+    before = time.monotonic()
+    final = _structured(_call(client, {**base, "run_id": run_id, "wait_seconds": 20}, req_id=2))
+
+    assert final["status"] == "ok", final
+    assert uuid.UUID(final["audit_id"])
+    assert final["extras"]["run_status"] == OperationRunStatus.SUCCEEDED.value
+    assert time.monotonic() - before < 15
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+async def test_waiting_check_answers_running_when_the_time_is_up(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(OperationRunService, "wait_recheck_seconds", 0.2)
+    client, _op = client_with_operator
+    run_id = await _insert_run(status=OperationRunStatus.RUNNING)
+
+    before = time.monotonic()
+    payload = _structured(
+        _call(
+            client,
+            {"connector_id": _CONNECTOR, "op_id": _OP, "run_id": str(run_id), "wait_seconds": 1},
+        )
+    )
+    assert payload["status"] == "running"
+    assert "next_step" in payload["extras"]
+    assert time.monotonic() - before >= 1
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.parametrize("wait_seconds", [0, None])
+async def test_no_wait_answers_at_once(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    wait_seconds: int | None,
+) -> None:
+    """``wait_seconds`` 0 or not sent: one read, no pause, as before."""
+
+    async def no_wait(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a check without wait_seconds must not wait")
+
+    monkeypatch.setattr(OperationRunService, "wait_until_done", no_wait)
+    client, _op = client_with_operator
+    run_id = await _insert_run(status=OperationRunStatus.RUNNING)
+    arguments: dict[str, Any] = {"connector_id": _CONNECTOR, "op_id": _OP, "run_id": str(run_id)}
+    if wait_seconds is not None:
+        arguments["wait_seconds"] = wait_seconds
+    assert _structured(_call(client, arguments))["status"] == "running"
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.parametrize("bad", [MAX_RUN_WAIT_SECONDS + 1, -1, 1.5, "10", True])
+def test_bad_wait_seconds_is_refused(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    bad: Any,
+) -> None:
+    client, _op = client_with_operator
+    arguments = {"connector_id": _CONNECTOR, "op_id": _OP, "run_id": str(uuid.uuid4())}
+    response = _call(client, {**arguments, "wait_seconds": bad})
+    body = response.json()
+    assert body["error"]["code"] == -32602, body
+    assert "inputSchema" in body["error"]["message"]
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_wait_seconds_above_the_limit_names_the_limit(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    client, _op = client_with_operator
+    arguments = {"connector_id": _CONNECTOR, "op_id": _OP, "run_id": str(uuid.uuid4())}
+    response = _call(client, {**arguments, "wait_seconds": MAX_RUN_WAIT_SECONDS + 1})
+    body = response.json()
+    assert body["error"]["code"] == -32602, body
+    assert f"maximum of {MAX_RUN_WAIT_SECONDS}" in body["error"]["message"]
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_wait_seconds_without_run_id_is_refused(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    client, _op = client_with_operator
+    response = _call(client, {"connector_id": _CONNECTOR, "op_id": _OP, "wait_seconds": 5})
+    assert _invalid_params_reason(response) == "wait_without_run_id"
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+async def test_wrong_run_is_refused_before_any_wait(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_wait(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a wrong run_id must be refused before the wait")
+
+    monkeypatch.setattr(OperationRunService, "wait_until_done", no_wait)
+    client, _op = client_with_operator
+    other_op_run = await _insert_run(status=OperationRunStatus.RUNNING, op_id="topology.other")
+    response = _call(
+        client,
+        {"connector_id": _CONNECTOR, "op_id": _OP, "run_id": str(other_op_run), "wait_seconds": 10},
+    )
+    assert _invalid_params_reason(response) == "unknown_run"

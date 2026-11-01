@@ -45,8 +45,10 @@ from uuid import UUID
 import structlog
 from fastapi import Depends, HTTPException, status
 
+from meho_backplane.auth.approval_sign_in import ApprovalAuth, check_fresh_approval_sign_in
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.middleware import verify_jwt_and_bind
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "HUMAN_ONLY_REST_REMEDIATION",
@@ -332,3 +334,17 @@ def require_human_principal(
     """
     ensure_human_principal(operator)
     return operator
+
+
+def require_fresh_approval_sign_in(
+    operator: Operator = Depends(verify_jwt_and_bind),
+) -> ApprovalAuth:
+    """FastAPI dependency: the token must show a fresh sign-in to approve (#3979).
+
+    Returns the :class:`~meho_backplane.auth.approval_sign_in.ApprovalAuth`
+    the route passes on to the approvals service, or raises ``401`` with
+    the RFC 9470 challenge. Attach it after :func:`require_human_principal`
+    so a machine principal still gets its ``403`` first. Only for approve:
+    a reject never runs anything and needs no fresh sign-in.
+    """
+    return check_fresh_approval_sign_in(operator, get_settings())

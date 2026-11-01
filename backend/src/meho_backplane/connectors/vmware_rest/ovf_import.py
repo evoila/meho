@@ -82,6 +82,7 @@ class ImportPlacement:
     network_mappings: dict[str, str] = field(default_factory=dict)
     ovf_properties: dict[str, str] = field(default_factory=dict)
     disk_provisioning: str | None = None
+    deployment_option: str | None = None
 
 
 @dataclass(frozen=True)
@@ -264,10 +265,12 @@ async def _run_transfer(
     """Stream the disks, complete the lease, and build the ``imported`` result.
 
     The disk plan matches ``CreateImportSpec``'s ``fileItem`` list to the
-    lease ``deviceUrl`` map (by import key). Any upload / control-plane fault
-    aborts the lease and returns a structured ``import_error`` -- vCenter then
-    removes the half-created VM, so a failed transfer never leaves a partial
-    import behind.
+    lease ``deviceUrl`` map (by import key). Any upload / control-plane fault,
+    and a source disk that does not prepare or read (a ``RuntimeError`` such as
+    ``LibraryDownloadError``), aborts the lease and returns a structured
+    ``import_error`` -- vCenter then removes the half-created VM, so a failed
+    transfer never leaves a partial import behind. Any other error aborts the
+    lease too and is raised again.
     """
     raw_device_urls = info.get("deviceUrl")
     device_urls: list[dict[str, Any]] = raw_device_urls if isinstance(raw_device_urls, list) else []
@@ -307,6 +310,18 @@ async def _run_transfer(
             warnings=warnings,
             issue=composite_issues.issue("transfer", "error", f"disk upload faulted: {exc}"),
         )
+    except RuntimeError as exc:
+        return await _abort_import_error(
+            connector,
+            target,
+            operator,
+            lease_moid=lease_moid,
+            warnings=warnings,
+            issue=composite_issues.issue("transfer", "error", f"disk read failed: {exc}"),
+        )
+    except Exception:
+        await control.abort_lease(connector, target, operator, lease_moid=lease_moid)
+        raise
     vm_id, resource_type = control.entity_from_info(info)
     return LeaseImportResult(
         status="imported",

@@ -300,8 +300,13 @@ before the handler runs. Reason codes extend the T1 set with
 
 **Transport-failure classification (#2771).** A connection-level failure
 is mapped to its reason code by walking the caught `httpx.TransportError`
-*tree* — both the `__cause__` chain **and** any `ExceptionGroup`
-children (`.exceptions`, PEP 654) — not just `__cause__`. This matters
+*tree* — the `__cause__` chain, the `__context__` chain, **and** any
+`ExceptionGroup` children (`.exceptions`, PEP 654) — not just
+`__cause__`. `__context__` matters because httpcore's connection pool
+re-raises with `raise exc from None` (httpcore 1.0.9), which clears
+`__cause__`; the `ssl.SSLCertVerificationError` of a self-signed or
+unknown-CA certificate is then reachable only as `__context__`, and a
+walk without it read `unreachable` (#5343). The group children matter
 because anyio's happy-eyeballs connect raises `OSError("All connection
 attempts failed") from ExceptionGroup(...)` on a multi-address (dual-stack
 A+AAAA) host, so the real per-attempt errors (`ConnectionRefusedError`,

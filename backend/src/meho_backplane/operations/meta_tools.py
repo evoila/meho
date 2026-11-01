@@ -122,6 +122,7 @@ from meho_backplane.operations.delivery_budget import (
 from meho_backplane.operations.dispatch_limits import rate_limited_read_envelope
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.ingest.list_connectors import next_step_for_registered_connector
+from meho_backplane.operations.op_policy import OpKey, effective_policy_map
 from meho_backplane.retrieval.retriever import RRF_K
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import (
@@ -145,6 +146,7 @@ __all__ = [
     "SearchOutcome",
     "UnknownConnectorError",
     "UnknownOperationError",
+    "apply_target_fqdn_override",
     "call_operation",
     "call_operation_with_approval",
     "describe_descriptor",
@@ -1474,14 +1476,31 @@ async def _resolve_target_or_error(
             # on the eventual audit row. Same shape as the targets routes.
             structlog.contextvars.bind_contextvars(audit_target_id=str(resolved_target.id))
 
-    # Per-call ``fqdn`` override -- applied in memory only. The DB row is not
-    # touched; the override travels with the resolved Target for the lifetime
-    # of this dispatch and is read by connectors that honour vhost routing
-    # (G3.6 VCF Automation). Non-string / empty values fall through silently.
+    apply_target_fqdn_override(resolved_target, target_arg)
+    return resolved_target, None
+
+
+def apply_target_fqdn_override(resolved_target: Any, target_arg: Any) -> None:
+    """Apply the per-call ``fqdn`` of a dict-shaped *target_arg* to *resolved_target*.
+
+    In memory only: the database row is not touched. The override travels
+    with the resolved target for the lifetime of one dispatch and is read by
+    connectors that route by virtual host (G3.6 VCF Automation: the HTTP
+    ``Host`` header and the TLS server name). The bare-string ``target``
+    shape carries no override; a non-string or empty value falls through
+    silently, and so does a missing target.
+
+    Shared by the name lookup of every call (:func:`_resolve_target_or_error`)
+    and by the agent waiter's resume after approval, which loads the target
+    by the id the approval row saved and then applies the override of the
+    agent's original call again, so the approved call reaches the same
+    virtual host as the call that waited for approval.
+    """
+    if resolved_target is None or not isinstance(target_arg, dict):
+        return
     fqdn_override = target_arg.get("fqdn")
     if isinstance(fqdn_override, str) and fqdn_override:
         resolved_target.fqdn = fqdn_override
-    return resolved_target, None
 
 
 async def _call_operation_impl(
@@ -1510,7 +1529,7 @@ async def _call_operation_impl(
 
     A caller that already holds the live target row passes it as
     *resolved_target*; then ``arguments["target"]`` is not read at all. The
-    agent waiter's composite re-entry uses this (#3421): it loads the target
+    agent waiter uses this on every resume: it loads the target
     the approval row saved by id, so the name the agent used when it parked
     cannot point at a different target by the time the approval lands.
     """
@@ -1671,10 +1690,11 @@ async def call_operation_with_approval(
     unenforced "coexist by design" note (#1117) had left open.
 
     *resolved_target*: the live target row to dispatch against, when the
-    caller already loaded it. The waiter's composite re-entry passes the
-    target the approval row saved by id (#3421), so ``arguments["target"]``
-    is ignored and no name lookup runs. A direct re-dispatch leaves it
-    ``None`` and resolves the agent's original ``target`` name as before.
+    caller already loaded it. The waiter passes the target the approval row
+    saved by id, for a composite re-entry and for a direct
+    re-dispatch, so ``arguments["target"]`` is ignored and no name lookup
+    runs. The waiter also sets ``arguments["target"]`` to ``None``, so a
+    tenant-wide op (no saved target) stays without a target.
     """
     return await _call_operation_impl(
         operator, arguments, approved=True, resolved_target=resolved_target
@@ -1779,6 +1799,12 @@ async def describe_descriptor(
         # another tenant collapses to "not found".
         if descriptor.tenant_id is not None and descriptor.tenant_id != operator.tenant_id:
             return None
+        # #4711: show the risk level and approval that apply to this
+        # tenant, with operator overrides, so the console run form and the
+        # REST read match what a call does.
+        policy = (
+            await effective_policy_map(session, tenant_id=operator.tenant_id, rows=[descriptor])
+        )[OpKey.of(descriptor)]
         return OperationDescriptor(
             id=descriptor.id,
             tenant_id=descriptor.tenant_id,
@@ -1802,8 +1828,8 @@ async def describe_descriptor(
             llm_instructions=(
                 dict(descriptor.llm_instructions) if descriptor.llm_instructions else None
             ),
-            safety_level=descriptor.safety_level,
-            requires_approval=descriptor.requires_approval,
+            safety_level=policy.safety_level,
+            requires_approval=policy.requires_approval,
             is_enabled=descriptor.is_enabled,
             custom_description=descriptor.custom_description,
             custom_notes=descriptor.custom_notes,

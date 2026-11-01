@@ -40,7 +40,7 @@ names.
   (`groups`, `search`, `call`).
 - `meho connector ...` (G0.7-T5 #405) — spec-ingestion + review
   workflow (`ingest`, `list`, `review`, `edit-group`, `edit-op`,
-  `enable`, `disable`, `delete`).
+  `overrides`, `remove-override`, `enable`, `disable`, `delete`).
 - `meho audit ...` (G8.1-T3 #467) — audit-log query surface
   (`query`, `recent`, `show`, `who-touched`, `my-recent`) wrapping
   the four `/api/v1/audit/*` routes shipped by G8.1-T2 (#466). G8.2-T5
@@ -180,6 +180,7 @@ cli/
     │   ├── client.go          # auth-aware wrapper; NewAuthedClient + GetHealth.
     │   ├── validation_error.go # HTTPValidationError.UnmarshalJSON: a 422 `detail` may be a string or a list (#5134).
     │   ├── workref.go         # Meho-Work-Ref header + MEHO_WORK_REF env names, work-ref shape check, context helpers (#3804).
+    │   ├── tenant.go          # Meho-Tenant header + MEHO_TENANT env names, context helpers (#5241).
     │   └── refresh.go         # lazy 401-retry refresh via x/oauth2.
     ├── auth/
     │   ├── devicecode.go      # OAuth 2.0 device-code flow + OIDC discovery.
@@ -188,10 +189,11 @@ cli/
     │   ├── resolver_test.go   # parse matrix + pinned-dial proof + AC#2 device-auth-POST honours-pin test.
     │   ├── store.go           # TokenStore interface + keyring/file backends.
     │   ├── store_test.go      # file-fallback round-trip + 0600-mode test.
-    │   ├── config.go          # backplane-URL config file ($XDG/meho/config.json).
+    │   ├── config.go          # config file ($XDG/meho/config.json): backplane URL + the tenant from `meho tenants use` (#5241).
     │   └── config_test.go     # roundtrip + 0600/0700 mode test.
     ├── cmd/
     │   ├── root.go            # cobra root + dynamic-discovery hook + global --work-ref pre-run (#3804).
+    │   ├── tenant_header.go   # root pre-run that picks the tenant (MEHO_TENANT, else the stored choice) for the Meho-Tenant header (#5241).
     │   ├── root_test.go       # built-in command surface + dynamic-graft test.
     │   ├── version.go         # `meho version` subcommand.
     │   ├── version_test.go    # output-contract test.
@@ -202,7 +204,9 @@ cli/
     │   ├── doctor.go          # `meho doctor` (#3666) — command, report model, redaction, exit codes.
     │   ├── doctor_offline.go  # offline layer: binary, config, credential store, plugin shim/lock/cache, plugin settings, CA bundle.
     │   ├── doctor_online.go   # authenticated layer: DNS, token + refresh, MCP handshake, working-surface compare.
+    │   ├── doctor_server.go   # server layer (#4740): runs `meho-host check --json` as root on a form-2 server.
     │   ├── doctor_test.go     # offline, credential-store, redaction, and httptest MCP-stub tests.
+    │   ├── doctor_server_test.go # server layer with a fake meho-host: root, not root, laptop, bad answers, time limit.
     │   ├── audit/            # G8.1-T3 #467 — `meho audit …` verb tree.
     │   │   ├── audit.go          # NewRootCmd + shared typed-client helpers (G0.12-T5 #1263).
     │   │   ├── query.go          # `meho audit query` (POST /api/v1/audit/query).
@@ -264,7 +268,9 @@ cli/
     │   │   ├── list.go           # `meho connector list` (GET  /api/v1/connectors). List endpoint returns dict[str, list[dict]] (no response_model on the backend; per-row UUID serialisation), so a package-private listEntry decode lives here.
     │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review). `--prefer tenant|builtin|legacy` (#3799, #4889) is sent as `?prefer=` to pick a row when the id matches both a built-in and a tenant connector (`legacy` picks the tenant's old copy under a former product name); omitted, the 409 stays the default.
     │   │   ├── edit_group.go     # `meho connector edit-group <id> <key>` (PATCH groups/{key}).
-    │   │   ├── edit_op.go        # `meho connector edit-op <id> <op>` (PATCH operations/{op}).
+    │   │   ├── edit_op.go        # `meho connector edit-op <id> <op>` (PATCH operations/{op}). `--safety` takes all four levels and can only raise the level; `--reason` goes to the audit row and is required to turn approval off (#4711). A `401` with `approval_off_needs_fresh_sign_in` prints the server's message and says to run `meho login` again.
+    │   │   ├── overrides.go      # `meho connector overrides [--reduced-approval]` (GET /api/v1/connectors/operation-overrides, #4711) — lists operator changes to risk levels and approval; `--reduced-approval` lists the operations running with approval turned off. The scope column shows the tenant id.
+    │   │   ├── remove_override.go # `meho connector remove-override <id> <op> [--tenant <uuid>] [--reason <text>]` (DELETE /api/v1/connectors/{id}/operation-overrides/{op_id}, #4711) — removes one tenant's or the install-wide change; ending approval needs platform_admin, a reason and a fresh sign-in.
     │   │   ├── enable.go         # `meho connector enable <id>`  + shared transition factory + `disable` + `delete`.
     │   │   ├── enable_reads.go   # `meho connector enable-reads <id>` (POST /enable-reads, G0.25-T7 #1749) — bulk-enable GET/HEAD ingested ops; writes stay default-deny. Renders the ops_enabled count; idempotent. Takes the same `--prefer tenant|builtin|legacy` flag as `review` (#3799, #4889).
     │   │   ├── disable.go        # `meho connector disable <id>` (constructor only; logic in enable.go).
@@ -355,6 +361,7 @@ cli/
     ├── output/
     │   ├── audit_receipt.go   # Meho-Audit-Id header reader + the `audit receipt: <id>` line (#4976).
     │   ├── format.go          # human + JSON formatters + structured exit codes.
+    │   ├── tenant.go          # RenderError turns a tenant_not_chosen answer into the plain "pick one" message (#5241).
     │   └── format_test.go     # human/JSON/exit-code pinning.
     └── version/
         ├── version.go         # build-time identity (Version/Commit/Date).
@@ -771,6 +778,20 @@ the operator's preferred backplane URL:
 { "backplane_url": "https://meho.evba.lab" }
 ```
 
+After `meho tenants use <name>` (#5241) the file also holds the chosen
+tenant. A login in one tenant never has the key:
+
+```json
+{
+  "backplane_url": "https://meho.example.test",
+  "tenant": { "id": "3f0c5a52-…", "name": "lab-b" }
+}
+```
+
+`meho login` keeps the `tenant` key when it logs in to the same
+backplane again (`configAfterLogin`), and drops it for another
+backplane.
+
 `meho login` writes this file at the end of a successful flow;
 `meho status` reads it to learn which backplane to query. The file
 contains no secrets, but it lives in the same directory as
@@ -1033,7 +1054,7 @@ that header from one place, so every verb gets it without its own flag.
   the HTTP request row. So the rows the connector service writes
   inside the request (`meho_connector_edit_op`,
   `meho_connector_llm_grouping` for an ingest, enable / disable, ...)
-  carry the same work-ref, and `meho audit query --work-ref` finds
+  carry the same work-ref, and `meho audit query --filter-work-ref` finds
   them together with the request row. `backend/tests/
   test_audit_work_ref_control_plane.py` proves this round trip for
   `targets add`, `agent grant create`, `connector ingest` (sync and
@@ -1043,13 +1064,101 @@ that header from one place, so every verb gets it without its own flag.
   header first. So the MCP row and the dispatch row of each tool call
   carry it. A `work_ref` argument on `call_operation` still wins over the
   header. `backend/tests/test_mcp_work_ref_header.py` proves this.
-- Some commands have their own local `--work-ref` (`operation call`,
-  `scheduler create`, `runbook start`, `agent run`, and the filters on
-  `audit query`, `approvals list`, `broadcast recent`, ...). Cobra lets a local
-  flag hide the parent's persistent flag, so on those commands the flag
-  keeps its own meaning. Only `MEHO_WORK_REF` reaches the header there.
+- Some commands have their own local `--work-ref`: `operation call`,
+  `scheduler create`, `runbook start`, `agent run` and
+  `broadcast announce`. There it has the same meaning as the global
+  flag: it tags the run with the reference. Cobra lets a local flag hide
+  the parent's persistent flag, so only `MEHO_WORK_REF` reaches the
+  header there.
+- The six read commands that filter by reference (`audit query`,
+  `approvals list`, `scheduler list`, `runbook runs`, `agent run-list`,
+  `broadcast recent`) use `--filter-work-ref` for the filter (#4988).
+  They have no local `--work-ref`, so the global flag tags their request
+  like on every other command. Before #4988 their own `--work-ref`
+  filtered the answer and hid the global flag, so
+  `meho --work-ref X audit query ...` silently showed only the rows of
+  ticket X. For one release, a `--work-ref` on these commands still
+  filters too when `--filter-work-ref` is not given, and
+  `workref.Filter` (`cli/internal/cmd/workref/`) prints one warning
+  line on stderr that names `--filter-work-ref`. A filter value need
+  not have the `gh:<owner>/<repo>#<n>` shape: when it does not,
+  `applyWorkRef` skips the tag on these commands instead of failing,
+  and the value only filters. When `--filter-work-ref` is given, also
+  empty (`--filter-work-ref=""` means no filter), `--work-ref` only
+  tags, and a bad value is an error like on every other command.
+  `MEHO_WORK_REF` never filters. `TestWorkRefFlagHasOneMeaning` walks
+  the command tree and fails when a command adds its own `--work-ref`
+  that is not a tag; `TestFilterWorkRefOnReadCommands` checks the
+  header and the filter on the wire for all six commands.
 - No PersistentPreRun hooks exist below the root. If one is added, it
-  must call `applyWorkRef` too (cobra runs only the nearest hook).
+  must call `applyRequestContext` too (cobra runs only the nearest hook).
+  That root hook runs `applyWorkRef` and then `applyTenant`.
+
+## Current tenant (`meho tenants use`, `MEHO_TENANT`, #5241)
+
+One login can list several tenants. The backplane works in one current
+tenant per request, named by the `Meho-Tenant` header (a tenant name or
+ID). With several tenants and no header it answers `400
+tenant_not_chosen`; a tenant outside the login's list gets `403
+tenant_not_member` (#5239, `docs/codebase/backend.md`). The CLI side:
+
+- `meho tenants use <name|id>` (`internal/cmd/tenants/use.go`) reads the
+  person's tenants from `GET /api/v1/health` **without** the header (the
+  backplane answers it with the list and does no tenant work), checks the
+  argument against that list, and stores `{id, name}` in `config.json`.
+  A login in one tenant is always in that tenant, and the deep check
+  then needs the operator role; on a `403` the list is read from
+  `GET /api/v1/health/live` instead (`AuthedClient.GetLiveness`), which
+  every role may read and which carries the same tenant list. So a
+  read_only login can list and choose its tenant, also when the stored
+  tenant is one it has left.
+  An unknown name exits 1 (`usage_error`) and lists the tenants with the
+  role in each. A login without a tenant list has nothing to choose and
+  gets the same exit code with a plain message.
+- `meho tenants use` without a name lists the tenants and marks the one
+  commands work in now. `--json` prints the `TenantEntry` rows.
+- The root pre-run `applyTenant` (`internal/cmd/tenant_header.go`) puts
+  the tenant into the command context: `MEHO_TENANT` when set, else the
+  stored ID. The stored ID applies only to the backplane it was chosen
+  on: a `--backplane` flag that names another backplane sends none. The
+  commands that send no backplane request (help, completion, version,
+  `doctor --no-network`) skip it.
+- `api.SetTenantHeader` adds the header. The `AuthedClient` request
+  editor calls it for every generated-client call, and the hand-rolled
+  requests (`status --watch`, the online doctor, `event-source`,
+  `targets import`, `broadcast watch`) call it next to
+  `SetWorkRefHeader`. `api.WithTenant(ctx, "")` clears the tenant for
+  one call.
+- `output.RenderError` rewrites any error whose detail carries
+  `tenant_not_chosen` to the code `tenant_not_chosen` and the message
+  "You are in several tenants. Pick one with `meho tenants use <name>`."
+  plus the tenant names. The exit code stays the one the command chose.
+  Every command renders backplane errors through `RenderError`, so one
+  place covers all of them.
+- `meho status` prints the tenant list with the role in each and marks
+  the current one (`formatTenants`, #5239). A stored tenant the person
+  has left gives a `403 tenant_not_member`; status prints the
+  backplane's reason and how to pick another tenant (exit 4). With the
+  read_only role in the current tenant the deep check answers `403
+  insufficient_role`; status then reads `GET /api/v1/health/live` and
+  prints the identity, the tenants, the database state and a note that
+  the other checks need the operator role (`output.PrintLiveness`,
+  exit 0; `--json` prints the `LivenessResponse`). The deep check stays
+  behind the operator role on the backplane.
+- The stored login is unchanged: one token holds all of the person's
+  tenants, so a switch needs no new login. There is no global
+  `--tenant` flag: several commands already use `--tenant` for "a
+  platform admin acts on another tenant". A platform admin who wants a
+  tenant outside their list sets `MEHO_TENANT`; `meho tenants use`
+  accepts only listed tenants.
+- Tests: `internal/cmd/tenant_header_test.go` runs the real root command
+  against a fake backplane with two tenants (read in one tenant, switch,
+  read again with the same token), plus the unknown name, the list, the
+  `MEHO_TENANT` override, another `--backplane`, a person in one
+  tenant, a stale tenant on `meho status` and the switch away from it,
+  `meho status` in a tenant with the read_only role, a read_only person
+  in one tenant, and the login that keeps the choice. The fake backplane
+  refuses the deep check for the read_only role, as the real one does.
 
 ## Audit receipt on writes with no body (#4976)
 
@@ -1157,11 +1266,62 @@ makes exactly the calls it reports, and none with `--no-network`.
    server lists for this session but the client did not see is a
    `surface_gap`.
 
+### Server layer (form-2 server only, #4740)
+
+`runServerChecks` in `doctor_server.go`. It runs last, after the
+authenticated layer. It is the ADR 0007 amendment of 2026-10-16: the
+checks of the built-in Kubernetes (RKE2) live in `meho-host check`, and
+the doctor runs them on the server, so the CLI needs no Kubernetes
+library.
+
+- **No `/usr/local/sbin/meho-host`** (a laptop): no server layer and no
+  line. The output is the same as before #4740. The path is the
+  constant `mehoHostPath`; `install.sh` of install form 2 puts the file
+  there.
+- **`--no-network`**: one `skip` line. `meho-host check` asks the
+  Kubernetes API, and the backplane runs in that same cluster.
+- **Not root** (effective user id is not 0): one `warn` line with the
+  hint "RKE2 checks need root: run `sudo meho doctor`". The doctor does
+  not run `meho-host` and does not ask for a password.
+- **Root**: runs `meho-host check --json` with a 60-second limit
+  (`mehoHostTimeout`) and adds one line per check, in its order, after
+  the doctor's own lines. `meho-host` exits 1 when a line is red. With
+  valid JSON that is a normal answer: the lines decide, not the exit
+  code.
+
+The status words map one to one: `ok`, `warn` and `fail` (the words
+`meho-host` uses), and `skip`. A line with another word becomes a
+`fail` line that names the word. These answers become one `fail` line
+named `meho-host check`, with a hint to run `sudo meho-host check`:
+no output, output that is not valid JSON, an empty list, a command that
+could not start, and the time limit. The detail names the exit status
+and the first line of `meho-host`'s error output, where it prints its
+own `[FAIL]` message.
+
+`exec.CommandContext` stops only `meho-host` itself at the limit. A
+`kubectl` or `rke2` that it started can keep the output pipe open, so
+`Cmd.WaitDelay` (5 seconds) bounds the wait for the output after that.
+Such a child process ends on its own; `kubectl` has a 10-second request
+limit in `meho-host`.
+
+The seams in `doctorDeps` are `stat` (the file check), `geteuid` (the
+user id), `runCommand` (runs the command and returns its standard output
+and standard error) and `serverTimeout`. The human output prints the
+server lines after the summary of the authenticated layer (scopes,
+working surface, session id). The JSON output has them at the end of
+`checks`, with `"layer":"server"`.
+
+Under `sudo`, the doctor runs as root. The offline and authenticated
+layers then read the settings and the login that root sees, which are
+usually not those of the admin's own user.
+
 Failure classes: `dns`, `tls`, `unreachable` (from `internal/netdiag`),
 `not_logged_in`, `refresh_rejected`, `no_refresh_token`, `unauthorized`,
 `surface_gap`, `unexpected`. Exit codes follow the `meho status`
 taxonomy: 2 login problem, 3 network problem, 4 unexpected answer or
-surface gap, 1 an offline check failed, 0 no failure.
+surface gap, 1 an offline or server check failed, 0 no failure. The
+first failed line decides, so a red server line gives 1 only when no
+earlier line failed. Warning lines keep 0.
 
 The scopes shown are the CLI login's scopes. A Claude client logs in on
 its own through `mcp-remote` and can hold other scopes (for example
@@ -1665,8 +1825,8 @@ removes one through `DELETE /api/v1/targets/{name}`.
   The optional flags mirror the `TargetCreate` fields one-for-one
   (`--alias` repeatable, `--version`, `--port`, `--fqdn`,
   `--secret-ref`, `--auth-model`, `--verify-tls`, `--tls-ca-pin`,
-  `--tls-server-name`, `--preferred-impl`, `--note`) and are sent only
-  when set, so the server's defaults apply to the rest — notably an
+  `--tls-server-name`, `--vpn-required`, `--preferred-impl`, `--note`)
+  and are sent only when set, so the server's defaults apply to the rest — notably an
   omitted `--secret-ref` derives the per-tenant default credential path
   (#1723) rather than persisting "no credential". `--no-secret-ref`
   (Task #3854; cannot be combined with `--secret-ref`) sends an
@@ -1683,10 +1843,12 @@ removes one through `DELETE /api/v1/targets/{name}`.
   `import.go`'s `doAuthedRequest` POST plumbing, so a static-bearer
   escape hatch is deliberately **not** offered — auth stays interactive
   `meho login` only.
-- `meho targets update <name-or-alias> [field flags] [--clear F]`
+- `meho targets update <name, alias or id> [field flags] [--clear F]`
   (Task #3854) — calls `PATCH /api/v1/targets/{name}` (`TargetUpdate`)
   for one target. The field flags have the same names as `add`'s and
   are sent only when set, so every other column keeps its value.
+  For example, `--vpn-required=false` clears the VPN flag, and an
+  update without `--vpn-required` leaves it as it is (#5075).
   `--alias` replaces the whole alias list and `--extra key=value`
   replaces the whole `extras` map, matching the server's PATCH
   semantics. `--clear <field>` (repeatable) sends an explicit JSON null
@@ -1725,15 +1887,15 @@ removes one through `DELETE /api/v1/targets/{name}`.
   paginated by name; `--cursor <last-name-seen>` walks pages. `--limit`
   is capped at 500 by the API; the CLI fails fast at the boundary so
   operators see the constraint without a 422 round-trip.
-- `meho targets describe <name-or-alias>` — calls
+- `meho targets describe <name, alias or id>` — calls
   `GET /api/v1/targets/{name}`. Renders the full `Target` read shape
   as a stable key-value summary including the post-#477 fields
   `fingerprint` (cached `FingerprintResult` from the last successful
   probe) and `preferred_impl_id` (operator override for the G0.6
-  resolver's tie-break ladder). Alias resolution happens server-side
-  via `resolve_target`; a 404 surfaces the resolver's near-miss list
+  resolver's tie-break ladder). The server finds the target by name,
+  alias or id (see [`targets.md`](targets.md)); a 404 surfaces the resolver's near-miss list
   so operators can correct a typo in one shot.
-- `meho targets probe <name-or-alias>` — calls
+- `meho targets probe <name, alias or id>` — calls
   `POST /api/v1/targets/{name}/probe`. Backend invokes the registered
   `Connector.fingerprint(target)`, persists the `FingerprintResult` to
   `targets.fingerprint` (so the G0.6 resolver reads it without
@@ -2538,8 +2700,11 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
 - `meho admin keycloak bootstrap-clients` — idempotently reconcile a
   realm against the recipe:
   1. Public device-code client (default name `meho-cli`,
-     `publicClient=true`, `oauth2DeviceAuthorizationGrantEnabled=true`,
-     every other flow off).
+     `publicClient=true`, `oauth2DeviceAuthorizationGrantEnabled=true`).
+     The standard flow is on too, with `pkce.code.challenge.method=S256`
+     and the one redirect URI `http://127.0.0.1:*`: `meho approvals
+     approve` uses it for the fresh browser sign-in an approval needs
+     (#3979). Implicit, password and service-account flows stay off.
   2. Public authorization-code+PKCE MCP client (default name
      `meho-mcp`, `standardFlowEnabled=true`,
      `pkce.code.challenge.method=S256`, default redirect URIs for the

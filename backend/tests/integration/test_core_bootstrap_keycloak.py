@@ -19,7 +19,8 @@ Job runs it, with a fake Secret store in place of the Kubernetes API:
 3. With the two logins, the first admin asks for a credential write through
    the backplane's REST API. It waits for approval, the first admin cannot
    approve it alone, and the second person approves it through the
-   approvals API, which runs the write.
+   approvals API, which runs the write. The second person's password-grant
+   token alone is refused: it shows no sign-in time (#3979).
 4. The plan names one extra tenant. Its five groups carry only
    ``meho_tenant``: a person in ``MEHO-Readers`` and
    ``MEHO-lab-b-Operators`` gets both tenants in ``meho_tenants`` and the
@@ -52,6 +53,7 @@ import yaml
 from cryptography.fernet import Fernet
 from httpx import ASGITransport
 
+from meho_backplane.auth.approval_sign_in import ApprovalAuth
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import reset_broadcast_client_for_testing
@@ -495,6 +497,7 @@ async def test_the_second_person_approves_the_first_admins_credential_write(
     keycloak: _Keycloak, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The acceptance path with the two people the Job made, over the REST API."""
+    from meho_backplane.api.v1 import approvals as approvals_module
     from meho_backplane.main import app
 
     first_login = keycloak.first_login
@@ -540,6 +543,32 @@ async def test_the_second_person_approves_the_first_admins_credential_write(
             assert asked.json()["status"] == "awaiting_approval", asked.json()
             request_id = asked.json()["extras"]["approval_request_id"]
             assert _WRITES == []
+
+            # A password-grant token is a plain API token: it shows no sign-in
+            # time, so it never approves over REST (#3979).
+            plain = await api.post(
+                f"/api/v1/approvals/{request_id}/decide",
+                headers=as_approver,
+                json={"decision": "approved"},
+            )
+            assert plain.status_code == 401, plain.text
+            assert plain.json()["detail"].startswith("fresh_sign_in_required:")
+            assert "insufficient_user_authentication" in plain.headers["www-authenticate"]
+            assert _WRITES == []
+
+            # From here on the people sign in fresh in the browser, which a
+            # test cannot do. Stand in for that proof; the group rules below
+            # are the real Keycloak tokens.
+            monkeypatch.setattr(
+                approvals_module,
+                "check_fresh_approval_sign_in",
+                lambda operator, settings: ApprovalAuth(
+                    channel="rest",
+                    method="fresh_sign_in",
+                    auth_time=int(time.time()),
+                    sid=secrets.token_hex(8),
+                ),
+            )
 
             # The first admin cannot approve their own request.
             own = await api.post(

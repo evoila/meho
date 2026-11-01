@@ -591,6 +591,19 @@ config:
   # `GET /ready` → `features.approval_queue.delegated_decision_posture`
   # shows the stance. See `docs/codebase/approvals.md`.
   approvalAllowDelegatedDecision: "false"
+  # -- How old a sign-in may be, in seconds, for an action that needs a
+  # fresh sign-in: turning approval off for an operation (#4711), and
+  # approving on the command line or REST (#3979). From 30 to 3600.
+  # Rendered into `FRESH_SIGN_IN_MAX_AGE_SECONDS`. An older sign-in gets
+  # 401 and `meho approvals approve` opens a new browser sign-in. One
+  # sign-in allows one approval. The web interface is not affected: the
+  # click is the proof.
+  freshSignInMaxAgeSeconds: "300"
+  # -- Comma-separated `acr` values that mean the person entered a one-time
+  # code from their authenticator app (#3979). Rendered into
+  # `APPROVAL_ONE_TIME_CODE_ACR_VALUES`. Empty (the default) turns the
+  # one-time code step off. The sign-in must still be recent.
+  approvalOneTimeCodeAcrValues: ""
   # -- Operator-console (`/ui/*`) OAuth client_id (#2594, Goal #336). The
   # browser BFF login (`GET /ui/auth/login`) runs an OAuth 2.1
   # authorization-code + PKCE grant server-side against the operator's
@@ -888,6 +901,10 @@ gsm:
 # matches the runner's service-account claims too. Recipe:
 # `docs/cross-repo/vault-provisioning.md` § "Bounding the check-runner
 # principal".
+#
+# On a Vault install the backplane enforces the first option: the check
+# runner does not start unless `VAULT_CHECK_RUNNER_ROLE` (set it through
+# `extraEnv`) names a Vault role of its own, not `config.vaultOidcRole`.
 #
 # `clientId` is non-secret operator config; `clientSecret` is wired
 # exclusively as a `secretKeyRef` — never a plaintext chart value. Default
@@ -1260,6 +1277,59 @@ coreKeycloak:
     enabled: false
     # -- The second tenant's id (a UUID). Required when `ci.enabled` is true.
     tenantId: ""
+  # The company login (an OpenID Connect login system such as authentik,
+  # Entra ID, Okta or ADFS) in front of the built-in Keycloak. When on, the
+  # bootstrap Job sets it up on every install and upgrade: people log in on
+  # the company login page (with its own second login step) and come back
+  # with a MEHO token from Keycloak. Their company group decides their MEHO
+  # group, and with it their tenant and role. Service accounts stay in
+  # Keycloak. Put each person in one MEHO role group only.
+  #
+  # In the company login system, make a confidential client with this
+  # redirect address (the install notes print it):
+  # `https://<hostname>/auth/realms/meho/broker/<alias>/endpoint`.
+  # It must sign its tokens with a published key (for example RS256).
+  #
+  # Turning `enabled` off later does not remove the login from Keycloak.
+  # To show the Keycloak login form again (the way in with the local
+  # accounts when the company login is down), keep `enabled` on and set
+  # `autoRedirect: false`.
+  companyLogin:
+    enabled: false
+    # -- Short name of the login in Keycloak. It is part of the redirect
+    # address. Letters, digits, `-` and `_`.
+    alias: company
+    # -- Name of the button on the Keycloak login page.
+    displayName: Company login
+    # -- The company login's discovery address, for example
+    # `https://<idp>/application/o/<slug>/.well-known/openid-configuration`.
+    # Keycloak reads it at every install and upgrade. Required when on.
+    discoveryUrl: ""
+    # -- The client id from the company login system. Required when on.
+    clientId: ""
+    # -- The Secret that holds the client secret. Create it before the
+    # install. Required when on.
+    clientSecret:
+      secretName: ""
+      secretKey: client_secret
+    # -- What Keycloak asks the company login for. Keep `profile`: it
+    # usually carries the groups.
+    scopes: openid profile email
+    # -- The token field that lists the person's company groups.
+    groupsClaim: groups
+    # -- Company group name -> MEHO group name, for example
+    # `{"Ops": "MEHO-Operators"}`. Keycloak checks the groups at every
+    # company login and takes a person out of a MEHO group that no longer
+    # matches. A removed line removes its rule.
+    groupMap: {}
+    # -- Skip the Keycloak login page and go straight to the company login.
+    autoRedirect: true
+    # -- Only for a company login with a certificate from a private CA: a
+    # ConfigMap in the release namespace with the CA certificate (PEM).
+    # Keycloak trusts it for its calls to the company login.
+    caBundle:
+      configMapName: ""
+      key: ca.crt
 
 coreVault:
   # -- Built-in OpenBao, the password safe (ADR 0008). When on, the install

@@ -106,8 +106,9 @@ def _cisp_body(placement: ImportPlacement) -> dict[str, Any]:
     ``entityName`` is the one required field (empty string lets vCenter fall
     back to the descriptor's product name). ``networkMapping`` /
     ``propertyMapping`` fold the operator's OVF-key maps into annotated
-    ``OvfNetworkMapping`` / ``KeyValue`` DataObjects; ``diskProvisioning`` is
-    passed through only when set.
+    ``OvfNetworkMapping`` / ``KeyValue`` DataObjects; ``diskProvisioning`` and
+    ``deploymentOption`` (the OVF configuration, for example an appliance
+    size) are passed through only when set.
     """
     cisp: dict[str, Any] = {
         VIM_TYPE_NAME_KEY: OVF_CREATE_IMPORT_SPEC_PARAMS_TYPE,
@@ -129,6 +130,8 @@ def _cisp_body(placement: ImportPlacement) -> dict[str, Any]:
         ]
     if placement.disk_provisioning:
         cisp["diskProvisioning"] = placement.disk_provisioning
+    if placement.deployment_option:
+        cisp["deploymentOption"] = placement.deployment_option
     return cisp
 
 

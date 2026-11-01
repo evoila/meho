@@ -41,6 +41,7 @@ Each `AuditEntry` carries the forensic fields you filter and pivot on:
 | `parent_audit_id` | the id of the row that caused this one. An approval's decision row and run row point at the approval request row. |
 | `work_ref` | an external change-ticket reference, when one was stamped |
 | `event_class` | what kind of record it is: `operation_execution`, `policy_decision`, `approval_decision`, `security_event`, or `legacy_request` (every row from before this field existed) |
+| `sandbox_mode` | `true` when MEHO ran in sandbox mode when it wrote the row, else `false` |
 | `method` / `path` / `status_code` / `duration_ms` / `payload` | the request particulars |
 
 ## The filter surface

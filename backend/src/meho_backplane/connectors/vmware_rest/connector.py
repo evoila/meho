@@ -3287,6 +3287,26 @@ class VmwareRestConnector(HttpConnector):
 
         return await snapshot_list_impl(self, operator, target, params)
 
+    async def network_portgroup_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.network.portgroup.show`` -- all settings of one distributed port group.
+
+        A ``source_kind="typed"`` read: reads the port group's VIM ``config``
+        property through PropertyCollector on the connector session, so it works
+        with zero catalog ingest. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_portgroup_show.portgroup_show_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_portgroup_show import (
+            portgroup_show_impl,
+        )
+
+        return await portgroup_show_impl(self, operator, target, params)
+
     async def vm_question_get(
         self,
         operator: Operator,
@@ -3320,6 +3340,23 @@ class VmwareRestConnector(HttpConnector):
         )
 
         return await vm_question_answer_impl(self, operator, target, params)
+
+    async def vcenter_deployment_status(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vcenter.deployment.status`` -- the install state of a new appliance (#4394).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vcenter_deployment_status.deployment_status_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vcenter_deployment_status import (
+            deployment_status_impl,
+        )
+
+        return await deployment_status_impl(self, operator, target, params)
 
     async def object_collect(
         self,
@@ -3423,6 +3460,25 @@ class VmwareRestConnector(HttpConnector):
 
         return await alarm_triggered_list_impl(self, operator, target, params)
 
+    async def folder_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.folder.list`` -- the inventory folders, with datacenter and parent.
+
+        A ``source_kind="typed"`` read. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_folder_list.folder_list_impl`
+        (imported lazily, like the other typed reads). Returns
+        ``{"folders": [...], "read_note"}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_folder_list import (
+            folder_list_impl,
+        )
+
+        return await folder_list_impl(self, operator, target, params)
+
     async def sso_admin_api_file_get(
         self,
         operator: Operator,
@@ -3495,6 +3551,158 @@ class VmwareRestConnector(HttpConnector):
         )
 
         return await license_assigned_list_impl(self, operator, target, params)
+
+    async def cluster_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.cluster.list`` -- the clusters, with datacenter, host count, HA, DRS and vSAN.
+
+        A ``source_kind="typed"`` read. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_cluster_list.cluster_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_cluster_list import (
+            cluster_list_impl,
+        )
+
+        return await cluster_list_impl(self, operator, target, params)
+
+    async def resource_pool_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.resource_pool.list`` -- the resource pools, with parent and settings.
+
+        A ``source_kind="typed"`` read on the REST API. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_resource_pool_list.resource_pool_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_resource_pool_list import (
+            resource_pool_list_impl,
+        )
+
+        return await resource_pool_list_impl(self, operator, target, params)
+
+    async def datacenter_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.datacenter.list`` -- the datacenters, with cluster, host and datastore counts.
+
+        A ``source_kind="typed"`` read on the REST API. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_datacenter_list.datacenter_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_datacenter_list import (
+            datacenter_list_impl,
+        )
+
+        return await datacenter_list_impl(self, operator, target, params)
+
+    async def network_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.network.list`` -- every network, with datacenter, switch and VLAN.
+
+        A ``source_kind="typed"`` read on the REST API (plus one vim read for
+        the distributed port groups). Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_network_list.network_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_network_list import (
+            network_list_impl,
+        )
+
+        return await network_list_impl(self, operator, target, params)
+
+    # The six content-library typed reads. Each delegates to
+    # :mod:`.content_library_reads` (imported lazily, like the other typed ops).
+
+    async def content_library_get(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.content_library.get`` -- one content library in full."""
+        from meho_backplane.connectors.vmware_rest.content_library_reads import (
+            content_library_get_impl,
+        )
+
+        return await content_library_get_impl(self, operator, target, params)
+
+    async def content_library_item_get(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.content_library.item.get`` -- one content library item."""
+        from meho_backplane.connectors.vmware_rest.content_library_reads import item_get_impl
+
+        return await item_get_impl(self, operator, target, params)
+
+    async def content_library_item_files_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.content_library.item.files.list`` -- the files of one item."""
+        from meho_backplane.connectors.vmware_rest.content_library_reads import (
+            item_files_list_impl,
+        )
+
+        return await item_files_list_impl(self, operator, target, params)
+
+    async def content_library_item_ovf_options(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.content_library.item.ovf_options`` -- the deploy options of an OVF item."""
+        from meho_backplane.connectors.vmware_rest.content_library_reads import (
+            item_ovf_options_impl,
+        )
+
+        return await item_ovf_options_impl(self, operator, target, params)
+
+    async def content_library_subscribed_probe(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.content_library.subscribed.probe`` -- check a subscription URL."""
+        from meho_backplane.connectors.vmware_rest.content_library_reads import (
+            subscribed_probe_impl,
+        )
+
+        return await subscribed_probe_impl(self, operator, target, params)
+
+    async def supervisor_content_library_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.supervisor.content_library.list`` -- the Supervisor libraries (9.0+)."""
+        from meho_backplane.connectors.vmware_rest.content_library_reads import (
+            supervisor_content_library_list_impl,
+        )
+
+        return await supervisor_content_library_list_impl(self, operator, target, params)
 
     async def content_library_find(
         self,

@@ -20,7 +20,7 @@ from typing import Any
 import httpx
 import pytest
 import respx
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from structlog.testing import capture_logs
@@ -29,6 +29,8 @@ with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     from authlib.jose import JsonWebKey, JsonWebToken
 
+from meho_backplane.auth import current_tenant
+from meho_backplane.auth.current_tenant import select_current_tenant
 from meho_backplane.auth.jwt import _operator_from_claims, clear_jwks_cache, verify_jwt
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.settings import get_settings
@@ -234,17 +236,88 @@ def test_good_entry_next_to_a_bad_entry_gives_no_flag(raw: Any) -> None:
         operator = _operator(_claims(meho_tenants=raw))
     assert operator.self_approver is False
     assert operator.may_self_approve is False
+    assert operator.tenants_claim_malformed is True
     assert [e["event"] for e in logs] == ["malformed_tenant_entry"]
     assert [t.tenant_id for t in operator.tenants] == [_TENANT_A]
 
 
-def test_two_entries_for_the_current_tenant_give_no_flag() -> None:
-    operator = _operator(
-        _claims(
-            meho_tenants=[f"{_TENANT_A}:lab-a:SA-Operators", f"{_TENANT_A}:lab-a:Readers"],
+def test_two_entries_for_the_current_tenant_refuse_the_login() -> None:
+    """Two role groups in one tenant are refused before the flag is read (#5239)."""
+    with pytest.raises(HTTPException) as exc:
+        _operator(
+            _claims(
+                meho_tenants=[f"{_TENANT_A}:lab-a:SA-Operators", f"{_TENANT_A}:lab-a:Readers"],
+            )
         )
-    )
+    assert exc.value.status_code == 401
+    assert str(exc.value.detail).startswith("multiple_role_groups")
+
+
+# ---------------------------------------------------------------------------
+# The flag follows the current tenant of the request (#5239)
+# ---------------------------------------------------------------------------
+
+_ENTRY_A_OPERATORS = f"{_TENANT_A}:lab-a:Operators"
+_ENTRY_B_SA = f"{_TENANT_B}:lab-b:SA-Operators"
+
+
+async def test_switching_to_the_sa_tenant_turns_the_flag_on() -> None:
+    """The flag is read again from the entry of the tenant the request names."""
+    operator = _operator(_claims(meho_tenants=[_ENTRY_A_OPERATORS, _ENTRY_B_SA]))
+    assert operator.tenant_id == _TENANT_A
     assert operator.self_approver is False
+
+    in_b = await select_current_tenant(operator, "lab-b")
+    assert in_b.tenant_id == _TENANT_B
+    assert in_b.tenant_role is TenantRole.OPERATOR
+    assert in_b.self_approver is True
+    assert in_b.may_self_approve is True
+
+    back_in_a = await select_current_tenant(in_b, str(_TENANT_A))
+    assert back_in_a.self_approver is False
+    assert back_in_a.may_self_approve is False
+
+
+async def test_switching_tenants_keeps_the_flag_off_after_a_bad_entry() -> None:
+    """A bad entry turns the flag off in every tenant, also after a switch."""
+    operator = _operator(
+        _claims(meho_tenants=[_ENTRY_A_OPERATORS, _ENTRY_B_SA, "not-a-uuid:lab-c:Readers"])
+    )
+    assert operator.tenants_claim_malformed is True
+    in_b = await select_current_tenant(operator, "lab-b")
+    assert in_b.tenant_id == _TENANT_B
+    assert in_b.self_approver is False
+    assert in_b.may_self_approve is False
+
+
+async def test_platform_admin_in_a_tenant_without_a_group_gets_no_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A platform admin acts as ``tenant_admin`` there, never as an SA-Operator."""
+    tenant_c = uuid.uuid4()
+
+    async def _lookup(wanted: str) -> uuid.UUID | None:
+        return tenant_c
+
+    monkeypatch.setattr(current_tenant, "_find_existing_tenant", _lookup)
+    operator = _operator(_claims(platform_admin=True, meho_tenants=[_ENTRY_B_SA]))
+    assert operator.self_approver is True
+    in_c = await select_current_tenant(operator, "team-c")
+    assert in_c.tenant_id == tenant_c
+    assert in_c.role_from_platform_admin is True
+    assert in_c.self_approver is False
+    assert in_c.may_self_approve is False
+
+
+async def test_status_answer_without_a_chosen_tenant_gets_no_flag() -> None:
+    """``tenant_chosen=False`` holds the first entry; it must not be used."""
+    operator = _operator(
+        _claims(meho_tenants=[f"{_TENANT_A}:lab-a:SA-Operators", _ENTRY_B_SA]),
+    )
+    unchosen = await select_current_tenant(operator, None, allow_unchosen=True)
+    assert unchosen.tenant_chosen is False
+    assert unchosen.self_approver is True
+    assert unchosen.may_self_approve is False
 
 
 # ---------------------------------------------------------------------------

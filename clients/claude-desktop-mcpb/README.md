@@ -65,7 +65,8 @@ and [`.github/workflows/cli-release.yml`](../../.github/workflows/cli-release.ym
 The manifest's `mcp_config.command` is `node`, running `server/index.mjs`
 with the operator's backplane URL and the optional internal-CA path as its
 arguments, the OAuth client id delivered as `MEHO_MCP_CLIENT_ID`, and the
-requested OAuth scopes delivered as `MEHO_MCP_SCOPES`. The launcher:
+requested OAuth scopes delivered as `MEHO_MCP_SCOPES`, and the optional
+tenant delivered as `MEHO_TENANT`. The launcher:
 
 1. Validates that the URL is a well-formed `https` URL.
 2. When an internal-CA path was given, appends its certificates to Node's
@@ -84,11 +85,16 @@ requested OAuth scopes delivered as `MEHO_MCP_SCOPES`. The launcher:
    `mcp:read mcp:execute offline_access mcp:admin`) is the deliberate opt-in to
    [operator mode](#elevated-operator-mode-opt-in). The seam variable is
    scrubbed from the environment `mcp-remote` inherits.
-5. Waits until no other copy of the extension is signing in, then takes a
+5. Reads the tenant from `MEHO_TENANT` (the optional `tenant` config). Empty,
+   whitespace, or an unsubstituted `${user_config.tenant}` placeholder means
+   no tenant — see [Work in one tenant](#work-in-one-tenant). The seam
+   variable is scrubbed from the environment `mcp-remote` inherits.
+6. Waits until no other copy of the extension is signing in, then takes a
    small lock file — see [One sign-in at a time](#one-sign-in-at-a-time).
-6. Sets `process.argv` to the `mcp-remote` invocation — the backplane URL,
-   plus `--static-oauth-client-info '{"client_id": "…"}'` and
-   `--static-oauth-client-metadata '{"scope": "<resolved scopes>"}'` — and
+7. Sets `process.argv` to the `mcp-remote` invocation — the backplane URL,
+   plus `--static-oauth-client-info '{"client_id": "…"}'`,
+   `--static-oauth-client-metadata '{"scope": "<resolved scopes>"}'`, and
+   `--header 'Meho-Tenant: <tenant>'` when a tenant is set — and
    **imports** the login guard, which imports the vendored
    `mcp-remote@0.1.39` CLI entry into this process (see
    [When the login expires or is not finished](#when-the-login-expires-or-is-not-finished)).
@@ -284,6 +290,24 @@ logins in `~/.mcp-auth/mcp-remote-0.1.38/` (it names the folder after its
 previous version). Older bundles used `~/.mcp-auth/mcp-remote-0.1.37/`. So
 after you install this bundle, the first use opens one browser login. If no
 other tool on your machine still uses the old folder, you can delete it.
+
+## Work in one tenant
+
+One login can belong to several tenants. MEHO works in one tenant per
+request, the one the `Meho-Tenant` header names (a tenant name or ID). The
+optional **Tenant** field (`tenant` user_config) is sent as that header on
+every request, so the extension works in one tenant until you change it.
+
+- One tenant: leave the field empty. Nothing changes.
+- Several tenants: set it. Without it, MEHO allows only `meho_status`,
+  which lists your tenants and your role in each.
+- To switch: change the field, then turn the extension off and on again in
+  Claude Desktop (Settings > Extensions). `mcp-remote` keeps one saved login
+  per header value, so the first session in a tenant opens a browser login
+  once more.
+
+There is no tool to switch tenant inside a session. So an agent cannot move
+to another tenant on its own.
 
 ## Elevated operator mode (opt-in)
 

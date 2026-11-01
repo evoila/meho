@@ -38,6 +38,9 @@ def _ci_integration_files() -> list[str]:
     return sorted(files | {CANARY_FILE})
 
 
+UNIT_SHARDS = 5
+
+
 def _integration_shard_job() -> dict[str, Any]:
     workflow = yaml.safe_load(CI_WORKFLOW.read_text())
     job: dict[str, Any] = workflow["jobs"]["python-integration-shard"]
@@ -47,19 +50,32 @@ def _integration_shard_job() -> dict[str, Any]:
 def test_every_ci_unit_file_lands_in_exactly_one_shard() -> None:
     files = _ci_unit_files()
     durations = splitter.load_durations()
-    shards = splitter.split(files, durations, 4)
+    shards = splitter.split(files, durations, UNIT_SHARDS)
 
-    assert len(shards) == 4
+    assert len(shards) == UNIT_SHARDS
     assert sorted(name for shard in shards for name in shard) == files
     assert all(shard for shard in shards)
+
+
+def test_ci_unit_shards_match_the_split_in_the_workflow() -> None:
+    workflow = yaml.safe_load(CI_WORKFLOW.read_text())
+    job = workflow["jobs"]["python-unit-shard"]
+    shards = list(range(1, UNIT_SHARDS + 1))
+    run = next(
+        step["run"] for step in job["steps"] if "_unit_shard_split.py" in step.get("run", "")
+    )
+
+    assert f"'{shards}'" in job["strategy"]["matrix"]["shard"]
+    assert f"TOTAL={UNIT_SHARDS}\n" in run
+    assert f"format('Python unit shard {{0}}/{UNIT_SHARDS}', matrix.shard)" in job["name"]
 
 
 def test_split_is_deterministic_and_ignores_input_order() -> None:
     files = _ci_unit_files()
     durations = splitter.load_durations()
 
-    first = splitter.split(files, durations, 4)
-    second = splitter.split(list(reversed(files)), durations, 4)
+    first = splitter.split(files, durations, UNIT_SHARDS)
+    second = splitter.split(list(reversed(files)), durations, UNIT_SHARDS)
 
     assert first == second
 

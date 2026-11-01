@@ -23,8 +23,8 @@ of the design:
    join token when the join options are given, copies the MEHO image archive and the storage
    manifest to the folders where RKE2 reads them, and writes the setting
    that makes RKE2's Traefik redirect port 80 to 443. It also
-   installs the host command `meho-host`
-   ([linux-server-meho-host.md](linux-server-meho-host.md)).
+   installs the host command `meho-host`, with the two files of `lib/` it
+   sources ([linux-server-meho-host.md](linux-server-meho-host.md)).
 3. **Install and start RKE2.** It runs RKE2's own installer in offline
    mode. Then it runs the host steps of RKE2's CIS profile: the `etcd` user
    and group, and RKE2's kernel settings, copied to `/etc/sysctl.d` and
@@ -74,13 +74,13 @@ update, read with `meho status --first-start`.
 | `lib/net.sh` | IPv4 helpers: the format of an address or a range, and whether two ranges overlap. |
 | `lib/checks.sh` | Step 1: one function per check. |
 | `lib/firewall.sh` | The host firewall: the checks of step 1 (`nft`, the admin network), the files and the start in step 2, `firewall_state` and `firewall_port_list`. |
-| `lib/prepare.sh` | Step 2: folders, `config.yaml`, join token, image archive, storage manifest, the Traefik redirect. |
-| `lib/cis.sh` | RKE2's CIS profile: the pod security file that `config.yaml` names, the host steps of step 3 (the `etcd` user and group, the kernel settings), and `cis_state`. |
+| `lib/prepare.sh` | Step 2: folders, `config.yaml`, join token, image archive, storage manifest, the Traefik redirect, and `meho-host` with the lib files it sources. |
+| `lib/cis.sh` | RKE2's CIS profile: the pod security file that `config.yaml` names, the host steps of step 3 (the `etcd` user and group with the record of the parts the install created, the kernel settings), and `cis_state`. `meho-host` sources it too. |
 | `lib/rke2.sh` | Step 3: RKE2's installer, the start, and the wait with one time limit. For the update: the restart, and the wait for the new run of `rke2-server`. |
 | `lib/update.sh` | The update: finding the install, reading `install.json`, the refused options, the version step, the backup question, the OS packages of the appliance, the result lines. |
 | `lib/core.sh` | Steps 4 to 6: the versions of the download, the place values, the Helm call, the two one-time files, the `meho` command, the install record, the result lines. |
 | `values-single-node.yaml` | The Helm values for one node. The download ships it as `chart/values-single-node.yaml`. |
-| `meho-host` | The host command, `check` and `support-bundle`; see [linux-server-meho-host.md](linux-server-meho-host.md). |
+| `meho-host` | The host command: `check` (with the hardening lines), `support-bundle`, `admin-network` and `uninstall`; see [linux-server-meho-host.md](linux-server-meho-host.md). |
 | `storage/local-path-storage.yaml` | Rancher's local-path provisioner v0.0.37 manifest with five changes. |
 | `tests/` | Python `unittest` suites that run `install.sh` against a fake machine. |
 | `.shellcheckrc` | Lets shellcheck follow the `source` lines of `install.sh`. |
@@ -146,6 +146,7 @@ service.
 | `/var/lib/rancher/rke2/server/manifests/local-path-storage.yaml` | 0600 | the storage manifest |
 | `/var/lib/rancher/rke2/server/manifests/rke2-traefik-config.yaml` | 0600 | a `HelmChartConfig` for `rke2-traefik`: port 80 redirects to 443 |
 | `/usr/local/sbin/meho-host` | 0755 | the host command, a copy of `meho-host` from the download |
+| `/usr/local/lib/meho-host/firewall.sh`, `/usr/local/lib/meho-host/cis.sh` | 0644 | copies of `lib/firewall.sh` and `lib/cis.sh`, which `meho-host` sources for its hardening lines (#4638) |
 
 The join token goes from file to file with `install`. It is never on a
 command line, in the output or in `config.yaml`.
@@ -364,9 +365,11 @@ depend on how the chart runs the migrations.
 **What the update leaves alone:** the firewall file and its units (the
 admin network changes only with `meho-host admin-network`), the two
 one-time files (the update does not write them again, also when the
-customer deleted them), the volumes in `/var/lib/meho/volumes`, OpenBao's
-data and the Secrets. It takes no etcd snapshot of its own (design,
-section 7): RKE2 takes one every 12 hours.
+customer deleted them), the record of the `etcd` account
+(`/etc/meho/etcd-account`, see [The host steps](#the-host-steps)), the
+volumes in `/var/lib/meho/volumes`, OpenBao's data and the Secrets. It
+takes no etcd snapshot of its own (design, section 7): RKE2 takes one
+every 12 hours.
 
 A failed step stops the update with one `[FAIL]` line. `install.json`
 still names the old version then, so a second run is again an update. The
@@ -674,9 +677,11 @@ the SSH session, `none`, or `meho-host admin-network`.
 ### For later Tasks
 
 - `firewall_state` (read-only) prints `on`, or `off: <reason>`, and returns
-  0 or 1. On means the table `inet meho` is loaded and
-  `meho-firewall.service` is enabled. `meho-host check` (#4737) and its
-  hardening lines (#4638) can call it.
+  0 or 1. On means: the table `inet meho` is loaded, its chain
+  `prerouting` filters the hook `prerouting` with `policy drop` (the rule
+  that closes the machine), and `meho-firewall.service` is enabled. When
+  `nft` is missing, it says `off: nft not found`. `meho-host check` shows
+  it as its firewall line (#4638), and step 2 calls it after the start.
 - `firewall_port_list` prints the ports as a port scan from another
   machine must see them: `80/tcp open`, `443/tcp open`,
   `22/tcp admin-network`, and RKE2's ports as `closed` (6443, 9345, 10250,
@@ -732,6 +737,30 @@ kernel settings file; the step then copies and loads it.
    command, `useradd -r -c "etcd user" -s /sbin/nologin -M -U etcd`. When
    only the group exists, `useradd` gets `-g etcd` instead of `-U`. When
    only the user exists, `groupadd -r etcd` adds the group.
+
+   Right after it creates a part, the step adds it to the record
+   `/etc/meho/etcd-account` (mode 0600): `user`, `group` or both, one per
+   line, below two comment lines. `meho-host uninstall` reads the record
+   before it removes `/etc/meho`, and it removes only the parts that the
+   record names (#5133;
+   [linux-server-meho-host.md](linux-server-meho-host.md)). So an `etcd`
+   user or group that existed before the install is never removed.
+
+   The record is a file of its own, not a key of `install.json`, for two
+   reasons. `install.json` is written only at the end of step 6, but the
+   account is created in step 3. When a run stops between the two, for
+   example at the kernel settings below, the next run is a first install
+   again and finds the user and group. Only a record written at once
+   still says that MEHO created them. And no later run has to carry the
+   answer over: a run that finds a part creates nothing and leaves the
+   record as it is. An update finds the user and group that the first
+   install created, so it keeps the first install's record. A part that a
+   later run creates, because someone removed it, is added to the record.
+
+   An install.sh from before #5133 wrote no record. An update of such an
+   install writes none either, because it cannot know who created the
+   account. `meho-host uninstall` then keeps the account and says how to
+   remove it: never remove what the record does not say MEHO created.
 2. **The kernel settings.** RKE2 ships them as `rke2-cis-sysctl.conf`.
    RKE2's installer puts it in RKE2's share folder:
    `/usr/local/share/rke2/` for the tarball, `/opt/rke2/share/rke2/` for the
@@ -826,9 +855,10 @@ reach MEHO (`networkPolicy.ingressControllerNamespace: kube-system` in
 1, like `firewall_state`. On means: `config.yaml` sets `profile: cis`, the
 pod security file exists, the `etcd` user and group are in `/etc/passwd`
 and `/etc/group`, `/etc/sysctl.d/60-rke2-cis.conf` exists, and the kernel
-has its values. `meho-host check` (#4638) can call it. `meho-host` sources
-nothing today, so #4638 decides how the function reaches the machine, as
-for `firewall_state`.
+has its values. `meho-host check` shows it as its CIS profile line
+(#4638). Step 2 copies `lib/cis.sh` and `lib/firewall.sh` to
+`/usr/local/lib/meho-host`, where `meho-host` sources them
+([linux-server-meho-host.md](linux-server-meho-host.md#how-meho-host-finds-its-lib-files)).
 
 ### A newer RKE2
 
@@ -922,7 +952,13 @@ turns that skip into a failure.
 (after the installer, before the start of RKE2), each place of RKE2's
 kernel settings file, values that come from RKE2's file, a later file that
 sets a value again, the existing `etcd` user or group, a second run that
-changes nothing, `--from-disk`, and every answer of `cis_state`.
+changes nothing, `--from-disk`, and every answer of `cis_state`. For the
+record of the `etcd` account it covers each part the install creates, no
+record when both existed or `useradd` failed, the record of a run that
+stopped later, an update that keeps the first install's record, an update
+of an install without a record, and a part that a later run adds.
+`tests/test_meho_host.py` runs the install, the update and
+`meho-host uninstall` one after the other on the same fake machine.
 
 `tests/test_update.py` covers finding the install (the three signs, each
 half-installed case, `--from-disk`), the refused options, the order of the
@@ -1059,8 +1095,8 @@ Tasks add in this folder are checked by the same job.
 - **A customer's `nftables.service`.** Its stop command (and on RHEL its
   reload) runs `flush ruleset`, which removes the MEHO table and the rules
   of kube-proxy and Canal. RKE2 keeps running until its next start, which
-  then waits for the MEHO table. `meho-host check` will show the firewall
-  as off (#4638).
+  then waits for the MEHO table. `meho-host check` shows the firewall as
+  off (#4638).
 - **More nodes later.** The rules drop RKE2's ports from every other
   machine, the VXLAN port 8472/UDP too. A join (`--join-address`) needs
   rules that open them to the other nodes' addresses (ADR 0009). That comes

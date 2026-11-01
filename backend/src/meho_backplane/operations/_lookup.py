@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import difflib
 import re
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -62,6 +63,7 @@ from meho_backplane.connectors.base import shim_kind
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup, TenantOperationSetting
+from meho_backplane.operations.op_policy import apply_effective_policy
 
 __all__ = [
     "close_connector_ids",
@@ -358,6 +360,12 @@ async def lookup_descriptor(
     built-in row (#3870). Otherwise the built-in row is used. Because
     only one bucket is ever visible, one SELECT finds at most one row.
 
+    The returned row carries the *effective* ``safety_level`` and
+    ``requires_approval`` for *tenant_id*: the operator overrides are
+    applied (#4711, :func:`~meho_backplane.operations.op_policy.apply_effective_policy`).
+    The row is detached from its session, so those values are never
+    written back.
+
     A row of a connector package that is not installed is not found
     (:func:`installed_owner_clause`).
     "Enabled" is :func:`enabled_for_tenant_clause`: for a built-in row the
@@ -382,7 +390,10 @@ async def lookup_descriptor(
                 installed_owner_clause(),
             )
         )
-        return result.scalar_one_or_none()
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        return await apply_effective_policy(session, tenant_id=tenant_id, row=row)
 
 
 async def descriptor_exists_any_state(
@@ -496,6 +507,7 @@ async def find_connectors_with_op(
     tenant_id: UUID | None,
     op_id: str,
     exclude: tuple[str, str, str],
+    skip: Callable[[EndpointDescriptor], bool] | None = None,
 ) -> list[str]:
     """Return the ids of other caller-visible connectors that have *op_id* enabled.
 
@@ -513,17 +525,14 @@ async def find_connectors_with_op(
     Each id is rendered as ``<impl_id>-<version>`` (``<product>`` for a
     v1-style row with no version) and kept only when it parses back to
     the same triple, so every named id can be passed to dispatch as is.
-    The list is sorted and capped at :data:`_CONNECTORS_WITH_OP_CAP`.
+    A row for which *skip* returns true is left out, before the cap
+    (#5069: a connector that refuses the caller's target). The list is
+    sorted and capped at :data:`_CONNECTORS_WITH_OP_CAP`.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         result = await session.execute(
-            select(
-                EndpointDescriptor.product,
-                EndpointDescriptor.version,
-                EndpointDescriptor.impl_id,
-            )
-            .where(
+            select(EndpointDescriptor).where(
                 visible_scope_clause(
                     EndpointDescriptor,
                     tenant_id=tenant_id,
@@ -535,9 +544,12 @@ async def find_connectors_with_op(
                 enabled_for_tenant_clause(tenant_id=tenant_id),
                 installed_owner_clause(),
             )
-            .distinct()
         )
-        triples = {(row.product, row.version, row.impl_id) for row in result}
+        triples = {
+            (row.product, row.version, row.impl_id)
+            for row in result.scalars()
+            if skip is None or not skip(row)
+        }
     triples.discard(exclude)
     rendered = {_render_connector_id(*triple) for triple in triples}
     return sorted(cid for cid in rendered if cid is not None)[:_CONNECTORS_WITH_OP_CAP]

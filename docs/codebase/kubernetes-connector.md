@@ -67,7 +67,16 @@ copy this pattern in G3.x).
   | `k8s.logs`   | `logs` (→ `ops_logs.k8s_logs`) | pod log fetch  |
 
   G3.2-T2 / T3 / T4 add the rest of the 13-op v0.2 read surface
-  against this same tuple.
+  against this same tuple. The full, current op list is in
+  [`connectors-kubernetes.md`](connectors-kubernetes.md#shipped-op-surface).
+
+* `ops_secret_list.py` (`k8s.secret.list` / `k8s.secret.info`)
+  -- two safe reads that list Secrets and describe one Secret by
+  **names only**: type, key names, labels, annotation names, owners
+  and, for `info`, the size of each value. No value and no annotation
+  value is ever returned. They need `list` and `get` on `secrets`. See
+  [`connectors-kubernetes.md`](connectors-kubernetes.md) for the full
+  shape.
 
 * `KubernetesTargetLike` (`backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py`)
   -- Protocol the connector reads against: `name`, `host`, `port`,
@@ -134,7 +143,7 @@ copy this pattern in G3.x).
 
 1. Dispatcher validates `params` against `K8S_LOGS_PARAMETER_SCHEMA`
    (pod_name + namespace required; tail capped at 5000; since matches
-   `^\s*\d+\s*[smhd]\s*$`).
+   `^\s*\d+\s*[smhd]\s*$`; since_time / until_time are RFC 3339 times).
 2. `KubernetesConnector.logs(target, params)` delegates to
    `ops_logs.k8s_logs(connector, target, params)`.
 3. `k8s_logs` resolves the `ApiClient` for the target via
@@ -142,8 +151,10 @@ copy this pattern in G3.x).
    `(tenant_id, id)` key) and builds a `client.CoreV1Api(api_client)`.
 4. `resolve_pod_and_container()` lists pods in the namespace, picks
    the exact match if present, falls back to prefix match. Multi-
-   container pods without `container` raise
-   `MultiContainerAmbiguityError`; pod-not-found / ambiguous prefix
+   container pods without `container`, or a `container` the pod does
+   not have, raise `MultiContainerAmbiguityError`. `k8s.logs` counts
+   init containers as valid `container` values (listed after the app
+   containers) but never auto-picks one; pod-not-found / ambiguous prefix
    raises `PodNotFoundError`. Both carry the candidate list in
    `args[1]` so the dispatcher's `connector_error` envelope can
    surface a "did-you-mean".
@@ -160,9 +171,65 @@ copy this pattern in G3.x).
    `truncated=True`, `line_count`, `byte_count`,
    `truncated_byte_count` for operator-facing "X KiB dropped" hints.
 
+### `k8s.logs` -- reading an older part of a long log
+
+Without `since_time`, `k8s.logs` returns the newest part of a log:
+at most 5,000 lines with `tail`, and at most 1 MiB per call (the
+oldest lines are dropped first). To read further back, use a time
+window:
+
+* `since_time` -- exact start time (RFC 3339). The handler reads
+  forward from that time, oldest line first. It sends no `tailLines`
+  unless the caller set `tail`. A call may set `since` or
+  `since_time`, not both (`LogWindowError`).
+* `until_time` -- exact end time (RFC 3339); needs `since_time`.
+  Kubernetes has no end filter, so MEHO drops the lines after it.
+* In this mode the handler asks for `timestamps=true`, so every
+  returned line starts with its RFC 3339 nanosecond time.
+* The window code lives in `ops_logs_window.py`. The request is
+  built with `ApiClient.call_api` on the same `/log`
+  path, because `kubernetes_asyncio`'s `read_namespaced_pod_log`
+  does not accept `since_time`. The call uses
+  `_preload_content=False` and reads the body as a stream, 64 KiB at
+  a time (`collect_window`). The read stops as soon as the page is
+  full or the window has ended, and the connection is closed. So a
+  forward read from an old time never pulls the whole rest of the
+  log into memory: at most one page plus the line being read.
+  With `_preload_content=False` the SDK does not check the HTTP
+  status, so `read_pod_log_window` raises `ApiException` itself.
+* The API server passes `sinceTime` to the node in whole seconds.
+  The handler reads the extra lines from the start of that second and
+  throws them away as they arrive, however many there are. So paging
+  keeps moving, also when more than a page is written in one second.
+* When the window is bigger than 1 MiB, the oldest lines that fit are
+  kept. Every kept line counts, so a page is never larger than 1 MiB.
+  The answer has `truncated: true`, `truncated_end: "end"`,
+  `line_count` and `next_since_time` (the time of the first line that
+  did not fit).
+* A page ends only at a time boundary. When the line that does not
+  fit has the same timestamp as the last kept lines, those lines are
+  dropped from the page again and come with the next page. So the
+  lines at `next_since_time` are all still to come.
+* Paging: call again with `since_time` set to `next_since_time`. The
+  start is inclusive, so the next answer starts with exactly the
+  lines that did not fit: no line is repeated and none is skipped.
+  Repeat until `truncated` is false.
+* One log line larger than 1 MiB can never be returned, on this page
+  or a later one. The same holds for several lines with the same
+  timestamp that are larger than 1 MiB together, because a page
+  cannot end between them. The call fails with
+  `LogLineTooLargeError`, a plain message that names the time. The
+  caller continues behind it with a later `since_time`. Such a line
+  before the window is skipped without being stored; one after
+  `until_time` just ends the read.
+* A long window still comes back behind a result handle, as any long
+  `lines` list does.
+* Limit: Kubernetes keeps only part of a log. The node rotates old log
+  files away, and MEHO cannot read what Kubernetes no longer serves.
+
 ## Dependencies
 
-* `kubernetes_asyncio>=32,<33` (target K8s 1.32 API; async fork of the
+* `kubernetes_asyncio>=36.1,<37` (async fork of the
   official Python client; no thread offload; loads kubeconfig from a
   dict).
 * `httpx` -- only used by the kubeconfig-free `probe()` against
@@ -185,6 +252,13 @@ copy this pattern in G3.x).
   `tools/call` envelope has no streaming shape in 2025-06-18; the
   connector's `OperationResult` is single-response). Operators
   following live logs continue using `kubectl-vcf.sh -f` until v0.2.next.
+* **A burst within one second is read again on every page.** The API
+  server sends `sinceTime` to the node in whole seconds, so every
+  page starts at the start of the second of `next_since_time`. The
+  lines before `next_since_time` are read and thrown away. With a very
+  large burst in one second (many MiB), each page spends time reading
+  that prefix again. No line is lost, but paging through such a
+  second is slow.
 * **1 MiB body cap is not configurable per-target.** The cap matches
   the operator's typical terminal scrollback and the MCP envelope's
   practical payload ceiling. A per-target override is v0.2.next.

@@ -428,3 +428,53 @@ func TestExitCodes(t *testing.T) {
 		})
 	}
 }
+
+// TestRenderHumanHealth_Tenants: the person's tenants are listed with
+// the role in each, and a login with several tenants that chose none
+// gets the list, a hint and the DB line only (#5239).
+func TestRenderHumanHealth_Tenants(t *testing.T) {
+	tenantA := api.TenantEntry{Name: "lab-a", TenantRole: api.TenantRoleReadOnly}
+	tenantB := api.TenantEntry{Name: "lab-b", TenantRole: api.TenantRoleOperator}
+	render := func(resp *api.HealthResponse) string {
+		var buf bytes.Buffer
+		if err := PrintHealth(&buf, resp); err != nil {
+			t.Fatalf("PrintHealth: %v", err)
+		}
+		return buf.String()
+	}
+
+	unchosen := render(&api.HealthResponse{
+		Operator: api.OperatorIdentity{Sub: "alice", Tenants: &[]api.TenantEntry{tenantA, tenantB}},
+		Vault:    api.VaultStatus{Detail: ptrStr("tenant_not_chosen")},
+		Db:       api.DbStatus{Migrated: ptrBool(true)},
+	})
+	for _, want := range []string{
+		"  Tenants:\n    lab-a  read_only\n    lab-b  operator\n",
+		"No tenant chosen. Choose one with `meho tenants use <name>`.",
+		"DB:    migrated",
+	} {
+		if !strings.Contains(unchosen, want) {
+			t.Errorf("missing %q in output:\n%s", want, unchosen)
+		}
+	}
+	if strings.Contains(unchosen, "Vault:") {
+		t.Errorf("unchosen output must not show the Vault line:\n%s", unchosen)
+	}
+
+	tenantB.Current = true
+	chosen := render(&api.HealthResponse{
+		Operator: api.OperatorIdentity{
+			Sub:      "alice",
+			TenantId: &tenantB.TenantId,
+			Tenants:  &[]api.TenantEntry{tenantA, tenantB},
+		},
+		Vault: api.VaultStatus{Reachable: true, ReadOk: true},
+		Db:    api.DbStatus{Migrated: ptrBool(true)},
+	})
+	if !strings.Contains(chosen, "    lab-b  operator  (current)\n") {
+		t.Errorf("current tenant not marked:\n%s", chosen)
+	}
+	if !strings.Contains(chosen, "Vault: reachable") || strings.Contains(chosen, "No tenant chosen") {
+		t.Errorf("chosen output wrong:\n%s", chosen)
+	}
+}

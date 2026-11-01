@@ -16,6 +16,7 @@ from meho_backplane.connectors.vmware_rest._vm_hardware_schemas import VM_SELECT
 
 __all__ = [
     "ADVANCED_SETTING_ROW_SCHEMA",
+    "BOOT_DEVICE_TYPES",
     "BOOT_ORDER_ENTRY_SCHEMA",
     "BOOT_STATE_PROPERTIES",
     "VM_ADVANCED_SETTINGS_PARAMETER_SCHEMA",

@@ -438,16 +438,17 @@ VM_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
     _P + "vm.device.cdrom": {
         "when_to_call": (
             "Call to remove a VM's CD-ROM drive, change what it is backed by, or "
-            "disconnect it. Typical use: a host-local ISO ties the VM to one host and "
-            "blocks vMotion; switch it to CLIENT_DEVICE."
+            "connect or disconnect it. Typical use: a host-local ISO ties the VM to one "
+            "host and blocks vMotion; switch it to CLIENT_DEVICE."
         ),
         "preconditions": (
-            "action 'update' needs backing. 'remove' deletes the device; the guest loses the drive."
+            "action 'update' needs backing. 'remove' deletes the device; the guest loses "
+            "the drive. 'connect' and 'disconnect' need the VM powered on."
         ),
         "parameter_hints": {"cdrom": "CD-ROM device id, e.g. '16000'."},
         "output_shape": (
-            "{status: removed|updated|disconnected|invalid_request|result_unknown, vm, "
-            "cdrom, action, current_backing: {type, iso_file, ...}, state, "
+            "{status: removed|updated|connected|disconnected|invalid_request|result_unknown, "
+            "vm, cdrom, action, current_backing: {type, iso_file, ...}, state, "
             "requested_backing, guidance}. On result_unknown also running_tasks, "
             "tasks_error and vm_question."
         ),

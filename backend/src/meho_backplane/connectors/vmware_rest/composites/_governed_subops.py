@@ -51,6 +51,8 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _vm_allocation,
     _vm_cdrom_library_iso,
     _vm_cdrom_tools,
+    _vm_cpu_memory_options,
+    _vm_nic_serial,
     _write,
 )
 from meho_backplane.connectors.vmware_rest.composites._vcenter_install_ops import (
@@ -139,6 +141,11 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     ),
     "vmware.composite.vm.cdrom.unmount_library_iso": (
         _vm_cdrom_library_iso.SUB_OPS_UNMOUNT_LIBRARY_ISO
+    ),
+    "vmware.composite.vm.nic.connect": _vm_nic_serial.SUB_OPS_VM_NIC_CONNECT,
+    "vmware.composite.vm.serial_port.add": _vm_nic_serial.SUB_OPS_VM_SERIAL_PORT_ADD,
+    "vmware.composite.vm.cpu_memory.options.set": (
+        _vm_cpu_memory_options.VIM_SUB_OPS_VM_CPU_MEMORY_OPTIONS_SET
     ),
     "vmware.composite.guest.customization_spec.create": (
         _write._SUB_OPS_GUEST_CUSTOMIZATION_SPEC_CREATE

@@ -113,6 +113,10 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     # Mount and unmount a content-library ISO (both caution).
     "vmware.composite.vm.cdrom.mount_library_iso",
     "vmware.composite.vm.cdrom.unmount_library_iso",
+    # Connect a NIC and add a serial port (dangerous); hot add and shares (caution).
+    "vmware.composite.vm.nic.connect",
+    "vmware.composite.vm.serial_port.add",
+    "vmware.composite.vm.cpu_memory.options.set",
     # VM CPU / memory limit + reservation write (#3880) -- caution + approval.
     "vmware.composite.vm.resource_allocation.set",
     "vmware.composite.host.evacuate",
@@ -468,6 +472,9 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.tools.installer.unmount": "vm",
     "vmware.composite.vm.cdrom.mount_library_iso": "vm",
     "vmware.composite.vm.cdrom.unmount_library_iso": "vm",
+    "vmware.composite.vm.nic.connect": "vm",
+    "vmware.composite.vm.serial_port.add": "vm",
+    "vmware.composite.vm.cpu_memory.options.set": "vm",
     "vmware.composite.vm.resource_allocation.set": "vm",
     "vmware.composite.license.assign": "vmware-licensing",
     "vmware.composite.vcenter.appliance.deploy": "vcenter_install",
@@ -688,6 +695,7 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
         "vmware.composite.vm.tools.installer.unmount",
         "vmware.composite.vm.cdrom.mount_library_iso",
         "vmware.composite.vm.cdrom.unmount_library_iso",
+        "vmware.composite.vm.cpu_memory.options.set",
         "vmware.composite.vm.snapshot.create",
         "vmware.composite.content_library.create",
         "vmware.composite.content_library.item.upload",
@@ -1031,6 +1039,7 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
         "vmware.composite.vm.device.cdrom": {
             "removed",
             "updated",
+            "connected",
             "disconnected",
             "invalid_request",
             "result_unknown",
@@ -1190,6 +1199,23 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "answer_not_allowed",
             "answer_failed",
             "answer_unknown",
+        },
+        "vmware.composite.vm.nic.connect": {
+            "connected",
+            "disconnected",
+            "unchanged",
+            "not_found",
+            "refused",
+        },
+        "vmware.composite.vm.serial_port.add": {"added", "refused", "invalid_request"},
+        "vmware.composite.vm.cpu_memory.options.set": {
+            "set",
+            "unchanged",
+            "requires_power_off",
+            "invalid_request",
+            "vm_not_found",
+            "partial",
+            "timeout",
         },
     }
     for op_id, expected_values in expected_status_values.items():

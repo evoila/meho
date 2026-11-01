@@ -464,14 +464,27 @@ _PARTS_HELD_BACK: dict[str, str] = {
     "installer.cb.sddc.retry": "credential_write: the request carries bring-up passwords.",
     "installer.cb.sddc.start": "credential_write: the request carries bring-up passwords.",
     "installer.cb.validation.start": "credential_write: the request carries bring-up passwords.",
+    "fleet.locker.certificate.import": (
+        "credential_write: the request carries the private key; the answer is one certificate."
+    ),
     "sddc.credential.list": "credential_read: the page lists stored passwords.",
     "sddc.host.commission": "credential_write: the request carries host passwords.",
     "installer.sddc.resources.calculate": (
         "credential_write: the request carries the spec passwords. The main numbers "
         "ride inline as flat result_scalars keys."
     ),
+    "vmware.composite.host.local_user.create": (
+        "credential_write: the request carries the new user's password."
+    ),
+    "vmware.composite.host.local_user.password.set": (
+        "credential_write: the request carries the new password."
+    ),
     "vmware.composite.vm.guest.file.read": (
         "credential_write: it reads guest files, which can hold secrets."
+    ),
+    "vmware.composite.host.advanced_settings.set": (
+        "credential_write: before and after hold setting values, and a setting can be a "
+        "secret from Vault. The answer is small (at most 20 settings), so a spill is rare."
     ),
 }
 

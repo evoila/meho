@@ -41,7 +41,7 @@ from meho_backplane.connectors.vr import (
     VrConnector,
     register_vr_typed_operations,
 )
-from meho_backplane.connectors.vr.reads import MAX_DISK_READS, PAGE_SIZE, REDACTED
+from meho_backplane.connectors.vr.reads import MAX_DISK_READS, PAGE_SIZE
 from meho_backplane.connectors.vr.typed_ops import VR_TYPED_WHEN_TO_USE_BY_GROUP
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
@@ -661,7 +661,11 @@ async def test_task_get_returns_the_task_and_hides_secret_names_in_the_result() 
     assert body["error"] == "made-up failure"
     assert body["error_details"] == "made-up details"
     assert body["progress"] == 40
-    assert body["result"] == {"replication_id": "replication-0001", "password": REDACTED}
+    # The connector masks the field; the default view of every answer hides it once more.
+    assert body["result"] == {
+        "replication_id": "replication-0001",
+        "password": "[REDACTED:param_name]",
+    }
     rendered = json.dumps(body) + json.dumps(result.extras, default=str)
     assert _PASSWORD not in rendered
     assert "vr-session-1" not in rendered

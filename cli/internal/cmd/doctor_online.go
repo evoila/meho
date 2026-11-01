@@ -157,7 +157,7 @@ func addRefreshFailure(r *doctorReport, err error, backplaneURL string) {
 	case api.IsRefreshRejected(err):
 		r.add(authed("token", doctorFail, classRefreshRejected,
 			"the login expired: the identity provider rejected the refresh token",
-			"run `meho login "+backplaneURL+"` (add --offline for a login that lasts longer)"))
+			"run `meho login "+backplaneURL+"`"))
 	case api.IsNoRefreshToken(err):
 		r.add(authed("token", doctorFail, classNoRefreshToken,
 			"the token expired and no refresh token is stored",

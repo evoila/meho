@@ -74,6 +74,7 @@ from meho_backplane.connectors._shared.vault_creds import (
     strip_credential_value,
 )
 from meho_backplane.connectors.msad.ops import SSH_TRANSPORT_NOTE, MsadOp
+from meho_backplane.operations import register_plain_fields
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:
@@ -93,6 +94,7 @@ __all__ = [
 
 #: The op id of the password set.
 SET_PASSWORD_OP_ID: str = "msad.user.set-password"
+PASSWORD_EXPIRY_OP_ID: str = "msad.user.password-expiry"
 
 #: ``msDS-UserPasswordExpiryTimeComputed`` when the password never expires.
 NEVER_EXPIRES_FILETIME: int = 0x7FFFFFFFFFFFFFFF
@@ -396,7 +398,7 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
 
 PASSWORD_OPS: tuple[MsadOp, ...] = (
     MsadOp(
-        op_id="msad.user.password-expiry",
+        op_id=PASSWORD_EXPIRY_OP_ID,
         handler_attr="msad_user_password_expiry",
         summary="Read when one AD account's password was last set and when it expires.",
         description=(
@@ -530,3 +532,8 @@ PASSWORD_OPS: tuple[MsadOp, ...] = (
         },
     ),
 )
+
+
+# A date and a day count about the password, never the password.
+register_plain_fields(SET_PASSWORD_OP_ID, ("password_last_set",))
+register_plain_fields(PASSWORD_EXPIRY_OP_ID, ("password_last_set", "password_age_days"))

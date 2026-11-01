@@ -311,7 +311,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   per-disk `results` array (partial failure tolerated, JSONFlux-reduced
   when large); `service_control` applies a `HostServiceSystem`
   start/stop/restart + optional `UpdateServicePolicy` **bounded to a
-  curated server-side allowlist** (`TSM-SSH` / `TSM` / `ntpd` / `ptpd`)
+  curated server-side allowlist** (`TSM-SSH` / `TSM` / `ntpd` / `ptpd` /
+  `snmpd` / `sfcbd-watchdog` / `slpd`)
   — an out-of-list service name is refused (`status='service_not_allowed'`)
   before any resolution or write, never passed through. On a **vCenter**
   target the host is selected by display name **or** moref
@@ -476,14 +477,36 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of
-  `_CompositeSpec` rows (reads and writes); each row carries its
+  lifespan startup. Each composite keeps its registration rows in its
+  own module, as `COMPOSITES`: a tuple of `CompositeSpec` rows
+  (`composites/_spec.py`). `collect_composites` in `_register.py`
+  imports every module of the package at start-up (with `pkgutil`, the
+  way the connector registry finds connector packages), collects the
+  rows and sorts them by op id. So a new composite is a new module; no
+  shared list changes. A row that is not a `CompositeSpec`, or an op id
+  two modules share, fails at import. The test
+  `test_connectors_vmware_rest_composites_collect.py` checks that the
+  rows of every module on disk are collected. Each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
-  implied by the spec, not by global defaults. The AI guidance
+  implied by the spec, not by global defaults; its preview builder
+  (`preview`, registered at import on the per-op hook); and, when the
+  composite is not on the vCenter 8.0 catalog, the reason (`not_on_8_0`).
+  Two flags on the row feed the coverage test
+  (`test_connectors_vmware_rest_composite_coverage.py`): `no_preview` (a
+  write that waits for approval with no preview of its effect, on
+  purpose) and `classifier_other` (the broadcast classifier `classify_op`
+  puts the op id in its generic `other` class, on purpose). The
+  registration test (`test_connectors_vmware_rest_composites_write_register.py`)
+  checks rules on every row, not a copy of every operation: each op id is
+  unique, each handler is a module-level `async def` whose path imports
+  back to it, each group key has a "when to use" text, and the risk level
+  fits the approval flag. So a new composite changes neither test file.
+  The per-group "when to use" texts stay hand-written in `_register.py`.
+  The AI guidance
   (`llm_instructions`) of the VM and folder writes and the VM allocation
   reads lives in `composites/_vm_llm_instructions.py`, one entry per op id;
-  their example calls sit under `examples` in each parameter schema. The derived registration-coverage guard uses explicit, closed exceptions only for write operations whose existing semantics intentionally omit a preview or governed-suboperation discovery entry; every other registry id must be represented. `test_reference_docs_drift.py` remains the single total-set drift gate for generated `docs-site/reference/connectors.md`; regenerate it with `cd backend && uv run python scripts/generate_reference_docs.py` when the registry changes. Idempotent on re-run via the body-hash skip path.
-- **Typed ops** (`typed_ops.py`, `#2257`) — the first vmware
+  their example calls sit under `examples` in each parameter schema. The derived registration-coverage guard uses explicit, closed exceptions only for write operations whose existing semantics intentionally omit a preview (the `no_preview` row flag) or governed-suboperation discovery entry; every other registry id must be represented. `test_reference_docs_drift.py` remains the single total-set drift gate for generated `docs-site/reference/connectors.md`; regenerate it with `cd backend && uv run python scripts/generate_reference_docs.py` when the registry changes. Idempotent on re-run via the body-hash skip path.
+- **Typed ops** (`typed_ops.py`, `typed_ops_host_usage.py`, `#2257`) — the first vmware
   `source_kind="typed"` op, `vmware.host.usage`. Unlike a composite, a
   typed op is a **bound method** on `VmwareRestConnector`
   (`host_usage(self, operator, target, params)`) that the dispatcher
@@ -514,6 +537,24 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   enough — `overallCpuUsage` / `overallMemoryUsage` live on the WS-API
   `HostSystem`, not the REST resource. It establishes the vmware typed-op
   pattern future per-host/per-VM typed reads reuse.
+- **How the typed ops are collected** (`typed_ops.py`, `#5554`) —
+  `typed_ops.py` keeps no list of operations. Each `typed_ops_<feature>.py`
+  module exports two names: `TYPED_OPS`, a tuple of its `VmwareTypedOp`
+  rows, and `WHEN_TO_USE_BY_GROUP`, the `when_to_use` text for each
+  `group_key` those rows use. At import, `typed_ops.py` finds every
+  `typed_ops_*` module of the package with `pkgutil` (the same way
+  `connectors/registry.py` finds connector subpackages), imports each one,
+  and joins the rows sorted by op id into `VMWARE_TYPED_OPS` and the texts
+  into `VMWARE_TYPED_WHEN_TO_USE_BY_GROUP`. A module without the two names
+  is a helper and is skipped. Two modules with the same op id, or the same
+  group key with different texts, fail at import. So a pull request that
+  adds a typed op adds its own module (with its connector wrapper method
+  and test) and does not touch `typed_ops.py`. The guard test
+  `test_connectors_vmware_rest_typed_ops_collect.py` fails when a module
+  on disk is not found, when a module defines a row it does not export,
+  and when a row is left out of the collected tuple. The feature modules
+  import `VmwareTypedOp` and two value helpers from `typed_ops.py`, so the
+  collection runs at the bottom of that file, after those names exist.
 - **Incident-survival typed reads** (`#2300`) — three more
   `source_kind="typed"` bound-method reads in sibling modules, each
   registered through `VMWARE_TYPED_OPS` (so no registrar change) and
@@ -892,10 +933,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `folder_list`) — the inventory folders of a vCenter, one flat row each, with
   the datacenter and the parent. `safe`, in its own group `vmware-folders`, on
   both catalogs. See **Folder list** under Control flow.
+- **`vmware.host.advanced_settings.show`** and **`vmware.host.firewall.show`**
+  (`typed_ops_host_security.py`, handlers `host_advanced_settings_show` and
+  `host_firewall_show`) — the advanced settings of one host (with the ones
+  that differ from the default marked) and its firewall rule sets. `safe`, in
+  the group `vmware-host-security` with the six host security changes, on
+  both catalogs. See **Host security settings** under Control flow.
 - **`vmware.network.portgroup.show`** (`typed_ops_portgroup_show.py`,
   handler `network_portgroup_show`) — all settings of one distributed port
   group, by id or name. `safe`, in its own group `vmware-portgroup-settings`,
   on both catalogs. See **Port group settings** under Control flow.
+- **`vmware.host.config.show`** (`typed_ops_host_config.py`, handler
+  `host_config_show`) — one host's NTP, DNS and host name, syslog targets,
+  lockdown mode, SNMP and core dump partition. `safe`, in its own group
+  `vmware-host-config`, on both catalogs. See **Host time, name and
+  logging** under Control flow.
 - **`vcenter.sso_admin.api_file.get`** (`typed_ops_sso_admin_api_file.py`,
   handler `sso_admin_api_file_get`) — reads one SSO Admin API description
   file (the WSDL or one of its XSD files) that a vCenter serves. No vendor
@@ -1188,7 +1240,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   composite registrar). Walks `VMWARE_TYPED_OPS`, resolves each op's
   `handler_attr` to the connector bound method, looks the group's
   curated `when_to_use` blurb up in `VMWARE_TYPED_WHEN_TO_USE_BY_GROUP`
-  (required for a grouped typed op), and upserts each row into
+  (required for a grouped typed op; both are collected from the
+  `typed_ops_*` modules, see "How the typed ops are collected" above),
+  and upserts each row into
   `endpoint_descriptor` with `source_kind="typed"` via
   `register_typed_operation`.
 - **`VsphereTargetLike`** (`session.py`) — runtime-checkable Protocol
@@ -1320,7 +1374,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    release. Notes:
    - The Supervisor and namespace composites are not on the 8.0 catalog.
      `COMPOSITES_NOT_ON_8_0` in `composites/_register.py` lists each
-     excluded composite with its reason. The test
+     excluded composite with its reason; it is read from the rows
+     (`CompositeSpec.not_on_8_0`). The test
      `test_connectors_vmware_rest_catalog_parity.py` fails when a composite
      or typed op on 9.0 is neither on 8.0 nor in that list.
    - The write steps inside a composite are checked under the connector
@@ -2325,6 +2380,88 @@ installer is mounted now. The `vm` id goes into the URL path, so it must match
 of these operations against the pinned `vcenter.yaml` of 8.0 and 9.0 (it
 skips without the vendor spec files). Tests use saved responses
 (`test_connectors_vmware_rest_typed_vm_hardware.py`).
+
+### VM boot settings, hardware and Tools upgrades, advanced settings
+
+Six typed operations for everyday VM settings. They need no catalog ingest and
+are on both catalogs (`vmware-rest-8.0` and `vmware-rest-9.0`). The two reads
+take the VM id (`vm`) or `name`. The four changes take the VM id only, wait
+for approval and are `dangerous`. Each change reads the current state first,
+sends only what differs (so it is safe to run twice) and reads the object back
+after the vendor call.
+
+| Operation | What it does | Returns | Vendor calls | Versions |
+|---|---|---|---|---|
+| `vmware.vm.boot.show` (`safe`) | Boot settings of one VM. | `firmware`, `efi_secure_boot`, `efi_legacy_boot`, `network_protocol`, `delay_ms`, `retry`, `retry_delay_ms`, `enter_setup_mode`, `boot_order` rows (`type`, `nic`, `disks`), `read_notes` | REST `GET .../hardware/boot` and `.../hardware/boot/device`; VIM `RetrievePropertiesEx` of `config.bootOptions` | 8.0, 9.x |
+| `vmware.composite.vm.boot.set` | Boot delay, enter setup, boot retry, boot order; with the VM off, firmware and EFI secure boot. | `status` (`set`, `unchanged`, `partial`, `refused`, `invalid_request`, `timeout`), `applied` steps, `before`, `after` | REST `PATCH .../hardware/boot`, `PUT .../hardware/boot/device`; VIM `ReconfigVM_Task` (`bootOptions.efiSecureBootEnabled`) | 8.0, 9.x |
+| `vmware.composite.vm.hardware.upgrade` | Upgrade a powered-off VM's hardware version to a given or the newest version. | `status` (`upgraded`, `unchanged`, `partial`, `refused`, `invalid_request`), `before` / `after` version | REST `GET .../hardware`, `POST .../hardware?action=upgrade` | 8.0, 9.x |
+| `vmware.composite.vm.tools.upgrade` | Upgrade VMware Tools in a running guest (`mode=upgrade`), or mount the Tools installer (`mode=mount_installer`). | `status` (`upgraded`, `upgrade_started`, `installer_mounted`, `unchanged`, `refused`, `invalid_request`), `before` / `after` Tools state | REST `GET .../tools`, `POST .../tools?action=upgrade`, `GET .../tools/installer`, `POST .../tools/installer?action=connect` | 8.0, 9.x |
+| `vmware.vm.advanced_settings.show` (`safe`) | The VM advanced settings (`extraConfig`), filter by `key_prefix`. | `settings` rows (`key`, `value`, `masked`), sorted by key; a long list goes behind a result handle | VIM `RetrievePropertiesEx` of `config.extraConfig` | 8.0, 9.x |
+| `vmware.composite.vm.advanced_settings.set` | Set or remove `extraConfig` keys. | `status` (`set`, `unchanged`, `partial`, `invalid_request`, `timeout`), `changes` rows (`key`, `action`, `before`, `after`, `masked`) | VIM `RetrievePropertiesEx`, `ReconfigVM_Task` (`extraConfig`) | 8.0, 9.x |
+
+Modules: `typed_ops_vm_boot.py`, `typed_ops_vm_advanced_settings.py` (schemas
+in `_vm_settings_schemas.py`, the VIM read in `vim_vm_props.py`), and
+`composites/_vm_boot.py`, `composites/_vm_upgrade.py`,
+`composites/_vm_advanced_settings.py` (shared helpers in
+`composites/_vm_change_common.py`). Both reads are in the
+`vmware-vm-hardware` group; the changes are in the `vm` group.
+
+Details:
+
+- **Boot change order.** Secure boot off runs first (so a switch to BIOS
+  works), then the REST `PATCH`, then the boot order `PUT`, then secure boot
+  on (after a switch to EFI). Secure boot on a VM that stays on BIOS is
+  `invalid_request`; nothing is sent. So is a switch to BIOS while secure
+  boot is on, unless the call also passes `efi_secure_boot: false`. A `DISK`
+  boot order entry without `disks` matches any disks vCenter reads back, so
+  a second run sends nothing. A REST HTTP 400 (for example a firmware
+  change on a running VM) gives `refused` with vCenter's error type and text,
+  and `applied` lists the steps that already ran.
+- **Hardware upgrade.** A VM already at the asked version gets nothing
+  (`unchanged`); a version older than now is `invalid_request`. vCenter's
+  `ALREADY_IN_DESIRED_STATE` also maps to `unchanged`. The upgrade cannot be
+  undone; the preview says so.
+- **Tools upgrade.** Tools with `version_status=CURRENT` gets nothing.
+  `command_line_options` with `mode=mount_installer` is `invalid_request`. vCenter
+  starts the upgrade in the guest, so the answer is `upgrade_started` until the
+  read-back shows `CURRENT`. The installer mount uses the REST form of the VIM
+  `MountToolsInstaller` call; an already mounted installer gets nothing. Both
+  upgrade calls use a long read timeout (900 s), because vCenter can answer
+  late.
+- **Secrets in advanced settings.** Keys that may hold a secret (the
+  `guestinfo.userdata`, `guestinfo.vendordata` and `guestinfo.ovfEnv` blobs,
+  the Ignition and Talos guest config keys (`guestinfo.ignition.*`,
+  `guestinfo.talos.*`), and any key whose name says password, secret, token, private key, API key,
+  credential or licence key) are never returned: `value` is `null` and
+  `masked` is true. The change refuses to set such a key (MEHO takes no
+  secret as a plain value) but can remove it. A removal sends the empty value;
+  vSphere removes a key whose value is empty. The `OptionValue.value` field is
+  an `Any` field in VI-JSON, so the string is boxed
+  (`{"_typeName": "string", "_value": ...}`).
+- **Flight recorder.** The `extraConfig` read goes through the traced HTTP
+  path, and the shared redaction does not know a setting value by shape. So
+  `VmwareRestConnector.trace_response_body` runs every JSON answer through
+  `trace.trace_payload` before the trace stores it: the `value` of every
+  `{key, value}` row whose key `is_secret_key` names is replaced by
+  `[MEHO-REDACTED:advanced-setting-value]`, the other rows stay. A stored
+  trace of the read or the change holds the key names, never a secret value
+  (`test_flight_recorder_spans_hold_no_secret_setting_value`, with a control
+  case without the mask).
+- **Faults.** A `ReconfigVM_Task` fault raises with the vim fault type and
+  text, so the dispatcher records a failed call. A task that does not finish
+  in 600 s gives `timeout` with an error issue.
+- **Previews.** Each change has an approval preview: the current boot settings
+  and the planned steps, the current hardware version, the current Tools
+  state, or the keys that change with their current values (masked where
+  needed).
+
+`test_connectors_vmware_rest_vm_settings_reconcile.py` checks every REST call
+against the pinned `vcenter.yaml` of 8.0 and 9.0, the REST body fields against
+the pinned 9.0 `vcenter.yaml` (`Vcenter.Vm.Hardware.Boot.UpdateSpec` and the
+other bodies), and every VIM method against the pinned 9.0 `vi-json.yaml` (it skips without the vendor spec files). The 8.0 U1 to U3
+VI-JSON files are checked by the source scan of
+`test_connectors_vmware_rest_8_0_spec_reconcile.py`. Tests use saved responses
+(`test_connectors_vmware_rest_vm_settings.py`).
 
 ### Content-library ISO mount and unmount
 
@@ -4198,9 +4335,11 @@ target_id}` — and since the dispatch `params` are deliberately never
 serialised onto a reviewer-facing surface (#1503), the four-eyes
 approver could not tell a one-VM power cycle from a 1000-VM outage.
 
-`composites/_write_preview.py` registers one preview builder per write
-composite on the generic per-op hook (`register_preview_builder`,
-`operations/_preview.py`, #1437). The builder result lands under
+`composites/_write_preview.py` holds one preview builder per write
+composite; the composite's registration row names it (`preview`), and
+`_register.py` puts it on the generic per-op hook at import
+(`register_preview_builder`, `operations/_preview.py`, #1437). The
+builder result lands under
 `proposed_effect["preview"]`, wrapped with the op's sensitivity
 `op_class` (see [`approvals.md`](approvals.md)). Three depths:
 
@@ -4209,6 +4348,9 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.power.bulk` | `{action, filter, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `host.evacuate` | `{host, tolerate_partial_failure, vsan_mode, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `host.maintenance.exit` | `{host, name, connection_state, in_maintenance_mode, ha_state, resolved, total_resolved, what_happens_next, unavailable?}` | live read (vim `RetrievePropertiesEx` on the host + `GET:/vcenter/vm`); a failed read is listed under `unavailable`, never blocks the park |
+| `host.add` | `{action, parent, parent_type, host_name, port, user_name, ssl_thumbprint, password_source, password_secret_ref, what_happens_next}` | params-only (`composites/_host_add.py`); never the password |
+| `host.move` / `host.connect` / `host.disconnect` | `{host, cluster?, name, connection_state, in_maintenance_mode, parent, parent_type, vm_count, what_happens_next, unavailable?}` | live read (vim `RetrievePropertiesEx` on the host, `composites/_host_membership.py`); a failed read is listed under `unavailable`, never blocks the park |
+| `host.remove` | `{blast_radius: {object, children, irreversibility, blockers?, refusal?, what_happens_next}}` | the handler's own plan (`composites/_host_remove.py`); a host that does not exist is refused before the park |
 | `host.detach_from_vds` | `{host, dvs, fallback_network, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `cluster.patch` | `{cluster, resolved, total_resolved}` | live read (`GET:/vcenter/host?clusters=...`) |
 | `vm.resize` | `{vm, name, power_state, current, requested}` sizing from->to | live read (`GET:/vcenter/vm/{vm}`) |
@@ -4899,6 +5041,186 @@ in `ImportVApp`, so check the inventory first and delete or rename that VM.
 A power-on that waits for approval saves the import's answer: approving it
 only powers on the VM and does not import again.
 
+### Host membership: add, move, connect, disconnect and remove a host (`#4349`)
+
+An agent or an operator can add an ESXi host to vCenter, move it into a
+cluster, reconnect or disconnect it, and remove it. Every change waits for
+approval. All six operations are typed (hand-written) and need no spec ingest.
+The five changes are in the group `host` on both catalogs, `vmware-rest-8.0`
+and `vmware-rest-9.0`. The status read `vmware.task.info` is a typed read in
+the tasks group (`vmware-tasks-recent`), shared with `vmware.tasks.recent`.
+
+| Operation | What it does | What it returns | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.composite.host.add` | Starts adding an ESXi host to a cluster (`AddHost_Task`) or alone to a host folder (`AddStandaloneHost_Task`). vCenter checks the host certificate against `ssl_thumbprint`. The password comes from Vault. | `status` (`accepted`, `already_added`, `already_running`, `parent_not_found`, `needs_vcenter`, `start_failed`, `start_unknown`), `task`, `status_read`, `host` | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.task.info` | One vCenter task by id: the status read of `host.add`. | `state` (`queued`, `running`, `success`, `error`, `not_found`, `not_reachable`), `progress`, `error_message`, `error_type`, `result` (the new host or its compute resource), `checked_at` | `safe` | 8.0, 9.x |
+| `vmware.composite.host.move` | Moves a host in maintenance mode into a cluster of the same datacenter (`MoveHostInto_Task`), with its VMs. | `status` (`moved`, `unchanged`, `not_found`, `cluster_not_found`, `not_in_maintenance_mode`, `needs_vcenter`, `not_verified`, `timeout`), the host read back | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.composite.host.connect` | Reconnects a disconnected or not responding host with the login vCenter has (`ReconnectHost_Task`). | `status` (`connected`, `unchanged`, ...), the host read back | `caution`, waits for approval | 8.0, 9.x |
+| `vmware.composite.host.disconnect` | Disconnects a host from vCenter (`DisconnectHost_Task`). Its VMs keep running. | `status` (`disconnected`, `unchanged`, ...), the host read back | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.composite.host.remove` | Removes a host from the vCenter inventory: `HostSystem.Destroy_Task` for a host in a cluster, `ComputeResource.Destroy_Task` on the host's own compute resource for a host alone. | `status` (`removed`, `unchanged`, `precondition_failed`, `needs_vcenter`, `still_present`, `timeout`), `object`, `blockers`, `task` | `destructive`, preview first, waits for approval | 8.0, 9.x |
+
+Code: `composites/_host_add.py`, `composites/_host_membership.py` (move,
+connect, disconnect and the shared host read), `composites/_host_remove.py`,
+the schemas and AI guidance in `composites/_host_membership_schemas.py`, and
+the registry rows and vendor-call lists in `composites/_host_membership_ops.py`
+(`_register.py` collects the rows; `_governed_subops.py` reads the
+vendor-call lists). The
+status read is `typed_ops_task_info.py`.
+
+Vendor calls: all are VIM methods sent as VI-JSON (`/sdk/vim25/<release>/...`)
+through the governed write seam `_write_vmomi_sub_op`; the reads are
+`PropertyCollector.RetrievePropertiesEx`, and `host.add` also lists hosts by
+name with `GET /api/vcenter/host`. vCenter 8.0 U1 to U3 and 9.0 serve every
+method; `tests/test_connectors_vmware_rest_host_membership_reconcile.py`
+checks them and the request body fields against the pinned `vi-json.yaml` of
+9.0 and the three 8.0 files. No method is missing on a version, so no
+operation needs the version check. A single ESXi host target is refused
+with `needs_vcenter`: these changes run on the vCenter that manages the host.
+
+**Move, connect and disconnect** read the host first (name, parent,
+connection state, maintenance mode, VMs). When the host already is where the
+call wants it, the answer is `unchanged` and nothing is sent, so a second call
+is safe. `host.move` also refuses a host that is not in maintenance mode
+(`not_in_maintenance_mode`; use `host.evacuate` first). Then the method is
+sent, its task is polled (600 s), and the host is read again: the answer gives
+the new state. A task fault fails the call with the vendor's fault type and
+text (`connector_error`). A poll timeout answers `timeout` with the task id
+and an `error` issue, so the call is not recorded as done.
+
+**`host.remove`** uses the plan-then-act seam of the teardown deletes
+(`TeardownPlan`, `blast_radius`, `destroy_task`). The plan reads the host and
+lists the VMs registered on it as `children` (and, for a host alone, its
+compute resource); they leave vCenter with the host, their files stay on the
+datastores. A connected host that is not in maintenance mode is refused
+before any write; a host that is disconnected or not responding may be
+removed. The preview builder raises when the host does not exist, so the call
+is refused (`blast_radius_required`) before it waits for approval. A person
+calls `preview_operation`, then `call_operation` with the `preview_hash`; an
+agent is always refused.
+
+**`host.add` is a vendor job.** The start call returns as soon as vCenter has
+accepted the job: `status: accepted`, the vCenter `task` id and
+`status_read: {op_id: vmware.task.info, params: {task}}`. It never says the
+host is added.
+
+- Before a start it reads the cluster or host folder, then looks for a host
+  with the same name in vCenter (`already_added`, with the host id) and for an
+  add task (`ClusterComputeResource.addHost` or `Folder.addStandaloneHost`)
+  that is queued or runs on the same cluster or folder (`already_running`,
+  with that task's id). Both start nothing. This check is a help, not a lock:
+  two callers can both check before either starts, and a task that just ended
+  is no longer running.
+- The running-add check reads the tasks of the cluster or folder with every
+  page (`retrieve_all_pages`): a running add on a later page must not start a
+  second add. The continuation call is in the vendor-call list of `host.add`.
+- After a lost reply, or when a gateway answered HTTP 502, 503 or 504 for the
+  start (`start_unknown`), do not start again blindly: call `host.add` again,
+  which answers `already_added` or `already_running` when the first call
+  worked, or read the task list (`vmware.tasks.recent`). Only an answer of
+  vCenter itself (a vendor fault) is `start_failed`.
+- Use MEHO's async mode (`async: true`, `docs/codebase/async-governed-dispatch.md`)
+  for the start: MEHO keeps the answer with the task id under a run handle, so
+  a lost reply does not lose the task id.
+- `vmware.task.info` reads `Task.info` of one task. It gives the vendor's
+  state, the progress, the vendor's error text and fault type, and on success
+  the object the task made (`result`). When the login expired between the
+  start and the read, the connector logs in again on `NotAuthenticated` and
+  reads once more. When vCenter does not answer, or a gateway answers HTTP
+  502, 503 or 504 for it, the state is `not_reachable` with the task id, the
+  reason (`connect_failed`, `timeout`, `tls_verify_failed`,
+  `service_unavailable`, `gateway_error`) and the time of the read, never
+  `error`. A vendor fault and a refused login are not an outage: they raise
+  as before. A task vCenter forgot gives `not_found`. MEHO keeps no job state between calls; the
+  caller keeps the task id.
+- A refused start (`start_failed`) gives the vendor's fault type and text, for
+  example `InvalidLogin` or `AlreadyBeingManaged` (`force` is always false, so
+  MEHO never takes a host away from another vCenter). A wrong thumbprint shows
+  as an `SSLVerifyFault` in the task error.
+
+**The password.** The host password comes from Vault
+(`password_secret_ref`, optional `password_secret_mount` and
+`password_secret_key`), read when the call runs, under the identity of the
+person who runs it (after an approval: the approver). It is only in the
+`HostConnectSpec` of the vCenter request body. A vendor text that holds it is
+replaced. `host.add` is pinned as `credential_write` (`broadcast/events.py`),
+so the flight recorder keeps no request body and the broadcast carries no
+params. The approval request and its preview show the Vault path and the
+thumbprint, never the password.
+
+Tests: `test_connectors_vmware_rest_host_membership.py` (the handlers against
+a vim fake), `test_connectors_vmware_rest_host_membership_http.py` (the real
+connector against `respx` on the 8.0.3 and 9.0 paths, and the status read:
+re-login, `not_reachable`, `not_found`),
+`test_connectors_vmware_rest_host_membership_approval.py` (the dispatcher:
+each change waits for approval; the remove needs a matching `preview_hash`)
+and the reconcile test above.
+
+### vSAN reads: settings, capacity, performance, resync, object health, maintenance pre-check (#4444)
+
+An agent or an operator can read the vSAN of a cluster with six typed
+operations. They need no spec ingest. They are on both catalogs,
+`vmware-rest-8.0` and `vmware-rest-9.0`, in the group `vmware-vsan`. All six
+are `safe` and run at once. The cluster health tests stay in
+`vmware.host.vsan_health`.
+
+| Operation | What it does | What it returns | vSphere calls | Versions |
+|---|---|---|---|---|
+| `vmware.vsan.cluster.info` | vSAN settings of a cluster. | `vsan_enabled`, `architecture` (`ESA` or `OSA`), `vsan_cluster_uuid`, deduplication, compression, encryption (on or off and the key provider name, never a key id), `stretched_or_two_node`, `witness_hosts`, `fault_domains`, and one row per host with its fault domain and vSAN node UUID | vSAN `VsanVcClusterConfigSystem.VsanClusterGetConfig`, vSAN `VimClusterVsanVcStretchedClusterSystem.VSANVcGetWitnessHosts`, the cluster's `configurationEx` (its `vsanHostConfig`) and the host `name` through `PropertyCollector.RetrievePropertiesEx` | 8.0, 9.x |
+| `vmware.vsan.capacity` | Capacity and space use. | total, free and used bytes, `overview`, `by_object_type`, `space_saving` (saved bytes and ratios), `capacity_threshold`, `host_failures` (what is left after 0, 1 or more host failures) | vSAN `VsanSpaceReportSystem.VsanQuerySpaceUsage`, vSAN `VsanVcClusterHealthSystem.VsanQueryVcClusterHealthSummary` with `fields: [limitHealth]` | 8.0, 9.x |
+| `vmware.vsan.performance` | Latency, IOPS, throughput and more over a time window. | flat `rows` `{entity, metric, time, value}`, and a `note` when vSAN sent no samples | vSAN `VsanPerformanceManager.VsanPerfQueryPerf` with one `VsanPerfQuerySpec` | 8.0, 9.x |
+| `vmware.vsan.resync.status` | Objects that resync now. | `objects_left`, `bytes_left`, `seconds_left`, `by_status` (active, queued, suspended), and one row per syncing component with bytes and time left and the reason | vSAN `VsanObjectSystem.QuerySyncingVsanObjectsSummary` | 8.0, 9.x |
+| `vmware.vsan.object.health` | Object health and the VMs of unhealthy objects. | `summary` (healthy, reduced redundancy, inaccessible, other), `by_state`, `unhealthy_objects` with type, VM, policy | vSAN `VsanVcClusterHealthSystem.VsanQueryVcClusterHealthSummary` with `fields: [objectHealth]`, then vSAN `VsanObjectSystem.VsanQueryObjectIdentities` for the objects that are not healthy | 8.0, 9.x |
+| `vmware.vsan.maintenance.precheck` | What a host's maintenance mode would do to vSAN data, for one vSAN data option (`ensureObjectAccessibility`, `evacuateAllData`, `noAction`). | `result` (green, yellow, red), data to move, objects that would become inaccessible or non-compliant, vSAN messages, one row per fault domain and host with space before and after, the task id, a `note` when the check did not end in 300 seconds | `HostSystem.parent` and the cluster's `configurationEx` (the host's vSAN node UUID), vSAN `VsanResourceCheckSystem.VsanPerformResourceCheck` (a vCenter task, polled to its end), then vSAN `VsanResourceCheckSystem.VsanGetResourceCheckStatus` | 8.0, 9.x |
+
+**How the calls go.** Every vSAN method goes through
+`VmwareRestConnector._post_vsan`: VI-JSON on
+`/sdk/vim25/{release}/vsan/<Type>/<moId>/<Method>` on vCenter 9.x, SOAP on
+`/vsanHealth` on vCenter 8.0 (the 8.0 VI/JSON files have no vSAN paths). The
+vSAN objects have fixed ids: `vsan-cluster-config-system`,
+`vsan-stretched-cluster-system`, `vsan-cluster-space-report-system`,
+`vsan-performance-manager`, `vsan-cluster-object-system`,
+`vsan-cluster-resource-check-system` and `vsan-cluster-health-system`. The
+property reads and the task poll are core vSphere and use VI-JSON on both.
+All these calls exist on vCenter 8.0 U1 to U3 and 9.0 to 9.1.1, so no
+operation stops early on a version.
+
+**The SOAP codec** (`soap_vsan.py`) now sends strings, whole numbers, lists
+(one element per entry) and data objects (one child per field, in the order
+of the dict, which must be the order the vendor type defines; no
+`xsi:type`, because each data object is the type the method declares). It
+reads every `returnval` of an answer, so a method that returns an array gives
+a list.
+
+**Fault domains** come from the cluster's `configurationEx.vsanHostConfig`
+(the same `VsanHostConfigInfo` as `HostVsanSystem.config`). One read covers
+all hosts, and the path is the same on vCenter 8.0 and 9.x.
+
+**Answers never look healthy by mistake.** A vSAN fault reaches the caller
+with vCenter's fault type and text; a missing cluster gives `not_found`. An
+empty answer, a capacity answer without `limitHealth`, an object-health answer
+without `objectHealth`, and a finished pre-check without a result all raise.
+A failed pre-check task raises with the task's error text.
+A pre-check whose task ended but whose status is not `resourceCheckCompleted`
+(for example `resourceCheckFailed`) raises and names the status.
+
+**Modules.** `typed_ops_vsan_common.py` (group text, readers that accept the
+VI-JSON and the SOAP form of a value, `vsan_call`, `read_properties`),
+`typed_ops_vsan_cluster_info.py`, `typed_ops_vsan_capacity.py`,
+`typed_ops_vsan_performance.py`, `typed_ops_vsan_objects.py` (resync and
+object health) and `typed_ops_vsan_precheck.py`. Each module exports its own
+`TYPED_OPS`, and `typed_ops.py` collects them (see "How the typed ops are
+collected"). A later vSAN operation is a new module, or a row in one of these.
+
+Tests: `test_connectors_vmware_rest_typed_vsan_cluster_reads.py` and
+`test_connectors_vmware_rest_typed_vsan_object_reads.py` run the real
+connector over mocked HTTP on vCenter 9.1 (VI-JSON) and 8.0.3 (SOAP), with
+hand-made answers in the shape of the vendor types (`tests/_vsan_wire.py`).
+The reconcile lanes check every vSAN method against the pinned 9.0
+`vi-json.yaml` and the vSAN SDK method lists of 8.0 U1 and U2
+(`test_connectors_vmware_rest_composites_read_reconcile.py`,
+`test_connectors_vmware_rest_8_0_spec_reconcile.py`). No live vCenter was
+used; a separate lab proof runs the six reads on 8.0 and 9.x.
+
 ### Reads of many objects read every page (`vim_retrieve.py`, #4862)
 
 A `PropertyCollector.RetrievePropertiesEx` call that asks for many objects
@@ -5065,6 +5387,116 @@ a key; flight-recorder spans, with a control case without the tag),
 `tests/test_connectors_vmware_rest_license_reconcile.py` (the pinned 9.0
 `vi-json.yaml`) and the source scan in
 `tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` (8.0 U1, U2, U3).
+
+### Host local users and Active Directory (`host.local_user.*`, `host.ad.*`)
+
+Seven operations for who can log in to an ESXi host: its local users, and
+its Active Directory domain. They share the group `vmware-host-access` (two
+typed reads and five changes, one group text). Every change waits until a
+second person approves.
+
+| Operation | What it does | Returns | Vendor call | Risk |
+|---|---|---|---|---|
+| `vmware.host.local_user.list` | The local users of the host and their access role. | `users: [{user, full_name, uid, shell_access, access_mode}]`, `read_notes` | `UserDirectory.RetrieveUserGroups`, `HostAccessManager.RetrieveHostAccessControlEntries` | `safe` |
+| `vmware.composite.host.local_user.create` | Creates a local user; the password comes from Vault. | `status` (`created`, `already_exists`, `failed`, ...), `user` | `HostLocalAccountManager.CreateUser` | `dangerous` |
+| `vmware.composite.host.local_user.password.set` | Sets a new password for a local user, from Vault. | `status` (`password_set`, `not_found`, `failed`), `user` | `HostLocalAccountManager.UpdateUser` | `dangerous` |
+| `vmware.composite.host.local_user.delete` | Deletes a local user and its access role. Never `root`. | `status` (`deleted`, `unchanged`, `protected`, ...), `user` | `HostLocalAccountManager.RemoveUser` | `destructive` |
+| `vmware.host.ad.status` | Is the host in a domain, which one, and is the membership healthy. | `joined`, `domain`, `trusted_domains`, `membership_status` | property `info` of `HostAuthenticationManager` | `safe` |
+| `vmware.composite.host.ad.join` | Joins the host to a domain; the join account's password comes from Vault. | `status` (`joined`, `unchanged`, `joined_other_domain`, `failed`, `timeout`, ...), the domain fields, `task` | `HostActiveDirectoryAuthentication.JoinDomain_Task` | `dangerous` |
+| `vmware.composite.host.ad.leave` | Takes the host out of its domain; `force` also deletes the permissions of domain users. | `status` (`left`, `unchanged`, `failed`, `timeout`, ...), the domain fields, `task` | `HostActiveDirectoryAuthentication.LeaveCurrentDomain_Task` | `dangerous` |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 U1, 8.0 U2, 8.0 U3 and ESXi 8.0 U1 to U3 | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 and ESX 9.0 to 9.1.1 | `vmware-rest-9.0` |
+
+Every vendor call exists on all these versions, so no operation needs the
+version check (`_version_gate.py`).
+
+- **Which target.** Local users live on the host, not on vCenter:
+  `HostLocalAccountManager` and the host's `UserDirectory` are on the ESXi
+  service instance. So the four local-user operations need the ESXi host
+  itself as the target (MEHO's single-host path, with the host's own
+  credentials in Vault), also when a vCenter manages the host. On a vCenter
+  target they answer `needs_esxi_target` before any call
+  (`host_access.needs_esxi_target`). The domain operations work on both: on a
+  vCenter target the `host` parameter names the host (name or moid, the
+  `_resolve_host_and_manager` ladder of `composites/_host.py`); on an ESXi
+  target the host is the target (`ha-host`).
+- **How they call the host.** Through `_post_vmomi_json`: VI-JSON on
+  vCenter, SOAP on a single host. `soap_host_access.py` builds the SOAP
+  envelopes of `RetrieveServiceContent`, `RetrieveUserGroups`,
+  `RetrieveHostAccessControlEntries`, `CreateUser`, `UpdateUser`,
+  `RemoveUser`, `JoinDomain_Task` and `LeaveCurrentDomain_Task` from the same
+  VI-JSON body, in the order of the vim25 WSDL, and turns the answers back
+  into the VI-JSON shape (a list answer is an `ArrayOf...` box that
+  `unwrap_vim_value` opens). The connector hands these methods to it in
+  `_build_esxi_soap_envelope` and `_parse_esxi_soap_response`.
+- **The ids.** The account manager and the user directory come from
+  `RetrieveServiceContent`. The access manager and the authentication manager
+  come from `HostSystem.configManager`. The Active Directory object is the
+  `HostActiveDirectoryAuthentication` entry of the authentication manager's
+  `supportedStore`; its `info.authConfig` holds the `HostActiveDirectoryInfo`.
+- **Passwords.** The create, the password change and the join read the
+  password from Vault (`password_secret_ref`, with the optional
+  `password_secret_mount` and `password_secret_key`; `read_secret_param`) when
+  the call runs, under the identity of the person who runs it. The parameter
+  schemas have `additionalProperties: false`, so a password cannot be passed
+  in. The password is only in the call to the host. The gate params (and so
+  the approval request), the previews and the answers name the Vault path. A
+  vendor fault text that holds the password is replaced (`hide_secrets`).
+  The three operations are pinned `credential_write` in
+  `broadcast/events.py`: the flight recorder keeps no request body, the
+  broadcast keeps no params and the dispatcher withholds the vendor text of
+  an error result. On a single host, the SOAP vendor-call span never has a
+  request body anyway.
+- **Each change.** It reads first and sends nothing when the host already is
+  as asked (`already_exists`, `not_found`, `unchanged`, `joined_other_domain`).
+  Then one gated call through `_write_vmomi_sub_op`. The domain changes wait
+  for their task (`poll_vim_task`, 600 s). Then it reads again and answers with
+  the new state; when the read-back does not show the change, the answer is
+  `not_verified` / `still_present` with an `error` issue, so the audit row says
+  `error`. A vendor fault (a VI-JSON fault body, a SOAP fault, or a task fault)
+  answers `failed` with `error_type` and `error_message` and an `error` issue.
+  A login problem or a lost connection is raised to the dispatcher as before.
+- **A refused join account.** The join sends the join account's user name and
+  password, so the host can answer the call with an `InvalidLogin` fault that
+  means that account, not the target's credentials. Both transports turn an
+  `InvalidLogin` fault into a `ConnectorAuthError`; the join reads it back
+  (`host_access.vendor_fault` with `request_login`) when the error is from a
+  call on a live session (`stage` is `call`; the SOAP path sets it in
+  `_post_soap`). Then the answer is `failed` with `error_type` `InvalidLogin`,
+  the fault text without the password, and guidance that names the join
+  account. A fault of the session login (`stage` `establish`), and a
+  `NotAuthenticated` fault (a lost session), still go to the dispatcher as
+  `connector_auth_failed`.
+- **Large user lists.** `host.local_user.list` answers with two lists,
+  `users` and `read_notes`. Its `result_digest` hint names `users` as the
+  collection, so a long list comes back as a result handle whose rows the
+  caller pages and filters with `result_query`, with `status_counts` per
+  `access_mode` inline (a `null` role counts as `UNKNOWN`). Without the hint
+  the reducer would keep the whole answer as one document.
+- **The delete.** `host.local_user.delete` is `destructive`. Its preview reads
+  the user and its access role and fills the `blast_radius` (`object` is the
+  user, `children` its access role, `irreversibility` is `permanent`). It
+  refuses a user that does not exist, so nothing waits for approval. MEHO never
+  deletes `root` (`protected`): without it, nobody may be able to log in.
+- **Not in this part.** Giving a new user an access role, local groups, and
+  the domain join through a vSphere Authentication Proxy (`JoinDomainWithCAM_Task`).
+
+Files: `host_access.py` (shared reads, group text, vendor-call ids),
+`typed_ops_host_access.py` (the two reads), `composites/_host_local_users.py`,
+`composites/_host_ad.py`, `composites/_host_access_schemas.py`,
+`composites/_host_access_ops.py` (registry rows and vendor-call lists),
+`soap_host_access.py`.
+
+Tests: `tests/test_connectors_vmware_rest_host_access.py` (the handlers on a
+fake), `tests/test_connectors_vmware_rest_host_access_http.py` (mocked HTTP on
+the vCenter 8.0.3 and 9.0 VI-JSON paths and SOAP on a single host),
+`tests/test_connectors_vmware_rest_host_access_approval.py` (the dispatcher:
+levels on both catalogs, waiting for approval, the delete preview) and
+`tests/test_connectors_vmware_rest_host_access_reconcile.py` (the pinned 9.0
+and 8.0 U1, U2, U3 `vi-json.yaml`).
 
 ### Cluster list (`vmware.cluster.list`)
 
@@ -5309,6 +5741,194 @@ no live vCenter; mocked HTTP on the vCenter 8.0.3 and 9.0 VI-JSON paths) and
 field the read uses against the pinned 9.0 `vi-json.yaml` and the 8.0 U1,
 U2 and U3 files; the network list filters against the pinned 8.0 U3 and 9.0
 `vcenter.yaml`).
+
+### Host time, name and logging (`host.config.show`, `host.ntp.set`, `host.dns.set`, `host.syslog.set`)
+
+One read of a host's base settings, and three changes that set NTP, DNS and
+the host name, and the remote syslog targets. All are written by hand, so
+they work on a fresh install with no spec ingest. The read is in its own
+group `vmware-host-config`; the three changes are in the `host` group.
+
+| Operation | What it does | Vendor calls | Risk |
+|---|---|---|---|
+| `vmware.host.config.show` | One host's `ntp` (servers, time zone, clock protocol, ntpd start policy and whether it runs), `dns` (DHCP flag, host name, domain name, servers, search domains), `syslog` (`Syslog.global.logHost` and its targets), `lockdown_mode`, `snmp` (on or off, port, how many read-only communities, trap targets) and `core_dump` (the active partition). A part that cannot be read is `null` with a line in `read_notes`; the other parts still come back. | VIM `RetrievePropertiesEx` of `HostSystem.configManager.*`, then of `HostDateTimeSystem.dateTimeInfo`, `HostServiceSystem.serviceInfo`, `HostNetworkSystem.dnsConfig`, `HostAccessManager.lockdownMode`, `HostSnmpSystem.configuration`, `HostDiagnosticSystem.activePartition`; `OptionManager.QueryOptions` (`Syslog.global.logHost`) | `safe`; runs at once |
+| `vmware.composite.host.ntp.set` | Sets the NTP server list, sets ntpd to start `on` (or `automatic`), then restarts ntpd, or starts it when it is stopped. Returns `before` and `after`. | VIM `HostDateTimeSystem.UpdateDateTimeConfig`, `HostServiceSystem.UpdateServicePolicy` (`ntpd`), `HostServiceSystem.RestartService` or `StartService` (`ntpd`) | `dangerous`; waits for approval |
+| `vmware.composite.host.dns.set` | Sets DNS servers, search domains, host name and domain name; a field left out keeps its value. A host with DHCP DNS answers `dhcp_in_use` and nothing is sent. | VIM `HostNetworkSystem.UpdateDnsConfig` | `dangerous`; waits for approval |
+| `vmware.composite.host.syslog.set` | Sets the remote syslog targets (`Syslog.global.logHost`). An empty list removes all. | VIM `OptionManager.UpdateOptions` | `dangerous`; waits for approval |
+| `vmware.composite.host.service_control` | Now also allows `snmpd`, `sfcbd-watchdog` (CIM) and `slpd`, and reads the service back (`service_state`). | VIM `HostServiceSystem.StartService` / `StopService` / `RestartService` / `UpdateServicePolicy` | `dangerous`; waits for approval |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 U1, U2, U3 | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+All the calls exist on every version in the table, so no operation stops
+early with the version message.
+
+- **How it calls vCenter.** On the connector's own session, through
+  `_post_vmomi_json` on the VI-JSON path of the target's release
+  (`/sdk/vim25/{release}`). The host is a display name (tried first) or a
+  moid, looked up with `GET /vcenter/host`; two hosts with the same name
+  answer `ambiguous_host` with `candidate_hosts`. The settings sit on the
+  host's config managers, so each call first reads
+  `HostSystem.configManager` once. The shared helpers are in
+  `host_config.py`. These operations are through vCenter; the path for a
+  single ESXi host without vCenter comes with the single-host work (the
+  ESXi SOAP transport has no builder for these methods yet).
+- **Safe to run twice.** Each change reads the settings first. When the host
+  already has them, the answer is `unchanged` and nothing is sent. Otherwise
+  only the calls that change something are sent (for NTP: the server list
+  only when it differs, the policy only when it differs, then the restart or
+  start). After the calls, each change reads the settings back (`after`).
+  When the read-back does not show the new settings, or cannot be read, the
+  answer is `not_verified` with an `error` issue.
+- **Faults.** The calls are synchronous (no vCenter task). A vim fault (HTTP
+  500 with the fault object) gives `failed` with the fault class and text in
+  `fault`, the calls that ran before in `applied_steps`, and an `error` issue,
+  so the call is recorded as failed. Other HTTP errors (for example 401) are
+  passed on to the dispatcher unchanged.
+- **Input checks.** Each NTP server, DNS server, search domain and syslog
+  target is one plain value: the schema refuses spaces, commas and line
+  breaks, so a caller cannot add NTP options or a second target inside one
+  entry. The host name is one label without dots.
+- **Syslog reload.** The vSphere API has no call to reload syslog. The host
+  applies a new `Syslog.global.logHost` itself, as for a change in the
+  vSphere Client. For `udp` or `tcp` targets on the usual ports, the host's
+  `syslog` firewall rule set must be on (`vmware.composite.host.firewall.ruleset.set`,
+  see **Host security settings** below).
+- **Secrets.** SNMP community strings are passwords: `host.config.show`
+  only counts them and never returns them.
+- **Core dump.** `core_dump` shows the active diagnostic partition only. A
+  core dump file on a datastore is not shown by this API, so
+  `partition_active: false` does not mean that no core dump target is set.
+- **Approval card.** Each change has a preview that shows the host, its
+  current settings and what is asked. The NTP card also shows the ntpd
+  start policy and whether ntpd runs.
+- **The generic calls wait for approval too.** The generic (ingested) rows
+  of the same vim calls — `HostDateTimeSystem.UpdateDateTimeConfig`,
+  `HostNetworkSystem.UpdateDnsConfig`, `OptionManager.UpdateOptions` (also
+  vCenter's own advanced settings) and `HostServiceSystem.UpdateServicePolicy`,
+  `StartService`, `StopService` and `RestartService` — are `dangerous` and
+  wait for approval on the 8.0 and 9.0 catalogs. `ingest_safety.py`
+  (`VMWARE_VIM_HOST_CONFIG_WRITES`) raises them. A running install gets the
+  new level on the next catalog ingest. One approval of a typed change is
+  still enough: its steps are checked against the composite's own facts, so
+  no second approval is asked for.
+- **PTP hosts.** `host.ntp.set` does not change the clock protocol. On a
+  host with protocol `ptp` it still starts ntpd, so do not use it there.
+- **Size.** One small object per call, so no result handle.
+
+Code: `host_config.py` (shared reads and parsers), `typed_ops_host_config.py`
+(the read), `composites/_host_config_writes.py` (the three changes),
+`composites/_host_config_write_schemas.py` (parameters, answers, AI
+guidance), `composites/_host_config_ops.py` (registry rows, previews, the
+vim calls for the grant set). Tests:
+`tests/test_connectors_vmware_rest_host_config.py` (a fake vCenter: bodies,
+read-back, faults, previews, schema checks),
+`tests/test_connectors_vmware_rest_host_config_flow.py` (real HTTP on the
+vCenter 8.0.3 and 9.0 VI-JSON paths; approval through the dispatcher; both
+catalogs) and `tests/test_connectors_vmware_rest_host_config_reconcile.py`
+(every vim method, property and body field against the pinned 9.0
+`vi-json.yaml` and the 8.0 U1, U2 and U3 files).
+
+### Host security settings (advanced settings, firewall, lockdown, SNMP, core dump)
+
+Two reads and six changes for the hardening settings of one ESXi host,
+through vCenter. All are written by hand, so they work on a fresh install
+with no spec ingest. All eight are in the group `vmware-host-security`
+(the typed reads and the multi-step changes share the key and the text).
+
+| Operation | What it does | Vendor calls | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.host.advanced_settings.show` | One row per advanced setting: `key`, `value`, `default`, `is_default`, `value_type`, `read_only`, `label`. Filter by a key or a prefix that ends with a dot (`prefix`), or only the changed ones (`changed_only`). About 1000 rows for all settings, so a long list comes back as a result handle. | VIM `OptionManager.QueryOptions`; `RetrievePropertiesEx` of `OptionManager.supportedOption` (type, default, read-only flag) | `safe` | 8.0, 9.x |
+| `vmware.host.firewall.show` | The default policy and one row per rule set: on or off, required, service, ports (`rules`), allowed IP addresses (`allowed`). Filter by one rule set or `enabled_only`. | VIM `RetrievePropertiesEx` of `HostFirewallSystem.firewallInfo` | `safe` | 8.0, 9.x |
+| `vmware.composite.host.advanced_settings.set` | Sets up to 20 settings. Checks first that each key exists, is not read-only, and that the value has the setting's type and is in its range or choices; then sends only the values that differ, with the type vSphere expects (`int`, `long`, `boolean`, `float`, `string`). Each setting takes `value` or `value_secret_ref`, one of them (the schema says so with `oneOf`). A setting that holds a secret takes its value from Vault (`value_secret_ref`); a plain `value` for it is refused (`secret_value_required`). A setting holds a secret when its key names a password, secret, token or community, it is not a password policy setting (`Security.PasswordHistory`, `Security.PasswordQualityControl`), and it is free text: a number, a switch or a choice never does. | VIM `OptionManager.UpdateOptions` | `dangerous`; waits for approval | 8.0, 9.x |
+| `vmware.composite.host.firewall.ruleset.set` | Turns one rule set on or off and sets who may connect (`allowed`: `all_ip`, `ip_addresses`, `networks`). A required rule set is never turned off. The allowed list is sent before the rule set is turned on. | VIM `HostFirewallSystem.UpdateRuleset`, `EnableRuleset`, `DisableRuleset` | `dangerous`; waits for approval | 8.0, 9.x |
+| `vmware.composite.host.lockdown.set` | Sets lockdown mode: `disabled`, `normal` or `strict`. | VIM `HostAccessManager.ChangeLockdownMode` | `dangerous`; waits for approval | 8.0, 9.x |
+| `vmware.composite.host.lockdown.exceptions.set` | Replaces the users who keep access in lockdown mode; `[]` removes all. | VIM `HostAccessManager.QueryLockdownExceptions`, `UpdateLockdownExceptions` | `dangerous`; waits for approval | 8.0, 9.x |
+| `vmware.composite.host.snmp.set` | Sets the SNMP agent: on or off, port, the read-only community (from Vault, `community_secret_ref`) and trap targets. Fields left out keep their value. | VIM `RetrievePropertiesEx` of `HostSnmpSystem.configuration`, `HostSnmpSystem.ReconfigureSnmpAgent` | `dangerous`; waits for approval | 8.0, 9.x |
+| `vmware.composite.host.coredump.set` | Makes one free diagnostic partition the core dump partition. A partition that is not free gives `partition_not_available` with the free ones in `before.available`. | VIM `HostDiagnosticSystem.QueryAvailablePartition`, `SelectActivePartition` | `dangerous`; waits for approval | 8.0, 9.x |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 U1, U2, U3 | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+Every call exists in the pinned VI-JSON files of 8.0 U1, U2, U3 and 9.0, so
+no operation stops early with the version message. One difference: the 8.0
+U1 file has no `userControllable` and `ipListUserConfigurable` on a rule set.
+When they are missing, MEHO treats the rule set as changeable, and vSphere
+refuses a change it does not allow (the answer is `failed` with the fault).
+
+- **How it calls vCenter.** On the connector's own session, through
+  `_post_vmomi_json` on the VI-JSON path of the target's release
+  (`/sdk/vim25/{release}`). The host is a display name (tried first) or a
+  moid; two hosts with the same name answer `ambiguous_host` with
+  `candidate_hosts`. Each setting sits on one of the host's config managers
+  (`advancedOption`, `firewallSystem`, `hostAccessManager`, `snmpSystem`,
+  `diagnosticSystem`), so each call first reads that
+  `HostSystem.configManager` entry. A host whose vCenter does not offer the
+  manager answers `config_manager_unreadable`. A single ESXi host target
+  answers `needs_vcenter`: its SOAP path has no builder for these methods
+  yet (the single-host work adds it).
+- **Safe to run twice.** Each change reads the setting first. When the host
+  already has it, the answer is `unchanged` and nothing is sent. Otherwise
+  only the calls that change something are sent. After the calls, each change
+  reads the setting back (`after`). When the read-back does not show the
+  change, or cannot be read, the answer is `not_verified` with an `error`
+  issue.
+- **Faults.** The calls are synchronous (no vCenter task). A vim fault (HTTP
+  500 with the fault object) gives `failed` with the fault class and text in
+  `fault`, the calls that ran before in `applied_steps`, and an `error`
+  issue, so the call is recorded as failed. Other HTTP errors are passed on
+  to the dispatcher unchanged.
+- **Secrets.** The SNMP community is read from Vault under the caller's
+  identity (after an approval: the approver) and goes only into the
+  `ReconfigureSnmpAgent` request body. `host.snmp.set` is pinned
+  `credential_write` in `broadcast/events.py`, so the flight recorder keeps
+  no body, the broadcast keeps no params, and a waiting approval keeps its
+  params in the encrypted handoff store. Answers and previews count the
+  communities and never show one; a fault text that holds any community of
+  the request is replaced. The read-back after the change is compared with
+  the communities it holds, so a host that keeps the old community answers
+  `not_verified`; the answer still shows counts only. An advanced setting
+  whose key names a password, secret, token or community takes its value
+  only from Vault (`value_secret_ref`, with `value_secret_mount` and
+  `value_secret_key`, default key `value`); a plain `value` for it is
+  refused before anything is read. Any string setting may take its value
+  from Vault this way. Such a value goes only into the `UpdateOptions`
+  request body and shows `<hidden>` in every answer and preview, and a
+  fault text that holds it is replaced. `host.advanced_settings.set` is
+  pinned `credential_write` too, because the `QueryOptions` read-back
+  answers hold the value as well: no body of the change is recorded.
+- **SNMP fields left out.** MEHO reads the current agent settings and sends
+  them back with only the asked fields changed, so a call that only turns
+  the agent on keeps the port, communities, trap targets and options. A new
+  community also goes to the trap targets that are kept. New trap targets
+  use the new community, or the first current one; with none, the answer is
+  `community_required`. To start the `snmpd` service, use
+  `host.service_control`.
+- **Approval card.** Each change has a preview that shows the host, its
+  current setting and what is asked.
+- **Size.** Each change returns one small object. The settings read can be
+  long; MEHO stores a long list behind a result handle.
+
+Code: `host_security.py` (shared host lookup, reads and parsers, the group
+text), `typed_ops_host_security.py` (the two reads),
+`composites/_host_security_flow.py` (the shared change flow and preview),
+`composites/_host_security_writes.py` (advanced settings, firewall),
+`composites/_host_access_writes.py` (lockdown, exception users, SNMP, core
+dump), `composites/_host_security_schemas.py` and
+`composites/_host_snmp_coredump_schemas.py` (parameters, answers, AI guidance),
+`composites/_host_security_ops.py` (registry rows, previews, the vim calls
+for the grant set). Tests: `tests/test_connectors_vmware_rest_host_security.py`
+(a fake vCenter: bodies, read-back, refusals, faults, secrets, previews),
+`tests/test_connectors_vmware_rest_host_security_flow.py` (real HTTP on the
+vCenter 8.0.3 and 9.0 VI-JSON paths; approval through the dispatcher; both
+catalogs and the contract check) and
+`tests/test_connectors_vmware_rest_host_security_reconcile.py` (every vim
+method, property, manager and body field against the pinned 9.0
+`vi-json.yaml` and the 8.0 U1, U2 and U3 files).
 
 ## Dependencies
 

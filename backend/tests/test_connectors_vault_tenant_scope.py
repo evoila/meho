@@ -31,6 +31,8 @@ from meho_backplane.connectors.vault.connector import _SYSTEM_TENANT_ID
 from meho_backplane.connectors.vault.ops import register_vault_typed_operations
 from meho_backplane.connectors.vault.tenant_scope import (
     PLATFORM_EXEMPT_PATHS,
+    REASON_OUTSIDE_TENANT,
+    REASON_PATH_COULD_MOVE,
     VaultTenantScopeError,
     enforce_tenant_scope,
     rendered_tenant_prefix,
@@ -155,6 +157,7 @@ def test_out_of_namespace_path_is_denied() -> None:
     # The message names the offending path + tenant, never a secret value.
     assert f"tenant-{_TENANT_B}/db/creds" in str(exc.value)
     assert str(_TENANT_A) in str(exc.value)
+    assert exc.value.reason == REASON_OUTSIDE_TENANT
 
 
 def test_sibling_prefix_does_not_satisfy_the_guard() -> None:
@@ -176,13 +179,66 @@ def test_cross_mount_request_is_denied() -> None:
         enforce_tenant_scope(op, mount="other", path=f"tenant-{_TENANT_A}/db", read_only=True)
 
 
-def test_empty_template_disables_the_guard(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default (empty prefix) is a no-op — pre-#1643 behaviour."""
+def test_empty_template_turns_the_prefix_check_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty prefix turns the tenant prefix check off; a plain path passes."""
     monkeypatch.setenv("VAULT_KV_TENANT_SCOPE_PREFIX", "")
     get_settings.cache_clear()
     op = _operator(_TENANT_A)
-    # Any path, including a cross-tenant one, is allowed when disabled.
+    # Any plain path, including a cross-tenant one, is allowed.
     enforce_tenant_scope(op, mount="secret", path=f"tenant-{_TENANT_B}/db", read_only=False)
+
+
+_PATHS_THAT_COULD_MOVE = [
+    f"tenant-{_TENANT_A}/../tenant-{_TENANT_B}/db",
+    f"tenant-{_TENANT_A}/./db",
+    f"tenant-{_TENANT_A}/%2e%2e/tenant-{_TENANT_B}/db",
+    f"tenant-{_TENANT_A}\\db",
+]
+_PATHS_THAT_COULD_MOVE_IDS = ["dotdot", "dot", "encoded", "backslash"]
+
+
+@pytest.mark.parametrize("path", _PATHS_THAT_COULD_MOVE, ids=_PATHS_THAT_COULD_MOVE_IDS)
+def test_empty_template_still_refuses_a_path_that_could_move(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """With an empty prefix, a ``.`` / ``..`` segment, a ``%`` or a backslash is still refused.
+
+    The rule does not depend on a prefix, so the message does not speak of
+    a tenant prefix either.
+    """
+    monkeypatch.setenv("VAULT_KV_TENANT_SCOPE_PREFIX", "")
+    get_settings.cache_clear()
+    with pytest.raises(VaultTenantScopeError) as exc:
+        enforce_tenant_scope(_operator(_TENANT_A), mount="secret", path=path, read_only=True)
+    assert exc.value.reason == REASON_PATH_COULD_MOVE
+    assert "tenant prefix" not in str(exc.value)
+
+
+@pytest.mark.parametrize("path", _PATHS_THAT_COULD_MOVE, ids=_PATHS_THAT_COULD_MOVE_IDS)
+def test_path_that_could_move_is_refused_inside_the_prefix(path: str) -> None:
+    """With a prefix set, such a path is refused even though it starts with the prefix."""
+    with pytest.raises(VaultTenantScopeError) as exc:
+        enforce_tenant_scope(_operator(_TENANT_A), mount="secret", path=path, read_only=True)
+    assert exc.value.reason == REASON_PATH_COULD_MOVE
+
+
+async def test_handler_refuses_a_path_that_could_move_without_a_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_typed_ops: None,
+) -> None:
+    """With an empty prefix, ``vault.kv.read`` of a ``..`` path stops before any Vault login."""
+    monkeypatch.setenv("VAULT_KV_TENANT_SCOPE_PREFIX", "")
+    get_settings.cache_clear()
+    fake = install_fake_client(monkeypatch, secret={"k": "v"})
+    result = await _dispatch(
+        "vault.kv.read",
+        {"path": f"tenant-{_TENANT_A}/../tenant-{_TENANT_B}/db/creds"},
+        tenant_id=_TENANT_A,
+    )
+
+    assert result.status == "error"
+    assert result.extras.get("exception_class") == "VaultTenantScopeError"
+    assert fake.auth.jwt.login_calls == []
 
 
 def test_default_prefix_is_mount_pinned_per_tenant(monkeypatch: pytest.MonkeyPatch) -> None:

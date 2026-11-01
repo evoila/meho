@@ -19,13 +19,14 @@ the task MEHO reads the VM again; ``encrypted`` / ``decrypted`` only when the
 VM home and every disk read back in the asked state, else ``not_confirmed``.
 
 The schemas and AI guidance live in :mod:`._vm_security_schemas`; the shared
-registry in ``_register.py`` only splats :data:`VM_ENCRYPTION_COMPOSITES`.
+registry in ``_register.py`` only collects :data:`COMPOSITES`.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._teardown import (
     STATUS_INVALID_REQUEST,
     STATUS_PRECONDITION_FAILED,
@@ -62,7 +63,6 @@ from meho_backplane.connectors.vmware_rest.vim_body import VIM_TYPE_NAME_KEY
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
@@ -71,7 +71,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
-    "VM_ENCRYPTION_COMPOSITES",
+    "COMPOSITES",
     "encryption_spec",
     "vm_encryption_set_composite",
 ]
@@ -257,27 +257,27 @@ async def _encryption_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return preview
 
 
-register_preview_builder(OP_ID_VM_ENCRYPTION_SET, _encryption_preview)
-
-
-#: The registration row, as ``_CompositeSpec`` keyword arguments.
-VM_ENCRYPTION_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_VM_ENCRYPTION_SET,
-        "handler": vm_encryption_set_composite,
-        "summary": "Encrypt or decrypt a powered-off VM and its disks with a storage policy.",
-        "description": (
+#: The registration row. ``.set`` is no suffix the broadcast classifier
+#: knows, so the row says ``other`` on purpose.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_VM_ENCRYPTION_SET,
+        handler=vm_encryption_set_composite,
+        summary="Encrypt or decrypt a powered-off VM and its disks with a storage policy.",
+        description=(
             "Encrypts or decrypts a VM, named by its VM id, and all its disks by applying a "
             "storage policy: an encryption policy to encrypt, a policy without encryption to "
             "decrypt. The VM must be off. Encrypt needs a default key provider. Waits for "
             "approval."
         ),
-        "parameter_schema": VM_ENCRYPTION_SET_PARAMETER_SCHEMA,
-        "response_schema": VM_ENCRYPTION_SET_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "security", "encryption", "vi-json"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VM_ENCRYPTION_SET_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=VM_ENCRYPTION_SET_PARAMETER_SCHEMA,
+        response_schema=VM_ENCRYPTION_SET_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "security", "encryption", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VM_ENCRYPTION_SET_LLM_INSTRUCTIONS,
+        preview=_encryption_preview,
+        classifier_other=True,
+    ),
 )

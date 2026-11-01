@@ -17,13 +17,14 @@ Both use one ``VirtualMachine.ReconfigVM_Task`` (see :mod:`._vm_security`):
   read-only plan feeds the approval-card ``blast_radius`` and the handler.
 
 The schemas and AI guidance live in :mod:`._vm_security_schemas`; the shared
-registry in ``_register.py`` only splats :data:`VM_VTPM_COMPOSITES`.
+registry in ``_register.py`` only collects :data:`COMPOSITES`.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._teardown import (
     STATUS_INVALID_REQUEST,
     STATUS_PRECONDITION_FAILED,
@@ -68,7 +69,6 @@ from meho_backplane.connectors.vmware_rest.vim_body import VIM_TYPE_NAME_KEY
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
@@ -77,7 +77,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
-    "VM_VTPM_COMPOSITES",
+    "COMPOSITES",
     "plan_vtpm_remove",
     "vm_vtpm_add_composite",
     "vm_vtpm_remove_composite",
@@ -346,44 +346,42 @@ async def _vtpm_remove_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return blast_radius(plan)
 
 
-register_preview_builder(OP_ID_VM_VTPM_ADD, _vtpm_add_preview)
-register_preview_builder(OP_ID_VM_VTPM_REMOVE, _vtpm_remove_preview)
-
-
-#: The two registration rows, as ``_CompositeSpec`` keyword arguments.
-VM_VTPM_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_VM_VTPM_ADD,
-        "handler": vm_vtpm_add_composite,
-        "summary": "Add a virtual TPM to a powered-off VM.",
-        "description": (
+#: The two registration rows.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_VM_VTPM_ADD,
+        handler=vm_vtpm_add_composite,
+        summary="Add a virtual TPM to a powered-off VM.",
+        description=(
             "Adds a virtual TPM 2.0 device to a VM, named by its VM id. The VM must be off, "
             "use EFI firmware and hardware version 14 or newer. vCenter encrypts the VM files "
             "with a key from the default key provider. Waits for approval."
         ),
-        "parameter_schema": VM_VTPM_ADD_PARAMETER_SCHEMA,
-        "response_schema": VM_VTPM_ADD_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "security", "vtpm", "vi-json"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VM_VTPM_ADD_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_VM_VTPM_REMOVE,
-        "handler": vm_vtpm_remove_composite,
-        "summary": "Remove the virtual TPM of a powered-off VM; its secrets are lost.",
-        "description": (
+        parameter_schema=VM_VTPM_ADD_PARAMETER_SCHEMA,
+        response_schema=VM_VTPM_ADD_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "security", "vtpm", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VM_VTPM_ADD_LLM_INSTRUCTIONS,
+        preview=_vtpm_add_preview,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_VM_VTPM_REMOVE,
+        handler=vm_vtpm_remove_composite,
+        summary="Remove the virtual TPM of a powered-off VM; its secrets are lost.",
+        description=(
             "Removes the virtual TPM of a VM, named by its VM id. The VM must be off. The keys "
             "and secrets the guest kept in the vTPM are lost for good. A second person always "
             "approves, after a preview."
         ),
-        "parameter_schema": VM_VTPM_REMOVE_PARAMETER_SCHEMA,
-        "response_schema": VM_VTPM_REMOVE_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "security", "vtpm", "vi-json"],
-        "safety_level": "destructive",
-        "requires_approval": True,
-        "llm_instructions": VM_VTPM_REMOVE_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=VM_VTPM_REMOVE_PARAMETER_SCHEMA,
+        response_schema=VM_VTPM_REMOVE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "security", "vtpm", "vi-json"],
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions=VM_VTPM_REMOVE_LLM_INSTRUCTIONS,
+        preview=_vtpm_remove_preview,
+    ),
 )

@@ -9,7 +9,8 @@ that dispatches VMware Aria Operations (formerly vRealize Operations Manager;
 G3.6-T1 (#829) shipped the skeleton; #2395 rebuilt its auth on an
 acquired-token session (`OpsToken`) after live VCF Operations 9.0.2 rejected
 the original stateless HTTP Basic. The audited read set ships as typed ops
-(#2303), and so does VCF 9 licence management (#4089); the remaining
+(#2303), and so do VCF 9 licence management (#4089) and the VCF 9.1 fleet
+roles (#4480); the remaining
 `/suite-api` breadth is ingested/curated.
 
 Source: `backend/src/meho_backplane/connectors/vcf_operations/`.
@@ -354,6 +355,72 @@ All paths start with `/suite-api/internal/extension/`.
   the licence store is empty. Check with `entitlement.query` (`totalCount`) and
   `vcenter.query` (each vCenter `state: LICENSED`, `unlicensedUsage: 0`).
 
+### Fleet roles (VCF Operations 9.1 and newer)
+
+In VCF 9.1, VCF Operations decides who may do what in the fleet. A user or a
+group from the identity provider gets VCF roles (for example
+`vcf_administrator`), each for the whole SSO realm or for some VCF instances.
+Three typed operations read and change these roles. They live in
+`fleet_iam_ops.py` (the op metadata) and `fleet_iam_handlers.py` (the
+handlers, on the `VropsFleetIamHandlers` mixin that `VcfOperationsConnector`
+inherits). They share one group, `vrops-fleet-roles`.
+
+| op_id | What it does | What it returns | Calls | Risk | Versions |
+|---|---|---|---|---|---|
+| `vrops.fleet.role.list` | The VCF roles (built-in and custom) and the SSO realms | `{roles: [...], ssoRealms: [...]}`, flat rows | `GET …/iam/roles` (every page), `GET …/iam/ssorealms` | read | 9.1+ |
+| `vrops.fleet.principal.find` | Find users or groups of a realm with their roles, or read one user's or group's role assignments | `{principals: [...], totalCount}` or `{assignments: [...]}` | `POST …/ssorealms/{ssoRealmId}/users/query`, `POST …/groups/query` (reads sent as POST), `GET …/principals/{principalId}/roles` | read | 9.1+ |
+| `vrops.fleet.role.assign` | Give or remove VCF roles of one user or group | `{changed, vendorCall, before, after}` | `GET`, then `PUT` or `DELETE` on `…/principals/{principalId}/roles` | change (dangerous) | 9.1+ |
+
+All paths start with `/suite-api/api/fleet-management/iam/`.
+
+- **Versions.** The calls exist from VCF Operations 9.1 on. Each handler first
+  reads the target's version (the probed version, then the version the
+  operator set) and on 9.0 raises `NotImplementedError` with
+  `"<op_id>: the fleet roles API needs VCF Operations 9.1 or newer; this target
+  is <version>."` before any vendor call. The dispatcher returns it as
+  `connector_unsupported`. A target with no known version goes on.
+- **The vendor PUT replaces all roles.** `vrops.fleet.role.assign` reads the
+  current assignments, keeps every role that is not removed, adds or updates
+  the given roles, and sends the whole set. When no role is left it sends
+  `DELETE`. When nothing changes it sends nothing (`changed: false`), so it is
+  safe to run twice.
+- **Checks before a change.** An unknown SSO realm, an unknown role name, or a
+  user or group the vendor answers `404` for is reported as not found, and
+  nothing is written. A role in both `add` and `remove`, or a `VCF_INSTANCE`
+  scope without `resourceIds`, is refused.
+- **The last administrator.** MEHO refuses a change that takes the VCF
+  Administrator role (`vcf_administrator`) from a user or group when no other
+  user or group in the realm holds it. It looks through the users and groups
+  that have a role (`filters: HAS_ROLE`) for another holder. Any scope counts.
+  For users it counts only roles given to the user directly
+  (`roleAssignmentTypes` holds `DIRECT`). A user who has the role only
+  through a group does not count, because that group may be the one being
+  changed. The group itself counts on its own row. The changed user or group
+  is left out by its id in any letter case: the vendor may answer a UUID in
+  lower case while the caller wrote it in upper case.
+- **One change at a time per realm.** Two changes that read the same
+  assignments and each send the whole set back would drop each other's
+  role, and two removals could each still see the other administrator. So
+  the change handler holds a lock for the SSO realm from the read to the
+  write (`fleet_iam_lock.py`): an `asyncio.Lock` for calls in this process
+  and a PG advisory lock
+  (`db/advisory.py`, keyed by tenant, target and realm) for calls in other
+  workers. A second call waits up to 30 seconds for the lock, then fails
+  without writing (`another role change in SSO realm ... is still running`).
+  The wait covers only taking the lock; a call that holds it runs its reads
+  and its write to the end.
+- **Safety.** The two reads are `safe`. `vrops.fleet.role.assign` is
+  `dangerous` with `requires_approval=True`: it waits until a person approves
+  it, and an agent needs a grant for it.
+- **9.x only.** The ops are kept out of `VROPS_TYPED_OPS` (which the 8.x
+  connector reuses); only the 9.x registrar adds them.
+- **Spec check.** `backend/tests/test_connectors_vcf_operations_91_spec_reconcile.py`
+  checks every call above against the pinned VCF Operations 9.1.0 and 9.1.1
+  API files (`vcf-operations-9.1/` on the shelf). The vendor files fail MEHO's
+  OpenAPI metaschema check, so the lane reads their `paths` map directly.
+- **Not covered.** Creating or changing custom VCF roles and component roles,
+  identity providers, SSO realms, API clients and tokens.
+
 ### Shutdown
 
 `aclose()` clears the in-memory session-token cache and the shared
@@ -406,6 +473,7 @@ NSX / vRLI take).
 - **Task (OpsToken auth rebuild)**: <https://github.com/evoila/meho/issues/2395>
 - **Task (stat/metric read for sizing)**: <https://github.com/evoila/meho/issues/2838>
 - **Task (VCF 9 licence management)**: <https://github.com/evoila/meho/issues/4089>
+- **Task (fleet roles, 9.1)**: <https://github.com/evoila/meho/issues/4480>
 - **Parent initiative**: <https://github.com/evoila/meho/issues/369>
 - **Parent goal**: <https://github.com/evoila/meho/issues/214>
 - **Sibling skeletons (same Initiative wave)**:

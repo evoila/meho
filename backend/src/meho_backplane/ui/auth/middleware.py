@@ -28,6 +28,10 @@ must be reachable unauthenticated):
    dependency to render operator-scoped views.
 5. On miss, 302-redirect to ``/ui/auth/login?return_to=<original
    path>`` so the operator lands back on the deep link after auth.
+   An htmx request gets ``204`` + ``HX-Redirect`` instead, with
+   ``return_to`` set to the page from ``HX-Current-URL``. When the
+   browser still sent a session cookie, the URL also carries
+   ``reason=session_ended`` and the login page says the session ended.
 
 Static assets bypass
 --------------------
@@ -94,7 +98,6 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, cast
-from urllib.parse import quote
 
 import structlog
 from fastapi import Depends, HTTPException, Request, status
@@ -110,7 +113,11 @@ from meho_backplane.sandbox_mode import (
 )
 from meho_backplane.ui.audit import bind_ui_view_audit
 from meho_backplane.ui.auth.revalidation import revalidate_read_session
-from meho_backplane.ui.auth.routes import LOGIN_PATH, SESSION_COOKIE_NAME
+from meho_backplane.ui.auth.routes import (
+    SESSION_COOKIE_NAME,
+    login_location,
+    page_from_htmx_current_url,
+)
 from meho_backplane.ui.auth.session_store import load_session
 
 if TYPE_CHECKING:
@@ -227,27 +234,42 @@ def _extract_session_cookie(scope: Scope) -> str | None:
     return None
 
 
-def _request_is_htmx(scope: Scope) -> bool:
-    """True when the request carries htmx's ``HX-Request: true`` header.
+def _request_header(scope: Scope, name: bytes) -> bytes | None:
+    """Return the first value of header *name* (lower-case) from the raw ASGI scope.
 
     Read straight off the raw ASGI headers (ASGI lower-cases header names
-    per spec, so we match ``b"hx-request"``) to keep the redirect path
-    allocation-light -- no :class:`Request` construction needed.
+    per spec) to keep the redirect path allocation-light -- no
+    :class:`Request` construction needed.
     """
     headers = scope.get("headers")
     if not isinstance(headers, list):
-        return False
-    for name, value in headers:
-        if not isinstance(name, (bytes, bytearray)) or name != b"hx-request":
+        return None
+    for header_name, value in headers:
+        if header_name != name or not isinstance(value, (bytes, bytearray)):
             continue
-        if not isinstance(value, (bytes, bytearray)):
-            continue
-        return value.strip().lower() == b"true"
-    return False
+        return bytes(value)
+    return None
+
+
+def _request_is_htmx(scope: Scope) -> bool:
+    """True when the request carries htmx's ``HX-Request: true`` header."""
+    value = _request_header(scope, b"hx-request")
+    return value is not None and value.strip().lower() == b"true"
+
+
+def _htmx_current_page(scope: Scope) -> str | None:
+    """The console page an htmx request came from (``HX-Current-URL``), if any."""
+    value = _request_header(scope, b"hx-current-url")
+    if value is None:
+        return None
+    try:
+        return page_from_htmx_current_url(value.decode("ascii"))
+    except UnicodeDecodeError:
+        return None
 
 
 def _redirect_to_login(
-    original_path_with_query: str, *, is_htmx: bool = False
+    original_path_with_query: str, *, is_htmx: bool = False, session_ended: bool = False
 ) -> tuple[int, list[tuple[bytes, bytes]]]:
     """Build the ASGI ``http.response.start`` shape for the login redirect.
 
@@ -256,9 +278,11 @@ def _redirect_to_login(
     :class:`RedirectResponse`) keeps the middleware single-allocation
     on the redirect path -- the body is empty.
 
-    The ``return_to`` query value is the original path with its query
-    string, URL-encoded so an operator-supplied target with reserved
-    characters round-trips cleanly. The login route's
+    The ``return_to`` query value is the path to come back to (the
+    caller passes the original path with its query string, or for an
+    htmx request the page from ``HX-Current-URL``), URL-encoded so an
+    operator-supplied target with reserved characters round-trips
+    cleanly. The login route's
     :func:`_safe_return_to` validates the decoded value before it
     lands in any subsequent redirect.
 
@@ -273,9 +297,13 @@ def _redirect_to_login(
       bounce. ``HX-Redirect`` makes htmx perform a full-page navigation to
       the same login URL instead, reusing the repo's 204+``HX-Redirect``
       precedent (e.g. ``ui/routes/connectors/forms.py``).
+
+    ``session_ended`` adds ``reason=session_ended``: the browser still
+    held a session cookie, so a session existed and has ended (idle
+    limit, ten-hour limit, revoked, or a failed renewal). The login
+    route then shows "Your session ended. Please sign in again." first.
     """
-    encoded = quote(original_path_with_query, safe="")
-    location = f"{LOGIN_PATH}?return_to={encoded}"
+    location = login_location(original_path_with_query, session_ended=session_ended)
     if is_htmx:
         # No ``content-length`` here: RFC 9110 §8.6 forbids it on a 204,
         # and this middleware writes the raw ASGI response (no framework
@@ -487,11 +515,19 @@ class UISessionMiddleware:
             )
             full_path = f"{path}?{query_string}" if query_string else path
             is_htmx = _request_is_htmx(scope)
-            status_code, headers = _redirect_to_login(full_path, is_htmx=is_htmx)
+            # An htmx request loads a part of a page; after the login the
+            # person must land on the page, not on the fragment URL.
+            return_to = (_htmx_current_page(scope) if is_htmx else None) or full_path
+            # A cookie means the browser had a session, so it has ended
+            # (not a first visit): the login page says so first.
+            had_cookie = cookie_value is not None
+            status_code, headers = _redirect_to_login(
+                return_to, is_htmx=is_htmx, session_ended=had_cookie
+            )
             log.info(
                 "ui_session_missing_or_invalid",
                 path=path,
-                had_cookie=cookie_value is not None,
+                had_cookie=had_cookie,
                 is_htmx=is_htmx,
             )
             await send(

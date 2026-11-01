@@ -65,6 +65,10 @@ from meho_backplane.connectors.vmware_rest.composites._migration_inventory_schem
     MIGRATION_GROUP_WHEN_TO_USE,
 )
 from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
+from meho_backplane.connectors.vmware_rest.host_access import (
+    HOST_ACCESS_GROUP_KEY,
+    HOST_ACCESS_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.license_common import (
     LICENSE_GROUP_KEY,
     LICENSE_WHEN_TO_USE,
@@ -266,6 +270,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "migration": MIGRATION_GROUP_WHEN_TO_USE,
     # #4394: shared with the typed read vmware.vcenter.deployment.status.
     INSTALL_GROUP_KEY: INSTALL_WHEN_TO_USE,
+    # Shared with the two typed host-access reads: the same key and text.
+    HOST_ACCESS_GROUP_KEY: HOST_ACCESS_WHEN_TO_USE,
 }
 
 

@@ -39,13 +39,16 @@ backs ``fingerprint`` and the ``vr.api_file.get`` answer. The operation
 Operations
 ----------
 
-``vr.about`` and ``vr.api_file.get``. The entry methods are defined on
-this class and call the shared code (``server_about`` on the base class
-and :func:`~meho_backplane.connectors.vmware_shared.dr_api_file.dr_api_file_get`).
-Defining them here, not on the base class, is what keeps a ``vr.*``
-operation from running on an ``srm`` target: the stored handler names
-this class, and the dispatcher binds it only to a ``VrConnector``. Both
-operations exist on 8.8, 9.0 and 9.1, so no operation needs a version
+``vr.about`` and ``vr.api_file.get`` call the shared code
+(``server_about`` on the base class and
+:func:`~meho_backplane.connectors.vmware_shared.dr_api_file.dr_api_file_get`).
+``vr.pairing.list``, ``vr.replication.list``, ``vr.replication.issues``,
+``vr.vm.check`` and ``vr.task.get`` call the bodies in
+:mod:`meho_backplane.connectors.vr.reads`. The entry methods are defined
+on this class, not on the base class: that is what keeps a ``vr.*``
+operation from running on an ``srm`` target. The stored handler names
+this class, and the dispatcher binds it only to a ``VrConnector``. Every
+operation exists on 8.8, 9.0 and 9.1, so no operation needs a version
 check yet.
 """
 
@@ -96,3 +99,43 @@ class VrConnector(DrRestConnector):
     ) -> dict[str, Any]:
         """``vr.api_file.get``; the body is ``vmware_shared.dr_api_file.dr_api_file_get``."""
         return await dr_api_file_get(self, operator, target, params)
+
+    async def pairing_list(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vr.pairing.list``; the body is ``vr.reads.pairing_list_impl``."""
+        from meho_backplane.connectors.vr.reads import pairing_list_impl
+
+        return await pairing_list_impl(self, operator, target, params)
+
+    async def replication_list(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vr.replication.list``; the body is ``vr.reads.replication_list_impl``."""
+        from meho_backplane.connectors.vr.reads import replication_list_impl
+
+        return await replication_list_impl(self, operator, target, params)
+
+    async def replication_issues(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vr.replication.issues``; the body is ``vr.reads.replication_issues_impl``."""
+        from meho_backplane.connectors.vr.reads import replication_issues_impl
+
+        return await replication_issues_impl(self, operator, target, params)
+
+    async def vm_check(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vr.vm.check``; the body is ``vr.reads.vm_check_impl``."""
+        from meho_backplane.connectors.vr.reads import vm_check_impl
+
+        return await vm_check_impl(self, operator, target, params)
+
+    async def task_get(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vr.task.get``; the body is ``vr.reads.task_get_impl``."""
+        from meho_backplane.connectors.vr.reads import task_get_impl
+
+        return await task_get_impl(self, operator, target, params)

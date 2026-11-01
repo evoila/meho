@@ -1,0 +1,35 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Session-ended page, served by ``GET /ui/auth/login?reason=session_ended``.
+
+  A session the browser still held has ended: the console stops a
+  session after 1 hour without use and after 10 hours at most, and the
+  login server can end it earlier. The page says so in one plain line
+  and offers a "Sign in" button. The button starts the normal login,
+  which brings the person back to the page they were on
+  (``sign_in_url`` carries the checked ``return_to``).
+
+  A standalone document, not ``base.html``: there is no session, so
+  there is no sidebar, tenant or account to show.
+-#}
+<!doctype html>
+<html lang="en" data-theme="meho-dark" class="h-full">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Session ended &middot; MEHO Operator Console</title>
+    {% include "_head_assets.html" %}
+  </head>
+  <body class="flex min-h-full items-center justify-center p-6">
+    <main class="card bg-base-200 w-full max-w-md shadow-xl">
+      <div class="card-body items-center text-center">
+        <p data-testid="session-ended-message">Your session ended. Please sign in again.</p>
+        <div class="card-actions mt-2">
+          <a class="btn btn-primary" href="{{ sign_in_url }}" data-testid="session-ended-sign-in">Sign in</a>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>

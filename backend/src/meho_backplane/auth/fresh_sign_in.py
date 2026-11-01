@@ -11,10 +11,18 @@ sign-in. A token refresh keeps that time (RFC 9470 section 6.1), so an old
 sign-in stays old however often the token is renewed.
 
 :func:`has_fresh_sign_in` passes only for a person (not an agent, a service
-account or a runner) whose ``auth_time`` is at most
-``FRESH_SIGN_IN_MAX_AGE_SECONDS`` old. A token without ``auth_time`` fails
-(fail closed). :func:`fresh_sign_in_challenge` builds the ``401`` answer
-from RFC 9470 section 3, so a client knows to sign in again.
+account or a runner) whose ``auth_time`` is at most *max_age_seconds* old.
+There are two limits (#5515):
+
+* ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`` (default 300) for an action that
+  needs a fresh sign-in each time: turning approval off, and approving a
+  ``destructive`` operation. It is the default here.
+* ``FRESH_SIGN_IN_MAX_AGE_SECONDS`` (default 900), the approval window: one
+  sign-in may approve several other requests while it is this young.
+
+A token without ``auth_time`` fails (fail closed).
+:func:`fresh_sign_in_challenge` builds the ``401`` answer from RFC 9470
+section 3, so a client knows to sign in again.
 
 The console does not use this check: a click in the web session is the
 person's proof there.
@@ -37,23 +45,34 @@ __all__ = ["CLOCK_SKEW_SECONDS", "fresh_sign_in_challenge", "has_fresh_sign_in"]
 CLOCK_SKEW_SECONDS: Final[int] = 60
 
 
-def has_fresh_sign_in(operator: Operator, *, now: float | None = None) -> bool:
-    """Return ``True`` when *operator* is a person who signed in just now."""
+def has_fresh_sign_in(
+    operator: Operator, *, now: float | None = None, max_age_seconds: int | None = None
+) -> bool:
+    """Return ``True`` when *operator* is a person who signed in just now.
+
+    *max_age_seconds* defaults to ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``.
+    """
     if not is_human_principal(operator) or operator.auth_time is None:
         return False
+    if max_age_seconds is None:
+        max_age_seconds = get_settings().per_action_sign_in_max_age_seconds
     age = (time.time() if now is None else now) - operator.auth_time
-    return -CLOCK_SKEW_SECONDS <= age <= get_settings().fresh_sign_in_max_age_seconds
+    return -CLOCK_SKEW_SECONDS <= age <= max_age_seconds
 
 
-def fresh_sign_in_challenge(detail: str) -> HTTPException:
-    """Return the ``401`` that asks the client for a fresh sign-in (RFC 9470)."""
-    max_age = get_settings().fresh_sign_in_max_age_seconds
+def fresh_sign_in_challenge(detail: str, *, max_age_seconds: int | None = None) -> HTTPException:
+    """Return the ``401`` that asks the client for a fresh sign-in (RFC 9470).
+
+    *max_age_seconds* defaults to ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``.
+    """
+    if max_age_seconds is None:
+        max_age_seconds = get_settings().per_action_sign_in_max_age_seconds
     return HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail=detail,
         headers={
             "WWW-Authenticate": (
-                f'Bearer error="insufficient_user_authentication", max_age={max_age}'
+                f'Bearer error="insufficient_user_authentication", max_age={max_age_seconds}'
             )
         },
     )

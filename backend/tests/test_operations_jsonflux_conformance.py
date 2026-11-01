@@ -482,6 +482,10 @@ _PARTS_HELD_BACK: dict[str, str] = {
     "vmware.composite.vm.guest.file.read": (
         "credential_write: it reads guest files, which can hold secrets."
     ),
+    "vmware.composite.host.advanced_settings.set": (
+        "credential_write: before and after hold setting values, and a setting can be a "
+        "secret from Vault. The answer is small (at most 20 settings), so a spill is rare."
+    ),
 }
 
 _SAMPLE_PART_OBJECT: dict[str, Any] = {"note": "sample"}

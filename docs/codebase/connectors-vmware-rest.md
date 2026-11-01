@@ -575,7 +575,16 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     `VirtualMachine`'s
     `runtime.powerState`, `guest.ipAddress` / `guest.hostName` /
     `guest.toolsStatus` / `guest.toolsRunningStatus`,
-    `guestHeartbeatStatus`, and `storage.perDatastoreUsage`. Unlike
+    `guestHeartbeatStatus`, `storage.perDatastoreUsage`,
+    `config.hardware.device` and `guest.disk`. The device list gives the
+    `disks` (size, file, datastore, thin or thick, controller, unit) and
+    the `nics` (adapter type, MAC address, port group, connected or not);
+    `guest.disk` gives the `guest_filesystems` (mount point, file system,
+    size, free space; empty when VMware Tools does not run). The parsers
+    are in `vm_devices.py`. The VIM device list is used instead of the REST
+    VM detail because only it says thin or thick. The names of distributed
+    port groups come from one more, best-effort property read; when it
+    fails, `network_name` is `null`. Unlike
     `host.usage`'s per-host best-effort leg, this single-object read is
     **load-bearing** (a failure propagates). The "poweredOn but no
     guest IP" hung-appliance shape is representable in one call — the
@@ -905,9 +914,16 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   sends an empty array and no `missingSet` entry, and is `ok` with zero
   rows. Set-shaped (JSONFlux-reduced when large).
 - **`vmware.snapshot.list`** (`typed_ops_snapshot_list.py`, handler
-  `snapshot_list`) — the snapshots of one VM (by `vm` moid) as a flat list in
-  tree order. `safe`, in its own group `vmware-snapshot-list`, on both
-  catalogs. See **VM snapshot operations** under Control flow.
+  `snapshot_list`) — the snapshots of one VM (by `vm` moid) or of every VM, as
+  a flat list, with age and size on disk; `older_than_days` keeps the old ones.
+  `safe`, in its own group `vmware-snapshot-list`, on both catalogs. See **VM
+  snapshot operations** under Control flow.
+- **`vmware.vm.list`** (`typed_ops_vm_list.py`, handler `vm_list`) and
+  **`vmware.inventory.find`** (`typed_ops_inventory_find.py`, handler
+  `inventory_find`) — every VM with its state in one call, and objects of any
+  kind by name, pattern or inventory path. `safe`, in the shared group
+  `vmware-inventory`, on both catalogs. See **VM list and inventory search**
+  under Control flow.
 - **`vmware.cluster.list`** (`typed_ops_cluster_list.py`, handler
   `cluster_list`) — the clusters of a vCenter, with the datacenter, the
   number of hosts, and whether HA, DRS and vSAN are on. `safe`, in its own
@@ -933,6 +949,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `folder_list`) — the inventory folders of a vCenter, one flat row each, with
   the datacenter and the parent. `safe`, in its own group `vmware-folders`, on
   both catalogs. See **Folder list** under Control flow.
+- **`vmware.host.advanced_settings.show`** and **`vmware.host.firewall.show`**
+  (`typed_ops_host_security.py`, handlers `host_advanced_settings_show` and
+  `host_firewall_show`) — the advanced settings of one host (with the ones
+  that differ from the default marked) and its firewall rule sets. `safe`, in
+  the group `vmware-host-security` with the six host security changes, on
+  both catalogs. See **Host security settings** under Control flow.
 - **`vmware.network.portgroup.show`** (`typed_ops_portgroup_show.py`,
   handler `network_portgroup_show`) — all settings of one distributed port
   group, by id or name. `safe`, in its own group `vmware-portgroup-settings`,
@@ -2907,33 +2929,46 @@ Code: `composites/_drs_group.py` (shared group reads + `members.set`),
 manifests are in `_governed_subops.py`. All of them are on `vmware-rest-8.0` and
 `vmware-rest-9.0`.
 
-### VM snapshot operations (`vmware.snapshot.list`, `vm.snapshot.create` / `.delete` / `.revert`)
+### VM snapshot operations (`vmware.snapshot.list`, `vm.snapshot.create` / `.delete` / `.delete_all` / `.revert`, `vm.disks.consolidate`)
 
 These operations cover the snapshot work on one VM. vCenter's REST API has no
 snapshot paths, so all of them use the VIM API, as VI-JSON on vCenter.
 
 | Operation | What it does | Returns | Risk |
 |---|---|---|---|
-| `vmware.snapshot.list` (typed) | Reads the VM's `snapshot` property (`rootSnapshotList`, `currentSnapshot`) | `{vm, vm_name, current_snapshot_id, snapshot_count, snapshots}`; each row: `snapshot_id`, `name`, `description`, `created`, `power_state`, `quiesced`, `current`, `parent_snapshot_id` | `safe` |
+| `vmware.snapshot.list` (typed) | One VM (`vm`) or every VM (`vm` left out); `older_than_days` keeps the snapshots taken longer ago. Reads `snapshot` (`rootSnapshotList`, `currentSnapshot`) and `layoutEx` | `{vm, vm_name, current_snapshot_id, snapshot_count, read_note, snapshots}`; each row: `vm`, `vm_name`, `snapshot_id`, `name`, `description`, `created`, `power_state`, `quiesced`, `current`, `parent_snapshot_id`, `age_days`, `memory`, `size_bytes` | `safe` |
 | `vmware.composite.vm.snapshot.create` | `VirtualMachine.CreateSnapshotEx_Task` with `snapshot_name`, optional `description`, `memory` (default false), `quiesce` (default false) | `{status, vm, vm_name, snapshot_id, snapshot, task, task_state, guidance}` | `caution`, `requires_approval=True` |
 | `vmware.composite.vm.snapshot.delete` | `VirtualMachineSnapshot.RemoveSnapshot_Task` for one `snapshot_id`; `remove_children` (default false) | the teardown envelope `{status, object, blockers, task, task_state, guidance}` | `destructive`, `requires_approval=True` |
 | `vmware.composite.vm.snapshot.revert` | `VirtualMachineSnapshot.RevertToSnapshot_Task`, by `snapshot_name` or `snapshot_id` (exactly one) | `{status, snapshot_id, candidates, guidance}` | `dangerous`, `requires_approval=True` |
+| `vmware.composite.vm.snapshot.delete_all` | `VirtualMachine.RemoveAllSnapshots_Task` with `consolidate: true` | the teardown envelope; `object`: `{kind, vm, vm_name, snapshot_count, snapshots_left}` | `destructive`, `requires_approval=True` |
+| `vmware.composite.vm.disks.consolidate` | `VirtualMachine.ConsolidateVMDisks_Task`, only when `runtime.consolidationNeeded` is true | `{status, vm, vm_name, consolidation_needed, task, task_state, guidance}` | `caution`, `requires_approval=True` |
 
 | Versions | Catalog |
 |---|---|
 | vCenter 8.0 U1, 8.0 U2, 8.0 U3 | `vmware-rest-8.0` |
 | vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
 
-Every vendor call is in the pinned 8.0 U1, 9.0 and 9.1.1 `vi-json.yaml`.
+Every vendor call is in the pinned 8.0 U1, 9.0 and 9.1.1 `vi-json.yaml`, so no
+operation needs the version check.
 
 - **Shared rows.** `snapshot_tree.py` turns the tree into flat rows, a parent
   before its children. It imports nothing from the connector, so the typed
   read, the composites and `schemas.py` share it without an import cycle. A
   one-node list that arrives as a plain dict (the SOAP shape of a single ESXi
   host) is read too.
-- **list.** A missing VM is `not_found`. A `snapshot` property vCenter could
+- **list.** For one VM, one property read of `name`, `snapshot` and
+  `layoutEx`. A missing VM is `not_found`. A `snapshot` property vCenter could
   not read (a `missingSet` entry) fails the call: an empty list would wrongly
-  say "no snapshots".
+  say "no snapshots". For every VM, a container view of all VMs reads `name`
+  and `snapshot` (see **VM list and inventory search**), then `layoutEx` is
+  read for the VMs with snapshots only. A VM whose snapshots vCenter could not
+  read is left out and counted in `read_note`; a failed `layoutEx` read leaves
+  `size_bytes` `null` and says so in `read_note`. `age_days` and the
+  `older_than_days` filter use `createTime`. `size_bytes` is counted like govc
+  (`object.SnapshotSize` in govmomi): the snapshot's `.vmsn` file and the disk
+  files of its chain that its parent does not have (for a root snapshot,
+  without the base disk); the current snapshot also counts the running delta
+  disks. `memory` is true when the saved power state is not `poweredOff`.
 - **create.** It uses `CreateSnapshotEx_Task`, because the pinned files mark the
   plain `CreateSnapshot_Task` deprecated since vSphere 8.0. `quiesce` sends an
   empty `VirtualMachineGuestQuiesceSpec`, like `govc snapshot.create -q`. A VM
@@ -2961,13 +2996,24 @@ Every vendor call is in the pinned 8.0 U1, 9.0 and 9.1.1 `vi-json.yaml`.
   for the three snapshot tasks, so create, delete and revert stop there with an
   error. The list uses the supported `RetrievePropertiesEx`, but no test covers
   it on SOAP.
-- **Not here** (Task #4334): the snapshots of all VMs in one call, an "older
-  than N days" filter, the size on disk, delete all snapshots, and disk
-  consolidation.
+- **delete_all.** The same plan seam as delete. An unknown VM is
+  `invalid_request`; a VM without snapshots is `unchanged`. The approval card
+  lists every snapshot (up to 50) as `children`. `deleted` only when a new read
+  shows no snapshots; otherwise `still_present` with `snapshots_left`. Needs a
+  preview and a second person; an agent is refused.
+- **disks.consolidate.** Reads `runtime.consolidationNeeded` first: only
+  `true` runs the task. `false` means `unchanged` and a flag vCenter did not
+  report means `unknown`; nothing is written in both cases. An unknown VM is
+  `not_found`. After the task it reads the flag again: `false` is
+  `consolidated`, `true` is `still_needed`, and a missing flag is `unverified`
+  with a warning issue. It waits for approval (`caution`); the approval card
+  echoes the VM.
 
 Code: `typed_ops_snapshot_list.py`, `snapshot_tree.py`, `composites/_snapshot.py`
-(create and delete) and `composites/_write.py` (revert). The governed sub-op
-manifests are in `_governed_subops.py`.
+(create and delete), `composites/_snapshot_cleanup.py` (delete_all and
+consolidate; its rows are in `composites/_snapshot_cleanup_ops.py`) and
+`composites/_write.py` (revert). The governed sub-op manifests are in
+`_governed_subops.py`.
 
 ### AI guidance of the host and cluster operations
 
@@ -5349,6 +5395,55 @@ a key; flight-recorder spans, with a control case without the tag),
 `vi-json.yaml`) and the source scan in
 `tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` (8.0 U1, U2, U3).
 
+### VM list and inventory search (`vmware.vm.list`, `vmware.inventory.find`)
+
+Two typed reads for the most common vCenter question: "what is there?". Both
+use the VIM API on the connector's own session, so they need no spec ingest.
+They share the group `vmware-inventory`.
+
+| Operation | What it does | Vendor calls | Risk |
+|---|---|---|---|
+| `vmware.vm.list` | One row per VM: `vm`, `name`, `power_state`, `host`, `host_name`, `cluster`, `cluster_name`, `folder`, `folder_name`, `guest_os`, `ip_address`, `cpu_count`, `memory_mb`, `used_storage_bytes`, `provisioned_storage_bytes`, `tools_status`, `snapshot_count`, `template`; plus `vm_count` and `read_note`. Filters: at most one of `cluster`, `host`, `folder` (moids), `power_state`, `name_pattern` | `ServiceInstance.RetrieveServiceContent`, `ViewManager.CreateContainerView` (type `VirtualMachine`), `PropertyCollector.RetrievePropertiesEx` and `ContinueRetrievePropertiesEx`, `ContainerView.DestroyView`; one more property read of the hosts, clusters and folders for their names | `safe`; runs at once |
+| `vmware.inventory.find` | Objects of any kind by exact `name`, `name_pattern` or inventory `path`; optional `type` (`vm`, `host`, `cluster`, `datastore`, `network`, `folder`, `datacenter`, `resource_pool`, ...). Each match: `kind`, `vim_type`, `id`, `name`, `path` | by path: `SearchIndex.FindByInventoryPath`; by name: the same container-view read as above, of every managed entity, properties `name` and `parent` | `safe`; runs at once |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 U1, 8.0 U2, 8.0 U3 | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+- **Why the VIM API.** The REST list `GET /api/vcenter/vm` stops at 4,000 VMs
+  and has no guest OS, IP address, storage, host or snapshot data. A container
+  view reads every VM with all of it in one paged read, like govc and PowerCLI.
+- **View reads (`vim_view.py`).** `read_view` makes the view below a container
+  (recursive), reads it with `retrieve_all_pages` (up to 1,000 objects per
+  page), and destroys the view in a `finally`; a failed destroy is only
+  logged. An unknown container raises `ConnectorResourceNotFoundError`, so the
+  caller gets `not_found`. `read_props` reads a list of known objects.
+- **vm.list scope and filters.** `cluster`, `host` or `folder` is the view's
+  container (at most one, `not anyOf` in the schema). `power_state` and
+  `name_pattern` (`*` and `?`, letter case does not matter) run in MEHO after
+  the read. `provisioned_storage_bytes` is `committed + uncommitted`, like
+  PowerCLI. The name read is best-effort: when it fails, the names and the
+  cluster are `null` and `read_note` says why. When vCenter could not read the
+  `snapshot` property of a VM (it is in the `missingSet` of the answer), that
+  row's `snapshot_count` is `null` and `read_note` says how many rows; the
+  count is never reported as zero for a failed read.
+- **inventory.find paths.** By name, the one read of `name` and `parent` of
+  every entity also gives the parents, so each match gets its inventory path
+  (from the datacenter down, as govc prints it; a `/` in a name is `%2f`). By
+  path, vCenter answers with the object or with nothing; the name is the last
+  path segment. No match is an empty list.
+- **Large lists.** The rows are flat, so a long list comes back as a result
+  handle that the caller reads with `result_query`. A test lists 5,000 VMs
+  in one call behind a handle.
+
+Code: `typed_ops_vm_list.py`, `typed_ops_inventory_find.py`, `vim_view.py`.
+Tests: `tests/test_connectors_vmware_rest_typed_vm_inventory.py` (a fake vCenter
+in `tests/_vmware_view_fake.py`, no live vCenter). The vendor calls are checked
+against the pinned VI-JSON files by
+`tests/test_connectors_vmware_rest_composites_l2_ingest_reconcile.py` (9.0) and
+`tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` (8.0 U1, U2, U3).
+
 ### Host local users and Active Directory (`host.local_user.*`, `host.ad.*`)
 
 Seven operations for who can log in to an ESXi host: its local users, and
@@ -5755,8 +5850,8 @@ early with the version message.
 - **Syslog reload.** The vSphere API has no call to reload syslog. The host
   applies a new `Syslog.global.logHost` itself, as for a change in the
   vSphere Client. For `udp` or `tcp` targets on the usual ports, the host's
-  `syslog` firewall rule set must be on (the firewall operations come with
-  the next host task).
+  `syslog` firewall rule set must be on (`vmware.composite.host.firewall.ruleset.set`,
+  see **Host security settings** below).
 - **Secrets.** SNMP community strings are passwords: `host.config.show`
   only counts them and never returns them.
 - **Core dump.** `core_dump` shows the active diagnostic partition only. A
@@ -5790,6 +5885,105 @@ read-back, faults, previews, schema checks),
 vCenter 8.0.3 and 9.0 VI-JSON paths; approval through the dispatcher; both
 catalogs) and `tests/test_connectors_vmware_rest_host_config_reconcile.py`
 (every vim method, property and body field against the pinned 9.0
+`vi-json.yaml` and the 8.0 U1, U2 and U3 files).
+
+### Host security settings (advanced settings, firewall, lockdown, SNMP, core dump)
+
+Two reads and six changes for the hardening settings of one ESXi host,
+through vCenter. All are written by hand, so they work on a fresh install
+with no spec ingest. All eight are in the group `vmware-host-security`
+(the typed reads and the multi-step changes share the key and the text).
+
+| Operation | What it does | Vendor calls | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.host.advanced_settings.show` | One row per advanced setting: `key`, `value`, `default`, `is_default`, `value_type`, `read_only`, `label`. Filter by a key or a prefix that ends with a dot (`prefix`), or only the changed ones (`changed_only`). About 1000 rows for all settings, so a long list comes back as a result handle. | VIM `OptionManager.QueryOptions`; `RetrievePropertiesEx` of `OptionManager.supportedOption` (type, default, read-only flag) | `safe` | 8.0, 9.x |
+| `vmware.host.firewall.show` | The default policy and one row per rule set: on or off, required, service, ports (`rules`), allowed IP addresses (`allowed`). Filter by one rule set or `enabled_only`. | VIM `RetrievePropertiesEx` of `HostFirewallSystem.firewallInfo` | `safe` | 8.0, 9.x |
+| `vmware.composite.host.advanced_settings.set` | Sets up to 20 settings. Checks first that each key exists, is not read-only, and that the value has the setting's type and is in its range or choices; then sends only the values that differ, with the type vSphere expects (`int`, `long`, `boolean`, `float`, `string`). Each setting takes `value` or `value_secret_ref`, one of them (the schema says so with `oneOf`). A setting that holds a secret takes its value from Vault (`value_secret_ref`); a plain `value` for it is refused (`secret_value_required`). A setting holds a secret when its key names a password, secret, token or community, it is not a password policy setting (`Security.PasswordHistory`, `Security.PasswordQualityControl`), and it is free text: a number, a switch or a choice never does. | VIM `OptionManager.UpdateOptions` | `dangerous`; waits for approval | 8.0, 9.x |
+| `vmware.composite.host.firewall.ruleset.set` | Turns one rule set on or off and sets who may connect (`allowed`: `all_ip`, `ip_addresses`, `networks`). A required rule set is never turned off. The allowed list is sent before the rule set is turned on. | VIM `HostFirewallSystem.UpdateRuleset`, `EnableRuleset`, `DisableRuleset` | `dangerous`; waits for approval | 8.0, 9.x |
+| `vmware.composite.host.lockdown.set` | Sets lockdown mode: `disabled`, `normal` or `strict`. | VIM `HostAccessManager.ChangeLockdownMode` | `dangerous`; waits for approval | 8.0, 9.x |
+| `vmware.composite.host.lockdown.exceptions.set` | Replaces the users who keep access in lockdown mode; `[]` removes all. | VIM `HostAccessManager.QueryLockdownExceptions`, `UpdateLockdownExceptions` | `dangerous`; waits for approval | 8.0, 9.x |
+| `vmware.composite.host.snmp.set` | Sets the SNMP agent: on or off, port, the read-only community (from Vault, `community_secret_ref`) and trap targets. Fields left out keep their value. | VIM `RetrievePropertiesEx` of `HostSnmpSystem.configuration`, `HostSnmpSystem.ReconfigureSnmpAgent` | `dangerous`; waits for approval | 8.0, 9.x |
+| `vmware.composite.host.coredump.set` | Makes one free diagnostic partition the core dump partition. A partition that is not free gives `partition_not_available` with the free ones in `before.available`. | VIM `HostDiagnosticSystem.QueryAvailablePartition`, `SelectActivePartition` | `dangerous`; waits for approval | 8.0, 9.x |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 U1, U2, U3 | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+Every call exists in the pinned VI-JSON files of 8.0 U1, U2, U3 and 9.0, so
+no operation stops early with the version message. One difference: the 8.0
+U1 file has no `userControllable` and `ipListUserConfigurable` on a rule set.
+When they are missing, MEHO treats the rule set as changeable, and vSphere
+refuses a change it does not allow (the answer is `failed` with the fault).
+
+- **How it calls vCenter.** On the connector's own session, through
+  `_post_vmomi_json` on the VI-JSON path of the target's release
+  (`/sdk/vim25/{release}`). The host is a display name (tried first) or a
+  moid; two hosts with the same name answer `ambiguous_host` with
+  `candidate_hosts`. Each setting sits on one of the host's config managers
+  (`advancedOption`, `firewallSystem`, `hostAccessManager`, `snmpSystem`,
+  `diagnosticSystem`), so each call first reads that
+  `HostSystem.configManager` entry. A host whose vCenter does not offer the
+  manager answers `config_manager_unreadable`. A single ESXi host target
+  answers `needs_vcenter`: its SOAP path has no builder for these methods
+  yet (the single-host work adds it).
+- **Safe to run twice.** Each change reads the setting first. When the host
+  already has it, the answer is `unchanged` and nothing is sent. Otherwise
+  only the calls that change something are sent. After the calls, each change
+  reads the setting back (`after`). When the read-back does not show the
+  change, or cannot be read, the answer is `not_verified` with an `error`
+  issue.
+- **Faults.** The calls are synchronous (no vCenter task). A vim fault (HTTP
+  500 with the fault object) gives `failed` with the fault class and text in
+  `fault`, the calls that ran before in `applied_steps`, and an `error`
+  issue, so the call is recorded as failed. Other HTTP errors are passed on
+  to the dispatcher unchanged.
+- **Secrets.** The SNMP community is read from Vault under the caller's
+  identity (after an approval: the approver) and goes only into the
+  `ReconfigureSnmpAgent` request body. `host.snmp.set` is pinned
+  `credential_write` in `broadcast/events.py`, so the flight recorder keeps
+  no body, the broadcast keeps no params, and a waiting approval keeps its
+  params in the encrypted handoff store. Answers and previews count the
+  communities and never show one; a fault text that holds any community of
+  the request is replaced. The read-back after the change is compared with
+  the communities it holds, so a host that keeps the old community answers
+  `not_verified`; the answer still shows counts only. An advanced setting
+  whose key names a password, secret, token or community takes its value
+  only from Vault (`value_secret_ref`, with `value_secret_mount` and
+  `value_secret_key`, default key `value`); a plain `value` for it is
+  refused before anything is read. Any string setting may take its value
+  from Vault this way. Such a value goes only into the `UpdateOptions`
+  request body and shows `<hidden>` in every answer and preview, and a
+  fault text that holds it is replaced. `host.advanced_settings.set` is
+  pinned `credential_write` too, because the `QueryOptions` read-back
+  answers hold the value as well: no body of the change is recorded.
+- **SNMP fields left out.** MEHO reads the current agent settings and sends
+  them back with only the asked fields changed, so a call that only turns
+  the agent on keeps the port, communities, trap targets and options. A new
+  community also goes to the trap targets that are kept. New trap targets
+  use the new community, or the first current one; with none, the answer is
+  `community_required`. To start the `snmpd` service, use
+  `host.service_control`.
+- **Approval card.** Each change has a preview that shows the host, its
+  current setting and what is asked.
+- **Size.** Each change returns one small object. The settings read can be
+  long; MEHO stores a long list behind a result handle.
+
+Code: `host_security.py` (shared host lookup, reads and parsers, the group
+text), `typed_ops_host_security.py` (the two reads),
+`composites/_host_security_flow.py` (the shared change flow and preview),
+`composites/_host_security_writes.py` (advanced settings, firewall),
+`composites/_host_access_writes.py` (lockdown, exception users, SNMP, core
+dump), `composites/_host_security_schemas.py` and
+`composites/_host_snmp_coredump_schemas.py` (parameters, answers, AI guidance),
+`composites/_host_security_ops.py` (registry rows, previews, the vim calls
+for the grant set). Tests: `tests/test_connectors_vmware_rest_host_security.py`
+(a fake vCenter: bodies, read-back, refusals, faults, secrets, previews),
+`tests/test_connectors_vmware_rest_host_security_flow.py` (real HTTP on the
+vCenter 8.0.3 and 9.0 VI-JSON paths; approval through the dispatcher; both
+catalogs and the contract check) and
+`tests/test_connectors_vmware_rest_host_security_reconcile.py` (every vim
+method, property, manager and body field against the pinned 9.0
 `vi-json.yaml` and the 8.0 U1, U2 and U3 files).
 
 ## Dependencies

@@ -44,6 +44,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _license,
     _namespace,
     _snapshot,
+    _snapshot_cleanup,
     _storage_policy,
     _supervisor,
     _teardown,
@@ -64,6 +65,9 @@ from meho_backplane.connectors.vmware_rest.composites._host_config_ops import (
 )
 from meho_backplane.connectors.vmware_rest.composites._host_membership_ops import (
     HOST_MEMBERSHIP_GOVERNED_SUBOPS,
+)
+from meho_backplane.connectors.vmware_rest.composites._host_security_ops import (
+    HOST_SECURITY_GOVERNED_SUBOPS,
 )
 from meho_backplane.connectors.vmware_rest.composites._vcenter_install_ops import (
     VCENTER_INSTALL_GOVERNED_SUBOPS,
@@ -92,6 +96,11 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     # The RemoveSnapshot_Task child is delete-shaped, so the discovery surface
     # flags it un-grantable -- a human always decides.
     "vmware.composite.vm.snapshot.delete": _snapshot._VIM_SUB_OPS_VM_SNAPSHOT_DELETE,
+    # RemoveAllSnapshots_Task is delete-shaped too: a human always decides.
+    "vmware.composite.vm.snapshot.delete_all": (
+        _snapshot_cleanup._VIM_SUB_OPS_VM_SNAPSHOT_DELETE_ALL
+    ),
+    "vmware.composite.vm.disks.consolidate": _snapshot_cleanup._VIM_SUB_OPS_VM_DISKS_CONSOLIDATE,
     "vmware.composite.vm.destroy": _write._SUB_OPS_VM_DESTROY + _write._VIM_SUB_OPS_VM_DESTROY,
     "vmware.composite.vm.migrate": _write._SUB_OPS_VM_MIGRATE + _write._VIM_SUB_OPS_VM_MIGRATE,
     "vmware.composite.vm.power.bulk": _write._SUB_OPS_VM_POWER_BULK,
@@ -208,6 +217,8 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
         _library_upload._SUB_OPS_CONTENT_LIBRARY_ITEM_UPLOAD
     ),
     "vmware.composite.license.assign": _license._VIM_SUB_OPS_LICENSE_ASSIGN,
+    # The six host security changes: the reads, then the one write each.
+    **HOST_SECURITY_GOVERNED_SUBOPS,
     # #4383 alarm changes: one AlarmManager write each, after two reads.
     "vmware.composite.alarm.acknowledge": _alarm._VIM_SUB_OPS_ALARM_ACKNOWLEDGE,
     "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,

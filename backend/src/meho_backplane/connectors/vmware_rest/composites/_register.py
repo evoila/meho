@@ -69,6 +69,10 @@ from meho_backplane.connectors.vmware_rest.host_access import (
     HOST_ACCESS_GROUP_KEY,
     HOST_ACCESS_WHEN_TO_USE,
 )
+from meho_backplane.connectors.vmware_rest.host_security import (
+    HOST_SECURITY_GROUP_KEY,
+    HOST_SECURITY_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.license_common import (
     LICENSE_GROUP_KEY,
     LICENSE_WHEN_TO_USE,
@@ -192,7 +196,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Use for virtual machines. Reads: list VMs (GET:/api/vcenter/vm), read "
         "one VM (GET:/api/vcenter/vm/{vm}), and a VM's CPU and memory limits "
         "(vm.resource_allocation.show, safe). To list a VM's snapshots, use "
-        "vmware.snapshot.list. Changes: power one VM or many (vm.power, "
+        "vmware.snapshot.list; for a list of all VMs, vmware.vm.list. Changes: "
+        "power one VM or many (vm.power, "
         "vm.power.bulk, dangerous); create, clone or deploy a VM (vm.create, "
         "vm.clone, vm.clone_from_template, vm.deploy_from_library, "
         "vm.import_from_library, dangerous); change CPU, memory, disks, NICs or "
@@ -205,7 +210,9 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "VMware Tools installer (vm.tools.installer.unmount, caution); move a VM to another "
         "host (vm.migrate, dangerous); take a snapshot (vm.snapshot.create, "
         "caution), revert to one (vm.snapshot.revert, dangerous) or delete one "
-        "(vm.snapshot.delete, destructive); delete a powered-off VM and its "
+        "(vm.snapshot.delete, destructive) or all of them (vm.snapshot.delete_all, "
+        "destructive); consolidate a VM's disks (vm.disks.consolidate, caution); "
+        "delete a powered-off VM and its "
         "disks (vm.destroy, destructive); create a VM folder (folder.create, "
         "dangerous) or delete an empty one (folder.delete, destructive). Pair "
         "with 'storage', 'networking' or 'cluster' for the reads a create or a "
@@ -271,6 +278,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # registers under the same group key with the same text.
     ALARMS_GROUP_KEY: ALARMS_WHEN_TO_USE,
     "migration": MIGRATION_GROUP_WHEN_TO_USE,
+    # Shared with the typed reads of host advanced settings and firewall.
+    HOST_SECURITY_GROUP_KEY: HOST_SECURITY_WHEN_TO_USE,
     # #4394: shared with the typed read vmware.vcenter.deployment.status.
     INSTALL_GROUP_KEY: INSTALL_WHEN_TO_USE,
     # Shared with the two typed host-access reads: the same key and text.

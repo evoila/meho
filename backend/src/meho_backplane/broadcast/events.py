@@ -320,6 +320,11 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # stores the approval input encrypted, and the flight recorder keeps
         # no body for it.
         "msad.user.set-password",
+        # The VCF Operations fleet password change. Same shape: both passwords
+        # come from the secret store at run time, params carry only the two
+        # references, and the vendor request body holds the values. The pin
+        # keeps that body out of the flight recorder.
+        "vrops.fleet.password.rotate",
         # The fleet locker writes. The password and the private key come from
         # Vault at run time and go in the request body; params carry only
         # Vault references. The pin keeps the body out of the flight recorder
@@ -516,6 +521,18 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # flight-recorder spans, collapses the broadcast to aggregate-only and
         # keeps a waiting approval's params in the encrypted handoff store.
         "keycloak.user.check_login",
+        # The ESXi SNMP agent change. Its params carry only a Vault *path*
+        # (``community_secret_ref``); the community string goes only into the
+        # ``ReconfigureSnmpAgent`` request BODY. The pin keeps that body out of
+        # the flight recorder and the params out of the broadcast.
+        "vmware.composite.host.snmp.set",
+        # The ESXi advanced settings change. A setting that holds a secret takes
+        # its value from a Vault *path* (``value_secret_ref``); the value goes
+        # into the ``UpdateOptions`` request BODY and comes back in the
+        # ``QueryOptions`` read-back. The pin keeps both bodies out of the
+        # flight recorder, the params out of the broadcast, and a waiting
+        # approval's params in the encrypted handoff store.
+        "vmware.composite.host.advanced_settings.set",
         # The host local-user create and password change, and the host's
         # Active Directory join. The params carry only a Vault path
         # (``password_secret_ref``); the password goes only into the call to

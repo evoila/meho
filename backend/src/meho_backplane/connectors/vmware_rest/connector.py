@@ -3433,6 +3433,40 @@ class VmwareRestConnector(HttpConnector):
 
         return await vm_info_impl(self, operator, target, params)
 
+    async def vm_list(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vm.list`` -- every VM, one row each, through a VIM container view.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vm_list.vm_list_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vm_list import vm_list_impl
+
+        return await vm_list_impl(self, operator, target, params)
+
+    async def inventory_find(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.inventory.find`` -- objects by name, name pattern or inventory path.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_inventory_find.inventory_find_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_inventory_find import (
+            inventory_find_impl,
+        )
+
+        return await inventory_find_impl(self, operator, target, params)
+
     async def snapshot_list(
         self,
         operator: Operator,
@@ -3476,6 +3510,41 @@ class VmwareRestConnector(HttpConnector):
         )
 
         return await portgroup_show_impl(self, operator, target, params)
+
+    async def host_advanced_settings_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.advanced_settings.show`` -- the advanced settings of one host.
+
+        A ``source_kind="typed"`` read. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_security.advanced_settings_show_impl`
+        (imported lazily, like the other typed reads).
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_security import (
+            advanced_settings_show_impl,
+        )
+
+        return await advanced_settings_show_impl(self, operator, target, params)
+
+    async def host_firewall_show(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.firewall.show`` -- the firewall rule sets of one host.
+
+        A ``source_kind="typed"`` read. Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_security.firewall_show_impl`.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_security import (
+            firewall_show_impl,
+        )
+
+        return await firewall_show_impl(self, operator, target, params)
 
     async def vm_question_get(
         self,

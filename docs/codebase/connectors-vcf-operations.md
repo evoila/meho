@@ -9,8 +9,8 @@ that dispatches VMware Aria Operations (formerly vRealize Operations Manager;
 G3.6-T1 (#829) shipped the skeleton; #2395 rebuilt its auth on an
 acquired-token session (`OpsToken`) after live VCF Operations 9.0.2 rejected
 the original stateless HTTP Basic. The audited read set ships as typed ops
-(#2303), and so do VCF 9 licence management (#4089) and the VCF 9.1 fleet
-roles (#4480); the remaining
+(#2303), and so do VCF 9 licence management (#4089), the VCF 9.1 fleet roles
+(#4480) and the VCF Operations 9.1 fleet certificates and passwords; the remaining
 `/suite-api` breadth is ingested/curated.
 
 Source: `backend/src/meho_backplane/connectors/vcf_operations/`.
@@ -420,6 +420,111 @@ All paths start with `/suite-api/api/fleet-management/iam/`.
   OpenAPI metaschema check, so the lane reads their `paths` map directly.
 - **Not covered.** Creating or changing custom VCF roles and component roles,
   identity providers, SSO realms, API clients and tokens.
+
+### Fleet certificates and passwords (VCF Operations 9.1)
+
+In VCF 9.1, fleet certificates and passwords are managed in VCF Operations.
+Five typed operations read and change them. They live in
+`fleet_secrets_ops.py` (the op metadata), `fleet_secrets_handlers.py` (the
+handlers, on the `VropsFleetSecretsHandlers` mixin that
+`VcfOperationsConnector` inherits) and `fleet_secrets_checks.py` (the version
+check, the secret reference form, the request outcome and the two approval
+previews). They share one group,
+`vrops-fleet-certificates-passwords`.
+
+| op_id | Call | What it does | Returns | Risk | Versions |
+|---|---|---|---|---|---|
+| `vrops.fleet.certificate.list` | `POST …/certificate-management/certificates/query`, or `GET …/certificates/{certificateId}` | The fleet certificates: product, appliance, expiry | `{certificates: [flat rows], total_count}` | read (`safe`) | 9.1+ |
+| `vrops.fleet.certificate.replace` | `PUT …/certificate-management/certificates/{certificateId}` | Start replacing one certificate | `{status: accepted, request_id, status_read, …}` | change (`dangerous`, waits for approval) | 9.1+ |
+| `vrops.fleet.password.list` | `POST …/password-management/accounts/query` | The fleet password accounts, never a password | `{accounts: [flat rows], total_count}` | read (`safe`) | 9.1+ |
+| `vrops.fleet.password.rotate` | `PUT …/password-management/accounts/{passwordAccountKey}/password` | Start changing one password | `{status: accepted, request_id, status_read, …}` | change (`dangerous`, waits for approval) | 9.1+ |
+| `vrops.fleet.request.get` | `GET /suite-api/api/workflows/requests/{requestId}` | The state of one started request | `{request_id, reachable, state, outcome, ended, error_text, checked_at, …}` | read (`safe`) | 9.1+ |
+
+The `…` stands for `/suite-api/api/fleet-management`. The paths come from the
+vendor's VCF Operations 9.1.0 and 9.1.1 API files (both have all six calls).
+
+- **Versions.** The calls exist on VCF Operations 9.1 and newer. Each handler
+  checks the target's detected version first. On 9.0 it stops before any
+  vendor call with `connector_unsupported` and the message
+  `<op_id>: fleet certificates and passwords need VCF Operations 9.1 or newer;
+  this target is 9.0.x.` A target with no known version goes on. The two
+  approval previews show the same message as `version_problem`.
+- **Values of 9.1.0 and 9.1.1.** The filter and input value lists of the
+  schemas (`appliance`, `category`, `status`, `type`, `caType`, `sortBy`) are
+  the union of both vendor files, without the vendor's `UNKNOWN` placeholder.
+  The 9.1.1 file added some values: `SELF_SIGNED_CA` as a CA type, the
+  appliances `CLOUD_PROXY`, `LICENSE_SERVER` and `SUPERVISOR`, many
+  certificate categories (`STS_CERT`, `VMCA_ROOT`, ...) and three certificate
+  sort fields. They are listed in `ADDED_IN_9_1_1` (`fleet_secrets_checks.py`).
+  On a 9.1.0 target a handler stops before any vendor call with
+  `<op_id>: <param> <value> needs VCF Operations 9.1.1 or newer; this target is
+  9.1.0.`; the previews show it as `version_problem`. The reconcile lane
+  checks both lists against both vendor files.
+- **Lists.** Both lists send `page` (default 0) and `pageSize` (default 1000;
+  the vendor default is 10) as query values, and the filters as the JSON body.
+  Each row is flat: the certificate row lifts `autoRenewInfo.autoRenewStatus`
+  to `autoRenewStatus` and drops links and alternative names. A long list
+  comes back as a result handle. The certificate id that the other calls take
+  is `certificateResourceKey` from the list.
+- **No secrets in answers.** The password list copies only the fields in
+  `PASSWORD_ROW_FIELDS`, so a password field the vendor might add never comes
+  back. The password change takes two references, `current_password_ref` and
+  `new_password_ref` (`<vault-path>#<field>`), never a password. The handler
+  reads both from the secret store only when the approved call runs, under the
+  operator's identity, and puts them only in the vendor request body. The
+  operation is pinned as a credential write (`_CREDENTIAL_WRITE_OPS`), so the
+  approval input is stored encrypted, the broadcast shows no params, and the
+  flight recorder keeps no request body. An error answer of the password
+  change is handled like the other password changes in MEHO
+  (`connectors/_shared/secret_echo.py`): the error keeps the status and the
+  vendor's message, but no vendor message that holds one of the two passwords,
+  and no request body. A failed password change can also repeat the password
+  in the error text of its workflow request (a password-policy error). So for
+  a password request (`category` `PASSWORD` or `VCF_PASSWORD_MANAGEMENT`, or
+  a request type or name with "password"; also when the vendor names no kind)
+  the status read puts a fixed sentence and the vendor's message ids into
+  `error_text` instead of the vendor's text, and the connector's
+  `trace_response_body` hands the flight recorder the vendor answer with
+  `message` and `exceptionMessage` of each `errorCause` masked. A certificate
+  request keeps the vendor's text. The parameter schema of the certificate
+  replacement refuses a `certificateChain` that holds a private key, so the
+  check runs before the call waits for approval; the handler checks again.
+- **Vendor jobs.** Both changes return as soon as the vendor accepted the
+  request: `status: accepted`, the vendor `request_id`, and
+  `status_read: vrops.fleet.request.get`. They never say the work is done.
+  The caller reads `vrops.fleet.request.get` until `ended` is true.
+- **A request that still runs.** The vendor has no list of running fleet
+  requests, so a start cannot look for one by itself. A caller that has the id
+  of an earlier start passes it as `previous_request_id`. If that request has
+  not ended (or its state is not known), the start returns
+  `status: already_running` with that id and starts nothing. A state MEHO does
+  not know counts as running on purpose: for a change that waits for
+  approval, starting nothing is the safe choice. This is a help, not a lock:
+  two callers can both read before either starts.
+- **A lost reply.** Do not start again blindly. For a certificate, read
+  `vrops.fleet.certificate.list` (a new `expiryDate` means it worked). For a
+  password, read `vrops.fleet.password.list` (a new `expiryDate`); a second
+  start with the old current password fails once the first one worked. Run the
+  start with `async: true` (`docs/codebase/async-governed-dispatch.md`), so
+  MEHO keeps its answer, with the request id, under a run handle.
+- **The status read.** It gives the vendor `state`, a plain `outcome`
+  (`queued`, `running`, `succeeded`, `failed`, `canceled`, `unknown`), `ended`,
+  and `error_text` (the vendor's `errorCause` messages; for a password request
+  a fixed sentence and the message ids, see above). The vendor gives no
+  steps and no progress for these requests. After a `401` (the login expired
+  since the start) it drops the session, logs in again and reads once more.
+  When VCF Operations does not answer (no connection, or `502`/`503`/`504`,
+  also at login), it returns `reachable: false`, `outcome: not_reachable`, the
+  request id and `checked_at`. It never says `failed` then. MEHO keeps no job
+  state between calls; the caller keeps the request id.
+- **One step each.** Each change sends one changing vendor call, so there is
+  no partial multi-step failure to report. A `previous_request_id` read that
+  fails stops the start before anything changed.
+- **Reconcile lane.** `tests/test_connectors_vcf_operations_fleet_spec_reconcile.py`
+  checks `VENDOR_CALLS` and the value lists of the schemas against both 9.1
+  files, and that `ADDED_IN_9_1_1` is exactly what the 9.1.1 file added. The
+  vendor files fail MEHO's ingest check (empty `required` lists), so the lane
+  reads the path keys and the value lists from the JSON directly.
 
 ### Shutdown
 

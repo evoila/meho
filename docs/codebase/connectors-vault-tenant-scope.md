@@ -357,7 +357,9 @@ tenant prefix is rejected at write time with a structured 422
 importing clean and failing every dispatch with an opaque Vault
 `permission denied`. Semantics deliberately mirror
 `enforce_tenant_scope`: the match candidate is the normalised
-mount-pinned `<mount>/<secret_ref>` (the dispatch-time credential read
+mount-pinned `<mount>/<path>`, where the path is the ref without its
+`vault:` scheme, as `split_credential_ref` returns it (the
+dispatch-time credential read strips the scheme the same way and
 addresses the default `secret` mount), matching is on a path-segment
 boundary, a ref with a `.` / `..` segment, a `%` or a backslash is
 refused (also with an empty prefix), and the empty-prefix opt-out turns

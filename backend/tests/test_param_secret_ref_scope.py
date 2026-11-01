@@ -661,6 +661,38 @@ def test_target_secret_ref_with_dot_segments_is_refused(ref: str) -> None:
     _enforce_secret_ref_tenant_scope(f"{_OWN}/vc-01", _operator(), "vc-01")
 
 
+@pytest.mark.parametrize("ref", ["vault:../vc-01", "vault:./vc-01", f"vault:{_OWN}/../vc-01"])
+def test_target_secret_ref_with_vault_scheme_and_dot_segment_is_refused(ref: str) -> None:
+    """The gate checks the path after the ``vault:`` scheme, as the credential read does."""
+    from meho_backplane.api.v1.targets import _enforce_secret_ref_tenant_scope
+
+    with pytest.raises(HTTPException) as exc:
+        _enforce_secret_ref_tenant_scope(ref, _operator(), "vc-01")
+    assert exc.value.status_code == 422
+    detail: Any = exc.value.detail
+    assert detail["kind"] == "secret_ref_outside_tenant_scope"
+    assert "a '.' or '..' segment, a '%' or a backslash" in detail["message"]
+    _enforce_secret_ref_tenant_scope(f"vault:{_OWN}/vc-01", _operator(), "vc-01")
+
+
+@pytest.mark.parametrize("ref", ["vault:../vc-01", "vault:./vc-01"])
+def test_target_secret_ref_with_vault_scheme_and_dot_segment_is_refused_when_the_prefix_is_off(
+    monkeypatch: pytest.MonkeyPatch, ref: str
+) -> None:
+    """With an empty prefix, a ``vault:`` scheme does not hide a ``.`` or ``..`` segment."""
+    from meho_backplane.api.v1.targets import _enforce_secret_ref_tenant_scope
+
+    _set_env(monkeypatch, VAULT_KV_TENANT_SCOPE_PREFIX="")
+    with pytest.raises(HTTPException) as exc:
+        _enforce_secret_ref_tenant_scope(ref, _operator(), "vc-01")
+    assert exc.value.status_code == 422
+    detail: Any = exc.value.detail
+    assert detail["kind"] == "secret_ref_outside_tenant_scope"
+    assert detail["tenant_prefix"] == ""
+    assert "a '.' or '..' segment, a '%' or a backslash" in detail["message"]
+    _enforce_secret_ref_tenant_scope("vault:vc-01", _operator(), "vc-01")
+
+
 @pytest.mark.parametrize(
     "ref", [f"{_OWN}/../{_TENANT_B}/vc-01", f"{_OWN}/%2e%2e/{_TENANT_B}/vc-01", f"{_OWN}\\vc-01"]
 )

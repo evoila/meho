@@ -981,6 +981,24 @@ def _tenant_prefix_or_empty(operator: Operator) -> str:
     return rendered_tenant_prefix(operator, template=template).strip().strip("/")
 
 
+def _vault_kv_candidate(secret_ref: str) -> str | None:
+    """Return the normalised ``<mount>/<path>`` the Vault read of *secret_ref* addresses.
+
+    ``None`` when the ref resolves through a non-Vault store (explicit
+    ``gsm:`` scheme, or the deploy default on a GSM install): the Vault
+    tenant-subtree convention does not apply there. The path is the
+    scheme-stripped store ref, the same one the dispatch-time read sends
+    to Vault, so a ``vault:`` scheme on the ref cannot hide a ``.`` or
+    ``..`` in the first segment.
+    """
+    kind, store_ref = split_credential_ref(
+        secret_ref, default_backend=get_settings().credential_backend
+    )
+    if kind != "vault":
+        return None
+    return f"{DEFAULT_KV_MOUNT}/{store_ref.strip().strip('/')}"
+
+
 def _enforce_secret_ref_tenant_scope(
     secret_ref: str,
     operator: Operator,
@@ -1037,21 +1055,18 @@ def _enforce_secret_ref_tenant_scope(
     ``CREDENTIAL_BACKEND=gsm`` deploy — has no Vault subtree to enforce
     and is passed through untouched. Backend resolution reuses
     :func:`~meho_backplane.connectors._shared.credential_backend.split_credential_ref`
-    with the deploy default, so the write-time gate's *applicability*
-    tracks the same backend dispatch resolves at read time
+    with the deploy default (:func:`_vault_kv_candidate`), so the
+    write-time gate's *applicability* and the path it checks track the
+    same backend and path dispatch resolves at read time
     (:func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`).
 
     Raises a structured 422 (``kind="secret_ref_outside_tenant_scope"``)
     on violation; returns ``None`` otherwise.
     """
-    kind, _ = split_credential_ref(secret_ref, default_backend=get_settings().credential_backend)
-    if kind != "vault":
-        # Ref resolves through a non-Vault store (explicit ``gsm:`` scheme,
-        # or the deploy default on a GSM install) — the Vault tenant-subtree
-        # convention does not apply, so there is nothing to enforce.
+    candidate = _vault_kv_candidate(secret_ref)
+    if candidate is None:
         return
 
-    candidate = f"{DEFAULT_KV_MOUNT}/{secret_ref.strip().strip('/')}"
     plain_path = is_plain_kv_path(candidate)
     normalised_prefix = _tenant_prefix_or_empty(operator)
     in_prefix = (

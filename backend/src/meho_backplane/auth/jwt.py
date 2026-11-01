@@ -1514,6 +1514,21 @@ def _start_tenant(
     )
 
 
+def _cap_agent_role(principal_kind: PrincipalKind, tenant_role: TenantRole) -> TenantRole:
+    """Return the role an agent login acts with: at most ``operator``.
+
+    An agent acts with operator rights in its tenant. Tenant-admin work
+    (connectors, targets, conventions, grants, tenant policies) is for
+    people. MEHO registers new agents with ``tenant_role=operator``. An
+    agent registered earlier still has ``tenant_admin`` in its token, so
+    MEHO reads that value as ``operator`` here. People, service logins
+    and runners keep the role their token carries.
+    """
+    if principal_kind is PrincipalKind.AGENT and tenant_role is TenantRole.TENANT_ADMIN:
+        return TenantRole.OPERATOR
+    return tenant_role
+
+
 def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Operator:
     """Project the validated claims into the public :class:`Operator` shape.
 
@@ -1573,6 +1588,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     principal_kind = _extract_principal_kind(claims, settings)
     tenants = _extract_tenants(claims, settings, principal_kind)
     tenant_id, tenant_role, approver = _start_tenant(claims, settings, tenants)
+    tenant_role = _cap_agent_role(principal_kind, tenant_role)
     client_id = _extract_client_id(claims, settings, principal_kind)
     capabilities = _extract_capabilities(claims, settings)
     scopes = _extract_scopes(claims, settings)

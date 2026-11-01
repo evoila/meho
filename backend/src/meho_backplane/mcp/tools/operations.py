@@ -619,9 +619,10 @@ register_mcp_tool(
                     "type": "object",
                     "description": (
                         "The operation's parameters. Unknown fields are "
-                        "refused. A credential read hides secret values by "
-                        "default; add `reveal_secret: true` only when you "
-                        "must pass the raw value on (the reveal is audited)."
+                        "refused. A secret read hides secret values by "
+                        "default. `reveal_secret: true` returns the raw "
+                        "values to a person only (audited); an agent is "
+                        "refused."
                     ),
                 },
                 "work_ref": {

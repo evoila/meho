@@ -184,6 +184,38 @@ uses, its schemas, its risk level, its approval flag and its steps. Then
 an update would end only the requests whose operation changed. That needs
 its own design.
 
+## An approval covers one target and one preview
+
+A person approves one call against one target, as it is set up when the
+request is made. Every approved run checks this right before it runs: the
+operator surfaces (`resume_dispatch_after_approval`), the in-process agent
+waiter (`agent/approval_wait.py`) and the re-run after a failure
+(`approval_rerun.py`). The checks live in
+`operations/approval_resume_checks.py`.
+
+**Target settings.** `create_pending_request` stores
+`approval_request.target_hash` (migration `0130`): a SHA-256 over the
+target's connection fields (`TARGET_HASH_FIELDS`: `product`, `host`,
+`port`, `fqdn`, `secret_ref`, `secret_field_map`, `auth_model`,
+`vpn_required`, `verify_tls`, `tls_ca_pin`, `tls_server_name`, `extras`).
+It reads the stored row, not the in-memory target of the call, so a
+per-call `fqdn` does not count (the agent waiter applies it again after
+the check, see below). `rehydrate_resume_target` loads the target
+by id as before and compares the hash. When it differs, the run is refused
+with `error_code = "target_changed_since_approval"` and nothing is sent.
+The requester asks again. A rename, new aliases, notes, a new detected
+version or a new fingerprint do not change the hash. A request with no
+target, and a row saved before the column, has no hash and is not checked.
+
+**Preview.** A request with a `preview_hash` (every `destructive` request)
+builds the preview again with the target and params of the run
+(`preview_changed_since_request`). When the hash differs, or the preview no
+longer builds, the run is refused with
+`error_code = "preview_changed_since_approval"`. The one-resumer claim is
+already taken at that point, so the refusal is stored as the request's run
+result and the request never runs later. The re-run path reports the same
+two checks as `target_changed` and `preview_changed`.
+
 ## The params hash on requests and audit rows
 
 Two kinds of rows carry a keyed hash of a call's params:
@@ -1007,6 +1039,7 @@ There is no MCP tool for it; the agent working surface is unchanged.
 | The params match `params_hash`. | same (`params_changed`) |
 | A multi-step credential write still has its input. MEHO keeps it only until the first run, so this one always needs a new approval. | same (`input_not_kept`) |
 | The saved target still resolves. | same (`target_gone`) |
+| The saved target has the connection settings it had when the request was made (`target_hash`, same check as every approved run). | same (`target_changed`) |
 | A `destructive` request: a new server-side preview has the approved `preview_hash`. | same (`preview_changed`) |
 
 The operation, connector and target always come from the request, so the
@@ -1798,8 +1831,10 @@ shown). At approve time `_load_pending_for_approval` re-verifies it
 raises `PreviewBindingMissingError` → HTTP 422 on every approve surface
 (REST `/approve`, `/decide`, the console). This extends the existing
 `params_hash` swap-defence to the preview binding. The resume path
-(`dispatch(..., _approved=True)`) skips the policy gate, so the binding is
-enforced once at park and once at approve, never re-checked on execution.
+(`dispatch(..., _approved=True)`) skips the policy gate. Right before the
+run, every resume path builds the preview again and compares its hash
+(`refuse_resume_if_preview_changed`, see
+[An approval covers one target and one preview](#an-approval-covers-one-target-and-one-preview)).
 
 **Requirement 3 — mandatory blast-radius statement.** A destructive op
 cannot park with only the identifier-only default: its `proposed_effect`
@@ -2944,19 +2979,35 @@ What the agent waiter does:
   the sub-op created a second request and nothing ran.
 - **Target check.** The re-run uses the target the row saved by id
   (`rehydrate_resume_target`, the same check the operator surface runs), not
-  the target name from the agent's original call. While the request waited,
+  the target name from the agent's original call. This holds for a composite
+  sub-op and for a direct request. While the request waited,
   that name may have moved to another target: the target was renamed, or
   deleted and a new one created with the same name. Loading by id means the
   approved write can only run against the original target. If the saved
-  target no longer resolves (soft-deleted or revoked), the waiter returns a
-  `denied` envelope and runs nothing. This check runs before the
-  one-resumer claim, so a refused resume leaves the claim free.
+  target no longer resolves (soft-deleted or revoked), or its connection
+  settings changed since the request was made (`target_changed_since_approval`,
+  see [An approval covers one target and one preview](#an-approval-covers-one-target-and-one-preview)),
+  the waiter returns a `denied` envelope and runs nothing. This check runs
+  before the one-resumer claim, so a refused resume leaves the claim free.
   Covered by `test_composite_resume_uses_saved_target_when_name_was_reassigned`
   and `test_composite_resume_fails_closed_when_saved_target_deleted_and_name_reused`
   (unit) and the two `test_agent_waiter_composite_resume_*` tests (end to
   end).
+- **Per-call `fqdn`.** The agent's call may name a `fqdn` in its `target`
+  dict: the virtual host the connector sends as the HTTP Host header and
+  the TLS server name. The park ran with it. After the saved target passed
+  the checks above, the waiter applies the same value to it again
+  (`apply_target_fqdn_override` in `operations/meta_tools.py`, the same
+  helper the name lookup of every call uses), in memory only, before the
+  preview is built again and before the run. So the approved call reaches
+  the same virtual host as the call that waited. A bare target name has no
+  override, so the stored `fqdn` is used. This holds for a direct request
+  and for a composite sub-op. Covered by
+  `test_direct_park_resume_keeps_the_per_call_fqdn`. The operator surfaces
+  run with the stored `fqdn`: the request row keeps no per-call value.
 - **Direct request (no `resume_parent`).** It runs the agent's original
-  `call_arguments` again, including the target name, with one change: the
+  `call_arguments` again with two changes: the target is the one the row
+  saved by id (the target name is not looked up again), and the
   `connector_id` is the catalog the request row stored. The park may have
   run on a sibling catalog of the one the agent named (for example the agent
   named `vmware-rest-9.0` for an 8.0.3 vCenter, so the park stored

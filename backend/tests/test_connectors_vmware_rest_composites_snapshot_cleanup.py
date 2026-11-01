@@ -65,6 +65,16 @@ _TARGET_NAME = "example-vcenter"
 class CleanupVimFake(SnapshotVimFake):
     """The snapshot fake plus the two clean-up tasks."""
 
+    #: What ``runtime.consolidationNeeded`` reads after the consolidate task;
+    #: ``None`` drops the property, like a read vCenter did not answer.
+    flag_after_consolidate: bool | None = False
+
+    def _after_consolidate(self, props: dict[str, Any]) -> None:
+        if self.flag_after_consolidate is None:
+            props.pop("runtime.consolidationNeeded", None)
+        else:
+            props["runtime.consolidationNeeded"] = self.flag_after_consolidate
+
     async def _post_vmomi_json(
         self,
         target: Any,
@@ -83,9 +93,7 @@ class CleanupVimFake(SnapshotVimFake):
         if method == "ConsolidateVMDisks_Task":
             self.calls.append((path, copy.deepcopy(json)))
             props = self.objects[("VirtualMachine", moid)]
-            return self._task(
-                method, apply=lambda: props.update({"runtime.consolidationNeeded": False})
-            )
+            return self._task(method, apply=lambda: self._after_consolidate(props))
         return await super()._post_vmomi_json(
             target,
             path,
@@ -263,6 +271,31 @@ async def test_consolidate_when_not_needed_changes_nothing(gate: GateRecorder) -
     assert conn.calls_to("ConsolidateVMDisks_Task") == []
 
 
+async def test_consolidate_without_the_flag_writes_nothing(gate: GateRecorder) -> None:
+    conn = CleanupVimFake()
+    conn.add("VirtualMachine", _VM, name="app-vm")
+    out = await _consolidate(conn)
+    assert out["status"] == "unknown"
+    assert out["consolidation_needed"] is None
+    assert out["vm_name"] == "app-vm"
+    assert "nothing was written" in out["guidance"]
+    Draft202012Validator(VM_DISKS_CONSOLIDATE_RESPONSE_SCHEMA).validate(out)
+    assert gate.calls == []
+    assert conn.calls_to("ConsolidateVMDisks_Task") == []
+
+
+async def test_consolidate_flag_missing_after_the_task_is_unverified(gate: GateRecorder) -> None:
+    conn = _needing_consolidation()
+    conn.flag_after_consolidate = None
+    out = await _consolidate(conn)
+    assert out["status"] == "unverified"
+    assert out["consolidation_needed"] is None
+    assert out["task_state"] == "success"
+    assert [i["severity"] for i in out["issues"]] == ["warning"]
+    Draft202012Validator(VM_DISKS_CONSOLIDATE_RESPONSE_SCHEMA).validate(out)
+    assert [c["op_id"] for c in gate.calls] == [_CONSOLIDATE_SUB_OP]
+
+
 async def test_consolidate_unknown_vm_and_bad_moid(gate: GateRecorder) -> None:
     assert (await _consolidate(CleanupVimFake()))["status"] == "not_found"
     conn = CleanupVimFake()
@@ -307,11 +340,15 @@ async def test_consolidate_preview_echoes_the_vm() -> None:
     assert effect == {"action": "consolidate_vm_disks", "vm": _VM}
 
 
-def test_schemas_take_a_vm_moid_only() -> None:
+def test_schemas_take_one_vm_and_show_a_placeholder_example() -> None:
+    """The schema needs ``vm``; the handler checks the moid shape (tests above)."""
     for schema in (VM_SNAPSHOT_DELETE_ALL_PARAMETER_SCHEMA, VM_DISKS_CONSOLIDATE_PARAMETER_SCHEMA):
+        assert schema["examples"] == [{"vm": "<vm-id>"}]
+        assert validate_params(schema, schema["examples"][0]) == []
         assert validate_params(schema, {"vm": "vm-42"}) == []
-        assert validate_params(schema, {"vm": "app-vm"}) != []
+        assert validate_params(schema, {"vm": ""}) != []
         assert validate_params(schema, {}) != []
+        assert validate_params(schema, {"vm": "vm-42", "force": True}) != []
 
 
 # ===========================================================================

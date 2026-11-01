@@ -2870,10 +2870,13 @@ operation needs the version check.
   lists every snapshot (up to 50) as `children`. `deleted` only when a new read
   shows no snapshots; otherwise `still_present` with `snapshots_left`. Needs a
   preview and a second person; an agent is refused.
-- **disks.consolidate.** Reads `runtime.consolidationNeeded` first: `false`
-  means `unchanged` and nothing is written; an unknown VM is `not_found`. After
-  the task it reads the flag again: `consolidated`, or `still_needed`. It waits
-  for approval (`caution`); the approval card echoes the VM.
+- **disks.consolidate.** Reads `runtime.consolidationNeeded` first: only
+  `true` runs the task. `false` means `unchanged` and a flag vCenter did not
+  report means `unknown`; nothing is written in both cases. An unknown VM is
+  `not_found`. After the task it reads the flag again: `false` is
+  `consolidated`, `true` is `still_needed`, and a missing flag is `unverified`
+  with a warning issue. It waits for approval (`caution`); the approval card
+  echoes the VM.
 
 Code: `typed_ops_snapshot_list.py`, `snapshot_tree.py`, `composites/_snapshot.py`
 (create and delete), `composites/_snapshot_cleanup.py` (delete_all and

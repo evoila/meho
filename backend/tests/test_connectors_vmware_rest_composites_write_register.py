@@ -1038,7 +1038,9 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
         "vmware.composite.vm.disks.consolidate": {
             "consolidated",
             "unchanged",
+            "unknown",
             "still_needed",
+            "unverified",
             "not_found",
             "invalid_request",
             "timeout",

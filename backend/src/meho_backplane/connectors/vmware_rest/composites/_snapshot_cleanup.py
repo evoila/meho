@@ -17,8 +17,10 @@ new read of the VM.
   nothing (``unchanged``); an unknown VM is refused.
 * ``vmware.composite.vm.disks.consolidate`` (``caution``) --
   ``VirtualMachine.ConsolidateVMDisks_Task``. It runs only when vCenter says
-  the VM needs it (``runtime.consolidationNeeded``); otherwise nothing
-  changes (``unchanged``).
+  the VM needs it (``runtime.consolidationNeeded`` is ``true``). A ``false``
+  flag changes nothing (``unchanged``); a flag vCenter did not report also
+  changes nothing (``unknown``). After the task only an explicit ``false``
+  confirms the result (``consolidated``).
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.composite_issues import issue
 from meho_backplane.connectors.vmware_rest.composites._snapshot import _snapshot_tree, _vm_name
 from meho_backplane.connectors.vmware_rest.composites._teardown import (
     LIST_CAP,
@@ -91,6 +94,10 @@ _TASK_TIMEOUT_SECONDS = 600.0
 STATUS_CONSOLIDATED: Final = "consolidated"
 STATUS_STILL_NEEDED: Final = "still_needed"
 STATUS_NOT_FOUND: Final = "not_found"
+#: vCenter did not report ``runtime.consolidationNeeded`` before the write.
+STATUS_UNKNOWN: Final = "unknown"
+#: The task succeeded, but the new read did not report the flag.
+STATUS_UNVERIFIED: Final = "unverified"
 
 
 # ===========================================================================
@@ -306,7 +313,18 @@ async def _consolidate_result(
         return timed_out
     after = await _consolidation_state(connector, target, operator, vm)
     needed = after[1] if after is not None else None
-    if needed:
+    return _consolidate_readback(vm, vm_name=vm_name, needed=needed, outcome=outcome)
+
+
+def _consolidate_readback(
+    vm: str, *, vm_name: str | None, needed: bool | None, outcome: VimTaskResult
+) -> dict[str, Any]:
+    """The envelope for a finished task, from the flag read back afterwards.
+
+    Only an explicit ``False`` confirms the result. A flag vCenter did not
+    report (or a VM that is gone) is ``unverified`` with a warning issue.
+    """
+    if needed is True:
         return _consolidate_envelope(
             STATUS_STILL_NEEDED,
             vm,
@@ -319,14 +337,36 @@ async def _consolidate_result(
                 "consolidation; check the datastore space and the VM's tasks"
             ),
         )
-    return _consolidate_envelope(
-        STATUS_CONSOLIDATED,
+    if needed is False:
+        return _consolidate_envelope(
+            STATUS_CONSOLIDATED,
+            vm,
+            vm_name=vm_name,
+            consolidation_needed=False,
+            task=outcome.task,
+            task_state=outcome.state,
+        )
+    unverified = _consolidate_envelope(
+        STATUS_UNVERIFIED,
         vm,
         vm_name=vm_name,
-        consolidation_needed=needed,
+        consolidation_needed=None,
         task=outcome.task,
         task_state=outcome.state,
+        guidance=(
+            "ConsolidateVMDisks_Task succeeded but the new read of the VM did not report "
+            "runtime.consolidationNeeded; check the VM and its tasks in vCenter"
+        ),
     )
+    unverified["issues"] = [
+        issue(
+            "connector",
+            "warning",
+            f"ConsolidateVMDisks_Task {outcome.task} succeeded but vCenter did not report "
+            "runtime.consolidationNeeded afterwards; the result is not confirmed",
+        )
+    ]
+    return unverified
 
 
 async def _consolidate_precheck(
@@ -341,6 +381,8 @@ async def _consolidate_precheck(
         guidance = f"no VM {vm!r}; pass a VM moid (vmware.vm.info finds it from the name)"
         return _consolidate_envelope(STATUS_NOT_FOUND, vm, guidance=guidance), None
     vm_name, needed = state
+    if needed is True:
+        return None, vm_name
     if needed is False:
         unchanged = _consolidate_envelope(
             STATUS_UNCHANGED,
@@ -350,7 +392,17 @@ async def _consolidate_precheck(
             guidance="vCenter says the VM's disks do not need consolidation; nothing was done",
         )
         return unchanged, vm_name
-    return None, vm_name
+    unknown = _consolidate_envelope(
+        STATUS_UNKNOWN,
+        vm,
+        vm_name=vm_name,
+        consolidation_needed=None,
+        guidance=(
+            "vCenter did not report runtime.consolidationNeeded for the VM; nothing was "
+            "written. Check the VM in vCenter, then call again"
+        ),
+    )
+    return unknown, vm_name
 
 
 async def vm_disks_consolidate_composite(
@@ -364,12 +416,14 @@ async def vm_disks_consolidate_composite(
 
     Op-id: ``vmware.composite.vm.disks.consolidate``. Reads
     ``runtime.consolidationNeeded`` first: an unknown VM is ``not_found``, a
-    VM that does not need it is ``unchanged`` (nothing is written). Otherwise
-    the gated ``ConsolidateVMDisks_Task`` (a parked / denied gate is returned
-    as is), polled to the end. A task fault raises (``connector_error``,
-    audited as failed); a poll timeout returns ``timeout`` with an error
-    issue. On success the VM is read again: ``consolidated`` when vCenter no
-    longer asks for it, else ``still_needed``.
+    VM that does not need it is ``unchanged``, and a VM whose flag vCenter
+    did not report is ``unknown`` (nothing is written in both cases). Only an
+    explicit ``true`` runs the gated ``ConsolidateVMDisks_Task`` (a parked /
+    denied gate is returned as is), polled to the end. A task fault raises
+    (``connector_error``, audited as failed); a poll timeout returns
+    ``timeout`` with an error issue. On success the VM is read again:
+    ``consolidated`` only when the flag reads back ``false``, ``still_needed``
+    when it is ``true``, ``unverified`` (warning issue) when it is missing.
     """
     vm = params["vm"]
     early, vm_name = await _consolidate_precheck(connector, target, operator, vm)

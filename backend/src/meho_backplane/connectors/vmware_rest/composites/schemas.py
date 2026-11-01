@@ -9464,16 +9464,16 @@ VM_SNAPSHOT_DELETE_ALL_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "vm": {
             "type": "string",
-            "pattern": VM_MOID_PATTERN,
+            "minLength": 1,
             "description": (
-                "Moid of the VM whose snapshots all go, e.g. 'vm-42' (vmware.vm.info finds it "
-                "from the name)."
+                "Moid of the VM whose snapshots all go, in the shape 'vm-<number>' "
+                "(vmware.vm.info finds it from the name). The call checks the shape."
             ),
         },
     },
     "required": ["vm"],
     "additionalProperties": False,
-    "examples": [{"vm": "vm-42"}],
+    "examples": [{"vm": "<vm-id>"}],
 }
 
 #: ``vmware.composite.vm.snapshot.delete_all`` response schema.
@@ -9506,16 +9506,16 @@ VM_DISKS_CONSOLIDATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "vm": {
             "type": "string",
-            "pattern": VM_MOID_PATTERN,
+            "minLength": 1,
             "description": (
-                "Moid of the VM whose disks to consolidate, e.g. 'vm-42' (vmware.vm.info finds "
-                "it from the name)."
+                "Moid of the VM whose disks to consolidate, in the shape 'vm-<number>' "
+                "(vmware.vm.info finds it from the name). The call checks the shape."
             ),
         },
     },
     "required": ["vm"],
     "additionalProperties": False,
-    "examples": [{"vm": "vm-42"}],
+    "examples": [{"vm": "<vm-id>"}],
 }
 
 #: ``vmware.composite.vm.disks.consolidate`` response schema.
@@ -9527,15 +9527,19 @@ VM_DISKS_CONSOLIDATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "enum": [
                 "consolidated",
                 "unchanged",
+                "unknown",
                 "still_needed",
+                "unverified",
                 "not_found",
                 "invalid_request",
                 "timeout",
             ],
             "description": (
-                "``'consolidated'`` -- the task ran and vCenter no longer asks for it; "
+                "``'consolidated'`` -- the task ran and vCenter reports the flag as false; "
                 "``'unchanged'`` -- the VM did not need it, nothing was written; "
+                "``'unknown'`` -- vCenter did not report the flag, nothing was written; "
                 "``'still_needed'`` -- the task ended but vCenter still asks for it; "
+                "``'unverified'`` -- the task ended but vCenter did not report the flag; "
                 "``'not_found'`` -- no VM with this moid; ``'invalid_request'`` -- the moid "
                 "has the wrong shape; ``'timeout'`` -- the task outran the poll bound."
             ),
@@ -9544,7 +9548,10 @@ VM_DISKS_CONSOLIDATE_RESPONSE_SCHEMA: dict[str, Any] = {
         "vm_name": {"type": ["string", "null"], "description": "VM name."},
         "consolidation_needed": {
             "type": ["boolean", "null"],
-            "description": "vCenter's runtime.consolidationNeeded, read after the task.",
+            "description": (
+                "vCenter's runtime.consolidationNeeded from the last read; null when vCenter "
+                "did not report it."
+            ),
         },
         "task": {"type": ["string", "null"], "description": "vim Task moid, when one ran."},
         "task_state": {
@@ -9555,7 +9562,10 @@ VM_DISKS_CONSOLIDATE_RESPONSE_SCHEMA: dict[str, Any] = {
         "issues": {
             "type": "array",
             "items": {"type": "object"},
-            "description": "Error details, e.g. a task that did not finish in time.",
+            "description": (
+                "Error details, e.g. a task that did not finish in time, or a warning when "
+                "the result could not be confirmed."
+            ),
         },
     },
     "required": ["status", "vm"],

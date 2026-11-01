@@ -266,17 +266,19 @@ VM_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
         ),
         "preconditions": (
             "Give the VM moid. The call waits for approval before it runs. It runs only "
-            "when vCenter reports that the VM needs it. It needs free datastore space and "
-            "can slow the VM while it runs."
+            "when vCenter reports that the VM needs it; when vCenter does not report the "
+            "flag, nothing is written. It needs free datastore space and can slow the VM "
+            "while it runs."
         ),
         "output_shape": (
-            "{status: consolidated|unchanged|still_needed|not_found|invalid_request|"
-            "timeout, vm, vm_name, consolidation_needed, task, task_state, guidance, "
-            "issues}."
+            "{status: consolidated|unchanged|unknown|still_needed|unverified|not_found|"
+            "invalid_request|timeout, vm, vm_name, consolidation_needed, task, "
+            "task_state, guidance, issues}."
         ),
         "next_step": (
             "On still_needed, check the datastore space and the task with "
-            "vmware.tasks.recent. On timeout, check the task, then call vmware.vm.info."
+            "vmware.tasks.recent. On unknown or unverified, check the VM in vCenter. On "
+            "timeout, check the task, then call vmware.vm.info."
         ),
     },
     _P + "vm.destroy": {

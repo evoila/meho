@@ -103,7 +103,10 @@ at the vendor and return at once:
   not_reachable` with the task id, the reason and `checked_at`. It never says
   `failed`. MEHO keeps no job state between calls.
 - When the login expired, the read gets a `401`; the dispatcher logs in again
-  and reads once more.
+  and reads once more. When that new login meets HTTP 502 / 503 / 504 at the
+  login service, the read also says `not_reachable` (reason `login HTTP 503`,
+  for example) with the task id. A refused login (401 / 403) stays an error
+  (`connector_auth_failed`).
 - Before a pre-check or an apply, MEHO reads the plan. When its `executions`
   list a run of the same kind (`PRECHECK` or `UPGRADE`) that has not ended,
   MEHO returns that run's task id as `already_running` and starts nothing.
@@ -123,11 +126,21 @@ at the vendor and return at once:
 the vendor's plan check (itself a job), reads that job until it ends (at most
 one minute), and creates the plan only when the check passed (no `ERROR` in
 `failedValidations`, no failed job). The answer lists `steps`, `steps_ran`,
-`step_failed` and `steps_not_run`. A failed check, or a check still running
-after the wait, creates nothing. A create that fails after the check passed
-lists the check as run and the create as failed with the vendor's text;
-nothing is undone. The vendor's create updates a matching plan, so a second
-call does not make a second plan.
+`step_failed`, `steps_not_run` and a `note` that says what to do next. A
+failed check, or a check still running after the wait, creates nothing. A
+create that fails after the check passed lists the check as run and the
+create as failed with the vendor's text; nothing is undone. The vendor's
+create updates a matching plan, so a second call does not make a second plan.
+
+The answer keeps what is known when the service stops answering:
+
+- While MEHO follows the check (no connection, a timeout, HTTP 502 / 503 /
+  504, or a login service that answers so): outcome `validation_not_reachable`.
+  The check step says `not_reachable` and keeps the check's task id, so the
+  caller can read it later with `fleet-lcm.task.info`. Nothing was created.
+- At the create itself: outcome `create_unknown`. The check is listed as run,
+  the create step says `unknown` with the reason. The plan may or may not
+  exist; read `fleet-lcm.upgrade-plan.list` before calling again.
 
 **No secrets.** No input takes a password. The vendor's `userInputSpec` can
 carry a VSP cluster password for a VCF Automation upgrade; MEHO offers only

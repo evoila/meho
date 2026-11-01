@@ -170,10 +170,18 @@ _STEP: dict[str, Any] = {
     "type": "object",
     "properties": {
         "name": _field("string", "validate or create."),
-        "result": _field("string", "succeeded, failed, still_running or not_run."),
+        "result": _field(
+            "string",
+            "succeeded, failed, still_running, not_reachable (the service stopped answering "
+            "while MEHO followed the check), unknown (the create got no answer; the plan "
+            "may or may not exist) or not_run.",
+        ),
         "task_id": _field(["string", "null"], "The vendor's task id of the plan check."),
         "vendor_status": _field(["string", "null"], "The vendor's status of the plan check."),
         "errors": {"type": "array", "items": {"type": "string"}, "description": "Error texts."},
+        "unreachable_reason": _field(
+            ["string", "null"], "Why the service gave no answer, when it did not."
+        ),
         "warnings": {
             "type": "array",
             "items": {"type": "string"},
@@ -192,7 +200,9 @@ _CREATE_RESPONSE: dict[str, Any] = {
                 "created",
                 "validation_failed",
                 "validation_still_running",
+                "validation_not_reachable",
                 "create_failed",
+                "create_unknown",
             ],
         },
         "plan_id": _field(["string", "null"], "The id of the created plan."),
@@ -214,13 +224,14 @@ _CREATE_RESPONSE: dict[str, Any] = {
         "step_failed": {
             **_STEP,
             "type": ["object", "null"],
-            "description": "The step that failed.",
+            "description": "The step that did not succeed.",
         },
         "steps_not_run": {
             "type": "array",
             "items": {"type": "string"},
             "description": "The steps that did not run.",
         },
+        "note": _field("string", "What to do next, in words."),
     },
 }
 
@@ -363,16 +374,19 @@ FLEET_LCM_LIFECYCLE_OPS: tuple[FleetLcmTypedOp, ...] = (
             ),
             "output_shape": (
                 "{outcome: created | validation_failed | validation_still_running | "
-                "create_failed, plan_id, plan, steps: [{name, result, task_id, errors, "
-                "warnings}], steps_ran, step_failed, steps_not_run}. Nothing is undone "
-                "when a step fails."
+                "validation_not_reachable | create_failed | create_unknown, plan_id, plan, "
+                "steps: [{name, result, task_id, errors, warnings, unreachable_reason}], "
+                "steps_ran, step_failed, steps_not_run, note}. Nothing is undone when a "
+                "step fails."
             ),
             "next_step": (
                 "created: run fleet-lcm.upgrade-plan.precheck with plan_id. "
                 "validation_failed: fix the spec from the errors and call again. "
-                "validation_still_running: follow steps[0].task_id with fleet-lcm.task.info, "
-                "then call again. After a lost reply, read fleet-lcm.upgrade-plan.list "
-                "before you call again."
+                "validation_still_running or validation_not_reachable: follow "
+                "steps[0].task_id with fleet-lcm.task.info, then call again. "
+                "create_unknown: the plan may or may not exist; read "
+                "fleet-lcm.upgrade-plan.list before you call again. After a lost reply, "
+                "read fleet-lcm.upgrade-plan.list before you call again."
             ),
         },
     ),

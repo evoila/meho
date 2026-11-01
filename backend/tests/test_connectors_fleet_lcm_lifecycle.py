@@ -18,10 +18,13 @@ What is proven:
 * a start answers ``accepted`` with the task id and names the status read; a
   pre-check or apply that already runs is returned and nothing new starts;
 * create checks the plan first: a failed check creates nothing, a failed create
-  lists what ran, what failed and what did not run;
+  lists what ran, what failed and what did not run; when the service stops
+  answering, the check step keeps the check's task id, and a create with no
+  answer says the outcome is unknown;
 * the status read gives state, progress and errors, says ``not_reachable`` (not
-  failed) when the service does not answer, and logs in again after the login
-  expired;
+  failed) when the service does not answer, logs in again after the login
+  expired, and says ``not_reachable`` too when that new login meets HTTP 503,
+  while a refused login stays an error;
 * no password or token reaches an answer, and no password can be passed in.
 """
 
@@ -567,6 +570,62 @@ async def test_create_failing_at_step_two_lists_what_ran(fleet: FleetLcmConnecto
     assert answer["plan"] is None
 
 
+async def test_create_keeps_the_check_task_id_when_polling_loses_the_connection(
+    fleet: FleetLcmConnector,
+) -> None:
+    """The check was accepted, then the service stops answering: the task id stays."""
+    with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mount_login(mock)
+        mock.post("/v1/upgrade-plans/validations").respond(202, json=_check_task("RUNNING"))
+        mock.get(f"/v1/tasks/{_CHECK_ID}").mock(side_effect=httpx.ConnectError("refused"))
+        create = mock.post("/v1/upgrade-plans").respond(201, json={"id": _PLAN_ID})
+        with patch.object(fleet._request_json.retry, "wait", wait_none()):  # type: ignore[attr-defined]
+            result = await _run("fleet-lcm.upgrade-plan.create", _CREATE_PARAMS)
+    assert result["status"] == "ok", result
+    answer = result["result"]
+    assert answer["outcome"] == "validation_not_reachable"
+    assert answer["steps_ran"] == []
+    assert answer["step_failed"]["name"] == "validate"
+    assert answer["step_failed"]["result"] == "not_reachable"
+    assert answer["step_failed"]["task_id"] == _CHECK_ID
+    assert answer["step_failed"]["unreachable_reason"] == "ConnectError"
+    assert answer["steps_not_run"] == ["create"]
+    assert answer["plan"] is None
+    assert "task_id" in answer["note"]
+    assert not create.called
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [httpx.ReadTimeout("slow"), httpx.Response(504)],
+    ids=["timeout", "http-504"],
+)
+async def test_create_with_no_answer_says_the_outcome_is_unknown(
+    fleet: FleetLcmConnector, answer: Any
+) -> None:
+    """The check passed, the create reply is lost: what ran is kept, the outcome is unknown."""
+    with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _mount_login(mock)
+        mock.post("/v1/upgrade-plans/validations").respond(202, json=_check_task("SUCCEEDED"))
+        route = mock.post("/v1/upgrade-plans")
+        if isinstance(answer, Exception):
+            route.mock(side_effect=answer)
+        else:
+            route.mock(return_value=answer)
+        result = await _run("fleet-lcm.upgrade-plan.create", _CREATE_PARAMS)
+    assert result["status"] == "ok", result
+    body = result["result"]
+    assert body["outcome"] == "create_unknown"
+    assert body["steps_ran"] == ["validate"]
+    assert body["steps"][0]["task_id"] == _CHECK_ID
+    assert body["step_failed"]["name"] == "create"
+    assert body["step_failed"]["result"] == "unknown"
+    assert body["step_failed"]["unreachable_reason"] in ("ReadTimeout", "HTTP 504")
+    assert body["steps_not_run"] == []
+    assert body["plan_id"] is None
+    assert "may or may not exist" in body["note"]
+
+
 async def test_create_vendor_error_at_the_check_reaches_the_answer(
     fleet: FleetLcmConnector,
 ) -> None:
@@ -696,4 +755,43 @@ async def test_status_read_logs_in_again_after_the_login_expired(
     assert result["result"]["state"] == "succeeded"
     assert acquire.call_count == 2
     assert read.call_count == 2
+    _assert_no_secret(result)
+
+
+async def test_status_read_says_not_reachable_when_the_new_login_meets_503(
+    fleet: FleetLcmConnector,
+) -> None:
+    """The login expired and the login service is down: not_reachable, with the task id."""
+    with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        acquire = _mount_login(mock)
+        mock.post("/v1/depot-metadata", params={"action": "sync"}).respond(202, json=_task())
+        started = await _run("fleet-lcm.depot.sync", {})
+        assert started["result"]["status"] == "accepted"
+        mock.get(_TASK_PATH).respond(401)
+        acquire.side_effect = [httpx.Response(503)]
+        result = await _run("fleet-lcm.task.info", {"taskId": started["result"]["task_id"]})
+    assert result["status"] == "ok", result
+    body = result["result"]
+    assert body["state"] == "not_reachable"
+    assert body["reachable"] is False
+    assert body["task_id"] == _TASK_ID
+    assert body["unreachable_reason"] == "login HTTP 503"
+    assert body["checked_at"]
+    assert acquire.call_count == 2
+    _assert_no_secret(result)
+
+
+async def test_status_read_keeps_a_refused_login_as_an_auth_error(
+    fleet: FleetLcmConnector,
+) -> None:
+    """The login expired and the new login is refused: an auth error, not not_reachable."""
+    with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        acquire = _mount_login(mock)
+        mock.post("/v1/depot-metadata", params={"action": "sync"}).respond(202, json=_task())
+        started = await _run("fleet-lcm.depot.sync", {})
+        mock.get(_TASK_PATH).respond(401)
+        acquire.side_effect = [httpx.Response(401)]
+        result = await _run("fleet-lcm.task.info", {"taskId": started["result"]["task_id"]})
+    assert result["status"] == "error", result
+    assert result["error"].startswith("connector_auth_failed:")
     _assert_no_secret(result)

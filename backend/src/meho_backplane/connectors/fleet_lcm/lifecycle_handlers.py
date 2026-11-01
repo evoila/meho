@@ -23,6 +23,12 @@ adds a plain state, the stage progress and the error texts to the vendor
 task, and says ``not_reachable`` (never ``failed``) when the service does not
 answer. MEHO keeps no job state between calls; the caller keeps the task id.
 
+"Does not answer" (:func:`_unreachable_reason`) means a transport error, HTTP
+502 / 503 / 504, or a new login that met one of those at the login service.
+A refused login (401 / 403) is a real error and is raised as before. The
+plan create reports the same way: a check that cannot be followed keeps its
+task id, and a create with no answer says the outcome is unknown.
+
 A ``401`` is not caught here: it reaches the dispatcher, which logs in again
 and runs the call once more.
 """
@@ -37,6 +43,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 import httpx
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError, SessionLoginError
 from meho_backplane.connectors.fleet_lcm._paths import (
     _DEPOT_SYNC_POST_PATH,
     _TASK_CANCEL_POST_PATH,
@@ -102,9 +109,30 @@ _ALREADY_RUNNING_NOTE = (
     "the running job with fleet-lcm.task.info."
 )
 _NOT_REACHABLE_NOTE = (
-    "The fleet lifecycle service did not answer. This does not mean the job failed. "
-    "Keep the task id and read again in a few minutes."
+    "The fleet lifecycle service, or the login service, did not answer. This does not "
+    "mean the job failed. Keep the task id and read again in a few minutes."
 )
+#: What to do next after each outcome of ``upgrade-plan.create``.
+_CREATE_NOTES: Final[dict[str, str]] = {
+    "created": "The plan exists. Run fleet-lcm.upgrade-plan.precheck with plan_id.",
+    "validation_failed": (
+        "The vendor's check refused the spec. Nothing was created. Fix the spec from the "
+        "errors and call again."
+    ),
+    "validation_still_running": (
+        "The check still runs. Nothing was created. Follow its task_id with "
+        "fleet-lcm.task.info, then call again."
+    ),
+    "validation_not_reachable": (
+        "The service stopped answering while MEHO followed the check. Nothing was created. "
+        "Keep the check's task_id, read it with fleet-lcm.task.info later, then call again."
+    ),
+    "create_failed": "The check passed, but the vendor refused the create. Nothing was created.",
+    "create_unknown": (
+        "The check passed, but the create got no answer. The plan may or may not exist. "
+        "Read fleet-lcm.upgrade-plan.list before you call again."
+    ),
+}
 
 
 def _now() -> str:
@@ -171,6 +199,27 @@ async def _read_task(
     return await connector._get_json(target, path, operator=operator)
 
 
+def _unreachable_reason(exc: BaseException) -> str | None:
+    """Why the service gave no answer, or ``None`` when *exc* is a real error.
+
+    No answer: a transport error, HTTP 502 / 503 / 504, or a new login that
+    met one of those at the login service (a :class:`SessionLoginError` whose
+    cause is such an HTTP error). A refused login (401 / 403,
+    :class:`ConnectorAuthError`) is a real error, as is every other status.
+    """
+    if isinstance(exc, httpx.TransportError):
+        return type(exc).__name__
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        return f"HTTP {code}" if code in _UNREACHABLE_HTTP else None
+    if isinstance(exc, SessionLoginError) and not isinstance(exc, ConnectorAuthError):
+        cause = exc.__cause__
+        if isinstance(cause, httpx.HTTPStatusError):
+            code = cause.response.status_code
+            return f"login HTTP {code}" if code in _UNREACHABLE_HTTP else None
+    return None
+
+
 def _not_reachable(task_id: str, reason: str) -> dict[str, Any]:
     return {
         "task_id": task_id,
@@ -192,19 +241,19 @@ async def task_status_impl(
 ) -> dict[str, Any]:
     """``fleet-lcm.task.info`` -- the vendor task plus state, progress and errors.
 
-    No answer (a transport error, or HTTP 502 / 503 / 504) gives ``state:
-    not_reachable`` with the task id and the time. Other HTTP errors raise, so
-    the dispatcher reports them (and logs in again on a ``401``).
+    No answer (see :func:`_unreachable_reason`: a transport error, HTTP 502 /
+    503 / 504, or a login service that answers so when the token is renewed)
+    gives ``state: not_reachable`` with the task id and the time. Other errors
+    raise, so the dispatcher reports them (and logs in again on a ``401``).
     """
     task_id = str(params["taskId"])
     try:
         task = await _read_task(connector, operator, target, task_id)
-    except httpx.TransportError as exc:
-        return _not_reachable(task_id, type(exc).__name__)
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code not in _UNREACHABLE_HTTP:
+    except (httpx.HTTPError, SessionLoginError) as exc:
+        reason = _unreachable_reason(exc)
+        if reason is None:
             raise
-        return _not_reachable(task_id, f"HTTP {exc.response.status_code}")
+        return _not_reachable(task_id, reason)
     return {
         **task,
         "task_id": task.get("id") or task_id,
@@ -380,31 +429,74 @@ async def _wait_for_check(
     operator: Operator,
     target: FleetLcmTargetLike,
     task: dict[str, Any],
-) -> dict[str, Any]:
-    """Read the plan-check task until it ends or the short wait is over."""
+) -> tuple[dict[str, Any], str | None]:
+    """Read the plan-check task until it ends or the short wait is over.
+
+    Returns the last task read and, when the service stopped answering
+    during the wait, why (else ``None``). The task keeps its id either way.
+    """
     task_id = task.get("id")
     deadline = time.monotonic() + VALIDATION_WAIT_SECONDS
     while task_id and _state(task.get("status")) in _ACTIVE_STATES:
         if time.monotonic() >= deadline:
             break
         await asyncio.sleep(VALIDATION_POLL_SECONDS)
-        task = await _read_task(connector, operator, target, str(task_id))
-    return task
+        try:
+            task = await _read_task(connector, operator, target, str(task_id))
+        except (httpx.HTTPError, SessionLoginError) as exc:
+            reason = _unreachable_reason(exc)
+            if reason is None:
+                raise
+            return task, reason
+    return task, None
+
+
+async def _create_step(
+    connector: FleetLcmConnector,
+    operator: Operator,
+    target: FleetLcmTargetLike,
+    spec: dict[str, Any],
+    step: dict[str, Any],
+) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+    """Step 2, the create. Returns the outcome, the step report and the plan.
+
+    No answer gives ``unknown``: the plan may or may not exist. A vendor
+    refusal gives ``failed`` with the vendor's text. A ``401`` / ``403`` and a
+    refused login raise, so the dispatcher handles them.
+    """
+    try:
+        plan = await _post(connector, operator, target, _UPGRADE_PLANS_POST_PATH, {"spec": spec})
+    except (httpx.HTTPError, SessionLoginError) as exc:
+        reason = _unreachable_reason(exc)
+        if reason is not None:
+            return (
+                "create_unknown",
+                {**step, "result": "unknown", "unreachable_reason": reason},
+                None,
+            )
+        if (
+            not isinstance(exc, httpx.HTTPStatusError)
+            or exc.response.status_code in _DISPATCHER_HTTP
+        ):
+            raise
+        return "create_failed", {**step, "result": "failed", "errors": [_vendor_error(exc)]}, None
+    return "created", {**step, "result": "succeeded"}, plan
 
 
 def _create_answer(
     outcome: str, check: dict[str, Any], create: dict[str, Any], plan: dict[str, Any] | None
 ) -> dict[str, Any]:
     steps = [check, create]
-    failed = next((s for s in steps if s["result"] in ("failed", "still_running")), None)
+    not_ok = ("failed", "still_running", "not_reachable", "unknown")
     return {
         "outcome": outcome,
         "plan_id": plan.get("id") if plan else None,
         "plan": plan,
         "steps": steps,
         "steps_ran": [s["name"] for s in steps if s["result"] == "succeeded"],
-        "step_failed": failed,
+        "step_failed": next((s for s in steps if s["result"] in not_ok), None),
         "steps_not_run": [s["name"] for s in steps if s["result"] == "not_run"],
+        "note": _CREATE_NOTES[outcome],
     }
 
 
@@ -421,24 +513,39 @@ async def upgrade_plan_create_impl(
     only when the check passed. A check that fails, or still runs after the
     wait, creates nothing. The vendor's create updates a matching plan, so
     running this twice does not make a second plan.
+
+    The answer always lists both steps. When the service stops answering
+    while MEHO follows the check, the check step keeps the check's task id
+    (``not_reachable``). When the create gets no answer, the create step says
+    ``unknown``: the plan may or may not exist.
     """
     spec: dict[str, Any] = {"desiredSoftware": params["desiredSoftware"]}
     if params.get("componentsFilter"):
         spec["componentsFilter"] = params["componentsFilter"]
-    not_run: dict[str, Any] = {"name": "create", "result": "not_run", "task_id": None, "errors": []}
+    not_run: dict[str, Any] = {
+        "name": "create",
+        "result": "not_run",
+        "task_id": None,
+        "errors": [],
+        "unreachable_reason": None,
+    }
 
     started = await _post(connector, operator, target, _UPGRADE_PLAN_VALIDATIONS_POST_PATH, spec)
-    task = await _wait_for_check(connector, operator, target, started)
+    task, unreachable = await _wait_for_check(connector, operator, target, started)
     state = _state(task.get("status"))
     errors = _task_errors(task) + _validation_findings(task, "ERROR")
     check: dict[str, Any] = {
         "name": "validate",
         "result": "succeeded",
-        "task_id": task.get("id"),
+        "task_id": task.get("id") or started.get("id"),
         "vendor_status": task.get("status"),
         "errors": errors,
         "warnings": _validation_findings(task, "WARNING"),
+        "unreachable_reason": unreachable,
     }
+    if unreachable is not None:
+        check["result"] = "not_reachable"
+        return _create_answer("validation_not_reachable", check, not_run, None)
     if state in _ACTIVE_STATES:
         check["result"] = "still_running"
         return _create_answer("validation_still_running", check, not_run, None)
@@ -446,12 +553,5 @@ async def upgrade_plan_create_impl(
         check["result"] = "failed"
         return _create_answer("validation_failed", check, not_run, None)
 
-    try:
-        plan = await _post(connector, operator, target, _UPGRADE_PLANS_POST_PATH, {"spec": spec})
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in _DISPATCHER_HTTP:
-            raise
-        create = {**not_run, "result": "failed", "errors": [_vendor_error(exc)]}
-        return _create_answer("create_failed", check, create, None)
-    create = {**not_run, "result": "succeeded"}
-    return _create_answer("created", check, create, plan)
+    outcome, create, plan = await _create_step(connector, operator, target, spec, not_run)
+    return _create_answer(outcome, check, create, plan)

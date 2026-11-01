@@ -55,11 +55,13 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
 
 from meho_backplane.connectors.schemas import AuthModel
+from meho_backplane.targets.field_rules import check_target_host, check_target_name
 from meho_backplane.targets.ssrf_guard import assert_public_destination
 
 if TYPE_CHECKING:
@@ -411,10 +413,19 @@ class TargetCreate(BaseModel):
     def _validate_ca_pin(cls, value: str | None) -> str | None:
         return validate_ca_pin_pem(value)
 
+    @field_validator("name", "aliases")
+    @classmethod
+    def _check_names(cls, value: str | list[str], info: ValidationInfo) -> str | list[str]:
+        for item in [value] if isinstance(value, str) else value:
+            check_target_name(item, str(info.field_name))
+        return value
+
     @field_validator("host", "fqdn")
     @classmethod
-    def _reject_non_public_destination(cls, value: str | None) -> str | None:
+    def _reject_non_public_destination(cls, value: str | None, info: ValidationInfo) -> str | None:
         """SSRF guard (evoila-bosnia/meho-internal#153).
+
+        :func:`check_target_host` runs first and refuses a malformed host.
 
         A non-public destination (private / loopback / link-local /
         metadata / CGNAT — any non-globally-routable address) is a
@@ -427,6 +438,7 @@ class TargetCreate(BaseModel):
         re-checks the *resolved* address before every dispatch).
         """
         if value is not None:
+            check_target_host(value, str(info.field_name))
             assert_public_destination(value)
         return value
 
@@ -553,9 +565,16 @@ class TargetUpdate(BaseModel):
     def _validate_ca_pin(cls, value: str | None) -> str | None:
         return validate_ca_pin_pem(value)
 
+    @field_validator("aliases")
+    @classmethod
+    def _check_aliases(cls, value: list[str] | None) -> list[str] | None:
+        for item in value or []:
+            check_target_name(item, "aliases")
+        return value
+
     @field_validator("host", "fqdn")
     @classmethod
-    def _reject_non_public_destination(cls, value: str | None) -> str | None:
+    def _reject_non_public_destination(cls, value: str | None, info: ValidationInfo) -> str | None:
         """SSRF guard (evoila-bosnia/meho-internal#153) — same as create.
 
         ``None`` is the PATCH absent-marker and passes untouched; a
@@ -564,6 +583,7 @@ class TargetUpdate(BaseModel):
         existing target into private space.
         """
         if value is not None:
+            check_target_host(value, str(info.field_name))
             assert_public_destination(value)
         return value
 

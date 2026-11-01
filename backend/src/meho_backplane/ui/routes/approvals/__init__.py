@@ -11,6 +11,8 @@ denies a pending :class:`~meho_backplane.db.models.ApprovalRequest`.
 * ``GET /ui/approvals/badge`` -- the live pending-count bell badge.
 * ``GET /ui/approvals`` -- the pending-requests panel (modal body).
 * ``GET /ui/approvals/{id}`` -- the request-detail + approve/deny modal.
+* ``GET`` / ``POST /ui/approvals/in-order`` -- approve the requests of one
+  change ticket oldest first, stopping at the first failure (#3597).
 * ``POST /ui/approvals/{id}/approve`` / ``.../reject`` -- the decisions,
   calling the :mod:`~meho_backplane.operations.approval_queue` service
   in-process (session + CSRF gated -- NOT the Bearer ``/api/v1/approvals``
@@ -25,6 +27,7 @@ never bound as the id parameter.
 
 from __future__ import annotations
 
+from meho_backplane.ui.routes.approvals.in_order import build_in_order_router
 from meho_backplane.ui.routes.approvals.routes import build_approvals_router
 
-__all__ = ["build_approvals_router"]
+__all__ = ["build_approvals_router", "build_in_order_router"]

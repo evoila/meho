@@ -317,6 +317,7 @@ func runBroadcastWatch(cmd *cobra.Command, opts watchOptions) error {
 	req.Header.Set("Authorization", "Bearer "+client.AccessToken())
 	req.Header.Set("Accept", "text/event-stream")
 	api.SetWorkRefHeader(req)
+	api.SetTenantHeader(req)
 	resp, err := client.HTTPClient().Do(req)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)), opts.JSONOut)

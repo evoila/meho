@@ -113,7 +113,9 @@ from meho_backplane.operations._audit import (
 from meho_backplane.operations._errors import (
     result_already_resumed,
     result_denied,
+    result_preview_changed_since_approval,
     result_release_changed_while_waiting,
+    result_target_changed_since_approval,
 )
 from meho_backplane.operations._validate import (
     params_hash_candidates,
@@ -132,6 +134,11 @@ from meho_backplane.operations.approval_handoff import (
     store as store_handoff,
 )
 from meho_backplane.operations.approval_outcome import with_approval_guidance
+from meho_backplane.operations.approval_resume_checks import (
+    park_time_target_hash,
+    preview_changed_since_request,
+    target_changed_since_request,
+)
 from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.version import running_release_id
 
@@ -178,6 +185,7 @@ __all__ = [
     "pending_chain_positions",
     "read_approval_result",
     "record_approval_step_event",
+    "refuse_resume_if_preview_changed",
     "refuse_resume_if_release_changed",
     "rehydrate_resume_target",
     "reject_request",
@@ -1381,6 +1389,9 @@ async def create_pending_request(
         resume_parent=stored_resume_parent,
         idempotency_key=idempotency_key,
         release_id=running_release_id(),
+        target_hash=await park_time_target_hash(
+            session, tenant_id=operator.tenant_id, target_id=target_id
+        ),
     )
     if idempotency_key is None:
         session.add(request)
@@ -2019,6 +2030,12 @@ async def resume_dispatch_after_approval(
     when the claim is free (covering waiter-gone -- timeout / restart /
     cancel) while the claim blocks the ``/approve`` / UI double-dispatch
     when the waiter is alive.
+
+    Before the run, the target must still have the connection settings it
+    had when the request was made (:func:`rehydrate_resume_target`), and a
+    request with a preview hash must still build the same preview
+    (:func:`refuse_resume_if_preview_changed`). Either change refuses the
+    run, and the requester asks again.
     """
     effective_params = params if params is not None else request.params
     if effective_params is None and request.execution_handle is None:
@@ -2070,6 +2087,12 @@ async def resume_dispatch_after_approval(
             # Never assign decrypted composite inputs to the ORM row: an
             # attached request could autoflush them back into approval_request.
             resume_parent_override = cast(dict[str, Any], handoff["resume_parent"])
+
+    preview_refusal = await refuse_resume_if_preview_changed(
+        operator, request, resolved_target, cast(dict[str, Any], effective_params)
+    )
+    if preview_refusal is not None:
+        return preview_refusal
 
     return await _dispatch_resume_with_bound_context(
         operator=operator,
@@ -2128,6 +2151,39 @@ async def refuse_resume_if_release_changed(
         op_id=request.op_id,
         request_release=request.release_id,
         running_release=running,
+        operator_sub=operator.sub,
+    )
+    await persist_resume_result(request.id, refusal, parked_op_id=request.op_id)
+    return refusal
+
+
+async def refuse_resume_if_preview_changed(
+    operator: Operator,
+    request: ApprovalRequest,
+    target: Any,
+    params: dict[str, Any],
+) -> OperationResult | None:
+    """Refuse an approved run whose preview is not the approved one.
+
+    Returns ``None`` when the request stored no preview hash, or when a
+    preview built now for *target* and *params* has the stored hash. Else
+    the operation does not run: the refusal is stored as the request's run
+    result, so every read surface shows the run as failed with the
+    ``preview_changed_since_approval`` error code. The caller has already
+    won the one-resumer claim, so the request cannot run later.
+
+    Shared by both resume paths: the operator surfaces
+    (:func:`resume_dispatch_after_approval`) and the in-process agent
+    waiter (:mod:`meho_backplane.agent.approval_wait`).
+    """
+    if not await preview_changed_since_request(operator, request, target, params):
+        return None
+    refusal = result_preview_changed_since_approval(request.op_id, approval_request_id=request.id)
+    _log().warning(
+        "approval_resume_preview_changed",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        connector_id=request.connector_id,
         operator_sub=operator.sub,
     )
     await persist_resume_result(request.id, refusal, parked_op_id=request.op_id)
@@ -2398,7 +2454,9 @@ def _composite_parent_binding(
         composite_resume_var.reset(resume_token)
 
 
-def _run_audit_context(request: ApprovalRequest) -> dict[str, Any]:
+def _run_audit_context(
+    request: ApprovalRequest, rerun_attempt: int | None = None
+) -> dict[str, Any]:
     """The ``audit_*`` log context to bind while an approved op runs (#3864).
 
     The REST approve routes bind ``audit_op_id="approval.decide"`` (and its
@@ -2409,11 +2467,16 @@ def _run_audit_context(request: ApprovalRequest) -> dict[str, Any]:
     ``None``), and only ``approval_request_id`` is kept, so the run row names
     its own op and the request it ran for. ``bound_contextvars`` puts the
     route keys back when the run ends.
+
+    A re-run of a failed request (#5417) passes *rerun_attempt*, so the
+    run row also says which attempt it is.
     """
     context: dict[str, Any] = {
         key: None for key in structlog.contextvars.get_contextvars() if key.startswith("audit_")
     }
     context["audit_approval_request_id"] = str(request.id)
+    if rerun_attempt is not None:
+        context["audit_approval_rerun_attempt"] = rerun_attempt
     return context
 
 
@@ -2424,6 +2487,7 @@ async def _dispatch_resume_with_bound_context(
     resolved_target: Any,
     effective_params: dict[str, Any],
     resume_parent_override: dict[str, Any] | None = None,
+    rerun_attempt: int | None = None,
 ) -> Any:
     """Re-bind the parked row's stored context, then dispatch ``_approved=True``.
 
@@ -2481,7 +2545,7 @@ async def _dispatch_resume_with_bound_context(
     owner_token = handle_owner_sub_var.set(request.principal_sub)
     try:
         with (
-            structlog.contextvars.bound_contextvars(**_run_audit_context(request)),
+            structlog.contextvars.bound_contextvars(**_run_audit_context(request, rerun_attempt)),
             bind_approved_requester(request),
             composite_resume_binding(
                 subop_op_id=request.op_id,
@@ -2538,6 +2602,13 @@ async def rehydrate_resume_target(
     ``target_id`` instead of the name the caller used at park time means a
     target renamed, or deleted and re-created under the same name, while the
     request waited can never receive the approved write.
+
+    A target whose connection settings changed since the request was made
+    (``request.target_hash``, see
+    :mod:`meho_backplane.operations.approval_resume_checks`) is refused the
+    same way, with the ``target_changed_since_approval`` error code: the
+    approval covers the target as the person saw it, not a new host or new
+    credentials.
     """
     if request.target_id is None:
         return None, None
@@ -2548,6 +2619,18 @@ async def rehydrate_resume_target(
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         resolved_target = await resolve_target_by_id(session, operator.tenant_id, request.target_id)
+    if resolved_target is not None and target_changed_since_request(request, resolved_target):
+        _log().warning(
+            "approval_resume_target_changed",
+            approval_request_id=str(request.id),
+            op_id=request.op_id,
+            connector_id=request.connector_id,
+            target_id=str(request.target_id),
+            operator_sub=operator.sub,
+        )
+        return None, result_target_changed_since_approval(
+            request.op_id, approval_request_id=request.id, target_id=request.target_id
+        )
     if resolved_target is not None:
         return resolved_target, None
 

@@ -224,6 +224,40 @@ test("whitespace-only MEHO_MCP_SCOPES falls back to the default surface", () => 
   assert.deepEqual(scopeMetadataFrom(res.stdout), { scope: DEFAULT_SCOPE });
 });
 
+// The current tenant (#5242): MEHO_TENANT becomes the Meho-Tenant header that
+// MEHO reads (backend auth/current_tenant.py TENANT_HEADER). Without it, no
+// header, so a person with one tenant sees no change.
+function headersFrom(stdout) {
+  const args = argvFrom(stdout);
+  return args.flatMap((a, i) => (a === "--header" ? [args[i + 1]] : []));
+}
+
+test("MEHO_TENANT is sent as the Meho-Tenant header", () => {
+  const { res } = runWrapper({ extraEnv: { MEHO_TENANT: "tenant-b" } });
+  assert.equal(res.status, 0, res.stderr);
+  assert.deepEqual(headersFrom(res.stdout), ["Meho-Tenant: tenant-b"]);
+  // The header comes after the static-OAuth flags; the URL stays first.
+  assert.equal(argvFrom(res.stdout)[0], URL);
+});
+
+test("MEHO_TENANT set in the config file is sent, with spaces trimmed", () => {
+  const cache = freshCache();
+  const config = join(cache, "plugin.env");
+  writeFileSync(config, 'MEHO_TENANT="  tenant b  "\n');
+  const { res } = runWrapper({ cache, extraEnv: { MEHO_PLUGIN_CONFIG: config } });
+  assert.equal(res.status, 0, res.stderr);
+  assert.deepEqual(headersFrom(res.stdout), ["Meho-Tenant: tenant b"]);
+});
+
+test("no MEHO_TENANT, or an empty one, sends no header", () => {
+  for (const extraEnv of [{}, { MEHO_TENANT: "" }, { MEHO_TENANT: "   " }]) {
+    const { res } = runWrapper({ extraEnv });
+    assert.equal(res.status, 0, res.stderr);
+    assert.deepEqual(headersFrom(res.stdout), [], JSON.stringify(extraEnv));
+    assert.equal(argvFrom(res.stdout).length, 5);
+  }
+});
+
 // The committed lock is the security artifact: it must pin mcp-remote to the
 // smoke-tested build and integrity-lock the transitive tree — including the
 // hardened `qs` the desktop bundle already pins (#3444) — so a floating
@@ -240,7 +274,7 @@ test("committed package-lock pins mcp-remote + integrity-locks the tree", () => 
   // never answering it; lib/login-guard.mjs relies on that (#3961).
   assert.equal(lock.packages[""].dependencies["mcp-remote"], "0.1.39");
   assert.equal(lock.packages["node_modules/mcp-remote"].version, "0.1.39");
-  assert.equal(lock.packages["node_modules/qs"].version, "6.16.0");
+  assert.equal(lock.packages["node_modules/qs"].version, "6.17.0");
   const integrities = Object.values(lock.packages).filter((p) => p.integrity);
   assert.ok(integrities.length >= 1, "transitive tree must carry integrity hashes");
 });

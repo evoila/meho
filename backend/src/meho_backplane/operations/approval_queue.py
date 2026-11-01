@@ -1281,12 +1281,13 @@ async def create_pending_request(
             requester.
         reveal_secret: The caller asked for the hidden values of the answer
             (``reveal_secret: true``; the dispatcher refused an agent
-            already). The flag is saved with the stored params, in
-            ``params`` or in the encrypted payload, so the approved run
-            returns the values. It is not part of *params_hash*, so the
-            retry check and the approval surfaces compare the call without
-            it; :func:`resume_dispatch_after_approval` takes it off again
-            before the hash and preview checks.
+            already). The choice is saved in its own column on the request,
+            not with the params and not in the encrypted payload of a
+            credential write, so every approved run returns the values,
+            also the re-run of a failed credential write after the first
+            run deleted the payload. It is not part of *params_hash*, so
+            the retry check and the approval surfaces compare the call
+            without it.
 
     Returns:
         The flushed :class:`ApprovalRequest` row (new, or reused).
@@ -1365,10 +1366,10 @@ async def create_pending_request(
     created_at = _now()
     bounded_expires_at = _bounded_expires_at(created_at, expires_at, _resolve_default_ttl())
     handoff_payload: dict[str, Any] | None = None
-    stored_params: dict[str, Any] | None = with_reveal_secret(params) if reveal_secret else params
+    stored_params: dict[str, Any] | None = params
     stored_resume_parent = resume_parent
     if classify_op(op_id) == "credential_write":
-        handoff_payload = {"params": stored_params, "resume_parent": resume_parent}
+        handoff_payload = {"params": params, "resume_parent": resume_parent}
         stored_params = None
         if resume_parent is not None:
             stored_resume_parent = {"op_id": resume_parent["op_id"]}
@@ -1402,6 +1403,7 @@ async def create_pending_request(
         target_hash=await park_time_target_hash(
             session, tenant_id=operator.tenant_id, target_id=target_id
         ),
+        reveal_secret=reveal_secret,
     )
     if idempotency_key is None:
         session.add(request)
@@ -2047,9 +2049,9 @@ async def resume_dispatch_after_approval(
     (:func:`refuse_resume_if_preview_changed`). Either change refuses the
     run, and the requester asks again.
     """
-    # The requester's reveal choice rides on the stored params, outside the
-    # hash (``create_pending_request``). It comes off before the hash and
-    # preview checks and goes back on for the run.
+    # The requester's reveal choice is on the request row, outside the
+    # params and the hash (``create_pending_request``). It goes on the
+    # params of the run only.
     effective_params, reveal_secret = _stored_call(request, params)
     if effective_params is None and request.execution_handle is None:
         return _resume_pre0036_denied(operator, request)
@@ -2091,9 +2093,7 @@ async def resume_dispatch_after_approval(
                 handoff_session, request.execution_handle, request.id, request.tenant_id
             )
             await handoff_session.commit()
-        effective_params, reveal_secret = split_reveal_secret(
-            cast(dict[str, Any], handoff["params"])
-        )
+        effective_params = cast(dict[str, Any], handoff["params"])
         if not params_hash_matches(effective_params, request.params_hash):
             raise ApprovalHandoffError(
                 "approval execution payload does not match the approved request"
@@ -2124,16 +2124,19 @@ def _stored_call(
 ) -> tuple[dict[str, Any] | None, bool]:
     """Return the params an approved run uses, and the requester's reveal choice.
 
-    *params* (the approve surface's own copy, already hash-checked) win over
-    the stored ``request.params``. The reveal choice always comes from the
-    stored params, so a surface that sends the params without the flag keeps
-    it. ``(None, False)`` when the row stores no params and none were sent.
+    *params* (the caller's own copy of the call) win over the stored
+    ``request.params``. A ``reveal_secret`` flag sent with them comes off
+    before the hash and preview checks and does not count: the choice is the
+    one of the original call, stored on the request row
+    (``request.reveal_secret``). So the choice also survives for a
+    credential write, whose params are not on the row and come from the
+    caller on a re-run. The params are ``None`` when the row stores none and
+    none were sent.
     """
-    stored = request.params
-    if stored is None:
-        return params, False
-    stored_params, reveal_secret = split_reveal_secret(cast(dict[str, Any], stored))
-    return (params if params is not None else stored_params), reveal_secret
+    if params is not None:
+        params, _ = split_reveal_secret(params)
+    effective = params if params is not None else request.params
+    return cast(dict[str, Any] | None, effective), bool(request.reveal_secret)
 
 
 async def refuse_resume_if_release_changed(
@@ -2564,10 +2567,10 @@ async def _dispatch_resume_with_bound_context(
     so an op that writes to a second, caller-named target checks the
     requester's policy there too, not only the reviewer's.
 
-    *reveal_secret* is the requester's ``reveal_secret: true`` from the
-    stored params. It goes back on the params of the run, so the answer
-    holds the values the requester asked for; the dispatcher stamps the
-    choice on the audit row of the run.
+    *reveal_secret* is the requester's ``reveal_secret: true``, stored on
+    the request row. It goes on the params of the run, so the answer holds
+    the values the requester asked for; the dispatcher stamps the choice on
+    the audit row of the run.
     """
     from meho_backplane.operations.dispatcher import dispatch
     from meho_backplane.operations.secondary_target_policy import bind_approved_requester

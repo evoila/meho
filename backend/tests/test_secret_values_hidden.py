@@ -68,6 +68,7 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
 )
+from meho_backplane.operations.approval_rerun import rerun_failed_request
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.redaction import redact
 from meho_backplane.redaction.resolver import get_default_policy
@@ -742,8 +743,9 @@ async def test_reveal_choice_survives_the_wait_for_approval(
     assert result.result["devices"][0]["password"] == _PASSWORD
     assert result.result["devices"][0]["api_token"] == _API_TOKEN
     (request,) = await _approval_requests()
-    # The choice is stored with the params; the hash covers the call without it.
-    assert request.params == {"path": "app/db", "reveal_secret": True}
+    # The choice is stored on the request, not in the params or the hash.
+    assert request.params == {"path": "app/db"}
+    assert request.reveal_secret is True
     assert request.params_hash == compute_params_hash({"path": "app/db"})
     (row,) = await _audit_rows(op_id)
     assert row.payload["reveal_secret"] is True
@@ -763,8 +765,114 @@ async def test_approved_run_without_the_flag_keeps_the_default_view(
     assert [value for value in _field_values() if value in result.model_dump_json()] == []
     (request,) = await _approval_requests()
     assert request.params == {"path": "app/db"}
+    assert request.reveal_secret is False
     (row,) = await _audit_rows(op_id)
     assert "reveal_secret" not in row.payload
+
+
+#: The runs of :func:`_credential_write_fails_once`, one entry per run.
+_credential_write_runs: list[int] = []
+
+
+async def _credential_write_fails_once(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> Any:
+    """Module-level credential write: the first run fails, every later run answers."""
+    _credential_write_runs.append(1)
+    if len(_credential_write_runs) == 1:
+        raise RuntimeError("the vendor did not answer")
+    return {"devices": _device_rows()[:1], "count": 1}
+
+
+@pytest.fixture
+def _no_vault_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Take the Vault permission check off ``vault.kv.put``: these tests have no Vault."""
+    from meho_backplane.operations import _preview
+
+    monkeypatch.delitem(_preview._PERMISSION_PREFLIGHTS, "vault.kv.put", raising=False)
+
+
+async def _register_failing_credential_write(embedding_service: AsyncMock) -> str:
+    _credential_write_runs.clear()
+    op_id = "vault.kv.put"
+    await _register(op_id, _credential_write_fails_once, embedding_service, requires_approval=True)
+    return op_id
+
+
+@pytest.mark.usefixtures("_no_vault_preflight")
+async def test_reveal_choice_survives_a_failed_credential_write_and_its_rerun(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A credential write keeps its params only until the first run. The reveal
+    choice stays on the request, so the re-run returns the values the requester
+    asked for, also when the params sent again carry the flag."""
+    op_id = await _register_failing_credential_write(stub_embedding_service)
+
+    failed = await _park_approve_and_run(op_id, reveal=True)
+
+    assert failed.status == "error", failed.error
+    (request,) = await _approval_requests()
+    assert request.params is None
+    assert request.execution_handle is not None
+    assert request.reveal_secret is True
+    assert request.resume_result is not None
+    assert request.resume_result["status"] == "error"
+
+    requester = _operator(PrincipalKind.USER, sub="requester")
+    outcome = await rerun_failed_request(
+        operator=requester,
+        request_id=request.id,
+        params={"path": "app/db", "reveal_secret": True},
+    )
+
+    assert outcome.attempt == 2
+    assert outcome.result.status == "ok", outcome.result.error
+    assert outcome.result.result["devices"][0]["password"] == _PASSWORD
+    assert outcome.result.result["devices"][0]["api_token"] == _API_TOKEN
+    assert len(_credential_write_runs) == 2
+    rows = await _audit_rows(op_id)
+    assert [row.payload.get("reveal_secret") for row in rows] == [True, True]
+    assert [value for value in _field_values() if value in json.dumps(rows[-1].raw_payload)] == []
+
+
+@pytest.mark.usefixtures("_no_vault_preflight")
+async def test_rerun_without_the_flag_keeps_the_stored_reveal_choice(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    op_id = await _register_failing_credential_write(stub_embedding_service)
+    failed = await _park_approve_and_run(op_id, reveal=True)
+    assert failed.status == "error", failed.error
+    (request,) = await _approval_requests()
+
+    outcome = await rerun_failed_request(
+        operator=_operator(PrincipalKind.USER, sub="requester"),
+        request_id=request.id,
+        params={"path": "app/db"},
+    )
+
+    assert outcome.result.status == "ok", outcome.result.error
+    assert outcome.result.result["devices"][0]["password"] == _PASSWORD
+
+
+@pytest.mark.usefixtures("_no_vault_preflight")
+async def test_rerun_flag_does_not_turn_on_a_reveal_the_call_did_not_ask_for(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    op_id = await _register_failing_credential_write(stub_embedding_service)
+    failed = await _park_approve_and_run(op_id, reveal=False)
+    assert failed.status == "error", failed.error
+    (request,) = await _approval_requests()
+    assert request.reveal_secret is False
+
+    outcome = await rerun_failed_request(
+        operator=_operator(PrincipalKind.USER, sub="requester"),
+        request_id=request.id,
+        params={"path": "app/db", "reveal_secret": True},
+    )
+
+    assert outcome.result.status == "ok", outcome.result.error
+    assert outcome.result.result["devices"][0]["password"] == _HIDDEN_FIELD
+    assert [value for value in _field_values() if value in outcome.result.model_dump_json()] == []
 
 
 async def test_reveal_by_an_agent_is_refused_before_the_call_waits_for_approval(

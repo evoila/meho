@@ -307,8 +307,9 @@ async def _check_rerun(
     """Apply rules 2 and 3; return the params, target and reveal choice to run with.
 
     The reveal choice (``reveal_secret: true`` of the original call) is
-    stored with the params and is not part of the hash or the preview, so
-    it comes off here and goes back on for the run.
+    stored on the request, not in the params, the hash or the preview. A
+    flag sent again with the params comes off before the hash check and
+    does not change the stored choice, which goes on the params of the run.
     """
     state = _not_failed_state(request)
     if state is not None:

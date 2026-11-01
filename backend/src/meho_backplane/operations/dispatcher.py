@@ -3228,9 +3228,9 @@ async def _handle_needs_approval(
     ``denied`` result so the dispatcher never raises.
 
     *reveal_secret* is the caller's ``reveal_secret: true`` (an agent was
-    refused before this point). It is saved with the params on the
-    request, outside the params hash, so the approved run returns the
-    values the caller asked for instead of the default view.
+    refused before this point). It is saved on the request, outside the
+    params and the params hash, so the approved run returns the values the
+    caller asked for instead of the default view.
     """
     # Thread the current agent run id (if any) from the contextvar so the
     # approval request links back to the paused run.

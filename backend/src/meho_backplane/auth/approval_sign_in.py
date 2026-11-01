@@ -12,9 +12,13 @@ the person's own approval sign-in (#5515):
   default ``meho-cli-approve``), and the principal is a person. A stored
   ``meho login`` token, an MCP token or any other token gets the same
   ``401`` as an old sign-in, whatever its ``auth_time``;
-* the sign-in is inside the approval window: the token's ``auth_time`` is
-  at most ``FRESH_SIGN_IN_MAX_AGE_SECONDS`` old (default 15 minutes). A
-  token without ``auth_time`` never approves;
+* the sign-in is young enough for the request: the token's ``auth_time``
+  is at most ``FRESH_SIGN_IN_MAX_AGE_SECONDS`` old (the approval window,
+  default 15 minutes), or for a request whose operation is ``destructive``
+  at most ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`` old (default five
+  minutes). Each risk level has its own limit; the window does not cap
+  the destructive limit, and the destructive limit does not cap the
+  window. A token without ``auth_time`` never approves;
 * the sign-in asked for the person's credentials: the token's ``acr`` is
   set and is not ``"0"``. With no level-of-authentication mapping,
   Keycloak gives ``"1"`` to a sign-in that asked for the password and
@@ -22,10 +26,12 @@ the person's own approval sign-in (#5515):
   always asks, so its tokens carry ``"1"`` (or a higher level).
 
 Inside the window one sign-in may approve several requests. A request
-whose operation is ``destructive`` is stricter: the sign-in must be at most
-``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`` old and must not have approved
-anything else. That rule needs the request and the audit log, so it lives
-in :func:`~meho_backplane.operations.approval_queue.approve_request`.
+whose operation is ``destructive`` is stricter: its sign-in must not have
+approved anything else. The age check and that rule need the request (its
+risk level) and the audit log, so they live in
+:func:`~meho_backplane.operations.approval_queue.approve_request`.
+:func:`check_fresh_approval_sign_in` runs before the request is read; it
+refuses a token that is too old for both limits.
 
 A refreshed token keeps the time of the first sign-in (RFC 9470 §6.1), so
 renewing a token never makes the window longer. The refusal is ``401``
@@ -51,6 +57,7 @@ from meho_backplane.settings import Settings, get_settings
 __all__ = [
     "FRESH_SIGN_IN_REMEDIATION",
     "ApprovalAuth",
+    "approval_sign_in_max_age",
     "asked_for_credentials",
     "check_fresh_approval_sign_in",
     "fresh_sign_in_required",
@@ -167,6 +174,18 @@ def asked_for_credentials(operator: Operator) -> bool:
     return operator.acr is not None and operator.acr != _NO_CREDENTIAL_ACR
 
 
+def approval_sign_in_max_age(settings: Settings, *, destructive: bool) -> int:
+    """How old a sign-in may be, in seconds, to approve a request of this risk level.
+
+    The approval window (``FRESH_SIGN_IN_MAX_AGE_SECONDS``) for every
+    request but one whose operation is ``destructive``; that one has its
+    own limit, ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``.
+    """
+    if destructive:
+        return settings.per_action_sign_in_max_age_seconds
+    return settings.fresh_sign_in_max_age_seconds
+
+
 def check_fresh_approval_sign_in(
     operator: Operator,
     settings: Settings,
@@ -176,22 +195,28 @@ def check_fresh_approval_sign_in(
     """Return the proof for a token approve, or raise the ``401`` challenge.
 
     The token must come from the person's approval sign-in
-    (:func:`is_approval_sign_in`), and that sign-in must be inside the
-    approval window: ``auth_time`` at most ``FRESH_SIGN_IN_MAX_AGE_SECONDS``
-    old (:func:`~meho_backplane.auth.fresh_sign_in.has_fresh_sign_in`), and
-    it must have asked for credentials (:func:`asked_for_credentials`). A
+    (:func:`is_approval_sign_in`), that sign-in must have asked for
+    credentials (:func:`asked_for_credentials`), and it must be young
+    enough for some request: ``auth_time`` at most the longer of the two
+    limits of :func:`approval_sign_in_max_age` old
+    (:func:`~meho_backplane.auth.fresh_sign_in.has_fresh_sign_in`). This
+    runs before the request is read; the limit of the request's own risk
+    level is applied in
+    :func:`~meho_backplane.operations.approval_queue.approve_request`. A
     token with no ``auth_time`` or no ``acr`` is refused (fail closed).
     Every refusal is the same ``401``, so a client cannot tell which part
     failed.
     """
     approval_client = is_approval_sign_in(operator, settings)
     credentials = asked_for_credentials(operator)
+    longest = max(
+        approval_sign_in_max_age(settings, destructive=False),
+        approval_sign_in_max_age(settings, destructive=True),
+    )
     if (
         not approval_client
         or not credentials
-        or not has_fresh_sign_in(
-            operator, now=now, max_age_seconds=settings.fresh_sign_in_max_age_seconds
-        )
+        or not has_fresh_sign_in(operator, now=now, max_age_seconds=longest)
     ):
         structlog.get_logger(__name__).warning(
             "approval_sign_in_not_fresh",

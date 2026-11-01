@@ -186,7 +186,7 @@ _MAX_REASON_LENGTH = MAX_REASON_LENGTH
 
 
 def _per_action_sign_in_required(reason: str) -> HTTPException:
-    """The ``401`` for a ``destructive`` approve whose sign-in cannot be used (#5515).
+    """The ``401`` for a ``destructive`` approve whose sign-in was already used (#5515).
 
     Its ``max_age`` is ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``, not the
     approval window: such an approve needs a sign-in of its own.
@@ -670,7 +670,9 @@ async def _capture_operator_decision(
     except ApprovalSignInReusedError as exc:
         raise _per_action_sign_in_required("fresh_sign_in_already_used") from exc
     except ApprovalSignInTooOldError as exc:
-        raise _per_action_sign_in_required("fresh_sign_in_required") from exc
+        raise fresh_sign_in_required(
+            reason="fresh_sign_in_required", max_age_seconds=exc.max_age_seconds
+        ) from exc
     except DelegatedReasonInvalidError as exc:
         raise _delegated_reason_http_error(exc) from exc
     except DelegatedDecisionForbiddenError as exc:
@@ -952,7 +954,9 @@ async def _record_approval_decision(
     except ApprovalSignInReusedError as exc:
         raise _per_action_sign_in_required("fresh_sign_in_already_used") from exc
     except ApprovalSignInTooOldError as exc:
-        raise _per_action_sign_in_required("fresh_sign_in_required") from exc
+        raise fresh_sign_in_required(
+            reason="fresh_sign_in_required", max_age_seconds=exc.max_age_seconds
+        ) from exc
     except DelegatedReasonInvalidError as exc:
         raise _delegated_reason_http_error(exc) from exc
     except DelegatedDecisionForbiddenError as exc:
@@ -994,8 +998,8 @@ async def approve_approval_request(
       does not come from the approval client (``azp``), or its
       ``auth_time`` is missing or older than
       ``FRESH_SIGN_IN_MAX_AGE_SECONDS``. For a ``destructive`` request the
-      sign-in must also be at most ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``
-      old and must not have approved anything else. The answer carries
+      limit is ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`` instead, and the
+      sign-in must not have approved anything else. The answer carries
       ``WWW-Authenticate: Bearer error="insufficient_user_authentication"``
       with ``max_age`` (RFC 9470). Approve in the web interface, or sign in
       again. The request stays pending.

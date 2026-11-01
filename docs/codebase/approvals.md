@@ -2213,7 +2213,18 @@ so on the CLI) the token must prove it:
   [Operator overrides and the fresh sign-in check](#operator-overrides-and-the-fresh-sign-in-check-4711)).
   The window counts from the sign-in: a refreshed token keeps the time of
   the first sign-in (RFC 9470 §6.1), and approving does not move it. A
-  token without `auth_time` is refused.
+  token without `auth_time` is refused. Each risk level has its own
+  limit (`approval_sign_in_max_age` in `auth/approval_sign_in.py`): the
+  window for every request but a `destructive` one, which uses
+  `PER_ACTION_SIGN_IN_MAX_AGE_SECONDS` instead (see below). Neither
+  limit caps the other: with a window of 120 seconds and the
+  destructive limit at 300, a 180-second-old sign-in approves a
+  destructive request and not a plain one. The route's dependency
+  (`require_fresh_approval_sign_in`) runs before the request is read,
+  so it refuses only a sign-in older than both limits; `approve_request`
+  applies the limit of the request's risk level
+  (`ApprovalSignInTooOldError`, mapped to 401 `fresh_sign_in_required:`
+  with that limit as `max_age`).
 - **A sign-in that asked for credentials.** The token's `acr` claim
   (`Operator.acr`) must be set and must not be `"0"`
   (`asked_for_credentials`). With no level-of-authentication mapping,
@@ -2232,8 +2243,9 @@ so on the CLI) the token must prove it:
   whose `proposed_effect.safety_level` is `destructive`,
   `approve_request` runs `_check_sign_in_use` (`operations/approval_queue.py`):
   - the sign-in must be at most `PER_ACTION_SIGN_IN_MAX_AGE_SECONDS` old
-    (default 300); else `ApprovalSignInTooOldError`, mapped to 401
-    `fresh_sign_in_required:` with `max_age=300`;
+    (default 300), whatever the window is; else
+    `ApprovalSignInTooOldError`, mapped to 401 `fresh_sign_in_required:`
+    with `max_age=300`;
   - the sign-in must not have approved anything else; else
     `ApprovalSignInReusedError`, mapped to 401
     `fresh_sign_in_already_used:` with `max_age=300`;

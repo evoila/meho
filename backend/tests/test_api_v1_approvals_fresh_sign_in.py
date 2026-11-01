@@ -10,8 +10,9 @@ approval window (``FRESH_SIGN_IN_MAX_AGE_SECONDS``, default 900).
 Otherwise they answer 401 with the RFC 9470 challenge and the request
 stays pending. Inside the window one sign-in may approve several requests.
 A ``destructive`` request needs a sign-in of its own, at most
-``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`` old. Reject is unchanged. The
-``approval.decision`` audit row records how the approval was given.
+``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`` old; that limit replaces the window
+for it, in both directions. Reject is unchanged. The ``approval.decision``
+audit row records how the approval was given.
 """
 
 from __future__ import annotations
@@ -485,6 +486,33 @@ async def test_a_destructive_request_does_not_use_the_window(
     assert response.json()["detail"].startswith("fresh_sign_in_required:")
     assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
     assert _fake_resume == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["approve", "decide"])
+async def test_a_destructive_request_keeps_its_own_limit_when_the_window_is_shorter(
+    route: str,
+    monkeypatch: pytest.MonkeyPatch,
+    _client: tuple[httpx.AsyncClient, Any],
+    _fake_resume: list[uuid.UUID],
+) -> None:
+    """Window 120 seconds, destructive limit 300: a 180-second-old sign-in
+    is too old for a plain request and young enough for a destructive one."""
+    monkeypatch.setenv("FRESH_SIGN_IN_MAX_AGE_SECONDS", "120")
+    get_settings.cache_clear()
+    ac, key = _client
+    plain, destructive = await _park(), await _park(destructive=True)
+    token = _token(key, auth_time=int(time.time()) - 180, sid="s-180")
+
+    response = await _approve(ac, route, plain, token)
+    _assert_challenge(response, max_age=120)
+    assert response.json()["detail"].startswith("fresh_sign_in_required:")
+    assert await _status(plain) == ApprovalRequestStatus.PENDING.value
+
+    assert (await _approve(ac, route, destructive, token)).status_code == 200
+    assert await _status(destructive) == ApprovalRequestStatus.APPROVED.value
+    assert (await _approval_auth(destructive))["single_use"] is True
+    assert _fake_resume == [destructive]
 
 
 @pytest.mark.asyncio

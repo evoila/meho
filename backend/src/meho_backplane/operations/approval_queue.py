@@ -90,7 +90,7 @@ from sqlalchemy import CursorResult, and_, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.approval_sign_in import ApprovalAuth
+from meho_backplane.auth.approval_sign_in import ApprovalAuth, approval_sign_in_max_age
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
@@ -357,18 +357,22 @@ class ApprovalSignInReusedError(ApprovalError):
 
 
 class ApprovalSignInTooOldError(ApprovalError):
-    """The sign-in is too old to approve a ``destructive`` request (#5515).
+    """The sign-in is too old for this request (#5515).
 
-    A destructive approve does not use the approval window. Its sign-in
-    must be at most ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`` old. The REST
-    layer answers ``401`` with the fresh sign-in challenge.
+    Each risk level has its own limit
+    (:func:`~meho_backplane.auth.approval_sign_in.approval_sign_in_max_age`):
+    the approval window ``FRESH_SIGN_IN_MAX_AGE_SECONDS``, or for a
+    ``destructive`` request ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``.
+    ``max_age_seconds`` is the limit that applied. The REST layer answers
+    ``401`` with the fresh sign-in challenge and that ``max_age``.
     """
 
-    def __init__(self, request_id: uuid.UUID) -> None:
+    def __init__(self, request_id: uuid.UUID, *, max_age_seconds: int) -> None:
         self.request_id = request_id
+        self.max_age_seconds = max_age_seconds
         super().__init__(
-            f"approval_request {request_id}: a destructive operation needs a "
-            "sign-in from the last few minutes"
+            f"approval_request {request_id}: the sign-in is older than "
+            f"{max_age_seconds} seconds; approving needs a newer one"
         )
 
 
@@ -1482,13 +1486,15 @@ async def _check_sign_in_use(
     operator: Operator,
     approval_auth: ApprovalAuth,
 ) -> bool:
-    """Apply the ``destructive`` rule to a token approve; return whether it is single-use.
+    """Check the sign-in's age and use for a token approve; return whether it is single-use.
 
-    Inside the approval window one sign-in may approve several requests
-    (#5515). A ``destructive`` request is the exception: it needs a sign-in
-    at most ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`` old
-    (:class:`ApprovalSignInTooOldError` otherwise) that has approved
-    nothing else, and after it that sign-in approves nothing more
+    The sign-in must be young enough for the request's risk level
+    (:func:`~meho_backplane.auth.approval_sign_in.approval_sign_in_max_age`,
+    :class:`ApprovalSignInTooOldError` otherwise): the approval window, or
+    for a ``destructive`` request its own limit. Inside the window one
+    sign-in may approve several requests (#5515). A ``destructive`` request
+    is the exception: its sign-in must have approved nothing else, and
+    after it that sign-in approves nothing more
     (:class:`ApprovalSignInReusedError` in both cases). A web click is
     never checked.
 
@@ -1512,17 +1518,18 @@ async def _check_sign_in_use(
     if key is None or approval_auth.auth_time is None:
         return False
     destructive = _is_destructive(request)
-    if destructive:
-        from meho_backplane.settings import get_settings
+    from meho_backplane.settings import get_settings
 
-        age = _now().timestamp() - approval_auth.auth_time
-        if age > get_settings().per_action_sign_in_max_age_seconds:
-            _log().warning(
-                "approval_sign_in_too_old_for_destructive",
-                approval_request_id=str(request.id),
-                operator_sub=operator.sub,
-            )
-            raise ApprovalSignInTooOldError(request.id)
+    max_age = approval_sign_in_max_age(get_settings(), destructive=destructive)
+    if _now().timestamp() - approval_auth.auth_time > max_age:
+        _log().warning(
+            "approval_sign_in_too_old",
+            approval_request_id=str(request.id),
+            operator_sub=operator.sub,
+            destructive=destructive,
+            max_age_seconds=max_age,
+        )
+        raise ApprovalSignInTooOldError(request.id, max_age_seconds=max_age)
     conn = await session.connection()
     if conn.dialect.name == "postgresql":
         await session.execute(
@@ -1642,8 +1649,9 @@ async def approve_request(
         ApprovalSignInReusedError: The request is ``destructive`` and
             *approval_auth* names a sign-in that already approved something,
             or the sign-in already approved a ``destructive`` request (#5515).
-        ApprovalSignInTooOldError: The request is ``destructive`` and the
-            sign-in is older than ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``.
+        ApprovalSignInTooOldError: The sign-in is older than the limit of
+            the request's risk level: the approval window, or for a
+            ``destructive`` request ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``.
     """
     request = await _load_pending_for_approval(
         session, request_id, operator=operator, params=params

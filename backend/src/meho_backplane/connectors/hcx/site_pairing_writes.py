@@ -9,7 +9,9 @@ read from the Vault path ``remote_secret_ref`` under the caller's identity
 (after an approval: the approver) and go only into that request body. The
 op is pinned ``credential_write`` in :mod:`meho_backplane.broadcast.events`,
 so the flight recorder keeps no body of the call. A started pairing answers
-``{"data": {"jobId"}}``; the caller follows the job with ``hcx.job.get``.
+``{"data": {"jobId"}}``; the caller follows the job with ``hcx.job.get``. A
+warning or error text of the answer that echoes the password is returned
+with the password hidden.
 When the Manager does not trust the remote site's certificate, it answers
 with an error whose ``data`` holds the certificate. Then nothing is paired
 and the op returns the certificate, so a person can check it and trust it
@@ -45,6 +47,7 @@ from meho_backplane.connectors._shared.vault_creds import (
 )
 from meho_backplane.connectors.hcx.session import HcxTargetLike
 from meho_backplane.connectors.hcx.typed_reads import (
+    REDACTED,
     _envelope_notes,
     _redact_object,
     _segment,
@@ -159,17 +162,42 @@ def _json_or_none(response: httpx.Response) -> Any:
         return None
 
 
+def _hide_value(value: Any, secret: str) -> Any:
+    """Return *value* with every copy of *secret* inside its text replaced, at any depth.
+
+    :func:`redact_secrets` masks secret-named fields. A vendor warning or
+    error can echo the password in free text under any name, so the text
+    itself is searched too.
+    """
+    if isinstance(value, str):
+        return value.replace(secret, REDACTED) if secret else value
+    if isinstance(value, dict):
+        return {key: _hide_value(item, secret) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_hide_value(item, secret) for item in value]
+    return value
+
+
 def _without_request_body(
     exc: httpx.HTTPStatusError, payload: Any, password: str
 ) -> httpx.HTTPStatusError:
-    """A copy of *exc* with the same status, no request body and no session header.
+    """A copy of *exc* with the same status and headers, but no request body.
 
     The dispatcher copies the response body into the result and the audit
     row, so the copy holds only the secret-masked JSON answer, and nothing
-    when the answer is not JSON or holds the password.
+    when the answer is not JSON or holds the password. The request headers
+    stay: on a ``401`` the dispatcher hands the rejected request to
+    :meth:`HcxConnector.invalidate_session`, which drops the cached session
+    token only when that request sent it. Without the header the stale
+    token would stay and the retry would fail with the same ``401``.
     """
     status = exc.response.status_code
-    request = httpx.Request(exc.request.method, exc.request.url)
+    headers = {
+        name: value
+        for name, value in exc.request.headers.items()
+        if name.lower() not in ("content-length", "content-type")
+    }
+    request = httpx.Request(exc.request.method, exc.request.url, headers=headers)
     masked = redact_secrets(payload) if payload is not None else None
     if masked is not None and password in json.dumps(masked):
         masked = None
@@ -238,17 +266,17 @@ async def _pair(
     data = payload.get("data") if isinstance(payload, dict) else None
     job_id = data.get("jobId") if isinstance(data, dict) else None
     if not job_id:
-        text = _error_text(payload)
-        text = "" if password in text else text
+        text = _hide_value(_error_text(payload), password)
         raise ValueError(
             "the HCX Manager did not start the pairing" + (f": {text}" if text else "")
         )
+    warnings = redact_secrets(_envelope_notes(payload)["warnings"])
     return {
         **answer,
         "status": "accepted",
         "job_id": job_id,
         "status_read": _JOB_READ,
-        "warnings": redact_secrets(_envelope_notes(payload)["warnings"]),
+        "warnings": _hide_value(warnings, password),
     }
 
 

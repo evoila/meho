@@ -23,6 +23,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
+import httpx
 import pytest
 import respx
 from cryptography import x509
@@ -48,6 +49,7 @@ from meho_backplane.connectors.hcx.site_pairing_ops import (
     HCX_SITE_PAIRING_OPS,
     site_pairing_preview,
 )
+from meho_backplane.connectors.hcx.typed_reads import REDACTED
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
@@ -721,6 +723,54 @@ async def test_pair_http_error_never_carries_the_password(
     rendered = _rendered(result) + json.dumps(result.extras, default=str)
     assert _REMOTE_PASSWORD not in rendered
     assert _REMOTE_USER not in rendered
+
+
+async def test_pair_success_warning_never_carries_the_password(
+    hcx: HcxConnector, vault_reads: list[str]
+) -> None:
+    answer = {
+        "success": True,
+        "data": {"jobId": "job-pair"},
+        "warnings": [{"message": f"remote login as {_REMOTE_USER} with {_REMOTE_PASSWORD}"}],
+    }
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        mock.get(_CLOUD_CONFIGS).respond(200, json={"items": []})
+        mock.post(_CLOUD_CONFIGS).respond(200, json=answer)
+        result = await _run("hcx.site_pairing.set", _PAIR)
+
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "accepted"
+    assert result.result["job_id"] == "job-pair"
+    expected = f"remote login as {_REMOTE_USER} with {REDACTED}"
+    assert result.result["warnings"] == [{"message": expected}]
+    assert _REMOTE_PASSWORD not in _rendered(result) + json.dumps(result.extras, default=str)
+
+
+async def test_pair_401_makes_a_new_login_and_the_pairing_then_succeeds(
+    hcx: HcxConnector, vault_reads: list[str]
+) -> None:
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = mock.post(_SESSIONS)
+        login.side_effect = [
+            httpx.Response(200, headers={"x-hm-authorization": "profiles-hm-token-1"}),
+            httpx.Response(200, headers={"x-hm-authorization": "profiles-hm-token-2"}),
+        ]
+        mock.get(_CLOUD_CONFIGS).respond(200, json={"items": []})
+        pair = mock.post(_CLOUD_CONFIGS)
+        pair.side_effect = [
+            httpx.Response(401),
+            httpx.Response(200, json={"success": True, "data": {"jobId": "job-pair"}}),
+        ]
+        result = await _run("hcx.site_pairing.set", _PAIR)
+
+    assert result.status == "ok", result.error
+    assert login.call_count == 2
+    assert pair.calls[0].request.headers["x-hm-authorization"] == "profiles-hm-token-1"
+    assert pair.calls[1].request.headers["x-hm-authorization"] == "profiles-hm-token-2"
+    assert result.result["status"] == "accepted"
+    assert result.result["job_id"] == "job-pair"
+    assert _REMOTE_PASSWORD not in _rendered(result)
 
 
 async def test_pair_needs_a_url_and_a_secret_ref(hcx: HcxConnector) -> None:

@@ -3,10 +3,10 @@
 
 """Registry rows of the host local-user and Active Directory changes.
 
-``_register.py`` collects :data:`COMPOSITES`, and ``_governed_subops.py`` reads
-:data:`HOST_ACCESS_GOVERNED_SUBOPS`. Every change has
-``requires_approval=True``. They share the group of the two typed reads
-(``host_access.HOST_ACCESS_GROUP_KEY``), with the same text.
+``_register.py`` collects :data:`COMPOSITES`. Each row names the vendor calls
+the change may make. Every change has ``requires_approval=True``. They share
+the group of the two typed reads (``host_access.HOST_ACCESS_GROUP_KEY``), with
+the same text.
 """
 
 from __future__ import annotations
@@ -53,6 +53,11 @@ __all__ = ["COMPOSITES", "HOST_ACCESS_GOVERNED_SUBOPS"]
 _USER_TAGS: Final = ("composite", "write", "host", "esxi", "users", "security")
 _AD_TAGS: Final = ("composite", "write", "host", "active-directory", "security", "vi-json")
 
+#: The reads of the local-user changes (on the ESXi host).
+_USER_READS: Final = (OP_RETRIEVE_SERVICE_CONTENT, OP_RETRIEVE_USER_GROUPS)
+#: The reads of the domain changes (the host list only on a vCenter target).
+_AD_READS: Final = (_OP_LIST_HOSTS, _OP_RETRIEVE_PROPERTIES)
+
 COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
     CompositeSpec(
         op_id=_host_local_users.OP_ID_LOCAL_USER_CREATE,
@@ -70,6 +75,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions=LOCAL_USER_CREATE_LLM_INSTRUCTIONS,
+        governed_subops=(*_USER_READS, OP_CREATE_USER),
     ),
     CompositeSpec(
         op_id=_host_local_users.OP_ID_LOCAL_USER_PASSWORD_SET,
@@ -87,6 +93,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions=LOCAL_USER_PASSWORD_SET_LLM_INSTRUCTIONS,
+        governed_subops=(*_USER_READS, OP_UPDATE_USER),
     ),
     CompositeSpec(
         op_id=_host_local_users.OP_ID_LOCAL_USER_DELETE,
@@ -104,6 +111,12 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         safety_level="destructive",
         requires_approval=True,
         llm_instructions=LOCAL_USER_DELETE_LLM_INSTRUCTIONS,
+        governed_subops=(
+            *_USER_READS,
+            _OP_RETRIEVE_PROPERTIES,
+            OP_RETRIEVE_ACCESS_ENTRIES,
+            OP_REMOVE_USER,
+        ),
     ),
     CompositeSpec(
         op_id=_host_ad.OP_ID_AD_JOIN,
@@ -121,6 +134,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions=AD_JOIN_LLM_INSTRUCTIONS,
+        governed_subops=(*_AD_READS, OP_JOIN_DOMAIN),
     ),
     CompositeSpec(
         op_id=_host_ad.OP_ID_AD_LEAVE,
@@ -138,27 +152,14 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions=AD_LEAVE_LLM_INSTRUCTIONS,
+        governed_subops=(*_AD_READS, OP_LEAVE_DOMAIN),
         # ``.leave`` is not a classifier suffix. The user create, the password
         # change and the join send a password: they are credential_write.
         classifier_other=True,
     ),
 )
 
-#: The reads of the local-user changes (on the ESXi host).
-_USER_READS: Final = (OP_RETRIEVE_SERVICE_CONTENT, OP_RETRIEVE_USER_GROUPS)
-#: The reads of the domain changes (the host list only on a vCenter target).
-_AD_READS: Final = (_OP_LIST_HOSTS, _OP_RETRIEVE_PROPERTIES)
-
-#: composite op id -> the vendor calls it may make (``_VIM_SUB_OPS_*`` style).
+#: composite op id -> the vendor calls it may make, read from the rows.
 HOST_ACCESS_GOVERNED_SUBOPS: Final[dict[str, tuple[str, ...]]] = {
-    _host_local_users.OP_ID_LOCAL_USER_CREATE: (*_USER_READS, OP_CREATE_USER),
-    _host_local_users.OP_ID_LOCAL_USER_PASSWORD_SET: (*_USER_READS, OP_UPDATE_USER),
-    _host_local_users.OP_ID_LOCAL_USER_DELETE: (
-        *_USER_READS,
-        _OP_RETRIEVE_PROPERTIES,
-        OP_RETRIEVE_ACCESS_ENTRIES,
-        OP_REMOVE_USER,
-    ),
-    _host_ad.OP_ID_AD_JOIN: (*_AD_READS, OP_JOIN_DOMAIN),
-    _host_ad.OP_ID_AD_LEAVE: (*_AD_READS, OP_LEAVE_DOMAIN),
+    row.op_id: row.governed_subops for row in COMPOSITES if row.governed_subops
 }

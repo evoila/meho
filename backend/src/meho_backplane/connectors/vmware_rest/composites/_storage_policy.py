@@ -839,8 +839,8 @@ async def storage_policy_delete_composite(
 
 
 # Re-export for the governed-subop manifest (#3349): the child op-ids each
-# write composite may fan out to, referenced (never re-typed) by
-# ``_governed_subops._GOVERNED_SUBOP_MANIFEST``.
+# write composite may fan out to, referenced (never re-typed) by the
+# composite rows in ``_storage_policy_ops``.
 _SUB_OPS_STORAGE_POLICY_CREATE: tuple[str, ...] = (
     _OP_CATEGORY_CREATE,
     _OP_TAG_CREATE,

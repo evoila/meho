@@ -80,7 +80,7 @@ _OP_UPDATE_OPTIONS: Final = "POST:/OptionManager/{moId}/UpdateOptions"
 
 #: Every vim call of each change (reads and writes). The reconcile test checks
 #: them against the pinned vSphere API files of 8.0 and 9.0, and
-#: ``_governed_subops`` lists them for the grant set.
+#: the composite rows list them for the grant set.
 VIM_SUB_OPS_HOST_NTP_SET: Final[tuple[str, ...]] = (
     OP_RETRIEVE_PROPERTIES,
     _OP_UPDATE_DATE_TIME_CONFIG,

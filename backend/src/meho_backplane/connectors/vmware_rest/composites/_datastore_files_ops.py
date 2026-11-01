@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _datastore_files
 from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
     datastore_dir_create_composite,
     datastore_dir_create_preview,
@@ -60,6 +61,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS["vmware.composite.datastore.file.delete"],
         preview=datastore_file_delete_preview,
+        governed_subops=_datastore_files._VIM_SUB_OPS_DATASTORE_FILE_DELETE,
     ),
     CompositeSpec(
         op_id="vmware.composite.datastore.dir.create",
@@ -79,5 +81,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS["vmware.composite.datastore.dir.create"],
         preview=datastore_dir_create_preview,
+        governed_subops=_datastore_files._VIM_SUB_OPS_DATASTORE_DIR_CREATE,
     ),
 )

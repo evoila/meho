@@ -91,8 +91,8 @@ _OP_ENABLE_RULESET: Final = "POST:/HostFirewallSystem/{moId}/EnableRuleset"
 _OP_DISABLE_RULESET: Final = "POST:/HostFirewallSystem/{moId}/DisableRuleset"
 
 #: Every vim call of each change (reads and writes). The reconcile test checks
-#: them against the pinned vSphere API files, and ``_governed_subops`` lists
-#: them for the grant set.
+#: them against the pinned vSphere API files, and the rows in
+#: ``_host_security_ops.py`` list them for the grant set.
 VIM_SUB_OPS_ADVANCED_SETTINGS_SET: Final[tuple[str, ...]] = (
     OP_RETRIEVE_PROPERTIES,
     OP_QUERY_OPTIONS,

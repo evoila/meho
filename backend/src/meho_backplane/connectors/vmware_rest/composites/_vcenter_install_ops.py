@@ -3,8 +3,8 @@
 
 """Registry rows of the three vCenter install composites (#4394).
 
-``_register.py`` collects :data:`COMPOSITES`, and ``_governed_subops.py`` reads
-:data:`VCENTER_INSTALL_GOVERNED_SUBOPS`. All three changes are ``dangerous``
+``_register.py`` collects :data:`COMPOSITES`. Each row names the vendor calls the
+change may make. All three changes are ``dangerous``
 with ``requires_approval=True``. The deploy and the install send a password
 from Vault to vCenter, so ``broadcast/events.py`` pins them as
 ``credential_write``: the flight recorder keeps no request body of them, the
@@ -58,6 +58,8 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=APPLIANCE_DEPLOY_LLM_INSTRUCTIONS,
         preview=_vcenter_deploy.vcenter_appliance_deploy_preview,
+        governed_subops=_vcenter_deploy._SUB_OPS_VCENTER_APPLIANCE_DEPLOY
+        + _vcenter_deploy._VIM_SUB_OPS_VCENTER_APPLIANCE_DEPLOY,
     ),
     CompositeSpec(
         op_id=_vcenter_install.INSTALL_OP_ID,
@@ -76,6 +78,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=INSTALL_LLM_INSTRUCTIONS,
         preview=_vcenter_install.vcenter_install_preview,
+        governed_subops=_vcenter_install._SUB_OPS_VCENTER_INSTALL,
     ),
     CompositeSpec(
         op_id=_vcenter_answer.ANSWER_OP_ID,
@@ -94,16 +97,12 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=DEPLOYMENT_ANSWER_LLM_INSTRUCTIONS,
         preview=_vcenter_answer.vcenter_deployment_answer_preview,
+        governed_subops=_vcenter_answer._SUB_OPS_VCENTER_DEPLOYMENT_ANSWER,
         classifier_other=True,
     ),
 )
 
-#: composite op id -> the vendor calls it may make (REST and VI-JSON).
+#: composite op id -> the vendor calls it may make, read from the rows.
 VCENTER_INSTALL_GOVERNED_SUBOPS: Final[dict[str, tuple[str, ...]]] = {
-    _vcenter_deploy.APPLIANCE_DEPLOY_OP_ID: (
-        _vcenter_deploy._SUB_OPS_VCENTER_APPLIANCE_DEPLOY
-        + _vcenter_deploy._VIM_SUB_OPS_VCENTER_APPLIANCE_DEPLOY
-    ),
-    _vcenter_install.INSTALL_OP_ID: _vcenter_install._SUB_OPS_VCENTER_INSTALL,
-    _vcenter_answer.ANSWER_OP_ID: _vcenter_answer._SUB_OPS_VCENTER_DEPLOYMENT_ANSWER,
+    row.op_id: row.governed_subops for row in COMPOSITES if row.governed_subops
 }

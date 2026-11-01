@@ -169,8 +169,13 @@ G11.2-T1):
   also means a standing grant is recorded as used only when the call runs.
   An `agent`-kind caller
   is still checked in that case, so its own `deny` grant refuses the call
-  instead of parking it. The rule in one line: a direct run may do only
-  what both the caller and the hosted agent may do. See `agent-runtime.md`
+  instead of parking it. The caller's `Operator` that reaches the gate is
+  already narrowed to the agent's own limits
+  (`auth/delegation.py::delegated_operator`: at most `operator`, no
+  `approver`, self-approval or `platform_admin` flag), so the role checks of
+  each tool call and operation also use the stricter identity. The rule in
+  one line: a direct run may do only what both the caller and the hosted
+  agent may do. See `agent-runtime.md`
   "Whose identity a direct run uses".
 
 Because a grant is consulted **only** on the `agent` branch, a grant whose

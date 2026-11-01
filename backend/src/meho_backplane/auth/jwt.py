@@ -884,8 +884,8 @@ def _extract_tenants(
 
     The entries come from the trusted issuer's signed token, so they are
     safe to log. When the result is not empty, :func:`_operator_from_claims`
-    takes the tenant, role and ``approver`` from it instead of the flat
-    claims (#5239).
+    takes the tenant, role, ``approver`` and ``self_approver`` from it
+    instead of the flat claims (#5239, #3327).
     """
     if principal_kind in MACHINE_PRINCIPAL_KINDS:
         return ()
@@ -1433,6 +1433,98 @@ def _extract_approver(claims: Any, settings: Settings) -> bool:
     return False
 
 
+def _tenants_claim_malformed(claims: Any, settings: Settings) -> bool:
+    """Return ``True`` when the ``meho_tenants`` claim is there but not all good.
+
+    A value that is not a list, or a list with any entry that
+    :func:`_parse_tenant_entry` refuses, counts as malformed;
+    :func:`_extract_tenants` already logged that claim or entry and kept
+    the good entries for :attr:`Operator.tenants`. The SA-Operators flag
+    does not trust such a claim: it stays off in every tenant, also after
+    :func:`~meho_backplane.auth.current_tenant.select_current_tenant`
+    switches the tenant. No claim gives ``False``.
+    """
+    if settings.jwt_tenants_claim_name not in claims:
+        return False
+    raw = claims[settings.jwt_tenants_claim_name]
+    return not isinstance(raw, list) or any(_parse_tenant_entry(entry) is None for entry in raw)
+
+
+def _self_approver_from_tenants(
+    claims: Any, settings: Settings, tenants: tuple[TenantMembership, ...], tenant_id: UUID
+) -> bool:
+    """Decide the SA-Operators flag from the ``meho_tenants`` claim as sent.
+
+    The whole claim must be good (:func:`_tenants_claim_malformed`).
+    *tenants* holds the good entries of the claim. Exactly one of them
+    must name *tenant_id*, and its group must give ``self_approval``.
+    """
+    if _tenants_claim_malformed(claims, settings):
+        return False
+    current = [t for t in tenants if t.tenant_id == tenant_id]
+    return len(current) == 1 and group_grant(current[0].group).self_approval
+
+
+def _extract_self_approver(
+    claims: Any,
+    settings: Settings,
+    principal_kind: PrincipalKind,
+    tenant_id: UUID,
+    tenants: tuple[TenantMembership, ...],
+) -> bool:
+    """Read whether the person is in the SA-Operators group of *tenant_id* (#3327).
+
+    SA-Operators may approve their own changes (#3325). The flag is off
+    by default and fails closed: anything unclear gives ``False``.
+
+    * A machine login (agent, service, runner) always gets ``False``,
+      even when its token carries the group. Agents never approve.
+    * The token has a ``meho_tenants`` claim (``JWT_TENANTS_CLAIM_NAME``):
+      only the list counts. *tenant_id* is the tenant the Operator starts
+      in (the first entry, :func:`_start_tenant`). The flag is on when
+      the list has exactly one entry for it and that entry's group gives
+      ``self_approval`` (:func:`~meho_backplane.auth.operator.group_grant`).
+      An entry of another tenant never counts. The whole claim must be
+      good: a claim that is not a list, has any bad entry (also one of
+      another tenant), or has no good entry for *tenant_id*, gives
+      ``False``. :func:`_extract_tenants` keeps the good entries of such
+      a list for :attr:`Operator.tenants`; this flag does not. When the
+      request then names another tenant of the list,
+      :func:`~meho_backplane.auth.current_tenant.with_membership` reads
+      the flag again from that tenant's entry, under the same rule.
+    * The token has no ``meho_tenants`` claim (a site with one tenant
+      and the older mappers): the flag is on when the ``groups`` claim
+      names the group ``JWT_SELF_APPROVER_GROUP`` (default
+      ``MEHO-SA-Operators``). A leading ``/`` is ignored on both sides,
+      the same as in the one-group check. A ``groups`` claim that is not
+      a list, or has an entry that is not a string, gives ``False`` and
+      logs ``malformed_groups_claim``.
+
+    Both claims come from the shipped login setup
+    (``docs/decisions/login-role-groups.md``): the ``groups-claim`` mapper
+    and the ``meho-tenants`` mapper. The flag is only ever read from the
+    signed token, never from a request field or header.
+    """
+    if principal_kind in MACHINE_PRINCIPAL_KINDS:
+        return False
+    if settings.jwt_tenants_claim_name in claims:
+        return _self_approver_from_tenants(claims, settings, tenants, tenant_id)
+    raw = claims.get(_GROUPS_CLAIM_NAME)
+    if raw is None:
+        return False
+    log = structlog.get_logger(__name__)
+    if not isinstance(raw, list):
+        log.warning("malformed_groups_claim", claim_name=_GROUPS_CLAIM_NAME, reason="not_a_list")
+        return False
+    if not all(isinstance(item, str) for item in raw):
+        log.warning(
+            "malformed_groups_claim", claim_name=_GROUPS_CLAIM_NAME, reason="entry_not_a_string"
+        )
+        return False
+    names = {item.lstrip("/") for item in raw}
+    return settings.jwt_self_approver_group.lstrip("/") in names
+
+
 def _extract_runner_id(claims: Any, settings: Settings) -> UUID | None:
     """Extract the optional ``runner_id`` claim as a :class:`UUID`.
 
@@ -1491,6 +1583,16 @@ def _extract_sign_in_claims(claims: Any) -> tuple[int | None, str | None, str | 
     )
 
 
+def _extract_azp(claims: Any) -> str | None:
+    """Read the ``azp`` claim: the client the token was made for (#5515).
+
+    The approve check compares it with the approval client. A value that
+    is not a non-empty string reads as missing, so the check refuses.
+    """
+    azp = claims.get("azp")
+    return azp if isinstance(azp, str) and azp else None
+
+
 def _start_tenant(
     claims: Any, settings: Settings, tenants: tuple[TenantMembership, ...]
 ) -> tuple[UUID, TenantRole, bool]:
@@ -1529,6 +1631,30 @@ def _cap_agent_role(principal_kind: PrincipalKind, tenant_role: TenantRole) -> T
     return tenant_role
 
 
+def _extract_sub(claims: Any) -> str:
+    """Return the ``sub`` claim, or raise 401 ``missing_sub``.
+
+    ``sub`` is mandated by OIDC core §2 / RFC 9068 §2.2.1. The primary
+    enforcement point is the ``sub: essential: True`` entry in
+    :func:`_decode_with_jwks`'s ``claims_options`` — a token without
+    ``sub`` raises ``MissingClaimError('sub')`` during decode, which
+    :func:`_classify_decode_error` surfaces as the ``missing_sub`` code.
+    This defensive check covers the one residual edge case authlib
+    doesn't catch: a ``sub`` that is *present but not a non-empty string*
+    (e.g. ``{"sub": null}`` or ``{"sub": ""}`` — neither violates
+    "essential" in authlib 1.7's ``_validate_essential_claims`` quite the
+    way intuition suggests; ``null`` passes the ``k in self`` check).
+    Surface the same ``missing_sub`` code so on-call telemetry sees one
+    event class regardless of which mode fired.
+    """
+    sub = claims.get("sub")
+    if not isinstance(sub, str) or not sub:
+        log = structlog.get_logger(__name__)
+        log.warning("missing_sub", claim_name="sub", reason="empty_or_non_string")
+        raise _http_401("missing_sub")
+    return sub
+
+
 def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Operator:
     """Project the validated claims into the public :class:`Operator` shape.
 
@@ -1565,24 +1691,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     token (``unknown_principal_kind``), matching the tenant-claim
     extractors above.
     """
-    sub = claims.get("sub")
-    if not isinstance(sub, str) or not sub:
-        # ``sub`` is mandated by OIDC core §2 / RFC 9068 §2.2.1. The
-        # primary enforcement point is the ``sub: essential: True``
-        # entry in :func:`_decode_with_jwks`'s ``claims_options`` —
-        # a token without ``sub`` raises ``MissingClaimError('sub')``
-        # during decode, which :func:`_classify_decode_error` surfaces
-        # as the ``missing_sub`` code. This defensive check covers the
-        # one residual edge case authlib doesn't catch: a ``sub`` that
-        # is *present but not a non-empty string* (e.g. ``{"sub": null}``
-        # or ``{"sub": ""}`` — neither violates "essential" in authlib
-        # 1.7's ``_validate_essential_claims`` quite the way intuition
-        # suggests; ``null`` passes the ``k in self`` check). Surface
-        # the same ``missing_sub`` code so on-call telemetry sees one
-        # event class regardless of which mode fired.
-        log = structlog.get_logger(__name__)
-        log.warning("missing_sub", claim_name="sub", reason="empty_or_non_string")
-        raise _http_401("missing_sub")
+    sub = _extract_sub(claims)
     name = claims.get("name")
     email = claims.get("email")
     principal_kind = _extract_principal_kind(claims, settings)
@@ -1594,6 +1703,8 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     scopes = _extract_scopes(claims, settings)
     platform_admin = _extract_platform_admin(claims, settings)
     runner_id = _extract_runner_id(claims, settings)
+    tenants_claim_malformed = _tenants_claim_malformed(claims, settings)
+    self_approver = _extract_self_approver(claims, settings, principal_kind, tenant_id, tenants)
     auth_time, acr, sid = _extract_sign_in_claims(claims)
     if principal_kind is PrincipalKind.RUNNER and runner_id is None:
         # Fail-closed pairing (Initiative #2415, #2502): a runner-kind
@@ -1621,9 +1732,12 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             approver=approver,
             runner_id=runner_id,
             tenants=tenants,
+            self_approver=self_approver,
+            tenants_claim_malformed=tenants_claim_malformed,
             auth_time=auth_time,
             acr=acr,
             sid=sid,
+            azp=_extract_azp(claims),
         )
     except pydantic.ValidationError as exc:
         raise _http_401("invalid_token") from exc

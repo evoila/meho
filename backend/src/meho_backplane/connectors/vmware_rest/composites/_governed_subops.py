@@ -44,14 +44,30 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _license,
     _namespace,
     _snapshot,
+    _snapshot_cleanup,
     _storage_policy,
     _supervisor,
     _teardown,
     _teardown_network,
+    _vm_advanced_settings,
     _vm_allocation,
+    _vm_boot,
     _vm_cdrom_library_iso,
     _vm_cdrom_tools,
+    _vm_upgrade,
     _write,
+)
+from meho_backplane.connectors.vmware_rest.composites._host_access_ops import (
+    HOST_ACCESS_GOVERNED_SUBOPS,
+)
+from meho_backplane.connectors.vmware_rest.composites._host_config_ops import (
+    HOST_CONFIG_GOVERNED_SUBOPS,
+)
+from meho_backplane.connectors.vmware_rest.composites._host_membership_ops import (
+    HOST_MEMBERSHIP_GOVERNED_SUBOPS,
+)
+from meho_backplane.connectors.vmware_rest.composites._host_security_ops import (
+    HOST_SECURITY_GOVERNED_SUBOPS,
 )
 from meho_backplane.connectors.vmware_rest.composites._vcenter_install_ops import (
     VCENTER_INSTALL_GOVERNED_SUBOPS,
@@ -86,6 +102,11 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     # The RemoveSnapshot_Task child is delete-shaped, so the discovery surface
     # flags it un-grantable -- a human always decides.
     "vmware.composite.vm.snapshot.delete": _snapshot._VIM_SUB_OPS_VM_SNAPSHOT_DELETE,
+    # RemoveAllSnapshots_Task is delete-shaped too: a human always decides.
+    "vmware.composite.vm.snapshot.delete_all": (
+        _snapshot_cleanup._VIM_SUB_OPS_VM_SNAPSHOT_DELETE_ALL
+    ),
+    "vmware.composite.vm.disks.consolidate": _snapshot_cleanup._VIM_SUB_OPS_VM_DISKS_CONSOLIDATE,
     "vmware.composite.vm.destroy": _write._SUB_OPS_VM_DESTROY + _write._VIM_SUB_OPS_VM_DESTROY,
     "vmware.composite.vm.migrate": _write._SUB_OPS_VM_MIGRATE + _write._VIM_SUB_OPS_VM_MIGRATE,
     "vmware.composite.vm.power.bulk": _write._SUB_OPS_VM_POWER_BULK,
@@ -146,6 +167,12 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.vm.cdrom.unmount_library_iso": (
         _vm_cdrom_library_iso.SUB_OPS_UNMOUNT_LIBRARY_ISO
     ),
+    "vmware.composite.vm.boot.set": _vm_boot.SUB_OPS_VM_BOOT_SET,
+    "vmware.composite.vm.hardware.upgrade": _vm_upgrade.SUB_OPS_VM_HARDWARE_UPGRADE,
+    "vmware.composite.vm.tools.upgrade": _vm_upgrade.SUB_OPS_VM_TOOLS_UPGRADE,
+    "vmware.composite.vm.advanced_settings.set": (
+        _vm_advanced_settings.VIM_SUB_OPS_VM_ADVANCED_SETTINGS_SET
+    ),
     "vmware.composite.guest.customization_spec.create": (
         _write._SUB_OPS_GUEST_CUSTOMIZATION_SPEC_CREATE
     ),
@@ -196,11 +223,19 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
         _library_upload._SUB_OPS_CONTENT_LIBRARY_ITEM_UPLOAD
     ),
     "vmware.composite.license.assign": _license._VIM_SUB_OPS_LICENSE_ASSIGN,
+    # The six host security changes: the reads, then the one write each.
+    **HOST_SECURITY_GOVERNED_SUBOPS,
     # #4383 alarm changes: one AlarmManager write each, after two reads.
     "vmware.composite.alarm.acknowledge": _alarm._VIM_SUB_OPS_ALARM_ACKNOWLEDGE,
     "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,
     # #4394 vCenter install: the deploy, the setup start and the answer.
     **VCENTER_INSTALL_GOVERNED_SUBOPS,
+    # Host local users and Active Directory join and leave.
+    **HOST_ACCESS_GOVERNED_SUBOPS,
+    # #4349 host membership: add, move, connect, disconnect, remove.
+    **HOST_MEMBERSHIP_GOVERNED_SUBOPS,
+    # Set NTP, DNS and the syslog targets of one host.
+    **HOST_CONFIG_GOVERNED_SUBOPS,
     # PCI passthrough add and remove, console screenshot and key send.
     **VM_PCI_DEVICE_GOVERNED_SUBOPS,
     **VM_CONSOLE_GOVERNED_SUBOPS,

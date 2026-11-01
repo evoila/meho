@@ -479,9 +479,12 @@ register_mcp_tool(
             "first), `no_match` (nothing matched; do "
             "not call an operation this search did not return), "
             "`unknown_group` (the group does not exist; `narrowing` lists "
-            "valid group keys), or `zero_enabled_operations` (nothing on "
+            "valid group keys), `zero_enabled_operations` (nothing on "
             "this connector is enabled; do not call it, an operator must "
-            "enable operations). `advisory` explains any outcome other than "
+            "enable operations), or `package_not_installed` (the "
+            "connector package the operations come from is not installed; "
+            "do not call it, the advisory names the package to install). "
+            "`advisory` explains any outcome other than "
             "`matched`; `narrowing` lists next steps."
         ),
         inputSchema={
@@ -619,10 +622,11 @@ register_mcp_tool(
                     "type": "object",
                     "description": (
                         "The operation's parameters. Unknown fields are "
-                        "refused. A secret read hides secret values by "
-                        "default. `reveal_secret: true` returns the raw "
-                        "values to a person only (audited); an agent is "
-                        "refused."
+                        "refused. Secret-named fields are hidden by default, "
+                        "and a secret read hides every value. "
+                        "`reveal_secret: true` returns the values to a "
+                        "person or a service login only (audited); an agent "
+                        "is refused."
                     ),
                 },
                 "work_ref": {

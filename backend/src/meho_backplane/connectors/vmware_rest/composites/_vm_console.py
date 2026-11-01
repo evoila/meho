@@ -32,6 +32,7 @@ from meho_backplane.connectors.vmware_rest.composites._datastore_browse import (
     DATACENTER_MO_TYPE,
     resolve_datacenter,
 )
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._teardown_reads import (
     moid_problem,
     read_object,
@@ -58,7 +59,6 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
 from meho_backplane.connectors.vmware_rest.composites.schemas import VM_MOID_PATTERN
 from meho_backplane.connectors.vmware_rest.vim_body import VIM_TYPE_NAME_KEY, unwrap_vim_value
 from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, poll_vim_task
-from meho_backplane.operations._preview import register_preview_builder
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -67,7 +67,7 @@ if TYPE_CHECKING:
     from meho_backplane.operations._preview import PreviewContext
 
 __all__ = [
-    "VM_CONSOLE_COMPOSITES",
+    "COMPOSITES",
     "VM_CONSOLE_GOVERNED_SUBOPS",
     "vm_keys_send_composite",
     "vm_screenshot_composite",
@@ -482,44 +482,44 @@ async def _vm_keys_send_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-register_preview_builder(OP_ID_VM_SCREENSHOT, _vm_screenshot_preview)
-register_preview_builder(OP_ID_VM_KEYS_SEND, _vm_keys_send_preview)
-
-
-#: The two registration rows, as ``_CompositeSpec`` keyword arguments.
-VM_CONSOLE_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_VM_SCREENSHOT,
-        "handler": vm_screenshot_composite,
-        "summary": "Take a console screenshot of a running VM and return it as a PNG.",
-        "description": (
+#: The two registration rows; the registry collects them from this module.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_VM_SCREENSHOT,
+        handler=vm_screenshot_composite,
+        summary="Take a console screenshot of a running VM and return it as a PNG.",
+        description=(
             "Takes a screenshot of a running VM's console and returns the PNG image as base64 "
             "rows, size-capped (default 2 MiB). vCenter keeps the PNG file in the VM's "
             "folder. Waits for approval."
         ),
-        "parameter_schema": VM_SCREENSHOT_PARAMETER_SCHEMA,
-        "response_schema": VM_SCREENSHOT_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "console", "vi-json"],
-        "safety_level": "caution",
-        "requires_approval": True,
-        "llm_instructions": VM_SCREENSHOT_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_VM_KEYS_SEND,
-        "handler": vm_keys_send_composite,
-        "summary": "Press special keys (Ctrl+Alt+Del, Enter, Esc, F1-F12, arrows) on a VM console.",
-        "description": (
+        parameter_schema=VM_SCREENSHOT_PARAMETER_SCHEMA,
+        response_schema=VM_SCREENSHOT_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "console", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=VM_SCREENSHOT_LLM_INSTRUCTIONS,
+        preview=_vm_screenshot_preview,
+        classifier_other=True,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_VM_KEYS_SEND,
+        handler=vm_keys_send_composite,
+        summary="Press special keys (Ctrl+Alt+Del, Enter, Esc, F1-F12, arrows) on a VM console.",
+        description=(
             "Presses keys from a fixed list on a running VM's console: Ctrl+Alt+Del, Enter, "
             "Esc, Tab, Backspace, F1 to F12 and the arrow keys. No free text, so it cannot "
             "type a command. Waits for approval."
         ),
-        "parameter_schema": VM_KEYS_SEND_PARAMETER_SCHEMA,
-        "response_schema": VM_KEYS_SEND_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "console", "vi-json"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VM_KEYS_SEND_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=VM_KEYS_SEND_PARAMETER_SCHEMA,
+        response_schema=VM_KEYS_SEND_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "console", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VM_KEYS_SEND_LLM_INSTRUCTIONS,
+        preview=_vm_keys_send_preview,
+        classifier_other=True,
+    ),
 )

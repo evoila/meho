@@ -22,14 +22,15 @@ the other VM device changes use:
 Both need the VM powered off, and both read the devices again after the task.
 A task fault raises (``connector_error``, audited as failed) with the vim
 fault type and text. The schemas and AI guidance live in
-:mod:`._vm_console_pci_schemas`; the shared registry only splats
-:data:`VM_PCI_DEVICE_COMPOSITES`.
+:mod:`._vm_console_pci_schemas`; the shared registry collects
+:data:`COMPOSITES` from this module.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._teardown_reads import (
     moid_problem,
     read_object,
@@ -63,7 +64,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
 from meho_backplane.connectors.vmware_rest.composites.schemas import VM_MOID_PATTERN
 from meho_backplane.connectors.vmware_rest.vim_body import unwrap_vim_value
 from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, poll_vim_task
-from meho_backplane.operations._preview import preview_failure_reason, register_preview_builder
+from meho_backplane.operations._preview import preview_failure_reason
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -73,7 +74,7 @@ if TYPE_CHECKING:
     from meho_backplane.operations._preview import PreviewContext
 
 __all__ = [
-    "VM_PCI_DEVICE_COMPOSITES",
+    "COMPOSITES",
     "VM_PCI_DEVICE_GOVERNED_SUBOPS",
     "vm_pci_device_add_composite",
     "vm_pci_device_remove_composite",
@@ -473,45 +474,43 @@ async def _vm_pci_device_remove_preview(ctx: PreviewContext) -> dict[str, Any] |
     }
 
 
-register_preview_builder(OP_ID_VM_PCI_DEVICE_ADD, _vm_pci_device_add_preview)
-register_preview_builder(OP_ID_VM_PCI_DEVICE_REMOVE, _vm_pci_device_remove_preview)
-
-
-#: The two registration rows, as ``_CompositeSpec`` keyword arguments.
-VM_PCI_DEVICE_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_VM_PCI_DEVICE_ADD,
-        "handler": vm_pci_device_add_composite,
-        "summary": "Add a PCI passthrough device (DirectPath I/O or dynamic) to a powered-off VM.",
-        "description": (
+#: The two registration rows; the registry collects them from this module.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_VM_PCI_DEVICE_ADD,
+        handler=vm_pci_device_add_composite,
+        summary="Add a PCI passthrough device (DirectPath I/O or dynamic) to a powered-off VM.",
+        description=(
             "Adds one PCI passthrough device to a powered-off VM: a host device by its PCI "
             "address (DirectPath I/O), or any free device of a vendor and device id (dynamic "
             "DirectPath). Reserves all VM memory by default. Reads the devices back. Waits "
             "for approval."
         ),
-        "parameter_schema": VM_PCI_DEVICE_ADD_PARAMETER_SCHEMA,
-        "response_schema": VM_PCI_DEVICE_ADD_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "hardware", "pci-passthrough", "vi-json"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VM_PCI_DEVICE_ADD_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_VM_PCI_DEVICE_REMOVE,
-        "handler": vm_pci_device_remove_composite,
-        "summary": "Remove a PCI passthrough device from a powered-off VM.",
-        "description": (
+        parameter_schema=VM_PCI_DEVICE_ADD_PARAMETER_SCHEMA,
+        response_schema=VM_PCI_DEVICE_ADD_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "hardware", "pci-passthrough", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VM_PCI_DEVICE_ADD_LLM_INSTRUCTIONS,
+        preview=_vm_pci_device_add_preview,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_VM_PCI_DEVICE_REMOVE,
+        handler=vm_pci_device_remove_composite,
+        summary="Remove a PCI passthrough device from a powered-off VM.",
+        description=(
             "Removes one PCI passthrough device from a powered-off VM, named by its device "
             "key. Sends nothing when the VM has no such device. Reads the devices back. "
             "Waits for approval."
         ),
-        "parameter_schema": VM_PCI_DEVICE_REMOVE_PARAMETER_SCHEMA,
-        "response_schema": VM_PCI_DEVICE_REMOVE_RESPONSE_SCHEMA,
-        "group_key": "vm",
-        "tags": ["composite", "write", "vm", "hardware", "pci-passthrough", "vi-json"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VM_PCI_DEVICE_REMOVE_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=VM_PCI_DEVICE_REMOVE_PARAMETER_SCHEMA,
+        response_schema=VM_PCI_DEVICE_REMOVE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "hardware", "pci-passthrough", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VM_PCI_DEVICE_REMOVE_LLM_INSTRUCTIONS,
+        preview=_vm_pci_device_remove_preview,
+    ),
 )

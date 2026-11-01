@@ -236,7 +236,8 @@ async def test_group_member_list_redacts_credentials(
     assert result["status"] == "ok", result.get("error")
     row = result["result"]["rows"][0]
     assert row["username"] == "operator-a"
-    assert row["credentials"] == "***REDACTED***"
+    # The connector masks the field; the default view of every answer hides it once more.
+    assert row["credentials"] == "[REDACTED:param_name]"
 
 
 # ---------------------------------------------------------------------------

@@ -49,14 +49,17 @@
 //     through the optional `client_id` user_config (delivered as
 //     MEHO_MCP_CLIENT_ID) without editing the installed bundle.
 //  3. One sign-in at a time (#3857). Claude Desktop can start the extension
-//     twice at once; signin-lock.mjs makes the second copy wait until the
-//     first one is connected, so only one browser tab opens.
+//     twice at once. The login guard (item 4) takes the sign-in lock
+//     (signin-lock.mjs) before it loads mcp-remote, so the second copy waits
+//     until the first one is connected, and only one browser tab opens.
+//     Claude Code sessions use the same lock.
 //  4. The login guard (#4003). mcp-remote runs through the Claude Code
 //     plugin's login guard (clients/claude-code-plugin/lib/login-guard.mjs;
-//     build.sh copies it into server/). It stops a connect that is not done
-//     within MEHO_MCP_LOGIN_TIMEOUT seconds (default 300), which frees the
-//     login port, and it answers a call whose login has expired with a
-//     clear message instead of no answer.
+//     build.sh copies it and its helper files into server/). It stops a
+//     connect that is not done within MEHO_MCP_LOGIN_TIMEOUT seconds
+//     (default 300), which frees the login port, and it answers a call whose
+//     login has expired with a clear message instead of no answer. It also
+//     keeps the shared login through a failed renewal (#5514).
 //  5. The current tenant (#5242). The optional `tenant` user_config
 //     (delivered as MEHO_TENANT) is sent as the Meho-Tenant header on every
 //     request, so the session works in that tenant.
@@ -67,8 +70,6 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import tls from "node:tls";
 import { fileURLToPath, pathToFileURL } from "node:url";
-
-import { acquireSignInLock } from "./signin-lock.mjs";
 
 const rawUrl = process.argv[2];
 
@@ -206,22 +207,6 @@ process.argv = [
   JSON.stringify({ scope: scopes }),
   ...tenantArgs,
 ];
-
-// One sign-in at a time (#3857): Claude Desktop can start this extension
-// twice at once, and both copies would open a browser sign-in. Wait until no
-// other copy is signing in, and release the lock once mcp-remote is
-// connected. mcp-remote writes nothing to stdout before its connection to
-// MEHO works, so its first stdout message is the "connected" signal. Details
-// in signin-lock.mjs.
-// The wrapper stays in place for every write: the login guard wraps
-// process.stdout.write on top of it, so this wrapper must not swap itself
-// out. Calling the release again is cheap; it does nothing once released.
-const releaseSignInLock = await acquireSignInLock(url.href);
-const stdoutWrite = process.stdout.write;
-process.stdout.write = function writeAndRelease(...args) {
-  releaseSignInLock();
-  return stdoutWrite.apply(this, args);
-};
 
 // The guard's messages name this bundle and say how to reconnect in Claude
 // Desktop. The guard removes both variables before mcp-remote loads.

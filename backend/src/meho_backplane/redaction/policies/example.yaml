@@ -61,6 +61,11 @@ rules:
     action: redact
     reason: "kubeconfig blob in payload"
 
+  - name: strip-password-hash
+    pattern: password_hash
+    action: redact
+    reason: "crypt(3) password hash, as in /etc/shadow"
+
   - name: mask-uuids
     pattern: uuid
     action: mask

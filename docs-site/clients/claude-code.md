@@ -155,7 +155,8 @@ plugin keeps that login when one renewal fails:
   the call fails with "The MEHO login server did not answer", and the
   login is kept. Try the call again later.
 - When the login server refuses a renewal, the plugin first checks whether
-  another session has saved a newer login, and uses it.
+  another session has saved a newer login, and uses it. Otherwise it asks
+  the login server once more before it gives the login up.
 - A failed renewal never deletes the saved login, so other sessions keep
   working.
 - Only one browser login runs at a time on the computer. Another session

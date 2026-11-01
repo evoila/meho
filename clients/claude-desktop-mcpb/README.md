@@ -274,8 +274,10 @@ The guard makes sure a MEHO call never hangs because of a login:
   seconds; if the login server still does not answer, the call fails with
   "The MEHO login server did not answer" and the extension keeps running.
   When the login server refuses a renewal, the extension first uses a newer
-  login that another copy (or a Claude Code session) saved. A failed renewal
-  never deletes the saved login.- **Nobody finishes a browser login.** The extension stops after 5 minutes
+  login that another copy (or a Claude Code session) saved, and otherwise
+  asks the login server once more. A failed renewal never deletes the saved
+  login.
+- **Nobody finishes a browser login.** The extension stops after 5 minutes
   without a connection. This frees the local login port. The extension's
   log then has a line like this:
 

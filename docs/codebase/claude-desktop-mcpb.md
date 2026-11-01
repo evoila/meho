@@ -121,16 +121,22 @@ records the launcher's contract and invariants.
      file, then a rename).
    - It wraps the global `fetch` for the refresh-token request only. One
      renewal runs at a time per MEHO server (`meho-renew-<hash>.lock`,
-     same lock code). Under the lock it reads the login file again and
-     renews with the newest refresh token in it, then saves the result.
+     same lock code). Under the lock it reads the login file again,
+     renews with the newest refresh token in it, and saves the result.
+     `mcp-remote` saves the same result once more afterwards, outside the
+     lock. The guard drops that save (it knows the access token it handed
+     out), so a late save never writes over a newer login that another
+     copy saved in between.
    - A network error or HTTP 5xx is tried again after 1, 2, 4 and 8
-     seconds (about 30 seconds in total). If it still fails, `mcp-remote`
-     gets a `temporarily_unavailable` answer. That is an OAuth error that
-     is not a server error, so `mcp-remote` fails the call and opens no
-     browser. The login is kept.
+     seconds (about 30 seconds in total). A connection that drops while
+     the answer is read counts as a network error. If it still fails,
+     `mcp-remote` gets a `temporarily_unavailable` answer. That is an
+     OAuth error that is not a server error, so `mcp-remote` fails the
+     call and opens no browser. The login is kept.
    - On `invalid_grant` it reads the file again. A newer refresh token
-     (another copy renewed, or finished a browser login) is tried once.
-     When the same token is refused, the login has ended.
+     (another copy renewed, or finished a browser login) is tried next.
+     The same token is tried once more after a short wait. Only when the
+     token read again is refused has the login ended.
    - An ended login before connect: the guard wraps
      `fs.promises.readFile` so `mcp-remote` sees no login file, and runs
      its browser login (under the sign-in lock). An ended login after

@@ -18,18 +18,24 @@
 //
 // 1. mcp-remote never deletes the login file. A new login (a renewal or a
 //    browser login) writes over it, all at once (a new file, then a
-//    rename), so no session ever reads half a login.
+//    rename), so no session ever reads half a login. The guard saves a
+//    renewed login itself, under the renewal lock. mcp-remote saves the
+//    same login once more afterwards, outside the lock; the guard drops
+//    that save, so a late save never writes over a newer login that
+//    another session saved in between.
 // 2. Only one renewal runs at a time for all sessions of one MEHO server
 //    (a lock file next to the login file). Under the lock the guard reads
 //    the login file again and renews with the newest refresh token in it,
 //    so a session uses a login that another session renewed.
 // 3. A network error or an HTTP 5xx answer is tried again after 1, 2, 4 and
-//    8 seconds, for about 30 seconds in total. If the login server still does
-//    not answer, the call fails with a clear message and the login is kept.
-//    No browser opens.
+//    8 seconds, for about 30 seconds in total. A connection that drops while
+//    the answer is read counts as a network error too. If the login server
+//    still does not answer, the call fails with a clear message and the
+//    login is kept. No browser opens.
 // 4. invalid_grant: the guard reads the login file again. If another session
-//    wrote a newer login, the guard renews with that one. Only when the same
-//    refresh token is refused does the login count as ended.
+//    wrote a newer login, the guard renews with that one. Otherwise it
+//    waits a moment and tries the same token once more. Only when the
+//    token read again is refused does the login count as ended.
 // 5. An ended login:
 //    - Before the session is connected, the guard hides the ended login file
 //      from mcp-remote, so mcp-remote runs a browser login. The guard holds
@@ -58,6 +64,9 @@ const RETRY_STEPS = [1, 2, 4, 8];
 const BUDGET_STEPS = 30;
 // The renewal lock holder needs at most about 30 seconds.
 const RENEW_WAIT_LIMIT_MS = 60 * 1000;
+// Requests of one renewal: a refused token is read again and tried once
+// more, and a newer saved token starts over. This bounds a long chain.
+const MAX_POSTS = 4;
 
 function isTokensFile(path) {
   return typeof path === "string" && path.endsWith("_tokens.json");
@@ -93,6 +102,8 @@ export function installRenewal({ serverUrl, isConnected, say, retryBaseMs = 1000
   const originalUnlink = fsPromises.unlink;
   const originalWriteFile = fsPromises.writeFile;
   const endedTokens = new Set();
+  // Access tokens of renewed logins the guard already saved under the lock.
+  const savedByGuard = new Set();
   let tokensPath = null;
   let queue = Promise.resolve();
   let temps = 0;
@@ -110,13 +121,15 @@ export function installRenewal({ serverUrl, isConnected, say, retryBaseMs = 1000
   // Write the whole file at once (a new file, then rename), so another
   // session never reads half a login.
   function writeSaved(tokens) {
-    if (!tokensPath) return;
+    if (!tokensPath) return false;
     const temp = tempName(tokensPath);
     try {
       writeFileSync(temp, JSON.stringify(tokens, null, 2), { mode: 0o600 });
       renameSync(temp, tokensPath);
+      return true;
     } catch (err) {
       say(`could not save the renewed login: ${err.message}`);
+      return false;
     }
   }
 
@@ -142,15 +155,22 @@ export function installRenewal({ serverUrl, isConnected, say, retryBaseMs = 1000
     return originalUnlink.call(this, path, ...rest);
   };
 
-  fsPromises.writeFile = async function writeFile(path, ...rest) {
-    if (!isTokensFile(path)) return originalWriteFile.call(this, path, ...rest);
+  // Rule 1: a renewed login was saved under the lock already (accept);
+  // mcp-remote's own save of it comes later and may be stale by then.
+  // Every other login (a browser login) is written all at once.
+  fsPromises.writeFile = async function writeFile(path, data, ...rest) {
+    if (!isTokensFile(path)) return originalWriteFile.call(this, path, data, ...rest);
+    tokensPath = path;
+    const accessToken = parse(String(data))?.access_token;
+    if (accessToken && savedByGuard.has(accessToken)) return undefined;
     const temp = tempName(path);
-    await originalWriteFile.call(this, temp, ...rest);
+    await originalWriteFile.call(this, temp, data, ...rest);
     return fsPromises.rename(temp, path);
   };
 
-  // Rule 3: one request, tried again on a network error or HTTP 5xx.
-  // Returns { response } or { problem } when every attempt failed.
+  // Rule 3: one request, tried again on a network error or HTTP 5xx. The
+  // answer is read here too: the connection can drop after the headers.
+  // Returns { status, text } or { problem } when every attempt failed.
   async function post(input, init, refreshToken) {
     const body = new URLSearchParams(init.body);
     body.set("refresh_token", refreshToken);
@@ -163,7 +183,9 @@ export function installRenewal({ serverUrl, isConnected, say, retryBaseMs = 1000
           body: new URLSearchParams(body),
           signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
         });
-        if (response.status < 500) return { response };
+        if (response.status < 500) {
+          return { status: response.status, text: await response.text() };
+        }
         problem = `HTTP ${response.status}`;
       } catch (err) {
         problem = err.cause?.message ?? err.message;
@@ -175,46 +197,50 @@ export function installRenewal({ serverUrl, isConnected, say, retryBaseMs = 1000
     }
   }
 
-  async function isInvalidGrant(response) {
-    if (response.status !== 400 && response.status !== 401) return false;
-    try {
-      return (await response.clone().json())?.error === "invalid_grant";
-    } catch {
-      return false;
-    }
+  function isInvalidGrant(status, text) {
+    if (status !== 400 && status !== 401) return false;
+    return parse(text)?.error === "invalid_grant";
+  }
+
+  function answer(status, text) {
+    return new Response(text, { status, headers: { "content-type": "application/json" } });
   }
 
   // Save a renewed login for every session, and hand it to mcp-remote.
-  async function accept(response, refreshToken) {
-    const tokens = parse(await response.clone().text());
-    if (!tokens || typeof tokens.access_token !== "string") return response;
+  function accept(status, text, refreshToken) {
+    const tokens = parse(text);
+    if (!tokens || typeof tokens.access_token !== "string") return answer(status, text);
     tokens.refresh_token ??= refreshToken;
-    writeSaved(tokens);
-    return new Response(JSON.stringify(tokens), {
-      status: response.status,
-      headers: { "content-type": "application/json" },
-    });
+    if (writeSaved(tokens)) savedByGuard.add(tokens.access_token);
+    return answer(status, JSON.stringify(tokens));
   }
 
   // Rules 2 to 4, under the renewal lock. Returns { response, ended }.
   async function renewOnce(input, init, sentToken) {
     let token = readSaved()?.refresh_token || sentToken;
-    for (let tries = 0; tries < 2; tries += 1) {
-      if (endedTokens.has(token)) break;
-      const { response, problem } = await post(input, init, token);
-      if (!response) {
+    let refused = null;
+    for (let posts = 0; posts < MAX_POSTS && !endedTokens.has(token); posts += 1) {
+      const { status, text, problem } = await post(input, init, token);
+      if (text === undefined) {
         say(`the MEHO login server did not answer (${problem}); keeping the login`);
         return { response: oauthAnswer("temporarily_unavailable", SERVER_DOWN) };
       }
-      if (response.ok) return { response: await accept(response, token) };
-      if (!(await isInvalidGrant(response))) return { response };
-      const newer = readSaved()?.refresh_token;
-      if (!newer || newer === token) {
+      if (status >= 200 && status < 300) return { response: accept(status, text, token) };
+      if (!isInvalidGrant(status, text)) return { response: answer(status, text) };
+      const saved = readSaved()?.refresh_token || token;
+      if (saved !== token) {
+        token = saved;
+        refused = null;
+        continue;
+      }
+      if (refused === token) {
         endedTokens.add(token);
-        say("the login server refused the saved MEHO login; it has ended");
+        say("the login server refused the saved MEHO login again; it has ended");
         break;
       }
-      token = newer;
+      refused = token;
+      say("the login server refused the saved MEHO login; trying once more");
+      await sleep(retryBaseMs);
     }
     return { response: oauthAnswer("invalid_grant", LOGIN_ENDED), ended: true };
   }

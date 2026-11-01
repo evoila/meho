@@ -655,8 +655,10 @@ e2e("e2e: a connected session that stops leaves another session's lockfile alone
 //   - A finished browser login (an authorization code) gets a new login too.
 //   - /mcp accepts only access tokens in `valid`.
 //   - onRefresh(token, n) can answer a renewal itself: "drop" closes the
-//     connection, a number answers with that HTTP status, a function runs
-//     before the normal answer.
+//     connection, "drop-body" closes it after the headers of a good answer,
+//     "refuse" answers invalid_grant and keeps the token live, a number
+//     answers with that HTTP status, a function runs before the normal
+//     answer.
 async function startRenewingMeho({ onRefresh } = {}) {
   let base;
   let issued = 0;
@@ -707,6 +709,16 @@ async function startRenewingMeho({ onRefresh } = {}) {
         refreshes.push(token);
         const verdict = onRefresh?.(token, refreshes.length);
         if (verdict === "drop") return req.socket.destroy();
+        if (verdict === "drop-body") {
+          // The client gets the headers and part of the body, then the
+          // connection drops.
+          res.writeHead(200, { "content-type": "application/json", "content-length": "4096" });
+          res.write('{"access_token":"half', () => setTimeout(() => req.socket.destroy(), 100));
+          return undefined;
+        }
+        if (verdict === "refuse") {
+          return json(400, { error: "invalid_grant", error_description: "Token is not active" });
+        }
         if (typeof verdict === "number") return json(verdict, { error: "server_error" });
         if (live.has(token)) {
           live.delete(token);
@@ -874,6 +886,79 @@ e2e("e2e: a network error and a server error during renewal are tried again", { 
   }
 });
 
+e2e("e2e: a connection that drops after the headers of the answer is tried again", { timeout: 30000 }, async () => {
+  const fake = await startRenewingMeho({ onRefresh: (_token, n) => (n === 1 ? "drop-body" : undefined) });
+  try {
+    const login = loginFile(fake.url);
+    fake.valid.add("access-old");
+    fake.live.add("refresh-old");
+    login.write({ access_token: "access-old", refresh_token: "refresh-old" });
+    const run = await connectedSession(fake, login);
+    fake.valid.delete("access-old");
+
+    run.send(TOOL_CALL);
+    const answer = await waitForAnswer(run, 2, "the call");
+    assert.ok(answer.result, `the call must work; stderr:\n${run.stderr}`);
+    assert.deepEqual(fake.refreshes, ["refresh-old", "refresh-old"]);
+    assert.match(run.stderr, /renewing the MEHO login failed .*; trying again/);
+    assert.equal(login.read()?.refresh_token, "refresh-1", "the login file must stay, renewed");
+    assert.doesNotMatch(run.stderr, BROWSER_LOGIN);
+    assert.equal(run.child.exitCode, null, "the session keeps running");
+    run.child.kill("SIGTERM");
+    await run.exited;
+  } finally {
+    fake.close();
+  }
+});
+
+e2e("e2e: one refused renewal of an unchanged login is tried once more", { timeout: 30000 }, async () => {
+  const fake = await startRenewingMeho({ onRefresh: (_token, n) => (n === 1 ? "refuse" : undefined) });
+  try {
+    const login = loginFile(fake.url);
+    fake.valid.add("access-old");
+    fake.live.add("refresh-old");
+    login.write({ access_token: "access-old", refresh_token: "refresh-old" });
+    const run = await connectedSession(fake, login);
+    fake.valid.delete("access-old");
+
+    run.send(TOOL_CALL);
+    const answer = await waitForAnswer(run, 2, "the call");
+    assert.ok(answer.result, `the call must work; stderr:\n${run.stderr}`);
+    assert.deepEqual(fake.refreshes, ["refresh-old", "refresh-old"], "the same token is tried once more");
+    assert.match(run.stderr, /refused the saved MEHO login; trying once more/);
+    assert.equal(login.read()?.refresh_token, "refresh-1", "the login file must stay, renewed");
+    assert.doesNotMatch(run.stderr, BROWSER_LOGIN);
+    assert.equal(run.child.exitCode, null, "the session keeps running");
+    run.child.kill("SIGTERM");
+    await run.exited;
+  } finally {
+    fake.close();
+  }
+});
+
+e2e("e2e: a login refused twice in a session ends it with a clear message, without a browser", { timeout: 30000 }, async () => {
+  const fake = await startRenewingMeho();
+  try {
+    const login = loginFile(fake.url);
+    fake.valid.add("access-old");
+    login.write({ access_token: "access-old", refresh_token: "refresh-ended" });
+    const run = await connectedSession(fake, login);
+    fake.valid.delete("access-old");
+
+    run.send(TOOL_CALL);
+    const { code } = await run.exited;
+    assert.equal(code, 1, run.stderr);
+    const answer = run.lines.map((l) => JSON.parse(l)).find((m) => m.id === 2);
+    assert.equal(answer?.error?.message, LOGIN_EXPIRED, `stderr:\n${run.stderr}`);
+    assert.deepEqual(fake.refreshes, ["refresh-ended", "refresh-ended"], "refused twice, then ended");
+    assert.match(run.stderr, /refused the saved MEHO login again; it has ended/);
+    assert.equal(login.read()?.refresh_token, "refresh-ended", "the login file must stay unchanged");
+    assert.doesNotMatch(run.stderr, BROWSER_LOGIN);
+  } finally {
+    fake.close();
+  }
+});
+
 e2e("e2e: when the login server stays down, the call fails and the login is kept", { timeout: 30000 }, async () => {
   const fake = await startRenewingMeho({ onRefresh: () => 503 });
   try {
@@ -914,7 +999,7 @@ e2e("e2e: an ended login at start gives exactly one browser login", { timeout: 3
     const answer = await waitForAnswer(run, 1, "the session to connect");
     assert.ok(answer.result, `the session must connect; stderr:\n${run.stderr}`);
     assert.equal(run.stderr.match(BROWSER_LOGIN).length, 1, "exactly one browser login");
-    assert.ok(fake.refreshes.every((t) => t === "refresh-ended"));
+    assert.deepEqual(fake.refreshes, ["refresh-ended", "refresh-ended"], "refused twice, then the browser");
     assert.equal(login.read()?.refresh_token, "refresh-1", "the new login is saved");
     run.child.kill("SIGTERM");
     await run.exited;

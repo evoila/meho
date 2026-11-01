@@ -235,8 +235,9 @@ of a login:
   again for about 30 seconds; if the login server still does not answer,
   the call fails with "The MEHO login server did not answer" and the shim
   keeps running. When the login server refuses a renewal, the shim first
-  uses a newer login that another session saved. A failed renewal never
-  deletes the saved login.- **Nobody finishes a browser login.** The shim stops after
+  uses a newer login that another session saved, and otherwise asks the
+  login server once more. A failed renewal never deletes the saved login.
+- **Nobody finishes a browser login.** The shim stops after
   `MEHO_MCP_LOGIN_TIMEOUT` seconds (default 300, so 5 minutes) without a
   connection. This frees the local callback port, so the next session can log
   in. The MCP log then has a line starting with `meho plugin:` that says what

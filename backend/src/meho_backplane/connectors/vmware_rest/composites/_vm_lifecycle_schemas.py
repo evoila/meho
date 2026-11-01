@@ -12,13 +12,6 @@ from __future__ import annotations
 
 from typing import Any, Final
 
-from meho_backplane.connectors.vmware_rest.composites.schemas import (
-    DATASTORE_MOID_PATTERN,
-    HOST_MOID_PATTERN,
-    VM_FOLDER_MOID_PATTERN,
-    VM_MOID_PATTERN,
-)
-
 __all__ = [
     "RESOURCE_POOL_MOID_PATTERN",
     "VMX_PATH_PATTERN",
@@ -51,24 +44,30 @@ _VM_ID_HELP: Final = (
     "Get it from vmware.vm.info (by VM name). A change takes no VM name, so after "
     "approval it runs on the VM the approver saw."
 )
+#: The examples hold placeholders, not ids that look real. So the id fields carry no
+#: ``pattern``; each handler checks the moid shape and answers ``invalid_request``.
+_SHAPE_CHECK: Final = "the call checks the shape"
 
 _VM_PROPERTY: Final[dict[str, Any]] = {
     "type": "string",
-    "pattern": VM_MOID_PATTERN,
-    "description": f"VM id, such as 'vm-42'. {_VM_ID_HELP}",
+    "minLength": 1,
+    "description": f"VM id, in the shape 'vm-<number>'; {_SHAPE_CHECK}. {_VM_ID_HELP}",
 }
 _POOL_PROPERTY: Final[dict[str, Any]] = {
     "type": "string",
-    "pattern": RESOURCE_POOL_MOID_PATTERN,
+    "minLength": 1,
     "description": (
-        "Resource pool id, such as 'resgroup-8' (a cluster's own pool, a child pool or a "
-        "vApp). List them with vmware.resource_pool.list."
+        f"Resource pool id, in the shape 'resgroup-<number>' (a cluster's own pool, a child "
+        f"pool or a vApp); {_SHAPE_CHECK}. List them with vmware.resource_pool.list."
     ),
 }
 _HOST_PROPERTY: Final[dict[str, Any]] = {
     "type": "string",
-    "pattern": HOST_MOID_PATTERN,
-    "description": "ESXi host id, such as 'host-12'. List them with GET:/api/vcenter/host.",
+    "minLength": 1,
+    "description": (
+        f"ESXi host id, in the shape 'host-<number>'; {_SHAPE_CHECK}. List them with "
+        "GET:/api/vcenter/host."
+    ),
 }
 
 _VM_VIEW: Final[dict[str, Any]] = {
@@ -116,7 +115,7 @@ VM_TEMPLATE_MARK_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "properties": {"vm": _VM_PROPERTY},
     "required": ["vm"],
     "additionalProperties": False,
-    "examples": [{"vm": "vm-42"}],
+    "examples": [{"vm": "<vm-id>"}],
 }
 
 VM_TEMPLATE_MARK_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
@@ -169,7 +168,9 @@ VM_TEMPLATE_UNMARK_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "properties": {
         "vm": {
             **_VM_PROPERTY,
-            "description": f"Id of the template, such as 'vm-42'. {_VM_ID_HELP}",
+            "description": (
+                f"Id of the template, in the shape 'vm-<number>'; {_SHAPE_CHECK}. {_VM_ID_HELP}"
+            ),
         },
         "resource_pool": {
             **_POOL_PROPERTY,
@@ -186,7 +187,7 @@ VM_TEMPLATE_UNMARK_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     },
     "required": ["vm", "resource_pool"],
     "additionalProperties": False,
-    "examples": [{"vm": "vm-42", "resource_pool": "resgroup-8"}],
+    "examples": [{"vm": "<template-id>", "resource_pool": "<resource-pool-id>"}],
 }
 
 VM_TEMPLATE_UNMARK_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
@@ -248,8 +249,11 @@ VM_REGISTER_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
         },
         "folder": {
             "type": "string",
-            "pattern": VM_FOLDER_MOID_PATTERN,
-            "description": "Id of the VM folder the VM goes into, such as 'group-v3'.",
+            "minLength": 1,
+            "description": (
+                f"Id of the VM folder the VM goes into, in the shape 'group-v<number>'; "
+                f"{_SHAPE_CHECK}."
+            ),
         },
         "name": {
             "type": "string",
@@ -288,14 +292,14 @@ VM_REGISTER_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "examples": [
         {
             "vmx_path": "[<datastore-name>] <vm-name>/<vm-name>.vmx",
-            "folder": "group-v3",
-            "resource_pool": "resgroup-8",
+            "folder": "<vm-folder-id>",
+            "resource_pool": "<resource-pool-id>",
         },
         {
             "vmx_path": "[<datastore-name>] <template-name>/<template-name>.vmtx",
-            "folder": "group-v3",
+            "folder": "<vm-folder-id>",
             "as_template": True,
-            "host": "host-12",
+            "host": "<host-id>",
         },
     ],
 }
@@ -310,7 +314,7 @@ VM_REGISTER_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
             "new VM does not read back.",
         ),
         "vmx_path": {"type": "string", "description": "The file that was registered."},
-        "vm": {**_NULLABLE_STR, "description": "Id of the new VM, such as 'vm-43'."},
+        "vm": {**_NULLABLE_STR, "description": "Id of the new VM."},
         "after": {**_VM_VIEW, "description": "The new VM as read after the task."},
         **_COMMON_ANSWER,
     },
@@ -350,7 +354,7 @@ VM_UNREGISTER_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "properties": {"vm": _VM_PROPERTY},
     "required": ["vm"],
     "additionalProperties": False,
-    "examples": [{"vm": "vm-42"}],
+    "examples": [{"vm": "<vm-id>"}],
 }
 
 VM_UNREGISTER_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
@@ -409,7 +413,10 @@ VM_INSTANT_CLONE_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "properties": {
         "source_vm": {
             **_VM_PROPERTY,
-            "description": f"Id of the running VM to clone, such as 'vm-42'. {_VM_ID_HELP}",
+            "description": (
+                f"Id of the running VM to clone, in the shape 'vm-<number>'; {_SHAPE_CHECK}. "
+                f"{_VM_ID_HELP}"
+            ),
         },
         "name": {
             "type": "string",
@@ -419,8 +426,11 @@ VM_INSTANT_CLONE_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
         },
         "folder": {
             "type": "string",
-            "pattern": VM_FOLDER_MOID_PATTERN,
-            "description": "Optional VM folder id, such as 'group-v3'. Default: as the source.",
+            "minLength": 1,
+            "description": (
+                f"Optional VM folder id, in the shape 'group-v<number>'; {_SHAPE_CHECK}. "
+                "Default: as the source."
+            ),
         },
         "resource_pool": {
             **_POOL_PROPERTY,
@@ -430,10 +440,10 @@ VM_INSTANT_CLONE_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
         },
         "datastore": {
             "type": "string",
-            "pattern": DATASTORE_MOID_PATTERN,
+            "minLength": 1,
             "description": (
-                "Optional datastore id, such as 'datastore-11', for the new VM's files. "
-                "Default: the source's datastore."
+                f"Optional datastore id, in the shape 'datastore-<number>', for the new VM's "
+                f"files; {_SHAPE_CHECK}. Default: the source's datastore."
             ),
         },
         "disconnect_all_nics": {
@@ -446,7 +456,7 @@ VM_INSTANT_CLONE_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     },
     "required": ["source_vm", "name"],
     "additionalProperties": False,
-    "examples": [{"source_vm": "vm-42", "name": "<new-vm-name>", "disconnect_all_nics": True}],
+    "examples": [{"source_vm": "<vm-id>", "name": "<new-vm-name>", "disconnect_all_nics": True}],
 }
 
 VM_INSTANT_CLONE_RESPONSE_SCHEMA: Final[dict[str, Any]] = {

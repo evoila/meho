@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import copy
 import json as jsonlib
+import re
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -50,9 +51,11 @@ from meho_backplane.connectors.vmware_rest.composites._vm_lifecycle_schemas impo
     VM_INSTANT_CLONE_RESPONSE_SCHEMA,
     VM_REGISTER_PARAMETER_SCHEMA,
     VM_REGISTER_RESPONSE_SCHEMA,
+    VM_TEMPLATE_MARK_PARAMETER_SCHEMA,
     VM_TEMPLATE_MARK_RESPONSE_SCHEMA,
     VM_TEMPLATE_UNMARK_PARAMETER_SCHEMA,
     VM_TEMPLATE_UNMARK_RESPONSE_SCHEMA,
+    VM_UNREGISTER_PARAMETER_SCHEMA,
     VM_UNREGISTER_RESPONSE_SCHEMA,
 )
 from meho_backplane.db.engine import get_sessionmaker
@@ -61,6 +64,7 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS
+from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
@@ -87,6 +91,16 @@ _UNREGISTER_OP = "vmware.composite.vm.unregister"
 _CLONE_OP = "vmware.composite.vm.instant_clone"
 _ALL_OPS = (_MARK_OP, _UNMARK_OP, _REGISTER_OP, _UNREGISTER_OP, _CLONE_OP)
 _CLONE_PATH = "/vcenter/vm?action=instant-clone"
+_PARAMETER_SCHEMAS = {
+    _MARK_OP: VM_TEMPLATE_MARK_PARAMETER_SCHEMA,
+    _UNMARK_OP: VM_TEMPLATE_UNMARK_PARAMETER_SCHEMA,
+    _REGISTER_OP: VM_REGISTER_PARAMETER_SCHEMA,
+    _UNREGISTER_OP: VM_UNREGISTER_PARAMETER_SCHEMA,
+    _CLONE_OP: VM_INSTANT_CLONE_PARAMETER_SCHEMA,
+}
+#: A value that looks like a real vCenter id (moid), the kind an example must not hold.
+_REAL_ID = re.compile(r"^(vm|host|group-[a-z]|resgroup-v?|datastore|domain-c)[0-9]+$")
+_PLACEHOLDER = re.compile(r"<[a-z-]+>")
 
 
 class LifecycleVimFake(VimFake):
@@ -393,15 +407,18 @@ async def test_register_a_template_sends_host_and_no_pool(gate: GateRecorder) ->
 
 
 @pytest.mark.parametrize(
-    ("params", "fragment"),
+    ("params", "fragment", "schema_rejects"),
     [
         (
             {"vmx_path": "app-vm.vmx", "folder": "group-v3", "resource_pool": "resgroup-8"},
             "vmx_path",
+            True,
         ),
-        ({"vmx_path": _VMX, "folder": "group-h4", "resource_pool": "resgroup-8"}, "folder"),
-        ({"vmx_path": _VMX, "folder": "group-v3"}, "needs resource_pool"),
-        ({"vmx_path": _VMX, "folder": "group-v3", "as_template": True}, "needs host"),
+        # The id fields carry no pattern (their examples are placeholders): the handler
+        # checks the shape, the schema does not.
+        ({"vmx_path": _VMX, "folder": "group-h4", "resource_pool": "resgroup-8"}, "folder", False),
+        ({"vmx_path": _VMX, "folder": "group-v3"}, "needs resource_pool", True),
+        ({"vmx_path": _VMX, "folder": "group-v3", "as_template": True}, "needs host", True),
         (
             {
                 "vmx_path": _VMX,
@@ -411,11 +428,12 @@ async def test_register_a_template_sends_host_and_no_pool(gate: GateRecorder) ->
                 "resource_pool": "resgroup-8",
             },
             "no resource_pool",
+            True,
         ),
     ],
 )
 async def test_register_refuses_bad_inputs_before_any_write(
-    gate: GateRecorder, params: dict[str, Any], fragment: str
+    gate: GateRecorder, params: dict[str, Any], fragment: str, schema_rejects: bool
 ) -> None:
     conn = LifecycleVimFake()
     out = await _call(_vm_register.vm_register_composite, conn, params)
@@ -423,7 +441,7 @@ async def test_register_refuses_bad_inputs_before_any_write(
     assert fragment in out["guidance"]
     assert gate.calls == []
     assert conn.calls == []
-    assert not Draft202012Validator(VM_REGISTER_PARAMETER_SCHEMA).is_valid(params)
+    assert Draft202012Validator(VM_REGISTER_PARAMETER_SCHEMA).is_valid(params) is not schema_rejects
 
 
 async def test_register_task_fault_reaches_the_error(gate: GateRecorder) -> None:
@@ -622,6 +640,59 @@ async def test_preview_names_the_stop() -> None:
     preview = await _PREVIEW_BUILDERS[_UNREGISTER_OP](preview_ctx({"vm": _VM}, conn))
     assert preview is not None
     assert preview["stops_with"] == "precondition_failed"
+
+
+# ===========================================================================
+# Examples: placeholders, never ids that look real
+# ===========================================================================
+
+
+@pytest.mark.parametrize("op_id", _ALL_OPS)
+def test_examples_hold_placeholders_and_validate(op_id: str) -> None:
+    """Every example validates, and every string in it is a placeholder.
+
+    A model copies an example value that looks real (``vm-42``) as a real
+    target. So the examples hold ``<vm-id>``-style placeholders, and the id
+    fields carry no ``pattern`` that such a placeholder would fail.
+    """
+    schema = _PARAMETER_SCHEMAS[op_id]
+    examples = schema["examples"]
+    assert examples
+    for example in examples:
+        assert validate_params(schema, example) == []
+        for key, value in example.items():
+            if isinstance(value, str):
+                assert _PLACEHOLDER.search(value), (op_id, key, value)
+                assert not _REAL_ID.match(value), (op_id, key, value)
+
+
+@pytest.mark.parametrize(
+    ("handler", "params"),
+    [
+        (_vm_template.vm_template_mark_composite, {"vm": "<vm-id>"}),
+        (
+            _vm_template.vm_template_unmark_composite,
+            {"vm": "<template-id>", "resource_pool": "<resource-pool-id>"},
+        ),
+        (
+            _vm_register.vm_register_composite,
+            {"vmx_path": _VMX, "folder": "<vm-folder-id>", "resource_pool": "<resource-pool-id>"},
+        ),
+        (_vm_register.vm_unregister_composite, {"vm": "<vm-id>"}),
+        (_vm_instant_clone.vm_instant_clone_composite, {"source_vm": "<vm-id>", "name": "c1"}),
+    ],
+)
+async def test_a_placeholder_sent_as_is_stops_before_any_write(
+    gate: GateRecorder, handler: Any, params: dict[str, Any]
+) -> None:
+    """The schema lets a placeholder through; the handler refuses it and sends nothing."""
+    conn = LifecycleVimFake()
+    _vm(conn, power="poweredOn")
+    out = await _call(handler, conn, params)
+    assert out["status"] == "invalid_request"
+    assert gate.calls == []
+    assert conn.calls == []
+    assert conn.rest_calls == []
 
 
 # ===========================================================================

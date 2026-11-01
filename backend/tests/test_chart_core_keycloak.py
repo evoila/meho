@@ -447,6 +447,7 @@ def test_backplane_settings_come_from_the_built_in_keycloak() -> None:
         "KEYCLOAK_DISCOVERY_URL": "http://test-keycloak:8080/auth/realms/meho",
         "KEYCLOAK_AUDIENCE": "meho-backplane",
         "KEYCLOAK_CLI_CLIENT_ID": "meho-cli",
+        "KEYCLOAK_CLI_APPROVE_CLIENT_ID": "meho-cli-approve",
         "UI_KEYCLOAK_CLIENT_ID": "meho-web",
         "KEYCLOAK_JWKS_CACHE_TTL_SECONDS": "300",
         "KEYCLOAK_JWT_LEEWAY_SECONDS": "30",
@@ -465,6 +466,7 @@ def test_audience_and_client_ids_match_the_realm_file() -> None:
     data, env, _ = _backplane(*_ON)
     assert clients[data["KEYCLOAK_AUDIENCE"]]["publicClient"] is False
     assert clients[data["KEYCLOAK_CLI_CLIENT_ID"]]["publicClient"] is True
+    assert clients[data["KEYCLOAK_CLI_APPROVE_CLIENT_ID"]]["publicClient"] is True
     assert clients[data["UI_KEYCLOAK_CLIENT_ID"]]["publicClient"] is False
     assert clients[env["KEYCLOAK_ADMIN_CLIENT_ID"]["value"]]["serviceAccountsEnabled"] is True
 
@@ -495,6 +497,7 @@ def test_bring_your_own_keycloak_settings_are_unchanged() -> None:
     assert data["KEYCLOAK_ISSUER_URL"] == "https://keycloak.test/realms/meho"
     assert data["KEYCLOAK_AUDIENCE"] == "meho-backplane"
     assert data["KEYCLOAK_CLI_CLIENT_ID"] == "my-cli"
+    assert data["KEYCLOAK_CLI_APPROVE_CLIENT_ID"] == "meho-cli-approve"
     assert data["UI_KEYCLOAK_CLIENT_ID"] == ""
     assert env["KEYCLOAK_ADMIN_URL"]["value"] == "https://keycloak.test/admin/realms/meho"
     assert env["KEYCLOAK_ADMIN_CLIENT_ID"]["value"] == "my-admin"

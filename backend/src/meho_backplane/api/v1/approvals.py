@@ -119,6 +119,7 @@ from meho_backplane.operations.approval_queue import (
     ApprovalRequestExpiredError,
     ApprovalResultState,
     ApprovalSignInReusedError,
+    ApprovalSignInTooOldError,
     DelegatedDecisionForbiddenError,
     DelegatedReasonInvalidError,
     Delegation,
@@ -175,13 +176,24 @@ _require_approvals_access = Depends(require_approvals_access)
 #: service principal's approval bridge can still list the queue.
 _require_human = Depends(require_human_principal)
 
-#: Approve-only proof that a person is present (#3979): the token must show
-#: a fresh sign-in or a one-time code, else ``401`` with the RFC 9470
+#: Approve-only proof that a person is present (#3979, #5515): the token must
+#: come from a fresh approval sign-in, else ``401`` with the RFC 9470
 #: challenge. Reject keeps the human gate alone.
 _require_fresh_sign_in = Depends(require_fresh_approval_sign_in)
 
 #: Decision ``reason`` length bound, the same value the console form uses.
 _MAX_REASON_LENGTH = MAX_REASON_LENGTH
+
+
+def _per_action_sign_in_required(reason: str) -> HTTPException:
+    """The ``401`` for a ``destructive`` approve whose sign-in was already used (#5515).
+
+    Its ``max_age`` is ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``, not the
+    approval window: such an approve needs a sign-in of its own.
+    """
+    return fresh_sign_in_required(
+        reason=reason, max_age_seconds=get_settings().per_action_sign_in_max_age_seconds
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -656,7 +668,11 @@ async def _capture_operator_decision(
             detail="preview_binding_missing",
         ) from exc
     except ApprovalSignInReusedError as exc:
-        raise fresh_sign_in_required(reason="fresh_sign_in_already_used") from exc
+        raise _per_action_sign_in_required("fresh_sign_in_already_used") from exc
+    except ApprovalSignInTooOldError as exc:
+        raise fresh_sign_in_required(
+            reason="fresh_sign_in_required", max_age_seconds=exc.max_age_seconds
+        ) from exc
     except DelegatedReasonInvalidError as exc:
         raise _delegated_reason_http_error(exc) from exc
     except DelegatedDecisionForbiddenError as exc:
@@ -936,7 +952,11 @@ async def _record_approval_decision(
             detail="preview_binding_missing",
         ) from exc
     except ApprovalSignInReusedError as exc:
-        raise fresh_sign_in_required(reason="fresh_sign_in_already_used") from exc
+        raise _per_action_sign_in_required("fresh_sign_in_already_used") from exc
+    except ApprovalSignInTooOldError as exc:
+        raise fresh_sign_in_required(
+            reason="fresh_sign_in_required", max_age_seconds=exc.max_age_seconds
+        ) from exc
     except DelegatedReasonInvalidError as exc:
         raise _delegated_reason_http_error(exc) from exc
     except DelegatedDecisionForbiddenError as exc:
@@ -974,9 +994,12 @@ async def approve_approval_request(
 
     * 200 — approved + re-dispatched successfully (sync).
     * 202 — approved; resume launched in the background (``async: true``).
-    * 401 — the token shows no fresh sign-in (#3979): its ``auth_time`` is
-      missing or older than ``FRESH_SIGN_IN_MAX_AGE_SECONDS``, or
-      this sign-in already gave an approval. The answer carries
+    * 401 — the token is not a fresh approval sign-in (#3979, #5515): it
+      does not come from the approval client (``azp``), or its
+      ``auth_time`` is missing or older than
+      ``FRESH_SIGN_IN_MAX_AGE_SECONDS``. For a ``destructive`` request the
+      limit is ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`` instead, and the
+      sign-in must not have approved anything else. The answer carries
       ``WWW-Authenticate: Bearer error="insufficient_user_authentication"``
       with ``max_age`` (RFC 9470). Approve in the web interface, or sign in
       again. The request stays pending.
@@ -1381,10 +1404,11 @@ async def decide_approval_request(
     coexist: the already-decided 409 prevents a second *decision*, and the
     claim prevents a second *dispatch* of one decision.
 
-    An approval needs a fresh sign-in or a one-time code (#3979): otherwise
-    the route answers 401 with ``WWW-Authenticate: Bearer
-    error="insufficient_user_authentication"`` and ``max_age`` (RFC 9470),
-    and the request stays pending. A rejection needs no fresh sign-in.
+    An approval needs a fresh approval sign-in (#3979, #5515), the same
+    check as ``/approve``: otherwise the route answers 401 with
+    ``WWW-Authenticate: Bearer error="insufficient_user_authentication"``
+    and ``max_age`` (RFC 9470), and the request stays pending. A rejection
+    needs no fresh sign-in.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id="approval.decide",
@@ -1398,7 +1422,7 @@ async def decide_approval_request(
             detail=f"decision must be 'approved' or 'rejected', got {body.decision!r}",
         )
 
-    # Approve needs a fresh sign-in or a one-time code (#3979); reject does not.
+    # Approve needs a fresh approval sign-in (#3979, #5515); reject does not.
     approval_auth = (
         check_fresh_approval_sign_in(operator, get_settings()) if decision == "approved" else None
     )

@@ -60,7 +60,6 @@ from meho_backplane.connectors.nsx import (
     NsxConnector,
     register_nsx_typed_operations,
 )
-from meho_backplane.connectors.nsx.typed_reads import REDACTED
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
@@ -675,8 +674,12 @@ async def test_backup_config_surfaces_retention_and_scrubs_secrets(
     assert config["inventory_summary_interval"] == 240
     # Secrets are scrubbed at the boundary -- top-level passphrase + nested
     # SFTP password both masked, and the raw values appear nowhere.
-    assert config["passphrase"] == REDACTED
-    assert config["remote_file_server"]["protocol"]["authentication_scheme"]["password"] == REDACTED
+    # The connector masks the field; the default view of every answer hides it once more.
+    assert config["passphrase"] == "[REDACTED:param_name]"
+    assert (
+        config["remote_file_server"]["protocol"]["authentication_scheme"]["password"]
+        == "[REDACTED:param_name]"
+    )
     serialised = repr(result.result)
     assert "super-secret-passphrase" not in serialised
     assert "sftp-pw" not in serialised

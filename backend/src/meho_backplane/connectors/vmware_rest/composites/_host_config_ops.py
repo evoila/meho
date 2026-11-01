@@ -159,6 +159,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=NTP_SET_LLM_INSTRUCTIONS,
         preview=_ntp_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id=OP_ID_DNS_SET,
@@ -177,6 +178,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=DNS_SET_LLM_INSTRUCTIONS,
         preview=_dns_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id=OP_ID_SYSLOG_SET,
@@ -195,5 +197,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=SYSLOG_SET_LLM_INSTRUCTIONS,
         preview=_syslog_preview,
+        classifier_other=True,
     ),
 )

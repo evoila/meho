@@ -32,7 +32,7 @@ Response shape locked by the CLI's discovery parser in
 ``fetchBackplaneAuthConfig``). Field renames here are wire-compat
 breaks for the CLI.
 
-The three fields:
+The four fields:
 
 * ``keycloak_issuer`` — the realm issuer URL.
 * ``audience`` — the JWT ``aud`` value the backplane validates inbound
@@ -45,6 +45,12 @@ The three fields:
   (chart-wired via ``config.keycloakCliClientId``). When unset (empty
   string), the CLI surfaces an actionable error naming the public-client
   requirement rather than silently using ``audience``.
+
+* ``cli_approve_client_id`` — the **public** client the CLI uses for the
+  fresh browser sign-in of ``meho approvals approve`` (#5515). Sourced
+  from :attr:`~meho_backplane.settings.Settings.keycloak_cli_approve_client_id`.
+  Only a token made for this client can approve on the command line or
+  REST. Empty means the backplane accepts no token approve.
 
 The ``cli_client_id`` field was added by G0.9.1-T9 after the 2026-05-21
 RDC dogfood (Signal #16) showed that the v0.3.1 endpoint (issuer +
@@ -82,6 +88,9 @@ class AuthConfigResponse(BaseModel):
     keycloak_issuer: str
     audience: str
     cli_client_id: str
+    #: The public client of the approval sign-in (#5515). A client that
+    #: does not know this field ignores it.
+    cli_approve_client_id: str = ""
 
 
 router = APIRouter(prefix="/api/v1", tags=["auth"])
@@ -89,7 +98,7 @@ router = APIRouter(prefix="/api/v1", tags=["auth"])
 
 @router.get("/auth-config", response_model=AuthConfigResponse)
 async def auth_config() -> AuthConfigResponse:
-    """Return Keycloak issuer, audience, and CLI client_id for device-code flow.
+    """Return Keycloak issuer, audience, and the CLI's two public client ids.
 
     Reads :func:`~meho_backplane.settings.get_settings` so the response
     cannot drift from the values :mod:`~meho_backplane.auth.jwt` uses
@@ -106,4 +115,5 @@ async def auth_config() -> AuthConfigResponse:
         keycloak_issuer=str(settings.keycloak_issuer_url),
         audience=settings.keycloak_audience,
         cli_client_id=settings.keycloak_cli_client_id,
+        cli_approve_client_id=settings.keycloak_cli_approve_client_id,
     )

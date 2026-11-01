@@ -36,6 +36,7 @@ from meho_backplane.connectors.vcf_automation import (
 )
 from meho_backplane.connectors.vcf_automation.day2_ops import VCFA_DAY2_OPS
 from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
+from meho_backplane.connectors.vcf_automation.typed_ops import VCFA_TYPED_OPS
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations import (
@@ -202,6 +203,7 @@ async def test_machine_list_is_flat_and_reads_every_page(
     vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(_day2, "_PAGE_SIZE", 1)
+    monkeypatch.setattr(_day2, "_MAX_PAGES", 2)
     pages = [
         {
             "content": [
@@ -239,6 +241,28 @@ async def test_machine_list_is_flat_and_reads_every_page(
     assert params["$filter"] == "projectId eq 'p-1'"
 
 
+async def test_machine_list_refuses_a_list_past_the_page_limit(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three rows, one a page, two pages at most: an error, not two rows."""
+    monkeypatch.setattr(_day2, "_PAGE_SIZE", 1)
+    monkeypatch.setattr(_day2, "_MAX_PAGES", 2)
+
+    def page(request: httpx.Request) -> httpx.Response:
+        skip = request.url.params["$skip"]
+        return httpx.Response(200, json={"content": [{"id": f"m-{skip}"}], "totalElements": 3})
+
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        route = mock.get(_MACHINES).mock(side_effect=page)
+        result = await run("vcfa.tenant.machine.list", {})
+    assert result["status"] == "error", result
+    assert result["extras"]["exception_class"] == "IncompleteListError"
+    assert "2 of 3" in result["extras"]["exception_message"]
+    assert "$filter" in result["extras"]["remediation"]
+    assert route.call_count == 2
+
+
 async def test_block_device_list_names_the_machines(vcfa: VcfAutomationConnector) -> None:
     disk = {
         "id": "b-1",
@@ -272,6 +296,7 @@ async def test_deployment_action_runs_a_built_in_action(vcfa: VcfAutomationConne
     out = result["result"]
     assert out["status"] == "submitted", result
     assert out["request"]["id"] == "req-1"
+    assert "vcfa.tenant.machine.list" in out["guidance"]
     assert _body(route) == {"actionId": "Deployment.PowerOff", "inputs": {}, "reason": "<why>"}
 
 
@@ -335,6 +360,41 @@ async def test_resource_action_resize_sends_the_inputs(vcfa: VcfAutomationConnec
         )
     assert result["result"]["status"] == "submitted", result
     assert _body(route)["inputs"] == {"cpuCount": 4, "totalMemoryMB": 8192}
+
+
+def test_follow_up_names_only_reads_this_connector_has() -> None:
+    """``vcfa.tenant.deployment.get`` reads the IaaS API: no request state, no lease.
+
+    So the guidance after an action or a lease change must not send the agent
+    there to wait; it names ``machine.list`` and says what MEHO cannot show.
+    """
+    deployment_get = next(op for op in VCFA_TYPED_OPS if op.op_id == "vcfa.tenant.deployment.get")
+    fields = deployment_get.response_schema["properties"]
+    assert "lastRequest" not in fields
+    assert "leaseExpireAt" not in fields
+    by_id = {op.op_id: op for op in VCFA_DAY2_OPS}
+    machine_row = by_id["vcfa.tenant.machine.list"].response_schema["properties"]["items"]["items"]
+    assert "powerState" in machine_row["properties"]
+
+    action = by_id["vcfa.tenant.deployment.action.run"].llm_instructions
+    resource = by_id["vcfa.tenant.resource.action.run"].llm_instructions
+    lease = by_id["vcfa.tenant.deployment.lease.change"].llm_instructions
+    request_texts = [
+        _day2._request_answer({}, "vcfa.tenant")["guidance"],
+        action["next_step"],
+        resource["next_step"],
+        lease["next_step"],
+    ]
+    for text in request_texts:
+        assert "vcfa.tenant.machine.list" in text, text
+        assert "deploymentId eq" in text, text
+        assert "10 minutes" in text, text
+    for text in [*request_texts, lease["preconditions"]]:
+        assert "lastRequest" not in text, text
+        assert "leaseExpireAt" not in text, text
+        assert "vcfa.vra8" not in text, text
+    assert "cannot read the lease end" in lease["preconditions"]
+    assert "cannot read the lease end" in lease["next_step"]
 
 
 async def test_lease_change_sends_the_lease_action(vcfa: VcfAutomationConnector) -> None:

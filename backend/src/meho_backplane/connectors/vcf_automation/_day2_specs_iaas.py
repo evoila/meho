@@ -11,6 +11,7 @@ Field names come from the pinned ``vra-iaas.json`` (``Machine``,
 
 from __future__ import annotations
 
+from meho_backplane.connectors.vcf_automation._day2 import LIST_ROW_LIMIT
 from meho_backplane.connectors.vcf_automation._day2_paths import (
     BLOCK_DEVICES_PATH,
     MACHINES_PATH,
@@ -37,7 +38,8 @@ def _machine_list(p: str) -> Day2OpSpec:
         summary="List the machines: name, project, power state, address and zone.",
         description=(
             "Reads every page of GET /iaas/api/machines and returns one flat row per machine: "
-            "id, name, project, deployment, power state, address, zone. Optional OData $filter."
+            "id, name, project, deployment, power state, address, zone. Optional OData $filter. "
+            f"A list of more than {LIST_ROW_LIMIT:,} rows is refused; narrow it with $filter."
         ),
         parameter_schema={
             "type": "object",
@@ -118,7 +120,8 @@ def _block_device_list(p: str) -> Day2OpSpec:
         description=(
             "Reads every page of GET /iaas/api/block-devices and returns one flat row per disk: "
             "id, name, size in GB, type, status, persistent, project, deployment and machine "
-            "ids. Optional OData $filter."
+            f"ids. Optional OData $filter. A list of more than {LIST_ROW_LIMIT:,} rows is "
+            "refused; narrow it with $filter."
         ),
         parameter_schema={
             "type": "object",

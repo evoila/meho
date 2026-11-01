@@ -34,6 +34,7 @@ from meho_backplane.connectors.vra8 import (
     VRA8_DAY2_OPS,
     VRA8_IMPL_ID,
     VRA8_PRODUCT,
+    VRA8_TYPED_OPS,
     VRA8_VERSION,
     Vra8Connector,
     register_vra8_typed_operations,
@@ -235,6 +236,31 @@ async def test_each_op_runs_on_the_vra8_login(
     assert route.called
     assert route.calls.last.request.headers["Authorization"] == "Bearer vra-bearer"
     assert "vcfa.tenant." not in json.dumps(result.result)
+
+
+def test_follow_up_matches_the_deployment_read() -> None:
+    """The guidance names only fields that ``vcfa.vra8.deployment.get`` answers."""
+    deployment_get = next(op for op in VRA8_TYPED_OPS if op.op_id == "vcfa.vra8.deployment.get")
+    fields = deployment_get.response_schema["properties"]
+    assert "leaseExpireAt" in fields
+    assert "status" in fields["lastRequest"]["properties"]
+    assert deployment_get.parameter_schema["required"] == ["deployment_id"]
+
+    by_id = {op.op_id: op for op in VRA8_DAY2_OPS}
+    lease = by_id["vcfa.vra8.deployment.lease.change"].llm_instructions
+    request_texts = [
+        _day2._request_answer({}, "vcfa.vra8")["guidance"],
+        by_id["vcfa.vra8.deployment.action.run"].llm_instructions["next_step"],
+        by_id["vcfa.vra8.resource.action.run"].llm_instructions["next_step"],
+        lease["next_step"],
+    ]
+    for text in request_texts:
+        assert "vcfa.vra8.deployment.get with deployment_id" in text, text
+        assert "lastRequest.status" in text, text
+        assert "10 minutes" in text, text
+        assert "vcfa.tenant" not in text, text
+    assert "leaseExpireAt" in lease["preconditions"]
+    assert "leaseExpireAt" in lease["next_step"]
 
 
 async def test_machine_create_runs_on_the_vra8_login() -> None:

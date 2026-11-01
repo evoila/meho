@@ -25,6 +25,7 @@ deletes (``vcfa.tenant.deployment.delete`` and ``vcfa.vra8.deployment.delete``).
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Final
 
 import httpx
@@ -46,15 +47,20 @@ from meho_backplane.operations._preview import PreviewContext, register_preview_
 
 __all__ = [
     "DEPLOYMENT_ACTION_IDS",
+    "FOLLOW_UPS",
     "LEASE_ACTION_ID",
     "LEASE_INPUT",
+    "LIST_ROW_LIMIT",
     "RESOURCE_ACTION_IDS",
+    "Day2FollowUp",
+    "IncompleteListError",
     "block_device_list",
     "deployment_action_run",
     "deployment_actions_list",
     "deployment_delete",
     "deployment_delete_preview",
     "deployment_lease_change",
+    "follow_up",
     "machine_list",
     "resource_action_run",
     "row_view",
@@ -86,9 +92,11 @@ LEASE_ACTION_ID: Final[str] = "Deployment.ChangeLease"
 LEASE_INPUT: Final[str] = "Lease Expiration Date"
 
 _API_VERSION: Final[dict[str, str]] = {"apiVersion": TENANT_IAAS_API_VERSION}
-#: Page size and page limit of the machine and disk lists (10,000 rows at most).
+#: Page size and page limit of the machine and disk lists. A list with more
+#: rows than :data:`LIST_ROW_LIMIT` is refused (:class:`IncompleteListError`).
 _PAGE_SIZE: Final[int] = 200
 _MAX_PAGES: Final[int] = 50
+LIST_ROW_LIMIT: Final[int] = _PAGE_SIZE * _MAX_PAGES
 
 _MACHINE_FIELDS: Final[tuple[str, ...]] = (
     "id",
@@ -136,6 +144,76 @@ _REQUEST_FIELDS: Final[tuple[str, ...]] = (
     "createdAt",
 )
 _REQUEST_STATES: Final[str] = "SUCCESSFUL, FAILED, ABORTED or APPROVAL_REJECTED"
+#: When an agent stops reading for a request that does not end.
+_WAIT_LIMIT: Final[str] = (
+    "Most requests end within a few minutes. Stop after 10 minutes and report the request id."
+)
+
+
+@dataclass(frozen=True)
+class Day2FollowUp:
+    """How an agent follows a day-2 request on one connector, with the reads it has.
+
+    The two connectors read a deployment from different APIs. The vRA 8 read
+    (``vcfa.vra8.deployment.get``, ``/deployment/api``) shows ``lastRequest``
+    and ``leaseExpireAt``. The VCF Automation read (``vcfa.tenant.deployment.get``,
+    ``/iaas/api``) shows neither, and MEHO has no read of a request there yet.
+    So the guidance of the action and lease ops is written per connector and
+    names only a read that shows the field.
+    """
+
+    request_end: str
+    """How to see that the request ended, and when to stop reading."""
+    lease_end: str
+    """How to read the lease end, or that MEHO cannot read it."""
+
+
+FOLLOW_UPS: Final[dict[str, Day2FollowUp]] = {
+    "vcfa.tenant": Day2FollowUp(
+        request_end=(
+            "MEHO has no read of a VCF Automation request yet, and vcfa.tenant.deployment.get "
+            "(the IaaS read) does not show it. Wait a minute, then read vcfa.tenant.machine.list "
+            "with $filter \"deploymentId eq '<deployment-id>'\" to see the new power state of "
+            f"the machines. {_WAIT_LIMIT} A person can check the request in the vendor UI."
+        ),
+        lease_end=(
+            "MEHO cannot read the lease end of a VCF Automation deployment yet: "
+            "vcfa.tenant.deployment.get reads the IaaS API, which has no lease field."
+        ),
+    ),
+    "vcfa.vra8": Day2FollowUp(
+        request_end=(
+            "Read vcfa.vra8.deployment.get with deployment_id until lastRequest.status is "
+            f"{_REQUEST_STATES}; inprogressRequests is then empty. {_WAIT_LIMIT}"
+        ),
+        lease_end="vcfa.vra8.deployment.get shows the lease end as leaseExpireAt.",
+    ),
+}
+
+
+def follow_up(prefix: str) -> Day2FollowUp:
+    """The follow-up texts of the connector whose op ids start with *prefix*."""
+    return FOLLOW_UPS[prefix]
+
+
+class IncompleteListError(RuntimeError):
+    """An IaaS list did not end within :data:`_MAX_PAGES` pages.
+
+    The rows read so far are not returned: a list that stops without a word
+    looks complete, and ``result_query`` cannot bring the missing rows back.
+    ``remediation`` reaches the answer as ``extras.remediation``.
+    """
+
+    def __init__(self, path: str, rows: int, total: Any) -> None:
+        of_total = f" of {total}" if isinstance(total, int) else ""
+        super().__init__(
+            f"{path} has more rows than this op reads ({rows}{of_total} read in {_MAX_PAGES} "
+            "pages); the list would be incomplete, so none of it is returned"
+        )
+        self.remediation = (
+            "Narrow the list with $filter, for example \"deploymentId eq '<deployment-id>'\" "
+            f"or \"projectId eq '<project-id>'\", so it has at most {LIST_ROW_LIMIT:,} rows."
+        )
 
 
 def row_view(row: Mapping[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
@@ -179,10 +257,7 @@ def _request_answer(request: Mapping[str, Any], prefix: str) -> dict[str, Any]:
     return {
         "status": "submitted",
         "request": row_view(request, _REQUEST_FIELDS),
-        "guidance": (
-            f"the action runs in the background; read {prefix}.deployment.get to see "
-            f"the deployment's last request until its state is {_REQUEST_STATES}"
-        ),
+        "guidance": f"The action runs in the background. {follow_up(prefix).request_end}",
     }
 
 
@@ -229,11 +304,16 @@ async def deployment_actions_list(
 async def _iaas_list(
     connector: Any, operator: Any, target: Any, path: str, params: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
-    """Every row of an IaaS list, page by page (at most ``_MAX_PAGES`` pages)."""
+    """Every row of an IaaS list, page by page.
+
+    Raises :class:`IncompleteListError` when the list has not ended after
+    ``_MAX_PAGES`` full pages, instead of returning a part of it.
+    """
     query: dict[str, Any] = {**_API_VERSION, "$top": _PAGE_SIZE}
     if params.get("$filter"):
         query["$filter"] = params["$filter"]
     rows: list[dict[str, Any]] = []
+    total: Any = None
     for page in range(_MAX_PAGES):
         answer = await connector._request_json(
             target, "GET", path, operator=operator, params={**query, "$skip": page * _PAGE_SIZE}
@@ -242,8 +322,8 @@ async def _iaas_list(
         rows.extend(dict(row) for row in content)
         total = answer.get("totalElements")
         if len(content) < _PAGE_SIZE or (isinstance(total, int) and len(rows) >= total):
-            break
-    return rows
+            return rows
+    raise IncompleteListError(path, len(rows), total)
 
 
 async def machine_list(

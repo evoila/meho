@@ -440,14 +440,27 @@ connector registers the same ops as `vcfa.vra8.*` (see
   that does not exist makes the preview fail, so the delete is refused before
   it waits for approval.
 - **Lists are flat.** `machine.list` and `block_device.list` read every page
-  (200 rows a page, at most 50 pages) and return `{items: [...]}`, so MEHO
-  stores a long list behind a result link. The zone, disk and machine ids
-  come from the `_links` of each row. They leave out `customProperties`.
+  (200 rows a page, at most 50 pages, so 10,000 rows) and return
+  `{items: [...]}`, so MEHO stores a long list behind a result link. A list
+  that has not ended after 50 pages is refused (`connector_error`,
+  `IncompleteListError`) with a `remediation` that asks for a `$filter`; MEHO
+  never returns a part of a list as if it were whole. The zone, disk and
+  machine ids come from the `_links` of each row. They leave out
+  `customProperties`.
 - **Resource ids.** The machine id from `machine.list` is the resource id of
   the machine in the deployment API. This follows the vendor examples; the
   live test will confirm it.
 - **Waiting.** The actions and the machine create run in the background; the
-  guidance names the read to repeat. The disk create waits up to 60 seconds
+  guidance names the read to repeat, per connector (`FOLLOW_UPS` in
+  `_day2.py`). Aria Automation 8: read `vcfa.vra8.deployment.get` until
+  `lastRequest.status` is `SUCCESSFUL`, `FAILED`, `ABORTED` or
+  `APPROVAL_REJECTED`; `leaseExpireAt` of the same read shows a new lease end.
+  VCF Automation 9: `vcfa.tenant.deployment.get` reads the IaaS API, which
+  shows neither the request nor the lease, and MEHO has no read of a request
+  there yet. So the guidance says to read `vcfa.tenant.machine.list` (with a
+  `deploymentId` filter) for the new power state, and that MEHO cannot show
+  the lease end. Both say to stop after 10 minutes and report the request id.
+  The disk create waits up to 60 seconds
   for its request, then attaches the new disk. A create still running then
   answers `in_progress` (attach it later with `block_device_id`); a failed
   create answers `failed`. `machine.create` answers `unchanged` when the

@@ -19,6 +19,7 @@ from meho_backplane.connectors.vcf_automation._day2 import (
     DEPLOYMENT_ACTION_IDS,
     LEASE_INPUT,
     RESOURCE_ACTION_IDS,
+    follow_up,
 )
 from meho_backplane.connectors.vcf_automation._day2_paths import (
     DEPLOYMENT_ACTIONS_PATH,
@@ -292,10 +293,7 @@ def _deployment_action_run(p: str) -> Day2OpSpec:
                 "{status: submitted, request: {id, name, actionId, status, deploymentId, "
                 "resourceIds, requestedBy, createdAt}, guidance}."
             ),
-            next_step=(
-                f"Read {p}.deployment.get until the last request is SUCCESSFUL or FAILED. "
-                f"To delete, use {p}.deployment.delete."
-            ),
+            next_step=f"{follow_up(p).request_end} To delete, use {p}.deployment.delete.",
         ),
     )
 
@@ -352,8 +350,7 @@ def _resource_action_run(p: str) -> Day2OpSpec:
                 "resourceIds, requestedBy, createdAt}, guidance}."
             ),
             next_step=(
-                f"Read {p}.deployment.get until the last request ends, then {p}.machine.list "
-                "to see the new state."
+                f"{follow_up(p).request_end} {p}.machine.list shows the new state of the machine."
             ),
         ),
     )
@@ -396,17 +393,17 @@ def _lease_change(p: str) -> Day2OpSpec:
         llm_instructions=guidance(
             when_to_call="Call to make a deployment live longer or end sooner.",
             preconditions=(
-                f"Read the lease now with {p}.deployment.get (leaseExpireAt). When the lease "
-                "ends, the appliance may power off or delete the deployment. A person must "
-                f"approve the call. The date goes to the input '{LEASE_INPUT}'."
+                f"{follow_up(p).lease_end} When the lease ends, the appliance may power off or "
+                "delete the deployment. A person must approve the call. The date goes to the "
+                f"input '{LEASE_INPUT}'."
             ),
             output_shape=(
                 "{status: submitted, request: {id, name, actionId, status, deploymentId, "
                 "resourceIds, requestedBy, createdAt}, guidance}."
             ),
             next_step=(
-                f"Read {p}.deployment.get until the last request ends and leaseExpireAt shows "
-                "the new date. A FAILED request often means a lease policy limit."
+                f"{follow_up(p).request_end} {follow_up(p).lease_end} A FAILED request often "
+                "means a lease policy limit."
             ),
         ),
     )

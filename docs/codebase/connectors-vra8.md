@@ -114,8 +114,12 @@ shims on `Vra8Connector` call the shared handlers with the vRA 8 login.
 The vendor calls, the answers, the fixed action lists and the blast-radius
 preview of the delete are described once in
 [connectors-vcf-automation.md](connectors-vcf-automation.md) ("Day-2 work").
-The guidance texts name the `vcfa.vra8.*` ops. These are the only changes
-this connector makes; every one waits for approval.
+The guidance texts name the `vcfa.vra8.*` ops. After an action or a lease
+change they say to read `vcfa.vra8.deployment.get` until `lastRequest.status`
+is `SUCCESSFUL`, `FAILED`, `ABORTED` or `APPROVAL_REJECTED`, and to stop after
+10 minutes; `leaseExpireAt` of the same read shows a new lease end. The two
+lists refuse more than 10,000 rows and ask for a `$filter`. These are the only
+changes this connector makes; every one waits for approval.
 
 ## Key types
 

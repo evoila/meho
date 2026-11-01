@@ -404,6 +404,105 @@ handlers, the org-create check and the park-time preview are in
   (`change` / `unchanged` / `invalid_request`). Without a connector it shows
   `would: set_if_different` and no current state.
 
+**Organization settings and networking (provider plane).** Seven ops for
+the set-up done once per site: change an organization, turn on its
+networking, and give it IP spaces, a provider gateway and regional
+networking in a region. They form the group `vcfa-provider-networking`.
+Metadata is in `provider_network_ops.py` and `provider_org_settings_ops.py`;
+the paths in `_provider_paths.py`; the handlers and approval cards in
+`_provider_network.py` (the read and shared helpers), `_provider_org_settings.py`,
+`_provider_ip_space.py`, `_provider_gateway.py`,
+`_provider_regional_networking.py` and `_provider_network_delete.py`. The
+calls follow the vendor's "Provider Infrastructure APIs" reference lists of
+9.0, 9.1 and 9.1.1; the field names follow `go-vcloud-director` v3
+(`types/v56/tm.go`).
+
+| op_id | what it does | returns | risk level / approval | versions |
+|---|---|---|---|---|
+| `vcfa.provider.network.list` | One kind of networking object as flat rows: IP spaces, provider gateways, IP space links, regional networking, edge clusters, free Tier-0 gateways, or an organization's networking settings. Also the status read of every networking job. | `{kind, reachable, checked_at, job_id, state, vendor_status, job_state, progress, error, count, items, job, guidance}` | safe | 9.x |
+| `vcfa.provider.org.update` | Changes an organization's display name, description, on/off state and publish rights (`GET`, then `PUT /cloudapi/1.0.0/orgs/{orgUrn}`). Its name and kind never change. Turning it off stops its users from signing in. | `{status, org, previous, job_id, guidance}` | dangerous, approval | 9.x |
+| `vcfa.provider.org.networking.set` | Turns networking on or off and sets the short name for logs (`…/orgs/{orgUrn}/networkingSettings`). The short name is the id of the organization's NSX project, so MEHO never changes it once set. | `{status, org_id, settings, previous, guidance}` | dangerous, approval | 9.x |
+| `vcfa.provider.ip_space.set` | Creates an IP space (`POST …/ipSpaces`) or adds ranges and changes the default limits of one (`PUT …/ipSpaces/{ipSpaceId}`). A new range needs `range_is_new_in_nsx: true`. | start answer (below) | dangerous, approval | 9.x |
+| `vcfa.provider.provider_gateway.set` | Creates a provider gateway on a free Tier-0 gateway with its first IP spaces (`POST …/providerGateways`), or links missing IP spaces to an existing one (`POST …/ipSpaceAssociations`, one per IP space). | start answer | dangerous, approval | 9.x |
+| `vcfa.provider.regional_networking.set` | Gives an organization networking in a region (`POST …/regionalNetworkingSettings`). VCF Automation then makes its NSX project, transit gateway and default VPC. | start answer | dangerous, approval | 9.x |
+| `vcfa.provider.network.delete` | Removes regional networking, a provider gateway (its IP space links go with it), an IP space or one IP space link (`DELETE`). | `{status, kind, object, blockers, job_id, status_read, guidance}` | destructive, preview + approval | 9.x |
+
+- **Paths per version.** The networking objects sit under `/cloudapi/vcf/`
+  in the 9.0 reference and only under `/cloudapi/v1/` in the 9.1 and
+  9.1.1 references. `provider_path()` picks the prefix from the target's
+  version (9.1 and newer get `v1`; no version counts as 9.0), the same rule
+  as `vcfa.provider.region.list`. The organization calls and the Tier-0 list
+  keep their `/cloudapi/1.0.0/` path on every version. The reconcile lane
+  checks every call against the reference list of each version.
+- **Vendor jobs.** VCF Automation answers a networking create, change or
+  delete with HTTP 202, an empty body and the task in the `Location`
+  header, and then works on its own. A start returns `accepted` with the
+  task id (`job_id`) and `status_read` (the op and params to read next; the
+  params carry the `job_id`). It never says the work is done. The object's `status` shows the progress;
+  each row maps it to `job_state`: `PENDING` queued, `CONFIGURING` running,
+  `REALIZED` succeeded, `REALIZATION_FAILED` failed. The object holds no
+  error text; the vendor task does. So when the status read gets the
+  `job_id`, it also reads the task: `GET /api/task/{id}`, a legacy call with
+  the classic `application/*+json;version=40.0` Accept header. No 9.x
+  reference lists it; the vendor's own Go SDK (`go-vcloud-director` v3)
+  follows every `202` start through it on VCF Automation 9. The answer then
+  has `job_state` (queued, running, succeeded, failed, canceled), `progress`
+  in percent, and a `job` block. When the job failed, `error` has the
+  vendor's error text (secrets filtered out, at most 500 characters). The
+  job state then sets `state`, also while the object still shows its old
+  status. One exception: when the object is gone and the job succeeded,
+  `state` stays `not_found`. So a delete's status read ends with
+  `not_found` (gone) or `failed` (it stays), as the delete's guidance says.
+  A job the vendor no longer knows (HTTP 404) or any other HTTP 4xx answer
+  on the task read gives `job.read: false` with the HTTP status in
+  `job.why_not_read`, and keeps the object's state. A bad `job_id` (empty,
+  `.`, `..`, a slash, or a colon form other than `urn:vcloud:task:<id>`) is
+  refused with `invalid_request` before any call. MEHO keeps no job state
+  between calls.
+- **A job that already runs.** Before a start, the op reads the object. When
+  it reads `PENDING` or `CONFIGURING`, the op answers `already_running` and
+  starts nothing. This helps but is not a lock: two callers can both check
+  before either starts.
+- **A lost reply.** The start ops tell the caller to use MEHO's async mode
+  (`async: true`, `async-governed-dispatch.md`), so the start's answer and
+  its job id stay under a run handle. After a lost reply, the caller reads
+  the object with the status read first and does not start again blindly.
+- **Not reachable.** When the appliance does not answer (a connection error,
+  a time-out, HTTP 502, 503 or 504), the status read answers
+  `reachable: false`, `state: not_reachable`, the job id it was given and
+  `checked_at`, also when only the task read gets no answer (the object
+  rows already read then stay in `items`). It never says
+  `failed` then. An expired login is handled by
+  the connector's usual 401 re-login.
+- **Part-way failure.** Linking IP spaces to an existing gateway sends one
+  link per IP space. When one is refused, the answer is `failed_part_way`
+  with `steps` (the links that started), `step_failed` (with the vendor's
+  error) and `steps_not_run`. Nothing is undone; running the op again links
+  only what is missing.
+- **Checks before a start.** The Tier-0 list is always read with a
+  `regionId` or `networkProviderId` filter: without one the appliance
+  answers an empty list. A gateway on 9.0 refuses the 9.1 fields
+  (`inbound_remote_networks`, `allow_advertising_private_ip_blocks`, `nat`):
+  9.0 would answer HTTP 400 "Unrecognized field", so MEHO stops first. The
+  backing type is `NSX_TIER0`, or `NSX_VRF_TIER0` for a Tier-0 VRF. The
+  reference pages only show `backingType` as a string; the two values come
+  from the vendor's Go SDK (`go-vcloud-director` v3, `types/v56/tm.go`). Regional networking needs the
+  organization's short log name (else 400 "Short Log Name is not set") and a
+  gateway that reads `REALIZED`; MEHO checks both first.
+- **Approval binds the state.** Each change has an approval card with the
+  object as it is now and a `state_hash` of it. The approved run reads the
+  object again and stops with `precondition_failed` when the hash differs.
+  The hash skips fields that move on their own (the `status`, usage counts).
+- **Delete order.** The delete card (`blast_radius`) names the object, what
+  goes with it (for regional networking the NSX project, transit gateway
+  and default VPC; for a gateway its IP space links; for an IP space its
+  NSX IP blocks) and that it is permanent. The card refuses a missing
+  object and an object still in use: a gateway that regional networking
+  uses, or an IP space that a link uses. The run checks again and answers
+  `precondition_failed` with `blockers`.
+- **Ids in paths.** Every id that goes into a URL path is checked (not
+  empty, not `.` or `..`, no slash) and percent-encoded.
+
 Source: `backend/src/meho_backplane/connectors/vcf_automation/`.
 
 The connector is **dual-plane**: a single registry triple covers both the
@@ -453,7 +552,8 @@ domains.
   (`typed_ops.py`) — the seven typed read ops (T5 #2305; tenant
   deployment list #2839; tenant deployment get #2960) and the four
   per-plane groups (`vcfa-provider-reads`, `vcfa-tenant-reads`, and the
-  #3890 `vcfa-provider-writes`, `vcfa-tenant-writes`).
+  #3890 `vcfa-provider-writes`, `vcfa-tenant-writes`), plus
+  `vcfa-tenant-images` and `vcfa-provider-networking`.
 - **`VCFA_NETWORK_OPS`** (`network_ops.py`) / **`VCFA_DEPLOY_OPS`**
   (`deploy_ops.py`) — the six network ops and the three deploy ops (see
   **A project's own network and its first deployment** above), checked by
@@ -469,6 +569,10 @@ domains.
 - **`VCFA_FEATURE_FLAG_OPS`** (`feature_flag_ops.py`) — the two
   feature-flag ops (see **Feature flags** above), validated by the same
   `validate_typed_ops()`.
+- **`VCFA_PROVIDER_NETWORK_OPS`** (`provider_network_ops.py`) — the seven
+  organization settings and networking ops of the `vcfa-provider-networking`
+  group (see **Organization settings and networking** above), validated by
+  the same `validate_typed_ops()`.
 - **`VCFA_PRODUCT` / `VCFA_VERSION` / `VCFA_IMPL_ID` /
   `VCFA_CONNECTOR_ID`** (`__init__.py`) — DB-side keys. Since #1814 the
   registry key `VcfAutomationConnector.product` was unified to `"vcfa"`,
@@ -497,8 +601,9 @@ domains.
    upserts the seven `typed_ops.VCFA_TYPED_OPS` descriptors, the nine
    `provisioning_ops.VCFA_PROVISIONING_OPS` (#3890), the four
    `image_ops.VCFA_IMAGE_OPS` and the nine
-   `VCFA_NETWORK_OPS` + `VCFA_DEPLOY_OPS` and the two
-   `VCFA_FEATURE_FLAG_OPS` — no ingest needed, so
+   `VCFA_NETWORK_OPS` + `VCFA_DEPLOY_OPS`, the two
+   `VCFA_FEATURE_FLAG_OPS` and the seven `VCFA_PROVIDER_NETWORK_OPS` — no
+   ingest needed, so
    the audited read surface and the provisioning writes work on a fresh
    boot.
 

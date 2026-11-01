@@ -145,8 +145,8 @@ gh catalog ingest.
   - `gh.composite.project_item_add` (write) — `addProjectV2ItemById`.
   - `gh.composite.project_item_set_field` (write) —
     `updateProjectV2ItemFieldValue` with a `singleSelectOptionId` value.
-- **`composites/_sub_issues.py`** — the one `issues`-group composite,
-  `gh.composite.sub_issue_add` (write), wrapping
+- **`composites/_sub_issues.py`** — the sub-issue link of the `issues`
+  group, `gh.composite.sub_issue_add` (write), wrapping
   `POST /repos/{owner}/{repo}/issues/{issue_number}/sub_issues`.
   **`sub_issue_id` is the child's database `id`, not its issue number** —
   the REST create-issue response carries that id; passing the number is
@@ -325,6 +325,82 @@ older-commit, refused-update and unsafe-name cases.
 risk level and approval flag of each operation, the `git` group, the
 preview builder, and that each operation passes the operation contract
 rules of `test_operation_contracts.py` with no gap.
+
+### Issues: search, read, file and comment
+
+Four hand-written operations in the `issues` group let an agent or an
+add-on work with GitHub issues without the raw generated operations. The
+handlers are in `composites/_issues.py`; the schemas and agent guidance are
+in `composites/schemas_issues.py`. Like the other composites, they call
+GitHub through the connector's own session (through `GitRepo` from
+`_git.py`, which checks and percent-encodes the owner and repository), so
+they work on a fresh install with no spec import.
+
+| Operation | What it does | GitHub calls | Risk level |
+|---|---|---|---|
+| `gh.composite.issue_search` | Finds issues in one repository. | `GET /repos/{owner}/{repo}/issues` or `GET /search/issues` | `safe` |
+| `gh.composite.issue_view` | One issue: title, text, state, labels, assignees, parent, direct sub-issues, number of comments, and on request the newest comments. | `GET .../issues/{n}`, `.../parent`, `.../sub_issues`, `.../comments` | `safe` |
+| `gh.composite.issue_create` | Files one issue. Returns its `number`, its `node_id` (for `project_item_add`) and its database `id` (for `sub_issue_add`). | `POST /repos/{owner}/{repo}/issues` | `caution`, waits for approval |
+| `gh.composite.issue_comment` | Adds one comment to one issue. | `POST .../issues/{n}/comments` | `caution`, waits for approval |
+
+**The two search modes.** Every answer says which mode ran.
+
+- `mode=exact` (the default) uses filters only: `state`, `labels` (all must
+  match), `assignee`, `author`, and an optional exact `phrase`. Newest first.
+  - Without a phrase, MEHO reads the plain issue list, 100 per page, to the
+    end. There is no page cap, so the list is complete. `total_count` is
+    null, because this list has no count.
+  - With a phrase, MEHO uses GitHub's search with the phrase in double
+    quotes, sorted by creation date, and reads up to 1,000 hits.
+- `mode=ranked` sends free text (`query`) to GitHub's search and keeps
+  GitHub's relevance order. It returns at most `limit` hits (default 30,
+  at most 100). Each hit has `suggestion: true`.
+- Every answer carries `mode`, `complete`, `total_count`, `count`, `reason`
+  (why the list is not complete, or null) and `query` (the search text
+  MEHO sent, or null for the plain list).
+- `complete` is false when GitHub says the results are incomplete
+  (`incomplete_results`), when there are more than 1,000 hits (GitHub's
+  search limit), or when a ranked search returned only its limit.
+- Pull requests are left out (`is:issue`, or dropped from the plain list)
+  unless `include_pull_requests` is true.
+
+**The search stays in the repository.** Every search query starts with
+`repo:<owner>/<repo>`. Before any call, MEHO refuses:
+
+- free text or a phrase that holds `repo:`, `org:`, `user:` or `owner:`;
+- free text with `OR`, `AND`, `NOT` or brackets;
+- a phrase with a double quote, and control characters;
+- an assignee or author that is not a GitHub login, and a label with a
+  double quote or a comma.
+
+A refused value raises a `ValueError`; GitHub is not called.
+
+**`issue_view` details.** A 404 from `/parent` means the issue has no
+parent (`parent: null`). A 404 from `/sub_issues` (for example on a pull
+request) means no sub-issues. GitHub lists comments oldest first, so MEHO
+reads the last page and, if needed, the page before it, and returns the
+newest `comments_limit` comments (0 to 50), oldest of them first.
+
+**The writes.** `issue_create` sends only the fields that were given.
+GitHub drops labels and assignees without an error when the identity has
+no push access; the answer shows the labels and assignees GitHub really
+set. Both writes are `caution` and wait for approval for now. A later
+change makes ticket writes `safe` inside the target's own repository.
+
+**Lists.** A long search answer goes behind a result handle. The scalars
+(`mode`, `complete`, `total_count`, `count`, `reason`, `query`) are listed
+under `llm_instructions.result_scalars`, so they stay in the direct answer.
+
+**Tests.** `backend/tests/test_connectors_github_composites_issues.py`
+drives the handlers with saved responses (no live GitHub): both search
+modes, a list over several pages, the 1,000-hit limit, the `repo:` prefix
+on every query, the refused inputs, the parent and comments of
+`issue_view`, and `issue_create` feeding its database id to
+`sub_issue_add`. `backend/tests/test_connectors_github_composites_issues_register.py`
+checks the risk levels, the `issues` group, the operation contract rules,
+and that each call through the dispatcher writes one audit row.
+`backend/tests/test_github_board_composite_flow.py` files its issues with
+`issue_create`.
 
 ## Key types
 

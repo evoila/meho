@@ -49,7 +49,7 @@ from tests._vmware_host_access_fake import (
 )
 from tests._vmware_teardown_fake import GateRecorder, http_status_error, operator, parked
 
-_TYPED = {op.op_id: op for op in typed.VMWARE_HOST_ACCESS_OPS}
+_TYPED = {op.op_id: op for op in typed.TYPED_OPS}
 _LIST_SCHEMA = _TYPED["vmware.host.local_user.list"].response_schema
 _STATUS_SCHEMA = _TYPED["vmware.host.ad.status"].response_schema
 _VAULT = "<vault-path-of-the-password>"

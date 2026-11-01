@@ -63,9 +63,10 @@ the vendor spec documents them is exactly what the first arm decides.
 The declared set is introspected from the connector's live constants (the #2944
 pattern — never a hardcoded mirror): the three ``_FLEET_*_PATH`` module
 constants (probe / about / environments) plus the
-``_FLEET_BROKEN_DIAGNOSTIC_ENDPOINTS`` tuple. The connector dispatches
-**GET-only** — HTTP Basic on every request, no session-establish POST — so every
-literal declares ``GET:``.
+``_FLEET_BROKEN_DIAGNOSTIC_ENDPOINTS`` tuple, all ``GET`` (HTTP Basic on every
+request, no session-establish POST), plus ``lifecycle.VENDOR_CALLS``, which
+carries its own methods (the request retry is a ``PATCH``, the inventory sync a
+``POST``).
 
 The documentation pages and folders that ``fleet.api_file.get`` reads
 (``api_file.DOCS_PAGES`` and ``api_file.DOCS_FOLDERS``) are listed as ``GET``
@@ -77,6 +78,7 @@ from __future__ import annotations
 
 from meho_backplane.connectors.vcf_fleet import api_file as _api_file
 from meho_backplane.connectors.vcf_fleet import connector as _connector
+from meho_backplane.connectors.vcf_fleet import lifecycle as _lifecycle
 from tests._spec_shelf import (
     assert_op_ids_served,
     openapi_served_op_ids,
@@ -111,13 +113,13 @@ def _declared_op_ids() -> set[str]:
 
     Sweeps the live module constants (never a hardcoded mirror): the
     ``_FLEET_*_PATH`` op/probe constants and the
-    ``_FLEET_BROKEN_DIAGNOSTIC_ENDPOINTS`` known-issue tuple. All dispatch as
-    ``GET`` — the Fleet connector sends HTTP Basic per request with no
-    session-establish POST.
+    ``_FLEET_BROKEN_DIAGNOSTIC_ENDPOINTS`` known-issue tuple, all ``GET``, and
+    ``lifecycle.VENDOR_CALLS`` with their own methods.
     """
     paths = set(_path_constants().values())
     paths |= set(_connector._FLEET_BROKEN_DIAGNOSTIC_ENDPOINTS)
-    return {f"GET:{path}" for path in paths}
+    declared = {f"GET:{path}" for path in paths}
+    return declared | {f"{method}:{path}" for method, path in _lifecycle.VENDOR_CALLS}
 
 
 def test_hand_coded_path_surface_is_pinned() -> None:
@@ -153,6 +155,15 @@ def test_hand_coded_path_surface_is_pinned() -> None:
         "GET:/lcm/lcops/api/v2/system-details",
         "GET:/lcm/lcops/api/v2/version",
         "GET:/lcm/locker/api/v2/about",
+        "GET:/lcm/request/api/v2/requests",
+        "GET:/lcm/request/api/v2/requests/{requestId}",
+        "GET:/lcm/request/api/v2/requests/{requestId}/error-causes",
+        "PATCH:/lcm/request/api/v2/requests/{requestId}/retry",
+        "GET:/lcm/lcops/api/v2/environments/{environmentId}",
+        "POST:/lcm/lcops/api/v2/environments/{environmentId}/products/{productId}/inventory-sync",
+        "GET:/lcm/lcops/api/v2/settings/system-details",
+        "GET:/lcm/health/api/v2/status",
+        "GET:/lcm/lcops/api/v2/datacenters/{dataCenterVmid}/vcenters",
     }
     assert {
         "GET:/api/swagger-ui.html",

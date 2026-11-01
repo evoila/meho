@@ -5770,7 +5770,8 @@ HOST_SERVICE_CONTROL_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Host service key (``HostService.key``). Enforced server-side "
                 "against a curated allowlist (``TSM-SSH`` / ``TSM`` / ``ntpd`` / "
-                "``ptpd``); any other name is refused with "
+                "``ptpd`` / ``snmpd`` / ``sfcbd-watchdog`` / ``slpd``); any other name "
+                "is refused with "
                 "``status='service_not_allowed'`` before any resolution or write."
             ),
         },
@@ -6007,6 +6008,21 @@ HOST_SERVICE_CONTROL_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": {"type": "string"},
             "description": "The curated allowlist, echoed on ``service_not_allowed``.",
+        },
+        "service_state": {
+            "type": ["object", "null"],
+            "description": (
+                "The service as read back after the change; null when the read failed."
+            ),
+            "properties": {
+                "key": {"type": "string", "description": "Service key."},
+                "label": {"type": ["string", "null"], "description": "Display name."},
+                "running": {"type": ["boolean", "null"], "description": "Runs now."},
+                "policy": {
+                    "type": ["string", "null"],
+                    "description": "Start policy: on, automatic or off.",
+                },
+            },
         },
         "candidate_hosts": {
             "type": "array",
@@ -6313,7 +6329,8 @@ GUEST_ENV_READ_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": (
                 "Guest environment as ``NAME=value`` strings (whole environment "
-                "when ``names`` was omitted, else the requested names). "
+                "when ``names`` was omitted, else the requested names). The "
+                "value part is hidden unless a person passed ``reveal_secret``. "
                 "Set-shaped -- JSONFlux-wrapped over threshold."
             ),
         },

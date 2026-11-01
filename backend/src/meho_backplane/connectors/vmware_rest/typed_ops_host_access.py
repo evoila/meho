@@ -45,7 +45,8 @@ if TYPE_CHECKING:
 __all__ = [
     "HOST_ACCESS_GROUP_KEY",
     "HOST_ACCESS_WHEN_TO_USE",
-    "VMWARE_HOST_ACCESS_OPS",
+    "TYPED_OPS",
+    "WHEN_TO_USE_BY_GROUP",
     "host_ad_status_impl",
     "host_local_user_list_impl",
 ]
@@ -260,4 +261,5 @@ _AD_STATUS_OP = VmwareTypedOp(
     },
 )
 
-VMWARE_HOST_ACCESS_OPS: Final[tuple[VmwareTypedOp, ...]] = (_LOCAL_USER_LIST_OP, _AD_STATUS_OP)
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (_LOCAL_USER_LIST_OP, _AD_STATUS_OP)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {HOST_ACCESS_GROUP_KEY: HOST_ACCESS_WHEN_TO_USE}

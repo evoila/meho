@@ -20,10 +20,15 @@ logging wrap the call, not patch the engine.
 **Walking strategy.** Strings are matched directly. Mappings are walked
 key-by-key; the key itself is not redacted (operator-facing keys are
 schema, not secrets), but its value is. Sequences are walked
-positionally. Anything that is not a str / Mapping / Sequence (numbers,
-booleans, None, bytes) is passed through verbatim -- regex redaction
-on numerics is nonsensical and bytes are not expected at the
-JSONFlux boundary.
+positionally. A sequence whose items are all strings (the rows of
+``linux.log.tail``, the lines of a ruleset) is matched as one text,
+the rows joined with newlines, so a secret that spans rows -- a PEM
+key is a ``BEGIN`` row, body rows and an ``END`` row -- is found as a
+whole; every row keeps its place and loses only its part of the match
+(see :func:`_apply_to_rows`). Anything that is not a str / Mapping /
+Sequence (numbers, booleans, None, bytes) is passed through verbatim
+-- regex redaction on numerics is nonsensical and bytes are not
+expected at the JSONFlux boundary.
 
 **Manifest contract.** :class:`RedactionManifestEntry` per match:
 
@@ -216,6 +221,8 @@ def _walk_and_apply(
             for key, value in node.items()
         }
     if isinstance(node, Sequence) and not isinstance(node, (str, bytes, bytearray)):
+        if len(node) > 1 and all(isinstance(item, str) for item in node):
+            return _apply_to_rows(list(node), rule, manifest, path=path, mutate=mutate)
         return [
             _walk_and_apply(
                 item,
@@ -272,6 +279,76 @@ def _apply_to_str(
     if not mutate:
         return leaf
     return _replace_spans(rule, leaf, spans)
+
+
+def _apply_to_rows(
+    rows: list[str],
+    rule: RedactionRule,
+    manifest: list[RedactionManifestEntry],
+    *,
+    path: str,
+    mutate: bool,
+) -> list[str]:
+    """Match *rule* against *rows* as one text; rewrite each row's part of a match.
+
+    A list of strings is usually the lines of one text. Matched row by
+    row, a secret that spans rows shows the pattern only its first row
+    (the ``BEGIN`` line of a PEM key), and the rest stays readable. So
+    the rows are joined with newlines and matched once. The list keeps
+    its length and every row keeps its place: a row inside a match is
+    rewritten for exactly the part of the match that falls into it, a
+    row outside every match is returned as is. A match inside one row
+    gives the same result as matching that row alone.
+
+    The manifest gets one entry per rewritten row, with the row's own
+    path and offsets, so the audit row reads the same as for a string
+    leaf. *mutate* works as in :func:`_apply_to_str`.
+
+    The spans come sorted and never overlap, so rows and spans are
+    walked together, each once, by index: a span that ends before the
+    current row is left behind, and a span that starts after the row's
+    end waits for a later row. The span list is never sliced or copied
+    per row. The cost grows with the number of rows plus the number of
+    matches, not their product, so a long log tail with many secrets in
+    every row is handled in about the time its rows take one by one.
+    """
+    pattern = get_pattern(rule.pattern)
+    spans = secret_spans(pattern, "\n".join(rows))
+    if not spans:
+        return rows
+
+    out: list[str] = []
+    offset = 0
+    first = 0
+    total = len(spans)
+    for index, row in enumerate(rows):
+        end = offset + len(row)
+        while first < total and spans[first][1] <= offset:
+            first += 1
+        row_spans: list[tuple[int, int]] = []
+        probe = first
+        while probe < total and spans[probe][0] < end:
+            start, stop = spans[probe]
+            if start < stop:
+                row_spans.append((max(start, offset) - offset, min(stop, end) - offset))
+            probe += 1
+        if row_spans:
+            manifest.append(
+                RedactionManifestEntry(
+                    rule=rule.name,
+                    pattern=rule.pattern,
+                    action=rule.action,
+                    count=len(row_spans),
+                    span=row_spans[0],
+                    reason=rule.reason,
+                    path=_join_path(path, str(index)),
+                ),
+            )
+            out.append(_replace_spans(rule, row, row_spans) if mutate else row)
+        else:
+            out.append(row)
+        offset = end + 1
+    return out
 
 
 def _replace_spans(rule: RedactionRule, leaf: str, spans: list[tuple[int, int]]) -> str:

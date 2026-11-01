@@ -274,7 +274,7 @@ test("committed package-lock pins mcp-remote + integrity-locks the tree", () => 
   // never answering it; lib/login-guard.mjs relies on that (#3961).
   assert.equal(lock.packages[""].dependencies["mcp-remote"], "0.1.39");
   assert.equal(lock.packages["node_modules/mcp-remote"].version, "0.1.39");
-  assert.equal(lock.packages["node_modules/qs"].version, "6.16.0");
+  assert.equal(lock.packages["node_modules/qs"].version, "6.17.0");
   const integrities = Object.values(lock.packages).filter((p) => p.integrity);
   assert.ok(integrities.length >= 1, "transitive tree must carry integrity hashes");
 });

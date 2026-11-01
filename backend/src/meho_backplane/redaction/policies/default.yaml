@@ -24,9 +24,9 @@ description: |
   Default-safe Tier-1 redaction policy applied at the dispatcher's
   connector-result boundary whenever no more-specific policy is
   registered for the call's (connector_id, tenant, op). Targets
-  credentials and kubeconfig blobs; identifier-shaped patterns
-  (UUID / IP / FQDN) are excluded to keep operator-facing summaries
-  legible by default.
+  credentials, private keys, password hashes and kubeconfig blobs;
+  identifier-shaped patterns (UUID / IP / FQDN) are excluded to keep
+  operator-facing summaries legible by default.
 
 rules:
   # This rule runs first. BIND allows a comment between the ``secret``
@@ -71,3 +71,8 @@ rules:
     pattern: kubeconfig
     action: redact
     reason: "kubeconfig blob in payload"
+
+  - name: strip-password-hash
+    pattern: password_hash
+    action: redact
+    reason: "crypt(3) password hash, as in /etc/shadow"

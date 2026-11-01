@@ -403,6 +403,20 @@ served them. `safe`, read-only, in its own group `vcfa-vra8-api-files`.
   error result after the retry, and `invalid_params` for a data path); and the reconcile lane below (`GET /vco/api/about` in the manifest,
   the documentation paths pinned apart).
 
+## Integrations (shared with VCF Automation 9)
+
+Five integration ops (`vcfa.vra8.integration.list`, `.integration.set`,
+`.integration.delete`, `.ipam_package.import`, `.git_repo.set`; group
+`vcfa-vra8-integrations`) are written once in `connectors/vmware_shared/` and
+registered here by `integration_ops.py`. `Vra8Connector` inherits
+`VcfaIntegrationOpsMixin` and adds `_integration_send`: one request with the
+bearer and `Accept: application/json`, any method, a raw body allowed, and one
+new login on a `401` (so a long IPAM package upload survives an expired
+token). What each op does, the IPAM shape rules, the Git sync job and the
+spec check are described once in
+[connectors-vcf-automation.md](connectors-vcf-automation.md) (section
+"Integrations: Orchestrator, IPAM and Git").
+
 ## Spec reconcile lane
 
 [`backend/tests/test_connectors_vra8_spec_reconcile.py`](../../backend/tests/test_connectors_vra8_spec_reconcile.py)

@@ -49,6 +49,7 @@ from typing import Final
 
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.vra8.connector import Vra8Connector
+from meho_backplane.connectors.vra8.integration_ops import register_vra8_integration_operations
 from meho_backplane.connectors.vra8.session import (
     Vra8CredentialsLoader,
     Vra8TargetLike,
@@ -92,6 +93,8 @@ register_connector_v2(
 # typed descriptor rows land before the first dispatch — the vRA 8 read core
 # dispatches on a fresh boot with zero catalog ingest (#3058).
 register_typed_op_registrar(register_vra8_typed_operations)
+# The integration ops shared with VCF Automation 9 (``vmware_shared``).
+register_typed_op_registrar(register_vra8_integration_operations)
 
 __all__ = [
     "VRA8_CONNECTOR_ID",
@@ -106,5 +109,6 @@ __all__ = [
     "Vra8TargetLike",
     "Vra8TypedOp",
     "load_credentials_from_vault",
+    "register_vra8_integration_operations",
     "register_vra8_typed_operations",
 ]

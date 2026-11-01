@@ -1,6 +1,6 @@
 # The connector kit for connector authors: one module, one version, one check (decision)
 
-**Status:** proposed. It waits for the program owner to agree in the pull request.
+**Status:** Agreed on 2026-11-01 by the program owner.
 **Date:** 2026-11-01
 **Issue:** [#5278](https://github.com/evoila/meho/issues/5278) — the connector kit as a documented package for connector authors
 **Initiative:** [#5060](https://github.com/evoila/meho/issues/5060) — a connector built in another repository runs like a built-in one
@@ -123,13 +123,13 @@ Inside three classes, the kit promises these parts:
 - `broadcast.client.get_broadcast_client`. One package uses it to keep a little state that every
   MEHO process must see, in MEHO's shared Valkey store (an in-memory store). The same store holds
   MEHO's broadcast feed, rate limits and approval waits (`connectors/result_handle_store.py`,
-  module text). See open question 2.
+  module text). Decision 2: no shared store for connectors now.
 - The result handle store (`connectors/result_handle_store.py`). No package needs it. A handler
   returns plain data, and MEHO turns a long list into a result handle (a link to the stored
   result) after the handler returns ([jsonflux.md](../codebase/jsonflux.md)).
 
 A name joins the kit when a package needs it, through the check below. The VMware and Azure
-packages will need more names (open question 1).
+packages move on the tier 2 path, so they may also import modules outside the kit (decision 1).
 
 ### 2. The check
 
@@ -150,7 +150,7 @@ How a change to the kit is noticed:
    It writes the same version into `backend/connector-kit/pyproject.toml`. The test checks that
    both versions are the same.
 4. **The pull request** shows the changed list file, so a person sees the kit change before the
-   merge. Open question 3 asks who must approve it.
+   merge. The kit owner must approve it, through the code owners file (decision 3).
 5. **The release.** A small script in `scripts/release/` compares the list file at the last release
    tag with the release commit. When the kit changed, it checks two things:
    - the version went up by the right number;
@@ -188,10 +188,9 @@ module always gets the full test run, because all kit names live in core modules
   **Choice:** stop the start, as an unknown folder does today. Reason: the build already refuses
   this case, so it only happens with an image made in another way. A clear stop is better than a
   package whose operations fail later.
-- **Imports outside the kit.** The range covers the kit only. A package that imports any other
-  MEHO module has no promise for those imports. It must be tested against each MEHO release it is
-  built on. The template's CI does this: it tests against one pinned MEHO tag and builds the
-  overlay from the image of the same tag.
+- **Imports outside the kit.** The range covers the kit only. Only a tier 2 package (evoila's own)
+  may import other MEHO modules. It is pinned to one exact MEHO version and tested on every MEHO
+  release (decision 1). A tier 1 package, like the template's sample, imports only the kit.
 - **The name on PyPI.** Neither `meho-backplane` nor `meho-connector-kit` exists on the public
   Python package index (PyPI) today. evoila claims `meho-connector-kit` there before the first
   package names it. Then no package index can hand out a different package under that name, for
@@ -236,8 +235,8 @@ ci/
     handle;
   - `example.widget.rename`: a change that waits for a person's approval, with a preview.
 
-  The proof Task #5040 needs a long list, a denied call and a waiting approval. So #5040 can use
-  a copy of this connector.
+  The proof Task #5040 needs a long list, a denied call and a waiting approval. The made-up
+  package of that proof becomes this sample connector (#5564).
 - `tests/test_kit_imports.py` reads the package's files without running them, the same way
   `backend/tests/test_split_ready_imports.py` does. It fails when a file imports a MEHO module
   other than the kit or the package's own folder.
@@ -255,7 +254,8 @@ ci/
    pushed and not signed (tier 1).
 
 **Moving to a new MEHO release:** change `MEHO_VERSION` in a pull request. The CI shows whether
-the package still works. Change the kit range only when the kit's first number changes.
+the package still works. Change the kit range only when the kit's first number changes. For the
+template repository itself, the weekly release step does this (decision 4).
 
 **Tier 2:** evoila's private repository runs the same steps. Its release adds
 `--push --sign --reviews` to the overlay build
@@ -302,9 +302,10 @@ kit name and the kit version are on the page, so the page cannot fall behind the
   test. They run one command, and the pull request shows the change.
 - **The release** gets one more check. The release notes get a `Connector kit` section when the
   kit changed.
-- **evoila's packages** change their imports to the kit, add a range and drop their own `execute`.
-  This happens in the private repository.
-- **The proof #5040** can use the sample connector of the template repository.
+- **evoila's packages** add a range and drop their own `execute`. On the tier 2 path they may keep
+  imports outside the kit, pinned to one exact MEHO version and tested on every release
+  (decision 1). This happens in the private repository.
+- **The proof #5040** gives the template repository its sample connector.
 - **The image** carries one more small Python package. `meho-backplane` and MEHO's release numbers
   do not change.
 
@@ -320,29 +321,36 @@ kit name and the kit version are on the page, so the page cannot fall behind the
 - CLI commands. A package's operations are reached with `meho operation call` and the MCP tool
   `call_operation`, like every other connector. A package adds no command.
 
-## Open questions for the program owner
+## Decisions on the open questions
 
-1. **Imports outside the kit.** May a package import MEHO modules outside the kit? Proposal: yes,
-   with no promise. Such a package is tested and built against each MEHO release. This matters for
-   the next moves: the first-wave VMware folders import 158 names from 54 MEHO modules today, and
-   `azure` imports 42 names from 22 (counted the same way, on `main` on 1 November 2026). #3345
-   already plans a test for every public release on the private side.
-2. **A store for connectors.** Should the kit give connectors a small shared store of their own, for
-   state that every MEHO process must see? Today one package uses MEHO's own store for this,
-   outside the kit. Proposal: not in the first kit version; decide when a second package needs it.
-3. **Who approves a kit change.** Today a pull request to `main` needs one approval, and no owner
-   review is required. Proposal: one named person must approve every pull request that changes
-   `backend/connector-kit/`, through a required-reviewer rule on `main`.
-4. **The template repository.** Is it public, under evoila on GitHub? Who moves its `MEHO_VERSION`
-   after each MEHO release? Proposal: public, under Apache-2.0. The person who moves the pin of the
-   private repository moves this one too.
-5. **A waiting time before a removal.** Should a kit name stay, marked as old, for at least one kit
-   version before a new first number removes it? Proposal: yes, for one version with a new second
-   number. Authors then see the change in the release notes before their build stops.
+The program owner answered the five open questions on 1 November 2026.
+
+1. **Imports outside the kit: only on the tier 2 path.** evoila's own packages may import MEHO
+   modules outside the kit. Such a package is pinned to one exact MEHO version and tested on every
+   MEHO release. The public template path (tier 1) gets the kit only. The VMware and Azure moves use
+   the tier 2 path. Today the first-wave VMware folders import 158 names from 54 MEHO modules, and
+   `azure` imports 42 names from 22 (counted the same way, on `main` on 1 November 2026).
+2. **No shared store for connectors now.** The kit has no store. The one package that keeps state in
+   MEHO's own store does so outside the kit, on the tier 2 path.
+3. **A kit change needs the kit owner's approval, through the code owners file.** `.github/CODEOWNERS`
+   names the kit owner for `backend/connector-kit/`. The kit owner is the program owner until the
+   program owner names someone else.
+   - The file takes effect only when the rules of `main` ask for a code owner's review. Today they
+     do not (`require_code_owner_review` is off). Turning it on is an admin step.
+   - GitHub does not count an approval by the person who opened the pull request. So a kit change
+     opened under the kit owner's own account needs another code owner to approve it.
+4. **The template repository is public, under evoila on GitHub.** The weekly release step moves its
+   pinned MEHO version (`MEHO_VERSION`).
+5. **An old kit name stays for one kit version, marked as old, then goes.** The list file and the docs
+   page mark the name as old, and the release notes say what to use instead. The check of section 2
+   refuses to remove a name that was not marked as old in the kit version before.
 
 ## Tasks that follow
 
-- **The coding step of #5278: the kit and its check** (filed under #5060).
+Under #5060, on 1 November 2026: #5278 was rewritten for coding, and #5563, #5565, #5564 and #5566
+were filed.
+
+- **#5278, the coding step: the kit and its check.**
   - `backend/connector-kit/`: `pyproject.toml` (`meho-connector-kit`, version 1.0) and the module
     `meho_connector_kit` with the 30 names. `Target` lists the six fields as a typed class.
   - The image build installs the kit next to MEHO (`backend/Dockerfile`), and `uv sync` installs it
@@ -351,28 +359,31 @@ kit name and the kit version are on the page, so the page cannot fall behind the
   - The list file, the command and the test of section 2. The release script and its step in
     RELEASING.md.
   - A section "The connector kit" in [connector-packages.md](../codebase/connector-packages.md).
-  - evoila claims `meho-connector-kit` on PyPI.
+  - The code owners file for `backend/connector-kit/` (decision 3).
   - No change to `CHANGELOG.md`. The next release pull request adds `Connector kit` to the list of
     CHANGELOG sections.
-- **New: MEHO checks the kit range at build and at start** (section 3), in
+- **#5563: MEHO checks the kit range at build and at start** (section 3), in
   `deploy/connector-overlay/overlay_check.py` and `connector_packages.py`. The made-up example in
   `deploy/connector-overlay/example/` names a range. The range test runs in the overlay build itself,
   with its pinned uv.
-- **New: the docs page** `docs-site/extend/connector-kit.md`, its menu entry, and the test that every
+- **#5565: the docs page** `docs-site/extend/connector-kit.md`, its menu entry, and the test that every
   kit name and the kit version are on it.
-- **New: the template repository** (section 4).
-- **In the private repository, not filed here:** evoila's packages import the kit and name their range.
+- **#5564: the template repository** (section 4). The made-up package of the proof #5040 becomes its
+  sample.
+- **#5566: claim `meho-connector-kit` on PyPI.** A person does it with evoila's company account.
+- **In the private repository, not filed here:** evoila's packages name their kit range and drop their
+  own `execute`. On the tier 2 path they may keep other imports (decision 1).
 
-**Order:** the kit first. Then the range check and the docs page. Then the template repository, which
-needs the range check. The private repository moves after the range check. The proof #5040 can use
-the template's sample connector when the template exists.
+**Order:** #5278 first. Then #5563 and #5565. Then #5564, which also needs #5563. The private
+repository moves after #5563. #5566 can happen at any time before a package with a kit range is
+published.
 
 ## Not proven yet
 
 - The range test ran with uv 0.12.0 on a laptop. The overlay build pins uv 0.11.12
-  (`deploy/connector-overlay/Dockerfile`, line 28). The range check Task repeats it in the build.
+  (`deploy/connector-overlay/Dockerfile`, line 28). #5563 repeats it in the build.
 - That the kit installs next to MEHO in the image build. The install step installs every wheel in
-  `/wheels/` without dependencies (`backend/Dockerfile`, line 126). The kit Task shows it.
+  `/wheels/` without dependencies (`backend/Dockerfile`, line 126). #5278 shows it.
 
 ## Words used here
 

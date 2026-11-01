@@ -353,10 +353,16 @@ async def test_builtin_rows_behave_as_before() -> None:
         assert result.extras["error_code"] == "unknown_op"
 
 
-async def _seed_package_only_connector() -> None:
-    """One group that holds only package ops: the whole connector comes from the package."""
+async def _seed_package_only_connector(*, all_disabled: bool = False) -> None:
+    """One group that holds only package ops: the whole connector comes from the package.
+
+    With *all_disabled* the operator turned every op off before the package
+    was removed.
+    """
     package_group = await _seed_group("items")
-    await _seed_op(op_id=_PACKAGE_OP, owner=_PACKAGE, group_id=package_group)
+    await _seed_op(
+        op_id=_PACKAGE_OP, owner=_PACKAGE, group_id=package_group, is_enabled=not all_disabled
+    )
     await _seed_op(op_id=_PACKAGE_OP_OFF, owner=_PACKAGE, group_id=package_group, is_enabled=False)
 
 
@@ -434,3 +440,40 @@ async def test_search_names_the_missing_package(group: str | None) -> None:
     result = await search_operations(_operator(), arguments)
     assert result["outcome"] != "package_not_installed"
     assert {hit["op_id"] for hit in result["hits"]} == {_PACKAGE_OP}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group", [None, "items"])
+async def test_search_names_the_missing_package_when_every_op_is_off(group: str | None) -> None:
+    """All ops were turned off before the package was removed: the advice is still the package."""
+    await _seed_package_only_connector(all_disabled=True)
+    _remove()
+
+    arguments: dict[str, Any] = {"connector_id": _CONNECTOR_ID, "query": "widget op"}
+    if group is not None:
+        arguments["group"] = group
+    result = await search_operations(_operator(), arguments)
+    assert result["hits"] == []
+    assert result["outcome"] == "package_not_installed"
+    assert _PACKAGE in result["advisory"]
+
+    _install()
+    result = await search_operations(_operator(), arguments)
+    assert result["hits"] == []
+    assert result["outcome"] == "zero_enabled_operations"
+
+
+@pytest.mark.asyncio
+async def test_search_asks_to_enable_when_built_in_ops_are_left() -> None:
+    """A built-in op that is off can be enabled, so the package is not the advice."""
+    package_group = await _seed_group("items")
+    builtin_group = await _seed_group("health")
+    await _seed_op(op_id=_PACKAGE_OP, owner=_PACKAGE, group_id=package_group)
+    await _seed_op(op_id=_BUILTIN_OP, owner=None, group_id=builtin_group, is_enabled=False)
+    _remove()
+
+    result = await search_operations(
+        _operator(), {"connector_id": _CONNECTOR_ID, "query": "widget op"}
+    )
+    assert result["hits"] == []
+    assert result["outcome"] == "zero_enabled_operations"

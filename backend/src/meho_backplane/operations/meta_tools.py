@@ -288,10 +288,10 @@ SEARCH_LIMIT_MAX: int = 50
 #: * ``unknown_group`` — the ``group`` filter names no visible group.
 #: * ``zero_enabled_operations`` — the connector is ingested, but none of
 #:   its operations is enabled for this caller. Nothing can be called.
-#: * ``package_not_installed`` — the connector's enabled operations all come
-#:   from a connector package that is not installed in this MEHO (#5560).
-#:   The advisory names the package. Nothing can be called until the
-#:   package is installed again.
+#: * ``package_not_installed`` — the connector's operations all come from a
+#:   connector package that is not installed in this MEHO (#5560), whether
+#:   they are enabled or not. The advisory names the package. Nothing can
+#:   be called until the package is installed again.
 SearchOutcome = Literal[
     "matched",
     "ambiguous",
@@ -1070,29 +1070,38 @@ async def _missing_package_of_connector(
     version: str,
     impl_id: str,
 ) -> str | None:
-    """Return a missing connector package that owns an enabled op, else ``None``.
+    """Return the missing connector package the connector's rows come from, else ``None``.
 
     The twin of :func:`_has_enabled_operation` for the rows that
-    :func:`installed_owner_clause` hides (#5560). Same tenant scope, enabled
-    rows only. It runs only when the caller can see no enabled op, so its
-    answer tells ``package_not_installed`` from ``zero_enabled_operations``.
+    :func:`installed_owner_clause` hides (#5560). Same tenant scope. The
+    enabled flags do not count: an operator may have turned every op off
+    before the package was removed, and the advice is still to install
+    the package, not to enable the ops. A connector that still has an
+    installed row, enabled or not, gives ``None``: there the operator can
+    enable the rows that are left. It runs only when the caller can see no
+    enabled op, so its answer tells ``package_not_installed`` from
+    ``zero_enabled_operations`` and ``unknown_group``.
     """
+    connector_rows = (
+        visible_scope_clause(
+            EndpointDescriptor,
+            tenant_id=tenant_id,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+        ),
+        EndpointDescriptor.product == product,
+        EndpointDescriptor.version == version,
+        EndpointDescriptor.impl_id == impl_id,
+    )
+    installed_row = select(
+        select(EndpointDescriptor.id).where(*connector_rows, installed_owner_clause()).exists()
+    )
+    if (await session.execute(installed_row)).scalar():
+        return None
     stmt = (
         select(EndpointDescriptor.owner_package)
-        .where(
-            visible_scope_clause(
-                EndpointDescriptor,
-                tenant_id=tenant_id,
-                product=product,
-                version=version,
-                impl_id=impl_id,
-            ),
-            EndpointDescriptor.product == product,
-            EndpointDescriptor.version == version,
-            EndpointDescriptor.impl_id == impl_id,
-            enabled_for_tenant_clause(tenant_id=tenant_id),
-            ~installed_owner_clause(),
-        )
+        .where(*connector_rows, ~installed_owner_clause())
         .order_by(EndpointDescriptor.owner_package)
         .limit(1)
     )

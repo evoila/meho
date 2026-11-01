@@ -340,9 +340,11 @@ MEHO (ingested ops are `NULL` too).
   `dispatchable=false`. Its `next_step` names the package. The MCP
   short row shows `status="package_not_installed"`, and the CLI table
   shows `no-package`.
-- When search finds no enabled op and the connector has enabled ops of
-  such a package, the result has `outcome="package_not_installed"`. The
-  advisory names the package and says to install it again.
+- When search finds no enabled op and all rows of the connector come
+  from such a package, the result has `outcome="package_not_installed"`,
+  also when the operator had turned every op off before. The advisory
+  names the package and says to install it again. A connector with a
+  built-in row left gets `zero_enabled_operations` as before.
 - Nothing is deleted or changed. When the package is installed again,
   the rows are visible again with the operator's settings on them, for
   example an op the operator turned off stays off.

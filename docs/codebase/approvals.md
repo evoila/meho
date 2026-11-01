@@ -232,6 +232,15 @@ Two kinds of rows carry a keyed hash of a call's params:
   - For a `credential_write` operation they are not on the request row.
     They are encrypted in `approval_execution_payload` instead (see
     "Credential-write execution custody" below).
+  - When the requester asked for the hidden values of the answer
+    (`reveal_secret: true`), the choice is stored in its own column,
+    `approval_request.reveal_secret` (migration `0131`). It is not a
+    parameter of the operation: it is not in the params, not in the
+    encrypted payload and not part of the hash. Every approved run reads
+    it from the row and honours it, also the re-run of a failed
+    credential write. A flag sent again with the params of a run comes off
+    before the hash check and does not change the stored choice (see
+    [redaction.md](redaction.md#secret-named-fields-in-every-answer-reveal_secret-for-people-and-service-principals)).
 - **Audit rows** (`payload.params_hash` on dispatch, MCP and hosted-agent
   tool rows, and `operation_run.params_hash`) store the hash, not the params.
   They use the same keyed hash, but each secret-named value (`password`,
@@ -1048,7 +1057,11 @@ caller cannot change them. A refused re-run runs nothing.
 **Credential writes.** MEHO keeps their params only in the one-time
 encrypted custody (`execution_handle`), and the first run deletes it. A
 re-run of a credential write must send the params again. They must match
-`params_hash`.
+`params_hash`. The requester's reveal choice (`reveal_secret: true` of the
+original call) is not in that custody: it is on the request row
+(`approval_request.reveal_secret`), so the re-run returns the values the
+requester asked for. A `reveal_secret` flag sent with the params comes off
+before the hash check and does not change the stored choice.
 
 **Runs once.** The re-run has its own claim, because `resumed_at` stays
 the one-way latch of the first run. The claim is one conditional `UPDATE`:
@@ -1084,8 +1097,10 @@ in `refusal`, and `status_code` `409` or `422`.
 **Response.** `RerunResponseBody`: `approval_request_id`, `attempt`,
 `dispatch_status`, `dispatch_op_id`, `dispatch_result`, `dispatch_error`.
 
-**Pinned by tests:** `tests/test_approval_rerun.py` and
-`tests/migrations/test_migration_0129_add_approval_request_rerun_count.py`.
+**Pinned by tests:** `tests/test_approval_rerun.py`,
+`tests/migrations/test_migration_0129_add_approval_request_rerun_count.py`,
+the credential-write re-run tests in `tests/test_secret_values_hidden.py`
+and `tests/migrations/test_migration_0131_add_approval_request_reveal_secret.py`.
 
 ## Surfacing the approved dispatch's result to the originating consumer (#3209)
 

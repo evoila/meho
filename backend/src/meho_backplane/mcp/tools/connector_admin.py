@@ -180,10 +180,12 @@ def connector_review_status(item: ConnectorListItem) -> str:
     is one that ``status="staged"`` returns. Two more words: a connector
     with no operations yet is ``"registered"``, and one whose groups are
     partly enabled and partly disabled (none staged) is ``"mixed"``. No
-    filter except ``all`` returns a mixed row.
+    filter except ``all`` returns a mixed row. A connector whose
+    connector package is not installed is ``"package_not_installed"``
+    (#5560).
     """
-    if item.state == "registered":
-        return "registered"
+    if item.state in ("registered", "package_not_installed"):
+        return item.state
     if item.staged_group_count > 0:
         return "staged"
     if item.group_count > 0 and item.enabled_group_count == item.group_count:

@@ -13,6 +13,9 @@
   the package registers its ops again with its own defaults, a stricter
   risk level or approval requirement saved on the row stays.
 * Built-in rows (owner ``NULL``) behave as before.
+* A connector whose rows all come from a removed package is listed as
+  ``package_not_installed`` and not usable, and search names the package
+  (#5560).
 
 The package and connector names are made up.
 """
@@ -38,9 +41,12 @@ from meho_backplane.connector_packages import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+from meho_backplane.mcp.tools.connector_admin import list_connector_rows
 from meho_backplane.operations import dispatch
 from meho_backplane.operations._lookup import lookup_descriptor
 from meho_backplane.operations._request_preview import preview_dispatch
+from meho_backplane.operations.ingest.api_schemas import ConnectorListItem
+from meho_backplane.operations.ingest.list_connectors import list_ingested_connectors
 from meho_backplane.operations.meta_tools import list_operation_groups, search_operations
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.settings import get_settings
@@ -345,3 +351,129 @@ async def test_builtin_rows_behave_as_before() -> None:
         assert row.owner_package is None
         result = await _call("widget.nothing.here")
         assert result.extras["error_code"] == "unknown_op"
+
+
+async def _seed_package_only_connector(*, all_disabled: bool = False) -> None:
+    """One group that holds only package ops: the whole connector comes from the package.
+
+    With *all_disabled* the operator turned every op off before the package
+    was removed.
+    """
+    package_group = await _seed_group("items")
+    await _seed_op(
+        op_id=_PACKAGE_OP, owner=_PACKAGE, group_id=package_group, is_enabled=not all_disabled
+    )
+    await _seed_op(op_id=_PACKAGE_OP_OFF, owner=_PACKAGE, group_id=package_group, is_enabled=False)
+
+
+async def _list_row() -> ConnectorListItem:
+    items = await list_ingested_connectors(operator=_operator())
+    rows = [item for item in items if item.connector_id == _CONNECTOR_ID]
+    assert len(rows) == 1
+    return rows[0]
+
+
+@pytest.mark.asyncio
+async def test_list_marks_a_connector_of_a_removed_package() -> None:
+    """The list (REST and MCP share it) does not offer the connector as usable (#5560)."""
+    await _seed_package_only_connector()
+    _remove()
+
+    row = await _list_row()
+    assert row.state == "package_not_installed"
+    assert row.dispatchable is False
+    assert (row.group_count, row.operation_count, row.enabled_operation_count) == (0, 0, 0)
+    assert row.next_step is not None
+    assert _PACKAGE in row.next_step.rationale
+
+    mcp = await list_connector_rows(_operator(), {})
+    short = [r for r in mcp["connectors"] if r["connector_id"] == _CONNECTOR_ID]
+    assert short == [
+        {
+            "connector_id": _CONNECTOR_ID,
+            "product": _PRODUCT,
+            "version": _VERSION,
+            "status": "package_not_installed",
+            "dispatchable": False,
+            "scope": "builtin",
+        }
+    ]
+
+    _install()
+    row = await _list_row()
+    assert row.state == "ingested"
+    assert row.next_step is None
+    assert (row.group_count, row.operation_count, row.enabled_operation_count) == (1, 2, 1)
+
+
+@pytest.mark.asyncio
+async def test_list_counts_only_installed_rows_of_a_mixed_connector() -> None:
+    """A connector with built-in rows left stays usable; the counts leave the package rows out."""
+    await _seed_estate()
+    _remove()
+
+    row = await _list_row()
+    assert row.state == "ingested"
+    assert row.next_step is None
+    assert (row.group_count, row.operation_count, row.enabled_operation_count) == (1, 1, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group", [None, "items"])
+async def test_search_names_the_missing_package(group: str | None) -> None:
+    """Search says to install the package, not to enable operations (#5560)."""
+    await _seed_package_only_connector()
+    _remove()
+
+    arguments: dict[str, Any] = {"connector_id": _CONNECTOR_ID, "query": "widget op"}
+    if group is not None:
+        arguments["group"] = group
+    result = await search_operations(_operator(), arguments)
+    assert result["hits"] == []
+    assert result["outcome"] == "package_not_installed"
+    assert _PACKAGE in result["advisory"]
+    assert result["narrowing"] == [
+        f"Ask an operator to install the connector package {_PACKAGE!r} again."
+    ]
+
+    _install()
+    result = await search_operations(_operator(), arguments)
+    assert result["outcome"] != "package_not_installed"
+    assert {hit["op_id"] for hit in result["hits"]} == {_PACKAGE_OP}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group", [None, "items"])
+async def test_search_names_the_missing_package_when_every_op_is_off(group: str | None) -> None:
+    """All ops were turned off before the package was removed: the advice is still the package."""
+    await _seed_package_only_connector(all_disabled=True)
+    _remove()
+
+    arguments: dict[str, Any] = {"connector_id": _CONNECTOR_ID, "query": "widget op"}
+    if group is not None:
+        arguments["group"] = group
+    result = await search_operations(_operator(), arguments)
+    assert result["hits"] == []
+    assert result["outcome"] == "package_not_installed"
+    assert _PACKAGE in result["advisory"]
+
+    _install()
+    result = await search_operations(_operator(), arguments)
+    assert result["hits"] == []
+    assert result["outcome"] == "zero_enabled_operations"
+
+
+@pytest.mark.asyncio
+async def test_search_asks_to_enable_when_built_in_ops_are_left() -> None:
+    """A built-in op that is off can be enabled, so the package is not the advice."""
+    package_group = await _seed_group("items")
+    builtin_group = await _seed_group("health")
+    await _seed_op(op_id=_PACKAGE_OP, owner=_PACKAGE, group_id=package_group)
+    await _seed_op(op_id=_BUILTIN_OP, owner=None, group_id=builtin_group, is_enabled=False)
+    _remove()
+
+    result = await search_operations(
+        _operator(), {"connector_id": _CONNECTOR_ID, "query": "widget op"}
+    )
+    assert result["hits"] == []
+    assert result["outcome"] == "zero_enabled_operations"

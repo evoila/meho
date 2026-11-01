@@ -4,7 +4,7 @@
 """Tests for the shared connect-time address check (``dial_guard``).
 
 Every driver checks the target address again when it connects, and dials
-only a checked IP address:
+only checked IP addresses, the next one when a connection attempt fails:
 
 * the shared check itself (IP literal, resolved name, allowlisted name,
   name that does not resolve);
@@ -20,7 +20,6 @@ refusal of names that do not resolve, so the real rules run.
 from __future__ import annotations
 
 import ipaddress
-import socket
 import types
 import uuid
 from typing import Any
@@ -30,13 +29,14 @@ import aiohttp
 import httpcore
 import httpx
 import pytest
+from aiohttp import web
 from kubernetes_asyncio import client as k8s_client
+from pymongo.errors import ServerSelectionTimeoutError
 
 from meho_backplane.connectors._shared import dial_guard
 from meho_backplane.connectors._shared.dial_guard import (
     DialHostUnresolvedError,
-    ScreeningResolver,
-    dial_host,
+    connect_checked,
     screen_dial_addresses,
 )
 from meho_backplane.connectors.adapters import ssh as ssh_module
@@ -153,16 +153,63 @@ def test_allowlisted_range_lets_a_private_answer_through(_live: pytest.MonkeyPat
     assert screen_dial_addresses("private.example.test") == ["10.0.0.7"]
 
 
+def _count_lookups(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every DNS lookup the check makes."""
+    lookups: list[str] = []
+
+    def _resolve(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+        lookups.append(host)
+        return _fake_resolve(host)
+
+    monkeypatch.setattr("meho_backplane.targets.ssrf_guard._resolve_addrs", _resolve)
+    return lookups
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_live")
-async def test_dial_host_returns_the_first_checked_address() -> None:
-    assert await dial_host("public.example.test") == _PUBLIC_IP
+async def test_connect_checked_dials_the_first_checked_address() -> None:
+    connect = AsyncMock(return_value="conn")
+    assert await connect_checked("public.example.test", connect) == "conn"
+    connect.assert_awaited_once_with(_PUBLIC_IP)
 
 
 @pytest.mark.asyncio
-async def test_dial_host_keeps_an_allowlisted_name(_live: pytest.MonkeyPatch) -> None:
+async def test_connect_checked_tries_the_next_address_without_a_second_lookup(
+    _live: pytest.MonkeyPatch,
+) -> None:
+    lookups = _count_lookups(_live)
+    connect = AsyncMock(side_effect=[ConnectionRefusedError("refused"), "conn"])
+    assert await connect_checked("public.example.test", connect) == "conn"
+    assert [call.args[0] for call in connect.await_args_list] == [_PUBLIC_IP, _PUBLIC_IP_2]
+    assert lookups == ["public.example.test"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_live")
+async def test_connect_checked_raises_the_last_error_when_every_address_fails() -> None:
+    connect = AsyncMock(side_effect=[ConnectionRefusedError("one"), TimeoutError("two")])
+    with pytest.raises(TimeoutError, match="two"):
+        await connect_checked("public.example.test", connect)
+    assert connect.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_live")
+async def test_connect_checked_does_not_retry_other_errors() -> None:
+    connect = AsyncMock(side_effect=PermissionError("login failed"))
+    with pytest.raises(PermissionError):
+        await connect_checked("public.example.test", connect, retry_on=(ConnectionRefusedError,))
+    connect.assert_awaited_once_with(_PUBLIC_IP)
+
+
+@pytest.mark.asyncio
+async def test_connect_checked_hands_an_allowlisted_name_over_as_written(
+    _live: pytest.MonkeyPatch,
+) -> None:
     _live.setenv(TARGET_SSRF_ALLOWLIST_ENV, "gone.example.test")
-    assert await dial_host("gone.example.test") == "gone.example.test"
+    connect = AsyncMock(return_value="conn")
+    assert await connect_checked("gone.example.test", connect) == "conn"
+    connect.assert_awaited_once_with("gone.example.test")
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +289,18 @@ async def test_ssh_refuses_before_connecting(_live: pytest.MonkeyPatch, host: st
     fake_connect.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_ssh_tries_the_next_checked_ip_when_the_first_refuses(
+    _live: pytest.MonkeyPatch,
+) -> None:
+    connector, fake_connect = _ssh_with_fake_connect(_live)
+    conn = fake_connect.return_value
+    fake_connect.side_effect = [ConnectionRefusedError("refused"), conn]
+    assert await connector._connect(_target("public.example.test")) is conn
+    assert [call.args[0] for call in fake_connect.await_args_list] == [_PUBLIC_IP, _PUBLIC_IP_2]
+    assert fake_connect.await_args_list[1].kwargs["host_key_alias"] == "public.example.test"
+
+
 # ---------------------------------------------------------------------------
 # Postgres and MSSQL
 # ---------------------------------------------------------------------------
@@ -266,30 +325,65 @@ async def test_postgres_refuses_before_connecting(_live: pytest.MonkeyPatch, hos
 
 
 @pytest.mark.asyncio
-async def test_mssql_dials_the_checked_ip(_live: pytest.MonkeyPatch) -> None:
-    fake_fetch = MagicMock(return_value=[])
-    _live.setattr(mssql_session, "_blocking_fetch", fake_fetch)
-    _live.setattr(
+async def test_postgres_tries_the_next_checked_ip_when_the_first_refuses(
+    _live: pytest.MonkeyPatch,
+) -> None:
+    """One lookup, two checked answers: the second is dialed when the first refuses."""
+    lookups = _count_lookups(_live)
+    conn = MagicMock()
+    fake_connect = AsyncMock(side_effect=[ConnectionRefusedError("refused"), conn])
+    _live.setattr(pg_session.asyncpg, "connect", fake_connect)
+    assert await pg_session.connect_read_only(_target("public.example.test"), None) is conn
+    assert [call.kwargs["host"] for call in fake_connect.await_args_list] == [
+        _PUBLIC_IP,
+        _PUBLIC_IP_2,
+    ]
+    assert lookups == ["public.example.test"]
+
+
+def _mssql_with_fake_connect(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    fake_connect = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr(mssql_session, "_blocking_connect", fake_connect)
+    monkeypatch.setattr(mssql_session, "_blocking_fetch", MagicMock(return_value=[]))
+    monkeypatch.setattr(mssql_session, "_blocking_execute", MagicMock())
+    monkeypatch.setattr(
         mssql_session,
         "resolve_sql_credentials",
         AsyncMock(return_value={"sql_username": "u", "sql_password": "p"}),
     )
+    return fake_connect
+
+
+@pytest.mark.asyncio
+async def test_mssql_dials_the_checked_ip(_live: pytest.MonkeyPatch) -> None:
+    fake_connect = _mssql_with_fake_connect(_live)
     await mssql_session.fetch_rows(_target("public.example.test"), None, "SELECT 1")
-    assert fake_fetch.call_args.kwargs["host"] == _PUBLIC_IP
+    assert fake_connect.call_args.kwargs["host"] == _PUBLIC_IP
 
 
 @pytest.mark.asyncio
 async def test_mssql_refuses_before_connecting(_live: pytest.MonkeyPatch) -> None:
-    fake_execute = MagicMock()
-    _live.setattr(mssql_session, "_blocking_execute", fake_execute)
-    _live.setattr(
-        mssql_session,
-        "resolve_sql_credentials",
-        AsyncMock(return_value={"sql_username": "u", "sql_password": "p"}),
-    )
+    fake_connect = _mssql_with_fake_connect(_live)
     with pytest.raises(TargetDestinationBlockedError):
         await mssql_session.execute_statement(_target("private.example.test"), None, "SELECT 1")
-    fake_execute.assert_not_called()
+    fake_connect.assert_not_called()
+    mssql_session._blocking_execute.assert_not_called()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_mssql_tries_the_next_checked_ip_when_the_first_refuses(
+    _live: pytest.MonkeyPatch,
+) -> None:
+    fake_connect = _mssql_with_fake_connect(_live)
+    conn = fake_connect.return_value
+    fake_connect.side_effect = [ConnectionRefusedError("refused"), conn]
+    await mssql_session.execute_statement(_target("public.example.test"), None, "SELECT 1")
+    assert [call.kwargs["host"] for call in fake_connect.call_args_list] == [
+        _PUBLIC_IP,
+        _PUBLIC_IP_2,
+    ]
+    mssql_session._blocking_execute.assert_called_once()  # type: ignore[attr-defined]
+    assert mssql_session._blocking_execute.call_args.args[0] is conn  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -299,11 +393,12 @@ async def test_mssql_refuses_before_connecting(_live: pytest.MonkeyPatch) -> Non
 
 @pytest.mark.asyncio
 async def test_mongodb_client_knows_only_the_checked_address(_live: pytest.MonkeyPatch) -> None:
-    """The real client is built (no I/O) and its topology holds one checked seed.
+    """The real client is built (the ping is stubbed) and its topology holds one checked seed.
 
     A direct connection to one IP address means the driver makes no SRV
     lookup and adds no replica-set members it learns from the server.
     """
+    _live.setattr(mongo_session, "_ping", AsyncMock())
     mongo = await mongo_session.connect_client(_target("public.example.test"), None)
     try:
         description = mongo.topology_description
@@ -318,6 +413,7 @@ async def test_mongodb_gives_a_checked_ipv6_address_in_brackets(
     _live: pytest.MonkeyPatch,
 ) -> None:
     """pymongo does not take a bare IPv6 address; the client still holds one checked seed."""
+    _live.setattr(mongo_session, "_ping", AsyncMock())
     mongo = await mongo_session.connect_client(_target("v6.example.test"), None)
     try:
         description = mongo.topology_description
@@ -348,6 +444,25 @@ async def test_mongodb_refuses_hosts_it_cannot_check(_live: pytest.MonkeyPatch, 
 
 
 @pytest.mark.asyncio
+async def test_mongodb_tries_the_next_checked_ip_when_the_first_does_not_answer(
+    _live: pytest.MonkeyPatch,
+) -> None:
+    """The lazy client is pinged; a dead first address is closed and the next one is tried."""
+    dead = MagicMock()
+    dead.get_database.return_value.command = AsyncMock(
+        side_effect=ServerSelectionTimeoutError("no server")
+    )
+    dead.close = AsyncMock()
+    alive = MagicMock()
+    alive.get_database.return_value.command = AsyncMock(return_value={"ok": 1.0})
+    fake_ctor = MagicMock(side_effect=[dead, alive])
+    _live.setattr(mongo_session, "AsyncMongoClient", fake_ctor)
+    assert await mongo_session.connect_client(_target("public.example.test"), None) is alive
+    assert [call.kwargs["host"] for call in fake_ctor.call_args_list] == [_PUBLIC_IP, _PUBLIC_IP_2]
+    dead.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_mongodb_refuses_an_allowlisted_name_with_a_path(_live: pytest.MonkeyPatch) -> None:
     """An allowlisted name is dialed by name, so it must be one plain host."""
     host = "a.example.test/admin"
@@ -364,38 +479,89 @@ async def test_mongodb_refuses_an_allowlisted_name_with_a_path(_live: pytest.Mon
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("_live")
-async def test_screening_resolver_answers_with_checked_addresses_only() -> None:
-    results = await ScreeningResolver().resolve("public.example.test", 6443, socket.AF_UNSPEC)
-    assert [(r["hostname"], r["host"], r["port"]) for r in results] == [
-        ("public.example.test", _PUBLIC_IP, 6443),
-        ("public.example.test", _PUBLIC_IP_2, 6443),
-    ]
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("_live")
-@pytest.mark.parametrize("host", ["private.example.test", "gone.example.test"])
-async def test_screening_resolver_refuses(host: str) -> None:
-    with pytest.raises(TargetDestinationBlockedError):
-        await ScreeningResolver().resolve(host, 6443, socket.AF_UNSPEC)
-
-
 def _api_client(server: str) -> k8s_client.ApiClient:
     configuration = k8s_client.Configuration(host=server)
     return k8s_client.ApiClient(configuration=configuration)
 
 
+def _connector_of(api_client: k8s_client.ApiClient) -> aiohttp.TCPConnector:
+    connector = api_client.rest_client.pool_manager.connector
+    assert isinstance(connector, aiohttp.TCPConnector)
+    return connector
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_live")
-async def test_k8s_client_resolves_through_the_check() -> None:
+async def test_k8s_client_resolves_a_name_through_the_check() -> None:
     api_client = _api_client("https://public.example.test:6443")
     try:
         await check_api_client_dials(api_client)
-        connector = api_client.rest_client.pool_manager.connector
-        assert isinstance(connector, aiohttp.TCPConnector)
-        assert isinstance(connector._resolver, ScreeningResolver)
+        results = await _connector_of(api_client)._resolve_host("public.example.test", 6443)
+        assert [(r["hostname"], r["host"], r["port"]) for r in results] == [
+            ("public.example.test", _PUBLIC_IP, 6443),
+            ("public.example.test", _PUBLIC_IP_2, 6443),
+        ]
+    finally:
+        await api_client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_live")
+@pytest.mark.parametrize(
+    "host", ["10.0.0.9", "169.254.169.254", "private.example.test", "gone.example.test"]
+)
+async def test_k8s_client_checks_every_host_it_dials(host: str) -> None:
+    """A later dial to a blocked literal or name is refused, also when the API server passed."""
+    api_client = _api_client("https://public.example.test:6443")
+    try:
+        await check_api_client_dials(api_client)
+        with pytest.raises(TargetDestinationBlockedError):
+            await _connector_of(api_client)._resolve_host(host, 443)
+    finally:
+        await api_client.close()
+
+
+@pytest.mark.asyncio
+async def test_k8s_client_refuses_a_redirect_to_a_blocked_address(
+    _live: pytest.MonkeyPatch,
+) -> None:
+    """A local server redirects to a blocked IP literal; the client does not follow it."""
+    hits: list[str] = []
+
+    async def _redirect(request: web.Request) -> web.Response:
+        hits.append(request.path)
+        raise web.HTTPFound("http://10.0.0.9/redirected")
+
+    app = web.Application()
+    app.router.add_get("/api", _redirect)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    _live.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.1/32")
+    api_client = _api_client(f"http://127.0.0.1:{port}")
+    try:
+        await check_api_client_dials(api_client)
+        with pytest.raises(TargetDestinationBlockedError):
+            await api_client.rest_client.pool_manager.get(f"http://127.0.0.1:{port}/api")
+        assert hits == ["/api"]
+    finally:
+        await api_client.close()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_live")
+@pytest.mark.parametrize("proxy", ["http://10.0.0.9:3128", "http://private.example.test:3128"])
+async def test_k8s_client_refuses_a_blocked_proxy(proxy: str) -> None:
+    api_client = _api_client("https://public.example.test:6443")
+    try:
+        await check_api_client_dials(api_client)
+        with pytest.raises(TargetDestinationBlockedError):
+            await api_client.rest_client.pool_manager.get(
+                "https://public.example.test:6443/api", proxy=proxy
+            )
     finally:
         await api_client.close()
 

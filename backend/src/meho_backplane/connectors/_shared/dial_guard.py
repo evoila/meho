@@ -17,9 +17,10 @@ The rules at connect time:
 * A host name that is listed verbatim on the allowlist is trusted as
   written. The driver dials it by name.
 * Any other host name is resolved once. Every answer is checked, and the
-  caller dials only one of those checked addresses. The driver never looks
-  the name up a second time, so the address it reaches is the address that
-  was checked.
+  caller dials only those checked addresses: the first one, then the next
+  when a connection attempt fails (:func:`connect_checked`). The driver
+  never looks the name up a second time, so the address it reaches is the
+  address that was checked.
 * A host name that does not resolve is refused
   (:class:`DialHostUnresolvedError`). MEHO does not connect to an address
   it could not check. At save time such a name is still accepted, because
@@ -36,10 +37,10 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING
 
-from aiohttp.abc import AbstractResolver, ResolveResult
-from aiohttp.resolver import ThreadedResolver
+from aiohttp.abc import ResolveResult
 
 from meho_backplane.targets.ssrf_guard import (
     TARGET_SSRF_ALLOWLIST_ENV,
@@ -51,12 +52,12 @@ from meho_backplane.targets.ssrf_guard import (
 
 if TYPE_CHECKING:
     from aiohttp import TCPConnector
+    from aiohttp.tracing import Trace
 
 __all__ = [
     "DialHostUnresolvedError",
-    "ScreeningResolver",
-    "dial_host",
-    "install_screening_resolver",
+    "connect_checked",
+    "screen_connector_dials",
     "screen_dial_addresses",
     "screen_dial_addresses_async",
 ]
@@ -108,17 +109,36 @@ async def screen_dial_addresses_async(host: str) -> list[str] | None:
     return await asyncio.to_thread(screen_dial_addresses, host)
 
 
-async def dial_host(host: str) -> str:
-    """Return the one host a single-address driver should dial for *host*.
+async def connect_checked[T](
+    host: str,
+    connect: Callable[[str], Awaitable[T]],
+    *,
+    retry_on: tuple[type[BaseException], ...] = (OSError,),
+) -> T:
+    """Check *host*, then call *connect* with one checked address at a time.
 
-    The first checked address, or *host* itself when it is a host name
-    listed verbatim on the allowlist. For drivers that take one host and
-    resolve it themselves (asyncssh, asyncpg, pytds, pymongo): handing them
-    an IP literal means they connect to the checked address and never look
-    the name up again.
+    For drivers that take one host and resolve it themselves (asyncssh,
+    asyncpg, pytds, pymongo). *connect* gets an IP literal, so the driver
+    connects to the checked address and never looks the name up again.
+
+    The name is resolved once. When *connect* fails with one of *retry_on*
+    (by default ``OSError``: refused, unreachable, timed out), the next
+    checked address from that same answer is tried. When every address
+    fails, the last error is raised. Any other error is raised at once. A
+    host name listed verbatim on the allowlist is handed to *connect* as
+    written, once.
     """
     addresses = await screen_dial_addresses_async(host)
-    return addresses[0] if addresses else host
+    if addresses is None:
+        return await connect(host)
+    last_exc: BaseException | None = None
+    for address in addresses:
+        try:
+            return await connect(address)
+        except retry_on as exc:
+            last_exc = exc
+    assert last_exc is not None
+    raise last_exc
 
 
 def _family_of(address: str) -> socket.AddressFamily:
@@ -127,48 +147,53 @@ def _family_of(address: str) -> socket.AddressFamily:
     return socket.AF_INET
 
 
-class ScreeningResolver(AbstractResolver):
-    """aiohttp resolver that answers only with checked addresses.
+def _resolve_results(
+    host: str, port: int, addresses: Sequence[str], family: socket.AddressFamily
+) -> list[ResolveResult]:
+    results = [
+        ResolveResult(
+            hostname=host,
+            host=address,
+            port=port,
+            family=_family_of(address),
+            proto=0,
+            flags=_NUMERIC_FLAGS,
+        )
+        for address in addresses
+        if family == socket.AF_UNSPEC or _family_of(address) == family
+    ]
+    if not results:
+        raise OSError(f"target host has no checked address in address family {family!r}")
+    return results
 
-    aiohttp asks its resolver for every new connection to a host name, so
-    each new connection is checked again. aiohttp does not ask the resolver
-    for an IP literal; callers check that once with
-    :func:`screen_dial_addresses_async` (an IP literal cannot change).
+
+def screen_connector_dials(connector: TCPConnector) -> None:
+    """Make an aiohttp connector check every host before it dials it.
+
+    For clients that build their own :class:`aiohttp.TCPConnector` (the
+    Kubernetes client). aiohttp resolves a host right before it opens a
+    new connection, through the connector's ``_resolve_host`` method: the
+    request host, the host of a redirect it follows, and a proxy host all
+    pass through it. aiohttp answers an IP literal there without asking
+    its resolver, and may answer a name from its DNS cache. So this hooks
+    that method instead of the resolver: every new connection is checked,
+    to a literal or to a name, and a name gets only the checked addresses
+    of one fresh lookup. A host name listed verbatim on the allowlist is
+    resolved by aiohttp itself. A connection that is already open is
+    reused as it is.
+
+    aiohttp has no public seam for this. It is the same kind of private
+    seam :mod:`.pinned_transport` uses for httpcore's network backend.
     """
+    original = connector._resolve_host
+    family: socket.AddressFamily = connector._family
 
-    async def resolve(
-        self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
+    async def _resolve_host(
+        host: str, port: int, traces: Sequence[Trace] | None = None
     ) -> list[ResolveResult]:
         addresses = await screen_dial_addresses_async(host)
         if addresses is None:
-            return await ThreadedResolver().resolve(host, port, family)
-        results = [
-            ResolveResult(
-                hostname=host,
-                host=address,
-                port=port,
-                family=_family_of(address),
-                proto=0,
-                flags=_NUMERIC_FLAGS,
-            )
-            for address in addresses
-            if family == socket.AF_UNSPEC or _family_of(address) == family
-        ]
-        if not results:
-            raise OSError(f"target host has no checked address in address family {family!r}")
-        return results
+            return await original(host, port, traces)
+        return _resolve_results(host, port, addresses, family)
 
-    async def close(self) -> None:
-        return None
-
-
-def install_screening_resolver(connector: TCPConnector) -> None:
-    """Make an existing aiohttp connector resolve through :class:`ScreeningResolver`.
-
-    For clients that build their own :class:`aiohttp.TCPConnector` with no
-    way to pass a resolver (the Kubernetes client). aiohttp has no public
-    setter, so this replaces the connector's resolver attribute, the same
-    kind of seam :mod:`.pinned_transport` uses for httpcore's network
-    backend.
-    """
-    connector._resolver = ScreeningResolver()
+    connector._resolve_host = _resolve_host  # type: ignore[method-assign]

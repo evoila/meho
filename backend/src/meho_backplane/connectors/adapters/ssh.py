@@ -89,7 +89,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
-from meho_backplane.connectors._shared.dial_guard import dial_host
+from meho_backplane.connectors._shared.dial_guard import connect_checked
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import (
     load_vault_secret_data,
@@ -250,6 +250,33 @@ class ConnectorUnreachableError(RuntimeError):
     """
 
 
+async def _dial(target: Target, auth_kwargs: dict[str, Any]) -> asyncssh.SSHClientConnection:
+    """Check the target address and open the SSH connection to a checked IP.
+
+    Only checked IP addresses are dialed, the next one when a connection
+    attempt fails
+    (:func:`~meho_backplane.connectors._shared.dial_guard.connect_checked`).
+    When the dialed IP differs from the target's host name, the host key is
+    still matched against the name (``host_key_alias``).
+    """
+
+    async def _open(address: str) -> asyncssh.SSHClientConnection:
+        alias_kwargs: dict[str, Any] = (
+            {"host_key_alias": target.host} if address != target.host else {}
+        )
+        return await asyncssh.connect(
+            address,
+            port=target.port or 22,
+            username=auth_kwargs["username"],
+            client_keys=auth_kwargs.get("client_keys"),
+            password=auth_kwargs.get("password"),
+            known_hosts=auth_kwargs["known_hosts"],
+            **alias_kwargs,
+        )
+
+    return await connect_checked(target.host, _open)
+
+
 class SshConnector(Connector):
     """Abstract SSH-transport connector.
 
@@ -402,22 +429,8 @@ class SshConnector(Connector):
             # silently disable verification.
             if "known_hosts" not in auth_kwargs:
                 raise SshHostKeyUnpinnedError(getattr(target, "name", "?"))
-            # Check the address now and dial the checked IP. When that IP
-            # differs from the target's host name, the host key is still
-            # matched against the name (host_key_alias).
-            dial = await dial_host(target.host)
-            alias_kwargs: dict[str, Any] = (
-                {"host_key_alias": target.host} if dial != target.host else {}
-            )
-            conn = await asyncssh.connect(
-                dial,
-                port=target.port or 22,
-                username=auth_kwargs["username"],
-                client_keys=auth_kwargs.get("client_keys"),
-                password=auth_kwargs.get("password"),
-                known_hosts=auth_kwargs["known_hosts"],
-                **alias_kwargs,
-            )
+
+            conn = await _dial(target, auth_kwargs)
             if self._pool_generations.get(cache_key, 0) != generation:
                 # The target was changed while this login ran: the secret
                 # read above, and maybe the host, are the old ones. Keeping

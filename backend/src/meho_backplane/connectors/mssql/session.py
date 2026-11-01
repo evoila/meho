@@ -63,7 +63,7 @@ from typing import Any
 import pytds
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.dial_guard import dial_host
+from meho_backplane.connectors._shared.dial_guard import connect_checked
 from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
 
 __all__ = [
@@ -281,19 +281,46 @@ def _connect_kwargs(
     }
 
 
-def _blocking_fetch(
-    *, host: str, port: int, database: str, creds: dict[str, str], sql: str, params: Any
-) -> list[dict[str, Any]]:
-    """Synchronous connect → execute → fetchall → close (runs in a worker thread)."""
-    conn = pytds.connect(
+def _blocking_connect(
+    *, host: str, port: int, database: str, creds: dict[str, str], query_timeout: int
+) -> pytds.Connection:
+    """Open one ``pytds`` connection to a checked IP address (runs in a worker thread)."""
+    return pytds.connect(
         **_connect_kwargs(
             host=host,
             port=port,
             database=database,
             creds=creds,
-            query_timeout=DEFAULT_QUERY_TIMEOUT_S,
+            query_timeout=query_timeout,
         )
     )
+
+
+async def _connect(
+    target: Any, creds: dict[str, str], *, database: str | None, query_timeout: int
+) -> pytds.Connection:
+    """Check the target address and connect to the checked IP addresses in turn.
+
+    The connect runs off the event loop. Only the connect is retried on the
+    next checked address, never a statement
+    (:func:`~meho_backplane.connectors._shared.dial_guard.connect_checked`).
+    """
+
+    async def _open(address: str) -> pytds.Connection:
+        return await asyncio.to_thread(
+            _blocking_connect,
+            host=address,
+            port=getattr(target, "port", None) or DEFAULT_PORT,
+            database=database or DEFAULT_DATABASE,
+            creds=creds,
+            query_timeout=query_timeout,
+        )
+
+    return await connect_checked(target.host, _open)
+
+
+def _blocking_fetch(conn: pytds.Connection, sql: str, params: Any) -> list[dict[str, Any]]:
+    """Synchronous execute → fetchall → close (runs in a worker thread)."""
     try:
         cursor = conn.cursor()
         cursor.execute(sql, params)
@@ -303,24 +330,13 @@ def _blocking_fetch(
         conn.close()
 
 
-def _blocking_execute(
-    *, host: str, port: int, database: str, creds: dict[str, str], sql: str, params: Any
-) -> None:
-    """Synchronous connect → execute → close for a non-row-returning statement.
+def _blocking_execute(conn: pytds.Connection, sql: str, params: Any) -> None:
+    """Synchronous execute → close for a non-row-returning statement.
 
-    Uses :data:`DEFAULT_WRITE_TIMEOUT_S` (a generous ceiling) so a legitimate
-    long-running ``BACKUP`` / ``RESTORE`` is not aborted by the short read
-    timeout.
+    The connection carries :data:`DEFAULT_WRITE_TIMEOUT_S` (a generous
+    ceiling) so a legitimate long-running ``BACKUP`` / ``RESTORE`` is not
+    aborted by the short read timeout.
     """
-    conn = pytds.connect(
-        **_connect_kwargs(
-            host=host,
-            port=port,
-            database=database,
-            creds=creds,
-            query_timeout=DEFAULT_WRITE_TIMEOUT_S,
-        )
-    )
     try:
         conn.cursor().execute(sql, params)
     finally:
@@ -344,15 +360,8 @@ async def fetch_rows(
     :func:`quote_identifier`.
     """
     creds = await resolve_sql_credentials(target, operator)
-    return await asyncio.to_thread(
-        _blocking_fetch,
-        host=await dial_host(target.host),
-        port=getattr(target, "port", None) or DEFAULT_PORT,
-        database=database or DEFAULT_DATABASE,
-        creds=creds,
-        sql=sql,
-        params=params,
-    )
+    conn = await _connect(target, creds, database=database, query_timeout=DEFAULT_QUERY_TIMEOUT_S)
+    return await asyncio.to_thread(_blocking_fetch, conn, sql, params)
 
 
 async def execute_statement(
@@ -372,12 +381,5 @@ async def execute_statement(
     :func:`quote_identifier`; any value predicate binds through *params*.
     """
     creds = await resolve_sql_credentials(target, operator)
-    await asyncio.to_thread(
-        _blocking_execute,
-        host=await dial_host(target.host),
-        port=getattr(target, "port", None) or DEFAULT_PORT,
-        database=database or DEFAULT_DATABASE,
-        creds=creds,
-        sql=sql,
-        params=params,
-    )
+    conn = await _connect(target, creds, database=database, query_timeout=DEFAULT_WRITE_TIMEOUT_S)
+    await asyncio.to_thread(_blocking_execute, conn, sql, params)

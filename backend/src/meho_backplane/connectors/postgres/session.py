@@ -42,7 +42,7 @@ from typing import Any
 import asyncpg
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.dial_guard import dial_host
+from meho_backplane.connectors._shared.dial_guard import connect_checked
 from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
 
 __all__ = [
@@ -192,11 +192,11 @@ async def connect_read_only(
     The resolved password is passed only to :func:`asyncpg.connect`; it is
     never logged, returned, or placed on an :class:`OperationResult`.
 
-    The target address is checked again here, and asyncpg dials the checked
-    IP address (:func:`~meho_backplane.connectors._shared.dial_guard.dial_host`).
+    The target address is checked again here, and asyncpg dials only the
+    checked IP addresses, one after the other until one connects
+    (:func:`~meho_backplane.connectors._shared.dial_guard.connect_checked`).
     """
     connect_kwargs: dict[str, Any] = {
-        "host": await dial_host(target.host),
         "port": getattr(target, "port", None) or DEFAULT_PORT,
         "database": database or DEFAULT_DATABASE,
         "timeout": timeout,
@@ -219,4 +219,7 @@ async def connect_read_only(
     else:
         connect_kwargs["user"] = DEFAULT_TRUST_USER
 
-    return await asyncpg.connect(**connect_kwargs)
+    async def _open(address: str) -> asyncpg.Connection:
+        return await asyncpg.connect(host=address, **connect_kwargs)
+
+    return await connect_checked(target.host, _open)

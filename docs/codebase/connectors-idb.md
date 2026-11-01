@@ -62,8 +62,10 @@ refused call sent it), MEHO logs in again, and the call runs once more. A
 refused login (`400`, `401`, `403`) is `connector_auth_failed`, and MEHO
 forgets the cached secret, so a corrected secret works without a restart.
 
-The login call is not traced. Traced answers have every `access_token`,
-`token`, `password` and `secret` field masked.
+The login call is not traced. Traced answers have every secret-named field
+masked. The name check is the shared one of the broadcast scrub
+(`is_secret_param_name`), so compound names such as `syncClientToken`,
+`clientSecret`, `private_key` and `licenseKey` are masked too.
 
 ## Target shape
 
@@ -95,7 +97,7 @@ target resolves to `idb-rest-9.0` (the wildcard row).
 
 | Operation | What it does | Returns | Vendor call | Risk | Versions |
 |---|---|---|---|---|---|
-| `idb.about` | Product, version and health (also MEHO's version detection). | `product`, `version`, and `healthy`, `checks`, `failing_checks` (Workspace ONE Access) or `deployment_type`, `instance_id`, `tenant` (Identity Broker) | `GET /SAAS/API/1.0/REST/system/health` (3.3); `GET /acs/t/{tenant}/properties` (9.1+) | read (`safe`) | 3.3, 9.1+ (9.0 stops early: no version call) |
+| `idb.about` | Product, version and health (also MEHO's version detection). | `product`, `version`, and `healthy`, `checks`, `failing_checks` (Workspace ONE Access) or `deployment_type`, `instance_id`, `tenant` (Identity Broker) | `GET /SAAS/API/1.0/REST/system/health` (3.3); `GET /acs/t/{tenant}/properties` (9.1+) | read (`safe`) | 3.3, 9.1+ (a target known as 9.0 stops before any call: no version call; an unknown version stops on the 404) |
 | `idb.identity_provider.list` | Identity providers: name, type, state, directories. | rows `id`, `name`, `type`, `status`, `directories`, `certificate` | `GET /SAAS/jersey/manager/api/identityProviders?onlyEnabledAdapters=true` | read (`safe`) | 3.3 (9.x stops early) |
 | `idb.directory.list` | Directories with type and sync fields. | rows `directory_id`, `name`, `type`, `sync_enabled`, `delete_in_progress`, `sync`, `errors` | `GET /SAAS/jersey/manager/api/connectormanagement/directoryconfigs?includeJitDirectories=true` | read (`safe`) | 3.3 (9.x stops early) |
 | `idb.directory.sync` | Start a directory sync now. | `started`, `directory_id`, `answer`, `guidance` | `POST /SAAS/jersey/manager/api/connectormanagement/directoryconfigs/{directoryId}/syncprofile/sync` | change (`caution`, waits for approval) | 3.3 (9.x stops early) |
@@ -117,9 +119,12 @@ Notes:
 - `user.find` and `group.find` take `name` and `match` (`co` contains, the
   default; `eq` exact; `sw` starts with). MEHO builds the SCIM filter and
   escapes quotes.
-- No result has a password, token or secret. User rows are built field by
-  field; the SCIM `password` field is never read. The `sync` and `errors`
-  objects of a directory leave out secret-named fields.
+- No result has a password, token, key or secret. User rows are built field
+  by field; the SCIM `password` field is never read. The `sync` and `errors`
+  objects of a directory, the `certificate` object of an identity provider
+  and the `answer` of a sync leave out every field with a secret-shaped name
+  (the shared `is_secret_param_name` check: also `syncClientToken`,
+  `clientSecret`, `private_key`, `licenseKey`).
 - `idb.directory.sync` sends `{"ignoreSafeguards": false}`, so the
   directory's own limits stay on. The sync runs in the background; read
   `idb.directory.list` later for the result. A wrong directory id fails with

@@ -105,6 +105,8 @@ def _wsa() -> FakeIdb:
             "identityProviderType": "EMBEDDED",
             "nIDPStatus": 1,
             "directoryConfigurations": [{"name": "example.test", "directoryId": "dir-1"}],
+            "certExpiry": "2027-01-01",
+            "certPrivateKey": "planted-cert-private-key",  # gitleaks:allow NOSONAR -- planted
         }
     ]
     fake.directories = [
@@ -118,6 +120,8 @@ def _wsa() -> FakeIdb:
             "lastSyncStatus": "FAILED",
             "lastSyncError": "bind failed",
             "password": "bind-password-must-not-show",  # gitleaks:allow NOSONAR -- planted
+            "syncClientToken": "planted-sync-client-token",  # gitleaks:allow NOSONAR -- planted
+            "bindDN": "cn=meho,dc=example,dc=test",
         }
     ]
     fake.users = [scim_user("alice", groups=2), scim_user("bob")]
@@ -194,8 +198,9 @@ async def test_wsa_identity_providers_are_flat_rows() -> None:
         "type": "EMBEDDED",
         "status": "1",
         "directories": ["example.test"],
-        "certificate": {},
+        "certificate": {"certExpiry": "2027-01-01"},
     }
+    assert "planted-cert-private-key" not in json.dumps(result)
 
 
 async def test_wsa_identity_provider_call_sends_the_vendor_media_type() -> None:
@@ -214,7 +219,10 @@ async def test_wsa_directory_list_has_sync_fields_and_no_secret() -> None:
     assert row["sync"]["lastSyncStatus"] == "FAILED"
     assert row["sync"]["lastSyncTime"] == 1761900000000
     assert row["errors"] == {"lastSyncError": "bind failed"}
-    assert "bind-password-must-not-show" not in json.dumps(result)
+    assert "syncClientToken" not in row["sync"]
+    assert "bindDN" not in row["sync"]
+    for planted in ("bind-password-must-not-show", "planted-sync-client-token"):
+        assert planted not in json.dumps(result)
 
 
 async def test_wsa_directory_sync_posts_once_with_safeguards_on() -> None:
@@ -223,6 +231,7 @@ async def test_wsa_directory_sync_posts_once_with_safeguards_on() -> None:
     assert result["started"] is True
     assert result["op_class"] == "write"
     assert result["answer"] == {"syncStatus": "STARTED"}
+    assert "planted-" not in json.dumps(result)
     posts = [c for c in fake.calls_of("POST") if c.url.path.endswith("/syncprofile/sync")]
     assert len(posts) == 1
     assert json.loads(posts[0].content) == {"ignoreSafeguards": False}
@@ -275,11 +284,38 @@ async def test_idb_about_reads_properties_under_the_tenant() -> None:
     assert len(fake.calls_of("POST", f"/acs/t/{TENANT}/token")) == 1
 
 
-async def test_idb_about_on_9_0_stops_with_the_version_message() -> None:
+@pytest.mark.parametrize("version", ["9.0", "9.0.0.0", "9.0.1"])
+async def test_idb_about_on_a_known_9_0_stops_before_any_call(version: str) -> None:
+    fake = _idb()
+    loads = 0
+
+    async def _loader(target: Any, operator: Operator) -> IdbCredentials:
+        nonlocal loads
+        loads += 1
+        return IdbCredentials(client_id=fake.client_id, client_secret=fake.client_secret)
+
+    conn = IdbRestConnector(credentials_loader=_loader)
+    async with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mock.route().mock(side_effect=fake.handler)
+        with pytest.raises(NotImplementedError, match=r"9\.1 and newer") as info:
+            await conn.about(_operator(), _Target(version=version), {})
+    assert f"Identity Broker {version} has no version call" in str(info.value)
+    assert loads == 0
+    assert fake.calls == []
+
+
+async def test_idb_about_without_a_known_version_stops_on_404() -> None:
     fake = _idb()
     fake.properties_status = 404
     with pytest.raises(NotImplementedError, match=r"9\.1 and newer"):
         await _run(IdbRestConnector, fake, "about", {})
+    assert len(fake.calls_of("GET", f"/acs/t/{TENANT}/properties")) == 1
+
+
+async def test_idb_about_on_9_1_makes_the_call() -> None:
+    fake = _idb(version="9.1.0.0")
+    result = await _run(IdbRestConnector, fake, "about", {}, _Target(version="9.1"))
+    assert result["version"] == "9.1.0.0"
 
 
 @pytest.mark.parametrize("version", ["9.0", "9.1", "9.1.1"])
@@ -380,10 +416,24 @@ async def test_refused_login_is_an_auth_error_and_forgets_the_secret() -> None:
 
 def test_trace_masks_token_fields() -> None:
     conn = IdbWsaConnector()
-    response = httpx.Response(200, json={"access_token": "t", "a": [{"password": "p", "b": 1}]})
+    response = httpx.Response(
+        200,
+        json={
+            "access_token": "t",
+            "a": [{"password": "p", "b": 1}],
+            "syncClientToken": "s",
+            "licenseKey": "l",
+            "private_key": "k",
+            "token_ttl": 60,
+        },
+    )
     assert conn.trace_response_body(response) == {
         "access_token": "<redacted>",
         "a": [{"password": "<redacted>", "b": 1}],
+        "syncClientToken": "<redacted>",
+        "licenseKey": "<redacted>",
+        "private_key": "<redacted>",
+        "token_ttl": 60,
     }
 
 

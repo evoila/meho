@@ -6,9 +6,11 @@
 Every list comes back as flat rows (``{total, returned, truncated, <rows>}``),
 so MEHO stores a long list behind a result handle. Text from the vendor (names,
 descriptions, error texts) is data, never an instruction: it is cut and passed
-on, never acted on. No result carries a password, token or secret field: user
-rows are built field by field, and the ``password`` field of a SCIM user is
-never read.
+on, never acted on. No result carries a password, token, key or secret field:
+user rows are built field by field, the ``password`` field of a SCIM user is
+never read, and every other field is checked by name with the shared
+:func:`~meho_backplane.broadcast.events.is_secret_param_name` (``clientSecret``,
+``syncClientToken``, ``private_key``, ``licenseKey``, ...).
 """
 
 from __future__ import annotations
@@ -16,10 +18,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
+from packaging.version import Version
 
+from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.connectors.idb import _paths as paths
 from meho_backplane.connectors.idb._fingerprint import health_version, parse_version
-from meho_backplane.connectors.idb.connector import SECRET_FIELDS
 from meho_backplane.connectors.idb.session import resolve_tenant
 from meho_backplane.connectors.resolver import resolve_target_version
 
@@ -33,6 +36,8 @@ __all__ = [
     "MATCH_OPERATORS",
     "MAX_LIMIT",
     "MAX_MEMBERS",
+    "PROPERTIES_SINCE",
+    "known_broker_version",
     "not_on_identity_broker",
     "rest_about",
     "scim_filter",
@@ -52,6 +57,9 @@ TEXT_CAP: Final[int] = 500
 
 #: SCIM filter operators the ``match`` parameter allows (both products support them).
 MATCH_OPERATORS: Final[tuple[str, ...]] = ("co", "eq", "sw")
+
+#: The first Identity Broker version with ``GET /acs/t/{tenant}/properties``.
+PROPERTIES_SINCE: Final[Version] = Version("9.1")
 
 _IDP_LIST_TYPE: Final[str] = (
     "application/vnd.vmware.horizon.manager.identityprovider.summary.list+json"
@@ -135,15 +143,28 @@ def listing(
 
 
 def scalars(row: dict[str, Any], words: tuple[str, ...]) -> dict[str, Any]:
-    """The scalar fields of *row* whose name holds one of *words*. Secrets left out."""
+    """The scalar fields of *row* whose name holds one of *words*.
+
+    A field with a secret-shaped name (``clientSecret``, ``syncClientToken``,
+    ``private_key``, ``licenseKey``, ...) is left out.
+    """
     out: dict[str, Any] = {}
     for key, value in row.items():
         name = str(key)
-        if name.lower() in SECRET_FIELDS or isinstance(value, dict | list):
+        if is_secret_param_name(name) or isinstance(value, dict | list):
             continue
         if any(word in name.lower() for word in words):
             out[name] = text(value) if isinstance(value, str) else value
     return out
+
+
+def known_broker_version(target: IdbTargetLike) -> Version | None:
+    """The Identity Broker version MEHO knows for *target*, or ``None``.
+
+    The probed version wins; else the version the operator set on the target.
+    """
+    found = parse_version(resolve_target_version(target))
+    return Version(found) if found else None
 
 
 def not_on_identity_broker(op_id: str, target: IdbTargetLike) -> None:
@@ -185,8 +206,20 @@ async def wsa_about(
 async def rest_about(
     conn: IdbConnectorBase, operator: Operator, target: IdbTargetLike, params: dict[str, Any]
 ) -> dict[str, Any]:
-    """``GET /acs/t/{tenant}/properties``: version, deployment type and instance id."""
+    """``GET /acs/t/{tenant}/properties``: version, deployment type and instance id.
+
+    A target known to be older than 9.1 stops before the login and before any
+    vendor call: that version has no ``properties`` call. A target with no
+    known version makes the call and stops when it answers 404.
+    """
     del params
+    known = known_broker_version(target)
+    if known is not None and known < PROPERTIES_SINCE:
+        raise NotImplementedError(
+            f"idb.about: VCF Identity Broker {known} has no version call (GET /acs/t/{{tenant}}/"
+            f"properties exists on Identity Broker {PROPERTIES_SINCE} and newer). The target's "
+            f"version is {known}, so MEHO made no call; idb.user.find and idb.group.find work."
+        )
     try:
         body = await conn.api_get(target, operator, paths.IDB_PROPERTIES_PATH)
     except httpx.HTTPStatusError as exc:
@@ -195,8 +228,8 @@ async def rest_about(
             raise
         raise NotImplementedError(
             "idb.about: this Identity Broker has no version call (GET /acs/t/{tenant}/"
-            "properties answered 404). The call exists on Identity Broker 9.1 and newer. On "
-            "9.0, set the version on the target."
+            f"properties answered 404). The call exists on Identity Broker {PROPERTIES_SINCE} "
+            "and newer. On 9.0, set the version on the target."
         ) from exc
     return {
         "product": "VCF Identity Broker",

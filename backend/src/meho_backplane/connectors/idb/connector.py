@@ -30,8 +30,9 @@ becomes ``connector_auth_failed`` and forgets the cached secret, so a
 corrected secret works without a restart.
 
 The login call is sent without a trace, so its token is never recorded.
-:meth:`trace_response_body` masks token and password fields in the answers
-that are recorded.
+:meth:`trace_response_body` masks every secret-named field (token, password,
+secret, key, also in compound names such as ``syncClientToken``) in the
+answers that are recorded.
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.system_operator import (
@@ -75,10 +77,6 @@ __all__ = ["IdbConnectorBase", "IdbRestConnector", "IdbWsaConnector"]
 
 _log = structlog.get_logger(__name__)
 
-#: Field names whose values never reach a stored trace or a result.
-SECRET_FIELDS: Final[frozenset[str]] = frozenset(
-    {"access_token", "refresh_token", "id_token", "token", "password", "client_secret", "secret"}
-)
 _MASK: Final[str] = "<redacted>"
 
 #: Renew the token this many seconds before it runs out.
@@ -96,10 +94,16 @@ _CacheKey = tuple[str, ...]
 
 
 def mask_secrets(value: Any) -> Any:
-    """Return *value* with every token, password and secret field masked."""
+    """Return *value* with every secret-named field masked.
+
+    The name check is the shared
+    :func:`~meho_backplane.broadcast.events.is_secret_param_name`, so a
+    compound name (``syncClientToken``, ``clientSecret``, ``licenseKey``,
+    ``private_key``) is masked like a plain ``token`` or ``password``.
+    """
     if isinstance(value, dict):
         return {
-            key: (_MASK if str(key).lower() in SECRET_FIELDS else mask_secrets(item))
+            key: (_MASK if is_secret_param_name(str(key)) else mask_secrets(item))
             for key, item in value.items()
         }
     if isinstance(value, list):

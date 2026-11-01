@@ -123,7 +123,16 @@ class FakeIdb:
                 return httpx.Response(
                     404, json={"errors": [{"code": "directory.not.found", "message": "no dir"}]}
                 )
-            return httpx.Response(self.sync_status, json={"syncStatus": "STARTED"})
+            return httpx.Response(
+                self.sync_status,
+                json={
+                    "syncStatus": "STARTED",
+                    # Planted: a sync answer must never carry these out.
+                    "clientSecret": "planted-client-secret",  # gitleaks:allow NOSONAR
+                    "private_key": "planted-private-key",  # gitleaks:allow NOSONAR
+                    "licenseKey": "planted-license-key",  # gitleaks:allow NOSONAR
+                },
+            )
         if path == f"{prefix}/scim/Users/.search" and request.method == "POST":
             return self._search(request, self.users, "userName", "Resources")
         if path == f"{prefix}/scim/Groups/.search" and request.method == "POST":

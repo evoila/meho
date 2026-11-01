@@ -172,9 +172,15 @@ _JWT = re.compile(
 # blob). A value that only starts like one (``[REDACTED:made-up``) or
 # that goes on after the ``]`` (``[REDACTED:x]made-up``) is a value
 # like any other and is redacted whole.
+#
+# The label may follow ``_`` or ``-`` (``DB_PASSWORD=...``,
+# ``GITHUB_TOKEN=...``, ``x-api-key: ...``), so the start is "no letter or
+# digit before the label" instead of ``\b``: ``_`` is a word character,
+# and ``\b`` would see no boundary between ``DB_`` and ``PASSWORD``. A
+# label glued to letters (``mypassword=``) still does not match.
 _NOT_A_PLACEHOLDER: Final[str] = r"(?!\[REDACTED:[^\]\s'\"]+\](?!" + _VALUE_CHARS + "))"
 _API_KEY = re.compile(
-    r"\b(?:"
+    r"(?<![A-Za-z0-9])(?:"
     r"api[_-]?key"
     r"|access[_-]?token"
     r"|refresh[_-]?token"
@@ -188,6 +194,17 @@ _API_KEY = re.compile(
     r")"
     r"\s*[=:]\s*['\"]?" + _NOT_A_PLACEHOLDER + _VALUE_CHARS + "{8," + str(_VALUE_MAX) + r"}['\"]?",
     re.IGNORECASE,
+)
+
+# PEM private keys: the whole block from the ``BEGIN`` line to the
+# matching ``END`` line (``RSA PRIVATE KEY``, ``EC PRIVATE KEY``,
+# ``ENCRYPTED PRIVATE KEY``, ``OPENSSH PRIVATE KEY``, plain ``PRIVATE
+# KEY``). A block cut off before its ``END`` line is redacted to the end
+# of the text. Public keys and certificates do not match.
+_PEM_PRIVATE_KEY = re.compile(
+    r"-----BEGIN ((?:[A-Z0-9]+ )*)PRIVATE KEY-----"
+    r".*?(?:-----END \1PRIVATE KEY-----|\Z)",
+    re.DOTALL,
 )
 
 # Kubeconfig: the giveaway is ``apiVersion: v1`` + ``kind: Config``
@@ -271,6 +288,7 @@ NAMED_PATTERNS: Final[dict[str, re.Pattern[str] | SecretFinder]] = {
     "jwt": _JWT,
     "api_key": _API_KEY,
     "kubeconfig": _KUBECONFIG,
+    "pem_private_key": _PEM_PRIVATE_KEY,
     "bind_key_secret": BIND_KEY_SECRET,
     "uuid": _UUID,
     "ipv4": _IPV4,

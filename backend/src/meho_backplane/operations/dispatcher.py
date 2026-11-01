@@ -268,7 +268,8 @@ import hvac.exceptions
 import structlog
 from sqlalchemy.exc import SQLAlchemyError
 
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.delegation import resolve_actor_sub
+from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
 from meho_backplane.broadcast.events import classify_op, scrub_secret_named_values
 from meho_backplane.broadcast.history import build_target_activity_advisory
@@ -361,6 +362,13 @@ from meho_backplane.operations._preview import (
 from meho_backplane.operations._request_preview import (
     compute_preview_hash,
     preview_dispatch,
+)
+from meho_backplane.operations._secret_values import (
+    fingerprint_hidden_values,
+    fingerprint_value,
+    hide_secret_values,
+    hides_secret_values,
+    reveal_hidden_values,
 )
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
@@ -792,7 +800,7 @@ async def _execute_and_audit(
     params: dict[str, Any],
     params_hash: str,
     started: float,
-    scrub_response: bool = False,
+    secret_view: SecretView | None = None,
 ) -> OperationResult:
     """Run the source_kind branch, redact, reduce, audit, broadcast, return.
 
@@ -839,7 +847,7 @@ async def _execute_and_audit(
             params_hash=params_hash,
             audit_id=audit_id,
             started=started,
-            scrub_response=scrub_response,
+            secret_view=secret_view,
         )
     finally:
         # Persists the trace via record_trace on the recorder's best-effort
@@ -873,7 +881,7 @@ async def _execute_and_audit_inner(
     params_hash: str,
     audit_id: uuid.UUID,
     started: float,
-    scrub_response: bool = False,
+    secret_view: SecretView | None = None,
 ) -> OperationResult:
     """The redact -> reduce -> audit success/error body of :func:`_execute_and_audit`.
 
@@ -921,7 +929,6 @@ async def _execute_and_audit_inner(
             params_hash=params_hash,
             duration_ms=_elapsed_ms(started),
         )
-
     # Step 7b -- composite terminal-error envelope (#3809). A composite handler
     # signals a load-bearing failure by RETURNING an envelope with an
     # ``error``-severity issue rather than raising; without this arm the
@@ -948,8 +955,10 @@ async def _execute_and_audit_inner(
             redaction=redaction,
             started=started,
             error_code=terminal_error_code,
+            secret_view=secret_view,
         )
 
+    redaction = _protect_secret_values(redaction, op_id=op_id, secret_view=secret_view)
     return await _reduce_and_audit_success(
         op_id=op_id,
         descriptor=descriptor,
@@ -960,8 +969,101 @@ async def _execute_and_audit_inner(
         audit_id=audit_id,
         redaction=redaction,
         started=started,
-        scrub_response=scrub_response,
     )
+
+
+#: How a secret read answers. ``"hidden"`` is the default view: names without
+#: values. ``"revealed"`` is a person's ``reveal_secret: true``: the secret
+#: fields as the connector returned them. ``None`` is any other operation.
+SecretView = Literal["hidden", "revealed"]
+
+
+def _protect_secret_values(
+    redaction: RedactionMiddlewareResult,
+    *,
+    op_id: str,
+    secret_view: SecretView | None,
+    error_cleanup: bool = False,
+) -> RedactionMiddlewareResult:
+    """Build what the caller sees and what the audit row stores.
+
+    ``redacted`` becomes the caller's answer. A secret read returns the
+    default view (:func:`hide_secret_values`) unless a person asked for the
+    values; then the secret fields the default view hides are put back as the
+    connector returned them (:func:`reveal_hidden_values`), and the redaction
+    of the other fields stays. Any other operation returns the redacted
+    answer.
+
+    ``raw`` -- the copy the audit row stores as ``raw_payload`` -- gets a
+    keyed fingerprint in place of every value the default view hides, whether
+    the caller saw the value or not. So no secret value is stored in the
+    audit table.
+
+    With *error_cleanup*, a multi-step error envelope, the full error cleanup
+    (:func:`redact_error_payload`: the secret-field walk, then the pinned
+    Tier-1 default policy) runs over the answer and the default view first.
+    So a value that only the cleanup hides, for example a bearer token under
+    a shadow-mode policy, is fingerprinted as well. Raises when the cleanup
+    fails; the caller then withholds the envelope.
+    """
+    redacted = redaction.redacted
+    shown = hide_secret_values(op_id, redacted, raw=redaction.raw)
+    if error_cleanup:
+        redacted, shown = redact_error_payload(redacted), redact_error_payload(shown)
+    if secret_view == "hidden":
+        caller = shown
+    elif secret_view == "revealed":
+        caller = reveal_hidden_values(redaction.raw, redacted, shown)
+    else:
+        caller = redacted
+    return redaction.model_copy(
+        update={"raw": fingerprint_hidden_values(redaction.raw, shown), "redacted": caller}
+    )
+
+
+def _secret_view(secret_read: bool, reveal_secret: bool) -> SecretView | None:
+    """The view of a dispatch: ``None`` unless the op is a secret read."""
+    if not secret_read:
+        return None
+    return "revealed" if reveal_secret else "hidden"
+
+
+def _agent_acts(operator: Operator) -> bool:
+    """True when an agent makes this call: an agent principal, or a hosted agent run."""
+    return operator.principal_kind is PrincipalKind.AGENT or resolve_actor_sub() is not None
+
+
+async def _refuse_agent_reveal(
+    *,
+    op_id: str,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    params_hash: str,
+    started: float,
+) -> OperationResult:
+    """Refuse ``reveal_secret: true`` for an agent, with a synchronous audit row.
+
+    Only a person may get the raw value of a secret read back. The agent
+    gets the names without the values by calling again without the flag,
+    or uses an operation that moves the secret without showing it.
+    """
+    duration_ms = _elapsed_ms(started)
+    receipt = await audit_safe(
+        audit_id=uuid.uuid4(),
+        event_class=AuditEventClass.POLICY_DECISION,
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params_hash=params_hash,
+        result_status="denied",
+        duration_ms=duration_ms,
+    )
+    reason = (
+        "reveal_secret is for people only. Call again without reveal_secret to get "
+        "the names without the values, or ask a person to read the secret."
+    )
+    return with_audit_receipt(result_denied(op_id, reason, duration_ms), receipt)
 
 
 def _composite_terminal_error_code(descriptor: EndpointDescriptor, envelope: Any) -> str | None:
@@ -1162,6 +1264,7 @@ async def _reduce_and_audit_composite_error(
     redaction: RedactionMiddlewareResult,
     started: float,
     error_code: str,
+    secret_view: SecretView | None = None,
 ) -> OperationResult:
     """Reduce a composite terminal-error envelope, audit it as ``error``, return it.
 
@@ -1196,15 +1299,21 @@ async def _reduce_and_audit_composite_error(
     ``redaction.redacted`` went through the operator's policy only, and a
     shadow-mode policy leaves a ``Bearer`` token in place; the reducer would
     then store that token behind the handle, where the later cleanup of the
-    inline result cannot reach it. If the cleanup fails, the envelope is
-    withheld like a reducer failure, and the ``error`` line is the code alone.
+    inline result cannot reach it. The cleanup runs inside
+    :func:`_protect_secret_values`, so the stored ``raw_payload`` holds a
+    fingerprint for every value the cleanup hides as well. If the cleanup
+    fails, the envelope is withheld like a reducer failure, the ``error`` line
+    is the code alone, and the stored copy is one fingerprint of the whole
+    envelope.
     """
     serialised_manifest = manifest_to_audit_payload(redaction.manifest)
     envelope: dict[str, Any] | None
     handle: ResultHandle | None = None
     delivery: Literal["complete", "partial", "unavailable"] | None = None
     try:
-        full_envelope: dict[str, Any] = redact_error_payload(redaction.redacted)
+        redaction = _protect_secret_values(
+            redaction, op_id=op_id, secret_view=secret_view, error_cleanup=True
+        )
     except Exception as exc:
         _log.warning(
             "result_delivery_unavailable",
@@ -1215,7 +1324,9 @@ async def _reduce_and_audit_composite_error(
         )
         error_summary = error_code
         envelope, delivery = None, "unavailable"
+        redaction = redaction.model_copy(update={"raw": fingerprint_value(redaction.raw)})
     else:
+        full_envelope: dict[str, Any] = redaction.redacted
         error_summary = _composite_error_summary(error_code, full_envelope)
         envelope, handle, delivery = await _reduce_composite_error_envelope(
             full_envelope,
@@ -1261,27 +1372,14 @@ async def _reduce_and_audit_success(
     audit_id: uuid.UUID,
     redaction: RedactionMiddlewareResult,
     started: float,
-    scrub_response: bool = False,
 ) -> OperationResult:
     """Run the reducer on the redacted payload, write the success-path
     audit row, and wrap the reduced summary into the final
     :class:`OperationResult`. Extracted from :func:`_execute_and_audit`
     so the orchestrator stays under the code-quality function-size cap
     and the redaction/reduce/audit ordering stays the only thing this
-    helper expresses.
-
-    *scrub_response* (#2467) key-name-scrubs the caller-bound response of a
-    ``credential_read``-classified op (``vault.kv.read`` et al.) unless the
-    caller passed ``params.reveal_secret=true``. Only the redacted
-    (reducer / caller) copy is scrubbed; ``redaction.raw`` -- captured
-    before this point and written to the audit row -- keeps the raw secret,
-    mirroring the #2172 secret-handler posture. The connector-boundary
-    engine matched only labelled string leaves, so a ``{"password": "..."}``
-    dict value reached here intact; :func:`scrub_secret_named_values`
-    replaces it with the redaction sentinel."""
-    if scrub_response:
-        scrubbed_redacted, _ = scrub_secret_named_values(redaction.redacted)
-        redaction = redaction.model_copy(update={"redacted": scrubbed_redacted})
+    helper expresses. Secret values are already hidden by
+    :func:`_protect_secret_values`."""
     serialised_manifest = manifest_to_audit_payload(redaction.manifest)
     reduced = await _reduce_or_error(
         op_id=op_id,
@@ -3360,17 +3458,18 @@ async def dispatch(
     started = time.monotonic()
     # #2467 -- ``reveal_secret`` is a MEHO dispatch control, not a connector
     # op param. Strip it before hashing / schema validation / handler
-    # forwarding: a ``credential_read``-classified response is key-name
-    # scrubbed by default so the raw secret never reaches the caller / agent
-    # transcript, and returning the raw value requires this explicit opt-in
-    # (stamped on the audit row). Stripping keeps the flag off the op's
-    # ``additionalProperties: false`` schema, out of the handler's params,
-    # and out of ``params_hash`` -- so a scrubbed read and its reveal share
-    # one hash (the reveal choice is recorded separately on the audit row).
+    # forwarding: the answer of a secret read (a ``credential_read`` op, or
+    # an op of ``_secret_values._VALUE_HIDING_OPS``) hides its secret values
+    # by default, and returning the raw value requires this explicit opt-in
+    # by a person (stamped on the audit row; an agent is refused). Stripping
+    # keeps the flag off the op's ``additionalProperties: false`` schema,
+    # out of the handler's params, and out of ``params_hash`` -- so a
+    # scrubbed read and its reveal share one hash (the reveal choice is
+    # recorded separately on the audit row).
     reveal_secret = bool(params.get("reveal_secret"))
     if "reveal_secret" in params:
         params = {key: value for key, value in params.items() if key != "reveal_secret"}
-    credential_read = classify_op(op_id) == "credential_read"
+    secret_read = classify_op(op_id) == "credential_read" or hides_secret_values(op_id)
     # The hash every audit row of this dispatch carries: keyed, with
     # secret-named values left out. A parked approval stores the full
     # approval hash instead (``_handle_needs_approval``).
@@ -3516,13 +3615,22 @@ async def dispatch(
     # child ``dispatch`` rebinds the var, and clears it for the next dispatch
     # reusing this task.
     _verdict_token = policy_decision_var.set(None)
-    # #2467 -- stamp the reveal choice on the credential_read audit row.
-    # Bound only for a credential_read op (True/False = raw / scrubbed
+    # Stamp the reveal choice on the audit row of a secret read.
+    # Bound only for a secret read (True/False = raw / scrubbed
     # response); every other dispatch binds ``None`` so the key stays absent.
     # Same token/finally reset discipline as ``policy_decision_var`` so a
     # composite parent's value is restored after a child dispatch rebinds it.
-    _reveal_token = reveal_secret_var.set(reveal_secret if credential_read else None)
+    _reveal_token = reveal_secret_var.set(reveal_secret if secret_read else None)
     try:
+        if reveal_secret and secret_read and _agent_acts(operator):
+            return await _refuse_agent_reveal(
+                op_id=op_id,
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params_hash=params_hash,
+                started=started,
+            )
         if not _approved:
             # G11.2-T3: async, three-state verdict (auto-execute / needs-approval
             # / deny). The call site signature is unchanged; the function now
@@ -3717,10 +3825,10 @@ async def dispatch(
             params=params,
             params_hash=params_hash,
             started=started,
-            # #2467 -- scrub the caller-bound response of a credential_read
-            # op unless the caller opted into the raw value. The audit row
-            # keeps the raw result either way.
-            scrub_response=credential_read and not reveal_secret,
+            # A secret read answers with names without values, unless a
+            # person asked for the values. The audit row stores
+            # fingerprints in place of them either way.
+            secret_view=_secret_view(secret_read, reveal_secret),
         )
     finally:
         policy_decision_var.reset(_verdict_token)

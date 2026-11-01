@@ -1367,7 +1367,7 @@ def is_secret_param_name_lowercased(name: str) -> bool:
     )
 
 
-def _scrub_secret_named_keys(node: Any) -> tuple[Any, bool]:
+def _scrub_secret_named_keys(node: Any, *, hide_numbers: bool = False) -> tuple[Any, bool]:
     """Replace values of secret-named keys; report whether any were found.
 
     The Tier-1 engine matches *labelled* secret shapes inside string
@@ -1384,16 +1384,19 @@ def _scrub_secret_named_keys(node: Any) -> tuple[Any, bool]:
     never ``bind_secret_id=true`` or ``secret_id_ttl=3600`` -- the
     Vault AppRole config attributes that would otherwise collapse a
     vetted full-detail write broadcast to aggregate on every dispatch.
+    With *hide_numbers* a number under a secret-shaped key is replaced
+    too (a PIN or a password stored as a number); booleans and ``None``
+    still pass through.
     """
     if isinstance(node, Mapping):
         found = False
         scrubbed: dict[str, Any] = {}
         for key, value in node.items():
-            if _is_secret_param_name(str(key)) and isinstance(value, (str, Mapping, Sequence)):
+            if _is_secret_param_name(str(key)) and _is_secret_value(value, hide_numbers):
                 scrubbed[str(key)] = _REDACTED_PARAM
                 found = True
                 continue
-            child, child_found = _scrub_secret_named_keys(value)
+            child, child_found = _scrub_secret_named_keys(value, hide_numbers=hide_numbers)
             scrubbed[str(key)] = child
             found = found or child_found
         return scrubbed, found
@@ -1401,14 +1404,21 @@ def _scrub_secret_named_keys(node: Any) -> tuple[Any, bool]:
         items: list[Any] = []
         found = False
         for item in node:
-            child, child_found = _scrub_secret_named_keys(item)
+            child, child_found = _scrub_secret_named_keys(item, hide_numbers=hide_numbers)
             items.append(child)
             found = found or child_found
         return items, found
     return node, False
 
 
-def scrub_secret_named_values(node: Any) -> tuple[Any, bool]:
+def _is_secret_value(value: Any, hide_numbers: bool) -> bool:
+    """True when *value* under a secret-shaped key is replaced."""
+    if isinstance(value, (str, Mapping, Sequence)):
+        return True
+    return hide_numbers and isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def scrub_secret_named_values(node: Any, *, hide_numbers: bool = False) -> tuple[Any, bool]:
     """Key-name-aware secret scrub for a caller-bound dispatch response.
 
     Public entry to :func:`_scrub_secret_named_keys` (the same walk the
@@ -1424,14 +1434,16 @@ def scrub_secret_named_values(node: Any) -> tuple[Any, bool]:
     caller-bound response of a ``credential_read``-classified op by
     default (#2467) so the raw value never reaches the ``call_operation``
     caller / agent transcript; ``params.reveal_secret=true`` opts out.
-    The audit row keeps the raw result regardless (the raw payload is
-    captured before this scrub runs), mirroring the #2172 secret-handler
-    posture. Unlike :func:`scrub_broadcast_params` this does **not** run
-    the Tier-1 engine pass -- the boundary middleware already applied it
-    to the response, so this layer is only the structured-dict
-    key-name complement.
+    The audit row stores a keyed fingerprint in place of each value this
+    scrub hides (:mod:`meho_backplane.operations._secret_values`). Unlike
+    :func:`scrub_broadcast_params` this does **not** run the Tier-1 engine
+    pass -- the boundary middleware already applied it to the response,
+    so this layer is only the structured-dict key-name complement.
+    *hide_numbers* also replaces a number under a secret-shaped key; the
+    dispatch answer and the stored audit copy use it, the params hash and
+    the broadcast params scrub do not.
     """
-    return _scrub_secret_named_keys(node)
+    return _scrub_secret_named_keys(node, hide_numbers=hide_numbers)
 
 
 def scrub_broadcast_params(params: dict[str, Any]) -> tuple[dict[str, Any], bool]:

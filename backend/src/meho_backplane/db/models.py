@@ -571,10 +571,10 @@ class AuditLog(Base):
     )
     # Connector-boundary redaction middleware (G11.4-T2 #1071). The
     # dispatcher captures the raw connector response, hands it to the
-    # redaction engine, and stores the raw payload here verbatim so an
-    # auditor can reconstruct the pre-redaction view (the trust boundary
-    # is the API surface, not the audit log — internal incident response
-    # needs the raw record). ``redaction_manifest`` carries one entry
+    # redaction engine, and stores the raw payload here so an auditor can
+    # reconstruct the pre-redaction view. Each value the redaction hides is
+    # stored as a keyed fingerprint, not in clear text
+    # (``operations/_secret_values.py``). ``redaction_manifest`` carries one entry
     # per rule firing (``rule`` / ``pattern`` / ``action`` / ``count`` /
     # ``span`` / ``reason`` / ``path``) plus the resolved ``policy_id``;
     # the C1-d round-trip CI gate (#1073) replays the manifest against

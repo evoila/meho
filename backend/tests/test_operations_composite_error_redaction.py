@@ -11,8 +11,9 @@ the envelope **before** the reduce: the reducer writes the handle's stored
 rows and sample rows right then, and the later cleanup of the inline result
 cannot reach them. These tests drive the real JSONFlux reducer with an
 in-memory store and check the inline result, the handle's sample rows, the
-stored rows and the audit row. When the cleanup itself fails, the envelope is
-withheld and nothing is stored.
+stored rows and the audit row. The audit row's raw copy holds a fingerprint in
+place of every value the cleanup hid. When the cleanup itself fails, the
+envelope is withheld, nothing is stored, and the raw copy is one fingerprint.
 """
 
 from __future__ import annotations
@@ -238,9 +239,15 @@ async def test_envelope_is_clean_in_result_handle_samples_and_stored_rows() -> N
     row = await _audit_row()
     assert row.payload["result_status"] == "error"
     assert _leaks(json.dumps(row.payload, default=str)) == []
-    # The raw payload keeps the handler's answer for replay, as for a normal
-    # row (``docs/codebase/redaction.md``); the shadow policy left it as is.
-    assert _leaks(json.dumps(row.raw_payload, default=str)) == [_TOKEN, _PASSWORD]
+    # The raw payload stores a fingerprint for the secret-named value and for
+    # every message the cleanup hid the token in, shadow policy or not.
+    stored = json.dumps(row.raw_payload, default=str)
+    assert [value for value in (_TOKEN, _PASSWORD) if value in stored] == []
+    last = row.raw_payload["issues"][-1]
+    assert last["rejected"]["password"].startswith("[FINGERPRINT:hmac-sha256:")
+    assert last["message"].startswith("[FINGERPRINT:hmac-sha256:")
+    assert last["category"] == "deploy"
+    assert row.raw_payload["status"] == "deploy_error"
 
 
 @pytest.mark.asyncio
@@ -268,3 +275,5 @@ async def test_failed_cleanup_withholds_the_envelope_and_stores_nothing(
     row = await _audit_row()
     assert row.payload["result_status"] == "error"
     assert _leaks(json.dumps(row.payload, default=str)) == []
+    assert isinstance(row.raw_payload, str)
+    assert row.raw_payload.startswith("[FINGERPRINT:hmac-sha256:")

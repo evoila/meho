@@ -56,8 +56,9 @@ _VM_ID: Final[dict[str, Any]] = {
     "type": "string",
     "pattern": VM_MOID_PATTERN,
     "description": (
-        "VM id, such as 'vm-42'. Get it from vmware.vm.list or vmware.vm.info. A change "
-        "takes no VM name, so after approval it runs on the VM the approver saw."
+        "VM id of the shape vm-<number>. Get it from vmware.vm.list or vmware.vm.info; do "
+        "not guess it. A change takes no VM name, so after approval it runs on the VM the "
+        "approver saw."
     ),
 }
 
@@ -164,8 +165,11 @@ VM_PCI_DEVICE_ADD_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "oneOf": [{"required": ["pci_id"]}, {"required": ["dynamic_device"]}],
     "additionalProperties": False,
     "examples": [
-        {"vm": "vm-42", "pci_id": "0000:00:00.0"},
-        {"vm": "vm-42", "dynamic_device": {"vendor_id": 0, "device_id": 0}},
+        {"vm": "<vm-id>", "pci_id": "<pci-address>"},
+        {
+            "vm": "<vm-id>",
+            "dynamic_device": {"vendor_id": "<vendor-id>", "device_id": "<device-id>"},
+        },
     ],
 }
 
@@ -216,7 +220,7 @@ VM_PCI_DEVICE_REMOVE_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     },
     "required": ["vm", "device_key"],
     "additionalProperties": False,
-    "examples": [{"vm": "vm-42", "device_key": 13000}],
+    "examples": [{"vm": "<vm-id>", "device_key": "<device-key>"}],
 }
 
 VM_PCI_DEVICE_REMOVE_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
@@ -318,7 +322,7 @@ VM_SCREENSHOT_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     },
     "required": ["vm"],
     "additionalProperties": False,
-    "examples": [{"vm": "vm-42"}],
+    "examples": [{"vm": "<vm-id>"}],
 }
 
 VM_SCREENSHOT_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
@@ -374,8 +378,8 @@ VM_KEYS_SEND_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "required": ["vm", "keys"],
     "additionalProperties": False,
     "examples": [
-        {"vm": "vm-42", "keys": ["ctrl_alt_del"]},
-        {"vm": "vm-42", "keys": ["down", "enter"]},
+        {"vm": "<vm-id>", "keys": ["ctrl_alt_del"]},
+        {"vm": "<vm-id>", "keys": ["down", "enter"]},
     ],
 }
 

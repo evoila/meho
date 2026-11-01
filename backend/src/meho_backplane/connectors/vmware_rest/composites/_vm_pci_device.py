@@ -160,7 +160,7 @@ async def _precheck(
         return _envelope("invalid_request", vm, guidance=problem), {}
     props_read = await _read_vm(connector, target, operator, vm, props)
     if props_read is None:
-        guidance = f"no VM {vm!r}; pass a VM id such as 'vm-42' (vmware.vm.list finds it)"
+        guidance = f"no VM {vm!r}; pass a VM id of the shape vm-<number> (vmware.vm.list finds it)"
         return _envelope("not_found", vm, guidance=guidance), {}
     name = as_str(props_read.get("name"))
     rows = passthrough_rows(props_read.get(_PROP_DEVICES))

@@ -250,7 +250,9 @@ async def _run(kc: CompanyKeycloak, *, store: FakeStore | None = None, **company
 async def test_off_by_default_touches_nothing_of_the_company_login() -> None:
     kc = _fresh()
     await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
-    assert not any(kc._company_path(path) for _, path in kc.calls)
+    # The realm stage lists the login flows for the realm file's own flows.
+    calls = [path for _, path in kc.calls if path != f"{_BASE}/authentication/flows"]
+    assert not any(kc._company_path(path) for path in calls)
     assert CompanyLoginPlan().enabled is False
 
 

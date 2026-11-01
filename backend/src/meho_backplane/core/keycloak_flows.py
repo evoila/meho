@@ -150,7 +150,7 @@ async def ensure_flows(admin: Admin, flows: list[Mapping[str, Any]]) -> dict[str
         else:
             made = await _make_flow(admin, flow, by_alias)
             if made is None:
-                _say(f"login flow {alias}: not created (no right to change login flows)")
+                _say(f"login flow {alias}: not made (no right to change login flows)")
                 continue
             have[alias] = made
             _say(f"login flow {alias}: created")

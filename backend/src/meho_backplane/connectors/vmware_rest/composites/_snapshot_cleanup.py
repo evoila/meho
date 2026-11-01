@@ -64,6 +64,8 @@ if TYPE_CHECKING:
     from meho_backplane.operations._preview import PreviewContext
 
 __all__ = [
+    "_VIM_SUB_OPS_VM_DISKS_CONSOLIDATE",
+    "_VIM_SUB_OPS_VM_SNAPSHOT_DELETE_ALL",
     "plan_snapshot_delete_all",
     "vm_disks_consolidate_composite",
     "vm_disks_consolidate_preview",

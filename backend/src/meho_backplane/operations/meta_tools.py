@@ -288,12 +288,17 @@ SEARCH_LIMIT_MAX: int = 50
 #: * ``unknown_group`` — the ``group`` filter names no visible group.
 #: * ``zero_enabled_operations`` — the connector is ingested, but none of
 #:   its operations is enabled for this caller. Nothing can be called.
+#: * ``package_not_installed`` — the connector's enabled operations all come
+#:   from a connector package that is not installed in this MEHO (#5560).
+#:   The advisory names the package. Nothing can be called until the
+#:   package is installed again.
 SearchOutcome = Literal[
     "matched",
     "ambiguous",
     "no_match",
     "unknown_group",
     "zero_enabled_operations",
+    "package_not_installed",
 ]
 SEARCH_OUTCOMES: Final[tuple[str, ...]] = get_args(SearchOutcome)
 
@@ -1057,6 +1062,44 @@ async def _has_enabled_operation(
     return bool((await session.execute(stmt)).scalar())
 
 
+async def _missing_package_of_connector(
+    session: Any,
+    *,
+    tenant_id: uuid.UUID,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> str | None:
+    """Return a missing connector package that owns an enabled op, else ``None``.
+
+    The twin of :func:`_has_enabled_operation` for the rows that
+    :func:`installed_owner_clause` hides (#5560). Same tenant scope, enabled
+    rows only. It runs only when the caller can see no enabled op, so its
+    answer tells ``package_not_installed`` from ``zero_enabled_operations``.
+    """
+    stmt = (
+        select(EndpointDescriptor.owner_package)
+        .where(
+            visible_scope_clause(
+                EndpointDescriptor,
+                tenant_id=tenant_id,
+                product=product,
+                version=version,
+                impl_id=impl_id,
+            ),
+            EndpointDescriptor.product == product,
+            EndpointDescriptor.version == version,
+            EndpointDescriptor.impl_id == impl_id,
+            enabled_for_tenant_clause(tenant_id=tenant_id),
+            ~installed_owner_clause(),
+        )
+        .order_by(EndpointDescriptor.owner_package)
+        .limit(1)
+    )
+    package: str | None = (await session.execute(stmt)).scalar_one_or_none()
+    return package
+
+
 async def _visible_group_keys(
     session: Any,
     *,
@@ -1105,13 +1148,22 @@ def _search_guidance(
     *,
     group_key: str | None,
     group_keys: list[str] | None = None,
+    package: str | None = None,
 ) -> tuple[str | None, list[str]]:
     """Return the ``(advisory, narrowing)`` pair for *outcome*.
 
-    The text names no disabled op and no count of hidden rows.
+    The text names no disabled op and no count of hidden rows. For
+    ``package_not_installed`` it names the missing *package*.
     """
     if outcome == "matched":
         return None, []
+    if outcome == "package_not_installed":
+        return (
+            f"The operations of this connector come from the connector package "
+            f"{package!r}, which is not installed in this MEHO. Do not call any "
+            f"operation on this connector.",
+            [f"Ask an operator to install the connector package {package!r} again."],
+        )
     if outcome == "unknown_group":
         return (
             f"Group {group_key!r} does not exist on this connector or has no "
@@ -1156,9 +1208,12 @@ async def _run_search(
 ) -> tuple[list[OperationSearchHit], SearchOutcome, list[str] | None]:
     """Run the search and pick its outcome.
 
-    Returns ``(hits, outcome, group_keys)``. ``group_keys`` is set only for
-    ``unknown_group``. The enabled-op ``EXISTS`` runs only when the search
-    found nothing, to tell ``no_match`` from ``zero_enabled_operations``.
+    Returns ``(hits, outcome, detail)``. ``detail`` is the visible group
+    keys for ``unknown_group`` and ``[package]`` for
+    ``package_not_installed``, else ``None``. The enabled-op ``EXISTS``
+    runs only when the search found nothing, to tell ``no_match`` from
+    ``zero_enabled_operations``; then the missing-package probe tells
+    ``package_not_installed`` from ``zero_enabled_operations`` (#5560).
 
     The retriever is asked for at least :data:`SEARCH_CLASSIFY_MIN_HITS`
     hits so the near-tie check can see the second hit. The outcome is read
@@ -1185,6 +1240,21 @@ async def _run_search(
                 version=version,
                 impl_id=impl_id,
             )
+            # No visible group at all: when a missing package is the
+            # reason, say so rather than "unknown group" (#5560).
+            package = (
+                None
+                if group_keys
+                else await _missing_package_of_connector(
+                    session,
+                    tenant_id=tenant_id,
+                    product=product,
+                    version=version,
+                    impl_id=impl_id,
+                )
+            )
+            if package is not None:
+                return [], "package_not_installed", [package]
             return [], "unknown_group", group_keys
     hits = await hybrid_search(
         session,
@@ -1205,7 +1275,14 @@ async def _run_search(
         version=version,
         impl_id=impl_id,
     )
-    return [], "no_match" if has_enabled else "zero_enabled_operations", None
+    if has_enabled:
+        return [], "no_match", None
+    package = await _missing_package_of_connector(
+        session, tenant_id=tenant_id, product=product, version=version, impl_id=impl_id
+    )
+    if package is not None:
+        return [], "package_not_installed", [package]
+    return [], "zero_enabled_operations", None
 
 
 async def search_operations(
@@ -1250,8 +1327,10 @@ async def search_operations(
     one (:class:`ConnectorNotIngestedError`, #1482). Every other result
     carries one ``outcome`` from :data:`SEARCH_OUTCOMES`: ``matched``,
     ``ambiguous`` (:func:`_classify_hits`), ``no_match``,
-    ``unknown_group`` (``narrowing`` lists the visible group keys), or
-    ``zero_enabled_operations`` (an abstention advisory, no op ids).
+    ``unknown_group`` (``narrowing`` lists the visible group keys),
+    ``zero_enabled_operations`` (an abstention advisory, no op ids), or
+    ``package_not_installed`` (the advisory names the missing connector
+    package, #5560).
     ``advisory`` explains a non-``matched`` outcome in one sentence;
     ``narrowing`` holds at most :data:`SEARCH_NARROWING_MAX` next steps.
     Hit order is the retriever's; the outcome never re-ranks.
@@ -1299,7 +1378,7 @@ async def search_operations(
     started = time.monotonic()
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        hits, outcome, group_keys = await _run_search(
+        hits, outcome, detail = await _run_search(
             session,
             tenant_id=operator.tenant_id,
             product=product,
@@ -1310,7 +1389,12 @@ async def search_operations(
             limit=limit,
         )
     duration_ms = (time.monotonic() - started) * 1000
-    advisory, narrowing = _search_guidance(outcome, group_key=group_key, group_keys=group_keys)
+    advisory, narrowing = _search_guidance(
+        outcome,
+        group_key=group_key,
+        group_keys=detail if outcome == "unknown_group" else None,
+        package=detail[0] if outcome == "package_not_installed" and detail else None,
+    )
     _log.info(
         "search_operations",
         connector_id=connector_id,

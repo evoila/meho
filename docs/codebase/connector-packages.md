@@ -332,6 +332,17 @@ MEHO (ingested ops are `NULL` too).
 - A call or a preview of such an op answers
   `connector_package_not_installed`, with the package name in
   `extras.package`.
+- The connector list (`GET /api/v1/connectors`, the MCP tool
+  `meho_connector_list` and `meho connector list`) does not count such
+  rows, and does not count a group that holds only such rows. When no
+  row of a connector is left, the connector stays in the list with
+  `state="package_not_installed"`, zero counts and
+  `dispatchable=false`. Its `next_step` names the package. The MCP
+  short row shows `status="package_not_installed"`, and the CLI table
+  shows `no-package`.
+- When search finds no enabled op and the connector has enabled ops of
+  such a package, the result has `outcome="package_not_installed"`. The
+  advisory names the package and says to install it again.
 - Nothing is deleted or changed. When the package is installed again,
   the rows are visible again with the operator's settings on them, for
   example an op the operator turned off stays off.

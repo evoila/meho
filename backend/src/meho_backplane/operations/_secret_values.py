@@ -18,6 +18,11 @@ redaction:
 * :func:`reveal_hidden_values` builds the answer of a reveal: the redacted
   answer, with every value the default view hides put back as the
   connector returned it. The redaction of the other fields stays.
+  ``reveal_secret`` is a dispatch control, not a parameter of the
+  operation: :func:`split_reveal_secret` takes it off the params before
+  they are hashed, checked and handed to the connector, and
+  :func:`with_reveal_secret` puts it back on the params an approval
+  request stores, so an approved run keeps the choice.
 * :func:`fingerprint_hidden_values` builds the copy of the raw answer that
   goes to ``audit_log.raw_payload``. Every value that differs between the
   raw answer and the default view is replaced by a keyed fingerprint
@@ -37,6 +42,7 @@ from meho_backplane.operations._validate import compute_audit_digest_hash
 
 __all__ = [
     "FINGERPRINT_PREFIX",
+    "REVEAL_SECRET_PARAM",
     "SECRET_VALUE_PLACEHOLDER",
     "fingerprint_hidden_values",
     "fingerprint_value",
@@ -46,6 +52,8 @@ __all__ = [
     "plain_fields_of",
     "register_plain_fields",
     "reveal_hidden_values",
+    "split_reveal_secret",
+    "with_reveal_secret",
 ]
 
 #: What a hidden value of a secret read is replaced with.
@@ -53,6 +61,10 @@ SECRET_VALUE_PLACEHOLDER: Final[str] = "[REDACTED:secret_value]"
 
 #: Start of a fingerprint in ``audit_log.raw_payload``.
 FINGERPRINT_PREFIX: Final[str] = "[FINGERPRINT:hmac-sha256:"
+
+#: The dispatch control a person or a service principal sets to get the
+#: hidden values of an answer back.
+REVEAL_SECRET_PARAM: Final[str] = "reveal_secret"
 
 _MISSING: Final[object] = object()
 
@@ -132,6 +144,25 @@ def hides_secret_values(op_id: str) -> bool:
 #: is not one. Filled at import time by the connector modules and by a
 #: connector package's registrar, like the preview builders.
 _PLAIN_FIELDS: Final[dict[str, frozenset[str]]] = {}
+
+
+def split_reveal_secret(params: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Return *params* without ``reveal_secret``, and whether it was set.
+
+    The flag is not a parameter of the operation: it stays off the params
+    hash, off the schema check and off the connector call. Without the
+    flag *params* is returned as is.
+    """
+    if REVEAL_SECRET_PARAM not in params:
+        return params, False
+    reveal_secret = bool(params[REVEAL_SECRET_PARAM])
+    without = {key: value for key, value in params.items() if key != REVEAL_SECRET_PARAM}
+    return without, reveal_secret
+
+
+def with_reveal_secret(params: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of *params* with ``reveal_secret: true`` set."""
+    return {**params, REVEAL_SECRET_PARAM: True}
 
 
 def register_plain_fields(op_id: str, field_names: Iterable[str]) -> None:

@@ -12,6 +12,10 @@
   their name says so (``register_plain_fields``); they stay.
 * ``reveal_secret: true`` returns the raw values to a person, a PEM private
   key included. An agent, or a hosted agent run, is refused with an audit row.
+* A call that waits for approval keeps the reveal choice: the approved run
+  returns the values the person asked for. The choice is stored with the
+  params on the approval request, outside the hash that ties the approval
+  to the call.
 * An operation that makes a new credential still returns it to the caller.
 * ``audit_log.raw_payload`` stores a keyed fingerprint in place of every
   hidden value; the same value gives the same fingerprint in two rows.
@@ -42,7 +46,7 @@ from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor
+from meho_backplane.db.models import ApprovalRequest, AuditLog, EndpointDescriptor
 from meho_backplane.operations import (
     PassThroughReducer,
     dispatch,
@@ -58,6 +62,11 @@ from meho_backplane.operations._secret_values import (
     hide_secret_values,
     plain_fields_of,
     reveal_hidden_values,
+)
+from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations.approval_queue import (
+    approve_request,
+    resume_dispatch_after_approval,
 )
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.redaction import redact
@@ -129,9 +138,11 @@ def stub_embedding_service() -> AsyncMock:
     return service
 
 
-def _operator(principal_kind: PrincipalKind = PrincipalKind.USER) -> Operator:
+def _operator(
+    principal_kind: PrincipalKind = PrincipalKind.USER, *, sub: str = "op-secret-values-test"
+) -> Operator:
     return Operator(
-        sub="op-secret-values-test",
+        sub=sub,
         name="Test Operator",
         email=None,
         raw_jwt="<test-raw-jwt>",
@@ -179,7 +190,9 @@ async def _guest_env_handler(
     }
 
 
-async def _register(op_id: str, handler: Any, embedding_service: AsyncMock) -> None:
+async def _register(
+    op_id: str, handler: Any, embedding_service: AsyncMock, *, requires_approval: bool = False
+) -> None:
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
     await register_typed_operation(
         product="vault",
@@ -191,6 +204,7 @@ async def _register(op_id: str, handler: Any, embedding_service: AsyncMock) -> N
         description="Read a secret.",
         parameter_schema={"type": "object", "properties": {"path": {"type": "string"}}},
         safety_level="safe",
+        requires_approval=requires_approval,
         when_to_use=None,
         embedding_service=embedding_service,
     )
@@ -689,3 +703,79 @@ async def test_an_operation_that_makes_a_credential_still_returns_it(
     assert _TOKEN not in json.dumps(row.raw_payload)
     assert row.raw_payload["secret_id"] == _HIDDEN_FIELD
     assert "reveal_secret" not in row.payload
+
+
+# ---------------------------------------------------------------------------
+# A call that waits for approval keeps the reveal choice
+# ---------------------------------------------------------------------------
+
+
+async def _approval_requests() -> list[ApprovalRequest]:
+    async with get_sessionmaker()() as fresh:
+        return list((await fresh.execute(select(ApprovalRequest))).scalars().all())
+
+
+async def _park_approve_and_run(op_id: str, *, reveal: bool) -> Any:
+    """A person's call waits for approval; another person approves and runs it."""
+    requester = _operator(PrincipalKind.USER, sub="requester")
+    parked = await _read(requester, reveal=reveal, op_id=op_id)
+    assert parked.status == "awaiting_approval", parked.error
+    request_id = UUID(parked.extras["approval_request_id"])
+
+    reviewer = _operator(PrincipalKind.USER, sub="reviewer")
+    async with get_sessionmaker()() as session:
+        approved = await approve_request(session, request_id, operator=reviewer)
+        await session.commit()
+    return await resume_dispatch_after_approval(operator=reviewer, request=approved, params=None)
+
+
+async def test_reveal_choice_survives_the_wait_for_approval(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The approved run returns the values the requester asked for, once."""
+    op_id = "vault.device.list_from_package"
+    await _register(op_id, _package_device_list, stub_embedding_service, requires_approval=True)
+
+    result = await _park_approve_and_run(op_id, reveal=True)
+
+    assert result.status == "ok", result.error
+    assert result.result["devices"][0]["password"] == _PASSWORD
+    assert result.result["devices"][0]["api_token"] == _API_TOKEN
+    (request,) = await _approval_requests()
+    # The choice is stored with the params; the hash covers the call without it.
+    assert request.params == {"path": "app/db", "reveal_secret": True}
+    assert request.params_hash == compute_params_hash({"path": "app/db"})
+    (row,) = await _audit_rows(op_id)
+    assert row.payload["reveal_secret"] is True
+    assert [value for value in _field_values() if value in json.dumps(row.raw_payload)] == []
+
+
+async def test_approved_run_without_the_flag_keeps_the_default_view(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    op_id = "vault.device.list_from_package"
+    await _register(op_id, _package_device_list, stub_embedding_service, requires_approval=True)
+
+    result = await _park_approve_and_run(op_id, reveal=False)
+
+    assert result.status == "ok", result.error
+    assert result.result["devices"][0]["password"] == _HIDDEN_FIELD
+    assert [value for value in _field_values() if value in result.model_dump_json()] == []
+    (request,) = await _approval_requests()
+    assert request.params == {"path": "app/db"}
+    (row,) = await _audit_rows(op_id)
+    assert "reveal_secret" not in row.payload
+
+
+async def test_reveal_by_an_agent_is_refused_before_the_call_waits_for_approval(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    op_id = "vault.device.list_from_package"
+    await _register(op_id, _package_device_list, stub_embedding_service, requires_approval=True)
+
+    result = await _read(_operator(PrincipalKind.AGENT), reveal=True, op_id=op_id)
+
+    assert result.status == "denied"
+    assert await _approval_requests() == []
+    (row,) = await _audit_rows(op_id)
+    assert row.payload["result_status"] == "denied"

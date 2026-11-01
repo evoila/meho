@@ -448,6 +448,15 @@ redaction (`dispatcher._protect_secret_values`), for **every** operation:
   sites are the `/ui` Vault console (`ui/routes/vault/routes.py`,
   reveal-on-click) and CLI `meho secret read`
   (`cli/internal/cmd/secret/read.go`).
+  A call that waits for approval keeps the choice: `create_pending_request`
+  stores the flag with the params on the approval request (in
+  `approval_request.params`, or in the encrypted payload of a credential
+  write), outside `params_hash`, so the retry check and the approve
+  surfaces compare the call without it. `resume_dispatch_after_approval`
+  and the rerun of a failed run take it off again before the hash and
+  preview checks (`_secret_values.split_reveal_secret`) and put it back on
+  the params of the approved run, which answers with the values and stamps
+  the choice on its audit row.
 - **Audit stamp.** `reveal_secret_var` (bound with the same token/finally
   discipline as `policy_decision_var`) lands as `payload['reveal_secret']`
   on the audit row of every secret read (`True` = values asked for,

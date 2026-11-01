@@ -232,6 +232,11 @@ Two kinds of rows carry a keyed hash of a call's params:
   - For a `credential_write` operation they are not on the request row.
     They are encrypted in `approval_execution_payload` instead (see
     "Credential-write execution custody" below).
+  - When the requester asked for the hidden values of the answer
+    (`reveal_secret: true`), that flag is stored with the params but is
+    not part of the hash. The approved run takes it off before the hash
+    and preview checks and honours it (see
+    [redaction.md](redaction.md#secret-named-fields-in-every-answer-reveal_secret-for-people-and-service-principals)).
 - **Audit rows** (`payload.params_hash` on dispatch, MCP and hosted-agent
   tool rows, and `operation_run.params_hash`) store the hash, not the params.
   They use the same keyed hash, but each secret-named value (`password`,

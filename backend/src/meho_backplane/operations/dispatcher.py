@@ -369,6 +369,7 @@ from meho_backplane.operations._secret_values import (
     hide_secret_values,
     hides_secret_values,
     reveal_hidden_values,
+    split_reveal_secret,
 )
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
@@ -3182,6 +3183,7 @@ async def _handle_needs_approval(
     duration_ms: float,
     preview_hash: str | None = None,
     idempotency_key: str | None = None,
+    reveal_secret: bool = False,
 ) -> OperationResult:
     """Create a durable pending approval row and return an awaiting_approval result.
 
@@ -3224,6 +3226,11 @@ async def _handle_needs_approval(
     ``idempotency_key_conflict`` and nothing is parked.
     On unexpected failure, logs at error level and falls back to a
     ``denied`` result so the dispatcher never raises.
+
+    *reveal_secret* is the caller's ``reveal_secret: true`` (an agent was
+    refused before this point). It is saved with the params on the
+    request, outside the params hash, so the approved run returns the
+    values the caller asked for instead of the default view.
     """
     # Thread the current agent run id (if any) from the contextvar so the
     # approval request links back to the paused run.
@@ -3326,6 +3333,7 @@ async def _handle_needs_approval(
                 proposed_effect=proposed_effect,
                 preview_hash=preview_hash,
                 idempotency_key=idempotency_key,
+                reveal_secret=reveal_secret,
             )
             await session.commit()
         if getattr(request, "_reused", False):
@@ -3470,10 +3478,9 @@ async def dispatch(
     # is refused). Stripping keeps the flag off the op's
     # ``additionalProperties: false`` schema, out of the handler's params,
     # and out of ``params_hash`` -- so a hidden answer and its reveal share
-    # one hash (the reveal choice is recorded separately on the audit row).
-    reveal_secret = bool(params.get("reveal_secret"))
-    if "reveal_secret" in params:
-        params = {key: value for key, value in params.items() if key != "reveal_secret"}
+    # one hash (the reveal choice is recorded separately on the audit row,
+    # and a call that waits for approval keeps it on the approval request).
+    params, reveal_secret = split_reveal_secret(params)
     op_class = classify_op(op_id)
     secret_read = op_class == "credential_read" or hides_secret_values(op_id)
     makes_new_secret = op_class == "credential_mint"
@@ -3689,6 +3696,7 @@ async def dispatch(
                     duration_ms=duration_ms,
                     preview_hash=preview_hash,
                     idempotency_key=idempotency_key,
+                    reveal_secret=reveal_secret,
                 )
             if verdict is not PermissionVerdict.AUTO_EXECUTE:
                 # Defensive fail-closed: only an explicit AUTO_EXECUTE proceeds

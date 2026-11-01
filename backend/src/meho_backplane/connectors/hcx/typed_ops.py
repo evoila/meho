@@ -14,7 +14,9 @@ and certificate changes in :mod:`meho_backplane.connectors.hcx.profile_ops` and
 and the task read in :mod:`meho_backplane.connectors.hcx.service_mesh_ops`; the
 network extension operations in
 :mod:`meho_backplane.connectors.hcx.network_extension_ops`; the migration
-operations in :mod:`meho_backplane.connectors.hcx.migration_ops`. The dataclass +
+operations in :mod:`meho_backplane.connectors.hcx.migration_ops`; the Network
+Extension HA operations in :mod:`meho_backplane.connectors.hcx.ha_group_ops`.
+The dataclass +
 tuple + registrar shape mirrors :mod:`meho_backplane.connectors.nsx.typed_ops`.
 """
 
@@ -23,6 +25,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.hcx.diagnostics_ops import HCX_DIAGNOSTICS_OPS
+from meho_backplane.connectors.hcx.ha_group_ops import (
+    HCX_HA_GROUP_OPS,
+    HCX_HA_GROUP_WHEN_TO_USE_BY_GROUP,
+)
 from meho_backplane.connectors.hcx.inventory_ops import HCX_INVENTORY_OPS
 from meho_backplane.connectors.hcx.migration_ops import (
     HCX_MIGRATION_OPS,
@@ -69,6 +75,7 @@ HCX_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     **HCX_PROFILE_WHEN_TO_USE_BY_GROUP,
     **HCX_NETWORK_EXTENSION_WHEN_TO_USE_BY_GROUP,
     **HCX_MIGRATION_WHEN_TO_USE_BY_GROUP,
+    **HCX_HA_GROUP_WHEN_TO_USE_BY_GROUP,
 }
 
 _PART_ITEM_SCHEMA: dict[str, Any] = {
@@ -210,6 +217,7 @@ HCX_TYPED_OPS: tuple[HcxTypedOp, ...] = (
     *HCX_SERVICE_MESH_OPS,
     *HCX_NETWORK_EXTENSION_OPS,
     *HCX_MIGRATION_OPS,
+    *HCX_HA_GROUP_OPS,
 )
 
 

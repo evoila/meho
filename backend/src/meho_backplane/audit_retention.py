@@ -5,11 +5,12 @@
 
 The connector-boundary redaction middleware (G11.4-T2 #1071) captures
 the raw connector response *before* the redactor runs and persists it
-verbatim into :attr:`~meho_backplane.db.models.AuditLog.raw_payload` so
-an auditor can reconstruct the pre-redaction view (the documented design
-intent at ``db/models.py``: the trust boundary is the API surface, not
-the audit log). For ``credential_read``-classified ops only the *caller*
-copy is scrubbed, so a raw secret can survive in ``raw_payload``.
+into :attr:`~meho_backplane.db.models.AuditLog.raw_payload` so an
+auditor can reconstruct the pre-redaction view. Each value the redaction
+hides is stored as a keyed fingerprint
+(:mod:`~meho_backplane.operations._secret_values`); rows written before
+that change can still hold raw values, and the rest of a raw answer is
+still a vendor body that can be large.
 
 Unlike every sibling durable store -- topology history
 (:mod:`~meho_backplane.topology.history_retention`), the flight-recorder

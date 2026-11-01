@@ -172,9 +172,15 @@ _JWT = re.compile(
 # blob). A value that only starts like one (``[REDACTED:made-up``) or
 # that goes on after the ``]`` (``[REDACTED:x]made-up``) is a value
 # like any other and is redacted whole.
+#
+# The label may follow ``_`` or ``-`` (``DB_PASSWORD=...``,
+# ``GITHUB_TOKEN=...``, ``x-api-key: ...``), so the start is "no letter or
+# digit before the label" instead of ``\b``: ``_`` is a word character,
+# and ``\b`` would see no boundary between ``DB_`` and ``PASSWORD``. A
+# label glued to letters (``mypassword=``) still does not match.
 _NOT_A_PLACEHOLDER: Final[str] = r"(?!\[REDACTED:[^\]\s'\"]+\](?!" + _VALUE_CHARS + "))"
 _API_KEY = re.compile(
-    r"\b(?:"
+    r"(?<![A-Za-z0-9])(?:"
     r"api[_-]?key"
     r"|access[_-]?token"
     r"|refresh[_-]?token"
@@ -190,6 +196,17 @@ _API_KEY = re.compile(
     re.IGNORECASE,
 )
 
+# PEM private keys: the whole block from the ``BEGIN`` line to the
+# matching ``END`` line (``RSA PRIVATE KEY``, ``EC PRIVATE KEY``,
+# ``ENCRYPTED PRIVATE KEY``, ``OPENSSH PRIVATE KEY``, plain ``PRIVATE
+# KEY``). A block cut off before its ``END`` line is redacted to the end
+# of the text. Public keys and certificates do not match.
+_PEM_PRIVATE_KEY = re.compile(
+    r"-----BEGIN ((?:[A-Z0-9]+ )*)PRIVATE KEY-----"
+    r".*?(?:-----END \1PRIVATE KEY-----|\Z)",
+    re.DOTALL,
+)
+
 # Kubeconfig: the giveaway is ``apiVersion: v1`` + ``kind: Config``
 # nearby in the same blob. We match the whole document by locking onto
 # the YAML preamble and then sweeping until the next blank line OR end
@@ -199,19 +216,6 @@ _API_KEY = re.compile(
 _KUBECONFIG = re.compile(
     r"apiVersion\s*:\s*v1\s*\n(?:.*\n){0,80}?kind\s*:\s*Config(?:\n(?:.*\n){0,200}?(?:\n|$))?",
     re.IGNORECASE,
-)
-
-# PEM private keys: from the ``-----BEGIN ... PRIVATE KEY-----`` line to
-# the matching ``END`` line (RSA, EC, OpenSSH, PKCS 8, encrypted, PGP
-# ``PRIVATE KEY BLOCK``). A key cut off before its ``END`` line (a read
-# with a byte cap) is redacted to the end of the text. Certificates and
-# public keys (``BEGIN CERTIFICATE`` / ``BEGIN PUBLIC KEY``) stay. The
-# lazy body stops at the first ``END`` line, and the ``BEGIN`` anchor is
-# rare, so the scan stays linear.
-_PRIVATE_KEY_BLOCK = re.compile(
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"
-    r"[\s\S]*?"
-    r"(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\Z)",
 )
 
 # crypt(3) password hashes as in ``/etc/shadow``: ``$<id>$`` then one to
@@ -297,7 +301,7 @@ NAMED_PATTERNS: Final[dict[str, re.Pattern[str] | SecretFinder]] = {
     "jwt": _JWT,
     "api_key": _API_KEY,
     "kubeconfig": _KUBECONFIG,
-    "private_key_block": _PRIVATE_KEY_BLOCK,
+    "pem_private_key": _PEM_PRIVATE_KEY,
     "password_hash": _PASSWORD_HASH,
     "bind_key_secret": BIND_KEY_SECRET,
     "uuid": _UUID,

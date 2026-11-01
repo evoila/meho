@@ -39,6 +39,14 @@ rules:
     action: redact
     reason: "TSIG / rndc key secret in a BIND config file"
 
+  # Before the api_key rule: a ``private_key=-----BEGIN ...`` pair would
+  # otherwise lose only its first line to that rule, and the key body
+  # would stay.
+  - name: strip-pem-private-key
+    pattern: pem_private_key
+    action: redact
+    reason: "PEM private key block in payload"
+
   - name: strip-authorization-header
     pattern: authorization_header
     action: redact
@@ -63,11 +71,6 @@ rules:
     pattern: kubeconfig
     action: redact
     reason: "kubeconfig blob in payload"
-
-  - name: strip-private-key-block
-    pattern: private_key_block
-    action: redact
-    reason: "PEM private key block"
 
   - name: strip-password-hash
     pattern: password_hash

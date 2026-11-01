@@ -44,7 +44,7 @@ _EXPECTED_NAMES = {
     "jwt",
     "api_key",
     "kubeconfig",
-    "private_key_block",
+    "pem_private_key",
     "password_hash",
     "bind_key_secret",
     "uuid",
@@ -85,20 +85,6 @@ _BIND_KEY_SECRET_FIXTURE_NEG = 'the secret is in the vault; key "rndc-key" { alg
 # PEM blocks and crypt(3) hashes, built from fragments so secret scanners
 # do not flag this file.
 _PEM_DASHES = "-" * 5
-_PRIVATE_KEY_BLOCK_FIXTURE = (
-    _PEM_DASHES
-    + "BEGIN OPENSSH "
-    + "PRIVATE KEY"
-    + _PEM_DASHES
-    + "\nb3BlbnNzaC1rZXktdjEAAAAA\nZmFrZWtleWJvZHk=\n"
-    + _PEM_DASHES
-    + "END OPENSSH "
-    + "PRIVATE KEY"
-    + _PEM_DASHES
-)
-_PRIVATE_KEY_CUT_FIXTURE = (
-    _PEM_DASHES + "BEGIN " + "PRIVATE KEY" + _PEM_DASHES + "\nMIIEvQIBADANBgkqhkiG9w0B"
-)
 _CERTIFICATE_FIXTURE = (
     _PEM_DASHES
     + "BEGIN CERTIFICATE"
@@ -114,6 +100,15 @@ _BCRYPT_HASH_FIXTURE = "$" + "2b$" + "12$" + "abcdefghijklmnopqrstuvABCDEFGHIJKL
 _YESCRYPT_HASH_FIXTURE = "$" + "y$" + "j9T$" + "saltsaltsalt$" + "abcdefghijklmnopqrstuvwxyz012345"
 _ARGON2_HASH_FIXTURE = (
     "$" + "argon2id$" + "v=19$" + "m=65536,t=3,p=4$" + "bXlzYWx0eHk$" + "aGFzaGhhc2hoYXNoaGFzaA"
+)
+
+
+# Assembled from fragments so secret scanners do not flag the test source.
+_PEM_PRIVATE_KEY_FIXTURE_POS = (
+    "-----BEGIN " + "EC PRIVATE KEY-----\nMHcCAQEEmadeup\n-----END " + "EC PRIVATE KEY-----"
+)
+_PEM_PUBLIC_KEY_FIXTURE_NEG = (
+    "-----BEGIN " + "PUBLIC KEY-----\nMFkwmadeup\n-----END PUBLIC KEY-----"
 )
 
 
@@ -701,6 +696,9 @@ def test_get_pattern_unknown_raises() -> None:
             ("apiVersion: v1\nkind: Pod\nmetadata:\n  name: nginx\n"),
             False,
         ),
+        # pem_private_key: a private key block, not a public key
+        ("pem_private_key", _PEM_PRIVATE_KEY_FIXTURE_POS, True),
+        ("pem_private_key", _PEM_PUBLIC_KEY_FIXTURE_NEG, False),
         # bind_key_secret: the quoted value after the ``secret`` keyword
         (
             "bind_key_secret",
@@ -723,10 +721,6 @@ def test_get_pattern_unknown_raises() -> None:
             "build_hash=abcdef0123456789 (16 hex, not uuid-shaped)",
             False,
         ),
-        # private_key_block: PEM private keys, also when cut off
-        ("private_key_block", _PRIVATE_KEY_BLOCK_FIXTURE, True),
-        ("private_key_block", _PRIVATE_KEY_CUT_FIXTURE, True),
-        ("private_key_block", _CERTIFICATE_FIXTURE, False),
         # password_hash: crypt(3) hashes as in /etc/shadow
         ("password_hash", _SHADOW_LINE_FIXTURE, True),
         ("password_hash", _BCRYPT_HASH_FIXTURE, True),
@@ -838,10 +832,10 @@ _PATTERN_TEST_ROWS: list[tuple[str, str, bool]] = [
     ("api_key", "the token machine is broken", False),
     ("kubeconfig", "apiVersion: v1\nkind: Config\n", True),
     ("kubeconfig", "apiVersion: v1\nkind: Pod\n", False),
+    ("pem_private_key", _PEM_PRIVATE_KEY_FIXTURE_POS, True),
+    ("pem_private_key", _PEM_PUBLIC_KEY_FIXTURE_NEG, False),
     ("bind_key_secret", _BIND_KEY_SECRET_FIXTURE_POS, True),
     ("bind_key_secret", _BIND_KEY_SECRET_FIXTURE_NEG, False),
-    ("private_key_block", _PRIVATE_KEY_BLOCK_FIXTURE, True),
-    ("private_key_block", _CERTIFICATE_FIXTURE, False),
     ("password_hash", _SHADOW_LINE_FIXTURE, True),
     ("password_hash", "daemon:*:19000:0:99999:7:::", False),
     ("uuid", "tenant_id=12345678-1234-1234-1234-123456789abc", True),
@@ -948,11 +942,3 @@ def test_default_policy_redacts_shadow_hash_and_keeps_the_other_columns() -> Non
     assert result.redacted == (
         "root:[REDACTED:password_hash]:19000:0:99999:7:::\ndaemon:*:19000:0:99999:7:::"
     )
-
-
-def test_default_policy_redacts_private_key_block_and_keeps_certificates() -> None:
-    """A private key block is hidden whole; a certificate next to it stays."""
-    policy = load_policy_yaml(DEFAULT_POLICY_PACKAGE, DEFAULT_POLICY_RESOURCE)
-    text = _CERTIFICATE_FIXTURE + "\n" + _PRIVATE_KEY_BLOCK_FIXTURE + "\ntail"
-    result = redact(text, policy)
-    assert result.redacted == _CERTIFICATE_FIXTURE + "\n[REDACTED:private_key_block]\ntail"

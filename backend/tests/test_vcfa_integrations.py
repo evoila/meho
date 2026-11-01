@@ -21,6 +21,7 @@ from sqlalchemy import select
 from meho_backplane.connectors.vcf_automation import VcfAutomationConnector
 from meho_backplane.connectors.vcf_automation._routing import plane_for_path
 from meho_backplane.connectors.vmware_shared.vcfa_integration_ops import INTEGRATION_OPS
+from meho_backplane.connectors.vmware_shared.vcfa_integrations import TRACKER_TEXT_HIDDEN
 from meho_backplane.connectors.vra8 import register_vra8_integration_operations
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
@@ -185,6 +186,58 @@ async def test_list_git_sources_with_their_last_sync(vcfa: VcfAutomationConnecto
     assert rows[0]["last_sync"] == {"request_id": "r-new", "status": "FAILED", "at": "2"}
 
 
+def _iaas_pages(*pages: list[dict[str, Any]]) -> Any:
+    """A respx side effect: the IaaS page for the request's ``$skip``."""
+    total = sum(len(page) for page in pages)
+
+    def _respond(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["$top"] == "500"
+        skip = int(request.url.params.get("$skip", "0"))
+        rows = [row for page in pages for row in page][skip : skip + 500]
+        return httpx.Response(200, json={"content": rows, "totalElements": total})
+
+    return _respond
+
+
+def _content_pages(*pages: list[dict[str, Any]]) -> Any:
+    """A respx side effect: the content API page for the request's ``page``."""
+
+    def _respond(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["size"] == "500"
+        number = int(request.url.params.get("page", "0"))
+        rows = pages[number] if number < len(pages) else []
+        meta = {"number": number, "size": 500, "totalPages": len(pages)}
+        return httpx.Response(200, json={"content": rows, "page": meta})
+
+    return _respond
+
+
+async def test_list_reads_every_page_of_integrations(vcfa: VcfAutomationConnector) -> None:
+    """The vendor pages the list; an integration on the second page is a row too."""
+    first = [{"id": f"int-{n}", "name": f"<n{n}>", "integrationType": "vro"} for n in range(500)]
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        route = mock.get(INTEGRATIONS).mock(side_effect=_iaas_pages(first, [_IPAM]))
+        result = await run("vcfa.tenant.integration.list", {"integration_type": "ipam"})
+    data = result["result"]
+    assert data["total"] == 1, data["total"]
+    assert data["rows"][0]["id"] == "int-ipam"
+    assert [c.request.url.params["$skip"] for c in route.calls] == ["0", "500"]
+
+
+async def test_list_git_sources_reads_every_page(vcfa: VcfAutomationConnector) -> None:
+    """A Git source on the second page of the content sources is a row too."""
+    first = [{"id": f"src-{n}", "typeId": "com.vmware.marketplace"} for n in range(500)]
+    git = {"id": "src-git", "name": "<source>", "typeId": "com.github", "config": {}}
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        route = mock.get(SOURCES).mock(side_effect=_content_pages(first, [git]))
+        mock.get(SYNC_HISTORY).respond(200, json={"content": []})
+        result = await run("vcfa.tenant.integration.list", {"view": "git_sources"})
+    assert [row["id"] for row in result["result"]["rows"]] == ["src-git"]
+    assert [c.request.url.params["page"] for c in route.calls] == ["0", "1"]
+
+
 async def test_status_read_of_a_failed_sync(vcfa: VcfAutomationConnector) -> None:
     sync = {
         "requestId": "sync-1",
@@ -333,6 +386,27 @@ async def test_validate_only_with_a_wrong_password_saves_nothing(
     assert [s["result"] for s in data["steps"]] == ["failed", "not_run", "not_run"]
     assert no_secret(result)
     assert any("action run record" in note for note in data["notes"])
+
+
+async def test_tracker_read_hides_the_vendor_text_of_a_failed_test(
+    vcfa: VcfAutomationConnector, vault: Any
+) -> None:
+    """The same failed tracker, read through integration.set and through the list op."""
+    failed = tracker("t-test", "FAILED", message=f"Login failed for user; got {VAULT_VALUE}")
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        mock.get(INTEGRATIONS).respond(200, json={"content": []})
+        mock.post(INTEGRATIONS).respond(202, json=tracker("t-test", "INPROGRESS"))
+        mock.get(f"{TRACKER}/t-test").respond(200, json=failed)
+        changed = await run("vcfa.tenant.integration.set", _IPAM_CALL)
+        read = await run("vcfa.tenant.integration.list", {"request_tracker_id": "t-test"})
+    assert changed["result"]["status"] == "test_failed"
+    assert no_secret(changed)
+    job = read["result"]["job"]
+    assert job["state"] == "FAILED"
+    assert job["done"] is True
+    assert job["message"] == TRACKER_TEXT_HIDDEN
+    assert no_secret(read)
 
 
 async def test_validate_only_with_a_wrong_address_reports_the_vendor_error(
@@ -495,6 +569,90 @@ async def test_a_save_whose_tracker_stops_answering_lists_the_steps(
     assert "t-save" in data["steps"][1]["error"]
     assert data["save"]["id"] == "t-save"
     assert data["save"]["status"] == "not_reachable"
+    assert no_secret(result)
+
+
+_LOST = [httpx.ConnectError("no route"), httpx.ReadTimeout("slow"), httpx.Response(503)]
+_LOST_IDS = ["no-connection", "timeout", "http-503"]
+
+
+@pytest.mark.parametrize("lost", _LOST, ids=_LOST_IDS)
+async def test_a_save_whose_send_gets_no_answer_keeps_the_steps(
+    vcfa: VcfAutomationConnector, vault: Any, lost: Any
+) -> None:
+    """The test passed; the save send itself gets no answer. The caller keeps every step."""
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        mock.get(INTEGRATIONS).respond(200, json={"content": []})
+        mock.post(INTEGRATIONS).mock(
+            side_effect=[httpx.Response(202, json=tracker("t-test", "FINISHED")), lost]
+        )
+        result = await run("vcfa.tenant.integration.set", _VRO_CALL)
+    assert result["status"] == "ok", result
+    data = result["result"]
+    assert data["status"] == "unfinished", data
+    assert [s["result"] for s in data["steps"]] == ["done", "unknown", "not_run"]
+    assert "did not answer" in data["steps"][1]["error"]
+    assert data["test"]["status"] == "FINISHED"
+    assert data["save"] is None
+    assert "vcfa.tenant.integration.list" in data["guidance"]
+    assert no_secret(result)
+
+
+async def test_a_change_whose_send_gets_no_answer_keeps_the_id(
+    vcfa: VcfAutomationConnector, vault: Any
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        mock.get(f"{INTEGRATIONS}/int-vro").respond(200, json=_VRO)
+        mock.post(INTEGRATIONS).respond(202, json=tracker("t-test", "FINISHED"))
+        mock.patch(f"{INTEGRATIONS}/int-vro").mock(side_effect=httpx.ReadTimeout("slow"))
+        result = await run("vcfa.tenant.integration.set", {**_VRO_CALL, "id": "int-vro"})
+    data = result["result"]
+    assert data["status"] == "unfinished", data
+    assert [s["result"] for s in data["steps"]] == ["done", "unknown", "not_run"]
+    assert data["integration"]["id"] == "int-vro"
+    assert "id int-vro" in data["guidance"]
+    assert no_secret(result)
+
+
+@pytest.mark.parametrize("lost", _LOST, ids=_LOST_IDS)
+async def test_a_test_whose_send_gets_no_answer_saves_nothing(
+    vcfa: VcfAutomationConnector, vault: Any, lost: Any
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        mock.get(INTEGRATIONS).respond(200, json={"content": []})
+        post = mock.post(INTEGRATIONS).mock(side_effect=[lost])
+        result = await run("vcfa.tenant.integration.set", _VRO_CALL)
+    data = result["result"]
+    assert data["status"] == "unfinished", data
+    assert [s["result"] for s in data["steps"]] == ["unknown", "not_run", "not_run"]
+    assert post.call_count == 1
+    assert "call again" in data["guidance"]
+    assert no_secret(result)
+
+
+async def test_a_save_whose_tracker_read_gets_a_vendor_error_lists_the_steps(
+    vcfa: VcfAutomationConnector, vault: Any
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        mock.get(INTEGRATIONS).respond(200, json={"content": []})
+        mock.post(INTEGRATIONS).mock(
+            side_effect=[
+                httpx.Response(202, json=tracker("t-test", "FINISHED")),
+                httpx.Response(202, json=tracker("t-save", "INPROGRESS")),
+            ]
+        )
+        mock.get(f"{TRACKER}/t-save").respond(500, json={"message": f"boom {VAULT_VALUE}"})
+        result = await run("vcfa.tenant.integration.set", _VRO_CALL)
+    data = result["result"]
+    assert data["status"] == "unfinished", result
+    assert [s["result"] for s in data["steps"]] == ["done", "unknown", "not_run"]
+    assert "HTTP 500" in data["steps"][1]["error"]
+    assert data["save"]["status"] == "not_read"
+    assert data["save"]["id"] == "t-save"
     assert no_secret(result)
 
 

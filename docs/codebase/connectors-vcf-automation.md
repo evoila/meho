@@ -417,11 +417,11 @@ method, raw body allowed, one new login on a `401`). `plane_for_path` sends
 
 | op (`vcfa.tenant.` / `vcfa.vra8.`) | what it does and returns | risk level | vendor calls | versions |
 |---|---|---|---|---|
-| `integration.list` | the integrations (flat rows, no secret, no certificate), or the Git content sources with their last sync (`view: git_sources`), or one integration (`id`), or the state of one Git sync (`sync_request_id`) or vendor request (`request_tracker_id`) as `job` | safe | `GET /iaas/api/integrations[/{id}]`, `GET /content/api/sources`, `GET /content/api/sourcecontrol/sync-history`, `GET .../sync-requests/{id}`, `GET /iaas/api/request-tracker/{id}` | 8.18, 9.x |
+| `integration.list` | the integrations (flat rows, no secret, no certificate; every page), or the Git content sources with their last sync (`view: git_sources`; every page), or one integration (`id`), or the state of one Git sync (`sync_request_id`) or vendor request (`request_tracker_id`) as `job` | safe | `GET /iaas/api/integrations[/{id}]`, `GET /content/api/sources`, `GET /content/api/sourcecontrol/sync-history`, `GET .../sync-requests/{id}`, `GET /iaas/api/request-tracker/{id}` | 8.18, 9.x |
 | `integration.set` | adds (`integration_type`: `vro`, `ipam`, `com.github.saas`, `com.gitlab.saas`, `org.bitbucket`) or changes (`id`) an integration: the vendor's test first, then the save; returns `status` (`saved`, `test_failed`, `failed`, `unfinished`, `exists`, `invalid_request`), the two trackers and the steps. It carries the tag `credential`, so traces keep no request body | dangerous, approval | `POST /iaas/api/integrations?validateOnly=true`, `POST /iaas/api/integrations` or `PATCH /iaas/api/integrations/{id}`, `GET /iaas/api/request-tracker/{id}` | 8.18, 9.x |
-| `integration.delete` | lists what uses the integration and stops (`in_use`) unless `confirm_in_use`; then removes it and follows the tracker | destructive, approval, preview first | `GET /iaas/api/external-network-ip-ranges`, `GET /iaas/api/network-profiles`, `GET /content/api/sources`, `DELETE /iaas/api/integrations/{id}`, `GET /iaas/api/request-tracker/{id}` | 8.18, 9.x |
+| `integration.delete` | lists what uses the integration (every page of each list) and stops (`in_use`) unless `confirm_in_use`; then removes it and follows the tracker | destructive, approval, preview first | `GET /iaas/api/external-network-ip-ranges`, `GET /iaas/api/network-profiles`, `GET /content/api/sources`, `DELETE /iaas/api/integrations/{id}`, `GET /iaas/api/request-tracker/{id}` | 8.18, 9.x |
 | `ipam_package.import` | needs the zip's SHA-256 (`expected_sha256`, shown in the preview); downloads a provider zip from an https URL, stops when the SHA-256 does not match, uploads it with the vendor's resumable upload and imports it; returns the file (name, size, SHA-256, source, target) and the provider id | destructive, approval, preview first | `GET /provisioning/ipam/api/providers`, `POST` + `PATCH /provisioning/ipam/api/providers/packages/import[/{upload}]` | 8.18, 9.x |
-| `git_repo.set` | `add`: a Git repository (branch, folder, content type) as a content source of a project, then a sync; answers `accepted` with the sync id. `remove`: deletes a content source | dangerous, approval | `POST /content/api/sources`, `POST /content/api/sourcecontrol/sync-requests`, `DELETE /content/api/sources/{id}` | 8.18, 9.x |
+| `git_repo.set` | `add`: a Git repository (branch, folder, content type) as a content source of a project, then a sync; answers `accepted` with the sync id, or `unfinished` when a step got no answer. `remove`: deletes a content source | dangerous, approval | `POST /content/api/sources`, `POST /content/api/sourcecontrol/sync-requests`, `DELETE /content/api/sources/{id}` | 8.18, 9.x |
 
 On VCF Automation 9 the ops work in a "VM Apps" organization. An "All Apps"
 organization has no IaaS API: `integration.list` answers with an error that
@@ -433,7 +433,17 @@ and is not covered.
   (`password_secret_ref`, optional `_mount` and `_key`), read under the
   caller's identity only when the approved call runs. It goes only into the
   request body. A vendor or tracker text that repeats it is replaced with a
-  fixed note. Results drop secret-named properties and the certificate.
+  fixed note. The separate tracker read (`integration.list` with
+  `request_tracker_id`) has no secret in hand, so it never shows the
+  vendor's text: `message` is a fixed note that says so. A Git sync request
+  carries no secret, so its message stays. Results drop secret-named
+  properties and the certificate.
+- **Every page.** The vendor pages its lists. MEHO reads every page of the
+  IaaS lists (`$top` and `$skip`, until `totalElements` rows are in) and of
+  the content API lists (`page` and `size`, until `page.totalPages`), so the
+  integration list, the Git sources with their last sync, and the "what uses
+  it" check of the remove see every row. A page that repeats the one before
+  it, or the 200th page, ends the read.
 - **IPAM shape.** Learned on a real system; the public API file does not say
   it. The running environment is `faasProviderEndpointId` (the id of the
   `abx.endpoint` integration), the login goes at the top level
@@ -447,10 +457,13 @@ and is not covered.
   `ipam_package.import`). The handler runs until every step is done and
   answers with the steps that ran, the failed step with the vendor's error,
   and the steps that did not run. It undoes nothing. When the system stops
-  answering while MEHO reads the vendor's request tracker (no connection, or
-  `502`/`503`/`504`), the step is `unknown`, the tracker comes back with
-  `status: not_reachable` and its id, and the answer is `unfinished` with
-  the steps. Call these ops with
+  answering at the send of a step (no connection, a timeout, or
+  `502`/`503`/`504`) or while MEHO reads the vendor's request tracker, the
+  step is `unknown` (the tracker, when there is one, comes back with
+  `status: not_reachable` and its id; `not_read` when the tracker read got a
+  vendor error), and the answer is `unfinished` with the steps that ran, the
+  id MEHO knows (a changed integration, a created content source) and what
+  to read before the next call. Call these ops with
   `async: true` ([async-governed-dispatch.md](async-governed-dispatch.md)):
   MEHO answers `202` with a run handle and stores the final answer. MEHO's
   async mode does not resume: if MEHO restarts during the call, the run ends

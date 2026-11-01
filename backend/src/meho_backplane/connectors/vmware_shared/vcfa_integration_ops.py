@@ -130,7 +130,9 @@ _LIST = IntegrationOpSpec(
         "output_shape": (
             "{view, rows: [flat rows], total, job}. job is set for sync_request_id or "
             "request_tracker_id: {kind, job_id, state, progress, message, done, checked_at}. "
-            "state not_reachable means the system did not answer; it is not a failure. A 404 "
+            "state not_reachable means the system did not answer; it is not a failure. A "
+            "request tracker's message is a fixed note, not the vendor's text (the request "
+            "may have carried a secret); the op that sent it shows the text. A 404 "
             "on the integration list on VCF Automation 9 means an 'All Apps' organization."
         ),
         "next_step": (
@@ -479,9 +481,9 @@ _GIT = IntegrationOpSpec(
         "properties": {
             "status": field(
                 "string",
-                "accepted (the sync started or already runs; not done), exists, failed, removed "
-                "or unchanged.",
-                enum=["accepted", "exists", "failed", "removed", "unchanged"],
+                "accepted (the sync started or already runs; not done), exists, failed, "
+                "unfinished (a step got no answer; see the steps), removed or unchanged.",
+                enum=["accepted", "exists", "failed", "unfinished", "removed", "unchanged"],
             ),
             "source": obj(
                 "The content source.",

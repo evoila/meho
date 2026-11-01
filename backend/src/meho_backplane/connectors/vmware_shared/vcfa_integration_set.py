@@ -15,7 +15,10 @@ MEHO does this work inside its own call, in three steps:
 3. **read** — read the saved integration.
 
 The answer lists the steps that ran, the step that failed with the vendor's
-error, and the steps that did not run. MEHO undoes nothing.
+error, and the steps that did not run. A step whose answer is lost (no
+connection, a timeout, or HTTP 502/503/504) is ``unknown``: the answer is
+``unfinished``, keeps the id of a changed integration, and says what to read
+before the next call. MEHO undoes nothing.
 
 The password or token comes from Vault (``password_secret_ref``) and goes
 only into the request body; a vendor text that repeats it is replaced.
@@ -45,9 +48,9 @@ from meho_backplane.connectors.vmware_shared.vcfa_integration_calls import (
     Calls,
     Steps,
     follow_tracker,
+    mark_failed_send,
     path_with,
     read_secret,
-    vendor_text,
 )
 from meho_backplane.connectors.vmware_shared.vcfa_integrations import (
     GIT_INTEGRATION_TYPES,
@@ -157,6 +160,8 @@ class _Run:
 
     calls: Calls
     params: Mapping[str, Any]
+    #: The stored integration on a change; its id stays in every answer.
+    existing: Mapping[str, Any] | None = None
     steps: Steps = field(default_factory=lambda: Steps("test", "save", "read"))
     secrets: tuple[str | None, ...] = ()
     notes: list[str] = field(default_factory=list)
@@ -221,7 +226,7 @@ async def _integration_set(calls: Calls, params: Mapping[str, Any]) -> dict[str,
         raise ValueError("integration_type is required to add an integration; nothing was sent")
     props = _check_properties(params, integration_type, existing)
     _check_login(params, integration_type)
-    run = _Run(calls, params)
+    run = _Run(calls, params, existing)
     if existing is None:
         same = [r for r in await list_integrations(calls) if r.get("name") == params["name"]]
         if same:
@@ -237,11 +242,18 @@ async def _integration_set(calls: Calls, params: Mapping[str, Any]) -> dict[str,
     if integration_type == "ipam":
         run.notes.append(IPAM_TEST_NOTE)
     if not await _test(run, spec):
+        if run.steps.rows()[0]["result"] == "failed":
+            return run.answer(
+                "test_failed",
+                "The test did not pass, so nothing was saved. Read the step error, fix the "
+                "input (address, login, certificate) and call again.",
+            )
         return run.answer(
-            "test_failed" if run.steps.rows()[0]["result"] == "failed" else "unfinished",
-            "The test did not pass, so nothing was saved. Read the step error, fix the input "
-            "(address, login, certificate) and call again. If the test did not end in time, "
-            f"read its tracker with {calls.op('integration.list')} request_tracker_id.",
+            "unfinished",
+            "The test did not end, so nothing was saved. When the step error names a tracker, "
+            f"read it with {calls.op('integration.list')} request_tracker_id. Otherwise the "
+            "system did not answer the test; call again.",
+            existing,
         )
     return await _save(run, spec)
 
@@ -249,11 +261,28 @@ async def _integration_set(calls: Calls, params: Mapping[str, Any]) -> dict[str,
 async def _test(run: _Run, spec: dict[str, Any]) -> bool:
     try:
         sent = await run.calls.iaas("POST", INTEGRATIONS_PATH, json=spec, validateOnly="true")
-    except httpx.HTTPStatusError as exc:
-        run.steps.failed("test", vendor_text(exc, run.secrets))
+    except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+        mark_failed_send(run.steps, "test", exc, run.secrets)
         return False
     run.test = await follow_tracker(run.calls, run.steps, "test", sent, run.wait, run.secrets)
     return bool(run.test["status"] == "FINISHED")
+
+
+def _save_lost_text(calls: Calls, params: Mapping[str, Any]) -> str:
+    """What to read before the next call when the save got no answer."""
+    head = (
+        "The test passed. The save was sent, but the system did not answer, so MEHO does not "
+        "know whether the vendor saved it. "
+    )
+    if params.get("id"):
+        return head + (
+            f"Read the integration with {calls.op('integration.list')} id {params['id']} and "
+            "compare its properties before you call again."
+        )
+    return head + (
+        f"Read the integrations with {calls.op('integration.list')} before you call again: "
+        "when the name is there, the save worked; call again with its id to change it."
+    )
 
 
 async def _save(run: _Run, spec: dict[str, Any]) -> dict[str, Any]:
@@ -265,15 +294,19 @@ async def _save(run: _Run, spec: dict[str, Any]) -> dict[str, Any]:
             sent = await calls.iaas("PATCH", path, json=body)
         else:
             sent = await calls.iaas("POST", INTEGRATIONS_PATH, json=spec)
-    except httpx.HTTPStatusError as exc:
-        run.steps.failed("save", vendor_text(exc, run.secrets))
-        return run.answer("failed", "The test passed, but the vendor refused the save.")
+    except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+        if not mark_failed_send(run.steps, "save", exc, run.secrets):
+            return run.answer(
+                "failed", "The test passed, but the vendor refused the save.", run.existing
+            )
+        return run.answer("unfinished", _save_lost_text(calls, params), run.existing)
     run.save = await follow_tracker(calls, run.steps, "save", sent, run.wait, run.secrets)
     if run.save["status"] != "FINISHED":
         return run.answer(
             "failed" if run.save["status"] == "FAILED" else "unfinished",
             "The save did not finish. Read the integrations with "
             f"{calls.op('integration.list')} before you call again.",
+            run.existing,
         )
     new_id = params.get("id") or next(
         (m.group(1) for res in run.save["resources"] if (m := _ID_IN_LINK.search(res))), None

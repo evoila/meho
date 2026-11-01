@@ -115,7 +115,8 @@ TRACKER = obj(
         "id": field(["string", "null"], "The tracker id; read it with request_tracker_id."),
         "status": field(
             ["string", "null"],
-            "FINISHED, INPROGRESS or FAILED; not_reachable when the system stopped answering.",
+            "FINISHED, INPROGRESS or FAILED; not_reachable when the system stopped answering, "
+            "not_read when the tracker read got a vendor error.",
         ),
         "progress": field(["integer", "null"], "Percent done."),
         "message": field(
@@ -154,7 +155,9 @@ JOB = obj(
         ),
         "progress": field(["integer", "null"], "Percent done, when the vendor gives it."),
         "message": field(
-            ["string", "null"], "The vendor's message; the error text when it failed."
+            ["string", "null"],
+            "The vendor's message; the error text when it failed. For a request tracker MEHO "
+            "shows a fixed note instead: the request may have carried a password or token.",
         ),
         "done": field("boolean", "True when the job has ended."),
         "checked_at": field("string", "When MEHO read the state (ISO 8601, UTC)."),

@@ -19,7 +19,10 @@ Add (``action: add``) is a vendor job. The steps:
 The answer says ``accepted`` with the vendor's sync id and the status read
 (``<ns>.integration.list`` with ``sync_request_id``). It never says the sync
 is done. A failure part-way returns the steps that ran, the failed step with
-the vendor's error and the steps that did not run; MEHO undoes nothing.
+the vendor's error and the steps that did not run; MEHO undoes nothing. A
+step whose answer is lost (no connection, a timeout, or HTTP 502/503/504)
+is ``unknown``: the answer is ``unfinished``, keeps the source MEHO knows,
+and says what to read before the next call.
 
 Remove (``action: remove``) deletes one content source by id.
 """
@@ -39,8 +42,8 @@ from meho_backplane.connectors.vmware_shared.vcfa_integration_calls import (
     SYNC_REQUESTS_PATH,
     Calls,
     Steps,
+    mark_failed_send,
     path_with,
-    vendor_text,
 )
 from meho_backplane.connectors.vmware_shared.vcfa_integrations import (
     SYNC_RUNNING_STATES,
@@ -177,9 +180,17 @@ async def _find_or_create(
         body["description"] = params["description"]
     try:
         created = await calls.json("POST", CONTENT_SOURCES_PATH, json=body)
-    except httpx.HTTPStatusError as exc:
-        steps.failed("create", vendor_text(exc))
-        return None, _answer("failed", "The vendor refused the new content source.", steps)
+    except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+        if not mark_failed_send(steps, "create", exc):
+            return None, _answer("failed", "The vendor refused the new content source.", steps)
+        return None, _answer(
+            "unfinished",
+            "The new content source was sent, but the system did not answer, so MEHO does not "
+            f"know whether the vendor created it. Read the sources with "
+            f"{calls.op('integration.list')} view git_sources, then call again with the same "
+            "values: MEHO reuses a source that is there and creates it when it is not.",
+            steps,
+        )
     steps.done("create")
     return {
         "id": created.get("id") if isinstance(created, Mapping) else None,
@@ -225,12 +236,21 @@ async def _add(calls: Calls, params: Mapping[str, Any]) -> dict[str, Any]:
         )
     try:
         sync = await calls.json("POST", SYNC_REQUESTS_PATH, json={"sourceId": source["id"]})
-    except httpx.HTTPStatusError as exc:
-        steps.failed("sync", vendor_text(exc))
+    except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+        if not mark_failed_send(steps, "sync", exc):
+            return _answer(
+                "failed",
+                "The content source is there, but the vendor refused the sync. Nothing was "
+                f"undone. Read the source with {calls.op('integration.list')} view git_sources.",
+                steps,
+                source,
+            )
         return _answer(
-            "failed",
-            "The content source is there, but the vendor refused the sync. Nothing was undone. "
-            f"Read the source with {calls.op('integration.list')} view git_sources.",
+            "unfinished",
+            f"The content source is there (id {source['id']}). The sync request was sent, but "
+            "the system did not answer, so MEHO does not know whether the vendor started it. "
+            f"Read the source's last sync with {calls.op('integration.list')} view "
+            "git_sources; when no sync runs, call again: MEHO reuses the source and starts one.",
             steps,
             source,
         )
@@ -259,9 +279,16 @@ async def _remove(calls: Calls, params: Mapping[str, Any]) -> dict[str, Any]:
         raise
     try:
         await calls.send("DELETE", path)
-    except httpx.HTTPStatusError as exc:
-        steps.failed("remove", vendor_text(exc))
-        return _answer("failed", "The vendor refused the remove.", steps)
+    except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+        if not mark_failed_send(steps, "remove", exc):
+            return _answer("failed", "The vendor refused the remove.", steps)
+        return _answer(
+            "unfinished",
+            "The remove was sent, but the system did not answer, so MEHO does not know whether "
+            f"the vendor removed it. Read the sources with {calls.op('integration.list')} view "
+            "git_sources: when the source is gone, it is removed; otherwise call again.",
+            steps,
+        )
     steps.done("remove")
     return _answer("removed", "The content source is removed.", steps)
 

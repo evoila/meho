@@ -62,9 +62,13 @@ __all__ = [
     "IaasNotServedError",
     "IntegrationTransport",
     "Steps",
+    "content_api_rows",
     "content_rows",
     "follow_tracker",
     "hide_secrets",
+    "iaas_rows",
+    "mark_failed_send",
+    "no_answer",
     "now_iso",
     "path_with",
     "read_secret",
@@ -101,8 +105,10 @@ TRACKER_END_STATES: Final[frozenset[str]] = frozenset({"FINISHED", "FAILED"})
 #: HTTP answers that mean the system did not answer (a gateway or proxy said so).
 UNREACHABLE_STATUS: Final[frozenset[int]] = frozenset({502, 503, 504})
 
-#: A row list read asks for at most this many rows (``$top``).
+#: A list read asks for this many rows per page (``$top``, or ``size``).
 LIST_TOP: Final[int] = 500
+#: A list read stops after this many pages, so a page that never ends cannot loop forever.
+MAX_PAGES: Final[int] = 200
 
 #: How long a change waits for a request tracker unless the call says otherwise.
 DEFAULT_WAIT_SECONDS: Final[int] = 300
@@ -211,6 +217,58 @@ def content_rows(page: Any) -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
 
+async def iaas_rows(calls: Calls, path: str, **query: Any) -> list[dict[str, Any]]:
+    """Every row of an IaaS list, read page by page (``$top`` rows, ``$skip`` apart).
+
+    The read ends at an empty page, when ``totalElements`` rows are in, when
+    the vendor gives no total and a page is short, or when a page repeats the
+    one before it (an endpoint that ignores ``$skip``).
+    """
+    rows: list[dict[str, Any]] = []
+    previous: dict[str, Any] | None = None
+    for _ in range(MAX_PAGES):
+        page = await calls.iaas("GET", path, **{"$top": LIST_TOP, "$skip": len(rows), **query})
+        batch = content_rows(page)
+        if not batch or batch[0] == previous:
+            break
+        previous = batch[0]
+        rows.extend(batch)
+        total = page.get("totalElements") if isinstance(page, Mapping) else None
+        if isinstance(total, int):
+            if len(rows) >= total:
+                break
+        elif len(batch) < LIST_TOP:
+            break
+    return rows
+
+
+async def content_api_rows(
+    calls: Calls, path: str, params: Mapping[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    """Every row of a content API list, read page by page (``page`` and ``size``).
+
+    The read ends at an empty page, after the last page (``page.totalPages``),
+    or, when the vendor gives no page count, at a short page.
+    """
+    rows: list[dict[str, Any]] = []
+    for number in range(MAX_PAGES):
+        page = await calls.json(
+            "GET", path, params={**(params or {}), "page": number, "size": LIST_TOP}
+        )
+        batch = content_rows(page)
+        rows.extend(batch)
+        meta = page.get("page") if isinstance(page, Mapping) else None
+        total_pages = meta.get("totalPages") if isinstance(meta, Mapping) else None
+        if not batch:
+            break
+        if isinstance(total_pages, int):
+            if number + 1 >= total_pages:
+                break
+        elif len(batch) < LIST_TOP:
+            break
+    return rows
+
+
 def now_iso() -> str:
     """The time now, ISO 8601 in UTC."""
     return datetime.now(UTC).isoformat()
@@ -296,6 +354,35 @@ def vendor_text(exc: httpx.HTTPStatusError, secrets: Iterable[str | None] = ()) 
     return f"HTTP {resp.status_code}" + (f": {text}" if text else "")
 
 
+def no_answer(exc: httpx.HTTPError) -> str | None:
+    """Why the system did not answer, or ``None`` when the vendor answered with an error.
+
+    No answer is a lost connection or a timeout, or HTTP 502/503/504 from a
+    gateway in front of the vendor. The request may or may not have reached
+    the vendor.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        return f"HTTP {code}" if code in UNREACHABLE_STATUS else None
+    return type(exc).__name__
+
+
+def mark_failed_send(
+    steps: Steps, step: str, exc: httpx.HTTPError, secrets: Iterable[str | None] = ()
+) -> bool:
+    """Mark *step* after its request raised *exc*; True when its outcome is unknown.
+
+    A vendor error answer marks the step ``failed`` with the vendor's text.
+    A lost answer (see :func:`no_answer`) marks it ``unknown``: the request
+    was sent, and MEHO does not know whether the vendor did the work.
+    """
+    if isinstance(exc, httpx.HTTPStatusError) and no_answer(exc) is None:
+        steps.failed(step, vendor_text(exc, secrets))
+        return False
+    steps.unknown(step, f"the system did not answer ({no_answer(exc)})")
+    return True
+
+
 def tracker_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """The flat view of a vendor request tracker."""
     resources = row.get("resources")
@@ -338,22 +425,24 @@ async def follow_tracker(
     The step was sent already. So when the system stops answering while MEHO
     reads the tracker (no connection, or HTTP 502/503/504), the step is
     ``unknown`` and the tracker comes back with ``status: not_reachable`` and
-    its id: the caller still answers with every step.
+    its id. When the tracker read gets a vendor error, the step is ``unknown``
+    too and the tracker says ``status: not_read``. The caller still answers
+    with every step.
     """
     first = sent if isinstance(sent, Mapping) else {}
     try:
         tracker = await wait_for_tracker(calls, first, wait)
     except (httpx.TransportError, httpx.HTTPStatusError) as exc:
-        if isinstance(exc, httpx.HTTPStatusError):
-            if exc.response.status_code not in UNREACHABLE_STATUS:
-                raise
-            why = f"HTTP {exc.response.status_code}"
-        else:
-            why = type(exc).__name__
         tracker = tracker_row(first)
-        tracker["status"] = "not_reachable"
         tracker["message"] = None
-        steps.unknown(step, f"the system did not answer ({why}); tracker {tracker['id']}")
+        why = no_answer(exc)
+        if why is not None:
+            tracker["status"] = "not_reachable"
+            steps.unknown(step, f"the system did not answer ({why}); tracker {tracker['id']}")
+            return tracker
+        text = vendor_text(exc, secrets) if isinstance(exc, httpx.HTTPStatusError) else ""
+        tracker["status"] = "not_read"
+        steps.unknown(step, f"the tracker read failed ({text}); tracker {tracker['id']}")
         return tracker
     if tracker["message"]:
         tracker["message"] = hide_secrets(str(tracker["message"]), secrets)

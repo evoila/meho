@@ -22,14 +22,14 @@ from meho_backplane.connectors.vmware_shared.vcfa_integration_calls import (
     CONTENT_SOURCES_PATH,
     INTEGRATION_PATH,
     INTEGRATIONS_PATH,
-    LIST_TOP,
     REQUEST_TRACKER_PATH,
     SYNC_HISTORY_PATH,
     SYNC_REQUEST_PATH,
     UNREACHABLE_STATUS,
     Calls,
     IaasNotServedError,
-    content_rows,
+    content_api_rows,
+    iaas_rows,
     now_iso,
     path_with,
     tracker_row,
@@ -40,6 +40,7 @@ __all__ = [
     "GIT_SOURCE_TYPES",
     "INTEGRATION_TYPES",
     "SYNC_RUNNING_STATES",
+    "TRACKER_TEXT_HIDDEN",
     "git_source_rows",
     "integration_list",
     "integration_row",
@@ -63,6 +64,13 @@ GIT_SOURCE_TYPES: Final[frozenset[str]] = frozenset(
 _SYNC_END_STATES: Final[frozenset[str]] = frozenset({"COMPLETED", "FAILED", "SKIPPED"})
 #: The states of a Git sync that has not ended yet.
 SYNC_RUNNING_STATES: Final[frozenset[str]] = frozenset({"REQUESTED", "STARTED", "PROCESSING"})
+
+#: What the separate tracker read shows instead of the vendor's message.
+TRACKER_TEXT_HIDDEN: Final[str] = (
+    "MEHO does not show the vendor's text on this read: the request may have carried a "
+    "password or token, and this read cannot tell it from the text. The op that sent the "
+    "request shows the text with the secret hidden."
+)
 
 _IAAS_404_TEXT: Final[str] = (
     "this organization answers 404 on /iaas/api/integrations. On VCF Automation 9 the "
@@ -129,33 +137,31 @@ def _source_row(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 async def list_integrations(calls: Calls) -> list[dict[str, Any]]:
-    """The vendor integration rows. A 404 means the organization has no IaaS API."""
+    """Every vendor integration row (all pages). A 404 means the organization has no IaaS API."""
     try:
-        page = await calls.iaas("GET", INTEGRATIONS_PATH, **{"$top": LIST_TOP})
+        return await iaas_rows(calls, INTEGRATIONS_PATH)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             raise IaasNotServedError(_IAAS_404_TEXT) from None
         raise
-    return content_rows(page)
 
 
 async def sync_history(calls: Calls, source_ids: list[str]) -> list[dict[str, Any]]:
-    """The vendor's sync history rows of *source_ids*, newest first."""
+    """The vendor's sync history rows of *source_ids* (all pages), newest first."""
     if not source_ids:
         return []
-    page = await calls.json("GET", SYNC_HISTORY_PATH, params={"sourceIds": source_ids})
-    rows = content_rows(page)
+    rows = await content_api_rows(calls, SYNC_HISTORY_PATH, {"sourceIds": source_ids})
     return sorted(rows, key=lambda r: str(r.get("timestamp") or ""), reverse=True)
 
 
 async def git_source_rows(
     calls: Calls, *, integration_id: str | None = None
 ) -> list[dict[str, Any]]:
-    """The Git content sources, each with its last sync (or ``None``)."""
+    """The Git content sources (all pages), each with its last sync (or ``None``)."""
     query = {"integrationId": integration_id} if integration_id else None
     sources = [
         _source_row(row)
-        for row in content_rows(await calls.json("GET", CONTENT_SOURCES_PATH, params=query))
+        for row in await content_api_rows(calls, CONTENT_SOURCES_PATH, query)
         if row.get("typeId") in GIT_SOURCE_TYPES
         and (integration_id is None or _source_row(row)["integration_id"] == integration_id)
     ]
@@ -193,13 +199,15 @@ def _job_view(kind: str, job_id: str, read: Mapping[str, Any]) -> dict[str, Any]
             "done": state in _SYNC_END_STATES,
             "checked_at": now_iso(),
         }
+    # This read has no secret in hand: a tracker of integration.set may repeat
+    # the password it tested, so its text is never shown here.
     row = tracker_row(read)
     return {
         "kind": kind,
         "job_id": row["id"] or job_id,
         "state": row["status"],
         "progress": row["progress"],
-        "message": row["message"],
+        "message": TRACKER_TEXT_HIDDEN if row["message"] else None,
         "resources": row["resources"],
         "done": row["status"] in {"FINISHED", "FAILED"},
         "checked_at": now_iso(),
@@ -211,6 +219,9 @@ async def read_job(calls: Calls, kind: str, job_id: str) -> dict[str, Any]:
 
     A system that does not answer gives ``state: not_reachable`` with the job
     id and the time, never ``failed``. MEHO keeps no job state between calls.
+    A request tracker comes back without the vendor's text (see
+    :data:`TRACKER_TEXT_HIDDEN`); a Git sync carries no secret, so its
+    message stays.
     """
     if kind == "git_sync":
         path = path_with(SYNC_REQUEST_PATH, job_id, "sync_request_id")

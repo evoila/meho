@@ -5,7 +5,8 @@
 
 MEHO first lists what uses the integration: the external IP ranges an IPAM
 integration brought in, the network profiles whose networks carry those
-ranges, and the content sources that read through it. When something uses it,
+ranges, and the content sources that read through it. Each list is read to
+its last page. When something uses it,
 MEHO stops and removes nothing, unless the call sets ``confirm_in_use``. Then
 it sends ``DELETE /iaas/api/integrations/{id}`` and reads the vendor's request
 tracker until it ends.
@@ -28,14 +29,13 @@ from meho_backplane.connectors.vmware_shared.vcfa_integration_calls import (
     EXTERNAL_IP_RANGES_PATH,
     IAAS_API_VERSION,
     INTEGRATION_PATH,
-    LIST_TOP,
     NETWORK_PROFILES_PATH,
     Calls,
     Steps,
-    content_rows,
     follow_tracker,
+    iaas_rows,
+    mark_failed_send,
     path_with,
-    vendor_text,
 )
 from meho_backplane.connectors.vmware_shared.vcfa_integrations import (
     git_source_rows,
@@ -67,11 +67,15 @@ def _link_ids(row: Mapping[str, Any], name: str) -> set[str]:
 
 
 async def integration_users(calls: Calls, integration_id: str) -> list[dict[str, Any]]:
-    """What uses the integration: its external IP ranges, their network profiles, sources."""
+    """What uses the integration: its external IP ranges, their network profiles, sources.
+
+    Each list is read to its last page: a user on a later page must stop the
+    remove too.
+    """
     users: list[dict[str, Any]] = []
     ranges = [
         row
-        for row in content_rows(await calls.iaas("GET", EXTERNAL_IP_RANGES_PATH))
+        for row in await iaas_rows(calls, EXTERNAL_IP_RANGES_PATH)
         if row.get("integrationId") == integration_id
     ]
     networks: set[str] = set()
@@ -79,9 +83,7 @@ async def integration_users(calls: Calls, integration_id: str) -> list[dict[str,
         users.append({"kind": "ip_range", "id": row.get("id"), "name": row.get("name")})
         networks |= _link_ids(row, "fabric-networks")
     if networks:
-        profiles = content_rows(
-            await calls.iaas("GET", NETWORK_PROFILES_PATH, **{"$top": LIST_TOP})
-        )
+        profiles = await iaas_rows(calls, NETWORK_PROFILES_PATH)
         users.extend(
             {"kind": "network_profile", "id": row.get("id"), "name": row.get("name")}
             for row in profiles
@@ -132,13 +134,25 @@ async def integration_delete(calls: Calls, params: Mapping[str, Any]) -> dict[st
         }
     try:
         resp = await calls.send("DELETE", path, params={"apiVersion": IAAS_API_VERSION})
-    except httpx.HTTPStatusError as exc:
-        steps.failed("delete", vendor_text(exc))
+    except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+        if not mark_failed_send(steps, "delete", exc):
+            return {
+                "status": "failed",
+                **base,
+                "steps": steps.rows(),
+                "guidance": "The vendor refused.",
+            }
         return {
-            "status": "failed",
+            "status": "unfinished",
             **base,
+            "tracker": None,
             "steps": steps.rows(),
-            "guidance": "The vendor refused.",
+            "guidance": (
+                "The remove was sent, but the system did not answer, so MEHO does not know "
+                f"whether the vendor removed it. Read it with {calls.op('integration.list')} "
+                f"id {integration_id}: when no integration has the id, it is removed; "
+                "otherwise call again."
+            ),
         }
     tracker = None
     if resp.status_code == httpx.codes.NO_CONTENT or not resp.content:

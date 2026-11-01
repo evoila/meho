@@ -62,7 +62,7 @@ from meho_backplane.connectors.vmware_shared.vcfa_integration_calls import (
     Calls,
     Steps,
     content_rows,
-    vendor_text,
+    mark_failed_send,
 )
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 from meho_backplane.targets.ssrf_guard import TargetDestinationBlockedError, screen_and_resolve
@@ -355,10 +355,8 @@ async def _run(
             steps.failed(step, "the new provider is not in the provider list")
     except PackageError as exc:
         steps.failed(step, str(exc))
-    except httpx.HTTPStatusError as exc:
-        steps.failed(step, vendor_text(exc))
-    except httpx.TransportError as exc:
-        steps.unknown(step, f"the system did not answer ({type(exc).__name__})")
+    except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+        mark_failed_send(steps, step, exc)
     else:
         return _answer(
             "imported",

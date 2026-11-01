@@ -127,6 +127,101 @@ async def test_remove_whose_tracker_stops_answering_lists_the_step(
     assert data["tracker"]["status"] == "not_reachable"
 
 
+def _iaas_pages(*pages: list[dict[str, Any]]) -> Any:
+    """A respx side effect: the IaaS page for the request's ``$skip``."""
+    total = sum(len(page) for page in pages)
+
+    def _respond(request: httpx.Request) -> httpx.Response:
+        skip = int(request.url.params.get("$skip", "0"))
+        rows = [row for page in pages for row in page][skip : skip + 500]
+        return httpx.Response(200, json={"content": rows, "totalElements": total})
+
+    return _respond
+
+
+def _content_pages(*pages: list[dict[str, Any]]) -> Any:
+    """A respx side effect: the content API page for the request's ``page``."""
+
+    def _respond(request: httpx.Request) -> httpx.Response:
+        number = int(request.url.params.get("page", "0"))
+        rows = pages[number] if number < len(pages) else []
+        meta = {"number": number, "size": 500, "totalPages": len(pages)}
+        return httpx.Response(200, json={"content": rows, "page": meta})
+
+    return _respond
+
+
+async def test_remove_sees_the_users_on_a_later_page(vcfa: VcfAutomationConnector) -> None:
+    """Users on the second page of each vendor list stop the remove too."""
+    other_ranges = [{"id": f"r-{n}", "integrationId": "int-other"} for n in range(500)]
+    other_profiles = [{"id": f"np-{n}", "name": f"<p{n}>"} for n in range(500)]
+    other_sources = [{"id": f"s-{n}", "typeId": "com.vmware.marketplace"} for n in range(500)]
+    git_source = {
+        "id": "src-git",
+        "name": "<git-source>",
+        "typeId": "com.github",
+        "config": {"integrationId": "int-ipam"},
+    }
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        mock.get(f"{INTEGRATIONS}/int-ipam").respond(200, json=_IPAM)
+        ranges = mock.get(RANGES).mock(side_effect=_iaas_pages(other_ranges, [_RANGE]))
+        mock.get(PROFILES).mock(side_effect=_iaas_pages(other_profiles, [_PROFILE]))
+        sources = mock.get(SOURCES).mock(side_effect=_content_pages(other_sources, [git_source]))
+        mock.get(SYNC_HISTORY).respond(200, json={"content": []})
+        delete = mock.delete(f"{INTEGRATIONS}/int-ipam").respond(204)
+        result = await run("vcfa.tenant.integration.delete", {"id": "int-ipam"})
+    data = result["result"]
+    assert data["status"] == "in_use", data
+    assert {(u["kind"], u["id"]) for u in data["users"]} == {
+        ("ip_range", "range-1"),
+        ("network_profile", "np-1"),
+        ("content_source", "src-git"),
+    }
+    assert not delete.called
+    assert [c.request.url.params["$skip"] for c in ranges.calls] == ["0", "500"]
+    assert [c.request.url.params["page"] for c in sources.calls] == ["0", "1"]
+
+
+async def test_remove_stops_when_a_list_repeats_its_page(vcfa: VcfAutomationConnector) -> None:
+    """An endpoint that ignores ``$skip`` answers the same full page again; the read ends."""
+    same = [{"id": f"r-{n}", "integrationId": "int-other"} for n in range(500)]
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        mock.get(f"{INTEGRATIONS}/int-ipam").respond(200, json=_IPAM)
+        ranges = mock.get(RANGES).respond(200, json={"content": same, "totalElements": 900})
+        mock.get(SOURCES).respond(200, json={"content": []})
+        mock.delete(f"{INTEGRATIONS}/int-ipam").respond(204)
+        result = await run("vcfa.tenant.integration.delete", {"id": "int-ipam"})
+    assert result["result"]["status"] == "removed", result
+    assert ranges.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "lost",
+    [httpx.ConnectError("no route"), httpx.ReadTimeout("slow"), httpx.Response(502)],
+    ids=["no-connection", "timeout", "http-502"],
+)
+async def test_remove_whose_send_gets_no_answer_lists_the_step(
+    vcfa: VcfAutomationConnector, lost: Any
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        mock.get(f"{INTEGRATIONS}/int-ipam").respond(200, json=_IPAM)
+        mock.get(RANGES).respond(200, json={"content": []})
+        mock.get(SOURCES).respond(200, json={"content": []})
+        mock.delete(f"{INTEGRATIONS}/int-ipam").mock(side_effect=[lost])
+        result = await run("vcfa.tenant.integration.delete", {"id": "int-ipam"})
+    assert result["status"] == "ok", result
+    data = result["result"]
+    assert data["status"] == "unfinished", data
+    assert data["steps"][0]["result"] == "unknown"
+    assert "did not answer" in data["steps"][0]["error"]
+    assert data["integration"]["id"] == "int-ipam"
+    assert data["tracker"] is None
+    assert "id int-ipam" in data["guidance"]
+
+
 async def test_remove_error_text_reaches_the_answer(vcfa: VcfAutomationConnector) -> None:
     with respx.mock(assert_all_called=False) as mock:
         mount_logins_full(mock)
@@ -344,6 +439,48 @@ async def test_git_add_that_fails_at_the_sync_lists_the_steps(
     assert "source not found" in data["steps"][3]["error"]
 
 
+@pytest.mark.parametrize(
+    "lost",
+    [httpx.ConnectError("no route"), httpx.ReadTimeout("slow"), httpx.Response(504)],
+    ids=["no-connection", "timeout", "http-504"],
+)
+async def test_git_add_whose_sync_send_gets_no_answer_keeps_the_source(
+    vcfa: VcfAutomationConnector, lost: Any
+) -> None:
+    """The source was created; the sync send gets no answer. The answer keeps the source id."""
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        _mount_git(mock)
+        mock.post(SOURCES).respond(201, json={"id": "src-new"})
+        mock.get(SYNC_HISTORY).respond(200, json={"content": []})
+        mock.post(SYNC_REQUESTS).mock(side_effect=[lost])
+        result = await run("vcfa.tenant.git_repo.set", _ADD)
+    assert result["status"] == "ok", result
+    data = result["result"]
+    assert data["status"] == "unfinished", data
+    assert [s["result"] for s in data["steps"]] == ["done", "done", "done", "unknown"]
+    assert "did not answer" in data["steps"][3]["error"]
+    assert data["source"]["id"] == "src-new"
+    assert data["job"] is None
+    assert "git_sources" in data["guidance"]
+
+
+async def test_git_add_whose_create_send_gets_no_answer_lists_the_steps(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        _mount_git(mock)
+        mock.post(SOURCES).mock(side_effect=httpx.ReadTimeout("slow"))
+        sync = mock.post(SYNC_REQUESTS)
+        result = await run("vcfa.tenant.git_repo.set", _ADD)
+    data = result["result"]
+    assert data["status"] == "unfinished", data
+    assert [s["result"] for s in data["steps"]] == ["done", "unknown", "not_run", "not_run"]
+    assert "same values" in data["guidance"]
+    assert not sync.called
+
+
 async def test_git_add_refuses_a_non_git_integration(vcfa: VcfAutomationConnector) -> None:
     with respx.mock(assert_all_called=False) as mock:
         mount_logins_full(mock)
@@ -378,6 +515,18 @@ async def test_git_remove(vcfa: VcfAutomationConnector) -> None:
         result = await run("vcfa.tenant.git_repo.set", {"action": "remove", "id": "src-1"})
     assert result["result"]["status"] == "removed"
     assert delete.called
+
+
+async def test_git_remove_whose_send_gets_no_answer(vcfa: VcfAutomationConnector) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        mount_logins_full(mock)
+        mock.get(f"{SOURCES}/src-1").respond(200, json={"id": "src-1"})
+        mock.delete(f"{SOURCES}/src-1").mock(side_effect=httpx.ConnectError("no route"))
+        result = await run("vcfa.tenant.git_repo.set", {"action": "remove", "id": "src-1"})
+    data = result["result"]
+    assert data["status"] == "unfinished", data
+    assert data["steps"][0]["result"] == "unknown"
+    assert "git_sources" in data["guidance"]
 
 
 async def test_git_remove_of_a_missing_source(vcfa: VcfAutomationConnector) -> None:

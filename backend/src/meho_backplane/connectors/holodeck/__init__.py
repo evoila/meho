@@ -38,7 +38,10 @@ this class.
 
 # Import for the side-effect: registers the holodeck.router.patch approval
 # preview (#4850).
-from meho_backplane.connectors.holodeck import router_patch_preview  # noqa: F401
+from meho_backplane.connectors.holodeck import (
+    op_classes,  # noqa: F401 -- declares the op classes
+    router_patch_preview,  # noqa: F401
+)
 from meho_backplane.connectors.holodeck.connector import HolodeckConnector
 from meho_backplane.connectors.holodeck.ops import HOLODECK_OPS, HolodeckOp
 from meho_backplane.connectors.registry import register_connector_v2

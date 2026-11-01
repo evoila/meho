@@ -171,9 +171,9 @@ CSP does not allow.
     even the path string is withheld.
   - `audit_query` (`audit.*` / `meho.audit.*`) — aggregate-only +
     `row_count`; the query filter never broadcasts.
-  - `credential_mint` (`harbor.robot.create`, `vault.token.create`,
-    `vault.auth.approle.generate_secret_id`) — **response** carries a
-    freshly-minted secret; aggregate-only.
+  - `credential_mint` (`vault.token.create`,
+    `vault.auth.approle.generate_secret_id`, `harbor.robot.create`) —
+    **response** carries a freshly-minted secret; aggregate-only.
   - `credential_write` (`vault.kv.put`, `vault.auth.userpass.write` /
     `.update_password`, `k8s.secret.create`, G11.7-T1 #1401) —
     **request params** carry the secret; aggregate-only.
@@ -190,6 +190,24 @@ CSP does not allow.
     prefix branch would relabel their rows — historical ones included.
     See [`docs/codebase/checks-broadcast.md`](checks-broadcast.md).
   - `other` — full detail.
+
+  **Where an exact class comes from (#5579).** Most operations get their
+  class from a pattern rule on the op id (the HTTP method of an ingested
+  op, or the last word: `.list`, `.create`, ...). An operation that needs
+  an exact class declares it in its own connector:
+  `connectors/<name>/op_classes.py` calls `declare_op_classes(...)` from
+  `meho_backplane/op_classes.py` at import, and the connector's
+  `__init__.py` imports that module. `classify_op` reads the declared
+  class first, then the pattern rules. The server imports every connector
+  package at start, so the declarations are in place before the first
+  call. A connector may declare `credential_read`, `credential_mint`,
+  `credential_write` and `write`; declaring a second, different class
+  for the same op id fails at import. `broadcast/events.py` keeps lists
+  only for the core connectors (`vault`, `keycloak`, `secret`,
+  `targets`, `topology` and the checks plane);
+  `tests/test_op_classes.py` fails when another connector's op id lands
+  there, and `tests/test_op_class_fixture.py` checks that no known
+  operation changed its class in the move.
 
   **One class per call.** The audit row and the broadcast event of one
   call carry the same `op_id` and `op_class`. Every writer gets the class
@@ -234,8 +252,8 @@ CSP does not allow.
     operations that make the target do work
     (`vmware.composite.datastore.refresh`, `rke2.etcd-snapshot.save`,
     `vcfa.tenant.cloud_account.enumerate_images`,
-    `hcx.service_mesh.diagnose`) are pinned `write` in
-    `_WRITE_OPS`.
+    `hcx.service_mesh.diagnose`) are declared `write` in their
+    connector's `op_classes.py`.
   - The credential and audit-query classes always win, as above.
   - Ingested operations keep the class from the HTTP method in their op
     id (`GET:` → `read`, `POST:` → `write`, ...).
@@ -255,7 +273,7 @@ CSP does not allow.
   MEHO's own registry writes that run through the dispatcher
   (`targets.register`, `topology.annotate` / `.unannotate` /
   `.bulk_import` / `.create_node` / `.delete_node`) are pinned `write` in
-  `_WRITE_OPS`.
+  `_WRITE_OPS` in `broadcast/events.py` (they are core).
 
   `credential_read` and `audit_query` are *upgradeable*: a per-call or
   per-tenant override may surface full detail to an operator who already

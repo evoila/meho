@@ -44,7 +44,7 @@ from kubernetes_asyncio.client.exceptions import ApiException
 from sqlalchemy import func, select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast.events import _CREDENTIAL_WRITE_OPS, classify_op
+from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors.kubernetes import (
     KUBERNETES_OPS,
     KubernetesConnector,
@@ -249,7 +249,6 @@ def test_handler_attrs_resolve_on_connector() -> None:
 
 
 def test_update_is_a_credential_write_and_delete_a_plain_write() -> None:
-    assert _UPDATE in _CREDENTIAL_WRITE_OPS
     assert classify_op(_UPDATE) == "credential_write"
     assert classify_op(_DELETE) == "write"
 

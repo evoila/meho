@@ -3,8 +3,8 @@
 
 """Approval preview for ``holodeck.router.patch`` (#4850).
 
-The op is pinned ``credential_write`` as a safety net
-(:data:`~meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS`), and it takes
+The op is declared ``credential_write`` as a safety net
+(``holodeck/op_classes.py``), and it takes
 no params. So without this builder the approver saw only the op id and the
 target, not what the call changes on the HoloRouter.
 

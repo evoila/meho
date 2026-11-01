@@ -4,8 +4,8 @@
 """Approval previews for ``sddc.host.validate`` and ``sddc.host.commission`` (#4850).
 
 Both ops send a list of ``HostCommissionSpec``, and each item holds the
-ESXi user's ``password``. So both are pinned ``credential_write``
-(:data:`~meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS`), and the
+ESXi user's ``password``. So both are declared ``credential_write``
+(``sddc_manager/op_classes.py``), and the
 generic echo of params is turned off for them. Without these builders the
 approver saw only the op id and the target, not which hosts change.
 

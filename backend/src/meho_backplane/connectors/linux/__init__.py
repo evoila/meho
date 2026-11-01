@@ -42,6 +42,7 @@ v1 ``register_connector`` write is intentionally omitted -- only the v2
 triple advertises this class.
 """
 
+from meho_backplane.connectors.linux import op_classes  # noqa: F401 -- declares the op classes
 from meho_backplane.connectors.linux.connector import LinuxSshConnector
 from meho_backplane.connectors.linux.ops import LINUX_OPS, LinuxOp
 from meho_backplane.connectors.registry import register_connector_v2

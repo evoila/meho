@@ -1655,8 +1655,9 @@ names). Further connectors register their own builders as needed.
 
 ## Credential writes: what the approver sees (#4850)
 
-A credential write is an op pinned `credential_write` in
-`broadcast/events.py` (`_CREDENTIAL_WRITE_OPS`). When it waits for
+A credential write is an op that `classify_op` (`broadcast/events.py`)
+calls `credential_write`; a connector declares that class in its own
+`op_classes.py`. When it waits for
 approval, the generic echo of params is turned off (invariant 3). So the
 approver sees only what a bespoke preview builder shows. Without one,
 the approver sees the op id, the target and the reason
@@ -1701,8 +1702,8 @@ no network calls. The builders live next to their connectors:
 `vmware_rest/composites/_guest_file_read_preview.py`.
 
 **CI keeps it that way.** `tests/test_credential_write_preview_conformance.py`
-runs every typed-op registrar. It takes each registered op that is in
-`_CREDENTIAL_WRITE_OPS` and can wait for approval (`requires_approval`,
+runs every typed-op registrar. It takes each registered op that
+classifies `credential_write` and can wait for approval (`requires_approval`,
 or a `safety_level` above `safe`), and fails when the op has no builder.
 An op that must stay without a preview goes into
 `_NO_PREVIEW_CREDENTIAL_WRITES` in that test, with the reason. The list
@@ -2011,8 +2012,8 @@ delete case in `tests/test_connectors_argocd_write_e2e.py`.
 Relatedly, `classify_op` gained the ArgoCD write verbs so all seven ops
 classify `op_class: write` rather than four of them falling through to
 `other`. All four verbs that were misclassified — `argocd.app.set` /
-`.sync` / `.rollback` / `.refresh` — are pinned by **exact op-id** in
-`_WRITE_OPS` rather than added to the global write-suffix set. A `.set` /
+`.sync` / `.rollback` / `.refresh` — are declared `write` by **exact op-id**
+(today in `argocd/op_classes.py`) rather than added to the global write-suffix set. A `.set` /
 `.sync` / `.rollback` suffix would classify the dotted argocd op-ids
 correctly, but `_MEHO_FLAT_WRITE_SUFFIXES` is auto-derived from
 `_WRITE_SUFFIXES` (`.` → `_`), so it would also relabel `meho_`-prefixed

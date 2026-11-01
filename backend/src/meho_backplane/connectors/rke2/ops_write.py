@@ -31,8 +31,8 @@ straight back on argv), and rke2 mints the replacement in-process and persists
 it to the ``0600`` server token file. The handler reads that file back over the
 same governed SSH channel and writes the value to **Vault** under the operator's
 identity; only a **pointer** to the Vault location plus non-secret metadata
-(``rotated`` / ``node`` / ``exit_status``) is returned. The op is pinned in
-:data:`~meho_backplane.broadcast.events._CREDENTIAL_MINT_OPS` and registers a
+(``rotated`` / ``node`` / ``exit_status``) is returned. The op is declared
+``credential_mint`` in ``rke2/op_classes.py`` and registers a
 non-secret park-time preview builder (``ops_write_preview``). A read-only
 fingerprint gate refuses a non-server / inactive / below-CVE-floor node
 **before** any mutation (a botched rotate wedges every future node-join,
@@ -58,8 +58,8 @@ shape) so the sudo password never lands in argv / history / log.
   does **not** restart (config is inert until one); it returns
   ``restart_required: true`` and changed key **names** only. An RKE2
   ``config.yaml`` body carries ``token:`` / ``agent-token:`` join credentials,
-  so ``config.update`` is pinned in
-  :data:`~meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS` and its result
+  so ``config.update`` is declared ``credential_write`` in
+  ``rke2/op_classes.py`` and its result
   + approval preview surface key **names** only.
 
 Privilege model for the T3 node ops: the connector operates as ``root`` over

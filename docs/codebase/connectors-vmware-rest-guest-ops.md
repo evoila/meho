@@ -130,7 +130,7 @@ load-bearing-ness:
    request body carries. That request body itself is never captured
    either: every guest composite that logs into the guest
    (`process.list` / `env.read` / `file.read` / `file.write` /
-   `program.run`) is pinned in `_CREDENTIAL_WRITE_OPS`, so the
+   `program.run`) is declared `credential_write` in `vmware_rest/op_classes.py`, so the
    flight recorder's `classify_body_exclusion` hard-excludes its
    vendor-call + typed spans from body recording — the vim request body,
    guest password included, is never recorded (#3717; `net.show` is not
@@ -146,7 +146,7 @@ load-bearing-ness:
    with. For any secret an operator might pass *inside* `guest.program.run`'s
    `arguments` / `env` (which, like GOSC's password param, do ride in
    params), `program.run` **matches** the GOSC posture rather than
-   exceeding it — both are pinned in `_CREDENTIAL_WRITE_OPS` so their
+   exceeding it — both are declared `credential_write` so their
    broadcasts clamp to aggregate-only (point 4), and both rely on the
    park-preview builder to keep values off the reviewer surface. The pin is
    what makes that parity true; without it `program.run` would have been
@@ -189,7 +189,7 @@ load-bearing-ness:
    `params_hash`, never the raw params.
 
    **Broadcast is clamped to aggregate-only.** `guest.program.run` is
-   pinned in `broadcast/events.py`'s `_CREDENTIAL_WRITE_OPS` frozenset, so
+   declared `credential_write` in `vmware_rest/op_classes.py`, so
    `classify_op` returns `credential_write` and the dispatch broadcast
    collapses the whole params dict to aggregate-only — it never ships the
    `arguments` string or `env` values on the SSE feed / Slack mirror /
@@ -215,7 +215,7 @@ load-bearing-ness:
    after a human approves, so it must persist them). The **flight-recorder
    vendor-call + typed spans do NOT** record the `StartProgramInGuest`
    request body: `program.run` (and every login-bearing guest composite) is
-   pinned in `_CREDENTIAL_WRITE_OPS`, and the recorder's
+   declared `credential_write` in `vmware_rest/op_classes.py`, and the recorder's
    `classify_body_exclusion` delegates to that classification, so its body is
    hard-excluded from recording (#3717 closed the same gap for the guest
    reads). So **operators must not put bare secrets in `arguments` / `env`**

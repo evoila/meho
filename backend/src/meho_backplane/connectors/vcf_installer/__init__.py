@@ -26,6 +26,7 @@ same ``{"spec": ...}`` shape).
 from typing import Final
 
 from meho_backplane.connectors.registry import register_connector_v2
+from meho_backplane.connectors.vcf_installer import op_classes  # noqa: F401 -- declares the op classes
 from meho_backplane.connectors.vcf_installer.bringup import (
     INSTALLER_BRINGUP_OP_ID,
     register_installer_composite_operations,

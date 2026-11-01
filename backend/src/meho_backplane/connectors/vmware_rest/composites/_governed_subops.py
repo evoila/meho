@@ -48,9 +48,12 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _supervisor,
     _teardown,
     _teardown_network,
+    _vm_advanced_settings,
     _vm_allocation,
+    _vm_boot,
     _vm_cdrom_library_iso,
     _vm_cdrom_tools,
+    _vm_upgrade,
     _write,
 )
 from meho_backplane.connectors.vmware_rest.composites._host_access_ops import (
@@ -148,6 +151,12 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     ),
     "vmware.composite.vm.cdrom.unmount_library_iso": (
         _vm_cdrom_library_iso.SUB_OPS_UNMOUNT_LIBRARY_ISO
+    ),
+    "vmware.composite.vm.boot.set": _vm_boot.SUB_OPS_VM_BOOT_SET,
+    "vmware.composite.vm.hardware.upgrade": _vm_upgrade.SUB_OPS_VM_HARDWARE_UPGRADE,
+    "vmware.composite.vm.tools.upgrade": _vm_upgrade.SUB_OPS_VM_TOOLS_UPGRADE,
+    "vmware.composite.vm.advanced_settings.set": (
+        _vm_advanced_settings.VIM_SUB_OPS_VM_ADVANCED_SETTINGS_SET
     ),
     "vmware.composite.guest.customization_spec.create": (
         _write._SUB_OPS_GUEST_CUSTOMIZATION_SPEC_CREATE

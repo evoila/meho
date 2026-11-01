@@ -5277,6 +5277,85 @@ field the read uses against the pinned 9.0 `vi-json.yaml` and the 8.0 U1,
 U2 and U3 files; the network list filters against the pinned 8.0 U3 and 9.0
 `vcenter.yaml`).
 
+### Move and copy a VM inside one vCenter (`vm.relocate`, `vm.clone_from_vm`, `#4346`)
+
+An agent or an operator can move a VM, also while it runs, and copy a VM.
+Both changes are typed (hand-written) and need no spec ingest. They are on
+both catalogs, `vmware-rest-8.0` and `vmware-rest-9.0`, in the group `vm`.
+Each one waits until a second person approves.
+
+| Operation | What it does | What it returns | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.composite.vm.relocate` | Moves one VM to another datastore (Storage vMotion; each disk can go to its own datastore with `disks`), resource pool, folder or host of the same vCenter. | `status` (`accepted`, `already_running`, `unchanged`, `not_found`, `invalid_request`), `task`, `status_read`, `before` (power state, host, pool, folder, datastores), `requested` | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.composite.vm.clone_from_vm` | Copies one VM, on or off, to a new VM: a full copy (`clone_type: full`), or a linked copy that shares the disks of a snapshot (`clone_type: linked`, needs `snapshot`). | `status` (`accepted`, `already_running`, `already_exists`, `not_found`, `invalid_request`), `task`, `status_read`, `folder`, `existing_vm` | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.task.info` | The status read of both: one vCenter task by its id. | `state` (`queued`, `running`, `success`, `error`, `not_found`, `not_reachable`), `done`, progress, the vendor's error type and text, times | `safe` | 8.0, 9.x |
+
+Vendor calls: VIM `VirtualMachine.RelocateVM_Task` and
+`VirtualMachine.CloneVM_Task`, plus `PropertyCollector.RetrievePropertiesEx`
+for the reads. vCenter 8.0 U1, U2, U3 and 9.0, 9.1, 9.1.1 all have them, so
+no version check is needed.
+
+- **Why the VIM API and not REST.** The REST calls
+  `POST /api/vcenter/vm/{vm}?action=relocate&vmw-task=true` and
+  `POST /api/vcenter/vm?action=clone&vmw-task=true` return a CIS task id,
+  which `vmware.task.info` (a VIM `Task` read) cannot follow. The REST clone
+  spec also has no linked copy. The VIM methods return a VIM task id and take
+  the linked copy (`location.diskMoveType: createNewChildDiskBacking` with
+  `spec.snapshot`, like `govc vm.clone -link`).
+- **Checks before a start.** Every id must have the right shape. The
+  relocate reads the VM: an unknown VM is `not_found`, an unknown disk key is
+  `invalid_request`, and a VM that already is where the call asks is
+  `unchanged`. The copy reads the source and the folder: a template (use
+  `vm.clone_from_template`), an unknown snapshot, an unknown folder, or a
+  source outside a VM folder without `folder` is `invalid_request`; a VM with
+  the name in the folder is `already_exists` with its id. Nothing is sent in
+  these cases.
+- **The approval card.** The relocate shows how much disk data a datastore
+  move copies and the free space of the target datastores (the same preview
+  as the generic relocate, `vm_relocate_preview.py`). The copy shows what is
+  copied, how and where.
+
+**Both are vendor jobs.** The start returns as soon as vCenter took the task:
+`status: accepted` with the task id in `task`, and `status_read: {op_id:
+vmware.task.info, params: {task}}`. It never says the move or the copy is
+done.
+
+- Before a start, each op reads the recent tasks of the VM. A move
+  (`VirtualMachine.relocate`) or a copy (`VirtualMachine.clone`) of the same
+  VM that is `queued` or `running` gives `already_running` with that task id,
+  and nothing new starts. This check is a help, not a lock: two callers can
+  both look before either starts, and a task that just ended is no longer in
+  the list.
+- After a lost reply, do not start again blindly. Read `vmware.tasks.recent`
+  or `vmware.task.info`, or read the VM (`vmware.vm.info`): a move that still
+  runs comes back as `already_running`, and a finished copy as
+  `already_exists`.
+- Use MEHO's async mode (`async: true`, `docs/codebase/async-governed-dispatch.md`)
+  for the start: MEHO keeps the answer with the task id under a run handle,
+  so a lost reply does not lose the task id.
+- `vmware.task.info` gives the vendor state, the progress and, on failure,
+  the vendor's fault type and text. An expired login is renewed by the
+  connector (`_post_vmomi_json` logs in again on `NotAuthenticated`). When
+  vCenter does not answer, the state is `not_reachable` with the task id and
+  the time, never `error`. MEHO keeps no job state between calls.
+- Each op is one vendor call, so there are no steps that can fail part-way.
+  A start the vendor refuses (for example `InvalidArgument`) fails the call
+  with the vendor's fault.
+
+Code: `composites/_vm_relocate.py`, `composites/_vm_clone_from_vm.py`, the
+shared helpers in `composites/_vm_job_common.py`, schemas and agent guidance
+in `composites/_vm_move_copy_schemas.py`, registry rows in
+`composites/_vm_move_copy_ops.py`, and the status read in
+`typed_ops_task_info.py`. Tests: `tests/test_connectors_vmware_rest_vm_move_copy.py`
+(handlers and previews against a vim fake),
+`tests/test_connectors_vmware_rest_vm_move_copy_dispatch.py` (approval,
+an agent without a grant, both catalogs, and the vCenter 8.0.3 and 9.0
+VI-JSON paths over mocked HTTP),
+`tests/test_connectors_vmware_rest_vm_move_copy_reconcile.py` (methods,
+request fields and enums against the pinned 9.0 `vi-json.yaml`; the 8.0 U1,
+U2 and U3 files through the 8.0 source scan) and
+`tests/test_connectors_vmware_rest_typed_task_info.py`.
+
 ## Dependencies
 
 - `meho_backplane.connectors.adapters.http.HttpConnector` (G0.2-T3

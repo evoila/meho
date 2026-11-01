@@ -199,6 +199,9 @@ from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_tools import (
 from meho_backplane.connectors.vmware_rest.composites._vm_llm_instructions import (
     VM_LLM_INSTRUCTIONS,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_move_copy_ops import (
+    VM_MOVE_COPY_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
     cluster_drs_vm_host_rule_create_composite,
@@ -528,7 +531,9 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "vm.cdrom.add, vm.device.cdrom, dangerous); set CPU and memory limits "
         "(vm.resource_allocation.set, caution); unmount the VMware Tools "
         "installer (vm.tools.installer.unmount, caution); move a VM to another "
-        "host (vm.migrate, dangerous); take a snapshot (vm.snapshot.create, "
+        "host (vm.migrate, dangerous); move a VM, also while it runs, to another "
+        "datastore, resource pool, folder or host (vm.relocate, dangerous); copy a "
+        "VM, full or linked (vm.clone_from_vm, dangerous); take a snapshot (vm.snapshot.create, "
         "caution), revert to one (vm.snapshot.revert, dangerous) or delete one "
         "(vm.snapshot.delete, destructive); delete a powered-off VM and its "
         "disks (vm.destroy, destructive); create a VM folder (folder.create, "
@@ -2139,6 +2144,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # Install a new vCenter (#4394), dangerous / approval; the rows live in
     # their own module.
     *(_CompositeSpec(**row) for row in VCENTER_INSTALL_COMPOSITES),
+    # Move and copy a VM inside one vCenter (#4346), dangerous / approval; the
+    # rows live in their own module.
+    *(_CompositeSpec(**row) for row in VM_MOVE_COPY_COMPOSITES),
 )
 
 

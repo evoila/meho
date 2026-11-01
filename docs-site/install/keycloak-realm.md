@@ -353,12 +353,18 @@ set them once (see [A realm that already runs](#a-realm-that-already-runs)).
 
 ### What stays strict
 
-- **Approvals still ask every time.** The fresh sign-in for an approval
+- **Approvals on the command line and through REST still ask every
+  time.** The fresh sign-in for an approval
   (see [Why approve needs a fresh sign-in](#why-approve-needs-a-fresh-sign-in))
   sends `prompt=login` and `max_age=0`. Keycloak then asks again, also in
   a remembered browser: password and code, or a passkey. MEHO also checks
   the sign-in time in the token. A token from a remembered browser keeps
-  the time of the first sign-in, so a browser cookie alone cannot approve.
+  the time of the first sign-in, so a browser cookie alone cannot approve
+  on the command line or through REST.
+- **Approvals in the console accept a click.** In the web interface the
+  click of the signed-in person is the proof. MEHO asks for no new
+  sign-in there. So whoever uses a remembered browser can also approve in
+  the console. See the next section for how to end such a login.
 - **The console keeps its own limit.** MEHO ends a console session after
   `UI_SESSION_ABSOLUTE_LIFETIME_SECONDS` (12 hours by default). The longer
   Keycloak login does not make it longer. After that limit the console

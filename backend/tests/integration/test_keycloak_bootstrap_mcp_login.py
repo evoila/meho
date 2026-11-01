@@ -582,23 +582,32 @@ def test_upgrade_replaces_fixed_mappers_and_second_run_changes_nothing(
     assert changed == [], f"second run changed the realm:\n{second}"
 
 
-def _device_login_request(base_url: str, realm: str, scope: str) -> httpx.Response:
-    """Start a device login on ``meho-cli``, as ``meho login`` does.
+def _cli_sign_in_request(base_url: str, realm: str, scope: str) -> httpx.Response:
+    """Open the browser sign-in of ``meho-cli`` (the fresh sign-in of an approval).
 
-    The CLI client requires PKCE, so the request carries a code challenge.
+    Keycloak checks the scope on this first request: it shows the login
+    page when the client offers every scope, and sends the browser back
+    to the CLI with ``error=invalid_scope`` when it does not. The device
+    login of ``meho login`` on Keycloak 26.0 checks the scope only later,
+    after the person has logged in, so it cannot be checked without a
+    browser here.
     """
     verifier = secrets.token_urlsafe(48)
     challenge = (
         base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     )
-    return httpx.post(
-        f"{base_url}/realms/{realm}/protocol/openid-connect/auth/device",
-        data={
+    return httpx.get(
+        f"{base_url}/realms/{realm}/protocol/openid-connect/auth",
+        params={
             "client_id": "meho-cli",
+            "response_type": "code",
+            "redirect_uri": _REDIRECT_URI,
             "scope": scope,
+            "state": "s5516",
             "code_challenge": challenge,
             "code_challenge_method": "S256",
         },
+        follow_redirects=False,
     )
 
 
@@ -611,17 +620,16 @@ def test_cli_offline_access_zero_removes_the_long_login(
     long_login = "openid offline_access"
 
     _run_bootstrap(meho_binary, fresh_keycloak, _OPT_OUT_REALM)
-    accepted = _device_login_request(fresh_keycloak, _OPT_OUT_REALM, long_login)
-    assert accepted.status_code == 200, accepted.text
-    assert "device_code" in accepted.json()
+    accepted = _cli_sign_in_request(fresh_keycloak, _OPT_OUT_REALM, long_login)
+    assert accepted.status_code == 200, accepted.headers.get("location", accepted.text)
 
     out = _run_bootstrap(meho_binary, fresh_keycloak, _OPT_OUT_REALM, "--cli-offline-access=0")
     assert "[removed] optional scope offline_access" in out, out
-    refused = _device_login_request(fresh_keycloak, _OPT_OUT_REALM, long_login)
-    assert refused.status_code == 400, refused.text
-    assert refused.json()["error"] == "invalid_scope"
-    short_login = _device_login_request(fresh_keycloak, _OPT_OUT_REALM, "openid")
-    assert short_login.status_code == 200, short_login.text
+    refused = _cli_sign_in_request(fresh_keycloak, _OPT_OUT_REALM, long_login)
+    assert refused.status_code == 302, refused.text
+    assert "error=invalid_scope" in refused.headers["location"], refused.headers["location"]
+    short_login = _cli_sign_in_request(fresh_keycloak, _OPT_OUT_REALM, "openid")
+    assert short_login.status_code == 200, short_login.headers.get("location", short_login.text)
     cli_uuid = _client_uuid(fresh_keycloak, _OPT_OUT_REALM, "meho-cli")
     cli = httpx.get(
         f"{fresh_keycloak}/admin/realms/{_OPT_OUT_REALM}/clients/{cli_uuid}",

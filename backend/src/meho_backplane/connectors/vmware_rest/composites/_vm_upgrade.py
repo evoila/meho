@@ -56,9 +56,9 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
+    "COMPOSITES",
     "SUB_OPS_VM_HARDWARE_UPGRADE",
     "SUB_OPS_VM_TOOLS_UPGRADE",
-    "COMPOSITES",
     "vm_hardware_upgrade_composite",
     "vm_tools_upgrade_composite",
 ]

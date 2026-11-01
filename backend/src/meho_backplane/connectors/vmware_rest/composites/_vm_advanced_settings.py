@@ -51,8 +51,8 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
-    "VIM_SUB_OPS_VM_ADVANCED_SETTINGS_SET",
     "COMPOSITES",
+    "VIM_SUB_OPS_VM_ADVANCED_SETTINGS_SET",
     "vm_advanced_settings_set_composite",
 ]
 

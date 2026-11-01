@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors import OperationResult
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
-__all__ = ["SUB_OPS_VM_BOOT_SET", "COMPOSITES", "vm_boot_set_composite"]
+__all__ = ["COMPOSITES", "SUB_OPS_VM_BOOT_SET", "vm_boot_set_composite"]
 
 OP_ID_VM_BOOT_SET: Final = "vmware.composite.vm.boot.set"
 

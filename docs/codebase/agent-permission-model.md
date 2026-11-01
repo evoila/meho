@@ -61,6 +61,14 @@ never a `destructive` one.
 An agent with the `read_only` role never runs anything at once: its best
 result is "waits for approval" (see step 5 below).
 
+**An agent acts with operator rights, at most.** MEHO registers a new agent
+with `tenant_role=operator`. An agent registered earlier still has
+`tenant_admin` in its token; MEHO reads that as `operator`. So an agent
+token gets 403 `insufficient_role` on every route that needs `tenant_admin`
+(connectors, targets, conventions, grants, tenant policies and the other
+admin routes). That work is for people. The check is in `_cap_agent_role`
+in `auth/jwt.py`.
+
 **Read scope for a service account (#4992).** A service account reads every
 target of its tenant. A person can narrow that: a read scope is a list of
 targets (ids or selectors) and, if wanted, a "no target" entry. When a scope

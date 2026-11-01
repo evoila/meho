@@ -171,6 +171,9 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vcenter.appliance.deploy",
     "vmware.composite.vcenter.install",
     "vmware.composite.vcenter.deployment.answer",
+    # Move and copy a VM (#4346): dangerous + approval.
+    "vmware.composite.vm.relocate",
+    "vmware.composite.vm.clone_from_vm",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -354,6 +357,13 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
         "meho_backplane.connectors.vmware_rest.composites._vcenter_answer."
         "vcenter_deployment_answer_composite"
     ),
+    "vmware.composite.vm.relocate": (
+        "meho_backplane.connectors.vmware_rest.composites._vm_relocate.vm_relocate_composite"
+    ),
+    "vmware.composite.vm.clone_from_vm": (
+        "meho_backplane.connectors.vmware_rest.composites._vm_clone_from_vm."
+        "vm_clone_from_vm_composite"
+    ),
     "vmware.composite.guest.customization_spec.create": (
         "meho_backplane.connectors.vmware_rest.composites._write."
         "guest_customization_spec_create_composite"
@@ -469,6 +479,8 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.cdrom.mount_library_iso": "vm",
     "vmware.composite.vm.cdrom.unmount_library_iso": "vm",
     "vmware.composite.vm.resource_allocation.set": "vm",
+    "vmware.composite.vm.relocate": "vm",
+    "vmware.composite.vm.clone_from_vm": "vm",
     "vmware.composite.license.assign": "vmware-licensing",
     "vmware.composite.vcenter.appliance.deploy": "vcenter_install",
     "vmware.composite.vcenter.install": "vcenter_install",
@@ -1190,6 +1202,21 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "answer_not_allowed",
             "answer_failed",
             "answer_unknown",
+        },
+        # Move and copy a VM (#4346): vendor jobs, accepted at once.
+        "vmware.composite.vm.relocate": {
+            "accepted",
+            "already_running",
+            "unchanged",
+            "not_found",
+            "invalid_request",
+        },
+        "vmware.composite.vm.clone_from_vm": {
+            "accepted",
+            "already_running",
+            "already_exists",
+            "not_found",
+            "invalid_request",
         },
     }
     for op_id, expected_values in expected_status_values.items():

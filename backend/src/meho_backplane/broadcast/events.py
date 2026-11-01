@@ -90,14 +90,20 @@ __all__ = [
 #: vendor ``vcenter.yaml`` writes the paths: proxy settings, content
 #: libraries, report download tokens, deployment and migration specs,
 #: guest customization specs, identity providers and broker clients, and
-#: Supervisor image registries. :data:`_CREDENTIAL_READ_OPS` lists each
-#: one twice, with and without the ``/api`` base.
+#: Supervisor image registries. The vCenter 8.0 vendor file names some
+#: path parameters differently (``{library_id}``,
+#: ``{container_image_registry}``), so those reads appear in both
+#: spellings. :data:`_CREDENTIAL_READ_OPS` lists each one twice, with and
+#: without the ``/api`` base.
 _VCENTER_CREDENTIAL_READ_PATHS: Final[tuple[str, ...]] = (
     "/appliance/networking/proxy",
     "/appliance/networking/proxy/{protocol}",
     "/content/library/{libraryId}",
     "/content/local-library/{libraryId}",
     "/content/subscribed-library/{libraryId}",
+    "/content/library/{library_id}",
+    "/content/local-library/{library_id}",
+    "/content/subscribed-library/{library_id}",
     "/esx/hcl/reports/{report}",
     "/vcenter/lcm/reports/{report}",
     "/vcenter/deployment/install",
@@ -111,6 +117,8 @@ _VCENTER_CREDENTIAL_READ_PATHS: Final[tuple[str, ...]] = (
     "/vcenter/namespace-management/supervisors/{supervisor}/container-image-registries",
     "/vcenter/namespace-management/supervisors/{supervisor}"
     "/container-image-registries/{containerImageRegistry}",
+    "/vcenter/namespace-management/supervisors/{supervisor}"
+    "/container-image-registries/{container_image_registry}",
 )
 
 #: Op-ids that classify as ``credential_read``. Extensible — every

@@ -365,6 +365,25 @@ in.
 - `CONNECTOR_PACKAGES_FILE`, `BUILTIN_DISTRIBUTION` — the file path and
   the built-in distribution name.
 
+## Secrets in an operation's answer
+
+MEHO hides the value of every secret-named field (`password`, `token`,
+`api_key`, `client_secret`, ...) in the answer of every operation, in the
+sample rows and in the rows stored behind a result handle. This holds for
+a package's operations as for the built-in ones; a package needs no code
+of its own for it. A person or a service principal gets the values with
+`reveal_secret: true`; an agent is refused. The audit row stores a keyed
+fingerprint in place of each hidden value.
+
+A field whose name looks like a secret but whose value is not one, for
+example the date `password_expires_at` or the count `secret_id_ttl`, is
+hidden too unless the package declares it. The registrar calls
+`register_plain_fields(op_id, names)` from `meho_backplane.operations`,
+once per operation, next to the operation's registration. A field that is
+not declared stays hidden, so a forgotten declaration never shows a secret.
+Details: `docs/codebase/redaction.md`, "Secret-named fields in every
+answer".
+
 ## Known limits
 
 - Code that Python runs before MEHO starts, for example from a `.pth` file

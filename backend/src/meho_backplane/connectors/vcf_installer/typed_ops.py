@@ -100,6 +100,7 @@ from meho_backplane.connectors.vcf_installer.typed_writes import (
     INSTALLER_SPEC_VALIDATE_OP_ID,
     INSTALLER_TRUSTED_CERTIFICATE_ADD_OP_ID,
 )
+from meho_backplane.operations import register_plain_fields
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -1086,3 +1087,8 @@ async def register_installer_typed_operations(
         version=InstallerConnector.version,
         impl_id=InstallerConnector.impl_id,
     )
+
+
+# ``referenceToken`` is the id of a vendor error message, not a credential.
+for _op in (_SPEC_VALIDATE, _VALIDATION_STATUS, _BRINGUP_START, _BRINGUP_RETRY, _BRINGUP_STATUS):
+    register_plain_fields(_op.op_id, ("referenceToken",))

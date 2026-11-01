@@ -183,18 +183,16 @@ policy_decision_var: ContextVar[str | None] = ContextVar(
 )
 
 
-#: ContextVar carrying the ``reveal_secret`` opt-in for a ``credential_read``
-#: dispatch (#2467). Bound in
-#: :func:`~meho_backplane.operations.dispatcher.dispatch` with a
+#: ContextVar carrying the ``reveal_secret`` opt-in of a dispatch (#2467).
+#: Bound in :func:`~meho_backplane.operations.dispatcher.dispatch` with a
 #: token/finally reset scoping it to the dispatch -- the same
 #: bound-at-a-boundary / read-at-the-write-call-site discipline as
 #: :data:`policy_decision_var`. Read by :func:`_build_audit_payload`, which
-#: stamps ``payload["reveal_secret"]`` so "which credential reads returned a
-#: raw value vs. the default key-name-scrubbed response" is queryable on the
-#: audit row. ``True`` = caller opted into the raw value; ``False`` = the
-#: default scrubbed response was returned; ``None`` (the value for every
-#: non-credential_read dispatch, and for pre-gate usage errors) leaves the
-#: key absent.
+#: stamps ``payload["reveal_secret"]`` so "which calls returned the hidden
+#: values vs. the default view" is queryable on the audit row. ``True`` =
+#: the caller asked for the values (any operation); ``False`` = a secret
+#: read returned its default view, names without values; ``None`` (every
+#: other dispatch, and pre-gate usage errors) leaves the key absent.
 reveal_secret_var: ContextVar[bool | None] = ContextVar(
     "reveal_secret",
     default=None,
@@ -474,10 +472,10 @@ def _apply_contextvar_lineage_mirrors(payload: dict[str, Any]) -> None:
       per-row attribution slice);
     * runbook correlation (G12.1-T2 #1294) -- ``run_id`` / ``step_id``,
       ``None`` outside a runbook step execution;
-    * credential_read reveal choice (#2467) -- ``reveal_secret`` (bool),
-      bound only for a credential_read dispatch (``True`` = the caller
-      opted into the raw value, ``False`` = the default key-name-scrubbed
-      response), so the key stays absent for every other op;
+    * reveal choice (#2467) -- ``reveal_secret`` (bool): ``True`` when the
+      caller asked for the hidden values of the answer (any operation),
+      ``False`` when a secret read returned its default view; the key stays
+      absent for every other dispatch;
     * caller gone (#3696) -- ``caller_gone_at`` (ISO-8601), present only when
       the caller of a synchronous request disconnected before this row was
       written (:mod:`meho_backplane.operations.caller_gone`). The operation

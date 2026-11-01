@@ -89,6 +89,7 @@ from meho_backplane.connectors.vcf_operations._response_schemas import (
     VROPS_RESOURCE_QUERY_RESPONSE,
     VROPS_RESOURCE_STATS_RESPONSE,
 )
+from meho_backplane.operations import register_plain_fields
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -813,3 +814,7 @@ async def register_vcf_operations_typed_operations(
         version=VcfOperationsConnector.version,
         impl_id=VcfOperationsConnector.impl_id,
     )
+
+
+# The handler masks the licence key; only its last 5 characters show.
+register_plain_fields(VROPS_LICENSE_INFO_OP.op_id, ("licenseKey",))

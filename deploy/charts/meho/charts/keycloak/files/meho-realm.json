@@ -124,6 +124,56 @@
       }
     }
   ],
+  "authenticationFlows": [
+    {
+      "id": "5d2b8f3e-6a41-4c0b-9e57-3f1a8c6d2b10",
+      "alias": "meho approval sign-in",
+      "description": "Sign-in of `meho approvals approve`: always asks for the password, and for the one-time code when the person has set one up.",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-username-password-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "CONDITIONAL",
+          "priority": 20,
+          "flowAlias": "meho approval sign-in - one-time code",
+          "userSetupAllowed": false
+        }
+      ]
+    },
+    {
+      "id": "9a7c4e21-0b3d-4f68-8d15-6e2f0a9b4c73",
+      "alias": "meho approval sign-in - one-time code",
+      "description": "Asks for the one-time code when the person has set one up.",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "conditional-user-configured",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticator": "auth-otp-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "userSetupAllowed": false
+        }
+      ]
+    }
+  ],
   "clients": [
     {
       "clientId": "meho-backplane",
@@ -316,6 +366,9 @@
         "oauth2.device.authorization.grant.enabled": "false",
         "use.refresh.tokens": "true",
         "client.use.lightweight.access.token.enabled": "false"
+      },
+      "authenticationFlowBindingOverrides": {
+        "browser": "5d2b8f3e-6a41-4c0b-9e57-3f1a8c6d2b10"
       },
       "redirectUris": [
         "http://127.0.0.1:*"

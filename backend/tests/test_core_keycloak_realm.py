@@ -333,3 +333,36 @@ def test_approval_sign_in_client(realm: dict[str, Any]) -> None:
         if m["name"] != "meho-mcp-audience"
     }
     assert {m["name"]: m for m in client["protocolMappers"]} == cli_mappers
+
+
+def test_approval_client_has_its_own_sign_in_flow(realm: dict[str, Any]) -> None:
+    """``meho-cli-approve`` signs in with a flow that always asks for the password.
+
+    The flow has the password form and the one-time code step (when the
+    person has set one up), and no other step: no step that signs a person
+    in without the form.
+    """
+    flows = {flow["alias"]: flow for flow in realm["authenticationFlows"]}
+    flow = flows["meho approval sign-in"]
+    assert flow["topLevel"] is True
+    assert flow["builtIn"] is False
+    assert _client(realm, "meho-cli-approve")["authenticationFlowBindingOverrides"] == {
+        "browser": flow["id"]
+    }
+    steps = [
+        (step.get("authenticator") or step["flowAlias"], step["requirement"])
+        for step in flow["authenticationExecutions"]
+    ]
+    assert steps == [
+        ("auth-username-password-form", "REQUIRED"),
+        ("meho approval sign-in - one-time code", "CONDITIONAL"),
+    ]
+    code = flows["meho approval sign-in - one-time code"]
+    assert code["topLevel"] is False
+    assert [(s["authenticator"], s["requirement"]) for s in code["authenticationExecutions"]] == [
+        ("conditional-user-configured", "REQUIRED"),
+        ("auth-otp-form", "REQUIRED"),
+    ]
+    # Only the approval client has a flow of its own.
+    bound = [c["clientId"] for c in realm["clients"] if c.get("authenticationFlowBindingOverrides")]
+    assert bound == ["meho-cli-approve"]

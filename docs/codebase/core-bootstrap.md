@@ -257,6 +257,17 @@ Steps of the realm stage, in order:
    set)`). An existing client gets the mappers and the scope assignments
    it lacks, and its secret is set when the file names one. Nothing is
    deleted, and an existing mapper or scope is not changed.
+   Before the clients come the **login flows** of the realm file
+   (`core/keycloak_flows.py`, #5515). Today that is one flow, `meho
+   approval sign-in`: the password form, then the one-time code when the
+   person has set one up. A missing flow is made with its steps; an
+   existing flow is kept as it is. A client that names a flow in
+   `authenticationFlowBindingOverrides` (only `meho-cli-approve`) is bound
+   to it (output: `kept (login flow set)`). Reading and making login flows
+   needs `manage-realm`. Without it the step prints `not checked (no right
+   to read login flows)` and the Job goes on; the client is then made
+   without its own flow. A fresh install gets the flow and the binding from
+   the realm import, so this matters only for a realm made before #5515.
 4. **CI login**, when on.
    Then the **company login**, when on (see "The company login").
 5. **First login.** Read `<release>-core-first-login`; make it when missing
@@ -271,9 +282,10 @@ Steps of the realm stage, in order:
    first-start account stays and the Job stops.
 
 Rights: `meho-admin` has `manage-clients` and `manage-users` on realm
-`meho` (from the realm file), which covers steps 3 to 5; with the company
-login on, the chart adds `manage-identity-providers` and `manage-realm`
-(see "Rights" under the company login). Only the first-start account can do
+`meho` (from the realm file), which covers steps 3 to 5 except the login
+flows; with the company login on, the chart adds `manage-identity-providers`
+and `manage-realm` (see "Rights" under the company login), and then the
+Job can make the login flows too. Only the first-start account can do
 step 6, and only it is needed there.
 
 ### Network rules

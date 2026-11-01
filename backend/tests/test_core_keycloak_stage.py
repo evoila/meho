@@ -19,6 +19,7 @@ import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -108,8 +109,19 @@ class FakeStore:
 class FakeKeycloak:
     """The Admin REST calls the stage makes, over an in-memory realm."""
 
-    def __init__(self, *, bootstrap: tuple[str, str] | None, ignore_secret_updates: bool = False):
+    def __init__(
+        self,
+        *,
+        bootstrap: tuple[str, str] | None,
+        ignore_secret_updates: bool = False,
+        flow_rights: bool = True,
+    ):
         self.master_clients: dict[str, dict[str, Any]] = {}
+        # Login flows by alias; each has its steps in ``executions``.
+        self.flows: dict[str, dict[str, Any]] = {}
+        self._add_flow({"alias": "browser", "providerId": "basic-flow", "topLevel": True})
+        # False: the account lacks manage-realm, so login flows answer 403.
+        self.flow_rights = flow_rights
         if bootstrap:
             self.master_clients[bootstrap[0]] = {"id": str(uuid.uuid4()), "secret": bootstrap[1]}
         self.scopes: dict[str, dict[str, Any]] = {}
@@ -130,8 +142,69 @@ class FakeKeycloak:
             self.scopes[scope["name"]] = {"id": str(uuid.uuid4()), **copy.deepcopy(scope)}
         for group in realm.get("groups", []):
             self.groups[group["name"]] = {"id": str(uuid.uuid4()), **copy.deepcopy(group)}
+        file_ids: dict[str, str] = {}
+        for flow in realm.get("authenticationFlows", []):
+            file_ids[flow["id"]] = self._add_flow(flow)["id"]
+        for flow in realm.get("authenticationFlows", []):
+            for step in flow["authenticationExecutions"]:
+                self._add_step(flow["alias"], step.get("authenticator"), step.get("flowAlias"))
+                self.flows[flow["alias"]]["executions"][-1]["requirement"] = step["requirement"]
         for client in realm.get("clients", []):
+            client = copy.deepcopy(client)
+            overrides = client.get("authenticationFlowBindingOverrides", {})
+            for binding, file_id in overrides.items():
+                overrides[binding] = file_ids[file_id]
             self._add_client(client)
+
+    def _add_flow(self, flow: Mapping[str, Any]) -> dict[str, Any]:
+        made = {
+            "id": str(uuid.uuid4()),
+            "alias": flow["alias"],
+            "providerId": flow["providerId"],
+            "topLevel": flow["topLevel"],
+            "executions": [],
+        }
+        self.flows[made["alias"]] = made
+        return made
+
+    def _add_step(self, parent: str, authenticator: str | None, flow_alias: str | None) -> None:
+        self.flows[parent]["executions"].append(
+            {
+                "id": str(uuid.uuid4()),
+                "authenticator": authenticator,
+                "flowAlias": flow_alias,
+                "requirement": "DISABLED",
+            }
+        )
+
+    def flow_steps(self, alias: str, level: int = 0) -> list[dict[str, Any]]:
+        """The steps of a flow as Keycloak lists them: sub-flow steps follow their sub-flow."""
+        steps: list[dict[str, Any]] = []
+        for step in self.flows[alias]["executions"]:
+            if step["flowAlias"]:
+                steps.append(
+                    {
+                        "id": step["id"],
+                        "displayName": step["flowAlias"],
+                        "authenticationFlow": True,
+                        "requirement": step["requirement"],
+                        "level": level,
+                        "flowId": self.flows[step["flowAlias"]]["id"],
+                    }
+                )
+                steps += self.flow_steps(step["flowAlias"], level + 1)
+            else:
+                steps.append(
+                    {
+                        "id": step["id"],
+                        "displayName": f"display of {step['authenticator']}",
+                        "providerId": step["authenticator"],
+                        "authenticationFlow": False,
+                        "requirement": step["requirement"],
+                        "level": level,
+                    }
+                )
+        return steps
 
     def _add_client(self, rep: Mapping[str, Any]) -> str:
         client = copy.deepcopy(dict(rep))
@@ -155,6 +228,7 @@ class FakeKeycloak:
                 "groups": self.groups,
                 "clients": self.clients,
                 "users": self.users,
+                "flows": self.flows,
             }
         )
 
@@ -216,6 +290,17 @@ class FakeKeycloak:
             assert params == {"username": params["username"], "exact": "true"}
             user = self.users.get(params["username"])
             return Reply(200, [{"id": user["id"], "username": user["username"]}] if user else [])
+        if path.startswith("/admin/realms/meho/authentication/") and not self.flow_rights:
+            return Reply(403, {"error": "HTTP 403 Forbidden"})
+        if path == "/admin/realms/meho/authentication/flows":
+            return Reply(
+                200,
+                [{"id": f["id"], "alias": a} for a, f in self.flows.items() if f["topLevel"]],
+            )
+        if match := re.fullmatch(
+            r"/admin/realms/meho/authentication/flows/([^/]+)/executions", path
+        ):
+            return Reply(200, self.flow_steps(unquote(match.group(1))))
         if match := re.fullmatch(r"/admin/realms/meho/groups/([^/]+)", path):
             group = self._group_by_id(match.group(1))
             if group is None:
@@ -236,6 +321,26 @@ class FakeKeycloak:
         raise AssertionError(f"unexpected GET {path}")
 
     def _post(self, path: str, body: Any, params: dict[str, str]) -> Reply:
+        if path.startswith("/admin/realms/meho/authentication/") and not self.flow_rights:
+            return Reply(403, {"error": "HTTP 403 Forbidden"})
+        if path == "/admin/realms/meho/authentication/flows":
+            assert body["topLevel"] is True and body["builtIn"] is False
+            if body["alias"] in self.flows:
+                return Reply(409, {"errorMessage": "Flow already exists"})
+            return Reply(201, None, f"{path}/{self._add_flow(body)['id']}")
+        if match := re.fullmatch(
+            r"/admin/realms/meho/authentication/flows/([^/]+)/executions/(execution|flow)", path
+        ):
+            parent = unquote(match.group(1))
+            if match.group(2) == "flow":
+                sub = self._add_flow(
+                    {"alias": body["alias"], "providerId": body["type"], "topLevel": False}
+                )
+                self._add_step(parent, None, body["alias"])
+                return Reply(201, None, f"/admin/realms/meho/authentication/flows/{sub['id']}")
+            self._add_step(parent, body["provider"], None)
+            step_id = self.flows[parent]["executions"][-1]["id"]
+            return Reply(201, None, f"/admin/realms/meho/authentication/executions/{step_id}")
         if path == "/admin/realms/meho/client-scopes":
             if body["name"] in self.scopes:
                 return Reply(409, {"errorMessage": "Client Scope name must be unique"})
@@ -253,6 +358,8 @@ class FakeKeycloak:
                 return Reply(409, {"errorMessage": "Client meho already exists"})
             for name in body.get("defaultClientScopes", []) + body.get("optionalClientScopes", []):
                 assert name in self.scopes, name
+            known = {f["id"] for f in self.flows.values()}
+            assert set((body.get("authenticationFlowBindingOverrides") or {}).values()) <= known
             return Reply(201, None, f"{path}/{self._add_client(body)}")
         if path == "/admin/realms/meho/users":
             if body["username"] in self.users:
@@ -296,7 +403,22 @@ class FakeKeycloak:
             assert body["id"] == client["id"]
             if not self.ignore_secret_updates:
                 client["secret"] = body.get("secret", client.get("secret"))
+            if "authenticationFlowBindingOverrides" in body:
+                overrides = body["authenticationFlowBindingOverrides"]
+                known = {f["id"] for f in self.flows.values()}
+                assert set(overrides.values()) <= known, "Unable to resolve the flow binding"
+                client["authenticationFlowBindingOverrides"] = copy.deepcopy(overrides)
             return Reply(204, None)
+        if match := re.fullmatch(
+            r"/admin/realms/meho/authentication/flows/([^/]+)/executions", path
+        ):
+            assert self.flow_rights
+            for flow in self.flows.values():
+                for step in flow["executions"]:
+                    if step["id"] == body["id"]:
+                        step["requirement"] = body["requirement"]
+                        return Reply(204, None)
+            return Reply(404, {"error": "Illegal execution"})
         if match := re.fullmatch(
             r"/admin/realms/meho/clients/([^/]+)/(default|optional)-client-scopes/([^/]+)", path
         ):
@@ -461,12 +583,45 @@ async def test_upgrade_adds_what_a_newer_realm_file_brings(
     assert "user admin: kept" in out
 
 
-async def test_upgrade_adds_the_approval_sign_in_client(capfd: pytest.CaptureFixture[str]) -> None:
-    """A running realm from before #5515 gets the ``meho-cli-approve`` client."""
+_APPROVAL_FLOW = "meho approval sign-in"
+_APPROVAL_STEPS = [
+    ("auth-username-password-form", "REQUIRED", 0),
+    ("meho approval sign-in - one-time code", "CONDITIONAL", 0),
+    ("conditional-user-configured", "REQUIRED", 1),
+    ("auth-otp-form", "REQUIRED", 1),
+]
+
+
+def _steps(kc: FakeKeycloak, alias: str) -> list[tuple[str, str, int]]:
+    return [
+        (
+            s["displayName"] if s["authenticationFlow"] else s["providerId"],
+            s["requirement"],
+            s["level"],
+        )
+        for s in kc.flow_steps(alias)
+    ]
+
+
+def _realm_before_the_approval_flow() -> dict[str, Any]:
     old = _realm_as_imported()
+    del old["authenticationFlows"]
     old["clients"] = [c for c in old["clients"] if c["clientId"] != "meho-cli-approve"]
+    return old
+
+
+def test_imported_realm_binds_the_approval_client_to_its_flow() -> None:
+    kc = _fresh()
+
+    assert _steps(kc, _APPROVAL_FLOW) == _APPROVAL_STEPS
+    overrides = kc.clients["meho-cli-approve"]["authenticationFlowBindingOverrides"]
+    assert overrides == {"browser": kc.flows[_APPROVAL_FLOW]["id"]}
+
+
+async def test_upgrade_adds_the_approval_sign_in_client(capfd: pytest.CaptureFixture[str]) -> None:
+    """A running realm from before #5515 gets ``meho-cli-approve`` and its login flow."""
     kc = FakeKeycloak(bootstrap=None)
-    kc.import_realm(old)
+    kc.import_realm(_realm_before_the_approval_flow())
 
     await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
 
@@ -475,7 +630,51 @@ async def test_upgrade_adds_the_approval_sign_in_client(capfd: pytest.CaptureFix
     assert client["attributes"]["oauth2.device.authorization.grant.enabled"] == "false"
     assert client["optionalClientScopes"] == []
     assert client["redirectUris"] == ["http://127.0.0.1:*"]
-    assert "client meho-cli-approve: created" in capfd.readouterr().out
+    assert _steps(kc, _APPROVAL_FLOW) == _APPROVAL_STEPS
+    assert client["authenticationFlowBindingOverrides"] == {
+        "browser": kc.flows[_APPROVAL_FLOW]["id"]
+    }
+    out = capfd.readouterr().out
+    assert f"login flow {_APPROVAL_FLOW}: created" in out
+    assert "client meho-cli-approve: created" in out
+
+
+async def test_upgrade_binds_an_existing_approval_client_to_its_flow(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    old = _realm_as_imported()
+    del old["authenticationFlows"]
+    approve = next(c for c in old["clients"] if c["clientId"] == "meho-cli-approve")
+    del approve["authenticationFlowBindingOverrides"]
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(old)
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    overrides = kc.clients["meho-cli-approve"]["authenticationFlowBindingOverrides"]
+    assert overrides == {"browser": kc.flows[_APPROVAL_FLOW]["id"]}
+    assert "client meho-cli-approve: kept (login flow set)" in capfd.readouterr().out
+    # The next run finds both in place.
+    kc.calls.clear()
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+    assert not [c for c in kc.calls if c[0] == "POST" and "authentication" in c[1]]
+    assert f"login flow {_APPROVAL_FLOW}: kept" in capfd.readouterr().out
+
+
+async def test_without_the_right_to_change_login_flows_the_stage_goes_on(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """``meho-admin`` without ``manage-realm``: the client is made, the flow is not."""
+    kc = FakeKeycloak(bootstrap=None, flow_rights=False)
+    kc.import_realm(_realm_before_the_approval_flow())
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    assert _APPROVAL_FLOW not in kc.flows
+    assert "authenticationFlowBindingOverrides" not in kc.clients["meho-cli-approve"]
+    out = capfd.readouterr().out
+    assert f"login flow {_APPROVAL_FLOW}: not checked (no right to read login flows)" in out
+    assert "client meho-cli-approve: created" in out
 
 
 async def test_output_never_contains_a_secret_value(

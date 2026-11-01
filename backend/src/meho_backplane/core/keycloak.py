@@ -12,6 +12,9 @@ running realm up to date through the Admin REST API:
   else as ``meho-admin``;
 * it adds every client scope, group, client, mapper and client scope
   assignment of the realm file that the realm does not have yet;
+* it adds the login flows of the realm file the realm does not have yet,
+  and binds a client to its own flow
+  (:mod:`meho_backplane.core.keycloak_flows`);
 * it sets the secrets of the confidential clients from the ``<release>-core-…``
   Secrets, so Keycloak and the backplane always agree;
 * it makes the first admin and the second person with temporary passwords,
@@ -67,6 +70,7 @@ from meho_backplane.core.keycloak_api import (
     expect,
     id_from,
 )
+from meho_backplane.core.keycloak_flows import OVERRIDES, ensure_flows, flow_overrides
 from meho_backplane.core.secrets import (
     CoreSecretsError,
     KubernetesSecretStore,
@@ -317,16 +321,25 @@ class _Realm:
             _say(f"client scope {name}: created")
         return ids
 
-    async def ensure_client(self, want: Mapping[str, Any], scope_ids: Mapping[str, str]) -> None:
+    async def ensure_client(
+        self,
+        want: Mapping[str, Any],
+        scope_ids: Mapping[str, str],
+        flow_ids: Mapping[str, str],
+    ) -> None:
         client_id = want["clientId"]
+        overrides = flow_overrides(want, flow_ids)
         found = expect(
             await self.admin.call("GET", f"{self.base}/clients", params={"clientId": client_id}),
             200,
             what=f"cannot look up client {client_id}",
         )
         if not found.data:
+            body = {key: value for key, value in want.items() if key != OVERRIDES}
+            if overrides:
+                body[OVERRIDES] = overrides
             expect(
-                await self.admin.call("POST", f"{self.base}/clients", json=dict(want)),
+                await self.admin.call("POST", f"{self.base}/clients", json=body),
                 201,
                 what=f"cannot create client {client_id}",
             )
@@ -335,17 +348,24 @@ class _Realm:
         url = f"{self.base}/clients/{found.data[0]['id']}"
         changes = await self._add_mappers(url, want)
         changes += await self._add_scopes(url, want, scope_ids)
+        update: dict[str, Any] = {}
         if "secret" in want:
+            update["secret"] = want["secret"]
+            changes.append("secret set")
+        bound = found.data[0].get(OVERRIDES) or {}
+        if any(bound.get(binding) != flow_id for binding, flow_id in overrides.items()):
+            update[OVERRIDES] = {**bound, **overrides}
+            changes.append("login flow set")
+        if update:
             current = expect(
                 await self.admin.call("GET", url), 200, what=f"cannot read client {client_id}"
             ).data
-            current["secret"] = want["secret"]
+            current.update(update)
             expect(
                 await self.admin.call("PUT", url, json=current),
                 204,
-                what=f"cannot set the secret of client {client_id}",
+                what=f"cannot update client {client_id}",
             )
-            changes.append("secret set")
         _say(f"client {client_id}: kept" + (f" ({', '.join(changes)})" if changes else ""))
 
     async def _add_mappers(self, url: str, want: Mapping[str, Any]) -> list[str]:
@@ -583,7 +603,7 @@ async def _ensure_ci(
     want = _ci_client(
         data["client_id"], data["client_secret"], environ[TENANT_ID_ENV], environ[PUBLIC_URL_ENV]
     )
-    await realm.ensure_client(want, scope_ids)
+    await realm.ensure_client(want, scope_ids, {})
 
 
 Session = Literal["bootstrap", "admin"]
@@ -652,8 +672,9 @@ async def finish_realm(
     for tenant in plan.tenants:
         for group in tenant_groups(tenant):
             await realm.ensure_group(group, drop=OLD_ACCESS_ATTRIBUTES)
+    flow_ids = await ensure_flows(admin, realm_file.get("authenticationFlows") or [])
     for want in realm_file.get("clients") or []:
-        await realm.ensure_client(want, scope_ids)
+        await realm.ensure_client(want, scope_ids, flow_ids)
     if plan.ci.enabled:
         await _ensure_ci(realm, plan, environ, store, scope_ids)
     if plan.company_login.enabled:

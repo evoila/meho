@@ -86,6 +86,33 @@ __all__ = [
 ]
 
 
+#: Generic vCenter REST reads whose answer holds credentials, as the
+#: vendor ``vcenter.yaml`` writes the paths: proxy settings, content
+#: libraries, report download tokens, deployment and migration specs,
+#: guest customization specs, identity providers and broker clients, and
+#: Supervisor image registries. :data:`_CREDENTIAL_READ_OPS` lists each
+#: one twice, with and without the ``/api`` base.
+_VCENTER_CREDENTIAL_READ_PATHS: Final[tuple[str, ...]] = (
+    "/appliance/networking/proxy",
+    "/appliance/networking/proxy/{protocol}",
+    "/content/library/{libraryId}",
+    "/content/local-library/{libraryId}",
+    "/content/subscribed-library/{libraryId}",
+    "/esx/hcl/reports/{report}",
+    "/vcenter/lcm/reports/{report}",
+    "/vcenter/deployment/install",
+    "/vcenter/deployment/upgrade",
+    "/vcenter/deployment/migrate",
+    "/vcenter/lcm/deployment/migration-upgrade",
+    "/vcenter/guest/customization-specs/{name}",
+    "/vcenter/identity/providers/{provider}",
+    "/vcenter/identity/broker/tenants/{tenant}/admin-client",
+    "/vcenter/identity/broker/tenants/operator-client",
+    "/vcenter/namespace-management/supervisors/{supervisor}/container-image-registries",
+    "/vcenter/namespace-management/supervisors/{supervisor}"
+    "/container-image-registries/{containerImageRegistry}",
+)
+
 #: Op-ids that classify as ``credential_read``. Extensible — every
 #: future credential-access verb (e.g. ``vault.transit.decrypt``,
 #: ``secretsmanager.get``, ``onepassword.read``) gets added here when
@@ -149,6 +176,21 @@ _CREDENTIAL_READ_OPS: Final[frozenset[str]] = frozenset(
         "GET:/v1/users/local/admin",
         "GET:/v1/identity-providers",
         "GET:/v1/identity-providers/{id}",
+        # The VCF Installer bring-up spec carries the host, NSX, vCenter and
+        # SDDC Manager passwords.
+        "GET:/v1/sddcs/{id}/spec",
+        # Generic vCenter reads whose answer holds credentials. The catalog
+        # rows ``vmware`` / ``9.0`` and ``8.0`` raise them to caution with
+        # approval; this entry scrubs the answer and collapses the broadcast.
+        # Each REST path is listed as the spec writes it and under the
+        # ``/api`` base, because the parser folds a relative ``servers.url``
+        # into every path.
+        *(f"GET:{path}" for path in _VCENTER_CREDENTIAL_READ_PATHS),
+        *(f"GET:/api{path}" for path in _VCENTER_CREDENTIAL_READ_PATHS),
+        # The older-API (VI-JSON) host config (IPMI password) and precheck
+        # remediation result (host profile passwords).
+        "GET:/HostSystem/{moId}/config",
+        "GET:/HostSystem/{moId}/precheckRemediationResult",
         # #4617 -- a BIND config file can hold TSIG and rndc key secrets.
         # The answer is one text field, so the Tier-1 ``bind_key_secret``
         # rule does the redaction; this entry collapses the broadcast and
@@ -279,11 +321,10 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         "rke2.node.config.update",
         # #2892 — the GOSC customization-spec create composite. Its params
         # carry Windows sysprep credentials (``windows_admin_password`` /
-        # ``windows_product_key`` / ``windows_domain_admin_password``). The
-        # ``password`` fields trip the key-name scrub, but ``product_key``
-        # does not (``key`` is neither an anywhere- nor a final-position
-        # secret token), so a plain ``write`` classification (the ``.create``
-        # suffix) would broadcast the product key in full. Pinning it
+        # ``windows_product_key`` / ``windows_domain_admin_password``). All
+        # three trip the key-name scrub (``product_key`` is a secret pair),
+        # and the pin makes the class explicit instead of relying on that
+        # runtime scrub for a plain ``write`` (the ``.create`` suffix). It
         # collapses the whole params dict to aggregate-only (#1503); the
         # park-time preview additionally echoes identity fields only. The
         # sibling ``vmware.composite.vm.customize`` carries only a spec-name
@@ -1270,7 +1311,9 @@ _SECRET_NAME_TOKENS_FINAL: Final[frozenset[str]] = frozenset(
 #: positional rules above don't (``api_key``, ``private_key``,
 #: ``secret_id`` -- the Vault AppRole SecretID is secret material
 #: even though ``secret`` is non-final there; ``license_key`` -- a
-#: product licence is a credential a vendor file may show in clear).
+#: product licence is a credential a vendor file may show in clear;
+#: ``product_key`` -- the Windows product key of a vSphere guest
+#: customization spec, the same kind of value).
 _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
     {
         ("api", "key"),
@@ -1279,6 +1322,7 @@ _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
         ("encryption", "key"),
         ("license", "key"),
         ("licence", "key"),
+        ("product", "key"),
         ("secret", "id"),
         ("secret", "value"),
         ("secret", "data"),

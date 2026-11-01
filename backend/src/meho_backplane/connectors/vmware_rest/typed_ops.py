@@ -409,6 +409,9 @@ from meho_backplane.connectors.vmware_rest.typed_ops_content_library_find import
     VMWARE_CONTENT_LIBRARY_FIND_OP,
     VMWARE_CONTENT_LIBRARY_ITEM_FIND_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_content_library_list import (  # noqa: E402
+    CONTENT_LIBRARY_LIST_OPS,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_datacenter_list import (  # noqa: E402
     DATACENTER_LIST_GROUP_KEY,
     DATACENTER_LIST_WHEN_TO_USE,
@@ -633,6 +636,8 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_DATACENTER_LIST_OP,
     VMWARE_FOLDER_LIST_OP,
     *CONTENT_LIBRARY_OPS,
+    # The content library list and item list (#4342).
+    *CONTENT_LIBRARY_LIST_OPS,
     VMWARE_VCENTER_DEPLOYMENT_STATUS_OP,
     VMWARE_NETWORK_PORTGROUP_SHOW_OP,
 )

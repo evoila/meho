@@ -116,12 +116,22 @@ from meho_backplane.connectors.vmware_rest.composites._library import (
     content_library_subscribed_status_composite,
     content_library_subscribed_sync_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._library_capture import (
+    CAPTURE_COMPOSITE,
+)
 from meho_backplane.connectors.vmware_rest.composites._library_delete import (
     content_library_delete_composite,
     content_library_item_delete_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._library_export import (
+    EXPORT_OVF_COMPOSITE,
+    ITEM_EXPORT_COMPOSITE,
+)
 from meho_backplane.connectors.vmware_rest.composites._library_local import (
     CONTENT_LIBRARY_CREATE_COMPOSITE,
+)
+from meho_backplane.connectors.vmware_rest.composites._library_publish import (
+    PUBLISH_SET_COMPOSITE,
 )
 from meho_backplane.connectors.vmware_rest.composites._library_upload import (
     CONTENT_LIBRARY_ITEM_UPLOAD_COMPOSITE,
@@ -2139,6 +2149,15 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # Install a new vCenter (#4394), dangerous / approval; the rows live in
     # their own module.
     *(_CompositeSpec(**row) for row in VCENTER_INSTALL_COMPOSITES),
+    # --- Content library reads, capture, OVF export (#4342) ------------
+    # Capture a VM into a library and publish a library (caution), copy an
+    # item's files out and export a VM as OVF files (dangerous); all wait
+    # for approval. The rows live in their own modules.
+    _CompositeSpec(**CAPTURE_COMPOSITE),
+    _CompositeSpec(**PUBLISH_SET_COMPOSITE),
+    _CompositeSpec(**ITEM_EXPORT_COMPOSITE),
+    _CompositeSpec(**EXPORT_OVF_COMPOSITE),
+    # --- end #4342 -----------------------------------------------------
 )
 
 

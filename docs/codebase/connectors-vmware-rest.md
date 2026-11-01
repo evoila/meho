@@ -3460,6 +3460,85 @@ how it goes away:
 - a `.meho-partial` file at the destination is removed or replaced by the
   next run. It never looks like a complete file.
 
+### Content library lists, VM capture and OVF export (#4342)
+
+Six operations. They work on a fresh install (no spec ingest) and are
+registered on both catalogs, `vmware-rest-8.0` and `vmware-rest-9.0`. Every
+vendor call exists in both pinned API files, so no operation stops early on
+a version.
+
+| Operation | What it does | What it returns | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.content_library.list` (typed) | All libraries. `GET /content/library`, then per library `GET /content/library/{id}` and `GET /content/library/item?library_id=` for the item count. | `{library_count, libraries: [{library_id, name, type, datastore_ids, published, item_count, last_sync_time, last_modified_time, read_note}]}` | `safe` | 8.0, 9.x |
+| `vmware.content_library.item.list` (typed) | The items of one library (by id or name). `GET /content/library/item?library_id=`, then `GET /content/library/item/{id}` per item. | `{library_id, item_count, items: [{library_item_id, name, type, size, content_version, cached, last_modified_time, read_note}]}` | `safe` | 8.0, 9.x |
+| `vmware.composite.vm.capture_to_library` | Saves a VM into a local library: `POST /vcenter/ovf/library-item` (OVF template, with `Client-Token`) or `POST /vcenter/vm-template/library-items` (VM template, needs a placement). Reads the item back. A taken item name gives `already_exists`. | `{status, vm, library_id, template_type, library_item_id, client_token, item, ...}` | `caution`, approval | 8.0, 9.x |
+| `vmware.composite.content_library.publish.set` | Turns publishing of a local library on or off and sets the login (`PATCH /content/local-library/{id}`). Passwords come as Vault references (`password_ref`, `current_password_ref`). Reads the library back. | `{status, library_id, before, publish, password_changed, ...}`; no password | `caution`, approval | 8.0, 9.x |
+| `vmware.composite.content_library.item.export` | Copies every file of one item to a URL that takes HTTP `PUT`, with the copy helper above. | `{status, library_item_id, files: [{name, size, sha256, destination_path, status}], leftovers_removed, cleanup, client_tokens, ...}` | `dangerous`, approval | 8.0, 9.x |
+| `vmware.composite.vm.export_ovf` | Captures a VM into a temporary OVF item (or uses an OVF item), copies its files like `item.export`, then deletes the temporary item. | same as `item.export`, plus `vm` and `temporary_item` | `dangerous`, approval | 8.0, 9.x |
+
+Code: the two lists are in `typed_ops_content_library_list.py`. The capture
+and the shared write step `governed_send` (with its halves `check_step` and
+`send_step`) are in `composites/_library_capture.py`,
+the publish change in `composites/_library_publish.py`, the two exports in
+`composites/_library_export.py`, and the download session and clean-up in
+`composites/_library_export_session.py`. Schemas and AI guidance are in
+`composites/_library_export_schemas.py`.
+
+**Write check.** The capture goes through `governed_send`: the same step
+check as `_write_sub_op`, plus request headers (the `Client-Token`) and check
+parameters that differ from the body. The publish change uses its two halves,
+`check_step` and `send_step`, so it reads the passwords from Vault only after
+the step check passes. It shows the Vault references in the step check and in
+an approval request, never the passwords. When the change fails, its answer
+keeps the HTTP status and vCenter's error type, not vCenter's error text, like
+other operations that send a secret. Its `password` tag, and the `token`
+tag of the two exports, keep the vendor bodies out of the flight recorder.
+The download-session calls change no vCenter object, so they run without a
+step check, like the library import of `library_download.py`.
+
+**`Client-Token`.** The OVF capture and the download session create send a
+new UUID in the `Client-Token` header and return it in the answer
+(`client_token`, `client_tokens`). vCenter makes nothing new when the same
+request comes again with the same token. The VM-template create has no such
+header in the vendor API.
+
+**The export, step by step.** Open a download session; list its files;
+`POST .../file?action=prepare` for each file; read
+`GET .../file?file_name=` until the file is `PREPARED` (an `ERROR` or the
+time limit of 10 minutes stops the run; a keep-alive goes out once a minute
+while it waits); then `copy_files` streams each file and keeps the session
+open. MEHO uses only the path of a vCenter download URL: it always sends the
+request, with the vCenter session, to the target's own host and port.
+
+**Use async mode.** An export of a large VM takes hours, and the handler
+runs until the copy and the clean-up are done. Call it with `async: true`:
+MEHO answers `202` with a run handle at once, and the stored result of the
+run has the final answer. MEHO's async mode does not resume a run: when MEHO
+restarts during the call, the run ends as failed. Check the destination,
+then start the operation again.
+
+**Clean-up.** In a `finally` block, also after an error, the export ends the
+download session (`DELETE /content/library/item/download-session/{id}`) and,
+for a VM export, deletes the temporary item. The answer's `cleanup` block
+says what worked. When the MEHO process dies, what is left and how it goes
+away:
+
+- the download session: vCenter ends it after its own timeout;
+- the temporary item: its name starts with `meho-transfer-ovf-export-`. The
+  next VM export into the same library deletes such items that are older
+  than a day (a younger one may belong to a run that is still going). Find
+  them with `vmware.content_library.item.list` and delete one by hand with
+  `content_library.item.delete`;
+- a file at the destination with the ending `.meho-partial`: the next run
+  removes or replaces it. It never looks like a complete file.
+
+**Not checked live yet.** The vendor calls are checked against the pinned
+`vcenter.yaml` of vCenter 8.0 and 9.0
+(`test_connectors_vmware_rest_library_export_reconcile.py`); the handlers are
+covered by mock tests (`test_connectors_vmware_rest_typed_content_library_list.py`,
+`test_connectors_vmware_rest_composites_library_export.py`). A lab proof on
+8.0 U1 to U3 and 9.0 to 9.1.1 is separate work.
+
 ### vim cluster / inventory writes (`cluster.drs_rule.create` + `folder.create`, #2895)
 
 Two more vim-only writes ride the #2893 substrate (Task E). Neither has a

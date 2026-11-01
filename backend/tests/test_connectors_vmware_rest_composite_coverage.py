@@ -103,6 +103,15 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.vcenter.deployment.answer",
         # ``.inventory`` is not a classifier suffix -> ``other``; a read.
         "vmware.migration.inventory",
+        # --- Content library capture and export (#4342): none of
+        # ``.capture_to_library`` / ``.export`` / ``.export_ovf`` is a
+        # classifier suffix -> ``other``. Their params hold a Vault reference
+        # at most, never a secret. (``content_library.publish.set`` is pinned
+        # ``credential_write``.)
+        "vmware.composite.vm.capture_to_library",
+        "vmware.composite.content_library.item.export",
+        "vmware.composite.vm.export_ovf",
+        # --- end #4342
     }
 )
 

@@ -509,6 +509,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vm_question import (  # noq
     VMWARE_VM_QUESTION_ANSWER_OP,
     VMWARE_VM_QUESTION_GET_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_vsan_reads import (  # noqa: E402
+    VSAN_GROUP_KEY,
+    VSAN_READ_OPS,
+    VSAN_WHEN_TO_USE,
+)
 
 #: Curated ``when_to_use`` blurb per typed-op group.
 #: ``register_typed_operation`` requires a non-empty string whenever
@@ -551,6 +556,7 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # Shared with the three install composites: the same key and text.
     DEPLOYMENT_STATUS_GROUP_KEY: DEPLOYMENT_STATUS_WHEN_TO_USE,
     PORTGROUP_SHOW_GROUP_KEY: PORTGROUP_SHOW_WHEN_TO_USE,
+    VSAN_GROUP_KEY: VSAN_WHEN_TO_USE,
 }
 
 VMWARE_HOST_USAGE_OP = VmwareTypedOp(
@@ -639,6 +645,7 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_VCENTER_DEPLOYMENT_STATUS_OP,
     VMWARE_NETWORK_PORTGROUP_SHOW_OP,
     VMWARE_TASK_INFO_OP,
+    *VSAN_READ_OPS,
 )
 
 

@@ -90,6 +90,49 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-11-01
+
+MEHO 0.41.0 guards more vCenter 8.0 credential reads, the same as on
+vCenter 9.0, and reads the SA-Operators group from the login. No
+database migration.
+
+### Security
+- On a vCenter 8.0 target, the generic reads of a content library, a
+  local library, a subscribed library and a Supervisor container image
+  registry wait for a person's approval, and every secret field comes
+  back as `[REDACTED:param_name]`, the same as on vCenter 9.0. The
+  approval part applies after you load the connector again; see "Steps
+  after the upgrade" (#5541).
+- The Claude Code plugin and the Claude Desktop bundle ship `qs` 6.17.0,
+  with the upstream fix for CVE-2026-110816. The plugin version is
+  0.31.1. The backplane image, the chart and the CLI do not change
+  (#5150).
+
+### Steps after the upgrade
+- Load the generic vCenter connector `vmware-rest-8.0` again with
+  `meho connector ingest` and the same API files you used before, so
+  the approval of these reads takes effect. The small API file that
+  `--catalog vmware/8.0` loads does not have these reads: if you loaded
+  only that file, skip this step (#5541).
+- Claude Desktop: install `meho-claude-desktop-0.41.0.mcpb` from the
+  release. Claude Code: run `claude plugin update meho@meho`, then
+  restart Claude Code (#5150).
+
+### Added
+- Login: MEHO reads whether a person is in the SA-Operators group of
+  the current tenant. Approvals do not use this yet and work as before.
+  When the login has no tenant list (`meho_tenants`), MEHO looks for the
+  group in the login's `groups` list; the new setting
+  `JWT_SELF_APPROVER_GROUP` names the group (default
+  `MEHO-SA-Operators`). Agent, service and runner logins never count as
+  members (#5394).
+
+### Documentation
+- Two steps after the upgrade in the 0.40.0 notes are corrected: the
+  Keycloak step no longer runs `meho admin keycloak bootstrap-clients`
+  on an existing realm, and the vCenter step loads the same API files
+  as before (#5540).
+
 ## [0.40.0] - 2026-11-01
 
 MEHO 0.40.0 keeps secret values hidden by default and runs an approved

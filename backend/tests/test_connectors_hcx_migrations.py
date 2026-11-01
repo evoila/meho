@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
@@ -675,6 +675,92 @@ async def test_start_with_some_migrations_rejected_says_partial(registered: None
         {"step": "start_group", "state": "partial", "error": "vm-0002: VM is powered off"}
     ]
     assert answer["status_read_params"] == {"mobility_group_id": _GROUP_ID}
+
+
+@pytest.mark.asyncio
+async def test_start_of_a_group_rejected_with_only_a_code_says_failed(registered: None) -> None:
+    answer = _group_answer(errors=[{"code": "E1"}])
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        _query_route(mock, [])
+        mock.post(_GROUPS_START).respond(200, json=answer)
+        result = await _call("hcx.migration.start", {"mobility_group_id": _GROUP_ID}, approved=True)
+
+    assert result.status == "ok", result.error
+    answer = result.result
+    assert answer["status"] == "failed"
+    assert answer["errors"] == [{"code": "E1"}]
+    assert answer["steps"] == [{"step": "start_group", "state": "failed", "error": "E1"}]
+
+
+@pytest.mark.asyncio
+async def test_start_with_a_migration_rejected_without_a_message_says_partial(
+    registered: None,
+) -> None:
+    started = {"migrationId": _MIGRATION_ID, "entityId": _VM_ID, "errors": [], "warnings": []}
+    rejected = {"migrationId": "migration-0002", "entityId": "vm-0002", "errors": [{}]}
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        _query_route(mock, [])
+        mock.post(_GROUPS_START).respond(200, json=_group_answer(migrations=[started, rejected]))
+        result = await _call("hcx.migration.start", {"mobility_group_id": _GROUP_ID}, approved=True)
+
+    assert result.status == "ok", result.error
+    answer = result.result
+    assert answer["status"] == "partial"
+    assert answer["migrations"][1]["errors"] == [{}]
+    assert answer["steps"] == [
+        {"step": "start_group", "state": "partial", "error": "vm-0002: rejected"}
+    ]
+
+
+_SECRET_MESSAGE = f'login failed with "password": "{_ECHOED_SECRET}"'
+
+
+@pytest.mark.parametrize(
+    ("answer", "copies"),
+    [
+        (
+            _group_answer(errors=[{"code": "E1", "message": _SECRET_MESSAGE}]),
+            lambda answer: [answer["errors"][0]["message"]],
+        ),
+        (
+            _group_answer(
+                migrations=[
+                    {
+                        "migrationId": _MIGRATION_ID,
+                        "entityId": _VM_ID,
+                        "errors": [{"message": _SECRET_MESSAGE}],
+                        "warnings": [{"message": f"token Bearer {_ECHOED_SECRET} expires soon"}],
+                    }
+                ]
+            ),
+            lambda answer: [
+                answer["migrations"][0]["errors"][0]["message"],
+                answer["migrations"][0]["warnings"][0]["message"],
+            ],
+        ),
+    ],
+    ids=["group-rejection", "migration-rejection"],
+)
+@pytest.mark.asyncio
+async def test_a_rejection_with_http_200_holds_no_secret_in_any_copy(
+    registered: None, answer: dict[str, Any], copies: Callable[[dict[str, Any]], list[str]]
+) -> None:
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        _query_route(mock, [])
+        mock.post(_GROUPS_START).respond(200, json=answer)
+        result = await _call("hcx.migration.start", {"mobility_group_id": _GROUP_ID}, approved=True)
+
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "failed"
+    assert result.result["steps"][-1]["state"] == "failed"
+    for copy in copies(result.result):
+        assert "login failed" in copy or "expires soon" in copy
+        assert _ECHOED_SECRET not in copy
+    rendered = json.dumps(result.result) + json.dumps(result.extras, default=str)
+    assert _ECHOED_SECRET not in rendered
 
 
 # ---------------------------------------------------------------------------

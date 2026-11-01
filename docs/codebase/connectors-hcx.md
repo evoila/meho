@@ -688,12 +688,17 @@ HCX does the migration after the start call returns. So:
   with the messages. Errors on some migrations mean HCX started the
   others: `status: partial`, `start_group` partial, and the rejected
   migrations are those with errors in `migrations`. A start of VMs keeps
-  its `create_group` done step in both cases; the group stays.
+  its `create_group` done step in both cases; the group stays. An error
+  counts by its presence, not by its text: one with only a `code` is a
+  rejection too, and the code (else `rejected`) becomes the step's text.
 - The error text of a step has its secrets removed before it leaves the
   connector: the value of each secret-named field of the vendor body
   (`"password": "..."`) is replaced, then the default redaction policy
   runs. The vendor's messages are kept; a body without messages becomes
-  text only after that scrub.
+  text only after that scrub. The same scrub runs on every text in the
+  `errors` and `warnings` lists of an answer (the group's, and each
+  migration's), so the copies next to the step error hold no secret
+  either.
 
 ### Shutdown
 

@@ -36,8 +36,9 @@ empty. Such an answer is ``failed`` (nothing started) or ``partial`` (HCX
 rejected some migrations and started the others), never ``accepted``.
 
 Every answer runs through :func:`~meho_backplane.connectors.hcx.typed_reads.redact_secrets`.
-The error text of a step (the vendor's messages, else its body) goes
-through the secret-field scrub and the default redaction policy first
+The error text of a step (the vendor's messages, else its body) and every
+text in the ``errors`` and ``warnings`` lists of an answer go through the
+secret-field scrub and the default redaction policy first
 (:func:`~meho_backplane.operations._vendor_text.redact_error_payload`), so
 a secret the Manager echoes in an error body never reaches the answer.
 """
@@ -142,9 +143,31 @@ def _now() -> str:
 
 
 def _notes(body: Any) -> dict[str, list[Any]]:
-    """The ``errors`` and ``warnings`` lists of a vendor object, always present."""
+    """The ``errors`` and ``warnings`` lists of a vendor object, always present.
+
+    Every text in them is cleaned of secrets (:func:`_clean_text`), so a
+    message the Manager echoes a secret in never reaches an answer, also
+    not as a copy next to the step error.
+    """
     body = body if isinstance(body, dict) else {}
-    return {"errors": body.get("errors") or [], "warnings": body.get("warnings") or []}
+    return {key: _clean_notes(body.get(key)) for key in ("errors", "warnings")}
+
+
+def _clean_notes(notes: Any) -> list[Any]:
+    """*notes* as a list, with every text at any depth cleaned of secrets."""
+    if not notes:
+        return []
+    return [_clean_note(note) for note in (notes if isinstance(notes, list) else [notes])]
+
+
+def _clean_note(note: Any) -> Any:
+    if isinstance(note, str):
+        return _clean_text(note)
+    if isinstance(note, dict):
+        return {key: _clean_note(value) for key, value in note.items()}
+    if isinstance(note, list):
+        return [_clean_note(value) for value in note]
+    return note
 
 
 def _texts(errors: list[Any]) -> list[str]:
@@ -154,6 +177,16 @@ def _texts(errors: list[Any]) -> list[str]:
         for error in errors
         if isinstance(error, dict) and error.get("message")
     ]
+
+
+def _rejection_text(errors: list[Any]) -> str:
+    """One text for a nonempty ``errors`` list: the messages, else the codes, else ``rejected``."""
+    parts = [
+        str(error.get("message") or error.get("code"))
+        for error in errors
+        if isinstance(error, dict) and (error.get("message") or error.get("code"))
+    ]
+    return "; ".join(parts) or "rejected"
 
 
 def _clean_text(text: str) -> str:
@@ -340,18 +373,19 @@ def _start_result(item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     on the group, or on every migration, mean HCX started nothing:
     ``failed``. Errors on some migrations mean HCX started the others:
     ``partial``; the rejected ones are those with errors in ``migrations``.
+    An error counts by its presence, not by its message: one with only a
+    ``code`` is a rejection too, and the code becomes the step's text.
     """
-    group_errors = _texts(_notes(item)["errors"])
+    group_errors = _notes(item)["errors"]
     if group_errors:
-        return "failed", _step("start_group", "failed", "; ".join(group_errors))
+        return "failed", _step("start_group", "failed", _rejection_text(group_errors))
     migrations = _migration_results(item)
     rejected = [migration for migration in migrations if migration["errors"]]
     if not rejected:
         return "accepted", _step("start_group", "done")
     error = "; ".join(
-        f"{migration['vm_id'] or migration['migration_id']}: {text}"
+        f"{migration['vm_id'] or migration['migration_id']}: {_rejection_text(migration['errors'])}"
         for migration in rejected
-        for text in (_texts(migration["errors"]) or ["rejected"])
     )
     if len(rejected) == len(migrations):
         return "failed", _step("start_group", "failed", error)
@@ -418,9 +452,13 @@ async def hcx_migration_start_impl(
     )
     new_id = created.get("migrationGroupId")
     if not new_id:
-        errors = "; ".join(_texts(_notes(created)["errors"]))
+        errors = _notes(created)["errors"]
         steps = [
-            _step("create_group", "failed", errors or "HCX returned no mobility group id"),
+            _step(
+                "create_group",
+                "failed",
+                _rejection_text(errors) if errors else "HCX returned no mobility group id",
+            ),
             _step("start_group", "not_run"),
         ]
         return _job_answer("failed", None, item=created, vm_ids=vm_ids, steps=steps)

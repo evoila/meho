@@ -493,7 +493,9 @@ async def test_rke2_e2e_config_get_dispatches_ok_and_redacts(
     assert payload["path"] == "/etc/rancher/rke2/config.yaml"
     assert payload["content"]["tls-san"] == ["10.0.0.5", "rke2.lab.example"]
     assert payload["content"]["node-taint"] == ["dedicated=infra:NoSchedule"]
-    assert payload["content"]["token"] == "***redacted***"
+    # The connector masks the join token; the default view of every answer
+    # hides the ``token`` field once more.
+    assert payload["content"]["token"] == "[REDACTED:param_name]"
     assert payload["redacted_keys"] == ["token"]
     # The planted join token never survives the dispatch (result view + audit).
     assert _CONFIG_TOKEN_CANARY not in repr(result)

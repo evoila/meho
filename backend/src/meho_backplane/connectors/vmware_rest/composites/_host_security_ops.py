@@ -165,7 +165,11 @@ def _row(
     description: str,
     tags: list[str],
     preview: PreviewBuilder,
+    *,
+    classifier_other: bool = False,
 ) -> CompositeSpec:
+    # The two ops that send a secret are pinned ``credential_write`` in
+    # ``broadcast/events.py``; the other four end in ``.set`` -> ``other``.
     return CompositeSpec(
         op_id=op_id,
         handler=handler,
@@ -177,6 +181,7 @@ def _row(
         safety_level="dangerous",
         requires_approval=True,
         preview=preview,
+        classifier_other=classifier_other,
     )
 
 
@@ -203,6 +208,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         "Waits for approval.",
         ["firewall"],
         _firewall_ruleset_preview,
+        classifier_other=True,
     ),
     _row(
         OP_ID_LOCKDOWN_SET,
@@ -214,6 +220,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         "approval.",
         ["lockdown", "security"],
         _lockdown_preview,
+        classifier_other=True,
     ),
     _row(
         OP_ID_LOCKDOWN_EXCEPTIONS_SET,
@@ -224,6 +231,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         "lockdown mode is on. Reads the list first and back after. Waits for approval.",
         ["lockdown", "security"],
         _lockdown_exceptions_preview,
+        classifier_other=True,
     ),
     _row(
         OP_ID_SNMP_SET,
@@ -245,5 +253,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         "approval.",
         ["coredump", "diagnostics"],
         _coredump_preview,
+        classifier_other=True,
     ),
 )

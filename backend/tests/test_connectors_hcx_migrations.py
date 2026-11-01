@@ -48,7 +48,6 @@ from meho_backplane.connectors.hcx import (
 from meho_backplane.connectors.hcx.migration_body import group_item, migration_outcome
 from meho_backplane.connectors.hcx.migration_ops import GROUP_MIGRATION, HCX_MIGRATION_OPS
 from meho_backplane.connectors.hcx.typed_ops import HCX_TYPED_WHEN_TO_USE_BY_GROUP
-from meho_backplane.connectors.hcx.typed_reads import REDACTED
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
@@ -890,7 +889,9 @@ async def test_results_hold_no_password_or_token(registered: None) -> None:
         result = await _call("hcx.migration.list", {})
 
     assert result.status == "ok", result.error
-    assert result.result["items"][0]["vcPassword"] == REDACTED
+    # The connector masks the password; the default view of every answer
+    # hides the ``vcPassword`` field once more.
+    assert result.result["items"][0]["vcPassword"] == "[REDACTED:param_name]"
     rendered = json.dumps(result.result) + json.dumps(result.extras, default=str)
     for secret in (_PASSWORD, _TOKEN, "made-up-password"):
         assert secret not in rendered

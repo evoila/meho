@@ -93,6 +93,7 @@ _OPERATOR_USER = "operator-4002"
 _OPERATOR_PASSWORD = "operator-pass-4002"
 _GROUP_USER_PASSWORD = "group-user-pass-4590"
 _UPGRADE_REALM = "meho-upgrade"
+_OPT_OUT_REALM = "meho-opt-out"
 _LAB_B_ID = "5d0f7a3e-1c2b-4e8d-9f6a-7b3c2d1e0f9a"
 
 # The five role groups and what a member must get (docs/decisions/login-role-groups.md).
@@ -579,6 +580,42 @@ def test_upgrade_replaces_fixed_mappers_and_second_run_changes_nothing(
         if re.search(r"\[(created|updated)\] (mapper|group|user|client scope)", line)
     ]
     assert changed == [], f"second run changed the realm:\n{second}"
+
+
+def _device_login_request(base_url: str, realm: str, scope: str) -> httpx.Response:
+    """Start a device login on ``meho-cli``, as ``meho login`` does."""
+    return httpx.post(
+        f"{base_url}/realms/{realm}/protocol/openid-connect/auth/device",
+        data={"client_id": "meho-cli", "scope": scope},
+    )
+
+
+def test_cli_offline_access_zero_removes_the_long_login(
+    fresh_keycloak: str,
+    meho_binary: Path,
+) -> None:
+    """``--cli-offline-access=0`` takes a long login away that a default run gave."""
+    _create_realm_per_docs(fresh_keycloak, _OPT_OUT_REALM)
+    long_login = "openid offline_access"
+
+    _run_bootstrap(meho_binary, fresh_keycloak, _OPT_OUT_REALM)
+    accepted = _device_login_request(fresh_keycloak, _OPT_OUT_REALM, long_login)
+    assert accepted.status_code == 200, accepted.text
+    assert "device_code" in accepted.json()
+
+    out = _run_bootstrap(meho_binary, fresh_keycloak, _OPT_OUT_REALM, "--cli-offline-access=0")
+    assert "[removed] optional scope offline_access" in out, out
+    refused = _device_login_request(fresh_keycloak, _OPT_OUT_REALM, long_login)
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["error"] == "invalid_scope"
+    short_login = _device_login_request(fresh_keycloak, _OPT_OUT_REALM, "openid")
+    assert short_login.status_code == 200, short_login.text
+    cli_uuid = _client_uuid(fresh_keycloak, _OPT_OUT_REALM, "meho-cli")
+    cli = httpx.get(
+        f"{fresh_keycloak}/admin/realms/{_OPT_OUT_REALM}/clients/{cli_uuid}",
+        headers=_admin_headers(fresh_keycloak),
+    ).json()
+    assert "client.offline.session.idle.timeout" not in cli["attributes"]
 
 
 @pytest.fixture(scope="module")

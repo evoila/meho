@@ -92,8 +92,9 @@ type BootstrapOptions struct {
 	// idle timeout) and sets the per-client
 	// `client.offline.session.idle.timeout` attribute to this many
 	// seconds, which bounds how long an unused login stays valid. Zero
-	// means no offline_access on the CLI client. The
-	// `--cli-offline-access` flag defaults to 48h; `=0` turns it off.
+	// removes offline_access and the idle limit from the CLI client,
+	// also when an earlier run assigned them. The `--cli-offline-access`
+	// flag defaults to 48h; `=0` turns it off.
 	CLIOfflineSessionIdleSeconds int
 
 	// MCPOfflineSessionIdleSeconds sets the per-client
@@ -430,10 +431,14 @@ func requiredMCPOptionalScopes() []string {
 // (it does by default; `--offline=false` stops it).
 func (o BootstrapOptions) requiredCLIOptionalScopes() []string {
 	if o.CLIOfflineSessionIdleSeconds > 0 {
-		return []string{"offline_access"}
+		return append([]string{}, cliOfflineScopes...)
 	}
 	return nil
 }
+
+// cliOfflineScopes are the optional scopes that make up the long CLI
+// login. `--cli-offline-access=0` removes them from the CLI client.
+var cliOfflineScopes = []string{"offline_access"}
 
 // boolPtr / strSlice are tiny helpers to make the desired-client
 // builders readable.
@@ -491,6 +496,10 @@ func (o BootstrapOptions) desiredCLIClient() *clientRep {
 		// realm value stays the upper bound.
 		c.Attributes["client.offline.session.idle.timeout"] =
 			strconv.Itoa(o.CLIOfflineSessionIdleSeconds)
+	} else {
+		// An empty value makes Keycloak drop the attribute on update,
+		// so a limit set by an earlier run does not stay behind.
+		c.Attributes["client.offline.session.idle.timeout"] = ""
 	}
 	return c
 }
@@ -561,7 +570,7 @@ type Result struct {
 //     *optional* client scopes (the three `mcp:*` scopes are created in
 //     the realm first if missing). The CLI
 //     device-code client gets `offline_access` too, with a 48h idle
-//     limit, unless --cli-offline-access=0.
+//     limit, unless --cli-offline-access=0, which removes the scope.
 //     The MCP client also gets `client.offline.session.idle.timeout`
 //     (48h unless --mcp-offline-session-idle says otherwise).
 //  6. The five MEHO role groups with their attributes (roleGroups),
@@ -640,7 +649,9 @@ func Bootstrap(
 	}
 	res.MapperEventsLog = append(res.MapperEventsLog, scopeEvents...)
 	// The CLI client gets offline_access as an optional scope unless
-	// --cli-offline-access=0. When off, this call is skipped entirely.
+	// --cli-offline-access=0. With =0 an assignment left by an earlier
+	// run is removed: a client PUT never changes scope assignments, so
+	// the opt-out needs its own call.
 	if cliOptional := opts.requiredCLIOptionalScopes(); len(cliOptional) > 0 {
 		cliOptionalEvents, oerr := reconcileOptionalScopes(
 			ctx, c, cliUUID, cliOptional)
@@ -648,6 +659,13 @@ func Bootstrap(
 			return nil, fmt.Errorf("reconcile CLI optional scopes: %w", oerr)
 		}
 		res.MapperEventsLog = append(res.MapperEventsLog, cliOptionalEvents...)
+	} else {
+		cliRemovedEvents, oerr := removeOptionalScopes(
+			ctx, c, cliUUID, cliOfflineScopes)
+		if oerr != nil {
+			return nil, fmt.Errorf("remove CLI optional scopes: %w", oerr)
+		}
+		res.MapperEventsLog = append(res.MapperEventsLog, cliRemovedEvents...)
 	}
 
 	// --- MCP browser-flow client --------------------------------------------
@@ -781,8 +799,8 @@ func dryRunSummary(
 			fmt.Fprintf(out, "    - %s\n", s)
 		}
 	} else {
-		fmt.Fprintln(out, "==> CLI device-code client: offline_access not "+
-			"assigned (--cli-offline-access=0)")
+		fmt.Fprintln(out, "==> CLI device-code client: offline_access "+
+			"removed when assigned (--cli-offline-access=0)")
 	}
 	if !opts.SkipUserProvisioning {
 		fmt.Fprintf(out, "==> admin user: %s (member of %s and %s)\n",
@@ -1041,6 +1059,42 @@ func reconcileOptionalScopes(
 		}
 		events = append(events,
 			fmt.Sprintf("[added]   optional scope %s", name))
+	}
+	return events, nil
+}
+
+// removeOptionalScopes takes every named scope off the client's
+// optional scopes when it is assigned. The reverse of
+// reconcileOptionalScopes; used for `--cli-offline-access=0`, which
+// must undo an assignment an earlier run made.
+func removeOptionalScopes(
+	ctx context.Context, c *adminClient,
+	clientUUID string, names []string,
+) ([]string, error) {
+	existing, err := c.listClientOptionalScopes(ctx, clientUUID)
+	if err != nil {
+		return nil, err
+	}
+	assignedIDByName := make(map[string]string, len(existing))
+	for _, s := range existing {
+		assignedIDByName[s.Name] = s.ID
+	}
+	var events []string
+	for _, name := range names {
+		id, ok := assignedIDByName[name]
+		if !ok {
+			events = append(events,
+				fmt.Sprintf("[skip]    optional scope %s (not assigned)",
+					name))
+			continue
+		}
+		if err := c.removeClientOptionalScope(
+			ctx, clientUUID, id); err != nil {
+			return nil, fmt.Errorf(
+				"remove optional scope %s: %w", name, err)
+		}
+		events = append(events,
+			fmt.Sprintf("[removed] optional scope %s", name))
 	}
 	return events, nil
 }

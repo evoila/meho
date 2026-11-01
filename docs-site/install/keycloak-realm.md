@@ -337,7 +337,8 @@ Two more things must be true:
 - The same command also gives `meho-cli` the scope `offline_access` and a
   48-hour offline idle limit. Pass `--cli-offline-access=<seconds>` for
   another limit, or `--cli-offline-access=0` to leave `meho-cli` without
-  a long login.
+  a long login. The `=0` run also removes a long login an earlier run
+  gave `meho-cli`; logins that ask for `offline_access` are then refused.
 
 ## Approve-only principal
 

@@ -151,6 +151,7 @@ func (f *fakeKeycloak) handler() http.HandlerFunc {
 			}
 			id := f.mintID()
 			c.ID = id
+			dropEmptyAttributes(&c)
 			f.clients[id] = &c
 			w.Header().Set("Location",
 				fmt.Sprintf("https://fake/admin/realms/r/clients/%s", id))
@@ -176,6 +177,7 @@ func (f *fakeKeycloak) handler() http.HandlerFunc {
 				return
 			}
 			c.ID = uuid
+			dropEmptyAttributes(&c)
 			f.clients[uuid] = &c
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(sub, "/protocol-mappers/models") &&
@@ -302,6 +304,20 @@ func (f *fakeKeycloak) handler() http.HandlerFunc {
 				}
 			}
 			f.optionalScopes[uuid] = append(f.optionalScopes[uuid], sid)
+			w.WriteHeader(http.StatusNoContent)
+		case strings.Contains(sub, "/optional-client-scopes/") &&
+			r.Method == http.MethodDelete:
+			f.calls["DELETE /clients/{uuid}/optional-client-scopes/{sid}"]++
+			parts := strings.Split(sub, "/")
+			uuid := parts[1]
+			sid := parts[len(parts)-1]
+			var kept []string
+			for _, already := range f.optionalScopes[uuid] {
+				if already != sid {
+					kept = append(kept, already)
+				}
+			}
+			f.optionalScopes[uuid] = kept
 			w.WriteHeader(http.StatusNoContent)
 		case sub == "groups" && r.Method == http.MethodGet:
 			f.calls["GET /groups"]++
@@ -432,6 +448,16 @@ func (f *fakeKeycloak) handler() http.HandlerFunc {
 				fmt.Sprintf("fakeKeycloak: unhandled %s %s",
 					r.Method, r.URL.Path),
 				http.StatusNotImplemented)
+		}
+	}
+}
+
+// dropEmptyAttributes mimics Keycloak: an attribute sent with an empty
+// value is removed from the client, not stored.
+func dropEmptyAttributes(c *clientRep) {
+	for k, v := range c.Attributes {
+		if v == "" {
+			delete(c.Attributes, k)
 		}
 	}
 }
@@ -984,6 +1010,59 @@ func TestBootstrap_ZeroLeavesCLIOfflineAccessOff(t *testing.T) {
 	}
 }
 
+// TestBootstrap_ZeroRemovesExistingCLIOfflineAccess: a run with the
+// default gives the CLI client the long login. A later run with
+// `--cli-offline-access=0` takes it away again: the optional scope is
+// removed and the idle limit is dropped. A client PUT alone would not
+// do that, since Keycloak never changes scope assignments on update.
+// A third run with 0 changes nothing more.
+func TestBootstrap_ZeroRemovesExistingCLIOfflineAccess(t *testing.T) {
+	fake := newFakeKeycloak()
+	withLongLogin := fullOpts()
+	withLongLogin.CLIOfflineSessionIdleSeconds = 172800
+	if _, _, err := runBootstrapOnce(t, fake, withLongLogin); err != nil {
+		t.Fatalf("first Bootstrap: %v", err)
+	}
+	cliUUID := fake.clientUUID(t, "meho-cli")
+	if !fake.hasOptionalScope(cliUUID, "scope-offline-access") {
+		t.Fatalf("first run did not assign offline_access to meho-cli")
+	}
+
+	const deleteKey = "DELETE /clients/{uuid}/optional-client-scopes/{sid}"
+	res, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("second Bootstrap (=0): %v", err)
+	}
+	if fake.hasOptionalScope(cliUUID, "scope-offline-access") {
+		t.Errorf("--cli-offline-access=0 left offline_access on meho-cli; "+
+			"got optionalScopes=%v", fake.optionalScopes[cliUUID])
+	}
+	if got := fake.calls[deleteKey]; got != 1 {
+		t.Errorf("DELETE optional scope called %d times, want 1", got)
+	}
+	if !hasEvent(res, "[removed] optional scope offline_access") {
+		t.Errorf("events do not report the removal:\n%v", res.MapperEventsLog)
+	}
+	if v, ok := fake.clients[cliUUID].Attributes["client.offline.session.idle.timeout"]; ok {
+		t.Errorf("--cli-offline-access=0 left "+
+			"client.offline.session.idle.timeout=%q on meho-cli", v)
+	}
+	// The MCP client keeps its long login.
+	if !fake.hasOptionalScope(fake.clientUUID(t, "meho-mcp"), "scope-offline-access") {
+		t.Errorf("--cli-offline-access=0 removed offline_access from meho-mcp")
+	}
+
+	if res, _, err = runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("third Bootstrap (=0): %v", err)
+	}
+	if got := fake.calls[deleteKey]; got != 1 {
+		t.Errorf("third run called DELETE again: total %d, want 1", got)
+	}
+	if !hasEvent(res, "[skip]    optional scope offline_access (not assigned)") {
+		t.Errorf("third run does not report the skip:\n%v", res.MapperEventsLog)
+	}
+}
+
 // TestBootstrapClientsCmd_CLIOfflineAccessFlagDefault: the CLI client
 // gets the long login by default (48h); a bare flag means the same.
 func TestBootstrapClientsCmd_CLIOfflineAccessFlagDefault(t *testing.T) {
@@ -1318,6 +1397,38 @@ func TestBootstrap_MCPClientOffersMCPScopes(t *testing.T) {
 }
 
 // groupByName returns the stored group with this exact name, or nil.
+// clientUUID finds a client in the fake by its clientId.
+func (f *fakeKeycloak) clientUUID(t *testing.T, clientID string) string {
+	t.Helper()
+	for uuid, c := range f.clients {
+		if c.ClientID == clientID {
+			return uuid
+		}
+	}
+	t.Fatalf("client %s not found", clientID)
+	return ""
+}
+
+// hasEvent reports whether the run logged the given event line.
+func hasEvent(res *Result, want string) bool {
+	for _, e := range res.MapperEventsLog {
+		if e == want {
+			return true
+		}
+	}
+	return false
+}
+
+// hasOptionalScope reports whether the scope is optional on the client.
+func (f *fakeKeycloak) hasOptionalScope(clientUUID, scopeID string) bool {
+	for _, sid := range f.optionalScopes[clientUUID] {
+		if sid == scopeID {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fakeKeycloak) groupByName(name string) *groupRep {
 	for _, g := range f.groups {
 		if g.Name == name {

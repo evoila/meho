@@ -2781,7 +2781,8 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      `offline_access` as optional AND sets the per-client
      `client.offline.session.idle.timeout` attribute so an idle offline
      token expires fast. `--cli-offline-access=0` leaves the CLI client
-     without it. `meho login` asks for the scope by default.
+     without it, and removes it (scope and attribute) from a client an
+     earlier run set up. `meho login` asks for the scope by default.
      The MCP client always gets `client.offline.session.idle.timeout`
      (default 48h = 172800s, change it with
      `--mcp-offline-session-idle=<seconds>`, #4001). Without it an MCP

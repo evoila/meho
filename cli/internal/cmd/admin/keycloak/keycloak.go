@@ -48,7 +48,8 @@ import (
 // timeout (48h) set on the CLI device-code client by default, so a
 // `meho login` renews itself. Daily use never asks for a new login; a
 // weekend without use costs one new login on Monday.
-// `--cli-offline-access=0` turns the long CLI login off.
+// `--cli-offline-access=0` turns the long CLI login off and removes it
+// from a client an earlier run set up.
 const defaultCLIOfflineSessionIdleSeconds = 172800
 
 // NewRootCmd returns the `meho admin keycloak` parent command, ready
@@ -120,7 +121,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 			"  * 8 protocol mappers on each client (audience-meho-backplane, meho-mcp-audience, groups-claim, and the User Attribute mappers tenant-id, tenant-role, approver, platform-admin and meho-tenants)\n" +
 			"  * 4 default client scopes on each client (basic, roles, web-origins, acr) — including the load-bearing `basic` scope that carries the `sub` claim in Keycloak 25+\n" +
 			"  * the `mcp:read`, `mcp:execute` and `mcp:admin` client scopes, plus `offline_access`, as optional scopes on the MCP client — MEHO's MCP clients ask for them at login, and Keycloak refuses a login that asks for a scope the client does not offer\n" +
-			"  * `offline_access` as an optional scope on the CLI client, with a 48-hour idle limit, so `meho login` gets a login that renews itself (`--cli-offline-access=0` turns it off)\n" +
+			"  * `offline_access` as an optional scope on the CLI client, with a 48-hour idle limit, so `meho login` gets a login that renews itself (`--cli-offline-access=0` turns it off, also on an existing client)\n" +
 			"  * the five MEHO role groups, each with a `tenant_id`, a `tenant_role` and a `meho_tenant` attribute:\n" +
 			"      MEHO-Readers (read_only), MEHO-Operators (operator), MEHO-SA-Operators (operator),\n" +
 			"      MEHO-Admins (tenant_admin), MEHO-Approvers (read_only, plus approver=true)\n" +
@@ -320,7 +321,8 @@ func newBootstrapClientsCmd() *cobra.Command {
 			"Default "+strconv.Itoa(defaultCLIOfflineSessionIdleSeconds)+
 			" seconds (48h). Use the equals form for another value, e.g. "+
 			"`--cli-offline-access=86400`. `--cli-offline-access=0` turns "+
-			"the long CLI login off. The refresh token is a long-lived "+
+			"the long CLI login off and removes it from a client an earlier "+
+			"run set up. The refresh token is a long-lived "+
 			"secret on the operator's disk (OS keyring first)")
 	cmd.Flags().IntVar(&mcpOfflineSessionIdle, "mcp-offline-session-idle",
 		defaultMCPOfflineSessionIdleSeconds,

@@ -61,6 +61,8 @@ _VM: Final = "VirtualMachine"
 _CLUSTER: Final = "ClusterComputeResource"
 
 #: The VM properties read for every row.
+_PROP_SNAPSHOT: Final = "snapshot"
+
 VM_LIST_PROPERTIES: Final[tuple[str, ...]] = (
     "name",
     "parent",
@@ -74,7 +76,7 @@ VM_LIST_PROPERTIES: Final[tuple[str, ...]] = (
     "summary.guest.toolsStatus",
     "summary.storage.committed",
     "summary.storage.uncommitted",
-    "snapshot",
+    _PROP_SNAPSHOT,
 )
 
 #: The parameter that names the scope, and the VIM type of its moid.
@@ -106,7 +108,12 @@ def _text(value: Any) -> str | None:
 
 
 def _row(vm: VimObject) -> dict[str, Any]:
-    """One output row from the VM's properties (names are filled in later)."""
+    """One output row from the VM's properties (names are filled in later).
+
+    ``snapshot_count`` is ``None`` when vCenter could not read the ``snapshot``
+    property (it is in the object's ``missingSet``): a failed read must not
+    look like a VM without snapshots.
+    """
     p = vm.props
     committed = _int(p.get("summary.storage.committed"))
     uncommitted = _int(p.get("summary.storage.uncommitted"))
@@ -117,6 +124,7 @@ def _row(vm: VimObject) -> dict[str, Any]:
         moref_value(parent) if isinstance(parent, dict) and parent.get("type") == "Folder" else None
     )
     _current, snapshots = snapshot_rows(p.get("snapshot"))
+    snapshot_count = None if _PROP_SNAPSHOT in vm.missing else len(snapshots)
     return {
         "vm": vm.moid,
         "name": _text(p.get("name")),
@@ -134,7 +142,7 @@ def _row(vm: VimObject) -> dict[str, Any]:
         "used_storage_bytes": committed,
         "provisioned_storage_bytes": provisioned,
         "tools_status": _text(p.get("summary.guest.toolsStatus")),
-        "snapshot_count": len(snapshots),
+        "snapshot_count": snapshot_count,
         "template": template if isinstance(template, bool) else None,
     }
 
@@ -236,9 +244,24 @@ async def vm_list_impl(
     )
     rows = [row for row in (_row(vm) for vm in vms) if _matches(row, params)]
     rows.sort(key=lambda r: ((r["name"] or "").casefold(), r["vm"]))
-    note = await _fill_names(connector, target, operator, rows) if rows else None
-    _log.info("vmware_vm_list_read", target=target.name, vm_count=len(rows))
-    return {"vm_count": len(rows), "read_note": note, "vms": rows}
+    notes: list[str] = []
+    if rows:
+        name_note = await _fill_names(connector, target, operator, rows)
+        if name_note is not None:
+            notes.append(name_note)
+    unread_snapshots = sum(1 for r in rows if r["snapshot_count"] is None)
+    if unread_snapshots:
+        notes.append(
+            f"the snapshot property of {unread_snapshots} VM(s) could not be read; "
+            "their snapshot_count is null"
+        )
+    _log.info(
+        "vmware_vm_list_read",
+        target=target.name,
+        vm_count=len(rows),
+        unread_snapshots=unread_snapshots,
+    )
+    return {"vm_count": len(rows), "read_note": "; ".join(notes) or None, "vms": rows}
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +362,13 @@ _VM_ROW_SCHEMA: dict[str, Any] = {
             "enum": ["toolsNotInstalled", "toolsNotRunning", "toolsOld", "toolsOk", None],
             "description": "VMware Tools status.",
         },
-        "snapshot_count": {"type": "integer", "description": "Number of snapshots of the VM."},
+        "snapshot_count": {
+            "type": ["integer", "null"],
+            "description": (
+                "Number of snapshots of the VM; null when vCenter could not read the "
+                "snapshot property (read_note says so)."
+            ),
+        },
         "template": {
             "type": ["boolean", "null"],
             "description": "True for a template (it cannot be powered on).",
@@ -354,7 +383,10 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         "vm_count": {"type": "integer", "description": "Number of rows in vms."},
         "read_note": {
             "type": ["string", "null"],
-            "description": "Set when the host, cluster and folder names could not be read.",
+            "description": (
+                "Set when the host, cluster and folder names could not be read, or when the "
+                "snapshot property of some VMs could not be read."
+            ),
         },
         "vms": {"type": "array", "items": _VM_ROW_SCHEMA, "description": "One row per VM."},
     },

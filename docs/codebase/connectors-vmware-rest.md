@@ -5289,7 +5289,10 @@ They share the group `vmware-inventory`.
   `name_pattern` (`*` and `?`, letter case does not matter) run in MEHO after
   the read. `provisioned_storage_bytes` is `committed + uncommitted`, like
   PowerCLI. The name read is best-effort: when it fails, the names and the
-  cluster are `null` and `read_note` says why.
+  cluster are `null` and `read_note` says why. When vCenter could not read the
+  `snapshot` property of a VM (it is in the `missingSet` of the answer), that
+  row's `snapshot_count` is `null` and `read_note` says how many rows; the
+  count is never reported as zero for a failed read.
 - **inventory.find paths.** By name, the one read of `name` and `parent` of
   every entity also gives the parents, so each match gets its inventory path
   (from the datacenter down, as govc prints it; a `/` in a name is `%2f`). By

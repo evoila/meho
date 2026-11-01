@@ -168,6 +168,18 @@ async def test_vm_list_counts_snapshots() -> None:
     assert [(r["vm"], r["snapshot_count"]) for r in out["vms"]] == [("vm-103", 2)]
 
 
+async def test_vm_list_unread_snapshot_property_is_null_not_zero() -> None:
+    fake = _fake()
+    fake.unreadable[("VirtualMachine", "vm-103")] = {"snapshot"}
+    out = await _vms(fake)
+    counts = {r["vm"]: r["snapshot_count"] for r in out["vms"]}
+    assert counts == {"vm-101": 0, "vm-102": 0, "vm-103": None}
+    assert out["read_note"] == (
+        "the snapshot property of 1 VM(s) could not be read; their snapshot_count is null"
+    )
+    Draft202012Validator(VMWARE_VM_LIST_OP.response_schema).validate(out)
+
+
 @pytest.mark.parametrize(
     ("params", "container", "names"),
     [

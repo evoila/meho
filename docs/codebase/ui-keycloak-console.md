@@ -219,6 +219,35 @@ code-quality size budget; the call order in the factory preserves the
 ordering invariant. The router is included before the stubs aggregate in
 `ui/routes/__init__.py::build_router`.
 
+## Realm session values and the console session (#5518)
+
+The realm-config card shows the realm's `ssoSessionIdleTimeout` and
+`ssoSessionMaxLifespan`. These two values decide how long the console
+session can live:
+
+- The console keeps its own session for 1 hour without use
+  (`UI_SESSION_SLIDING_EXTENSION_SECONDS`, 3600) and 10 hours at most
+  (`UI_SESSION_ABSOLUTE_LIFETIME_SECONDS`, 36000).
+- The console renews its access token at Keycloak. When Keycloak has
+  already ended its own session, the renewal fails and the console
+  session ends too.
+- The shipped realm file sets `ssoSessionIdleTimeout: 3600` and
+  `ssoSessionMaxLifespan: 36000`, so both sessions end at the same time.
+  With Keycloak's defaults (30 minutes, 10 hours) the console session
+  ends after 30 minutes without use.
+
+When the session ends, a full page load gets a `302` and an htmx request
+gets `204` + `HX-Redirect`. Both go to
+`/ui/auth/login?return_to=<page>&reason=session_ended`, which shows "Your
+session ended. Please sign in again." and a "Sign in" button that brings
+the person back to the same page. Details: [`ui.md`](ui.md).
+
+The console asks for no `offline_access` (no long login). Its session
+lives on the MEHO server; a long login would survive a logout in the
+browser; and a browser the login server remembers already makes a new
+login quick. How to set the two values on a running realm:
+[Keycloak realm setup](../../docs-site/install/keycloak-realm.md#the-web-console-session).
+
 ## Dependencies
 
 - `operations.meta_tools.call_operation` — the in-process dispatch entry

@@ -48,7 +48,7 @@ from meho_backplane.connectors.vmware_rest.vim_task import (
     VimTaskResult,
     poll_vim_task,
 )
-from meho_backplane.operations._preview import preview_failure_reason, register_preview_builder
+from meho_backplane.operations._preview import preview_failure_reason
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -486,8 +486,3 @@ async def _host_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     if isinstance(op_id, str) and op_id in _WHAT_HAPPENS:
         preview["what_happens_next"] = _WHAT_HAPPENS[op_id]
     return preview
-
-
-register_preview_builder(OP_ID_HOST_MOVE, _host_preview)
-register_preview_builder(OP_ID_HOST_CONNECT, _host_preview)
-register_preview_builder(OP_ID_HOST_DISCONNECT, _host_preview)

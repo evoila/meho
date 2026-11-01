@@ -17,8 +17,9 @@ has walked every ``connectors/<product>/`` subpackage, so the
 any dispatch can fire.
 
 Layout mirrors the :mod:`meho_backplane.connectors.vault` pattern: the
-``__init__`` wires the registrar; ``_register.py`` carries the
-per-composite registration metadata; ``_read.py`` and ``_write.py``
+``__init__`` wires the registrar; each composite module carries its
+registration rows as ``COMPOSITES`` and ``_register.py`` collects them
+at start-up (``_spec.py`` defines the row); ``_read.py`` and ``_write.py``
 carry the handler implementations; ``schemas.py`` carries the JSON
 Schema 2020-12 parameter + response contracts.
 
@@ -232,18 +233,6 @@ register_typed_op_registrar(register_vmware_composite_operations)
 # The same composites on the ``vmware-rest-8.0`` catalog (#3789), so the
 # catalog the resolver picks for an 8.0.x target carries them too.
 register_typed_op_registrar(register_vmware_composite_operations_8_0)
-
-# Side-effect import: registers the 24 write composites' park-time
-# ``proposed_effect`` preview builders (#1608, destructive-tier
-# blast-radius #3198) onto the per-op hook in
-# :mod:`meho_backplane.operations._preview` — mirrors how
-# ``connectors/argocd/__init__`` wires ``ops_write_preview``.
-# Same for the guest file read (#4850): a caution read, so an agent's call
-# waits for approval.
-from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402,F401
-    _guest_file_read_preview,
-    _write_preview,
-)
 
 __all__ = [
     "alarm_acknowledge_composite",

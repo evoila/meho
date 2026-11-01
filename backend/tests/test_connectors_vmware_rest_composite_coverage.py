@@ -8,12 +8,16 @@ from __future__ import annotations
 import pytest
 
 from meho_backplane.broadcast.events import classify_op
-from meho_backplane.connectors.vmware_rest.composites import _write_preview
 from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
     _GOVERNED_SUBOP_MANIFEST,
 )
 from meho_backplane.connectors.vmware_rest.composites._register import _COMPOSITES
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS
+
+# The preview builders the registration rows carry (``CompositeSpec.preview``).
+_ROW_PREVIEW_BUILDERS = {
+    spec.op_id: spec.preview for spec in _COMPOSITES if spec.preview is not None
+}
 
 # These writes deliberately do not park a proposed-effect preview. The exception
 # set names policy, while the registry remains the source for every op-id set.
@@ -159,9 +163,10 @@ def test_registry_coverage_is_derived_from_composites() -> None:
 
 
 def _registered_preview_builders(registry_ids: set[str]) -> dict[str, object]:
-    """Every preview builder of a composite: the shared map, and the ones a module registers."""
+    """Every preview builder of a composite: the one its row carries, registered at import."""
     found = {op_id: b for op_id, b in _PREVIEW_BUILDERS.items() if op_id in registry_ids}
-    assert set(_write_preview._WRITE_PREVIEW_BUILDERS) <= set(found)
+    for op_id, builder in _ROW_PREVIEW_BUILDERS.items():
+        assert found.get(op_id) is builder, op_id
     return found
 
 
@@ -174,7 +179,7 @@ def test_deliberately_unmapped_composite_fails_closed() -> None:
         _assert_composite_coverage(
             registry_ids,
             metadata,
-            dict(_write_preview._WRITE_PREVIEW_BUILDERS),
+            dict(_ROW_PREVIEW_BUILDERS),
             dict(_GOVERNED_SUBOP_MANIFEST),
             {op_id: classify_op(op_id) for op_id in registry_ids},
         )
@@ -189,7 +194,7 @@ def test_deliberately_unhandled_classifier_op_fails_closed() -> None:
         _assert_composite_coverage(
             registry_ids,
             {spec.op_id: spec for spec in _COMPOSITES},
-            dict(_write_preview._WRITE_PREVIEW_BUILDERS),
+            dict(_ROW_PREVIEW_BUILDERS),
             dict(_GOVERNED_SUBOP_MANIFEST),
             classifier,
         )

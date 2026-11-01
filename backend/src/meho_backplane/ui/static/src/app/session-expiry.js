@@ -9,11 +9,10 @@
 // ``{swap: false, error: true}``, so the target container stays empty and
 // the only signal is a ``htmx:responseError`` event no global listener was
 // catching. The operator is left with a dead control and no clue their
-// session expired -- the headline session-expiry symptom #1694 fixed
-// server-side for full-page navigations but which still slips through on
-// background htmx XHRs (those send ``Accept: */*``, not ``text/html``, so
-// the ``ui.auth.errors`` handler returns the JSON 401 body rather than the
-// HTML login redirect -- the browser sees a swallowed error, not a page).
+// session expired. Since #5518 the server answers a failed session renewal
+// on an htmx request with ``204`` + ``HX-Redirect`` to the login page, so
+// that case no longer reaches this module; any other ``401`` on an htmx
+// request still does.
 //
 // The same swallow-on-4xx behaviour hides the CSRF middleware's ``403``
 // (#2112). A state-changing ``/ui/*`` POST whose ``meho_csrf`` double-submit

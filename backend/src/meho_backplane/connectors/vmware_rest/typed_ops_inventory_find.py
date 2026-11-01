@@ -44,7 +44,9 @@ __all__ = [
     "INVENTORY_GROUP_KEY",
     "INVENTORY_WHEN_TO_USE",
     "KIND_BY_VIM_TYPE",
+    "TYPED_OPS",
     "VMWARE_INVENTORY_FIND_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "inventory_find_impl",
     "inventory_paths",
 ]
@@ -310,3 +312,6 @@ VMWARE_INVENTORY_FIND_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_INVENTORY_FIND_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {INVENTORY_GROUP_KEY: INVENTORY_WHEN_TO_USE}

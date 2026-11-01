@@ -61,7 +61,9 @@ __all__ = [
     "SNAPSHOT_LIST_CALLS",
     "SNAPSHOT_LIST_GROUP_KEY",
     "SNAPSHOT_LIST_WHEN_TO_USE",
+    "TYPED_OPS",
     "VMWARE_SNAPSHOT_LIST_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "snapshot_list_impl",
 ]
 
@@ -416,3 +418,6 @@ VMWARE_SNAPSHOT_LIST_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_SNAPSHOT_LIST_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {SNAPSHOT_LIST_GROUP_KEY: SNAPSHOT_LIST_WHEN_TO_USE}

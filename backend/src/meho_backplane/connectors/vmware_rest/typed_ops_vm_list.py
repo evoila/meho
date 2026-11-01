@@ -30,7 +30,10 @@ import structlog
 from meho_backplane.connectors.base import ConnectorUpstreamError
 from meho_backplane.connectors.vmware_rest.snapshot_tree import snapshot_rows
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp
-from meho_backplane.connectors.vmware_rest.typed_ops_inventory_find import INVENTORY_GROUP_KEY
+from meho_backplane.connectors.vmware_rest.typed_ops_inventory_find import (
+    INVENTORY_GROUP_KEY,
+    INVENTORY_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.vim_view import (
     VIEW_READ_CALLS,
     VimObject,
@@ -46,9 +49,11 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 
 __all__ = [
+    "TYPED_OPS",
     "VMWARE_VM_LIST_OP",
     "VM_LIST_CALLS",
     "VM_LIST_PROPERTIES",
+    "WHEN_TO_USE_BY_GROUP",
     "vm_list_impl",
 ]
 
@@ -433,3 +438,7 @@ VMWARE_VM_LIST_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_VM_LIST_OP,)
+# vm.list and inventory.find share one group: the same key and text.
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {INVENTORY_GROUP_KEY: INVENTORY_WHEN_TO_USE}

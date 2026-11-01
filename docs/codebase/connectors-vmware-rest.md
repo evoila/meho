@@ -477,14 +477,26 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     know a signed URL's token.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of
-  `_CompositeSpec` rows (reads and writes); each row carries its
+  lifespan startup. Each composite keeps its registration rows in its
+  own module, as `COMPOSITES`: a tuple of `CompositeSpec` rows
+  (`composites/_spec.py`). `collect_composites` in `_register.py`
+  imports every module of the package at start-up (with `pkgutil`, the
+  way the connector registry finds connector packages), collects the
+  rows and sorts them by op id. So a new composite is a new module; no
+  shared list changes. A row that is not a `CompositeSpec`, or an op id
+  two modules share, fails at import. The test
+  `test_connectors_vmware_rest_composites_collect.py` checks that the
+  rows of every module on disk are collected. Each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
-  implied by the spec, not by global defaults. The AI guidance
+  implied by the spec, not by global defaults; its preview builder
+  (`preview`, registered at import on the per-op hook); and, when the
+  composite is not on the vCenter 8.0 catalog, the reason (`not_on_8_0`).
+  The per-group "when to use" texts stay hand-written in `_register.py`.
+  The AI guidance
   (`llm_instructions`) of the VM and folder writes and the VM allocation
   reads lives in `composites/_vm_llm_instructions.py`, one entry per op id;
   their example calls sit under `examples` in each parameter schema. The derived registration-coverage guard uses explicit, closed exceptions only for write operations whose existing semantics intentionally omit a preview or governed-suboperation discovery entry; every other registry id must be represented. `test_reference_docs_drift.py` remains the single total-set drift gate for generated `docs-site/reference/connectors.md`; regenerate it with `cd backend && uv run python scripts/generate_reference_docs.py` when the registry changes. Idempotent on re-run via the body-hash skip path.
-- **Typed ops** (`typed_ops.py`, `#2257`) — the first vmware
+- **Typed ops** (`typed_ops.py`, `typed_ops_host_usage.py`, `#2257`) — the first vmware
   `source_kind="typed"` op, `vmware.host.usage`. Unlike a composite, a
   typed op is a **bound method** on `VmwareRestConnector`
   (`host_usage(self, operator, target, params)`) that the dispatcher
@@ -515,6 +527,24 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   enough — `overallCpuUsage` / `overallMemoryUsage` live on the WS-API
   `HostSystem`, not the REST resource. It establishes the vmware typed-op
   pattern future per-host/per-VM typed reads reuse.
+- **How the typed ops are collected** (`typed_ops.py`, `#5554`) —
+  `typed_ops.py` keeps no list of operations. Each `typed_ops_<feature>.py`
+  module exports two names: `TYPED_OPS`, a tuple of its `VmwareTypedOp`
+  rows, and `WHEN_TO_USE_BY_GROUP`, the `when_to_use` text for each
+  `group_key` those rows use. At import, `typed_ops.py` finds every
+  `typed_ops_*` module of the package with `pkgutil` (the same way
+  `connectors/registry.py` finds connector subpackages), imports each one,
+  and joins the rows sorted by op id into `VMWARE_TYPED_OPS` and the texts
+  into `VMWARE_TYPED_WHEN_TO_USE_BY_GROUP`. A module without the two names
+  is a helper and is skipped. Two modules with the same op id, or the same
+  group key with different texts, fail at import. So a pull request that
+  adds a typed op adds its own module (with its connector wrapper method
+  and test) and does not touch `typed_ops.py`. The guard test
+  `test_connectors_vmware_rest_typed_ops_collect.py` fails when a module
+  on disk is not found, when a module defines a row it does not export,
+  and when a row is left out of the collected tuple. The feature modules
+  import `VmwareTypedOp` and two value helpers from `typed_ops.py`, so the
+  collection runs at the bottom of that file, after those names exist.
 - **Incident-survival typed reads** (`#2300`) — three more
   `source_kind="typed"` bound-method reads in sibling modules, each
   registered through `VMWARE_TYPED_OPS` (so no registrar change) and
@@ -1210,7 +1240,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   composite registrar). Walks `VMWARE_TYPED_OPS`, resolves each op's
   `handler_attr` to the connector bound method, looks the group's
   curated `when_to_use` blurb up in `VMWARE_TYPED_WHEN_TO_USE_BY_GROUP`
-  (required for a grouped typed op), and upserts each row into
+  (required for a grouped typed op; both are collected from the
+  `typed_ops_*` modules, see "How the typed ops are collected" above),
+  and upserts each row into
   `endpoint_descriptor` with `source_kind="typed"` via
   `register_typed_operation`.
 - **`VsphereTargetLike`** (`session.py`) — runtime-checkable Protocol
@@ -1342,7 +1374,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    release. Notes:
    - The Supervisor and namespace composites are not on the 8.0 catalog.
      `COMPOSITES_NOT_ON_8_0` in `composites/_register.py` lists each
-     excluded composite with its reason. The test
+     excluded composite with its reason; it is read from the rows
+     (`CompositeSpec.not_on_8_0`). The test
      `test_connectors_vmware_rest_catalog_parity.py` fails when a composite
      or typed op on 9.0 is neither on 8.0 nor in that list.
    - The write steps inside a composite are checked under the connector
@@ -2880,8 +2913,9 @@ operation needs the version check.
 
 Code: `typed_ops_snapshot_list.py`, `snapshot_tree.py`, `composites/_snapshot.py`
 (create and delete), `composites/_snapshot_cleanup.py` (delete_all and
-consolidate) and `composites/_write.py` (revert). The governed sub-op
-manifests are in `_governed_subops.py`.
+consolidate; its rows are in `composites/_snapshot_cleanup_ops.py`) and
+`composites/_write.py` (revert). The governed sub-op manifests are in
+`_governed_subops.py`.
 
 ### AI guidance of the host and cluster operations
 
@@ -4210,9 +4244,11 @@ target_id}` — and since the dispatch `params` are deliberately never
 serialised onto a reviewer-facing surface (#1503), the four-eyes
 approver could not tell a one-VM power cycle from a 1000-VM outage.
 
-`composites/_write_preview.py` registers one preview builder per write
-composite on the generic per-op hook (`register_preview_builder`,
-`operations/_preview.py`, #1437). The builder result lands under
+`composites/_write_preview.py` holds one preview builder per write
+composite; the composite's registration row names it (`preview`), and
+`_register.py` puts it on the generic per-op hook at import
+(`register_preview_builder`, `operations/_preview.py`, #1437). The
+builder result lands under
 `proposed_effect["preview"]`, wrapped with the op's sensitivity
 `op_class` (see [`approvals.md`](approvals.md)). Three depths:
 
@@ -4936,7 +4972,8 @@ Code: `composites/_host_add.py`, `composites/_host_membership.py` (move,
 connect, disconnect and the shared host read), `composites/_host_remove.py`,
 the schemas and AI guidance in `composites/_host_membership_schemas.py`, and
 the registry rows and vendor-call lists in `composites/_host_membership_ops.py`
-(`_register.py` and `_governed_subops.py` read them in one place each). The
+(`_register.py` collects the rows; `_governed_subops.py` reads the
+vendor-call lists). The
 status read is `typed_ops_task_info.py`.
 
 Vendor calls: all are VIM methods sent as VI-JSON (`/sdk/vim25/<release>/...`)
@@ -5079,9 +5116,9 @@ A pre-check whose task ended but whose status is not `resourceCheckCompleted`
 VI-JSON and the SOAP form of a value, `vsan_call`, `read_properties`),
 `typed_ops_vsan_cluster_info.py`, `typed_ops_vsan_capacity.py`,
 `typed_ops_vsan_performance.py`, `typed_ops_vsan_objects.py` (resync and
-object health), `typed_ops_vsan_precheck.py`, and `typed_ops_vsan_reads.py`,
-the one tuple `typed_ops.VMWARE_TYPED_OPS` takes. Later vSAN operations join
-that tuple.
+object health) and `typed_ops_vsan_precheck.py`. Each module exports its own
+`TYPED_OPS`, and `typed_ops.py` collects them (see "How the typed ops are
+collected"). A later vSAN operation is a new module, or a row in one of these.
 
 Tests: `test_connectors_vmware_rest_typed_vsan_cluster_reads.py` and
 `test_connectors_vmware_rest_typed_vsan_object_reads.py` run the real

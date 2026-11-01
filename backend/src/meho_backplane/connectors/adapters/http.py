@@ -97,13 +97,13 @@ from meho_backplane.connectors._shared.cache_key import (
     effective_scheme,
     target_cache_key,
 )
+from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
 from meho_backplane.connectors._shared.pinned_transport import build_pinned_async_transport
 from meho_backplane.connectors.base import Connector
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.targets.ssrf_guard import (
     TargetDestinationBlockedError,
     assert_public_destination_async,
-    screen_and_resolve,
 )
 
 logger = structlog.get_logger(__name__)
@@ -262,8 +262,9 @@ def _ca_pin_digest(ca_pem: str | None) -> str:
 def _pin_target_addresses(host: str) -> list[str] | None:
     """Connect-time screen for the pinned transport, in ``SsrfBlockedError`` terms.
 
-    Wraps :func:`screen_and_resolve` (the target SSRF guard's
-    address-returning arm) so a block raised from *inside* the transport's
+    Wraps :func:`~meho_backplane.connectors._shared.dial_guard.screen_dial_addresses`
+    (the shared connect-time address check, which also refuses a host name
+    that does not resolve) so a block raised from *inside* the transport's
     ``connect_tcp`` surfaces as :class:`SsrfBlockedError` — an
     ``httpx.ConnectError`` subclass — exactly like the ``_http_client``
     pre-check does. httpx's transport exception mapping re-raises an
@@ -275,7 +276,7 @@ def _pin_target_addresses(host: str) -> list[str] | None:
     the pre-check's rejection is: the verdict is deterministic policy.
     """
     try:
-        return screen_and_resolve(host)
+        return screen_dial_addresses(host)
     except TargetDestinationBlockedError as exc:
         raise SsrfBlockedError(str(exc)) from exc
 

@@ -17,6 +17,7 @@ the load-bearing proof of the C1-a deliverable's behavioural contract.
 from __future__ import annotations
 
 import textwrap
+import time
 
 import pytest
 
@@ -222,6 +223,61 @@ def test_string_rows_keep_the_text_around_a_match_in_one_row() -> None:
     assert len(result.manifest) == 1
     assert result.manifest[0].path == "1"
     assert result.manifest[0].span == (4, 4 + len("Bearer abc123def456GHIJKL"))
+
+
+def test_string_rows_with_many_matches_are_redacted_in_linear_time() -> None:
+    """A long list of rows with a secret in every row does not stall.
+
+    This is the shape of a large ``log.tail`` result at its supported
+    limit. Every row is rewritten and gets its own manifest entry, and
+    the whole list is done well inside the time an operator waits for a
+    response. Rows and matches are walked together once, so the time
+    grows with the number of rows, not with rows times matches.
+    """
+    policy = _policy_with_rules(
+        textwrap.dedent(
+            """
+            - name: strip-bearer
+              pattern: bearer_token
+              action: redact
+              reason: "token in every log row"
+            """,
+        ),
+    )
+    rows = [
+        f"row {index}: Authorization: Bearer abc123def456GHIJKL{index:05d}"
+        for index in range(10_000)
+    ]
+    started = time.perf_counter()
+    result = redact({"rows": rows, "total": len(rows)}, policy)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 5.0, f"redaction of 10000 rows took {elapsed:.1f}s"
+    assert len(result.redacted["rows"]) == len(rows)
+    assert all("Bearer" not in row for row in result.redacted["rows"])
+    assert result.redacted["rows"][0] == "row 0: Authorization: [REDACTED:bearer_token]"
+    assert len(result.manifest) == len(rows)
+    assert result.manifest[-1].path == "rows.9999"
+
+
+def test_string_rows_keep_a_match_that_covers_an_empty_row() -> None:
+    """An empty row inside a multi-row match is still inside the match."""
+    policy = _policy_with_rules(
+        textwrap.dedent(
+            """
+            - name: strip-key
+              pattern: pem_private_key
+              action: redact
+              reason: "key with a blank line"
+            """,
+        ),
+    )
+    begin = "-----BEGIN " + "PRIVATE KEY-----"
+    end = "-----END " + "PRIVATE KEY-----"
+    rows = ["start", begin, "", "keybodyline", end, "finish"]
+    result = redact(rows, policy)
+    hidden = "[REDACTED:pem_private_key]"
+    assert result.redacted == ["start", hidden, hidden, hidden, hidden, "finish"]
+    assert [entry.path for entry in result.manifest] == ["1", "2", "3", "4"]
 
 
 def test_non_string_scalars_passed_through() -> None:

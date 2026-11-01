@@ -52,7 +52,9 @@ rules in policy order, and returns:
   rows (a PEM key: `BEGIN` row, body rows, `END` row) is found whole.
   The list keeps its length and every row keeps its place; a row
   inside a match loses only its part of the match. A match inside one
-  row gives the same result as matching that row alone.
+  row gives the same result as matching that row alone. Rows and
+  matches are walked together once, so a long list with a secret in
+  every row costs the same as its rows alone.
 - `manifest` — a tuple of `RedactionManifestEntry` records, one per
   rule firing per leaf, carrying `rule`, `pattern`, `action`,
   `count`, `span`, `reason`, and `path`. C1-b will persist this

@@ -303,6 +303,13 @@ def _apply_to_rows(
     The manifest gets one entry per rewritten row, with the row's own
     path and offsets, so the audit row reads the same as for a string
     leaf. *mutate* works as in :func:`_apply_to_str`.
+
+    The spans come sorted and never overlap, so rows and spans are
+    walked together, each once: a span that ends before the current
+    row is left behind, and a span that starts after the row's end
+    waits for a later row. The cost grows with the number of rows plus
+    the number of matches, not their product, so a long log tail with
+    a secret in every row is handled in the same time as its rows alone.
     """
     pattern = get_pattern(rule.pattern)
     spans = secret_spans(pattern, "\n".join(rows))
@@ -311,13 +318,17 @@ def _apply_to_rows(
 
     out: list[str] = []
     offset = 0
+    next_span = 0
     for index, row in enumerate(rows):
         end = offset + len(row)
-        row_spans = [
-            (max(start, offset) - offset, min(stop, end) - offset)
-            for start, stop in spans
-            if max(start, offset) < min(stop, end)
-        ]
+        while next_span < len(spans) and spans[next_span][1] <= offset:
+            next_span += 1
+        row_spans: list[tuple[int, int]] = []
+        for start, stop in spans[next_span:]:
+            if start >= end:
+                break
+            if start < stop:
+                row_spans.append((max(start, offset) - offset, min(stop, end) - offset))
         if row_spans:
             manifest.append(
                 RedactionManifestEntry(

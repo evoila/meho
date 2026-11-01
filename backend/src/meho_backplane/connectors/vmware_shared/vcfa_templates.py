@@ -34,7 +34,11 @@ request fills in. ``blueprint.create``, ``blueprint.update`` and
 ``blueprint.validate`` refuse YAML with a secret value
 (:func:`refuse_secret_values`) before any vendor call, and the approval
 card of a create or update shows the YAML with its secret values hidden
-(:func:`blueprint_write_preview`).
+(:func:`blueprint_write_preview`). The ``inputs`` of ``blueprint.validate``
+may name a secret input only by a reference: one with a secret name, and
+one the template marks ``encrypted: true``, in the YAML it gets or in the
+inputs schema of the stored template it names
+(:mod:`~meho_backplane.connectors.vmware_shared.vcfa_template_inputs`).
 """
 
 from __future__ import annotations
@@ -45,10 +49,12 @@ from urllib.parse import quote
 
 import httpx
 
-from meho_backplane.broadcast.events import is_secret_param_name
+from meho_backplane.connectors.vmware_shared.vcfa_template_inputs import (
+    encrypted_inputs_schema,
+    refuse_secret_input_values,
+)
 from meho_backplane.connectors.vmware_shared.vcfa_yaml_secrets import (
     MARKER_PREFIX,
-    is_reference,
     scrub_inputs_schema,
     scrub_template_yaml,
 )
@@ -63,6 +69,7 @@ __all__ = [
     "BLUEPRINT_PATH",
     "BLUEPRINT_VALIDATION_PATH",
     "BLUEPRINT_VERSIONS_PATH",
+    "BLUEPRINT_VERSION_INPUTS_SCHEMA_PATH",
     "BLUEPRINT_VERSION_RELEASE_PATH",
     "BLUEPRINT_VERSION_UNRELEASE_PATH",
     "DELETE_OP_IDS",
@@ -84,6 +91,9 @@ BLUEPRINTS_PATH: Final[str] = "/blueprint/api/blueprints"
 BLUEPRINT_PATH: Final[str] = "/blueprint/api/blueprints/{blueprintId}"
 BLUEPRINT_INPUTS_SCHEMA_PATH: Final[str] = "/blueprint/api/blueprints/{blueprintId}/inputs-schema"
 BLUEPRINT_VERSIONS_PATH: Final[str] = "/blueprint/api/blueprints/{blueprintId}/versions"
+BLUEPRINT_VERSION_INPUTS_SCHEMA_PATH: Final[str] = (
+    "/blueprint/api/blueprints/{blueprintId}/versions/{version}/inputs-schema"
+)
 BLUEPRINT_VERSION_RELEASE_PATH: Final[str] = (
     "/blueprint/api/blueprints/{blueprintId}/versions/{version}/actions/release"
 )
@@ -290,8 +300,21 @@ async def blueprint_version_list(
 async def blueprint_validate(
     connector: ContentTransport, operator: Operator, target: Any, params: dict[str, Any]
 ) -> dict[str, Any]:
-    """``*.blueprint.validate``: check template YAML or a stored template. Changes nothing."""
+    """``*.blueprint.validate``: check template YAML or a stored template. Changes nothing.
+
+    A secret input in ``inputs`` must be a reference. Which inputs are
+    secret comes from the YAML in ``content``, or from the inputs schema of
+    the stored template (one ``GET`` before the check).
+    """
     refuse_secret_values(params)
+    inputs = params.get("inputs")
+    if isinstance(inputs, Mapping) and inputs:
+        content = params.get("content")
+        if isinstance(content, str):
+            schema = encrypted_inputs_schema(content)
+        else:
+            schema = await _stored_inputs_schema(connector, operator, target, params)
+        refuse_secret_input_values(inputs, schema)
     fields = {
         "project_id": "projectId",
         "content": "content",
@@ -345,16 +368,21 @@ def refuse_secret_values(params: Mapping[str, Any]) -> None:
             )
     inputs = params.get("inputs")
     if isinstance(inputs, Mapping):
-        literal = sorted(
-            str(name)
-            for name, value in inputs.items()
-            if is_secret_param_name(str(name)) and not is_reference(value)
-        )
-        if literal:
-            raise ValueError(
-                f"the secret input(s) {', '.join(literal)} hold a value; MEHO does not send "
-                "it. Give a reference such as ${secret.<name>}, or leave the input out"
-            )
+        refuse_secret_input_values(inputs, None)
+
+
+async def _stored_inputs_schema(
+    connector: ContentTransport, operator: Operator, target: Any, params: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The inputs schema of the stored template (its draft, or a version)."""
+    segments = {"blueprintId": quote_segment(params["blueprint_id"])}
+    if params.get("blueprint_version") is not None:
+        segments["version"] = quote_segment(params["blueprint_version"])
+        path = BLUEPRINT_VERSION_INPUTS_SCHEMA_PATH.format(**segments)
+    else:
+        path = BLUEPRINT_INPUTS_SCHEMA_PATH.format(**segments)
+    schema = await get_json(connector, operator, target, path)
+    return schema if isinstance(schema, dict) else {}
 
 
 async def _find_by_name(

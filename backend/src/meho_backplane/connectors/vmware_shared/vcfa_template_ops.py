@@ -472,7 +472,8 @@ _VALIDATE = ContentOpSpec(
     description=(
         "Sends POST /blueprint/api/blueprint-validation with template YAML (content) or "
         "a stored template (blueprint_id). Returns valid and the problems found. "
-        "Nothing is saved. YAML or an input with a secret value is refused."
+        "Nothing is saved. YAML with a secret value is refused, and so is a value for "
+        "a secret input (a secret name, or encrypted: true in the template)."
     ),
     parameter_schema={
         "type": "object",
@@ -497,7 +498,8 @@ _VALIDATE = ContentOpSpec(
                 "type": "object",
                 "description": (
                     "Optional input values, by input name. A secret input (a password, "
-                    "key or token) takes a reference such as ${secret.<name>}, never the value."
+                    "key or token, or an input with encrypted: true) takes a reference "
+                    "such as ${secret.<name>}, never the value."
                 ),
                 "additionalProperties": True,
             },

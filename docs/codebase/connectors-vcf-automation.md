@@ -422,7 +422,7 @@ registered on both connectors:
 | `blueprint.delete` | deletes a template and all its versions; `deleted` / `unchanged` (404) | destructive, approval, preview first | `GET …/{blueprintId}`, every page of `GET …/{blueprintId}/versions` (preview), then `DELETE /blueprint/api/blueprints/{blueprintId}` | 8.18, 9.x |
 | `blueprint.version.list` | flat rows `{id, version, status, versionDescription, versionChangeLog, createdAt, createdBy}` | safe | `GET /blueprint/api/blueprints/{blueprintId}/versions` | 8.18, 9.x |
 | `blueprint.version.release` | `release`: makes a new version from the draft and releases it, or releases an existing one; `unrelease`: takes it out of the catalog | dangerous, approval | `GET …/versions?version=`, then `POST …/versions` (`release: true`), `POST …/versions/{version}/actions/release` or `…/unrelease` | 8.18, 9.x |
-| `blueprint.validate` | checks template YAML or a stored template; `{valid, validationMessages}`; saves nothing | safe | `POST /blueprint/api/blueprint-validation` | 8.18, 9.x |
+| `blueprint.validate` | checks template YAML or a stored template; `{valid, validationMessages}`; saves nothing | safe | `GET …/{blueprintId}/inputs-schema` or `…/versions/{version}/inputs-schema` (only with `inputs` for a stored template), then `POST /blueprint/api/blueprint-validation` | 8.18, 9.x |
 | `catalog.source.list` | flat rows of content sources, with `sourceProjectId` and the last import | safe | `GET /catalog/api/admin/sources` | 8.18, 9.x |
 | `catalog.source.create` | a source of type `com.vmw.blueprint` that imports the released templates of a project; `created` / `unchanged` (same name, type and project; a name used by another type or project is refused) | caution, approval | `GET …/sources?search=`, then `POST /catalog/api/admin/sources` | 8.18, 9.x |
 | `catalog.share.list` | flat rows of shares (entitlements): project and shared source or item | safe | `GET /catalog/api/admin/entitlements` | 8.18, 9.x |
@@ -457,18 +457,30 @@ registered on both connectors:
   `[REDACTED:...]` marker. In a cloud-init `chpasswd` block only the
   `list` part and the passwords of `users` are hidden; `expire` stays. A
   secret input (an input under `inputs:` with a secret name, or any map
-  with `encrypted: true`, also as a one-line flow map and with quoted
-  keys) keeps its lines; only its `default`, `const`, `enum`, `example`
-  and `examples` become a marker, in the YAML and in `inputs_schema`
-  alike (`vcfa_yaml_secrets.scrub_inputs_schema`). `secrets_replaced`
-  counts all markers. References such as `${secret.<name>}` or
-  `${input.<name>}` stay. Every other line comes back as written.
+  with `encrypted: true`, also as a flow map and with quoted keys) keeps
+  its lines; only its `default`, `const`, `enum`, `example` and
+  `examples` become a marker, in the YAML and in `inputs_schema` alike
+  (`vcfa_yaml_secrets.scrub_inputs_schema`). A flow map (`{a: 1, b: 2}`)
+  is read as one value, also when it runs over several lines and at any
+  depth of nesting (a `chpasswd` map inside another map); when it holds a
+  secret, the whole map becomes one marker. A double-quoted value whose
+  `\n` escapes hold more YAML lines (a `cloudConfig` written on one
+  line) is checked like a block. `secrets_replaced` counts all markers.
+  References such as `${secret.<name>}` or `${input.<name>}` stay. Every
+  other line comes back as written.
 - **No secret value is sent.** `blueprint.create`, `blueprint.update`
   and `blueprint.validate` run the same check on the `content` they get
   (`vcfa_templates.refuse_secret_values`) and refuse YAML that holds a
   secret value or a `[REDACTED:...]` marker, before any call to the
-  vendor. `blueprint.validate` also refuses a secret-named key in
-  `inputs` whose value is not a reference. A template takes a password
+  vendor. `blueprint.validate` also refuses a value in `inputs` for a
+  secret input (`vcfa_template_inputs.refuse_secret_input_values`): an
+  input with a secret name, or one the template marks `encrypted: true`.
+  For YAML in `content` it reads that mark from the YAML (composed, not
+  loaded, so an alias cannot blow up the parse); for a stored template it
+  reads the vendor's inputs schema first (`GET …/{blueprintId}/inputs-schema`,
+  or `…/versions/{version}/inputs-schema` when a version is named). An
+  object input is checked the same way, against its `properties`. A
+  reference such as `${secret.<name>}` passes. A template takes a password
   through `${secret.<name>}` or an `encrypted: true` input without a
   default; the request fills it in. The approval card of a create or
   update (`vcfa_templates.blueprint_write_preview`, registered for both

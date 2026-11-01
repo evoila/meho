@@ -967,3 +967,12 @@ def test_default_policy_redacts_a_private_key_split_over_log_rows() -> None:
         *(["[REDACTED:pem_private_key]"] * len(key_rows)),
         "after",
     ]
+
+
+@pytest.mark.parametrize("resource", [DEFAULT_POLICY_RESOURCE, "example.yaml"])
+def test_packaged_policies_hide_a_labelled_private_key_whole(resource: str) -> None:
+    """``private_key: -----BEGIN ...`` loses the whole block, and the label stays."""
+    policy = load_policy_yaml(DEFAULT_POLICY_PACKAGE, resource)
+    text = "private_key: " + _PEM_PRIVATE_KEY_FIXTURE_POS + "\ntail"
+    result = redact(text, policy)
+    assert result.redacted == "private_key: [REDACTED:pem_private_key]\ntail"

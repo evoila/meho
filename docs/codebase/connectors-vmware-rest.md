@@ -2929,6 +2929,48 @@ Code: `composites/_drs_group.py` (shared group reads + `members.set`),
 manifests are in `_governed_subops.py`. All of them are on `vmware-rest-8.0` and
 `vmware-rest-9.0`.
 
+### vApps
+
+Four operations create a vApp, start and stop it in its start order, set
+that order, and delete it (`#4341`). A vApp is a resource pool that groups
+VMs and starts and stops them in a set order. vCenter's REST API has no call
+for it, so the operations use the VIM API as VI-JSON: read the objects
+(`RetrievePropertiesEx`), run one vim write through the governed write seam
+(`_write._write_vmomi_sub_op`), poll the task where the method is a
+`*_Task`, and read the vApp again to return its new state. They are on both
+catalogs (`vmware-rest-8.0` and `vmware-rest-9.0`), wait for approval, and
+need no catalog ingest. A change takes the vApp id (`vapp`, such as
+`resgroup-v42`), never a name, so after approval it runs on the vApp the
+approver saw. An object that is in the asked state already answers
+`unchanged` and nothing is sent. A vendor fault (task fault, or the HTTP 500
+fault body of a call without a task) fails the call with the fault type and
+text.
+
+| Operation | What it does | Returns | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.composite.vapp.create` | `ResourcePool.CreateVApp` in a cluster's root resource pool (`cluster`) or in a pool (`resource_pool`), shown in a VM folder (`folder`). Default resources: no reservation, no limit, normal shares. Checks first that the pool and folder exist and that the folder holds vApps. A vApp of the same name in the pool is `unchanged`; a resource pool of that name is refused. | `status` (`created`, `unchanged`, ...), the vApp (`vapp`, `name`, `state`, `vms`), `resource_pool`, `folder` | `caution` | 8.0, 9.x |
+| `vmware.composite.vapp.power` | `action=power_on`: `VirtualApp.PowerOnVApp_Task`, vCenter starts the VMs in their start order. `action=power_off`: `PowerOffVApp_Task`, the VMs stop in the reverse order, or all at once with `force=true`. A vApp that is starting or stopping is refused. | `status` (`powered_on`, `powered_off`, `unchanged`, `not_confirmed`, ...), `state_before`, `state`, `vms` with each VM's power state and start settings | `dangerous` | 8.0, 9.x |
+| `vmware.composite.vapp.start_order.set` | `VirtualApp.UpdateVAppConfig` with one `VAppEntityConfigInfo` per given VM: start group, start and stop delay, wait for the guest, start and stop action. Fields left out keep their value. Each VM must be in the vApp. | `status` (`updated`, `unchanged`, `not_confirmed`, ...), `vms` as read after the change | `caution` | 8.0, 9.x |
+| `vmware.composite.vapp.delete` | `VirtualApp.Destroy_Task`: deletes the vApp and every VM in it with their disks. Refused when the vApp is not stopped, a VM in it is not powered off, or it holds other vApps or resource pools. | the teardown envelope: `status` (`deleted`, `unchanged`, `still_present`, ...), `object` (vApp, VM count, what is lost), `children` (the VMs) | `destructive` | 8.0, 9.x |
+
+The VM rows (`vms`) come in start order: `vm`, `name`, `power_state`,
+`start_order`, `start_delay`, `wait_for_guest`, `start_action`,
+`stop_action`, `stop_delay`. The vApp state comes from `summary` (read
+whole, because `vAppState` is on the `VirtualAppSummary` subtype only). The
+delete uses the plan-then-act seam of `_teardown.py`: one read-only plan
+feeds the approval-card `blast_radius` (`object`, `children`,
+`irreversibility`) and the handler. A person calls `preview_operation` first,
+and an agent is always refused. `children` and `blockers` carry every VM,
+however many: the approval card shows all that goes, and a long result goes
+through JSONFlux whole under a result handle (`result_query` with `path`
+`/children` pages it). The other three have approval previews that
+show the objects now and whether the call would stop before the change.
+Code: `composites/_vapp.py` (shared reads, views and write steps),
+`_vapp_change.py` (create, power), `_vapp_start_order.py`, `_vapp_delete.py`
+and `_vapp_schemas.py`. The sub-operation lists `_vapp._VIM_SUB_OPS_VAPP_*`
+are pinned by the reconcile lane against the pinned `vi-json.yaml`. Tests:
+`test_connectors_vmware_rest_composites_vapp.py`.
+
 ### VM snapshot operations (`vmware.snapshot.list`, `vm.snapshot.create` / `.delete` / `.delete_all` / `.revert`, `vm.disks.consolidate`)
 
 These operations cover the snapshot work on one VM. vCenter's REST API has no

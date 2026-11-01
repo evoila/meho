@@ -17,7 +17,9 @@ registers at start-up, of every connector, against ten rules:
 4. ``llm_instructions`` -- ``when_to_call``, ``output_shape`` and
    ``next_step``; a change (not ``safe``) also has ``preconditions``.
 5. ``examples`` -- at least one entry under ``examples`` in the parameter
-   schema, and each one validates against the schema.
+   schema, and each one validates against the schema. A placeholder for an
+   id (``<vapp-id>``) is swapped for a made-up id of the right shape first
+   (``tests/_example_placeholders.py``); the schema stays strict.
 6. ``no_ticket_numbers`` -- no ticket number (``#1234``) in the summary,
    description or guidance.
 7. ``requires_approval`` -- every operation that is not ``safe`` has
@@ -61,6 +63,7 @@ from meho_backplane.operations._preview import _PREVIEW_BUILDERS
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.typed_register import run_typed_op_registrars
 from meho_backplane.settings import get_settings
+from tests._example_placeholders import with_synthetic_ids
 
 GAPS_FILE: Final[Path] = Path(__file__).parent / "data" / "operation_contract_gaps.yaml"
 
@@ -218,7 +221,7 @@ def check_examples(op: OperationContract) -> list[str]:
         if not isinstance(example, Mapping):
             problems.append(f"example {index} is not an object")
             continue
-        for error in validate_params(dict(op.parameter_schema), dict(example)):
+        for error in validate_params(dict(op.parameter_schema), dict(with_synthetic_ids(example))):
             problems.append(
                 f"example {index} does not validate: {error['path']} expects {error['expected']}"
             )

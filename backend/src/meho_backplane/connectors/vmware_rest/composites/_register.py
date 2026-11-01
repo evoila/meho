@@ -122,7 +122,7 @@ _VERSION_8_0 = "8.0"
 #: ``tests/test_operation_group_texts.py`` checks it).
 _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "cluster": (
-        "Use for clusters, DRS and resource pools. Read: a cluster's DRS "
+        "Use for clusters, DRS, resource pools and vApps. Read: a cluster's DRS "
         "settings and the moves DRS recommends now "
         "(cluster.drs_recommendations, safe). Changes: "
         "update every host of a cluster in turn (cluster.patch, dangerous); add a "
@@ -131,8 +131,12 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "(cluster.drs_vm_host_rule.create, caution); delete a DRS rule "
         "(cluster.drs_rule.delete, destructive); create a resource pool "
         "(resource_pool.create, caution) or delete one (resource_pool.delete, "
-        "dangerous). Pair with 'host' for one host's maintenance and with 'vm' "
-        "to move VMs."
+        "dangerous); create a vApp, a group of VMs that start in a set order "
+        "(vapp.create, caution); power a vApp on or off in that order "
+        "(vapp.power, dangerous); set the order (vapp.start_order.set, "
+        "caution); delete a powered-off vApp with its VMs (vapp.delete, "
+        "destructive). Pair with 'host' for one host's maintenance and with "
+        "'vm' to move VMs."
     ),
     "events": (
         "Use for vCenter events: what changed, and when. Reads: the latest "

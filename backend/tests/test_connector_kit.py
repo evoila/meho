@@ -141,7 +141,8 @@ def test_command_raises_the_second_number_for_an_added_name(
     kit_files: tuple[Path, Path],
 ) -> None:
     new = _names(a=_list_before, b=_list_after)
-    assert write(new, *kit_files) == 0
+    exit_code = write(new, *kit_files)
+    assert exit_code == 0
     assert _written(*kit_files) == ("1.4", "1.4", new)
 
 
@@ -149,7 +150,8 @@ def test_command_raises_the_first_number_for_a_changed_name(
     kit_files: tuple[Path, Path],
 ) -> None:
     new = _names(a=_list_after)
-    assert write(new, *kit_files) == 0
+    exit_code = write(new, *kit_files)
+    assert exit_code == 0
     assert _written(*kit_files)[:2] == ("2.0", "2.0")
 
 
@@ -160,7 +162,8 @@ def test_command_raises_the_first_number_for_a_removed_old_name(
     old = _names(a=_list_before, b=_list_after)
     old["b"]["old"] = "use a"
     names_file.write_text(json.dumps({"kit_version": "1.3", "names": old}))
-    assert write(_names(a=_list_before), names_file, pyproject) == 0
+    exit_code = write(_names(a=_list_before), names_file, pyproject)
+    assert exit_code == 0
     assert _written(names_file, pyproject)[:2] == ("2.0", "2.0")
 
 
@@ -169,12 +172,14 @@ def test_command_raises_the_second_number_when_a_name_is_marked_old(
 ) -> None:
     new = _names(a=_list_before)
     new["a"]["old"] = "use b"
-    assert write(new, *kit_files) == 0
+    exit_code = write(new, *kit_files)
+    assert exit_code == 0
     assert _written(*kit_files)[:2] == ("1.4", "1.4")
 
 
 def test_command_keeps_the_version_when_nothing_changed(kit_files: tuple[Path, Path]) -> None:
-    assert write(_names(a=_list_before), *kit_files) == 0
+    exit_code = write(_names(a=_list_before), *kit_files)
+    assert exit_code == 0
     assert _written(*kit_files)[:2] == ("1.3", "1.3")
 
 
@@ -186,7 +191,9 @@ def test_removing_a_name_that_was_not_old_fails(kit_files: tuple[Path, Path]) ->
     assert message is not None
     assert "did not mark them as old: a" in message
 
-    assert write({}, names_file, pyproject) == 1
+    exit_code = write({}, names_file, pyproject)
+
+    assert exit_code == 1
     assert names_file.read_text() == before
 
 

@@ -40,7 +40,6 @@ from meho_backplane.connectors.vmware_rest.composites._teardown_reads import (
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _CLUSTER_COMPUTE_RESOURCE_MO_TYPE,
     _FOLDER_MO_TYPE,
-    _VMOMI_RETRIEVE_PROPERTIES_PATH,
     _unwrap_value,
     _write_vmomi_sub_op,
 )
@@ -52,12 +51,14 @@ from meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent import (
 from meho_backplane.connectors.vmware_rest.vcenter_deployment import (
     hide_secrets,
     read_secret_param,
+    unreachable_http_reason,
 )
 from meho_backplane.connectors.vmware_rest.vim_body import (
     VIM_TYPE_NAME_KEY,
     fault_message,
     unwrap_vim_value,
 )
+from meho_backplane.connectors.vmware_rest.vim_retrieve import retrieve_all_pages
 from meho_backplane.connectors.vmware_rest.vim_task import task_moref_value
 from meho_backplane.operations._preview import register_preview_builder
 
@@ -156,15 +157,16 @@ def _add_answer(
 async def _running_add_task(
     connector: VmwareRestConnector, target: Any, operator: Operator, recent: Any
 ) -> str | None:
-    """The id of an add task that is queued or runs on the parent, else ``None``."""
+    """The id of an add task that is queued or runs on the parent, else ``None``.
+
+    The task list is a read of many objects, so it follows every page: a
+    running add on a later page must not start a second add.
+    """
     task_ids = [moid for _type, moid in moref_values(recent)]
     if not task_ids:
         return None
-    payload = await connector._post_vmomi_json(
-        target,
-        _VMOMI_RETRIEVE_PROPERTIES_PATH,
-        operator=operator,
-        json=build_task_info_retrieve_params(task_ids),
+    payload = await retrieve_all_pages(
+        connector, target, operator, build_task_info_retrieve_params(task_ids)
     )
     for task, info in _parse_task_info_results(payload).items():
         if not isinstance(info, dict):
@@ -185,6 +187,19 @@ def _start_fault(exc: httpx.HTTPStatusError, secrets: tuple[str, ...]) -> tuple[
     text = fault_message(fault) if isinstance(fault, dict) else None
     message = hide_secrets(text, secrets) or f"HTTP {exc.response.status_code}"
     return (fault_type if isinstance(fault_type, str) else None), message
+
+
+def _start_unknown(params: dict[str, Any], parent_name: str | None, error: str) -> dict[str, Any]:
+    """The answer when MEHO cannot know whether vCenter took the job."""
+    return _add_answer(
+        "start_unknown",
+        params,
+        "The start got no clear answer; MEHO does not know if the add runs. Do not start "
+        "again blindly: call host.add again later. It answers already_added or "
+        "already_running when the first call worked.",
+        parent_name=parent_name,
+        error_message=error,
+    )
 
 
 async def host_add_composite(
@@ -249,6 +264,9 @@ async def host_add_composite(
             params=_add_plan(params),
         )
     except httpx.HTTPStatusError as exc:
+        if unreachable_http_reason(exc) is not None:
+            # A gateway answered, not vCenter's service: the job may have started.
+            return _start_unknown(params, parent_name, f"HTTP {exc.response.status_code}")
         fault_type, message = _start_fault(exc, secrets)
         return _add_answer(
             "start_failed",
@@ -260,15 +278,7 @@ async def host_add_composite(
             error_message=message,
         )
     except httpx.TransportError as exc:
-        return _add_answer(
-            "start_unknown",
-            params,
-            "The start got no reply; MEHO does not know if the add runs. Do not start again "
-            "blindly: call host.add again later. It answers already_added or already_running "
-            "when the first call worked.",
-            parent_name=parent_name,
-            error_message=type(exc).__name__,
-        )
+        return _start_unknown(params, parent_name, type(exc).__name__)
     if gate is not None:
         return gate
     task = task_moref_value(_unwrap_value(payload))

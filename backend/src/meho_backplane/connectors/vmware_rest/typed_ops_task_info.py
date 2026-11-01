@@ -16,8 +16,9 @@ MEHO keeps no task state between calls; the caller keeps the task id.
 * A task vCenter no longer knows gives ``not_found``. vCenter forgets
   finished tasks after a while.
 * When vCenter does not answer (for example during its own upgrade), the
-  answer is ``not_reachable`` with the task id and the time of the read. It
-  never says ``error`` for that.
+  answer is ``not_reachable`` with the task id and the time of the read. The
+  same holds when a gateway answers HTTP 502, 503 or 504 for it. It never
+  says ``error`` for that.
 * An expired login is handled by the connector: on ``NotAuthenticated`` it
   logs in again and reads once more (``VmwareRestConnector._post_vmomi_json``).
 """
@@ -41,7 +42,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent import (
     TASKS_RECENT_GROUP_KEY,
     build_task_info_retrieve_params,
 )
-from meho_backplane.connectors.vmware_rest.vcenter_deployment import now_iso, unreachable_reason
+from meho_backplane.connectors.vmware_rest.vcenter_deployment import (
+    now_iso,
+    unreachable_http_reason,
+    unreachable_reason,
+)
 from meho_backplane.connectors.vmware_rest.vim_body import (
     fault_message,
     fault_type_name,
@@ -83,8 +88,8 @@ _GUIDANCE: Final[dict[str, str]] = {
         "while. Read the object the task worked on to see its state."
     ),
     "not_reachable": (
-        "vCenter did not answer. This is not a task failure. Read again in a few minutes "
-        "with the same task id."
+        "vCenter did not answer, or a gateway answered for it. This is not a task failure. "
+        "Read again in a few minutes with the same task id."
     ),
 }
 
@@ -156,6 +161,18 @@ def _project(answer: dict[str, Any], info: dict[str, Any]) -> None:
     )
 
 
+def _not_reachable(
+    answer: dict[str, Any], target: VsphereTargetLike, reason: str
+) -> dict[str, Any]:
+    """The answer when vCenter gave no answer: the task id and the time stay in it."""
+    _log.info(
+        "vmware_task_info_not_reachable", target=target.name, task=answer["task"], reason=reason
+    )
+    answer.update(reachable=False, state="not_reachable", unreachable_reason=reason)
+    answer["guidance"] = _GUIDANCE["not_reachable"]
+    return answer
+
+
 async def task_info_impl(
     connector: VmwareRestConnector,
     operator: Operator,
@@ -177,12 +194,11 @@ async def task_info_impl(
         answer["guidance"] = _GUIDANCE["not_found"]
         return answer
     except httpx.TransportError as exc:
-        reason = unreachable_reason(exc)
-        _log.info("vmware_task_info_not_reachable", target=target.name, task=task, reason=reason)
-        answer.update(reachable=False, state="not_reachable", unreachable_reason=reason)
-        answer["guidance"] = _GUIDANCE["not_reachable"]
-        return answer
+        return _not_reachable(answer, target, unreachable_reason(exc))
     except httpx.HTTPStatusError as exc:
+        outage = unreachable_http_reason(exc)
+        if outage is not None:
+            return _not_reachable(answer, target, outage)
         if exc.response.status_code != 500 or (
             method_fault_type(exc.response.text) != _MO_NOT_FOUND_FAULT
         ):
@@ -250,8 +266,19 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "unreachable_reason": {
             "type": _NULLABLE_TEXT,
-            "enum": ["connect_failed", "timeout", "tls_verify_failed", None],
-            "description": "Why vCenter did not answer; null when it answered.",
+            "enum": [
+                "connect_failed",
+                "timeout",
+                "tls_verify_failed",
+                "service_unavailable",
+                "gateway_error",
+                None,
+            ],
+            "description": (
+                "Why vCenter did not answer: no connection, a timeout, a failed TLS check, "
+                "or a gateway answered HTTP 503 (service_unavailable), 502 or 504 "
+                "(gateway_error). Null when vCenter answered."
+            ),
         },
         "guidance": {"type": "string", "description": "What to do next, in plain words."},
     },

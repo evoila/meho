@@ -136,7 +136,7 @@ _READS: Final = (_OP_RETRIEVE_PROPERTIES, _OP_CONTINUE_RETRIEVE_PROPERTIES)
 #: VI-JSON vendor calls of each change (``_VIM_SUB_OPS_*`` naming, so the
 #: vcenter.yaml sweep skips them; the vi-json reconcile lanes check them).
 _VIM_SUB_OPS_HOST_ADD: Final = (
-    _OP_RETRIEVE_PROPERTIES,
+    *_READS,
     _host_add._OP_ADD_HOST,
     _host_add._OP_ADD_STANDALONE_HOST,
 )

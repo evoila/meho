@@ -194,7 +194,8 @@ HOST_ADD_RESPONSE_SCHEMA: dict[str, Any] = {
                 "with this name is in vCenter; nothing sent. already_running: an add runs on "
                 "this cluster or folder; nothing sent. parent_not_found, needs_vcenter: "
                 "nothing sent. start_failed: vCenter refused the start. start_unknown: no "
-                "reply to the start."
+                "reply to the start, or a gateway answered HTTP 502, 503 or 504 for it; the "
+                "job may run."
             ),
         },
         "host_name": {"type": "string", "description": "The host name the call named."},
@@ -227,7 +228,10 @@ HOST_ADD_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "error_message": {
             "type": _NULLABLE_TEXT,
-            "description": "On start_failed or start_unknown: the vendor's error text.",
+            "description": (
+                "On start_failed: the vendor's error text. On start_unknown: the error class "
+                "or the HTTP status of the answer that was not from vCenter."
+            ),
         },
         "guidance": {"type": "string", "description": "What to do next, in plain words."},
     },
@@ -260,8 +264,9 @@ HOST_ADD_LLM_INSTRUCTIONS: dict[str, Any] = {
     ),
     "next_step": (
         "accepted or already_running: call vmware.task.info with the task id until the state "
-        "is success (result names the new host or its compute resource) or error. After a "
-        "lost reply, do not start again blindly: call host.add again; it answers "
+        "is success (result names the new host or its compute resource) or error. After "
+        "start_unknown (a lost reply or a gateway error), do not start again blindly: call "
+        "host.add again; it answers "
         "already_added or already_running when the first call worked. Then license the host "
         "(license.assign) and add it to a distributed switch."
     ),

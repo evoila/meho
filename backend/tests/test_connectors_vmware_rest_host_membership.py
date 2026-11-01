@@ -372,6 +372,27 @@ async def test_add_returns_the_running_add_and_starts_nothing(add_env: AsyncMock
     assert conn.calls_to("AddHost_Task") == []
 
 
+async def test_add_finds_a_running_add_on_a_later_page(add_env: AsyncMock) -> None:
+    """vCenter may split the task read into pages; the running add is on page two."""
+    conn = HostVim()
+    conn.page_size = 1
+    conn.add(
+        "ClusterComputeResource",
+        CLUSTER,
+        name="<cluster-name>",
+        recentTask=[moref("Task", "task-50"), moref("Task", "task-51")],
+    )
+    conn._tasks["task-50"] = {"state": "success", "descriptionId": "ClusterComputeResource.addHost"}
+    conn._tasks["task-51"] = {"state": "queued", "descriptionId": "ClusterComputeResource.addHost"}
+    out = _check(HOST_ADD_RESPONSE_SCHEMA, await _add(conn, _add_params()))
+    assert out["status"] == "already_running"
+    assert out["task"] == "task-51"
+    assert conn.calls_to("AddHost_Task") == []
+    # The second page was read with the token, on the session of the first call.
+    assert conn.continue_calls == [("<token-1>", "<session-1>")]
+    assert conn._pending == {}
+
+
 async def test_add_answers_parent_not_found(add_env: AsyncMock) -> None:
     out = _check(HOST_ADD_RESPONSE_SCHEMA, await _add(HostVim(), _add_params()))
     assert out["status"] == "parent_not_found"
@@ -405,6 +426,26 @@ async def test_a_start_with_no_reply_says_start_unknown(add_env: AsyncMock) -> N
         mp.setattr(_host_add, "_write_vmomi_sub_op", lost)
         out = _check(HOST_ADD_RESPONSE_SCHEMA, await _add(conn, _add_params()))
     assert out["status"] == "start_unknown"
+    assert "Do not start again blindly" in out["guidance"]
+
+
+@pytest.mark.parametrize("status_code", [502, 503, 504])
+async def test_a_gateway_answer_to_the_start_says_start_unknown(
+    add_env: AsyncMock, status_code: int
+) -> None:
+    """A gateway can answer after vCenter took the job, so the start is not 'failed'."""
+    conn = HostVim()
+    conn.add("ClusterComputeResource", CLUSTER, name="<cluster-name>", recentTask=[])
+
+    async def gateway(*_args: Any, **_kwargs: Any) -> Any:
+        raise http_status_error(status_code, "<html>gateway</html>")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(_host_add, "_write_vmomi_sub_op", gateway)
+        out = _check(HOST_ADD_RESPONSE_SCHEMA, await _add(conn, _add_params()))
+    assert out["status"] == "start_unknown"
+    assert out["error_message"] == f"HTTP {status_code}"
+    assert out["error_type"] is None
     assert "Do not start again blindly" in out["guidance"]
 
 

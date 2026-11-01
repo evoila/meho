@@ -4937,9 +4937,14 @@ host is added.
   with that task's id). Both start nothing. This check is a help, not a lock:
   two callers can both check before either starts, and a task that just ended
   is no longer running.
-- After a lost reply (`start_unknown`), do not start again blindly: call
-  `host.add` again, which answers `already_added` or `already_running` when
-  the first call worked, or read the task list (`vmware.tasks.recent`).
+- The running-add check reads the tasks of the cluster or folder with every
+  page (`retrieve_all_pages`): a running add on a later page must not start a
+  second add. The continuation call is in the vendor-call list of `host.add`.
+- After a lost reply, or when a gateway answered HTTP 502, 503 or 504 for the
+  start (`start_unknown`), do not start again blindly: call `host.add` again,
+  which answers `already_added` or `already_running` when the first call
+  worked, or read the task list (`vmware.tasks.recent`). Only an answer of
+  vCenter itself (a vendor fault) is `start_failed`.
 - Use MEHO's async mode (`async: true`, `docs/codebase/async-governed-dispatch.md`)
   for the start: MEHO keeps the answer with the task id under a run handle, so
   a lost reply does not lose the task id.
@@ -4947,9 +4952,12 @@ host is added.
   state, the progress, the vendor's error text and fault type, and on success
   the object the task made (`result`). When the login expired between the
   start and the read, the connector logs in again on `NotAuthenticated` and
-  reads once more. When vCenter does not answer, the state is `not_reachable`
-  with the task id, the reason and the time of the read, never `error`. A task
-  vCenter forgot gives `not_found`. MEHO keeps no job state between calls; the
+  reads once more. When vCenter does not answer, or a gateway answers HTTP
+  502, 503 or 504 for it, the state is `not_reachable` with the task id, the
+  reason (`connect_failed`, `timeout`, `tls_verify_failed`,
+  `service_unavailable`, `gateway_error`) and the time of the read, never
+  `error`. A vendor fault and a refused login are not an outage: they raise
+  as before. A task vCenter forgot gives `not_found`. MEHO keeps no job state between calls; the
   caller keeps the task id.
 - A refused start (`start_failed`) gives the vendor's fault type and text, for
   example `InvalidLogin` or `AlreadyBeingManaged` (`force` is always false, so

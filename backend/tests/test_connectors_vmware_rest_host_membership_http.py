@@ -322,6 +322,46 @@ async def test_task_info_says_not_reachable_with_the_task_and_the_time() -> None
     assert out["error_message"] is None
 
 
+@pytest.mark.parametrize(
+    ("status_code", "reason"),
+    [(503, "service_unavailable"), (502, "gateway_error"), (504, "gateway_error")],
+)
+async def test_task_info_says_not_reachable_when_a_gateway_answers(
+    status_code: int, reason: str
+) -> None:
+    """During an outage a gateway answers for vCenter: that is not a task failure."""
+    connector = _connector()
+    try:
+        async with respx.mock(base_url=_BASE) as mock:
+            mock.get("/api/about").respond(200, json={"version": "8.0.3"})
+            mock.post("/api/session").respond(200, json="tok")
+            mock.post(_RETRIEVE_80).respond(status_code, text="<html>service unavailable</html>")
+            out = await _task_info(connector)
+    finally:
+        await _close(connector)
+    assert out["state"] == "not_reachable"
+    assert out["reachable"] is False
+    assert out["task"] == "task-9"
+    assert out["checked_at"]
+    assert out["unreachable_reason"] == reason
+    assert out["error_message"] is None
+
+
+async def test_task_info_raises_a_vendor_fault_that_is_not_an_outage() -> None:
+    """A fault of vCenter itself is an error of the read, never ``not_reachable``."""
+    fault = {"_typeName": "InvalidArgument", "faultstring": "bad property path"}
+    connector = _connector()
+    try:
+        async with respx.mock(base_url=_BASE) as mock:
+            mock.get("/api/about").respond(200, json={"version": "8.0.3"})
+            mock.post("/api/session").respond(200, json="tok")
+            mock.post(_RETRIEVE_80).respond(500, json=fault)
+            with pytest.raises(httpx.HTTPStatusError):
+                await _task_info(connector)
+    finally:
+        await _close(connector)
+
+
 async def test_task_info_says_not_found_for_a_task_vcenter_forgot() -> None:
     gone = {
         "_typeName": "ManagedObjectNotFound",

@@ -575,7 +575,16 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     `VirtualMachine`'s
     `runtime.powerState`, `guest.ipAddress` / `guest.hostName` /
     `guest.toolsStatus` / `guest.toolsRunningStatus`,
-    `guestHeartbeatStatus`, and `storage.perDatastoreUsage`. Unlike
+    `guestHeartbeatStatus`, `storage.perDatastoreUsage`,
+    `config.hardware.device` and `guest.disk`. The device list gives the
+    `disks` (size, file, datastore, thin or thick, controller, unit) and
+    the `nics` (adapter type, MAC address, port group, connected or not);
+    `guest.disk` gives the `guest_filesystems` (mount point, file system,
+    size, free space; empty when VMware Tools does not run). The parsers
+    are in `vm_devices.py`. The VIM device list is used instead of the REST
+    VM detail because only it says thin or thick. The names of distributed
+    port groups come from one more, best-effort property read; when it
+    fails, `network_name` is `null`. Unlike
     `host.usage`'s per-host best-effort leg, this single-object read is
     **load-bearing** (a failure propagates). The "poweredOn but no
     guest IP" hung-appliance shape is representable in one call — the
@@ -905,9 +914,16 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   sends an empty array and no `missingSet` entry, and is `ok` with zero
   rows. Set-shaped (JSONFlux-reduced when large).
 - **`vmware.snapshot.list`** (`typed_ops_snapshot_list.py`, handler
-  `snapshot_list`) — the snapshots of one VM (by `vm` moid) as a flat list in
-  tree order. `safe`, in its own group `vmware-snapshot-list`, on both
-  catalogs. See **VM snapshot operations** under Control flow.
+  `snapshot_list`) — the snapshots of one VM (by `vm` moid) or of every VM, as
+  a flat list, with age and size on disk; `older_than_days` keeps the old ones.
+  `safe`, in its own group `vmware-snapshot-list`, on both catalogs. See **VM
+  snapshot operations** under Control flow.
+- **`vmware.vm.list`** (`typed_ops_vm_list.py`, handler `vm_list`) and
+  **`vmware.inventory.find`** (`typed_ops_inventory_find.py`, handler
+  `inventory_find`) — every VM with its state in one call, and objects of any
+  kind by name, pattern or inventory path. `safe`, in the shared group
+  `vmware-inventory`, on both catalogs. See **VM list and inventory search**
+  under Control flow.
 - **`vmware.cluster.list`** (`typed_ops_cluster_list.py`, handler
   `cluster_list`) — the clusters of a vCenter, with the datacenter, the
   number of hosts, and whether HA, DRS and vSAN are on. `safe`, in its own
@@ -2913,33 +2929,46 @@ Code: `composites/_drs_group.py` (shared group reads + `members.set`),
 manifests are in `_governed_subops.py`. All of them are on `vmware-rest-8.0` and
 `vmware-rest-9.0`.
 
-### VM snapshot operations (`vmware.snapshot.list`, `vm.snapshot.create` / `.delete` / `.revert`)
+### VM snapshot operations (`vmware.snapshot.list`, `vm.snapshot.create` / `.delete` / `.delete_all` / `.revert`, `vm.disks.consolidate`)
 
 These operations cover the snapshot work on one VM. vCenter's REST API has no
 snapshot paths, so all of them use the VIM API, as VI-JSON on vCenter.
 
 | Operation | What it does | Returns | Risk |
 |---|---|---|---|
-| `vmware.snapshot.list` (typed) | Reads the VM's `snapshot` property (`rootSnapshotList`, `currentSnapshot`) | `{vm, vm_name, current_snapshot_id, snapshot_count, snapshots}`; each row: `snapshot_id`, `name`, `description`, `created`, `power_state`, `quiesced`, `current`, `parent_snapshot_id` | `safe` |
+| `vmware.snapshot.list` (typed) | One VM (`vm`) or every VM (`vm` left out); `older_than_days` keeps the snapshots taken longer ago. Reads `snapshot` (`rootSnapshotList`, `currentSnapshot`) and `layoutEx` | `{vm, vm_name, current_snapshot_id, snapshot_count, read_note, snapshots}`; each row: `vm`, `vm_name`, `snapshot_id`, `name`, `description`, `created`, `power_state`, `quiesced`, `current`, `parent_snapshot_id`, `age_days`, `memory`, `size_bytes` | `safe` |
 | `vmware.composite.vm.snapshot.create` | `VirtualMachine.CreateSnapshotEx_Task` with `snapshot_name`, optional `description`, `memory` (default false), `quiesce` (default false) | `{status, vm, vm_name, snapshot_id, snapshot, task, task_state, guidance}` | `caution`, `requires_approval=True` |
 | `vmware.composite.vm.snapshot.delete` | `VirtualMachineSnapshot.RemoveSnapshot_Task` for one `snapshot_id`; `remove_children` (default false) | the teardown envelope `{status, object, blockers, task, task_state, guidance}` | `destructive`, `requires_approval=True` |
 | `vmware.composite.vm.snapshot.revert` | `VirtualMachineSnapshot.RevertToSnapshot_Task`, by `snapshot_name` or `snapshot_id` (exactly one) | `{status, snapshot_id, candidates, guidance}` | `dangerous`, `requires_approval=True` |
+| `vmware.composite.vm.snapshot.delete_all` | `VirtualMachine.RemoveAllSnapshots_Task` with `consolidate: true` | the teardown envelope; `object`: `{kind, vm, vm_name, snapshot_count, snapshots_left}` | `destructive`, `requires_approval=True` |
+| `vmware.composite.vm.disks.consolidate` | `VirtualMachine.ConsolidateVMDisks_Task`, only when `runtime.consolidationNeeded` is true | `{status, vm, vm_name, consolidation_needed, task, task_state, guidance}` | `caution`, `requires_approval=True` |
 
 | Versions | Catalog |
 |---|---|
 | vCenter 8.0 U1, 8.0 U2, 8.0 U3 | `vmware-rest-8.0` |
 | vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
 
-Every vendor call is in the pinned 8.0 U1, 9.0 and 9.1.1 `vi-json.yaml`.
+Every vendor call is in the pinned 8.0 U1, 9.0 and 9.1.1 `vi-json.yaml`, so no
+operation needs the version check.
 
 - **Shared rows.** `snapshot_tree.py` turns the tree into flat rows, a parent
   before its children. It imports nothing from the connector, so the typed
   read, the composites and `schemas.py` share it without an import cycle. A
   one-node list that arrives as a plain dict (the SOAP shape of a single ESXi
   host) is read too.
-- **list.** A missing VM is `not_found`. A `snapshot` property vCenter could
+- **list.** For one VM, one property read of `name`, `snapshot` and
+  `layoutEx`. A missing VM is `not_found`. A `snapshot` property vCenter could
   not read (a `missingSet` entry) fails the call: an empty list would wrongly
-  say "no snapshots".
+  say "no snapshots". For every VM, a container view of all VMs reads `name`
+  and `snapshot` (see **VM list and inventory search**), then `layoutEx` is
+  read for the VMs with snapshots only. A VM whose snapshots vCenter could not
+  read is left out and counted in `read_note`; a failed `layoutEx` read leaves
+  `size_bytes` `null` and says so in `read_note`. `age_days` and the
+  `older_than_days` filter use `createTime`. `size_bytes` is counted like govc
+  (`object.SnapshotSize` in govmomi): the snapshot's `.vmsn` file and the disk
+  files of its chain that its parent does not have (for a root snapshot,
+  without the base disk); the current snapshot also counts the running delta
+  disks. `memory` is true when the saved power state is not `poweredOff`.
 - **create.** It uses `CreateSnapshotEx_Task`, because the pinned files mark the
   plain `CreateSnapshot_Task` deprecated since vSphere 8.0. `quiesce` sends an
   empty `VirtualMachineGuestQuiesceSpec`, like `govc snapshot.create -q`. A VM
@@ -2967,13 +2996,24 @@ Every vendor call is in the pinned 8.0 U1, 9.0 and 9.1.1 `vi-json.yaml`.
   for the three snapshot tasks, so create, delete and revert stop there with an
   error. The list uses the supported `RetrievePropertiesEx`, but no test covers
   it on SOAP.
-- **Not here** (Task #4334): the snapshots of all VMs in one call, an "older
-  than N days" filter, the size on disk, delete all snapshots, and disk
-  consolidation.
+- **delete_all.** The same plan seam as delete. An unknown VM is
+  `invalid_request`; a VM without snapshots is `unchanged`. The approval card
+  lists every snapshot (up to 50) as `children`. `deleted` only when a new read
+  shows no snapshots; otherwise `still_present` with `snapshots_left`. Needs a
+  preview and a second person; an agent is refused.
+- **disks.consolidate.** Reads `runtime.consolidationNeeded` first: only
+  `true` runs the task. `false` means `unchanged` and a flag vCenter did not
+  report means `unknown`; nothing is written in both cases. An unknown VM is
+  `not_found`. After the task it reads the flag again: `false` is
+  `consolidated`, `true` is `still_needed`, and a missing flag is `unverified`
+  with a warning issue. It waits for approval (`caution`); the approval card
+  echoes the VM.
 
 Code: `typed_ops_snapshot_list.py`, `snapshot_tree.py`, `composites/_snapshot.py`
-(create and delete) and `composites/_write.py` (revert). The governed sub-op
-manifests are in `_governed_subops.py`.
+(create and delete), `composites/_snapshot_cleanup.py` (delete_all and
+consolidate; its rows are in `composites/_snapshot_cleanup_ops.py`) and
+`composites/_write.py` (revert). The governed sub-op manifests are in
+`_governed_subops.py`.
 
 ### AI guidance of the host and cluster operations
 
@@ -5353,6 +5393,55 @@ approval to the assignment, with a check that no audit or approval row holds
 a key; flight-recorder spans, with a control case without the tag),
 `tests/test_connectors_vmware_rest_license_reconcile.py` (the pinned 9.0
 `vi-json.yaml`) and the source scan in
+`tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` (8.0 U1, U2, U3).
+
+### VM list and inventory search (`vmware.vm.list`, `vmware.inventory.find`)
+
+Two typed reads for the most common vCenter question: "what is there?". Both
+use the VIM API on the connector's own session, so they need no spec ingest.
+They share the group `vmware-inventory`.
+
+| Operation | What it does | Vendor calls | Risk |
+|---|---|---|---|
+| `vmware.vm.list` | One row per VM: `vm`, `name`, `power_state`, `host`, `host_name`, `cluster`, `cluster_name`, `folder`, `folder_name`, `guest_os`, `ip_address`, `cpu_count`, `memory_mb`, `used_storage_bytes`, `provisioned_storage_bytes`, `tools_status`, `snapshot_count`, `template`; plus `vm_count` and `read_note`. Filters: at most one of `cluster`, `host`, `folder` (moids), `power_state`, `name_pattern` | `ServiceInstance.RetrieveServiceContent`, `ViewManager.CreateContainerView` (type `VirtualMachine`), `PropertyCollector.RetrievePropertiesEx` and `ContinueRetrievePropertiesEx`, `ContainerView.DestroyView`; one more property read of the hosts, clusters and folders for their names | `safe`; runs at once |
+| `vmware.inventory.find` | Objects of any kind by exact `name`, `name_pattern` or inventory `path`; optional `type` (`vm`, `host`, `cluster`, `datastore`, `network`, `folder`, `datacenter`, `resource_pool`, ...). Each match: `kind`, `vim_type`, `id`, `name`, `path` | by path: `SearchIndex.FindByInventoryPath`; by name: the same container-view read as above, of every managed entity, properties `name` and `parent` | `safe`; runs at once |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 U1, 8.0 U2, 8.0 U3 | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+- **Why the VIM API.** The REST list `GET /api/vcenter/vm` stops at 4,000 VMs
+  and has no guest OS, IP address, storage, host or snapshot data. A container
+  view reads every VM with all of it in one paged read, like govc and PowerCLI.
+- **View reads (`vim_view.py`).** `read_view` makes the view below a container
+  (recursive), reads it with `retrieve_all_pages` (up to 1,000 objects per
+  page), and destroys the view in a `finally`; a failed destroy is only
+  logged. An unknown container raises `ConnectorResourceNotFoundError`, so the
+  caller gets `not_found`. `read_props` reads a list of known objects.
+- **vm.list scope and filters.** `cluster`, `host` or `folder` is the view's
+  container (at most one, `not anyOf` in the schema). `power_state` and
+  `name_pattern` (`*` and `?`, letter case does not matter) run in MEHO after
+  the read. `provisioned_storage_bytes` is `committed + uncommitted`, like
+  PowerCLI. The name read is best-effort: when it fails, the names and the
+  cluster are `null` and `read_note` says why. When vCenter could not read the
+  `snapshot` property of a VM (it is in the `missingSet` of the answer), that
+  row's `snapshot_count` is `null` and `read_note` says how many rows; the
+  count is never reported as zero for a failed read.
+- **inventory.find paths.** By name, the one read of `name` and `parent` of
+  every entity also gives the parents, so each match gets its inventory path
+  (from the datacenter down, as govc prints it; a `/` in a name is `%2f`). By
+  path, vCenter answers with the object or with nothing; the name is the last
+  path segment. No match is an empty list.
+- **Large lists.** The rows are flat, so a long list comes back as a result
+  handle that the caller reads with `result_query`. A test lists 5,000 VMs
+  in one call behind a handle.
+
+Code: `typed_ops_vm_list.py`, `typed_ops_inventory_find.py`, `vim_view.py`.
+Tests: `tests/test_connectors_vmware_rest_typed_vm_inventory.py` (a fake vCenter
+in `tests/_vmware_view_fake.py`, no live vCenter). The vendor calls are checked
+against the pinned VI-JSON files by
+`tests/test_connectors_vmware_rest_composites_l2_ingest_reconcile.py` (9.0) and
 `tests/test_connectors_vmware_rest_8_0_spec_reconcile.py` (8.0 U1, U2, U3).
 
 ### Host local users and Active Directory (`host.local_user.*`, `host.ad.*`)

@@ -25,6 +25,11 @@ convention: typed ops own the curated read core. The cloud template and catalog
 ops, writes included, are written once for this connector and VCF Automation 9;
 :mod:`.content_ops` registers them here too.
 
+The day-2 ops (:data:`VRA8_DAY2_OPS`) are the exception: they are written once for
+both Automation generations in
+:mod:`meho_backplane.connectors.vcf_automation.day2_ops` and registered here with
+the ``vcfa.vra8.`` prefix.
+
 Op ids are namespaced ``vcfa.vra8.*`` (distinct from the modern sibling's
 ``vcfa.provider.*`` / ``vcfa.tenant.*``): the two impls of ``product="vcfa"``
 publish different read surfaces (vRA 8's ``/deployment`` + ``/blueprint`` +
@@ -40,6 +45,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
+from meho_backplane.connectors.vcf_automation.day2_ops import day2_specs
 from meho_backplane.connectors.vmware_shared.vcfa_content import CONTENT_GROUP_TEXTS, render_text
 from meho_backplane.connectors.vra8._llm_instructions import VRA8_READ_LLM_INSTRUCTIONS
 from meho_backplane.connectors.vra8._response_schemas import (
@@ -57,6 +63,7 @@ if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
+    "VRA8_DAY2_OPS",
     "VRA8_TYPED_OPS",
     "VRA8_TYPED_WHEN_TO_USE_BY_GROUP",
     "Vra8TypedOp",
@@ -72,6 +79,7 @@ _log = structlog.get_logger(__name__)
 _GROUP_INVENTORY = "vcfa-vra8-inventory"
 _GROUP_CONTENT = "vcfa-vra8-content"
 _GROUP_API_FILES = "vcfa-vra8-api-files"
+_GROUP_DAY2 = "vcfa-vra8-day2"
 
 
 @dataclass(frozen=True)
@@ -130,6 +138,18 @@ VRA8_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # (:mod:`.content_ops`). List the templates with vcfa.vra8.blueprint.list.
     "vcfa-vra8-templates": render_text(CONTENT_GROUP_TEXTS["templates"], "vcfa.vra8"),
     "vcfa-vra8-catalog": render_text(CONTENT_GROUP_TEXTS["catalog"], "vcfa.vra8"),
+    _GROUP_DAY2: (
+        "Day-2 work on the deployments of Aria Automation 8. Reads: the actions a "
+        "deployment or machine offers (vcfa.vra8.deployment.actions.list), the machines "
+        "(vcfa.vra8.machine.list) and the disks with their machines "
+        "(vcfa.vra8.block_device.list). Changes, each after a person approves: run a "
+        "built-in deployment action (vcfa.vra8.deployment.action.run) or machine action "
+        "such as power, resize, add disk or snapshot (vcfa.vra8.resource.action.run), "
+        "change a lease (vcfa.vra8.deployment.lease.change), create a machine "
+        "(vcfa.vra8.machine.create) or a disk for a machine (vcfa.vra8.block_device.create), "
+        "and delete a deployment (vcfa.vra8.deployment.delete; only a person can run it, "
+        "after a preview)."
+    ),
 }
 
 
@@ -425,11 +445,32 @@ VRA8_TYPED_OPS: tuple[Vra8TypedOp, ...] = (
 )
 
 
+#: The day-2 ops, written once for Aria Automation 8 and VCF Automation 9
+#: (:mod:`meho_backplane.connectors.vcf_automation.day2_ops`), here with the
+#: ``vcfa.vra8.`` prefix. Kept apart from the read core above.
+VRA8_DAY2_OPS: tuple[Vra8TypedOp, ...] = tuple(
+    Vra8TypedOp(
+        op_id=f"vcfa.vra8.{spec.name}",
+        handler_attr=spec.handler,
+        summary=spec.summary,
+        description=spec.description,
+        parameter_schema=spec.parameter_schema,
+        response_schema=spec.response_schema,
+        group_key=_GROUP_DAY2,
+        tags=(*spec.tags, "vra8", "vra"),
+        safety_level=spec.safety_level,
+        requires_approval=spec.requires_approval,
+        llm_instructions=spec.llm_instructions,
+    )
+    for spec in day2_specs("vcfa.vra8")
+)
+
+
 async def register_vra8_typed_operations(
     *,
     embedding_service: EmbeddingService | None = None,
 ) -> None:
-    """Upsert :data:`VRA8_TYPED_OPS` and ``VRA8_CONTENT_OPS`` into ``endpoint_descriptor``.
+    """Upsert the typed, cloud template and day-2 ops of vRA 8 as descriptor rows.
 
     Queued onto the lifespan-driven registrar list via
     :func:`~meho_backplane.operations.typed_register.register_typed_op_registrar`
@@ -455,7 +496,7 @@ async def register_vra8_typed_operations(
     from meho_backplane.connectors.vra8.content_ops import VRA8_CONTENT_OPS
     from meho_backplane.operations.typed_register import register_typed_operation
 
-    all_ops = (*VRA8_TYPED_OPS, *VRA8_CONTENT_OPS)
+    all_ops = (*VRA8_TYPED_OPS, *VRA8_CONTENT_OPS, *VRA8_DAY2_OPS)
     for op in all_ops:
         handler = getattr(Vra8Connector, op.handler_attr, None)
         if handler is None:

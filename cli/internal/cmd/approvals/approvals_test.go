@@ -69,6 +69,7 @@ func (inMemoryStore) Describe() string { return "in-memory test store" }
 // substrate used by client_test.go.
 func newTestClient(t *testing.T, srv *httptest.Server) *api.AuthedClient {
 	t.Helper()
+	stubSignIn(t)
 	store := &inMemoryStore{}
 	service, user := auth.KeyForBackplane(srv.URL)
 	_ = store.Save(service, user, auth.StoredToken{

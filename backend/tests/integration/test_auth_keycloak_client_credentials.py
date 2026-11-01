@@ -122,9 +122,11 @@ async def test_client_credentials_grant_end_to_end(
     assert operator.raw_jwt == token
 
     # 5. The hardcoded-claim mappers stamp the agent-principal shape
-    # T1 (#815) introduced.
+    # T1 (#815) introduced. The fixture client still stamps
+    # ``tenant_admin``, like an agent registered earlier; an agent acts
+    # with operator rights at most, so MEHO reads it as ``operator``.
     assert operator.principal_kind == PrincipalKind.AGENT
-    assert operator.tenant_role == TenantRole.TENANT_ADMIN
+    assert operator.tenant_role == TenantRole.OPERATOR
     assert operator.tenant_id == UUID(keycloak_bootstrap.expected_tenant_id)
 
 
@@ -178,7 +180,7 @@ async def test_register_provisioned_client_authenticates_end_to_end(
             tenant_id=str(tenant_id),
             owner_sub="integration-test-owner",
             audience=keycloak_bootstrap.audience,
-            tenant_role=TenantRole.TENANT_ADMIN.value,
+            tenant_role=TenantRole.OPERATOR.value,
         )
         client_secret = await admin.get_client_secret(internal_id)
 
@@ -204,5 +206,5 @@ async def test_register_provisioned_client_authenticates_end_to_end(
     # 4. Every claim the provisioned mappers + default scopes must land.
     assert operator.sub, "Operator.sub must resolve (carried by the basic scope's mapper)"
     assert operator.tenant_id == tenant_id
-    assert operator.tenant_role == TenantRole.TENANT_ADMIN
+    assert operator.tenant_role == TenantRole.OPERATOR
     assert operator.principal_kind == PrincipalKind.AGENT

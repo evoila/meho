@@ -10,17 +10,18 @@ module-import time via
 :mod:`meho_backplane.connectors.nsx.__init__`; re-ingests against the
 same ``(product="nsx", version="9.0", impl_id="nsx-rest")`` triple no-op.
 
-VCF-9 version renumber (#1530)
-------------------------------
+Two implementations: NSX 9.x here, NSX 4.x in a subclass
+---------------------------------------------------------
 
 NSX-T 4.x was renumbered onto the VCF train at VCF 9.0 -- a live VCF-9
-appliance reports NSX 9.0.x. The :attr:`supported_version_range`
-``>=4.0,<10.0`` keeps one class covering both the standalone NSX-T 4.x
-line and the VCF-9-aligned 9.x line; dispatch and the ingest
-version-range pre-flight key on the
-:class:`packaging.specifiers.SpecifierSet`, not the class-pinned
-:attr:`version`. Same posture :class:`VmwareRestConnector` took for the
-vSphere 8.x -> 9.0 jump.
+appliance reports NSX 9.0.x. The API differs by generation, so this
+class serves only ``>=9.0,<10.0`` and keeps the ``("nsx", "", "")``
+wildcard (a target with no detected version lands here). NSX 4.x
+targets resolve to
+:class:`~meho_backplane.connectors.nsx.connector_4x.Nsx4Connector`
+(``nsx-rest-4.2``, ``>=4.0,<9.0``), a thin subclass with the same auth,
+fingerprint and typed reads. The resolver picks one by the target's
+detected version.
 
 Auth divergence from the vSphere precedent
 ------------------------------------------
@@ -152,13 +153,12 @@ class NsxConnector(HttpConnector):
     # G0.6 v2 registry metadata. The (product, version, impl_id) triple
     # matches the dispatcher's parse_connector_id contract:
     # ``"nsx-rest-9.0"`` -> (``"nsx"``, ``"9.0"``, ``"nsx-rest"``). The
-    # version pin tracks the VCF-9-aligned product line (#1530); the
-    # ``>=4.0,<10.0`` range keeps the standalone NSX-T 4.x line
-    # dispatchable through the same class.
+    # version pin tracks the VCF-9-aligned product line (#1530). NSX 4.x
+    # targets resolve to the ``Nsx4Connector`` subclass instead.
     product = "nsx"
     version = "9.0"
     impl_id = "nsx-rest"
-    supported_version_range = ">=4.0,<10.0"
+    supported_version_range = ">=9.0,<10.0"
     priority = 1
 
     def __init__(

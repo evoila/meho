@@ -8,19 +8,11 @@ Covers the identity group (``vault.identity.entity.write`` /
 ``entity.read`` / ``group.read`` / ``list``) and the token group
 (``vault.token.create`` / ``revoke_accessor`` / ``list_accessors``):
 registration with the stated safety_level + requires_approval +
-group_key, happy paths, the value-free / normalised responses, and --
-load-bearing for #1412 -- the **response-side token redaction** for
-``vault.token.create``.
-
-Redaction is enforced at the classification layer (#1397/#1401's
-op-class allowlists), not the handlers: ``vault.token.create`` classifies
-``credential_mint`` (the minted client token is in the response). The
-redaction test seeds a distinctive sentinel token and positively asserts
-the sentinel is ABSENT from the payload
-:func:`~meho_backplane.broadcast.events.redact_payload` would ship --
-mirroring the ``generate_secret_id`` / ``vault.kv.put`` sentinel pattern.
-The audit row never carries raw params (only a params_hash), so the
-token is structurally absent there by construction.
+group_key, happy paths, and the value-free / normalised responses.
+``vault.token.create`` returns the accessor and the policies, never the new
+token. It still classifies ``credential_mint``, so the broadcast is
+aggregate-only. Where the token ends up after an approval or in a run record
+is covered in ``test_vault_new_credential_records.py``.
 
 Mocking discipline mirrors ``test_connectors_vault_auth_write.py``: the
 in-process fake hvac client (``install_fake_client`` -> ``_build_client``
@@ -388,14 +380,14 @@ async def test_list_empty_store_normalises_to_empty_keys(
 # ---------------------------------------------------------------------------
 
 
-async def test_token_create_returns_token_and_accessor(
+async def test_token_create_returns_accessor_and_no_token(
     monkeypatch: pytest.MonkeyPatch,
     _registered_vault_typed_ops: None,
 ) -> None:
-    """token.create forwards policies/ttl and returns the minted token + accessor."""
+    """token.create forwards policies/ttl and returns the accessor, never the token."""
     fake = install_fake_client(monkeypatch)
-    fake.auth.token.minted_client_token = "s.minted-token-1412"
-    fake.auth.token.minted_accessor = "acc-1412"
+    fake.auth.token.minted_client_token = "s.minted-token-not-shown"
+    fake.auth.token.minted_accessor = "acc-token-create"
 
     result = await _dispatch_vault(
         "vault.token.create",
@@ -403,9 +395,8 @@ async def test_token_create_returns_token_and_accessor(
     )
 
     assert result.status == "ok", result.error
-    assert result.result["client_token"] == "s.minted-token-1412"
-    assert result.result["accessor"] == "acc-1412"
-    assert result.result["policies"] == ["default"]
+    assert result.result == {"accessor": "acc-token-create", "policies": ["default"]}
+    assert "s.minted-token-not-shown" not in str(result.model_dump())
     call = fake.auth.token.create_calls[0]
     assert call["policies"] == ["default"]
     assert call["ttl"] == "1h"
@@ -441,25 +432,6 @@ def test_token_create_classifies_credential_mint_and_redacts_broadcast() -> None
     payload = redact_payload("credential_mint", raw_params, "ok")
     assert payload == {"op_class": "credential_mint", "result_status": "ok"}
     assert sentinel not in str(payload), "minted token leaked into broadcast payload"
-
-
-async def test_token_create_token_absent_from_response_str_only_on_purpose(
-    monkeypatch: pytest.MonkeyPatch,
-    _registered_vault_typed_ops: None,
-) -> None:
-    """The token IS in the OperationResult (the point of minting) — sanity guard.
-
-    Distinct from the redaction test: the caller's result must carry the
-    secret so it can be stored. The redaction is the broadcast/audit
-    layer's job, asserted in the dispatch-level integration test.
-    """
-    fake = install_fake_client(monkeypatch)
-    fake.auth.token.minted_client_token = "s.must-reach-caller"
-
-    result = await _dispatch_vault("vault.token.create", {})
-
-    assert result.status == "ok", result.error
-    assert result.result["client_token"] == "s.must-reach-caller"
 
 
 # ---------------------------------------------------------------------------

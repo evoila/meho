@@ -17,6 +17,7 @@ the load-bearing proof of the C1-a deliverable's behavioural contract.
 from __future__ import annotations
 
 import textwrap
+import time
 
 import pytest
 
@@ -177,6 +178,117 @@ def test_nested_dict_and_list_payload_walked() -> None:
     # Two leaves matched; manifest carries two entries with their paths.
     paths = sorted(entry.path for entry in result.manifest)
     assert paths == ["items.0", "request.headers"]
+
+
+def test_string_rows_are_matched_as_one_text() -> None:
+    """A secret that spans rows is found whole; every row keeps its place."""
+    policy = _policy_with_rules(
+        textwrap.dedent(
+            """
+            - name: strip-key
+              pattern: pem_private_key
+              action: redact
+              reason: "key split over rows"
+            """,
+        ),
+    )
+    begin = "-----BEGIN " + "PRIVATE KEY-----"
+    end = "-----END " + "PRIVATE KEY-----"
+    rows = ["start", begin, "keybodyline", end, "finish"]
+    result = redact({"rows": rows, "total": 5}, policy)
+    hidden = "[REDACTED:pem_private_key]"
+    assert result.redacted == {"rows": ["start", hidden, hidden, hidden, "finish"], "total": 5}
+    assert [entry.path for entry in result.manifest] == ["rows.1", "rows.2", "rows.3"]
+    assert [entry.count for entry in result.manifest] == [1, 1, 1]
+    # Offsets are the row's own, as for a string leaf.
+    assert result.manifest[0].span == (0, len(begin))
+    assert result.manifest[1].span == (0, len("keybodyline"))
+
+
+def test_string_rows_keep_the_text_around_a_match_in_one_row() -> None:
+    """A match inside one row changes only that part of that row."""
+    policy = _policy_with_rules(
+        textwrap.dedent(
+            """
+            - name: strip-bearer
+              pattern: bearer_token
+              action: redact
+              reason: "token in a log row"
+            """,
+        ),
+    )
+    rows = ["plain row", "got Bearer abc123def456GHIJKL from client", "plain row"]
+    result = redact(rows, policy)
+    assert result.redacted == ["plain row", "got [REDACTED:bearer_token] from client", "plain row"]
+    assert len(result.manifest) == 1
+    assert result.manifest[0].path == "1"
+    assert result.manifest[0].span == (4, 4 + len("Bearer abc123def456GHIJKL"))
+
+
+def test_string_rows_with_many_matches_are_redacted_in_linear_time() -> None:
+    """A long list of rows with many secrets in every row does not stall.
+
+    This is the shape of a large ``log.tail`` result at its supported
+    limit, with rows that each hold many tokens. Every row is rewritten
+    and gets its own manifest entry, and the whole list is done in about
+    the time the same rows take one by one. Rows and matches are walked
+    together once, without copying the remaining matches per row, so
+    the time grows with rows plus matches, not with rows times matches.
+    """
+    policy = _policy_with_rules(
+        textwrap.dedent(
+            """
+            - name: strip-bearer
+              pattern: bearer_token
+              action: redact
+              reason: "token in every log row"
+            """,
+        ),
+    )
+    per_row = 40
+    rows = [
+        f"row {index}: "
+        + " ".join(
+            f"Authorization: Bearer abc123def456GHIJKL{index:05d}x{slot:02d}"
+            for slot in range(per_row)
+        )
+        for index in range(10_000)
+    ]
+    started = time.perf_counter()
+    result = redact({"rows": rows, "total": len(rows)}, policy)
+    as_list = time.perf_counter() - started
+    started = time.perf_counter()
+    one_by_one = [redact(row, policy).redacted for row in rows]
+    singly = time.perf_counter() - started
+    assert as_list < 5.0, f"redaction of 10000 rows took {as_list:.1f}s"
+    assert as_list < 5 * singly, f"the list took {as_list:.2f}s, the rows one by one {singly:.2f}s"
+    assert result.redacted["rows"] == one_by_one
+    assert all("Bearer" not in row for row in result.redacted["rows"])
+    assert result.redacted["rows"][0].count("[REDACTED:bearer_token]") == per_row
+    assert len(result.manifest) == len(rows)
+    assert all(entry.count == per_row for entry in result.manifest)
+    assert result.manifest[-1].path == "rows.9999"
+
+
+def test_string_rows_keep_a_match_that_covers_an_empty_row() -> None:
+    """An empty row inside a multi-row match is still inside the match."""
+    policy = _policy_with_rules(
+        textwrap.dedent(
+            """
+            - name: strip-key
+              pattern: pem_private_key
+              action: redact
+              reason: "key with a blank line"
+            """,
+        ),
+    )
+    begin = "-----BEGIN " + "PRIVATE KEY-----"
+    end = "-----END " + "PRIVATE KEY-----"
+    rows = ["start", begin, "", "keybodyline", end, "finish"]
+    result = redact(rows, policy)
+    hidden = "[REDACTED:pem_private_key]"
+    assert result.redacted == ["start", hidden, hidden, hidden, hidden, "finish"]
+    assert [entry.path for entry in result.manifest] == ["1", "2", "3", "4"]
 
 
 def test_non_string_scalars_passed_through() -> None:

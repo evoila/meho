@@ -53,6 +53,7 @@ from meho_backplane.audit_query import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
+from meho_backplane.operations._secret_values import fingerprint_hidden_values
 from meho_backplane.redaction import (
     RedactionPolicy,
     clear_overrides,
@@ -142,13 +143,16 @@ async def _seed_audit_row(
     tenant_id: uuid.UUID,
     raw_payload: object,
     policy: RedactionPolicy | None,
+    fingerprint: bool = False,
 ) -> uuid.UUID:
     """Insert an audit row mirroring the dispatcher's write contract.
 
     When *policy* is supplied, the engine runs against *raw_payload* to
     produce the canonical manifest the replay will diff against. ``None``
     seeds a pre-G11.4-T2 row (no ``raw_payload`` / ``redaction_policy_id``)
-    so the ``REPLAY_NOT_APPLICABLE`` path can be exercised.
+    so the ``REPLAY_NOT_APPLICABLE`` path can be exercised. *fingerprint*
+    stores the raw payload the way the dispatcher does: each value the
+    redaction hid is a keyed fingerprint.
     """
     audit_id = uuid.uuid4()
     normalized = normalize_for_audit(raw_payload) if policy is not None else None
@@ -164,7 +168,9 @@ async def _seed_audit_row(
             "redaction_policy_id": policy.id,
             "connector_impl_id": "vsphere-rest",
         }
-        raw_store = normalized
+        raw_store = (
+            fingerprint_hidden_values(normalized, result.redacted) if fingerprint else normalized
+        )
     s.add(
         AuditLog(
             id=audit_id,
@@ -219,6 +225,39 @@ async def test_match_when_policy_is_deterministic(session: AsyncSession) -> None
     # The replayed redacted view is the engine's deterministic output;
     # the bearer token has been removed.
     assert verdict.replayed_redacted is not None
+    assert "secret-token" not in str(verdict.replayed_redacted)
+
+
+@pytest.mark.asyncio
+async def test_match_when_hidden_values_are_stored_as_fingerprints(
+    session: AsyncSession,
+) -> None:
+    """A row that stores a fingerprint for the hidden value still replays as a match.
+
+    The replay cannot fire on a fingerprint, so the manifest entry at that
+    path is left out of the comparison instead of showing up as missing.
+    """
+    tenant_id = uuid.uuid4()
+    policy = _bearer_policy("test-bearer-fingerprint")
+    register_policy(policy)
+    raw_payload = {
+        "headers": {"Authorization": "Bearer secret-token-aaaabbbbccccdddd"},
+        "note": "plain text",
+    }
+    audit_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        raw_payload=raw_payload,
+        policy=policy,
+        fingerprint=True,
+    )
+    await session.commit()
+
+    verdict = await replay_policy(audit_id, tenant_id=tenant_id, session=session)
+
+    assert verdict.status is PolicyReplayStatus.MATCH
+    assert verdict.missing == ()
+    assert verdict.extra == ()
     assert "secret-token" not in str(verdict.replayed_redacted)
 
 

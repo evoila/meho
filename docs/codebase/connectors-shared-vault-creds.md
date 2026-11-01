@@ -99,6 +99,17 @@ dispatcher's `connector_error` branch.
   mount)` holds the KV-v2 API-path guard, the operator-context Vault read,
   and the structural unwrap. The loaders dispatch to it; direct callers
   should keep using `load_basic_credentials` / `load_vault_secret_data`.
+  For the check runner's operator (`check_runner_dispatch`) it also runs
+  the tenant path check on every read.
+- **`check_param_secret_ref(operator, secret_ref, *, param, mount)`** —
+  checks a secret ref taken from the op params before any read: a Vault
+  ref must sit in the caller's tenant subtree (`enforce_tenant_scope`), a
+  `gsm:` ref must name a project in `GSM_PARAM_ALLOWED_PROJECTS` (empty by
+  default, so all are refused), any other store kind is refused. Raises
+  `SecretRefScopeError` (a `SecretRefReadError`, so the dispatcher answers
+  `vault_credentials_read_error`). `load_param_secret_data` calls it
+  first. See `connectors-vault-tenant-scope.md`, "Secret refs in
+  operation parameters".
 
 ## Control flow
 
@@ -236,6 +247,13 @@ address). The same `credential_backend` setting also drives the
 second backend on the seam, so a GCP-native adopter runs Vault-free. The
 `_shared` package `__init__` imports the module so the `register_credential_backend("gsm", ...)`
 call runs eagerly, exactly as `vault_creds` does for `vault`.
+
+**`gsm:` refs named in op params.** A target's own `gsm:` ref is read as
+described below. A `gsm:` ref taken from an op parameter (for example a
+`password_secret_ref`) is read only when its project is listed in
+`GSM_PARAM_ALLOWED_PROJECTS` (`Settings.gsm_param_allowed_projects`,
+comma-separated, empty by default). With the default every such ref is
+refused before any Google call (`check_param_secret_ref`).
 
 **Auth model — SA-direct under GKE Workload Identity (Phase 1).** The read
 runs under MEHO's *own* identity: the pod's Application Default Credentials
@@ -401,7 +419,8 @@ with no further provisioning and hands it the full policy. Enabling
 calls cannot perform an operator-context Vault read" carve-out for *all*
 background dispatch, not just for Sensors. Operators are told to bound the
 role first — a distinct audience plus a dedicated narrower role (the backplane
-points the check-runner's background dispatch at it via `VAULT_CHECK_RUNNER_ROLE`,
+points the check-runner's background dispatch, and the inbound event
+intake's secret read, at it via `VAULT_CHECK_RUNNER_ROLE`,
 #2757, leaving interactive logins on `VAULT_OIDC_ROLE`), or an
 **exact-match** `bound_claims` on `meho-mcp` keyed on a claim value only
 operator tokens carry (a `bound_claims_type=glob` `"*"` is not one: it
@@ -411,6 +430,12 @@ matches any present value, including the runner service account's
 principal", in the `checkRunner` block of `deploy/charts/meho/values.yaml`,
 and in a `helm install` NOTES warning the chart prints whenever
 `checkRunner.enabled` meets `config.credentialBackend: vault`.
+
+Since then the runner itself enforces the dedicated role: with a principal
+on an install that sets `VAULT_ADDR`, it does not start unless
+`VAULT_CHECK_RUNNER_ROLE` names a role other than `VAULT_OIDC_ROLE`
+(`checks.runner.sensor_runner_refusal`). Each of its Vault reads also
+passes the tenant path check for the sensor's tenant.
 
 **Error hierarchy (#2642).** `credential_backend.CredentialsReadError` is
 the backend-neutral base; `VaultCredentialsReadError` and

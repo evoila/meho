@@ -675,11 +675,17 @@ def test_target_secret_ref_with_vault_scheme_and_dot_segment_is_refused(ref: str
     _enforce_secret_ref_tenant_scope(f"vault:{_OWN}/vc-01", _operator(), "vc-01")
 
 
-@pytest.mark.parametrize("ref", ["vault:../vc-01", "vault:./vc-01"])
+@pytest.mark.parametrize(
+    "ref", ["vault:../vc-01", "vault:./vc-01", " vault:../vc-01", " vault:./vc-01"]
+)
 def test_target_secret_ref_with_vault_scheme_and_dot_segment_is_refused_when_the_prefix_is_off(
     monkeypatch: pytest.MonkeyPatch, ref: str
 ) -> None:
-    """With an empty prefix, a ``vault:`` scheme does not hide a ``.`` or ``..`` segment."""
+    """With an empty prefix, a ``vault:`` scheme does not hide a ``.`` or ``..`` segment.
+
+    Nor does a leading blank before the scheme: the gate cuts surrounding
+    whitespace first, as the credential read does.
+    """
     from meho_backplane.api.v1.targets import _enforce_secret_ref_tenant_scope
 
     _set_env(monkeypatch, VAULT_KV_TENANT_SCOPE_PREFIX="")

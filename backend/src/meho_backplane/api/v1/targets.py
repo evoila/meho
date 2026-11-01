@@ -989,14 +989,16 @@ def _vault_kv_candidate(secret_ref: str) -> str | None:
     tenant-subtree convention does not apply there. The path is the
     scheme-stripped store ref, the same one the dispatch-time read sends
     to Vault, so a ``vault:`` scheme on the ref cannot hide a ``.`` or
-    ``..`` in the first segment.
+    ``..`` in the first segment. Surrounding whitespace is cut before the
+    scheme is read, as the dispatch-time read cuts it, so a leading blank
+    cannot hide the scheme either.
     """
     kind, store_ref = split_credential_ref(
-        secret_ref, default_backend=get_settings().credential_backend
+        secret_ref.strip(), default_backend=get_settings().credential_backend
     )
     if kind != "vault":
         return None
-    return f"{DEFAULT_KV_MOUNT}/{store_ref.strip().strip('/')}"
+    return f"{DEFAULT_KV_MOUNT}/{store_ref.strip('/')}"
 
 
 def _enforce_secret_ref_tenant_scope(

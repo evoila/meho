@@ -29,7 +29,7 @@ from jsonschema import Draft202012Validator
 from meho_backplane.connectors.vmware_rest.composites import _write
 from meho_backplane.connectors.vmware_rest.composites._host import service_control_composite
 from meho_backplane.connectors.vmware_rest.composites._host_config_ops import (
-    HOST_CONFIG_COMPOSITES,
+    COMPOSITES,
     HOST_CONFIG_GOVERNED_SUBOPS,
 )
 from meho_backplane.connectors.vmware_rest.composites._host_config_writes import (
@@ -535,13 +535,13 @@ def test_each_operation_has_its_risk_level_and_approval() -> None:
     for op_id in [*_CHANGES, "vmware.composite.host.service_control"]:
         assert rows[op_id].safety_level == "dangerous", op_id
         assert rows[op_id].requires_approval is True, op_id
-    assert {row["op_id"] for row in HOST_CONFIG_COMPOSITES} == _CHANGES
+    assert {row.op_id for row in COMPOSITES} == _CHANGES
     assert set(HOST_CONFIG_GOVERNED_SUBOPS) == _CHANGES
     assert set(_PREVIEW_BUILDERS) >= _CHANGES
 
 
 def _schemas() -> list[tuple[str, dict[str, Any]]]:
-    rows = [(row["op_id"], row["parameter_schema"]) for row in HOST_CONFIG_COMPOSITES]
+    rows = [(row.op_id, row.parameter_schema) for row in COMPOSITES]
     return [*rows, (VMWARE_HOST_CONFIG_SHOW_OP.op_id, VMWARE_HOST_CONFIG_SHOW_OP.parameter_schema)]
 
 
@@ -567,14 +567,12 @@ def test_examples_are_valid(op_id: str, schema: dict[str, Any]) -> None:
     ],
 )
 def test_bad_input_is_refused_by_the_schema(op_id: str, params: dict[str, Any]) -> None:
-    schema = next(
-        row["parameter_schema"] for row in HOST_CONFIG_COMPOSITES if row["op_id"] == op_id
-    )
+    schema = next(row.parameter_schema for row in COMPOSITES if row.op_id == op_id)
     errors = list(Draft202012Validator(schema).iter_errors({"host": "esxi-a", **params}))
     assert errors, params
 
 
 def test_every_change_answer_names_its_main_fields() -> None:
-    for row in HOST_CONFIG_COMPOSITES:
-        props = row["response_schema"]["properties"]
-        assert {"status", "host", "before", "after", "fault"} <= set(props), row["op_id"]
+    for row in COMPOSITES:
+        props = row.response_schema["properties"]
+        assert {"status", "host", "before", "after", "fault"} <= set(props), row.op_id

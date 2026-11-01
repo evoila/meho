@@ -99,7 +99,7 @@ but ``execute(target, op_id, ...)`` against any ``op_id`` resolves to
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
@@ -1277,8 +1277,10 @@ class VcfAutomationConnector(HttpConnector):
         async def get(path: str, params: Mapping[str, Any] | None) -> dict[str, Any]:
             return await self._request_json(target, "GET", path, operator=operator, params=params)
 
-        async def post(path: str, body: Mapping[str, Any]) -> Any:
-            # The request answer is a JSON list, which _post_json refuses.
+        async def post(path: str, body: Mapping[str, Any], secrets: Sequence[str]) -> Any:
+            # The request answer is a JSON list, which _post_json refuses. This
+            # send records no trace span, so the secret values are not needed.
+            del secrets
             resp = await self._send_with_retry(target, "POST", path, operator=operator, json=body)
             return json_payload_or_empty(resp)
 

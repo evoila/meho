@@ -94,7 +94,7 @@ pinned with their size, SHA-256 and the build the Orchestrator reports
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -106,7 +106,11 @@ from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import is_acceptable_auth_model
-from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.adapters.http import (
+    HttpConnector,
+    _read_capped_json_response,
+    json_payload_or_empty,
+)
 from meho_backplane.connectors.schemas import (
     AuthModel,
     FingerprintResult,
@@ -119,6 +123,7 @@ from meho_backplane.connectors.vra8.session import (
     Vra8TargetLike,
     load_credentials_from_vault,
 )
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 
 __all__ = ["Vra8Connector"]
 
@@ -485,16 +490,60 @@ class Vra8Connector(HttpConnector):
             query = dict(params) if params is not None else None
             return await self._vra_get(target, path, operator=operator, params=query)
 
-        async def post(path: str, body: Mapping[str, Any]) -> Any:
-            return await self._post_json(
-                target,
-                path,
-                operator=operator,
-                json=dict(body),
-                extra_headers={"Accept": _JSON_ACCEPT},
+        async def post(path: str, body: Mapping[str, Any], secrets: Sequence[str]) -> Any:
+            return await self._vra_post(
+                target, path, operator=operator, json=dict(body), secrets=secrets
             )
 
         return VraCalls(get=get, post=post, prefix=CATALOG_PREFIX, operator=operator, target=target)
+
+    async def _vra_post(
+        self,
+        target: Vra8TargetLike,
+        path: str,
+        *,
+        operator: Operator,
+        json: dict[str, Any],
+        secrets: Sequence[str],
+    ) -> Any:
+        """One POST with the bearer, like :meth:`HttpConnector._post_json`.
+
+        The trace span records the request body and the response body with
+        each of *secrets* replaced (the secret inputs of a catalog request,
+        read from Vault). The shared trace redaction knows a secret by its
+        field name or by its shape; a secret input with an ordinary name
+        has neither, so it is replaced by value here before the span is
+        recorded. The answer may be a JSON list.
+        """
+        from meho_backplane.connectors.vmware_shared.vra_catalog import replace_secret_values
+
+        client = await self._http_client(target)
+        headers = {**await self.auth_headers(target, operator), "Accept": _JSON_ACCEPT}
+        start = flight_recorder_capture.span_start()
+        try:
+            resp = await _read_capped_json_response(
+                client,
+                "POST",
+                path,
+                json=json,
+                headers=headers,
+                extensions=self._request_extensions(target),
+            )
+        except httpx.TransportError as exc:
+            flight_recorder_capture.record_vendor_call_error(start, method="POST", exc=exc)
+            raise
+        if start is not None:
+            flight_recorder_capture.record_vendor_call(
+                start,
+                method="POST",
+                request_headers=headers,
+                response=resp,
+                request_body=replace_secret_values(json, secrets),
+                request_content_type="application/json",
+                response_body=replace_secret_values(resp.text, secrets),
+            )
+        resp.raise_for_status()
+        return json_payload_or_empty(resp)
 
     async def vra_catalog_item_list(
         self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]

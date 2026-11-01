@@ -432,15 +432,24 @@ tenant login, like `/deployment/api/*`.
   same name in the project. When it finds one, it answers `unchanged` and
   sends nothing.
 - **Secrets.** A secret input is never a value. The caller gives
-  `secret_inputs`: input name → `"<vault-path>#<field>"`. The value is read
-  from Vault under the caller's identity only when the approved call runs,
-  and goes only into the request body. An input in `inputs` with a secret
-  name is refused (`invalid_request`). When the vendor's error text repeats
-  a secret value, the value is replaced with a marker; the rest of the
-  error text reaches the answer. In results, the default of a secret form
-  field (secret name, `encrypted`, `format: password` or `writeOnly`) and
-  secret-named values in request inputs, outputs, event details and log
-  lines are replaced with a marker.
+  `secret_inputs`: top-level input name → `"<vault-path>#<field>"`. The
+  value is read from Vault under the caller's identity only when the
+  approved call runs, and goes only into the request body. An input in
+  `inputs` is refused (`invalid_request`) when its name is a secret name,
+  or when the item's form marks its field as a secret (`encrypted`,
+  `format: password` or `writeOnly`). Both checks look inside objects and
+  lists too (`config.password`, `disks[0].key`); the form check reads the
+  item, or the requested `version`, before anything is sent. When the
+  vendor's error text repeats a secret value, the value is replaced with a
+  marker, also when the text is JSON that escapes the value; the rest of
+  the error text reaches the answer. In results, the default of a secret
+  form field (also inside an object or a list default) and secret-named
+  values in request inputs, outputs, event details and log lines are
+  replaced with a marker. On the vRA 8 connector the request's trace span
+  (flight recorder) records the request and response bodies with each
+  secret value replaced, so a secret input with an ordinary name (one the
+  trace redaction knows neither by name nor by shape) never reaches a
+  stored trace.
 - **Request id.** The vendor answers the request with only the deployment
   id. The op then reads the deployment with `expand=lastRequest` to get the
   request id. When that read fails, the op still answers `submitted`, with

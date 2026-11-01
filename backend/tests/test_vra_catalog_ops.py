@@ -42,7 +42,8 @@ from meho_backplane.connectors.vra8 import (
 )
 from meho_backplane.connectors.vra8.catalog_ops import VRA8_CATALOG_OPS
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import DispatchTrace, DispatchTraceSpan, EndpointDescriptor, Tenant
+from meho_backplane.flight_recorder.config import reset_flight_recorder_config_cache_for_testing
 from meho_backplane.operations import (
     PassThroughReducer,
     dispatch,
@@ -226,6 +227,54 @@ async def test_item_get_reads_the_version_form_and_hides_secret_defaults(
     assert out["schema"]["properties"]["adminPassword"]["type"] == "string"
 
 
+async def test_item_get_hides_secrets_inside_object_and_list_defaults(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    """A secret inside an object or a list default is found by the nested field, or by name."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "config": {
+                "type": "object",
+                "properties": {
+                    "size": {"type": "string"},
+                    "pin": {"type": "string", "encrypted": True},
+                },
+                "default": {
+                    "size": "small",
+                    "pin": "<not-a-real-pin>",
+                    "password": "<not-a-real-pw>",
+                },
+            },
+            "nodes": {
+                "type": "array",
+                "items": {"type": "object", "properties": {"host": {"type": "string"}}},
+                "default": [{"host": "n1", "apiKey": "<not-a-real-key>"}],
+            },
+            "handles": {
+                "type": "array",
+                "items": {"type": "string", "format": "password"},
+                "default": ["<not-a-real-handle>"],
+            },
+        },
+    }
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(f"{_ITEMS}/ci-1").respond(200, json={"id": "ci-1", "schema": schema})
+        result = await run("vcfa.tenant.catalog.item.get", {"id": "ci-1"})
+    out = result["result"]
+    assert "<not-a-real" not in json.dumps(out)
+    rows = {row["name"]: row for row in out["inputs"]}
+    assert rows["config"]["default"] == {
+        "size": "small",
+        "pin": SECRET_FIELD_MARKER,
+        "password": SECRET_FIELD_MARKER,
+    }
+    assert rows["nodes"]["default"] == [{"host": "n1", "apiKey": SECRET_FIELD_MARKER}]
+    assert rows["handles"]["default"] == [SECRET_FIELD_MARKER]
+    assert out["schema"]["properties"]["config"]["default"] == rows["config"]["default"]
+
+
 async def test_request_get_hides_secret_inputs(vcfa: VcfAutomationConnector) -> None:
     request = {
         "id": "r-1",
@@ -294,7 +343,35 @@ _REQUEST_PARAMS: dict[str, Any] = {
 }
 
 
+#: The request form of item ci-1: ``bootstrap`` is a secret by the form's
+#: flag only, ``config.pin`` is one inside an object, ``disks[].key`` inside
+#: a list.
+_FORM: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "size": {"type": "string"},
+        "adminPassword": {"type": "string"},
+        "bootstrap": {"type": "string", "encrypted": True},
+        "config": {
+            "type": "object",
+            "properties": {
+                "zone": {"type": "string"},
+                "pin": {"type": "string", "writeOnly": True},
+            },
+        },
+        "disks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"size": {"type": "integer"}, "key": {"format": "password"}},
+            },
+        },
+    },
+}
+
+
 def _mount_request(mock: respx.MockRouter, *, existing: list[dict[str, Any]] | None = None) -> Any:
+    mock.get(f"{_ITEMS}/ci-1").respond(200, json={"id": "ci-1", "schema": _FORM})
     lookup = mock.get(_DEPLOYMENTS).respond(200, json={"content": existing or []})
     post = mock.post(f"{_ITEMS}/ci-1/request").respond(
         200, json=[{"deploymentId": "d-1", "deploymentName": "<deployment-name>"}]
@@ -360,24 +437,76 @@ async def test_request_same_name_in_the_project_is_unchanged(
 
 
 @pytest.mark.parametrize(
-    "change",
+    ("change", "named"),
     [
-        {"inputs": {"password": "<not-a-real-value>"}},
-        {"inputs": {"adminPassword": "x"}},
+        ({"inputs": {"password": "<not-a-real-value>"}}, "['password']"),
+        ({"inputs": {"adminPassword": "x"}}, "['adminPassword']"),
+        ({"inputs": {"config": {"password": "<not-a-real-value>"}}}, "['config.password']"),
+        (
+            {"inputs": {"disks": [{"size": 1}, {"size": 2, "apiKey": "<not-a-real-value>"}]}},
+            "['disks[1].apiKey']",
+        ),
     ],
-    ids=["secret-in-inputs", "in-both"],
+    ids=["secret-in-inputs", "in-both", "nested-object", "nested-list"],
 )
-async def test_request_refuses_a_secret_value_or_a_bad_reference(
-    vcfa: VcfAutomationConnector, vault: AsyncMock, change: dict[str, Any]
+async def test_request_refuses_a_secret_named_value_at_any_depth(
+    vcfa: VcfAutomationConnector, vault: AsyncMock, change: dict[str, Any], named: str
 ) -> None:
+    """The name check needs no vendor call: nothing is read and nothing is sent."""
     params = {**_REQUEST_PARAMS, **change}
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         mount_logins(mock)
         lookup, post, _ = _mount_request(mock)
         result = await run("vcfa.tenant.catalog.item.request", params)
     assert result["result"]["status"] == "invalid_request", result
+    assert named in result["result"]["guidance"]
+    assert not lookup.called and not post.called
+    assert not mock.calls.called or mock.calls.last.request.method == "POST"  # logins only
+    assert "<not-a-real-value>" not in json.dumps(result)
+    vault.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("inputs", "named"),
+    [
+        ({"bootstrap": "<not-a-real-value>"}, "['bootstrap']"),
+        ({"config": {"zone": "a", "pin": "<not-a-real-value>"}}, "['config.pin']"),
+        ({"disks": [{"size": 1, "key": "<not-a-real-value>"}]}, "['disks[0].key']"),
+    ],
+    ids=["flagged-top-level", "flagged-in-object", "flagged-in-list"],
+)
+async def test_request_refuses_a_plain_value_for_a_form_secret_field(
+    vcfa: VcfAutomationConnector, vault: AsyncMock, inputs: dict[str, Any], named: str
+) -> None:
+    """A field the form marks as a secret, with an ordinary name, needs secret_inputs too."""
+    params = {**_REQUEST_PARAMS, "inputs": inputs}
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        lookup, post, _ = _mount_request(mock)
+        result = await run("vcfa.tenant.catalog.item.request", params)
+    assert result["result"]["status"] == "invalid_request", result
+    assert named in result["result"]["guidance"]
     assert not lookup.called and not post.called
     assert "<not-a-real-value>" not in json.dumps(result)
+    vault.assert_not_awaited()
+
+
+async def test_request_reads_the_form_of_the_requested_version(
+    vcfa: VcfAutomationConnector, vault: AsyncMock
+) -> None:
+    """With ``version``, that version's form decides which fields are secrets."""
+    params = {**_REQUEST_PARAMS, "version": "v2", "inputs": {"size": "small", "bootstrap": "x"}}
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        _, post, _ = _mount_request(mock)
+        version = mock.get(f"{_ITEMS}/ci-1/versions/v2").respond(
+            200, json={"id": "v2", "schema": {"type": "object", "properties": {"size": {}}}}
+        )
+        result = await run("vcfa.tenant.catalog.item.request", params)
+    assert version.called
+    assert result["result"]["status"] == "submitted", result
+    assert _body(post)["version"] == "v2"
+    assert _body(post)["inputs"]["bootstrap"] == "x"
 
 
 async def test_request_refuses_a_reference_without_a_field(
@@ -417,6 +546,52 @@ async def test_request_vendor_error_reaches_the_answer_without_the_secret(
     assert result["extras"]["http_status"] == 400
     assert "is too short for size small" in result["extras"]["upstream_message"]
     assert _SECRET not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    "secret",
+    ['Sv"quote-4c1e', "Sv\\back-4c1e", "Sv-tab\t4c1e"],
+    ids=["quote", "backslash", "tab"],
+)
+async def test_request_vendor_error_hides_a_secret_the_json_text_escapes(
+    vcfa: VcfAutomationConnector, vault: AsyncMock, secret: str
+) -> None:
+    """A JSON error body escapes the value; it is still found and replaced."""
+    vault.return_value = {"password": secret}
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        _mount_request(mock)
+        mock.post(f"{_ITEMS}/ci-1/request").respond(
+            400, json={"message": f"Input adminPassword={secret} is too short", "code": 400}
+        )
+        result = await run("vcfa.tenant.catalog.item.request", _REQUEST_PARAMS)
+    assert result["status"] == "error"
+    assert "is too short" in result["extras"]["upstream_message"]
+    assert SECRET_FIELD_MARKER in result["extras"]["upstream_message"]
+    text = json.dumps(result)
+    assert secret not in text and json.dumps(secret)[1:-1] not in text
+
+
+@pytest.mark.parametrize(
+    ("text", "secrets", "expected"),
+    [
+        ('{"message": "bad: Sv\\"q"}', ['Sv"q'], '{"message": "bad: [REDACTED:param_name]"}'),
+        (
+            "plain: Sv\\\\b and Sv\\\\b",
+            ["Sv\\b"],
+            "plain: [REDACTED:param_name] and [REDACTED:param_name]",
+        ),
+        ("not json: Sv-x", ["Sv-x", ""], "not json: [REDACTED:param_name]"),
+    ],
+    ids=["json-escaped-quote", "text-escaped-backslash", "plain-text-empty-secret-ignored"],
+)
+def test_without_secrets_handles_json_and_plain_text(
+    text: str, secrets: list[str], expected: str
+) -> None:
+    request = httpx.Request("POST", "https://vra.test/x")
+    response = httpx.Response(400, text=text, request=request)
+    exc = httpx.HTTPStatusError("bad", request=request, response=response)
+    assert vra_catalog._without_secrets(exc, secrets).response.text == expected
 
 
 # ---------------------------------------------------------------------------
@@ -540,3 +715,63 @@ async def test_vra8_request_without_a_readable_request_still_answers(
     assert result.result["status"] == "submitted"
     assert result.result["request"] is None
     assert result.result["deployment"]["id"] == "d-1"
+
+
+async def _turn_on_the_flight_recorder() -> None:
+    async with get_sessionmaker()() as session:
+        session.add(
+            Tenant(
+                id=_VRA_OPERATOR.tenant_id,
+                slug="vra-catalog",
+                name="vra-catalog",
+                flight_recorder_enabled=True,
+            )
+        )
+        await session.commit()
+    reset_flight_recorder_config_cache_for_testing()
+
+
+async def _spans(audit_id: UUID) -> list[DispatchTraceSpan]:
+    async with get_sessionmaker()() as session:
+        trace = (
+            await session.execute(select(DispatchTrace).where(DispatchTrace.audit_id == audit_id))
+        ).scalar_one()
+        rows = await session.execute(
+            select(DispatchTraceSpan)
+            .where(DispatchTraceSpan.trace_id == trace.id)
+            .order_by(DispatchTraceSpan.seq.asc())
+        )
+        return list(rows.scalars().all())
+
+
+@pytest.mark.parametrize(
+    ("status", "answer"),
+    [
+        (200, [{"deploymentId": "d-1", "deploymentName": "<deployment-name>"}]),
+        (400, {"message": f"Input bootstrap={_SECRET} is too short"}),
+    ],
+    ids=["submitted", "vendor-error-echoes-the-secret"],
+)
+async def test_vra8_trace_holds_no_secret_input_with_an_ordinary_name(
+    vra8: Vra8Connector, vault: AsyncMock, status: int, answer: Any
+) -> None:
+    """``bootstrap`` is a secret only by the form; the trace redaction cannot know it."""
+    await _turn_on_the_flight_recorder()
+    params = {**_REQUEST_PARAMS, "secret_inputs": {"bootstrap": "<vault-path>#password"}}
+    async with respx.mock(base_url=_VRA_BASE_URL, assert_all_called=False) as mock:
+        _mount_vra_logins(mock)
+        _, post, _ = _mount_request(mock)
+        post.respond(status, json=answer)
+        result = await _vra_run("vcfa.vra8.catalog.item.request", params)
+    assert result.status == ("ok" if status == 200 else "error"), result.error
+    assert _body(post)["inputs"]["bootstrap"] == _SECRET
+    assert result.audit_id is not None
+    spans = await _spans(result.audit_id)
+    (span,) = [s for s in spans if s.span_kind == "vendor_call" and s.name.endswith("/request")]
+    assert span.attributes["body_recorded"] is True
+    assert span.attributes["request_body"]["inputs"] == {
+        "size": "small",
+        "bootstrap": SECRET_FIELD_MARKER,
+    }
+    assert _SECRET not in json.dumps([[s.name, s.attributes] for s in spans], default=str)
+    assert _SECRET not in json.dumps(result.result or result.extras)

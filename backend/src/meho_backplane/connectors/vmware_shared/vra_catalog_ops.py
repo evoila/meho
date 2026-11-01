@@ -245,13 +245,16 @@ def _request_params(prefix: str) -> dict[str, Any]:
             "version": _id_param("Optional item version; omit for the current one."),
             "inputs": {
                 "type": "object",
-                "description": "The form inputs by name. No secrets: use secret_inputs.",
+                "description": (
+                    "The form inputs by name. No secrets, also none inside an object or "
+                    "a list: use secret_inputs."
+                ),
                 "additionalProperties": {"description": "The value of one input."},
             },
             "secret_inputs": {
                 "type": "object",
                 "description": (
-                    "Secret inputs by name. Each value is a Vault reference "
+                    "Secret inputs by top-level name. Each value is a Vault reference "
                     "'<vault-path>#<field>', never the secret."
                 ),
                 "additionalProperties": {

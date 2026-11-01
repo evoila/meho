@@ -21,14 +21,18 @@ them against that file on the spec shelf.
 Secrets:
 
 * A request input that is a secret is never a value. The caller gives
-  ``secret_inputs``: input name -> ``"<vault-path>#<field>"``. The value is
-  read from Vault under the caller's identity only when the approved call
-  runs. It goes only into the request body. A vendor error text that
-  repeats it gets a marker in its place.
-* An input in ``inputs`` whose name is a secret name is refused.
-* Results: the default of a secret form field, and secret-named values in
-  request inputs, outputs, event details and log lines, are replaced with
-  a marker.
+  ``secret_inputs``: top-level input name -> ``"<vault-path>#<field>"``.
+  The value is read from Vault under the caller's identity only when the
+  approved call runs. It goes only into the request body. A vendor error
+  text that repeats it gets a marker in its place, also when the text is
+  JSON that escapes the value. A connector that records a trace gets the
+  values too, so it can replace them in what it records.
+* An input in ``inputs`` is refused when its name is a secret name or when
+  the form marks its field as a secret (``encrypted``, ``format: password``
+  or ``writeOnly``), at any depth: also inside an object or a list.
+* Results: the default of a secret form field (also inside an object or a
+  list default), and secret-named values in request inputs, outputs, event
+  details and log lines, are replaced with a marker.
 
 An upstream 4xx/5xx raises :exc:`httpx.HTTPStatusError`; the dispatcher
 turns it into ``connector_error`` with the vendor's message.
@@ -36,7 +40,8 @@ turns it into ``connector_error`` with the vendor's message.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+import json
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import quote
@@ -68,6 +73,7 @@ __all__ = [
     "catalog_item_list",
     "catalog_item_request",
     "parse_secret_ref",
+    "replace_secret_values",
     "request_events",
     "request_get",
     "request_logs",
@@ -89,7 +95,10 @@ REQUEST_EVENTS_PATH: Final[str] = "/deployment/api/requests/{requestId}/events"
 REQUEST_EVENT_LOGS_PATH: Final[str] = "/deployment/api/requests/{requestId}/events/{eventId}/logs"
 
 GetJson = Callable[[str, Mapping[str, Any] | None], Awaitable[dict[str, Any]]]
-PostJson = Callable[[str, Mapping[str, Any]], Awaitable[Any]]
+#: ``post(path, body, secrets)``: *secrets* are the secret values inside
+#: *body*. A connector that records a trace replaces them in what it records
+#: (:func:`replace_secret_values`); they never go anywhere else.
+PostJson = Callable[[str, Mapping[str, Any], Sequence[str]], Awaitable[Any]]
 
 
 @dataclass(frozen=True)
@@ -97,7 +106,8 @@ class VraCalls:
     """What a connector hands the shared handlers.
 
     ``get`` and ``post`` send one request with the connector's login and
-    return the parsed JSON (``post`` may return a list). ``prefix`` is the
+    return the parsed JSON (``post`` may return a list; it also gets the
+    secret values of the body, see :data:`PostJson`). ``prefix`` is the
     op id prefix (``vcfa.vra8`` or ``vcfa.tenant``). ``operator`` and
     ``target`` are used only for the Vault read of ``secret_inputs``.
     """
@@ -170,6 +180,25 @@ def _is_secret_field(name: str, definition: Mapping[str, Any]) -> bool:
     )
 
 
+def _clean_value(name: str, value: Any, definition: Any) -> Any:
+    """*value* of the form field *name* with each secret part replaced.
+
+    A secret field (by *definition* or by name) gets the marker. An object
+    is walked against the field's ``properties``, a list against its
+    ``items``, so a secret inside an object or a list default is found too.
+    """
+    field = definition if isinstance(definition, Mapping) else {}
+    if _is_secret_field(name, field):
+        return value if value in (None, "") else SECRET_FIELD_MARKER
+    if isinstance(value, Mapping):
+        properties = field.get("properties")
+        nested = properties if isinstance(properties, Mapping) else {}
+        return {key: _clean_value(str(key), entry, nested.get(key)) for key, entry in value.items()}
+    if isinstance(value, list):
+        return [_clean_value(name, entry, field.get("items")) for entry in value]
+    return value
+
+
 def _clean_schema(schema: Any) -> Any:
     """Copy *schema* with the ``default`` of each secret field replaced.
 
@@ -183,12 +212,10 @@ def _clean_schema(schema: Any) -> Any:
     properties = cleaned.get("properties")
     if isinstance(properties, dict):
         for name, definition in properties.items():
-            if (
-                isinstance(definition, dict)
-                and _is_secret_field(str(name), definition)
-                and definition.get("default") not in (None, "")
-            ):
-                definition["default"] = SECRET_FIELD_MARKER
+            if isinstance(definition, dict) and "default" in definition:
+                definition["default"] = _clean_value(str(name), definition["default"], definition)
+    if "default" in cleaned:
+        cleaned["default"] = _clean_value("", cleaned["default"], cleaned)
     return cleaned
 
 
@@ -290,16 +317,49 @@ def _invalid(guidance: str) -> dict[str, Any]:
     return {"status": "invalid_request", "deployment": None, "request": None, "guidance": guidance}
 
 
+def _secret_input_paths(value: Any, definition: Any, name: str, path: str) -> list[str]:
+    """The paths inside the input *value* that hold a secret, by name or by the form.
+
+    Walks an object against the field's ``properties`` and a list against
+    its ``items``, like :func:`_clean_value`. Without a *definition* only
+    the names count. An empty value is not a secret.
+    """
+    field = definition if isinstance(definition, Mapping) else {}
+    if _is_secret_field(name, field):
+        return [] if value in (None, "") else [path]
+    if isinstance(value, Mapping):
+        properties = field.get("properties")
+        nested = properties if isinstance(properties, Mapping) else {}
+        return [
+            found
+            for key, entry in value.items()
+            for found in _secret_input_paths(
+                entry, nested.get(key), str(key), f"{path}.{key}" if path else str(key)
+            )
+        ]
+    if isinstance(value, list):
+        return [
+            found
+            for index, entry in enumerate(value)
+            for found in _secret_input_paths(entry, field.get("items"), name, f"{path}[{index}]")
+        ]
+    return []
+
+
+def _secrets_guidance(paths: list[str]) -> str:
+    return (
+        f"inputs {paths} are secrets; store each value in Vault and give its place in "
+        "secret_inputs as '<vault-path>#<field>', never the value"
+    )
+
+
 def _check_inputs(params: Mapping[str, Any]) -> tuple[dict[str, tuple[str, str]], str | None]:
-    """Parse ``secret_inputs`` and refuse a secret value in ``inputs``."""
+    """Parse ``secret_inputs`` and refuse a secret-named value in ``inputs``, at any depth."""
     inputs = params.get("inputs") or {}
     secret_inputs = params.get("secret_inputs") or {}
-    named = sorted(name for name in inputs if is_secret_param_name(str(name)))
+    named = _secret_input_paths(inputs, None, "", "")
     if named:
-        return {}, (
-            f"inputs {named} look like secrets; store each value in Vault and give its "
-            "place in secret_inputs as '<vault-path>#<field>', never the value"
-        )
+        return {}, _secrets_guidance(named)
     both = sorted(set(inputs) & set(secret_inputs))
     if both:
         return {}, f"inputs {both} are in both inputs and secret_inputs; give each one once"
@@ -323,16 +383,58 @@ async def _existing_deployment(
     return None
 
 
+def replace_secret_values(node: Any, secrets: Sequence[str]) -> Any:
+    """*node* (JSON data or text) with each of *secrets* replaced by the marker.
+
+    Text is searched for the plain value and for its JSON-escaped form, so
+    a value with a quote or a backslash is found inside a JSON text too.
+    Data is walked; each string in it is handled as text.
+    """
+    if isinstance(node, str):
+        for value in secrets:
+            if value:
+                node = node.replace(value, SECRET_FIELD_MARKER)
+                node = node.replace(json.dumps(value)[1:-1], SECRET_FIELD_MARKER)
+        return node
+    if isinstance(node, Mapping):
+        return {
+            replace_secret_values(key, secrets): replace_secret_values(value, secrets)
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [replace_secret_values(entry, secrets) for entry in node]
+    return node
+
+
 def _without_secrets(exc: httpx.HTTPStatusError, values: list[str]) -> httpx.HTTPStatusError:
-    """The same error with each secret value in the vendor text replaced."""
+    """The same error with each secret value in the vendor text replaced.
+
+    A JSON body is decoded first, so an escaped value is found inside its
+    strings; the body is then written again in the same shape. Any other
+    text is searched as it is.
+    """
     text = exc.response.text
-    for value in values:
-        text = text.replace(value, SECRET_FIELD_MARKER)
+    try:
+        decoded = json.loads(text)
+    except ValueError:
+        decoded = None
+    if decoded is not None:
+        text = json.dumps(replace_secret_values(decoded, values), ensure_ascii=False)
+    text = replace_secret_values(text, values)
     headers = {k: v for k, v in exc.response.headers.items() if k.lower() == "content-type"}
     response = httpx.Response(
         exc.response.status_code, headers=headers, content=text.encode(), request=exc.request
     )
     return httpx.HTTPStatusError(str(exc), request=exc.request, response=response)
+
+
+async def _form(calls: VraCalls, params: Mapping[str, Any]) -> Any:
+    """The request form of the item, or of the requested ``version`` when given."""
+    item_id = _seg(params["id"])
+    if params.get("version"):
+        path = CATALOG_ITEM_VERSION_PATH.format(id=item_id, versionId=_seg(params["version"]))
+        return (await calls.get(path, None)).get("schema")
+    return (await calls.get(CATALOG_ITEM_PATH.format(id=item_id), None)).get("schema")
 
 
 async def _new_request(calls: VraCalls, deployment_id: str) -> dict[str, Any] | None:
@@ -351,12 +453,17 @@ async def _new_request(calls: VraCalls, deployment_id: str) -> dict[str, Any] | 
 async def catalog_item_request(calls: VraCalls, params: Mapping[str, Any]) -> dict[str, Any]:
     """``<prefix>.catalog.item.request`` — ``POST /catalog/api/items/{id}/request``.
 
-    Safe to run twice: when the project already has a deployment with this
-    name, nothing is requested and the answer is ``unchanged``.
+    Reads the item's form first and refuses a plain value for a field the
+    form marks as a secret. Safe to run twice: when the project already has
+    a deployment with this name, nothing is requested and the answer is
+    ``unchanged``.
     """
     refs, problem = _check_inputs(params)
     if problem is not None:
         return _invalid(problem)
+    flagged = _secret_input_paths(params.get("inputs") or {}, await _form(calls, params), "", "")
+    if flagged:
+        return _invalid(_secrets_guidance(flagged))
     name, project_id = str(params["deployment_name"]), str(params["project_id"])
     existing = await _existing_deployment(calls, name, project_id)
     if existing is not None:
@@ -389,7 +496,7 @@ async def catalog_item_request(calls: VraCalls, params: Mapping[str, Any]) -> di
             body[wire] = params[param]
     path = CATALOG_ITEM_REQUEST_PATH.format(id=_seg(params["id"]))
     try:
-        answer = await calls.post(path, body)
+        answer = await calls.post(path, body, secrets)
     except httpx.HTTPStatusError as exc:
         if not secrets:
             raise

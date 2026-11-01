@@ -12,6 +12,7 @@ and [connector-packages.md](../codebase/connector-packages.md) (the start-up che
 - MEHO gets one small Python package for connector authors: **`meho-connector-kit`**.
   Its one module, `meho_connector_kit`, offers the 30 names a connector package may use.
   Every other MEHO module is private. It can change in any release, without notice.
+  The kit ships only with MEHO's own release files and image, never on a public package index.
 - The kit has **its own version number**, starting at 1.0. The first number goes up
   when a change can break a package. The second number goes up when a name is added.
 - A connector package says which kit versions it fits, in the normal Python way:
@@ -21,7 +22,8 @@ and [connector-packages.md](../codebase/connector-packages.md) (the start-up che
 - A test writes down every kit name with its inputs. A change makes the test fail until
   the list is written again and the kit version goes up. The release notes then get a
   `Connector kit` section.
-- A template repository gives authors a working start. One page in the docs site explains the kit.
+- A template folder in this repository, `templates/connector-package/`, gives authors a working
+  start. One page in the docs site explains the kit, and the README points to it.
 
 ## Context
 
@@ -191,37 +193,30 @@ module always gets the full test run, because all kit names live in core modules
 - **Imports outside the kit.** The range covers the kit only. Only a tier 2 package (evoila's own)
   may import other MEHO modules. It is pinned to one exact MEHO version and tested on every MEHO
   release (decision 1). A tier 1 package, like the template's sample, imports only the kit.
-- **The name on PyPI.** Neither `meho-backplane` nor `meho-connector-kit` exists on the public
-  Python package index (PyPI) today. evoila claims `meho-connector-kit` there before the first
-  package names it. Then no package index can hand out a different package under that name, for
-  example to an author who runs `pip install` on a laptop. The overlay build reads no index.
+- **Where the kit comes from.** The kit is never published on a public package index. It ships only
+  with MEHO's own release files and image. evoila's private packages build against the kit of one
+  pinned MEHO release tag, and install it from MEHO's own release files. A connector package gets
+  into MEHO only through the overlay build, which reads no package index.
 - **MEHO's release number keeps its meaning.** It stays the version of the image, the chart and the
   CLI. `meho-backplane` stays `0.1.0-dev`.
 
-### 4. The template repository
+### 4. The template folder
 
-The template repository is a repository of its own. An author copies it and renames the made-up
-names. It runs the same steps that evoila's private repository already runs, with one package at
-the top instead of several.
+The template is the folder `templates/connector-package/` in this repository. An author copies the
+folder into a repository of their own and renames the made-up names.
 
 ```text
-README.md                    how to start, tier 1 and tier 2, how to move to a new MEHO release
-LICENSE                      Apache-2.0
-MEHO_VERSION                 one MEHO release tag, for example v0.42.0
-pyproject.toml               the wheel: name, version, kit range, the one folder it holds
-meho_backplane/connectors/example_widget/
-  __init__.py                registers the connector, its operations and its preview
-  connector.py               ExampleWidgetConnector, an HttpConnector
-  operations.py              the two operations and their texts
-tests/
-  __init__.py
-  test_example_widget.py     both operations through MEHO, against a fake widget API
-  test_kit_imports.py        the package imports MEHO only through the kit
-ci/
-  meho-checkout.sh           a clean MEHO checkout at MEHO_VERSION, then "uv sync"
-  test.sh                    copies the folder and the tests in, checks the connector id, runs the tests
-  build.sh                   builds the wheel; with --overlay, also an overlay image
-.github/workflows/ci.yml     one job, "check"
+templates/connector-package/
+  README.md                  how to start, tier 1 and tier 2, how to test against a MEHO release
+  pyproject.toml             the wheel: name, version, kit range, the one folder it holds
+  meho_backplane/connectors/example_widget/
+    __init__.py              registers the connector, its operations and its preview
+    connector.py             ExampleWidgetConnector, an HttpConnector
+    operations.py            the two operations and their texts
+  tests/
+    __init__.py
+    test_example_widget.py   both operations through MEHO, against a fake widget API
+    test_kit_imports.py      the package imports MEHO only through the kit
 ```
 
 **The sample connector** uses made-up names:
@@ -241,25 +236,22 @@ ci/
   `backend/tests/test_split_ready_imports.py` does. It fails when a file imports a MEHO module
   other than the kit or the package's own folder.
 
-**CI** (one job, `check`, on every pull request):
+**CI:** one small job in this repository's CI tests the sample against this repository's own code.
+There is no pinned MEHO tag, and nothing to move after a release. The job:
 
-1. A sign-off line (DCO) on every commit.
-2. `ci/test.sh`: check out MEHO at `MEHO_VERSION`, copy the folder and the tests in, check that
-   MEHO's connector list has `example-widget-1.x`, and run the package's tests and MEHO's
-   operation contract check (`backend/tests/test_operation_contracts.py`).
-3. `ci/build.sh --overlay`: build the wheel, run the wheel checks of
-   `deploy/connector-overlay/overlay_check.py`, and build an overlay image with
-   `deploy/connector-overlay/build.sh` from the MEHO image of the pinned tag, pinned by its digest (its checksum).
-   Start the image and check that it lists the connector id. The image is a check only: it is not
-   pushed and not signed (tier 1).
+1. copies the sample's folder and its tests into the CI checkout, and checks that MEHO's connector
+   list has `example-widget-1.x`;
+2. runs the sample's tests (with `tests/test_kit_imports.py`) and MEHO's operation contract check
+   (`backend/tests/test_operation_contracts.py`);
+3. builds the sample's wheel and runs the wheel checks of `deploy/connector-overlay/overlay_check.py`.
 
-**Moving to a new MEHO release:** change `MEHO_VERSION` in a pull request. The CI shows whether
-the package still works. Change the kit range only when the kit's first number changes. For the
-template repository itself, the weekly release step does this (decision 4).
+So a kit change that breaks the sample fails in the same pull request. The folder is not part of the
+MEHO image or of any MEHO package.
 
-**Tier 2:** evoila's private repository runs the same steps. Its release adds
-`--push --sign --reviews` to the overlay build
-([connector-packages.md](../codebase/connector-packages.md), "Tier 2: an image evoila signs").
+**Tier 2:** evoila's private repository tests its packages against one pinned MEHO release tag, and
+builds the overlay image from the image of that tag. Its release adds `--push --sign --reviews` to
+the overlay build ([connector-packages.md](../codebase/connector-packages.md), "Tier 2: an image
+evoila signs").
 
 ### 5. The docs page
 
@@ -272,7 +264,8 @@ The sections of the page:
 1. **What you build.** A wheel with one folder under `meho_backplane/connectors/`. MEHO runs its
    operations with the same policy, approvals, audit, secret removal and result handles as its own.
    Tier 1 and tier 2.
-2. **Start from the template repository.** Copy it, rename the made-up names, run `ci/test.sh`.
+2. **Start from the template folder.** Copy `templates/connector-package/` into a repository of your
+   own, and rename the made-up names.
 3. **The connector kit.** The module, the kit version, and every name in a table, grouped as above.
    Everything else is private.
 4. **Write the connector.** The class, the target fields, secrets and errors.
@@ -281,8 +274,8 @@ The sections of the page:
    and result handles.
 6. **Say which MEHO releases fit.** The kit range, where to find the kit version of a MEHO release,
    and what happens when the range does not fit.
-7. **Test.** The pinned MEHO tag, the operation contract check, and tests that run inside a MEHO
-   checkout without a promise.
+7. **Test.** Test against the MEHO release you build for: its operation contract check, and tests
+   that run inside a MEHO checkout without a promise.
 8. **Build an image.** The overlay build for tier 1; the review and the signature for tier 2.
 9. **When the kit changes.** The `Connector kit` section of the release notes, and what the two
    numbers of the kit version mean.
@@ -293,6 +286,10 @@ The page links to the codebase pages instead of repeating them:
 [approvals.md](../codebase/approvals.md), [jsonflux.md](../codebase/jsonflux.md) and
 [error-message-shape.md](../codebase/error-message-shape.md). The kit test also checks that every
 kit name and the kit version are on the page, so the page cannot fall behind the code.
+
+**The README.** The `README.md` of this repository gets a short section, "Writing a connector
+package". It says in three lines what the kit is, and links to this page and to the template
+folder.
 
 ## Consequences
 
@@ -305,7 +302,7 @@ kit name and the kit version are on the page, so the page cannot fall behind the
 - **evoila's packages** add a range and drop their own `execute`. On the tier 2 path they may keep
   imports outside the kit, pinned to one exact MEHO version and tested on every release
   (decision 1). This happens in the private repository.
-- **The proof #5040** gives the template repository its sample connector.
+- **The proof #5040** gives the template folder its sample connector.
 - **The image** carries one more small Python package. `meho-backplane` and MEHO's release numbers
   do not change.
 
@@ -339,16 +336,17 @@ The program owner answered the five open questions on 1 November 2026.
      do not (`require_code_owner_review` is off). Turning it on is an admin step.
    - GitHub does not count an approval by the person who opened the pull request. So a kit change
      opened under the kit owner's own account needs another code owner to approve it.
-4. **The template repository is public, under evoila on GitHub.** The weekly release step moves its
-   pinned MEHO version (`MEHO_VERSION`).
+4. **The template is the folder `templates/connector-package/` in this repository.** It holds the
+   sample connector. A small CI job tests it against this repository's own code, so there is no
+   pinned MEHO tag and nothing to move after a release.
 5. **An old kit name stays for one kit version, marked as old, then goes.** The list file and the docs
    page mark the name as old, and the release notes say what to use instead. The check of section 2
    refuses to remove a name that was not marked as old in the kit version before.
 
 ## Tasks that follow
 
-Under #5060, on 1 November 2026: #5278 was rewritten for coding, and #5563, #5565, #5564 and #5566
-were filed.
+Under #5060, on 1 November 2026: #5278 was rewritten for coding, and #5563, #5565 and #5564 were
+filed.
 
 - **#5278, the coding step: the kit and its check.**
   - `backend/connector-kit/`: `pyproject.toml` (`meho-connector-kit`, version 1.0) and the module
@@ -366,17 +364,14 @@ were filed.
   `deploy/connector-overlay/overlay_check.py` and `connector_packages.py`. The made-up example in
   `deploy/connector-overlay/example/` names a range. The range test runs in the overlay build itself,
   with its pinned uv.
-- **#5565: the docs page** `docs-site/extend/connector-kit.md`, its menu entry, and the test that every
-  kit name and the kit version are on it.
-- **#5564: the template repository** (section 4). The made-up package of the proof #5040 becomes its
-  sample.
-- **#5566: claim `meho-connector-kit` on PyPI.** A person does it with evoila's company account.
+- **#5565: the docs page** `docs-site/extend/connector-kit.md`, its menu entry, the test that every
+  kit name and the kit version are on it, and the README section "Writing a connector package".
+- **#5564: the template folder** `templates/connector-package/` and its CI job (section 4). The
+  made-up package of the proof #5040 becomes its sample.
 - **In the private repository, not filed here:** evoila's packages name their kit range and drop their
   own `execute`. On the tier 2 path they may keep other imports (decision 1).
 
-**Order:** #5278 first. Then #5563 and #5565. Then #5564, which also needs #5563. The private
-repository moves after #5563. #5566 can happen at any time before a package with a kit range is
-published.
+**Order:** #5278 first. Then #5563, #5565 and #5564. The private repository moves after #5563.
 
 ## Not proven yet
 

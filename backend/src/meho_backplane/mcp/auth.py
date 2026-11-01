@@ -56,6 +56,7 @@ from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
+    "MCP_SCOPES_SUPPORTED",
     "mcp_resource_uri",
     "verify_mcp_jwt",
     "verify_mcp_jwt_and_bind",
@@ -63,6 +64,15 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
+
+# The scopes MEHO advertises to MCP clients: in ``scopes_supported`` of the
+# protected-resource document and in the ``scope`` of the 401 challenge.
+# MCP 2025-11-25 "Scope Selection Strategy": a client asks for the challenge
+# ``scope`` first, then for ``scopes_supported``. ``offline_access`` is in
+# the list so a client gets a login that renews itself instead of one that
+# ends at the login server's short idle limit. ``mcp:admin`` is not listed:
+# a client must ask for it on purpose.
+MCP_SCOPES_SUPPORTED: tuple[str, ...] = ("mcp:read", "mcp:execute", "offline_access")
 
 
 def mcp_resource_uri(settings: Settings | None = None) -> str:
@@ -107,7 +117,12 @@ def www_authenticate_header(settings: Settings | None = None) -> str:
 
     Shape per spec example::
 
-        Bearer resource_metadata="https://meho.example/.well-known/oauth-protected-resource"
+        Bearer resource_metadata="https://meho.example/.well-known/oauth-protected-resource",
+               scope="mcp:read mcp:execute offline_access"
+
+    The ``scope`` parameter (RFC 6750 §3) lists
+    :data:`MCP_SCOPES_SUPPORTED`. MCP 2025-11-25 says a server SHOULD send
+    it, and clients use it first when they pick the scopes for a login.
 
     The metadata URL is rooted at ``backplane_url`` because RFC 9728
     §3 hosts the document at ``/.well-known/oauth-protected-resource``
@@ -122,7 +137,8 @@ def www_authenticate_header(settings: Settings | None = None) -> str:
     if not base:
         return "Bearer"
     metadata_url = f"{base}/.well-known/oauth-protected-resource"
-    return f'Bearer resource_metadata="{metadata_url}"'
+    scope = " ".join(MCP_SCOPES_SUPPORTED)
+    return f'Bearer resource_metadata="{metadata_url}", scope="{scope}"'
 
 
 async def verify_mcp_jwt(

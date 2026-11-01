@@ -42,7 +42,6 @@ from meho_backplane.connectors.hcx import (
     HcxConnector,
     register_hcx_typed_operations,
 )
-from meho_backplane.connectors.hcx.ha_group_ops import HCX_HA_GROUP_OPS
 from meho_backplane.connectors.hcx.read_ops import HCX_READ_OPS
 from meho_backplane.connectors.hcx.typed_ops import HCX_TYPED_OPS, HCX_TYPED_WHEN_TO_USE_BY_GROUP
 from meho_backplane.connectors.hcx.typed_reads import (
@@ -513,7 +512,10 @@ async def test_job_get_reads_one_job(_stub_embedding: AsyncMock, session: AsyncS
 
     assert result.status == "ok", result.error
     assert route.call_count == 1
-    assert result.result == job
+    assert {key: result.result[key] for key in job} == job
+    assert result.result["outcome"] == "succeeded"
+    assert result.result["error"] is None
+    assert result.result["checked_at"]
 
 
 @pytest.mark.asyncio
@@ -977,9 +979,7 @@ async def test_reads_are_registered_typed_safe_and_grouped(
         "hcx.inventory.datastore.list",
         "hcx.inventory.network.list",
     }
-    reads = [
-        op for op in HCX_TYPED_OPS if op.op_id != "hcx.api_file.get" and op not in HCX_HA_GROUP_OPS
-    ]
+    reads = [op for op in HCX_TYPED_OPS if op.op_id in expected]
     assert {op.op_id for op in HCX_READ_OPS} == first_eight
     assert {op.op_id for op in reads} == expected
     assert expected <= set(rows)

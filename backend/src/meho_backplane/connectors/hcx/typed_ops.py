@@ -8,8 +8,13 @@
 site pairings, service mesh, jobs, alerts and inventory are defined in
 :mod:`meho_backplane.connectors.hcx.read_ops`,
 :mod:`meho_backplane.connectors.hcx.diagnostics_ops` and
-:mod:`meho_backplane.connectors.hcx.inventory_ops`; the Network Extension
-HA operations in :mod:`meho_backplane.connectors.hcx.ha_group_ops`. The dataclass +
+:mod:`meho_backplane.connectors.hcx.inventory_ops`; the service mesh changes
+and the task read in :mod:`meho_backplane.connectors.hcx.service_mesh_ops`; the
+network extension operations in
+:mod:`meho_backplane.connectors.hcx.network_extension_ops`; the migration
+operations in :mod:`meho_backplane.connectors.hcx.migration_ops`; the Network
+Extension HA operations in :mod:`meho_backplane.connectors.hcx.ha_group_ops`.
+The dataclass +
 tuple + registrar shape mirrors :mod:`meho_backplane.connectors.nsx.typed_ops`.
 """
 
@@ -23,8 +28,17 @@ from meho_backplane.connectors.hcx.ha_group_ops import (
     HCX_HA_GROUP_WHEN_TO_USE_BY_GROUP,
 )
 from meho_backplane.connectors.hcx.inventory_ops import HCX_INVENTORY_OPS
+from meho_backplane.connectors.hcx.migration_ops import (
+    HCX_MIGRATION_OPS,
+    HCX_MIGRATION_WHEN_TO_USE_BY_GROUP,
+)
+from meho_backplane.connectors.hcx.network_extension_ops import (
+    HCX_NETWORK_EXTENSION_OPS,
+    HCX_NETWORK_EXTENSION_WHEN_TO_USE_BY_GROUP,
+)
 from meho_backplane.connectors.hcx.op_types import HcxTypedOp
 from meho_backplane.connectors.hcx.read_ops import HCX_READ_OPS, HCX_READ_WHEN_TO_USE_BY_GROUP
+from meho_backplane.connectors.hcx.service_mesh_ops import HCX_SERVICE_MESH_OPS
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -51,6 +65,8 @@ HCX_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "compared. It refuses every other path."
     ),
     **HCX_READ_WHEN_TO_USE_BY_GROUP,
+    **HCX_NETWORK_EXTENSION_WHEN_TO_USE_BY_GROUP,
+    **HCX_MIGRATION_WHEN_TO_USE_BY_GROUP,
     **HCX_HA_GROUP_WHEN_TO_USE_BY_GROUP,
 }
 
@@ -188,6 +204,9 @@ HCX_TYPED_OPS: tuple[HcxTypedOp, ...] = (
     *HCX_READ_OPS,
     *HCX_DIAGNOSTICS_OPS,
     *HCX_INVENTORY_OPS,
+    *HCX_SERVICE_MESH_OPS,
+    *HCX_NETWORK_EXTENSION_OPS,
+    *HCX_MIGRATION_OPS,
     *HCX_HA_GROUP_OPS,
 )
 

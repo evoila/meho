@@ -13,6 +13,7 @@ records the RFC 8693 actor (acting agent) on audit rows without an IdP-minted
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 import pytest
 import structlog
@@ -20,8 +21,10 @@ import structlog
 from meho_backplane.auth.delegation import (
     ACTOR_SUB_KEY,
     actor_delegation,
+    delegated_operator,
     resolve_actor_sub,
 )
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 
 
 def setup_function() -> None:
@@ -97,3 +100,50 @@ async def test_child_task_created_inside_block_inherits_actor() -> None:
     assert resolve_actor_sub() is None
     await task
     assert seen == ["agent:snapshot-bot"]
+
+
+def _caller(role: TenantRole, *, principal_kind: PrincipalKind = PrincipalKind.USER) -> Operator:
+    return Operator(
+        sub="alice",
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=uuid.UUID("5e1f0000-0000-0000-0000-000000000001"),
+        tenant_role=role,
+        principal_kind=principal_kind,
+        approver=True,
+        self_approver=True,
+        platform_admin=True,
+    )
+
+
+def test_delegated_operator_narrows_tenant_admin_to_operator() -> None:
+    narrowed = delegated_operator(_caller(TenantRole.TENANT_ADMIN))
+    assert narrowed.tenant_role is TenantRole.OPERATOR
+
+
+@pytest.mark.parametrize("role", [TenantRole.OPERATOR, TenantRole.READ_ONLY])
+def test_delegated_operator_keeps_a_lower_role(role: TenantRole) -> None:
+    assert delegated_operator(_caller(role)).tenant_role is role
+
+
+def test_delegated_operator_clears_the_approval_and_platform_flags() -> None:
+    narrowed = delegated_operator(_caller(TenantRole.TENANT_ADMIN))
+    assert (narrowed.approver, narrowed.self_approver, narrowed.platform_admin) == (
+        False,
+        False,
+        False,
+    )
+    assert narrowed.may_self_approve is False
+
+
+def test_delegated_operator_keeps_the_caller_as_the_subject() -> None:
+    caller = _caller(TenantRole.TENANT_ADMIN, principal_kind=PrincipalKind.SERVICE)
+    narrowed = delegated_operator(caller)
+    assert (narrowed.sub, narrowed.tenant_id, narrowed.principal_kind, narrowed.raw_jwt) == (
+        caller.sub,
+        caller.tenant_id,
+        caller.principal_kind,
+        caller.raw_jwt,
+    )
+    # The caller's own identity is not changed.
+    assert caller.tenant_role is TenantRole.TENANT_ADMIN
+    assert caller.approver is True

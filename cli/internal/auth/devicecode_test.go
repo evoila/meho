@@ -1054,3 +1054,24 @@ func TestClassifyDeviceTokenErrorIdPCodesUnchanged(t *testing.T) {
 		t.Errorf("access_denied message regressed: %q", got)
 	}
 }
+
+func TestIsInvalidScope(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"error code", &oauth2.RetrieveError{ErrorCode: "invalid_scope"}, true},
+		{"body only", fmt.Errorf("wrapped: %w", &oauth2.RetrieveError{Body: []byte(`{"error":"invalid_scope"}`)}), true},
+		{"other code", &oauth2.RetrieveError{ErrorCode: "invalid_client"}, false},
+		{"other body", &oauth2.RetrieveError{Body: []byte(`{"error":"invalid_request"}`)}, false},
+		{"not json", &oauth2.RetrieveError{Body: []byte("<html>")}, false},
+		{"plain error", errors.New("invalid_scope"), false},
+		{"nil", nil, false},
+	}
+	for _, c := range cases {
+		if got := IsInvalidScope(c.err); got != c.want {
+			t.Errorf("%s: IsInvalidScope = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

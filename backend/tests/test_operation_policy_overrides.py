@@ -885,10 +885,15 @@ def test_has_fresh_sign_in() -> None:
 def test_fresh_sign_in_max_age_comes_from_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``FRESH_SIGN_IN_MAX_AGE_SECONDS`` sets the check and the 401 challenge."""
-    monkeypatch.setenv("FRESH_SIGN_IN_MAX_AGE_SECONDS", "60")
+    """``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`` sets the check and the 401 challenge.
+
+    Turning approval off needs a fresh sign-in each time (#5515), so it
+    reads the per-action limit, not the approval window.
+    """
+    monkeypatch.setenv("PER_ACTION_SIGN_IN_MAX_AGE_SECONDS", "60")
+    monkeypatch.setenv("FRESH_SIGN_IN_MAX_AGE_SECONDS", "900")
     get_settings.cache_clear()
-    assert get_settings().fresh_sign_in_max_age_seconds == 60
+    assert get_settings().per_action_sign_in_max_age_seconds == 60
     now = time.time()
     tenant_id = uuid.uuid4()
     assert has_fresh_sign_in(_operator(tenant_id, auth_time=int(now) - 30), now=now)
@@ -947,9 +952,8 @@ _OFF = {"requires_approval": False, "reason": "read-only in practice"}
         {"platform_admin": True, "extra_claims": {"auth_time": int(time.time()) - 3600}},
         {"platform_admin": True},
         {"platform_admin": True, "principal_kind": "service", "extra_claims": {"auth_time": 1}},
-        {"platform_admin": True, "principal_kind": "agent"},
     ],
-    ids=["old-sign-in", "no-auth-time", "service-principal", "agent"],
+    ids=["old-sign-in", "no-auth-time", "service-principal"],
 )
 async def test_rest_without_fresh_sign_in_cannot_turn_approval_off(
     embedding: AsyncMock, token_kwargs: dict[str, Any]
@@ -960,6 +964,35 @@ async def test_rest_without_fresh_sign_in_cannot_turn_approval_off(
     assert 'error="insufficient_user_authentication"' in response.headers["www-authenticate"]
     assert "approval_off_needs_fresh_sign_in" in response.json()["detail"]
     assert report.json() == {"overrides": []}
+
+
+@pytest.mark.asyncio
+async def test_rest_approval_window_does_not_cover_turning_approval_off(
+    embedding: AsyncMock,
+) -> None:
+    """A 400-second-old sign-in is inside the approval window but too old here (#5515)."""
+    await _register_typed(embedding, requires_approval=True)
+    response, report = _patch(
+        {"platform_admin": True, "extra_claims": {"auth_time": int(time.time()) - 400}}, _OFF
+    )
+    assert get_settings().fresh_sign_in_max_age_seconds == 900
+    assert response.status_code == 401, response.text
+    assert response.headers["www-authenticate"].endswith("max_age=300")
+    assert "approval_off_needs_fresh_sign_in" in response.json()["detail"]
+    assert report.json() == {"overrides": []}
+
+
+@pytest.mark.asyncio
+async def test_rest_agent_token_cannot_turn_approval_off(embedding: AsyncMock) -> None:
+    """An agent acts with operator rights, so the tenant-admin route refuses it."""
+    await _register_typed(embedding, requires_approval=True)
+    tenant_id = uuid.uuid4()
+    response, _ = _patch(
+        {"platform_admin": True, "principal_kind": "agent"}, _OFF, tenant_id=tenant_id
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == "insufficient_role"
+    assert (await _effective(tenant_id))[1] is True
 
 
 @pytest.mark.asyncio

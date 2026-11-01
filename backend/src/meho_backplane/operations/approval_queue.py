@@ -90,7 +90,7 @@ from sqlalchemy import CursorResult, and_, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.approval_sign_in import ApprovalAuth
+from meho_backplane.auth.approval_sign_in import ApprovalAuth, approval_sign_in_max_age
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
@@ -113,7 +113,9 @@ from meho_backplane.operations._audit import (
 from meho_backplane.operations._errors import (
     result_already_resumed,
     result_denied,
+    result_preview_changed_since_approval,
     result_release_changed_while_waiting,
+    result_target_changed_since_approval,
 )
 from meho_backplane.operations._validate import (
     params_hash_candidates,
@@ -132,6 +134,11 @@ from meho_backplane.operations.approval_handoff import (
     store as store_handoff,
 )
 from meho_backplane.operations.approval_outcome import with_approval_guidance
+from meho_backplane.operations.approval_resume_checks import (
+    park_time_target_hash,
+    preview_changed_since_request,
+    target_changed_since_request,
+)
 from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.version import running_release_id
 
@@ -147,6 +154,7 @@ __all__ = [
     "ApprovalRequestExpiredError",
     "ApprovalResultState",
     "ApprovalSignInReusedError",
+    "ApprovalSignInTooOldError",
     "ChainPosition",
     "DelegatedDecisionForbiddenError",
     "DelegatedReasonInvalidError",
@@ -178,6 +186,7 @@ __all__ = [
     "pending_chain_positions",
     "read_approval_result",
     "record_approval_step_event",
+    "refuse_resume_if_preview_changed",
     "refuse_resume_if_release_changed",
     "rehydrate_resume_target",
     "reject_request",
@@ -324,20 +333,46 @@ class PreviewBindingMissingError(ApprovalError):
 
 
 class ApprovalSignInReusedError(ApprovalError):
-    """This sign-in already gave an approval (#3979).
+    """This sign-in cannot give this approval: it is used up (#3979, #5515).
 
-    One fresh sign-in or one-time code allows exactly one approval. Raised
-    by :func:`approve_request` when an earlier ``approval.decision`` audit
-    row of the same person carries the same ``sign_in_key``. The REST layer
-    answers ``401`` with the same fresh sign-in challenge as a too-old
-    sign-in, so the command line asks for a new sign-in.
+    Raised by :func:`approve_request` in two cases, both read from the
+    person's earlier ``approval.decision`` audit rows with the same
+    ``sign_in_key``:
+
+    * the request is ``destructive`` and the sign-in already approved
+      something: a destructive approve needs a sign-in of its own;
+    * the sign-in already approved a ``destructive`` request: that sign-in
+      approves nothing more.
+
+    The REST layer answers ``401`` with the same fresh sign-in challenge as
+    a too-old sign-in, so the command line asks for a new sign-in.
     """
 
     def __init__(self, request_id: uuid.UUID) -> None:
         self.request_id = request_id
         super().__init__(
-            f"approval_request {request_id}: this sign-in was already used for "
-            "an approval; one sign-in allows one approval"
+            f"approval_request {request_id}: this sign-in was already used; "
+            "a destructive operation needs a sign-in of its own"
+        )
+
+
+class ApprovalSignInTooOldError(ApprovalError):
+    """The sign-in is too old for this request (#5515).
+
+    Each risk level has its own limit
+    (:func:`~meho_backplane.auth.approval_sign_in.approval_sign_in_max_age`):
+    the approval window ``FRESH_SIGN_IN_MAX_AGE_SECONDS``, or for a
+    ``destructive`` request ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``.
+    ``max_age_seconds`` is the limit that applied. The REST layer answers
+    ``401`` with the fresh sign-in challenge and that ``max_age``.
+    """
+
+    def __init__(self, request_id: uuid.UUID, *, max_age_seconds: int) -> None:
+        self.request_id = request_id
+        self.max_age_seconds = max_age_seconds
+        super().__init__(
+            f"approval_request {request_id}: the sign-in is older than "
+            f"{max_age_seconds} seconds; approving needs a newer one"
         )
 
 
@@ -1381,6 +1416,9 @@ async def create_pending_request(
         resume_parent=stored_resume_parent,
         idempotency_key=idempotency_key,
         release_id=running_release_id(),
+        target_hash=await park_time_target_hash(
+            session, tenant_id=operator.tenant_id, target_id=target_id
+        ),
     )
     if idempotency_key is None:
         session.add(request)
@@ -1437,25 +1475,39 @@ def _sign_in_lock_key(sign_in_key: str) -> int:
     return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
 
 
-async def _refuse_reused_sign_in(
+def _is_destructive(request: ApprovalRequest) -> bool:
+    """Whether the parked operation is ``destructive`` (read off ``proposed_effect``)."""
+    return (request.proposed_effect or {}).get("safety_level") == "destructive"
+
+
+async def _check_sign_in_use(
     session: AsyncSession,
-    request_id: uuid.UUID,
+    request: ApprovalRequest,
     operator: Operator,
     approval_auth: ApprovalAuth,
-) -> None:
-    """Raise :class:`ApprovalSignInReusedError` when this sign-in already approved.
+) -> bool:
+    """Check the sign-in's age and use for a token approve; return whether it is single-use.
 
-    Looks at the person's ``approval.decision`` audit rows written since
-    the sign-in. The sign-in is at most a few minutes old, so the scan is
-    short. A web click is not single-use and is never checked.
+    The sign-in must be young enough for the request's risk level
+    (:func:`~meho_backplane.auth.approval_sign_in.approval_sign_in_max_age`,
+    :class:`ApprovalSignInTooOldError` otherwise): the approval window, or
+    for a ``destructive`` request its own limit. Inside the window one
+    sign-in may approve several requests (#5515). A ``destructive`` request
+    is the exception: its sign-in must have approved nothing else, and
+    after it that sign-in approves nothing more
+    (:class:`ApprovalSignInReusedError` in both cases). A web click is
+    never checked.
 
-    Two approves with the same sign-in can run at the same moment, for two
-    different requests and on two replicas. So the check first takes a
-    transaction-level PostgreSQL advisory lock on the sign-in key. The
-    second approve waits until the first commits or rolls back, and then
-    its scan sees the first audit row. PostgreSQL releases the lock with
-    the transaction. On other databases (the single-writer SQLite test
-    path) there is no lock.
+    The earlier approves of the sign-in are the person's
+    ``approval.decision`` audit rows with the same ``sign_in_key``,
+    written since the sign-in. The scan is short: the window is minutes.
+
+    Two approves with the same sign-in can run at the same moment, on two
+    replicas. So the check first takes a transaction-level PostgreSQL
+    advisory lock on the sign-in key. The second approve waits until the
+    first commits or rolls back, and then its scan sees the first audit
+    row. PostgreSQL releases the lock with the transaction. On other
+    databases (the single-writer SQLite test path) there is no lock.
 
     The scan starts :data:`~meho_backplane.auth.fresh_sign_in.CLOCK_SKEW_SECONDS`
     before ``auth_time``: the fresh sign-in check accepts an ``auth_time``
@@ -1464,7 +1516,20 @@ async def _refuse_reused_sign_in(
     """
     key = approval_auth.sign_in_key(operator.sub)
     if key is None or approval_auth.auth_time is None:
-        return
+        return False
+    destructive = _is_destructive(request)
+    from meho_backplane.settings import get_settings
+
+    max_age = approval_sign_in_max_age(get_settings(), destructive=destructive)
+    if _now().timestamp() - approval_auth.auth_time > max_age:
+        _log().warning(
+            "approval_sign_in_too_old",
+            approval_request_id=str(request.id),
+            operator_sub=operator.sub,
+            destructive=destructive,
+            max_age_seconds=max_age,
+        )
+        raise ApprovalSignInTooOldError(request.id, max_age_seconds=max_age)
     conn = await session.connection()
     if conn.dialect.name == "postgresql":
         await session.execute(
@@ -1480,13 +1545,17 @@ async def _refuse_reused_sign_in(
     )
     for (payload,) in rows:
         earlier = payload.get("approval_auth") if isinstance(payload, dict) else None
-        if isinstance(earlier, dict) and earlier.get("sign_in_key") == key:
+        if not isinstance(earlier, dict) or earlier.get("sign_in_key") != key:
+            continue
+        if destructive or earlier.get("single_use") is True:
             _log().warning(
                 "approval_sign_in_reused",
-                approval_request_id=str(request_id),
+                approval_request_id=str(request.id),
                 operator_sub=operator.sub,
+                destructive=destructive,
             )
-            raise ApprovalSignInReusedError(request_id)
+            raise ApprovalSignInReusedError(request.id)
+    return destructive
 
 
 # code-quality-allow: 101 lines but ~70 are the Args/Raises docstring documenting
@@ -1554,8 +1623,10 @@ async def approve_request(
             audit payload). Mirrors :func:`reject_request`.
         approval_auth: How the person proved they were present (#3979): a
             web click, a fresh sign-in or a one-time code. Recorded in the
-            audit payload as ``approval_auth``. A token proof allows one
-            approval only. Every production approve path passes it.
+            audit payload as ``approval_auth``. Inside the approval window
+            one token sign-in may approve several requests; a
+            ``destructive`` request needs a sign-in of its own (#5515).
+            Every production approve path passes it.
 
     Returns:
         The updated, flushed :class:`ApprovalRequest`.
@@ -1575,8 +1646,12 @@ async def approve_request(
             (``Instructed-by:``) but its trailer block is incomplete (#3692).
         DelegatedDecisionForbiddenError: *reason* is a valid delegated
             decision but the deployment is not lab-class (#3693).
-        ApprovalSignInReusedError: *approval_auth* names a sign-in that
-            already gave an approval (#3979).
+        ApprovalSignInReusedError: The request is ``destructive`` and
+            *approval_auth* names a sign-in that already approved something,
+            or the sign-in already approved a ``destructive`` request (#5515).
+        ApprovalSignInTooOldError: The sign-in is older than the limit of
+            the request's risk level: the approval window, or for a
+            ``destructive`` request ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS``.
     """
     request = await _load_pending_for_approval(
         session, request_id, operator=operator, params=params
@@ -1585,8 +1660,9 @@ async def approve_request(
     # reason leaves the row pending (#3692, #3693).
     delegation = parse_delegation(reason)
     _check_delegated_allowed(delegation, request=request, operator=operator, decision="approved")
+    single_use = False
     if approval_auth is not None:
-        await _refuse_reused_sign_in(session, request_id, operator, approval_auth)
+        single_use = await _check_sign_in_use(session, request, operator, approval_auth)
 
     now = _now()
     request.status = ApprovalRequestStatus.APPROVED.value
@@ -1602,7 +1678,7 @@ async def approve_request(
     if reason:
         extra["reason"] = reason
     if approval_auth is not None:
-        extra["approval_auth"] = approval_auth.audit_payload(operator.sub)
+        extra["approval_auth"] = approval_auth.audit_payload(operator.sub, single_use=single_use)
     _record_delegation(extra, delegation, request=request, operator=operator, decision="approved")
 
     approve_audit_id = uuid.uuid4()
@@ -2019,6 +2095,12 @@ async def resume_dispatch_after_approval(
     when the claim is free (covering waiter-gone -- timeout / restart /
     cancel) while the claim blocks the ``/approve`` / UI double-dispatch
     when the waiter is alive.
+
+    Before the run, the target must still have the connection settings it
+    had when the request was made (:func:`rehydrate_resume_target`), and a
+    request with a preview hash must still build the same preview
+    (:func:`refuse_resume_if_preview_changed`). Either change refuses the
+    run, and the requester asks again.
     """
     effective_params = params if params is not None else request.params
     if effective_params is None and request.execution_handle is None:
@@ -2070,6 +2152,12 @@ async def resume_dispatch_after_approval(
             # Never assign decrypted composite inputs to the ORM row: an
             # attached request could autoflush them back into approval_request.
             resume_parent_override = cast(dict[str, Any], handoff["resume_parent"])
+
+    preview_refusal = await refuse_resume_if_preview_changed(
+        operator, request, resolved_target, cast(dict[str, Any], effective_params)
+    )
+    if preview_refusal is not None:
+        return preview_refusal
 
     return await _dispatch_resume_with_bound_context(
         operator=operator,
@@ -2128,6 +2216,39 @@ async def refuse_resume_if_release_changed(
         op_id=request.op_id,
         request_release=request.release_id,
         running_release=running,
+        operator_sub=operator.sub,
+    )
+    await persist_resume_result(request.id, refusal, parked_op_id=request.op_id)
+    return refusal
+
+
+async def refuse_resume_if_preview_changed(
+    operator: Operator,
+    request: ApprovalRequest,
+    target: Any,
+    params: dict[str, Any],
+) -> OperationResult | None:
+    """Refuse an approved run whose preview is not the approved one.
+
+    Returns ``None`` when the request stored no preview hash, or when a
+    preview built now for *target* and *params* has the stored hash. Else
+    the operation does not run: the refusal is stored as the request's run
+    result, so every read surface shows the run as failed with the
+    ``preview_changed_since_approval`` error code. The caller has already
+    won the one-resumer claim, so the request cannot run later.
+
+    Shared by both resume paths: the operator surfaces
+    (:func:`resume_dispatch_after_approval`) and the in-process agent
+    waiter (:mod:`meho_backplane.agent.approval_wait`).
+    """
+    if not await preview_changed_since_request(operator, request, target, params):
+        return None
+    refusal = result_preview_changed_since_approval(request.op_id, approval_request_id=request.id)
+    _log().warning(
+        "approval_resume_preview_changed",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        connector_id=request.connector_id,
         operator_sub=operator.sub,
     )
     await persist_resume_result(request.id, refusal, parked_op_id=request.op_id)
@@ -2546,6 +2667,13 @@ async def rehydrate_resume_target(
     ``target_id`` instead of the name the caller used at park time means a
     target renamed, or deleted and re-created under the same name, while the
     request waited can never receive the approved write.
+
+    A target whose connection settings changed since the request was made
+    (``request.target_hash``, see
+    :mod:`meho_backplane.operations.approval_resume_checks`) is refused the
+    same way, with the ``target_changed_since_approval`` error code: the
+    approval covers the target as the person saw it, not a new host or new
+    credentials.
     """
     if request.target_id is None:
         return None, None
@@ -2556,6 +2684,18 @@ async def rehydrate_resume_target(
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         resolved_target = await resolve_target_by_id(session, operator.tenant_id, request.target_id)
+    if resolved_target is not None and target_changed_since_request(request, resolved_target):
+        _log().warning(
+            "approval_resume_target_changed",
+            approval_request_id=str(request.id),
+            op_id=request.op_id,
+            connector_id=request.connector_id,
+            target_id=str(request.target_id),
+            operator_sub=operator.sub,
+        )
+        return None, result_target_changed_since_approval(
+            request.op_id, approval_request_id=request.id, target_id=request.target_id
+        )
     if resolved_target is not None:
         return resolved_target, None
 

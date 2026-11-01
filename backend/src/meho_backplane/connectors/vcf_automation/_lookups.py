@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import quote
 
 from meho_backplane.connectors._shared.vault_creds import (
+    check_param_secret_ref,
     load_vault_secret_data,
     strip_credential_value,
 )
@@ -335,6 +336,7 @@ async def read_password(
     propagate. The value never enters a log event, result or error.
     """
     secret_ref, mount, key = password_ref(params)
+    check_param_secret_ref(operator, secret_ref, param="password_secret_ref", mount=mount)
     data = await load_vault_secret_data(
         _SecretRefTarget(name=target.name, host=target.host, secret_ref=secret_ref),
         operator,

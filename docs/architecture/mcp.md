@@ -96,7 +96,7 @@ Response shapes per the spec's *Sending Messages to the Server* section:
 | Invalid request | HTTP 200 + `error: { code: -32600, ... }` |
 | Unsupported `MCP-Protocol-Version` | **HTTP 400** + JSON-RPC error envelope (spec MUST) |
 | Missing `Mcp-Session-Id` **and** `MCP_REQUIRE_SESSION_ID=true` | HTTP 200 + `error: { code: -32600, ... }` (no audit row written) |
-| Missing/invalid Bearer token | HTTP 401 + `WWW-Authenticate: Bearer resource_metadata="..."` |
+| Missing/invalid Bearer token | HTTP 401 + `WWW-Authenticate: Bearer resource_metadata="...", scope="mcp:read mcp:execute offline_access"` |
 | Insufficient scope/role | HTTP 403 |
 | GET on `/mcp` | HTTP 405 (FastAPI default; SSE-on-GET unimplemented in v0.2) |
 
@@ -104,7 +104,7 @@ Response shapes per the spec's *Sending Messages to the Server* section:
 
 MEHO acts as an **OAuth 2.1 resource server** per [RFC 9728 (Protected Resource Metadata)](https://datatracker.ietf.org/doc/html/rfc9728) + [RFC 8707 (Resource Indicators)](https://www.rfc-editor.org/rfc/rfc8707.html). The flow:
 
-1. Client sends request without token → server returns **401** + `WWW-Authenticate: Bearer resource_metadata="<backplane>/.well-known/oauth-protected-resource"`.
+1. Client sends request without token → server returns **401** + `WWW-Authenticate: Bearer resource_metadata="<backplane>/.well-known/oauth-protected-resource", scope="mcp:read mcp:execute offline_access"`.
 2. Client fetches PR metadata at the URL in step 1.
 3. Client follows OAuth 2.1 (PKCE + `resource` parameter) against the discovered Keycloak authorization server.
 4. Client retries with `Authorization: Bearer <token>`. Server validates `aud` matches `MCP_RESOURCE_URI`.
@@ -115,7 +115,7 @@ MEHO acts as an **OAuth 2.1 resource server** per [RFC 9728 (Protected Resource 
 {
   "resource": "https://meho.evba.lab/mcp",
   "authorization_servers": ["https://keycloak.evba.lab/realms/evba"],
-  "scopes_supported": ["mcp:read", "mcp:execute"],
+  "scopes_supported": ["mcp:read", "mcp:execute", "offline_access"],
   "bearer_methods_supported": ["header"]
 }
 ```

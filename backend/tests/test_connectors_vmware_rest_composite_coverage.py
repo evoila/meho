@@ -101,6 +101,13 @@ _CLASSIFIER_OTHER = frozenset(
         # #4394: ``.answer`` is not a classifier suffix -> ``other``. The
         # deploy and the install send a password: they are credential_write.
         "vmware.composite.vcenter.deployment.answer",
+        # #4446: none of these suffixes is a classifier suffix -> ``other``.
+        # ``vsan.hcl.update`` ends in ``.update`` and classifies ``write``.
+        "vmware.vsan.cluster.power.precheck",
+        "vmware.composite.vsan.cluster.shutdown",
+        "vmware.composite.vsan.cluster.start",
+        "vmware.composite.vsan.proactive_test.run",
+        "vmware.composite.vsan.object.repair",
         # ``.inventory`` is not a classifier suffix -> ``other``; a read.
         "vmware.migration.inventory",
     }

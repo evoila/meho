@@ -84,6 +84,9 @@ READS_WITH_A_WRITE_WORD: Final[Mapping[str, str]] = {
     "installer.system.depot.sync-status": "reads the state of the depot sync; starts none",
     "mssql.ha.sync-health": "reads the health of the availability-group sync",
     "winsrv.system.pending-reboot": "reads whether a reboot is pending; reboots nothing",
+    "vmware.vsan.cluster.power.precheck": (
+        "checks whether a vSAN cluster can be shut down; changes no power state"
+    ),
 }
 
 SUMMARY_MAX: Final[int] = 120

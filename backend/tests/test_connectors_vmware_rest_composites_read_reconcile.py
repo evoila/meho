@@ -153,6 +153,17 @@ def test_vim_read_sub_ops_are_served_by_the_pinned_vi_json_spec() -> None:
 def test_vsan_read_paths_are_the_reconciled_keys() -> None:
     """Pin the vSAN VI-JSON paths the connector calls (sandbox-safe, always runs)."""
     assert {vsan_vi_json_op_id(method) for method in vsan_methods()} == {
+        # #4446: HCL update, cluster power, proactive tests, object repair.
+        "POST:/vsan/VsanVcClusterHealthSystem/{moId}/VsanVcUpdateHclDbFromWeb",
+        "POST:/vsan/VsanVcClusterHealthSystem/{moId}/VsanVcUploadHclDb",
+        "POST:/vsan/VsanVumSystem/{moId}/VsanVcUploadReleaseDb",
+        "POST:/vsan/VsanClusterPowerSystem/{moId}/QueryClusterPowerContext",
+        "POST:/vsan/VsanClusterPowerSystem/{moId}/PerformClusterPowerAction",
+        "POST:/vsan/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterCreateVmHealthTest",
+        "POST:/vsan/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterNetworkPerfTest",
+        "POST:/vsan/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterVmdkWorkloadTypes",
+        "POST:/vsan/VsanVcClusterHealthSystem/{moId}/VsanVcClusterRunVmdkLoadTest",
+        "POST:/vsan/VsanVcClusterHealthSystem/{moId}/VsanHealthRepairClusterObjectsImmediate",
         "POST:/vsan/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary",
     }
 

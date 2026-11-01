@@ -199,6 +199,11 @@ from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_tools import (
 from meho_backplane.connectors.vmware_rest.composites._vm_llm_instructions import (
     VM_LLM_INSTRUCTIONS,
 )
+from meho_backplane.connectors.vmware_rest.composites._vsan_ops import (
+    VSAN_CLUSTER_COMPOSITES,
+    VSAN_CLUSTER_GROUP_KEY,
+    VSAN_CLUSTER_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
     cluster_drs_vm_host_rule_create_composite,
@@ -594,6 +599,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "migration": MIGRATION_GROUP_WHEN_TO_USE,
     # #4394: shared with the typed read vmware.vcenter.deployment.status.
     INSTALL_GROUP_KEY: INSTALL_WHEN_TO_USE,
+    # #4446: HCL update, cluster power, proactive tests, object repair.
+    VSAN_CLUSTER_GROUP_KEY: VSAN_CLUSTER_WHEN_TO_USE,
 }
 
 
@@ -2139,6 +2146,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # Install a new vCenter (#4394), dangerous / approval; the rows live in
     # their own module.
     *(_CompositeSpec(**row) for row in VCENTER_INSTALL_COMPOSITES),
+    # vSAN cluster work (#4446): one read and five changes; the rows live in
+    # their own module.
+    *(_CompositeSpec(**row) for row in VSAN_CLUSTER_COMPOSITES),
 )
 
 

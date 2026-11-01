@@ -475,6 +475,9 @@ from meho_backplane.connectors.vmware_rest.typed_ops_sso_admin_api_file import (
     SSO_ADMIN_API_FILE_WHEN_TO_USE,
     VCENTER_SSO_ADMIN_API_FILE_GET_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_task_info import (  # noqa: E402
+    VMWARE_TASK_INFO_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_tasks_history import (  # noqa: E402
     TASKS_HISTORY_GROUP_KEY,
     TASKS_HISTORY_WHEN_TO_USE,
@@ -635,6 +638,7 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     *CONTENT_LIBRARY_OPS,
     VMWARE_VCENTER_DEPLOYMENT_STATUS_OP,
     VMWARE_NETWORK_PORTGROUP_SHOW_OP,
+    VMWARE_TASK_INFO_OP,
 )
 
 

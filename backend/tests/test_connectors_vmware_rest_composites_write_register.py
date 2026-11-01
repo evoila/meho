@@ -171,6 +171,11 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vcenter.appliance.deploy",
     "vmware.composite.vcenter.install",
     "vmware.composite.vcenter.deployment.answer",
+    # vSAN cluster changes (#4446): dangerous + approval.
+    "vmware.composite.vsan.cluster.shutdown",
+    "vmware.composite.vsan.cluster.start",
+    "vmware.composite.vsan.proactive_test.run",
+    "vmware.composite.vsan.object.repair",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -209,6 +214,8 @@ _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.content_library.subscribed.items.list",
     # Migration inventory read of one vCenter.
     "vmware.migration.inventory",
+    # vSAN cluster power pre-check (#4446).
+    "vmware.vsan.cluster.power.precheck",
 )
 
 # 2 caution + approval writes (#3495) -- the SUBSCRIBED content-library
@@ -222,6 +229,8 @@ _CAUTION_OP_IDS: tuple[str, ...] = (
     # The two alarm changes (#4383), caution + approval as well.
     "vmware.composite.alarm.acknowledge",
     "vmware.composite.alarm.reset",
+    # The vSAN HCL database update (#4446), caution + approval as well.
+    "vmware.composite.vsan.hcl.update",
 )
 
 # 54 total -- 14 read (T5 / #508 + 4 guest-ops reads / #3100 + the
@@ -354,6 +363,20 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
         "meho_backplane.connectors.vmware_rest.composites._vcenter_answer."
         "vcenter_deployment_answer_composite"
     ),
+    "vmware.composite.vsan.cluster.shutdown": (
+        "meho_backplane.connectors.vmware_rest.composites._vsan_power."
+        "vsan_cluster_shutdown_composite"
+    ),
+    "vmware.composite.vsan.cluster.start": (
+        "meho_backplane.connectors.vmware_rest.composites._vsan_power.vsan_cluster_start_composite"
+    ),
+    "vmware.composite.vsan.proactive_test.run": (
+        "meho_backplane.connectors.vmware_rest.composites._vsan_checks."
+        "vsan_proactive_test_composite"
+    ),
+    "vmware.composite.vsan.object.repair": (
+        "meho_backplane.connectors.vmware_rest.composites._vsan_checks.vsan_object_repair_composite"
+    ),
     "vmware.composite.guest.customization_spec.create": (
         "meho_backplane.connectors.vmware_rest.composites._write."
         "guest_customization_spec_create_composite"
@@ -473,6 +496,10 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vcenter.appliance.deploy": "vcenter_install",
     "vmware.composite.vcenter.install": "vcenter_install",
     "vmware.composite.vcenter.deployment.answer": "vcenter_install",
+    "vmware.composite.vsan.cluster.shutdown": "vsan_cluster",
+    "vmware.composite.vsan.cluster.start": "vsan_cluster",
+    "vmware.composite.vsan.proactive_test.run": "vsan_cluster",
+    "vmware.composite.vsan.object.repair": "vsan_cluster",
     "vmware.composite.host.evacuate": "host",
     "vmware.composite.host.maintenance.exit": "host",
     "vmware.composite.host.detach_from_vds": "host",

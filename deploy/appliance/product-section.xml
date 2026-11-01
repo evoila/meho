@@ -1,0 +1,73 @@
+<!--
+SPDX-License-Identifier: Apache-2.0
+Copyright (c) 2026 evoila Group
+
+The product section of the appliance OVA: what the import wizard in vCenter
+asks. rewrite-ovf.sh puts it into the exported .ovf in place of the Ubuntu
+cloud image's cloud-init section, and replaces @VERSION@.
+
+The properties are the ones of the form-1 design, section 2, in the order
+the wizard shows them. The first-start service that reads them is #4812
+and does not exist yet, so until it lands an appliance imported with these
+values does nothing with them. #4812 may change labels and descriptions
+here; the keys are the design's.
+-->
+    <ProductSection ovf:required="false">
+      <Info>The settings of this MEHO appliance</Info>
+      <Product>MEHO appliance</Product>
+      <Vendor>evoila</Vendor>
+      <Version>@VERSION@</Version>
+      <ProductUrl>https://meho.ai</ProductUrl>
+      <Category>Host name and time</Category>
+      <Property ovf:key="hostname" ovf:type="string" ovf:userConfigurable="true">
+        <Label>Host name</Label>
+        <Description>The full DNS name of the appliance, for example meho.example.com. It must resolve in your DNS.</Description>
+      </Property>
+      <Property ovf:key="net.ntp" ovf:type="string" ovf:userConfigurable="true">
+        <Label>Time servers</Label>
+        <Description>One or more NTP servers, comma-separated.</Description>
+      </Property>
+      <Category>Network</Category>
+      <Property ovf:key="net.mode" ovf:type="string" ovf:qualifiers="ValueMap{&quot;static&quot;,&quot;dhcp&quot;}" ovf:userConfigurable="true" ovf:value="static">
+        <Label>Network: static or DHCP</Label>
+        <Description>static: the three fields below set the address. dhcp: the appliance takes an address from DHCP and the fields below stay empty.</Description>
+      </Property>
+      <Property ovf:key="net.ip" ovf:type="string" ovf:userConfigurable="true">
+        <Label>IP address with prefix</Label>
+        <Description>For a static address only, for example 10.0.0.10/24.</Description>
+      </Property>
+      <Property ovf:key="net.gateway" ovf:type="string" ovf:userConfigurable="true">
+        <Label>Default gateway</Label>
+        <Description>For a static address only.</Description>
+      </Property>
+      <Property ovf:key="net.dns" ovf:type="string" ovf:userConfigurable="true">
+        <Label>DNS servers</Label>
+        <Description>For a static address only. One or more, comma-separated.</Description>
+      </Property>
+      <Category>Admin access</Category>
+      <Property ovf:key="net.admin_network" ovf:type="string" ovf:userConfigurable="true">
+        <Label>Admin network</Label>
+        <Description>The IPv4 address range that may use SSH, for example 10.0.50.0/24. From every other address only the web console (ports 80 and 443) answers.</Description>
+      </Property>
+      <Property ovf:key="admin.password" ovf:type="string" ovf:password="true" ovf:qualifiers="MinLen(14)" ovf:userConfigurable="true">
+        <Label>Appliance admin password</Label>
+        <Description>The password of the Linux account admin, for the VM console and sudo. At least 14 characters. You must change it at the first login.</Description>
+      </Property>
+      <Property ovf:key="admin.ssh_key" ovf:type="string" ovf:userConfigurable="true">
+        <Label>Admin SSH public key</Label>
+        <Description>The public key that may log in as admin over SSH. SSH takes only keys, no passwords.</Description>
+      </Property>
+      <Category>Cluster (leave empty for one appliance)</Category>
+      <Property ovf:key="cluster.join.address" ovf:type="string" ovf:userConfigurable="true">
+        <Label>Join address</Label>
+        <Description>The address of a MEHO node to join. Leave empty for a single appliance.</Description>
+      </Property>
+      <Property ovf:key="cluster.join.token" ovf:type="string" ovf:password="true" ovf:userConfigurable="true">
+        <Label>Join token</Label>
+        <Description>The token of the node to join. Leave empty for a single appliance.</Description>
+      </Property>
+      <Property ovf:key="cluster.vip" ovf:type="string" ovf:userConfigurable="true">
+        <Label>Virtual IP</Label>
+        <Description>One shared address that always points to a working node. Leave empty for a single appliance.</Description>
+      </Property>
+    </ProductSection>

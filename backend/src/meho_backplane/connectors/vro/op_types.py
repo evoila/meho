@@ -10,6 +10,7 @@ from typing import Any, Final, Literal
 
 __all__ = [
     "GROUP_EXECUTIONS",
+    "GROUP_LIBRARY",
     "GROUP_SERVER",
     "GROUP_WORKFLOWS",
     "NO_PARAMS_SCHEMA",
@@ -22,6 +23,7 @@ __all__ = [
 GROUP_SERVER: Final = "vro-server"
 GROUP_WORKFLOWS: Final = "vro-workflows"
 GROUP_EXECUTIONS: Final = "vro-executions"
+GROUP_LIBRARY: Final = "vro-library"
 
 #: Parameter schema of a read that takes no input.
 NO_PARAMS_SCHEMA: Final[dict[str, Any]] = {

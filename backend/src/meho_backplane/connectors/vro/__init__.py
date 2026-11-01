@@ -6,10 +6,12 @@
 Importing this package registers :class:`VroConnector` against the v2
 connector registry under ``(product="vro", version="9.0",
 impl_id="vro-rest")`` plus the product wildcard, and queues the typed-op
-registrar so the seven Orchestrator reads land in ``endpoint_descriptor``
-before the first dispatch. The ``>=8.0,<10.0`` range keeps Orchestrator
-8.x (on its own or inside Aria Automation 8.x) and the VCF 9 Operations
-orchestrator on one class: both serve the same ``/vco/api`` paths.
+registrar so the ten Orchestrator reads and the two changes (run a
+workflow, cancel a run) land in ``endpoint_descriptor`` before the first
+dispatch. Importing it also registers the run preview builder. The
+``>=8.0,<10.0`` range keeps Orchestrator 8.x (on its own or inside Aria
+Automation 8.x) and the VCF 9 Operations orchestrator on one class: both
+serve the same ``/vco/api`` paths.
 """
 
 from typing import Final

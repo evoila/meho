@@ -523,6 +523,18 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # flight-recorder spans, collapses the broadcast to aggregate-only and
         # keeps a waiting approval's params in the encrypted handoff store.
         "keycloak.user.check_login",
+        # The ESXi SNMP agent change. Its params carry only a Vault *path*
+        # (``community_secret_ref``); the community string goes only into the
+        # ``ReconfigureSnmpAgent`` request BODY. The pin keeps that body out of
+        # the flight recorder and the params out of the broadcast.
+        "vmware.composite.host.snmp.set",
+        # The ESXi advanced settings change. A setting that holds a secret takes
+        # its value from a Vault *path* (``value_secret_ref``); the value goes
+        # into the ``UpdateOptions`` request BODY and comes back in the
+        # ``QueryOptions`` read-back. The pin keeps both bodies out of the
+        # flight recorder, the params out of the broadcast, and a waiting
+        # approval's params in the encrypted handoff store.
+        "vmware.composite.host.advanced_settings.set",
         # The host local-user create and password change, and the host's
         # Active Directory join. The params carry only a Vault path
         # (``password_secret_ref``); the password goes only into the call to

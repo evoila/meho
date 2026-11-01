@@ -69,6 +69,10 @@ from meho_backplane.connectors.vmware_rest.host_access import (
     HOST_ACCESS_GROUP_KEY,
     HOST_ACCESS_WHEN_TO_USE,
 )
+from meho_backplane.connectors.vmware_rest.host_certificate import (
+    HOST_CERTIFICATES_GROUP_KEY,
+    HOST_CERTIFICATES_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.host_security import (
     HOST_SECURITY_GROUP_KEY,
     HOST_SECURITY_WHEN_TO_USE,
@@ -274,6 +278,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     CONTENT_LIBRARY_GROUP_KEY: CONTENT_LIBRARY_WHEN_TO_USE,
     # Shared with the two typed licence reads: the same key and text.
     LICENSE_GROUP_KEY: LICENSE_WHEN_TO_USE,
+    # Shared with the typed host certificate and TPM reads: the same key and text.
+    HOST_CERTIFICATES_GROUP_KEY: HOST_CERTIFICATES_WHEN_TO_USE,
     # #4383: shared with the typed read vmware.alarm.triggered.list, which
     # registers under the same group key with the same text.
     ALARMS_GROUP_KEY: ALARMS_WHEN_TO_USE,

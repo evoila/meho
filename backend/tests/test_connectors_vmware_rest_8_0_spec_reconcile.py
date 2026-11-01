@@ -240,9 +240,15 @@ _VI_JSON_8_0_FILES: dict[str, str] = {
 #: VI-JSON methods MEHO calls that an 8.0 VI/JSON file does not have. Each
 #: entry names the updates that lack it and why the call is still safe there.
 #: The lane fails when a file lacks a method that is not listed here, and when
-#: a listed method is in fact in the file. Empty today: the vSAN methods, which
-#: no 8.0 VI/JSON file has, go as SOAP on 8.0 (#4441, checked below).
-_NOT_IN_8_0_VI_JSON: dict[str, tuple[frozenset[str], str]] = {}
+#: a listed method is in fact in the file. The vSAN methods, which no 8.0
+#: VI/JSON file has, go as SOAP on 8.0 (#4441, checked below).
+_NOT_IN_8_0_VI_JSON: dict[str, tuple[frozenset[str], str]] = {
+    "POST:/HostCertificateManager/{moId}/NotifyAffectedServices": (
+        frozenset({"8.0u1", "8.0u2"}),
+        "In the API from 8.0 U3 on. host.certificate.install checks the vCenter "
+        "version and does not send it on an older vCenter.",
+    ),
+}
 
 #: ``POST:/<Type>/{moId}/<Method>`` -- the governed sub-op form.
 _SUB_OP_RE = re.compile(r"^POST:/([A-Z][A-Za-z0-9]*)/\{moId\}/([A-Za-z_][A-Za-z0-9_]*)$")

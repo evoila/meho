@@ -496,9 +496,11 @@ words stay, but these values are hidden: the value of a `NAME=VALUE` or
 `--name=value` whose name holds a secret word (`PGPASSWORD=...`,
 `AWS_SECRET_ACCESS_KEY=...`, `--password=...`, any length; the value is the
 rest of the shell word, quotes, escapes and text joined after a closing
-quote included, so `"PGPASSWORD=x"suffix` hides `suffix` too, and the
-commands after the word stay visible; a quoted shell string, `sh -c "..."`,
-is read as its own command line), the argument after a secret flag (`--password x`, `--token x`, `-p x`; the whole list
+quote included, so `"PGPASSWORD=x"suffix` hides `suffix` too; an unquoted
+shell operator, `;` `&` `|` `<` `>` `(` `)`, ends the word, so
+`PGPASSWORD=x;id` keeps `id`, and the commands after the word stay
+visible; a quoted shell string, `sh -c "..."`, is read as its own command
+line), the argument after a secret flag (`--password x`, `--token x`, `-p x`; the whole list
 item or the whole shell word, quotes and backslash escapes included, also
 when the flag ends `command` and the value starts `args`), the password in
 `user:password` after `-u` or `--user`, the password in a URL that carries

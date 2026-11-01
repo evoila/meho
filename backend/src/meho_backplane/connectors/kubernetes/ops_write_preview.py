@@ -51,9 +51,11 @@ What is never shown
   ``--name=value`` whose name holds a secret word (``PGPASSWORD=...``,
   ``AWS_SECRET_ACCESS_KEY=...``, ``--password=...``, any length; the value
   is the rest of the shell word, quotes, escapes and text joined after a
-  closing quote included, so ``"PGPASSWORD=x"suffix`` hides ``suffix`` too,
-  and the commands after the word stay visible; a quoted shell string,
-  ``sh -c "..."``, is read as its own command line), the
+  closing quote included, so ``"PGPASSWORD=x"suffix`` hides ``suffix`` too;
+  an unquoted shell operator, ``;`` ``&`` ``|`` ``<`` ``>`` ``(`` ``)``, ends
+  the word, so ``PGPASSWORD=x;id`` keeps ``id``, and the commands after the
+  word stay visible; a quoted shell string, ``sh -c "..."``, is read as its
+  own command line), the
   argument after a secret flag (``--password x``, ``--token x``, ``-p x``;
   the whole list item, or the whole shell word in a shell string, quotes
   and backslash escapes included, also when the flag ends ``command`` and
@@ -187,19 +189,27 @@ _COMMAND_SECRET_WORDS = ("PASS", "PWD", "SECRET", "TOKEN", "KEY", "CREDENTIAL", 
 _USER_FLAGS = frozenset({"u", "user"})
 
 
-#: Regex for one shell word, read the way a POSIX shell reads it. A word is
-#: bare text, escaped characters (``\\ `` and ``\\"`` are part of the word, not
-#: an end of it), single-quoted parts and double-quoted parts in which
-#: ``\\"`` does not close the quote, in any mix. So ``"PGPASSWORD=x"suffix`` is
-#: one word, as it is for the shell. A quote that is never closed runs to the
-#: end of the string, as in a shell.
-_SHELL_WORD = r"""(?:[^\s'"\\]+|\\(?:[\s\S]|\Z)|'[^']*(?:'|\Z)|"(?:[^"\\]|\\[\s\S])*(?:"|\Z))+"""
+#: The characters that end a shell word when they are not quoted or escaped:
+#: the shell's operators (``;``, ``&&``, ``|``, ``2>&1``, ``( )``).
+_OPERATOR_CHARS = "|&;()<>"
 
-#: One token of a shell string: whitespace, or a shell word in which a quoted
-#: or escaped part may hold spaces (``--password 'my phrase'``,
-#: ``--password my\\ phrase``). Joined back, the tokens give the string as
-#: it was.
-_TOKEN = re.compile(rf"""\s+|{_SHELL_WORD}|\S+""")
+#: Regex for one shell word, read the way a POSIX shell reads it. A word is
+#: bare text up to whitespace or an operator, escaped characters (``\\ ``,
+#: ``\\;`` and ``\\"`` are part of the word, not an end of it), single-quoted
+#: parts and double-quoted parts in which ``\\"`` does not close the quote, in
+#: any mix. So ``"PGPASSWORD=x"suffix`` is one word and ``PGPASSWORD=x;id``
+#: is two, as for the shell. A quote that is never closed runs to the end of
+#: the string, as in a shell.
+_SHELL_WORD = (
+    rf"""(?:[^\s'"\\{_OPERATOR_CHARS}]+|\\(?:[\s\S]|\Z)|'[^']*(?:'|\Z)|"""
+    r""""(?:[^"\\]|\\[\s\S])*(?:"|\Z))+"""
+)
+
+#: One token of a shell string: whitespace, a run of operator characters, or
+#: a shell word in which a quoted or escaped part may hold spaces
+#: (``--password 'my phrase'``, ``--password my\\ phrase``). Joined back,
+#: the tokens give the string as it was.
+_TOKEN = re.compile(rf"""\s+|[{_OPERATOR_CHARS}]+|{_SHELL_WORD}|\S+""")
 
 #: A shell word that is one quoted part and nothing else: a shell string, as
 #: the one after ``sh -c``, or a quoted value.
@@ -288,27 +298,39 @@ def _hide_command_text(text: str, pending: str | None) -> tuple[str, str | None]
     text is the flag that waits at its end, for the next item. For each
     shell word, in this order:
 
+    * An unquoted shell operator (``;``, ``&&``, ``|``) ends the command
+      before it: a flag that still waits for its value gets none, and the
+      next word is a new command, shown.
     * After a secret flag, the whole word is the value: hidden.
     * A word that is one quoted part and starts with a secret-named
       assignment (``"PGPASSWORD=a b"``) is that assignment: hidden whole.
+      Not after ``-c``: there it is a shell string.
     * Any other word that is one quoted part is read as its own command
-      line (``sh -c "tool --password=x run"``), so its words stay.
+      line (``sh -c "tool --password=x run"``,
+      ``sh -c "PGPASSWORD=x; id"``), so its words stay.
     * A word that holds a secret-named assignment anywhere (``PGPASSWORD=x``,
       ``"PGPASSWORD=x"suffix``, ``--env=PGPASSWORD=x``) is hidden from the
       ``NAME=`` to its end.
     * A secret flag makes the next word its value.
     """
     words = _TOKEN.findall(text)
+    previous = ""
     for index, word in enumerate(words):
         if word.isspace():
             continue
+        if word[0] in _OPERATOR_CHARS:
+            pending = None
+            previous = ""
+            continue
+        previous, before = word, previous
         if pending is not None and not word.startswith("-"):
             words[index] = _hide_flag_value(pending, word)
             pending = None
             continue
         pending = None
         assignment = _secret_assignment(word)
-        if _QUOTED_STRING.fullmatch(word) and (assignment is None or assignment.start() != 1):
+        shell_string = assignment is None or assignment.start() != 1 or before == "-c"
+        if _QUOTED_STRING.fullmatch(word) and shell_string:
             inner, pending = _hide_command_text(word[1:-1], None)
             words[index] = f"{word[0]}{inner}{word[0]}"
             continue
@@ -331,11 +353,12 @@ def _hide_command_secrets(parts: list[Any]) -> list[Any]:
 
     The words stay, so the approver still reads what runs. Hidden are: the
     rest of a shell word after a ``NAME=`` (or ``--name=``) with a
-    secret-shaped name, the password in a URL, tokens with a known vendor
-    prefix, the argument after a secret-shaped flag (``--password x``,
-    ``-p x``) and the password in ``user:password`` after ``-u`` or
-    ``--user``. A flag and its value may be two list items or two words of
-    one string (``sh -c "..."``). The argument after a flag is hidden
+    secret-shaped name (an unquoted shell operator ends the word, so
+    ``PGPASSWORD=x;id`` keeps ``id``), the password in a URL, tokens with a
+    known vendor prefix, the argument after a secret-shaped flag
+    (``--password x``, ``-p x``) and the password in ``user:password`` after
+    ``-u`` or ``--user``. A flag and its value may be two list items or two
+    words of one string (``sh -c "..."``). The argument after a flag is hidden
     whole: the whole list item, or the whole shell word in a string, quotes
     and backslash escapes included (``"a\\" b"``, ``a\\ b``), so a password
     with a space or a quote in it does not leak in part.

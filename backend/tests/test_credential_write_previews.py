@@ -320,6 +320,9 @@ _URL_WITH_PASSWORD = f"https://bob:{_SHORT}@example.invalid"  # trufflehog:ignor
         (["-c", f"mytool --password={_SHORT}\\ phrase run"], "run"),
         (["-c", f"PGPASSWORD='{_SHORT} phrase pg_dump"], "PGPASSWORD="),
         (["-c", f'env "PGPASSWORD={_SHORT}" pg_dump app'], "pg_dump app"),
+        (["-c", f"PGPASSWORD={_SHORT};id"], "***REDACTED***;id"),
+        (["-c", f"PGPASSWORD={_SHORT}&&pg_dump app|tee out"], "&&pg_dump app|tee out"),
+        (["-c", f"tool --password {_SHORT} 2>&1; id"], "2>&1; id"),
         (["-c", f"mysql -u root -p {_SHORT} app"], "mysql"),
         (["-c", f"curl -u admin:{_SHORT} https://example.invalid"], "admin:"),  # gitleaks:allow
         (["curl", "--user", f"admin:{_SHORT}", _URL_WITH_PASSWORD], "curl"),
@@ -392,8 +395,10 @@ async def test_k8s_job_create_keeps_the_commands_after_a_quoted_assignment() -> 
     """The whole shell word after ``NAME=`` is hidden; the commands after the word stay.
 
     Text joined to the word after a closing quote (``"PGPASSWORD=x"suffix``)
-    is part of the value for the shell, so it is hidden too. A quoted shell
-    string (``sh -c "..."``) is read as its own command line.
+    is part of the value for the shell, so it is hidden too. An unquoted
+    shell operator (``;``, ``&&``) ends the word, so the command after it
+    stays. A quoted shell string (``sh -c "..."``) is read as its own
+    command line, also when it starts with a secret assignment.
     """
     _, preview = await _preview(
         "k8s.job.create",
@@ -407,6 +412,9 @@ async def test_k8s_job_create_keeps_the_commands_after_a_quoted_assignment() -> 
                     f"env 'PGPASSWORD={_SHORT} phrase' pg_dump app",
                     f'env "PGPASSWORD={_SHORT}"suffix pg_dump app',
                     f"env PGPASSWORD='{_SHORT}'suffix pg_dump app",
+                    f"PGPASSWORD={_SHORT};id",
+                    f'env "PGPASSWORD={_SHORT};id" pg_dump',
+                    f'sh -c "PGPASSWORD={_SHORT}; id" && echo done',
                     f'sh -c "pg_dump --password={_SHORT} app" && echo done',
                     f"sh -c 'curl --user=admin:{_SHORT} x.invalid' && echo done",  # gitleaks:allow
                 ],
@@ -417,14 +425,17 @@ async def test_k8s_job_create_keeps_the_commands_after_a_quoted_assignment() -> 
     assert _SHORT not in json.dumps(container)
     assert "phrase" not in json.dumps(container)
     assert "suffix" not in json.dumps(container)
-    assert container["args"][:4] == [
+    assert container["args"][:7] == [
         'env "PGPASSWORD=***REDACTED***" pg_dump app',
         "env 'PGPASSWORD=***REDACTED***' pg_dump app",
         'env "PGPASSWORD=***REDACTED***" pg_dump app',
         "env PGPASSWORD=***REDACTED*** pg_dump app",
+        "PGPASSWORD=***REDACTED***;id",
+        'env "PGPASSWORD=***REDACTED***" pg_dump',
+        'sh -c "PGPASSWORD=***REDACTED***; id" && echo done',
     ]
-    assert container["args"][4].endswith(' app" && echo done')
-    assert container["args"][5] == (
+    assert container["args"][7].endswith(' app" && echo done')
+    assert container["args"][8] == (
         "sh -c 'curl --user=admin:***REDACTED*** x.invalid' && echo done"  # gitleaks:allow
     )
 

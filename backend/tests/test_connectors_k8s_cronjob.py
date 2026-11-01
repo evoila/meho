@@ -339,6 +339,8 @@ async def test_cronjob_run_preview_shows_job_template_and_active_jobs_not_values
         f"tool --password {_SHORT}\\ phrase run",
         f'env "PGPASSWORD={_SHORT}" pg_dump app',
         f'env "PGPASSWORD={_SHORT}"suffix pg_dump app',
+        f"PGPASSWORD={_SHORT};id",
+        f'sh -c "PGPASSWORD={_SHORT}; id" && echo done',
         f'sh -c "pg_dump --password={_SHORT} app" && echo done',
     ]
     ctx = PreviewContext(
@@ -377,11 +379,13 @@ async def test_cronjob_run_preview_shows_job_template_and_active_jobs_not_values
     assert container["image"] == "registry.example/backup:1.2"
     assert container["command"] == ["run-backup", "--password"]
     assert container["args"][0] == "***REDACTED***"
-    assert container["args"][-5:-1] == [
+    assert container["args"][-7:-1] == [
         "tool --password ***REDACTED*** run",
         "tool --password ***REDACTED*** run",
         'env "PGPASSWORD=***REDACTED***" pg_dump app',
         'env "PGPASSWORD=***REDACTED***" pg_dump app',
+        "PGPASSWORD=***REDACTED***;id",
+        'sh -c "PGPASSWORD=***REDACTED***; id" && echo done',
     ]
     assert container["args"][-1].endswith(' app" && echo done')
     assert container["securityContext"] == {"privileged": True}

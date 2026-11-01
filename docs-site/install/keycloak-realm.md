@@ -21,6 +21,7 @@ the end, then return to the trail.
 | 8 protocol mappers | On both public clients | Make issued tokens carry the claims the backplane validates |
 | 4 default client scopes | On both public clients | Including the `basic` scope that carries the mandatory `sub` claim |
 | `mcp:read`, `mcp:execute`, `mcp:admin` | Client scopes, optional on `meho-mcp` | The scopes MEHO's MCP clients ask for at login |
+| `offline_access` | Built-in client scope, optional on both public clients | The long login that renews itself |
 | `MEHO-Readers`, `MEHO-Operators`, `MEHO-SA-Operators`, `MEHO-Admins`, `MEHO-Approvers` | Top-level groups with attributes | Give each person their tenant and their role |
 | `MEHO-Platform-Admins` | Top-level group with one attribute | Rights across all tenants, for the people who run MEHO |
 | A user in `MEHO-Admins` and `MEHO-Platform-Admins` | Realm user | The first admin: approves device-code logins and operates MEHO |
@@ -74,6 +75,8 @@ In the realm that hosts `meho-backplane`, create a client with:
 | **OAuth 2.0 Device Authorization Grant** | **On** | This *is* `meho login` ([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)). |
 | Valid redirect URIs | `http://127.0.0.1:*` | Only for the fresh sign-in. The CLI listens on 127.0.0.1 with a random port ([RFC 8252](https://www.rfc-editor.org/rfc/rfc8252#section-7.3)). Do not add other addresses. |
 | Web origins | (none) | The CLI is not a web page. |
+| `offline_access` client scope | Assign as **Optional** | `meho login` asks for it by default, so the login renews itself. See [How long each login lasts](#how-long-each-login-lasts). |
+| Client Offline Session Idle (attribute `client.offline.session.idle.timeout`) | **`172800`** seconds (48 hours) | The login ends after 48 hours without use. Without it, the realm's Offline Session Idle applies (30 days by default). Set it on the **Advanced** tab of the client. |
 
 ### Why approve needs a fresh sign-in
 
@@ -270,13 +273,42 @@ differences:
 | Device grant | Off | Not used by MCP clients. |
 | Valid redirect URIs | **Loopback only** — `http://localhost:<port>/callback` (Claude Code) plus `http://localhost:<port>/oauth/callback` and its `http://127.0.0.1:<port>/oauth/callback` twin (the `mcp-remote` shim) | MEHO is internal-only, so there is **no** public `claude.ai` Custom-Connector redirect. `<port>` matches the client's configured callback port; the exact per-client values are in [Connect clients](../clients/index.md). |
 | PKCE challenge method | `S256` | Spec-required for public clients. |
-| `offline_access` client scope | Assign as **Optional** | The MEHO Claude Code plugin, the Claude Desktop bundle, and Claude Code's own HTTP client ask for it, so the login lasts past the realm's SSO idle limit. Keycloak refuses a login that asks for a scope the client does not offer: it answers `invalid_scope` and issues no token. `meho-cli` does not get this scope by default. |
+| `offline_access` client scope | Assign as **Optional** | The MEHO Claude Code plugin, the Claude Desktop bundle, and Claude Code's own HTTP client ask for it, so the login lasts past the realm's SSO idle limit. Keycloak refuses a login that asks for a scope the client does not offer: it answers `invalid_scope` and issues no token. |
 | `mcp:read`, `mcp:execute`, `mcp:admin` client scopes | Create each, then assign as **Optional** | The Claude Code plugin and the Claude Desktop bundle ask for `mcp:read mcp:execute` at every login, and for `mcp:admin` when you turn on the operator tools. Keycloak does not ship these scopes. Create each one under **Client scopes → Create client scope**: protocol **OpenID Connect**, **Include in token scope** On. Then add all three to `meho-mcp` as **Optional**. If one is missing, Keycloak refuses the login with `invalid_scope`. `meho-cli` does not get them. |
 | Client Offline Session Idle (attribute `client.offline.session.idle.timeout`) | **`172800`** seconds (48 hours) | Sets how long the MCP login lasts with no use. Without it, the realm's Offline Session Idle applies (30 days by default). If you set up the client by hand, set it on the **Advanced** tab of the client, or with `kcadm.sh update clients/<client-uuid> -r <realm> -s 'attributes."client.offline.session.idle.timeout"=172800'`. |
 
 The eight mappers and four default scopes apply identically. Which MCP
 client uses which flow — and everything else client-side — is the
 [Connect clients](../clients/index.md) section's territory.
+
+## How long each login lasts
+
+| Client | Who uses it | Login | It ends |
+|---|---|---|---|
+| `meho-cli` | `meho login` (the default) | Long login (`offline_access`). It renews itself. | After 48 hours without use, or after 7 days at most. |
+| `meho-cli` | `meho login --offline=false` | Short login | At the realm's SSO Session Idle limit (30 minutes by default). |
+| `meho-mcp` | The Claude Code plugin, the Claude Desktop bundle, a plain HTTP entry in Claude Code's `.mcp.json` | Long login (`offline_access`). It renews itself. | After 48 hours without use, or after 7 days at most. |
+| `meho-web` | The web console | Browser session | At the realm's SSO Session limits. |
+
+The 7-day maximum is set in MEHO's built-in login setup (realm setting
+**Offline Session Max Limited** On, **Offline Session Max** 7 days). On
+your own Keycloak, turn on **Offline Session Max Limited** to get a
+maximum; Keycloak's default is 60 days.
+
+**To end a person's long login:** in the Keycloak admin console, open
+**Users**, then the person, then the **Consents** tab, and revoke the
+client (`meho-cli` or `meho-mcp`). The next renewal fails, and the CLI
+asks the person to run `meho login` again. With the Admin REST API:
+`DELETE /admin/realms/<realm>/users/<user-id>/consents/<client-id>`.
+The **Offline Access** tab of each client lists all long logins of
+that client.
+
+If the realm does not offer `offline_access` to `meho-cli` (an older
+realm), `meho login` logs in without it. It prints one line: the login
+ends after a short time without use, and how to fix the realm. MEHO's
+built-in login setup gets the scope at the next upgrade. On your own
+Keycloak, assign it as described in Step 2, or run
+`meho admin keycloak bootstrap-clients`.
 
 ### How long an MCP login lasts
 
@@ -302,6 +334,11 @@ Two more things must be true:
   `--mcp-offline-session-idle=<seconds>`. Each run sets the value again,
   so a value changed by hand goes back to 48 hours unless you pass the
   flag.
+- The same command also gives `meho-cli` the scope `offline_access` and a
+  48-hour offline idle limit. Pass `--cli-offline-access=<seconds>` for
+  another limit, or `--cli-offline-access=0` to leave `meho-cli` without
+  a long login. The `=0` run also removes a long login an earlier run
+  gave `meho-cli`; logins that ask for `offline_access` are then refused.
 
 ## The web console session
 

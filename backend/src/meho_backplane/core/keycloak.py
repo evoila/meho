@@ -14,6 +14,9 @@ running realm up to date through the Admin REST API:
   assignment of the realm file that the realm does not have yet;
 * it sets the secrets of the confidential clients from the ``<release>-core-…``
   Secrets, so Keycloak and the backplane always agree;
+* it adds the client attributes in ``ADDED_CLIENT_ATTRIBUTES`` (the idle
+  limit of a long login) to a client that does not have them yet, and
+  keeps a value that is there;
 * it makes the first admin and the second person with temporary passwords,
   stored in ``<release>-core-first-login``;
 * it makes the five role groups of every extra tenant in
@@ -74,6 +77,7 @@ from meho_backplane.core.secrets import (
 )
 
 __all__ = [
+    "ADDED_CLIENT_ATTRIBUTES",
     "ADMIN_CLIENT_ID",
     "ADMIN_SECRET_ENV",
     "BOOTSTRAP_ID_ENV",
@@ -123,6 +127,10 @@ OLD_ACCESS_ATTRIBUTES = ("tenant_id", "tenant_role", "approver")
 # differs from a shipped group only in case are refused.
 _TENANT_NAME = r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
 _RESERVED_TENANT_NAMES = frozenset({"sa", "platform", "ci"})
+
+# Client attributes the stage adds to a client that exists already, when
+# the client does not have them yet. A value that is there stays.
+ADDED_CLIENT_ATTRIBUTES = ("client.offline.session.idle.timeout",)
 
 # Seconds per request; the Job's backoffLimit decides whether it runs again.
 _HTTP_TIMEOUT_S = 30
@@ -335,18 +343,41 @@ class _Realm:
         url = f"{self.base}/clients/{found.data[0]['id']}"
         changes = await self._add_mappers(url, want)
         changes += await self._add_scopes(url, want, scope_ids)
-        if "secret" in want:
-            current = expect(
-                await self.admin.call("GET", url), 200, what=f"cannot read client {client_id}"
-            ).data
-            current["secret"] = want["secret"]
-            expect(
-                await self.admin.call("PUT", url, json=current),
-                204,
-                what=f"cannot set the secret of client {client_id}",
-            )
-            changes.append("secret set")
+        changes += await self._update_client(url, want)
         _say(f"client {client_id}: kept" + (f" ({', '.join(changes)})" if changes else ""))
+
+    async def _update_client(self, url: str, want: Mapping[str, Any]) -> list[str]:
+        """Set the secret, and add the attributes of ``ADDED_CLIENT_ATTRIBUTES`` that are missing.
+
+        An attribute the client has already keeps its value: an admin may have set it.
+        """
+        client_id = want["clientId"]
+        file_attributes = want.get("attributes") or {}
+        names = [name for name in ADDED_CLIENT_ATTRIBUTES if name in file_attributes]
+        if "secret" not in want and not names:
+            return []
+        current = expect(
+            await self.admin.call("GET", url), 200, what=f"cannot read client {client_id}"
+        ).data
+        attributes = current.get("attributes") or {}
+        changes: list[str] = []
+        for name in names:
+            if not attributes.get(name):
+                attributes[name] = file_attributes[name]
+                changes.append(f"attribute {name} added")
+        if changes:
+            current["attributes"] = attributes
+        if "secret" in want:
+            current["secret"] = want["secret"]
+            changes.append("secret set")
+        if not changes:
+            return []
+        expect(
+            await self.admin.call("PUT", url, json=current),
+            204,
+            what=f"cannot update client {client_id}",
+        )
+        return changes
 
     async def _add_mappers(self, url: str, want: Mapping[str, Any]) -> list[str]:
         changes: list[str] = []

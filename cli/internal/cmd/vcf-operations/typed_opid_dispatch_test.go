@@ -81,6 +81,12 @@ var typedOpCLICoverage = map[string]string{
 	"vrops.licensing.vcenter.query":       "",
 	"vrops.licensing.server.query":        "",
 	"vrops.licensing.assign":              "",
+	// VCF 9.1 fleet certificates and passwords: no CLI verb yet, agent surface only.
+	"vrops.fleet.certificate.list":    "",
+	"vrops.fleet.certificate.replace": "",
+	"vrops.fleet.password.list":       "",
+	"vrops.fleet.password.rotate":     "",
+	"vrops.fleet.request.get":         "",
 	// VCF 9.1 fleet roles: no CLI verb yet, agent surface only.
 	"vrops.fleet.role.list":      "",
 	"vrops.fleet.principal.find": "",

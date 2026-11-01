@@ -255,13 +255,19 @@ Steps of the realm stage, in order:
    existing group gets the attributes the file (or the tenant) names, when
    a value differs; its other attributes stay (output: `kept (attributes
    set)`). An existing client gets the mappers and the scope assignments
-   it lacks, and its secret is set when the file names one. Nothing is
-   deleted, and an existing mapper or scope is not changed.
+   it lacks, and its secret is set when the file names one. Its token
+   settings (`use.refresh.tokens`, `access.token.lifespan`) are set to the
+   values of the file when they differ (output: `kept (token settings
+   set)`); today only `meho-cli-approve` names a lifespan, and it gets no
+   refresh token. Nothing is deleted, and an existing mapper or scope is
+   not changed.
    Before the clients come the **login flows** of the realm file
    (`core/keycloak_flows.py`, #5515). Today that is one flow, `meho
    approval sign-in`: the password form, then the one-time code when the
    person has set one up. A missing flow is made with its steps; an
-   existing flow is kept as it is. A client that names a flow in
+   existing flow is kept as it is. When the steps or their requirements of
+   an existing flow differ from the file, the step prints `kept, but its
+   steps differ from the realm file`. A client that names a flow in
    `authenticationFlowBindingOverrides` (only `meho-cli-approve`) is bound
    to it (output: `kept (login flow set)`). Reading and making login flows
    needs `manage-realm`. Without it the step prints `not checked (no right

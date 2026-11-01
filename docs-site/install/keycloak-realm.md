@@ -97,7 +97,10 @@ sign-in:
 
 `meho approvals approve` opens the browser and asks for the password
 again (it sends `prompt=login` and `max_age=0`). It keeps the token in
-memory for this one run and never stores it. Reject needs no new
+memory for this one run and never stores it. The approval client gives
+no refresh token, and its access token lasts as long as the approval
+window. When the token runs out, the CLI says so and asks for a new
+sign-in. Reject needs no new
 sign-in. The web interface needs none either: the click is the proof.
 
 Create a second public client with these settings:
@@ -113,6 +116,8 @@ Create a second public client with these settings:
 | Valid redirect URIs | `http://127.0.0.1:*` | The CLI listens on 127.0.0.1 with a random port. Do not add other addresses. |
 | Web origins | (none) | The CLI is not a web page. |
 | `offline_access` | Not assigned | The approval sign-in never gives a long login. |
+| Use refresh tokens (**Advanced → OpenID Connect Compatibility Modes**) | **Off** | The sign-in gives one access token and no refresh token. |
+| Access Token Lifespan (**Advanced → Advanced settings**) | 15 minutes | As long as the approval window. If you change `config.freshSignInMaxAgeSeconds`, set the same time here. |
 
 Give it the default scopes of Step 4 and the mappers of Step 3, except
 `meho-mcp-audience`: its token is only for the approve call. The `basic`
@@ -139,9 +144,11 @@ People who sign in with a company login see its button on the form and
 click it.
 
 **On an existing realm.** `meho admin keycloak bootstrap-clients` creates
-`meho-cli-approve` and its login flow when you run it again. The Keycloak
-that ships with the MEHO chart creates the client on the next upgrade
-(the realm finishing job adds a client that is missing). The job makes
+`meho-cli-approve` and its login flow when you run it again, and sets
+the two token settings above on an existing `meho-cli-approve`. The
+Keycloak that ships with the MEHO chart creates the client on the next
+upgrade (the realm finishing job adds a client that is missing, and sets
+the two token settings on an existing one). The job makes
 the login flow only when its account `meho-admin` has the
 `manage-realm` role, which it has when the company login is on.
 Otherwise create the flow by hand as above. Until the client exists,

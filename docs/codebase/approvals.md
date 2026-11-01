@@ -2338,8 +2338,14 @@ redirect on `127.0.0.1` and a random port (RFC 8252 §7.3), and
 The token goes on `/decide` through a per-request editor. It stays in
 memory for this one run (`approvalSignIn`): it is never written to the
 token store, a file, an environment variable or the output.
-`auth.FreshSignInTokenSource` renews it in memory with its refresh token
-when it expires; the renewal keeps `auth_time`. One run reuses the
+The approval client gives no refresh token, and its access token lasts
+900 seconds, the default approval window. When the token runs out,
+`auth.FreshSignInTokenSource` returns `auth.ErrFreshSignInExpired`;
+`approvalSignIn.bearer` then prints "The approval sign-in has run out.
+Sign in again in the browser." (several-ids and in-order runs) and opens
+a new sign-in. Where an identity provider does give a refresh token, the
+source renews the token in memory with it; the renewal keeps
+`auth_time`. One run reuses the
 sign-in for several approves. Before a destructive request whose sign-in
 was already used, and after a destructive approve, it opens a new
 sign-in. When `/decide` still answers 401 with
@@ -2360,7 +2366,9 @@ question, as before.
 
 The Keycloak side — the public client `meho-cli-approve` with standard
 flow, PKCE and `http://127.0.0.1:*` only, no device flow, no
-`offline_access`, the claim mappers of `meho-cli` without the MCP
+`offline_access`, no refresh token (`use.refresh.tokens` `false`) and an
+access token that lasts 900 seconds (`access.token.lifespan`), the claim
+mappers of `meho-cli` without the MCP
 audience, and its own login flow `meho approval sign-in`
 (`authenticationFlowBindingOverrides.browser`) — is set by `meho admin keycloak bootstrap-clients`, the
 bundled realm `deploy/charts/meho/charts/keycloak/files/meho-realm.json`

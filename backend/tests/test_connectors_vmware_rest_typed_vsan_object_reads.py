@@ -23,11 +23,8 @@ from meho_backplane.connectors.vmware_rest.typed_ops import (
     VMWARE_TYPED_OPS,
     VMWARE_TYPED_WHEN_TO_USE_BY_GROUP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_vsan_common import VSAN_GROUP_KEY
 from meho_backplane.connectors.vmware_rest.typed_ops_vsan_objects import health_group
-from meho_backplane.connectors.vmware_rest.typed_ops_vsan_reads import (
-    VSAN_GROUP_KEY,
-    VSAN_READ_OPS,
-)
 from meho_backplane.operations._validate import validate_params
 from tests._vsan_wire import (
     BASE,
@@ -634,10 +631,12 @@ _OP_IDS = {
 }
 
 
+# The vSAN reads, as the typed-op registry collected them from their modules.
+VSAN_READ_OPS = tuple(op for op in VMWARE_TYPED_OPS if op.group_key == VSAN_GROUP_KEY)
+
+
 def test_the_six_reads_are_registered_typed_ops_in_one_group() -> None:
     assert {op.op_id for op in VSAN_READ_OPS} == _OP_IDS
-    registered = {op.op_id for op in VMWARE_TYPED_OPS}
-    assert registered >= _OP_IDS
     for op in VSAN_READ_OPS:
         assert op.group_key == VSAN_GROUP_KEY
         assert op.safety_level == "safe"

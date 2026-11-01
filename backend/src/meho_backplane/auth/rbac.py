@@ -339,7 +339,7 @@ def require_human_principal(
 def require_fresh_approval_sign_in(
     operator: Operator = Depends(verify_jwt_and_bind),
 ) -> ApprovalAuth:
-    """FastAPI dependency: the token must show a fresh sign-in to approve (#3979).
+    """FastAPI dependency: the token must come from a fresh approval sign-in (#3979, #5515).
 
     Returns the :class:`~meho_backplane.auth.approval_sign_in.ApprovalAuth`
     the route passes on to the approvals service, or raises ``401`` with

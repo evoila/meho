@@ -1092,16 +1092,17 @@ def test_create_submit_expired_token_refreshes_and_persists() -> None:
     assert refresh == "refresh-token-rotated"
 
 
-def test_create_submit_refresh_unavailable_redirects_html_to_login() -> None:
-    """AC #3 (HTML): refresh fails -> 302 /ui/auth/login, never raw token_expired.
+def test_create_submit_refresh_unavailable_redirects_htmx_to_login() -> None:
+    """AC #3 (htmx): refresh fails -> 204 + HX-Redirect to login, never raw token_expired.
 
     The refresh token is expired / revoked, so Keycloak answers the
     grant with ``invalid_grant``. The seam fails closed to
     ``session_expired``, which the app-level handler maps to a login
-    redirect carrying ``return_to`` for an HTML ``Accept`` -- the
-    documented recovery path, not a silent no-op and not the raw
-    ``token_expired`` body the reporter saw. The dead session cookie is
-    cleared on the way out.
+    redirect. The submit is an htmx request, so the redirect is the
+    ``HX-Redirect`` header (#5518), and ``return_to`` is the page the
+    person was on (``HX-Current-URL``). Not a silent no-op and not the
+    raw ``token_expired`` body the reporter saw. The dead session
+    cookie is cleared on the way out.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     keypair, jwks = _make_keypair_and_jwks()
@@ -1119,15 +1120,18 @@ def test_create_submit_refresh_unavailable_redirects_html_to_login() -> None:
             response = client.post(
                 "/ui/memory/create",
                 data={"scope": "user", "body": "lost to an expired session"},
-                headers={**_csrf_headers(csrf), "accept": "text/html,application/xhtml+xml"},
+                headers={
+                    **_csrf_headers(csrf),
+                    "HX-Current-URL": "https://console.example/ui/memory/create",
+                },
             )
     finally:
         mock.stop()
-    assert response.status_code == 302, response.text
-    location = response.headers["location"]
+    assert response.status_code == 204, response.text
+    location = response.headers["hx-redirect"]
     assert location.startswith("/ui/auth/login?return_to=")
-    # The return_to round-trips the original write path (percent-encoded)
-    # so the operator lands back where they were after re-auth.
+    # The return_to is the page (percent-encoded) so the operator lands
+    # back where they were after re-auth.
     return_to = parse_qs(urlparse(location).query)["return_to"][0]
     assert return_to == "/ui/memory/create"
     assert "Max-Age=0" in response.headers["set-cookie"]
@@ -1139,7 +1143,7 @@ def test_create_submit_refresh_unavailable_redirects_html_to_login() -> None:
 def test_create_submit_refresh_unavailable_keeps_json_shape_for_fetch() -> None:
     """AC #3 (fetch): refresh fails -> 401 session_expired, never raw token_expired.
 
-    A fetch/HTMX caller without an HTML ``Accept`` gets the structured
+    A fetch caller (not htmx) without an HTML ``Accept`` gets the structured
     ``session_expired`` body (with the dead cookie cleared), not the raw
     ``token_expired`` the upstream API emitted -- so the client can key a
     re-login on the stable ``session_expired`` code. Asserts the raw
@@ -1158,7 +1162,7 @@ def test_create_submit_refresh_unavailable_keeps_json_shape_for_fetch() -> None:
             response = client.post(
                 "/ui/memory/create",
                 data={"scope": "user", "body": "fetch caller"},
-                headers={**_csrf_headers(csrf), "accept": "application/json"},
+                headers={"X-CSRF-Token": csrf, "accept": "application/json"},
             )
     finally:
         mock.stop()

@@ -375,6 +375,7 @@ from meho_backplane.operations._validate import (
     compute_audit_params_hash,
     compute_params_hash,
     ingested_schema_for_validation,
+    params_check_errors,
     policy_gate,
     validate_params,
 )
@@ -3405,6 +3406,12 @@ def _params_error(
         return result_invalid_op_schema(op_id, exc.missing_ref, _elapsed_ms(started))
     if validation_errors:
         return result_invalid_params(op_id, validation_errors, _elapsed_ms(started))
+    # The op's own params check (``register_params_check``): a problem the
+    # schema cannot say, refused here, before the policy gate can park the
+    # call with its params in the approval queue.
+    problems = params_check_errors(op_id, params)
+    if problems:
+        return result_invalid_params(op_id, problems, _elapsed_ms(started))
     return None
 
 

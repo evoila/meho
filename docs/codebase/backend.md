@@ -801,7 +801,8 @@ this stage it exposes:
   — RFC 8707 §2 audience binding, so a token issued for the HTTP API
   surface cannot be replayed at `/mcp` and vice versa. On every 401
   the wrapper attaches the RFC 9728 §5.1
-  `WWW-Authenticate: Bearer resource_metadata="<url>"` header so MCP
+  `WWW-Authenticate: Bearer resource_metadata="<url>", scope="<scopes>"`
+  header (the scopes are `MCP_SCOPES_SUPPORTED`, with `offline_access`) so MCP
   clients can discover the resource-metadata document and walk the
   OAuth 2.1 + PKCE handshake against Keycloak. The unauthenticated
   metadata document lives at `/.well-known/oauth-protected-resource`

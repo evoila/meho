@@ -41,6 +41,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vsan_common import (
     CLUSTER_PARAM_SCHEMA,
     FROM_CACHE_PARAM_SCHEMA,
     VSAN_GROUP_KEY,
+    VSAN_WHEN_TO_USE,
     as_int,
     as_text,
     cluster_ref,
@@ -64,10 +65,12 @@ if TYPE_CHECKING:
 
 __all__ = [
     "HEALTH_GROUP_HEALTHY",
+    "TYPED_OPS",
     "VMWARE_VSAN_OBJECT_HEALTH_OP",
     "VMWARE_VSAN_RESYNC_STATUS_OP",
     "VSAN_QUERY_OBJECT_IDENTITIES",
     "VSAN_QUERY_SYNCING_OBJECTS",
+    "WHEN_TO_USE_BY_GROUP",
     "health_group",
     "vsan_object_health_impl",
     "vsan_resync_status_impl",
@@ -368,3 +371,6 @@ VMWARE_VSAN_OBJECT_HEALTH_OP: Final[VmwareTypedOp] = VmwareTypedOp(
     requires_approval=False,
     llm_instructions=OBJECT_HEALTH_LLM_INSTRUCTIONS,
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_VSAN_RESYNC_STATUS_OP, VMWARE_VSAN_OBJECT_HEALTH_OP)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {VSAN_GROUP_KEY: VSAN_WHEN_TO_USE}

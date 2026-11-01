@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``0130_add_web_session_tenant_choice`` (#5240).
+"""Behavioural tests for ``0131_add_web_session_tenant_choice`` (#5240).
 
 The migration adds two boolean columns to ``web_session``. These tests
 pin: a row written before the upgrade gets ``tenant_chosen = true`` and
 ``can_switch_tenant = false`` (it was made for one tenant, as before),
 and ``downgrade()`` drops both columns.
 
-Every step targets this migration's own revision (``0130``) and its
-``down_revision`` (``0129``), never ``head``.
+Every step targets this migration's own revision (``0131``) and its
+``down_revision`` (``0130``), never ``head``.
 """
 
 from __future__ import annotations
@@ -27,14 +27,14 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0130"
-_DOWN_REVISION = "0129"
+_REVISION = "0131"
+_DOWN_REVISION = "0130"
 _COLUMNS = {"tenant_chosen", "can_switch_tenant"}
 
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
-    db_path = tmp_path / "migration_0130.db"
+    db_path = tmp_path / "migration_0131.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

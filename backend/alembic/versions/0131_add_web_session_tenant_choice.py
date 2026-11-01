@@ -3,8 +3,8 @@
 
 """Add ``web_session.tenant_chosen`` and ``web_session.can_switch_tenant`` (#5240).
 
-Revision ID: 0130
-Revises: 0129
+Revision ID: 0131
+Revises: 0130
 Create Date: 2026-10-31
 
 Two boolean columns for the web interface's current tenant:
@@ -30,8 +30,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0130"
-down_revision: str | None = "0129"
+revision: str = "0131"
+down_revision: str | None = "0130"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -20,9 +20,17 @@ and name the status read ``fleet.request.get`` (in :mod:`.lifecycle`). They
 never wait for the end.
 
 Before an upgrade, an upgrade pre-check or an environment create, the
-handler reads the request list and looks for a running request of the same
-kind on the same object. When one runs, it returns that request's id and
-starts nothing. This is a help, not a lock.
+handler reads the request list and looks for a running request on the same
+object. A request of the same kind makes it return ``already_running`` with
+that request's id; a running upgrade when a pre-check is asked (or the
+other way round) makes it return ``blocked``. Both start nothing. This is a
+help, not a lock.
+
+An environment spec must name every secret by its locker reference. The
+check (:func:`spec_secret_problem`) is registered as the params check of
+both environment ops, so the dispatcher refuses a clear secret before the
+call can wait for approval; the handlers check again before the vendor
+call.
 
 The handlers sit on a mixin so the connector module stays small. The
 dispatcher rebinds each one to the live connector through
@@ -43,12 +51,14 @@ import httpx
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
+from meho_backplane.operations._validate import params_problem, register_params_check
 
 __all__ = [
     "FLEET_STATUS_READ_OP_ID",
     "VENDOR_CALLS",
     "FleetChangeHandlers",
     "environment_delete_preview",
+    "environment_spec_check",
     "spec_secret_problem",
 ]
 
@@ -82,12 +92,23 @@ VENDOR_CALLS: Final[tuple[tuple[str, str], ...]] = (
 #: Request states that mean "not ended yet".
 _RUNNING_STATES: Final = frozenset({"CREATED", "SUBMITTED", "INPROGRESS", "IN_PROGRESS"})
 
-#: Words in a request's type, name or reason that mark its kind.
-_UPGRADE_KIND: Final = ("upgrade",)
-_CREATE_KIND: Final = ("create_environment", "createenvironment", "create environment")
+#: Words in a request's type, name or reason that mark its kind. A request
+#: with an upgrade word and a check word is an upgrade pre-check; with an
+#: upgrade word alone it is an upgrade.
+_UPGRADE_WORDS: Final = ("upgrade",)
+_CHECK_WORDS: Final = ("validat", "precheck", "pre-check", "pre_check")
+_CREATE_WORDS: Final = ("create_environment", "createenvironment", "create environment")
+
+#: The kinds of request a start looks for, by name.
+_KIND_UPGRADE: Final = "upgrade"
+_KIND_UPGRADE_PRECHECK: Final = "upgrade pre-check"
+_KIND_CREATE: Final = "environment create"
 
 #: A value that names a secret in the appliance's own store (the locker).
 _LOCKER_PREFIX: Final = "locker:"
+
+#: Transport errors: the call may or may not have reached the appliance.
+_TRANSPORT_ERRORS: Final = (httpx.TransportError,)
 
 if TYPE_CHECKING:
     # The connector also inherits HttpConnector; naming it as the base here
@@ -121,11 +142,11 @@ def _accepted(request_id: Any, **extra: Any) -> dict[str, Any]:
     }
 
 
-def _already_running(request: dict[str, Any], **extra: Any) -> dict[str, Any]:
-    """The answer when a request of the same kind already runs on the object."""
+def _running_answer(status: str, request: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    """The answer when a running request on the object stops the start."""
     rid = str(request.get("vmid") or request.get("requestId") or "")
     return {
-        "status": "already_running",
+        "status": status,
         "request_id": rid,
         "request_state": request.get("state"),
         "status_read": _status_read(rid),
@@ -156,18 +177,27 @@ def _input_values(value: Any) -> set[str]:
     return set()
 
 
-def _matches(request: dict[str, Any], kind: tuple[str, ...], words: tuple[str, ...]) -> bool:
-    """True when *request* runs, is of *kind*, and its ``inputMap`` holds every one of *words*.
+def _request_kind(request: dict[str, Any]) -> str | None:
+    """The kind of *request* by its type, name and reason, or ``None`` for another kind."""
+    label = " ".join(
+        str(request.get(key) or "") for key in ("requestType", "requestName", "requestReason")
+    ).lower()
+    if any(word in label for word in _CREATE_WORDS):
+        return _KIND_CREATE
+    if any(word in label for word in _UPGRADE_WORDS):
+        if any(word in label for word in _CHECK_WORDS):
+            return _KIND_UPGRADE_PRECHECK
+        return _KIND_UPGRADE
+    return None
+
+
+def _runs_on(request: dict[str, Any], words: tuple[str, ...]) -> bool:
+    """True when *request* runs and its ``inputMap`` holds every one of *words*.
 
     Each word must equal a whole value in the ``inputMap``: a request for
     ``Production-DR`` does not match ``Production``. An empty word never matches.
     """
     if str(request.get("state") or "").upper() not in _RUNNING_STATES:
-        return False
-    label = " ".join(
-        str(request.get(key) or "") for key in ("requestType", "requestName", "requestReason")
-    ).lower()
-    if not any(word in label for word in kind):
         return False
     if not words or not all(words):
         return False
@@ -201,6 +231,23 @@ def spec_secret_problem(value: Any, path: str = "spec") -> str | None:
     return None
 
 
+def environment_spec_check(params: dict[str, Any]) -> dict[str, Any] | None:
+    """The params check of the environment ops: a clear secret in ``spec`` is refused.
+
+    Runs in the dispatcher right after the schema check, before the call can
+    wait for approval, so a clear secret never reaches the approval queue.
+    """
+    problem = spec_secret_problem(params.get("spec"))
+    if problem is None:
+        return None
+    where, _, why = problem.partition(" ")
+    return params_problem(
+        where,
+        "a locker reference (locker:...), never a secret value" if "locker" in why else why,
+        "Store the secret in the appliance locker and give its reference in the spec.",
+    )
+
+
 def _upgrade_body(params: dict[str, Any], *, pre_validate: bool) -> dict[str, Any]:
     """The vendor ``UpgradeProductRequestDTO`` for an upgrade or its pre-check."""
     license_ref = params.get("license_ref")
@@ -219,8 +266,10 @@ def _upgrade_body(params: dict[str, Any], *, pre_validate: bool) -> dict[str, An
     }
 
 
-def _vendor_error(exc: httpx.HTTPStatusError) -> str:
-    """The vendor's error text of *exc*: its ``message``, or the raw body."""
+def _vendor_error(exc: Exception) -> str:
+    """The error text of *exc*: the vendor's ``message``, the raw body, or the transport error."""
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return f"{type(exc).__name__}: {exc}"[:500]
     try:
         body = exc.response.json()
     except ValueError:
@@ -239,12 +288,15 @@ class FleetChangeHandlers(_Base):
         self,
         target: VcfFleetTargetLike,
         operator: Operator,
-        kind: tuple[str, ...],
+        kinds: tuple[str, ...],
         words: tuple[str, ...],
     ) -> dict[str, Any] | None:
-        """The first running request of *kind* that names all *words*, or ``None``."""
+        """The first running request of one of *kinds* that names all *words*, or ``None``."""
         payload: Any = await self._get_json(target, _REQUESTS_PATH, operator=operator)
-        return next((r for r in _request_rows(payload) if _matches(r, kind, words)), None)
+        return next(
+            (r for r in _request_rows(payload) if _request_kind(r) in kinds and _runs_on(r, words)),
+            None,
+        )
 
     async def _start_upgrade(
         self,
@@ -253,14 +305,25 @@ class FleetChangeHandlers(_Base):
         params: dict[str, Any],
         *,
         path: str,
+        kind: str,
         pre_validate: bool,
     ) -> dict[str, Any]:
         env_id, product_id = params["environment_id"], params["product_id"]
         body = _upgrade_body(params, pre_validate=pre_validate)
-        running = await self._running_request(target, operator, _UPGRADE_KIND, (env_id, product_id))
+        running = await self._running_request(
+            target, operator, (_KIND_UPGRADE, _KIND_UPGRADE_PRECHECK), (env_id, product_id)
+        )
         ids = {"environment_id": env_id, "product_id": product_id}
         if running is not None:
-            return _already_running(running, **ids)
+            running_kind = _request_kind(running)
+            if running_kind == kind:
+                return _running_answer("already_running", running, **ids)
+            return _running_answer(
+                "blocked",
+                running,
+                reason=f"an {running_kind} of this product is still running; wait for it",
+                **ids,
+            )
         url = path.format(environmentId=env_id, productId=product_id)
         answer = await self._post_json(target, url, operator=operator, json=body)
         return _accepted(answer.get("requestId"), **ids)
@@ -278,6 +341,7 @@ class FleetChangeHandlers(_Base):
             target,
             params,
             path=_UPGRADE_PATH,
+            kind=_KIND_UPGRADE,
             pre_validate=not params.get("skip_precheck", False),
         )
 
@@ -286,7 +350,12 @@ class FleetChangeHandlers(_Base):
     ) -> dict[str, Any]:
         """``fleet.product.upgrade.precheck`` — start the pre-check of an upgrade."""
         return await self._start_upgrade(
-            operator, target, params, path=_UPGRADE_PRECHECK_PATH, pre_validate=True
+            operator,
+            target,
+            params,
+            path=_UPGRADE_PRECHECK_PATH,
+            kind=_KIND_UPGRADE_PRECHECK,
+            pre_validate=True,
         )
 
     async def binary_list(
@@ -307,14 +376,16 @@ class FleetChangeHandlers(_Base):
         the binaries it found) and ``map`` (``POST product-binaries/download``,
         a vendor job). A failed step stops the run; the answer lists the steps
         that ran, the step that failed with the vendor's error, and the steps
-        that did not run. Nothing is undone.
+        that did not run. When the appliance does not answer the ``map`` step
+        (a time-out or a lost connection), the answer says the mapping outcome
+        is ``unknown``: the files may be mapping. Nothing is undone.
         """
         source = {"sourceLocation": params["source_location"], "sourceType": params["source_type"]}
         try:
             found: Any = await self._post_json(
                 target, _BINARIES_PATH, operator=operator, json=source
             )
-        except httpx.HTTPStatusError as exc:
+        except (httpx.HTTPStatusError, *_TRANSPORT_ERRORS) as exc:
             return _step_failure([], "find", _vendor_error(exc), ["map"])
         rows = [row for row in (found if isinstance(found, list) else []) if isinstance(row, dict)]
         names = set(params.get("names") or [])
@@ -330,7 +401,9 @@ class FleetChangeHandlers(_Base):
         try:
             answer = await self._post_json(target, _BINARIES_MAP_PATH, operator=operator, json=body)
         except httpx.HTTPStatusError as exc:
-            return _step_failure([find_step], "map", _vendor_error(exc), [])
+            return _step_failure([find_step], "map", _vendor_error(exc), [], binaries=body)
+        except _TRANSPORT_ERRORS as exc:
+            return _step_unknown([find_step], "map", _vendor_error(exc), binaries=body)
         steps = [find_step, {"step": "map", "result": "accepted"}]
         return _accepted(answer.get("requestId"), binaries=body, steps=steps)
 
@@ -350,9 +423,9 @@ class FleetChangeHandlers(_Base):
         """``fleet.environment.create`` — start creating an environment from a spec."""
         spec = _checked_spec(params)
         name = str(spec.get("environmentName") or "")
-        running = await self._running_request(target, operator, _CREATE_KIND, (name,))
+        running = await self._running_request(target, operator, (_KIND_CREATE,), (name,))
         if running is not None:
-            return _already_running(running, environment_name=name)
+            return _running_answer("already_running", running, environment_name=name)
         answer = await self._post_json(target, _ENVIRONMENTS_PATH, operator=operator, json=spec)
         return _accepted(answer.get("requestId"), environment_name=name)
 
@@ -387,7 +460,7 @@ def _checked_spec(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _step_failure(
-    ran: list[dict[str, Any]], failed: str, error: str, not_run: list[str]
+    ran: list[dict[str, Any]], failed: str, error: str, not_run: list[str], **extra: Any
 ) -> dict[str, Any]:
     """The answer of a multi-step change that stopped at step *failed*."""
     return {
@@ -397,6 +470,20 @@ def _step_failure(
             {"step": failed, "result": "failed", "error": error},
             *({"step": step, "result": "not_run"} for step in not_run),
         ],
+        **extra,
+    }
+
+
+def _step_unknown(ran: list[dict[str, Any]], step: str, error: str, **extra: Any) -> dict[str, Any]:
+    """The answer when the appliance did not answer *step*: its outcome is unknown."""
+    return {
+        "status": "unknown",
+        "steps": [*ran, {"step": step, "result": "unknown", "error": error}],
+        "reason": (
+            f"the appliance did not answer the {step} step; it may have run. Read "
+            "fleet.request.list and fleet.binary.list before you call again"
+        ),
+        **extra,
     }
 
 
@@ -456,3 +543,5 @@ async def environment_delete_preview(ctx: PreviewContext) -> dict[str, Any] | No
 
 
 register_preview_builder("fleet.environment.delete", environment_delete_preview)
+register_params_check("fleet.environment.precheck", environment_spec_check)
+register_params_check("fleet.environment.create", environment_spec_check)

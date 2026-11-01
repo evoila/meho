@@ -10,10 +10,16 @@ ids.
 
 * Registration: each op has the risk and approval the Task table names.
 * Every change waits for approval when a person calls it.
+* A spec with a clear secret is refused by the dispatcher before the call
+  can wait for approval: no approval row, no vendor call.
+* The status read a start names (``fleet.request.get``) dispatches on the
+  typed registration alone, with no spec ingested.
 * The approved path (the handler called directly): the wire call, the
   ``accepted`` answer with the request id and the status read, the running
-  request that stops a second start, and the vendor error text.
-* ``fleet.binary.map`` reports its steps when the second step fails.
+  request that stops a second start (a running pre-check blocks an upgrade
+  and the other way round), and the vendor error text.
+* ``fleet.binary.map`` reports its steps when a step fails, and says the
+  outcome is unknown when the appliance does not answer the second step.
 * ``fleet.environment.delete``: the preview reads the environment and fills
   the blast radius, refuses a missing one, and the call is refused without a
   matching ``preview_hash``; an agent is refused.
@@ -32,6 +38,7 @@ from uuid import UUID
 import httpx
 import pytest
 import respx
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -39,13 +46,16 @@ from meho_backplane.connectors.registry import clear_registry, register_connecto
 from meho_backplane.connectors.vcf_fleet import FLEET_CONNECTOR_ID, VcfFleetConnector
 from meho_backplane.connectors.vcf_fleet.changes import (
     environment_delete_preview,
+    environment_spec_check,
     spec_secret_problem,
 )
 from meho_backplane.connectors.vcf_fleet.changes_ops import (
     CHANGE_OPS,
     CHANGE_WHEN_TO_USE_BY_GROUP,
 )
+from meho_backplane.connectors.vcf_fleet.typed_ops import FLEET_TYPED_OPS
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._errors import result_connector_error
 from meho_backplane.operations._handler_resolve import (
@@ -57,6 +67,7 @@ from meho_backplane.operations._preview import (
     PreviewContext,
     blast_radius_missing_reason,
 )
+from meho_backplane.operations._validate import _PARAMS_CHECKS
 from meho_backplane.settings import get_settings
 
 _HOST = "fleet-lifecycle.test.invalid"
@@ -223,6 +234,17 @@ def test_destructive_delete_has_a_preview_builder() -> None:
     assert _PREVIEW_BUILDERS["fleet.environment.delete"] is environment_delete_preview
 
 
+def test_environment_ops_register_the_secret_check() -> None:
+    for op_id in ("fleet.environment.precheck", "fleet.environment.create"):
+        assert _PARAMS_CHECKS[op_id] is environment_spec_check
+
+
+def test_the_status_read_every_start_names_is_registered() -> None:
+    """The connector itself brings ``fleet.request.get`` and ``fleet.request.list``."""
+    op_ids = {op.op_id for op in FLEET_TYPED_OPS}
+    assert {"fleet.request.get", "fleet.request.list"} <= op_ids
+
+
 # ---------------------------------------------------------------------------
 # Every change waits for approval
 # ---------------------------------------------------------------------------
@@ -341,6 +363,35 @@ async def test_upgrade_returns_the_running_request_and_starts_nothing() -> None:
     await connector.aclose()
 
 
+@pytest.mark.parametrize(
+    ("handler", "running_type", "status"),
+    [
+        ("product_upgrade", "PRODUCT_UPGRADE_PRE_VALIDATE", "blocked"),
+        ("product_upgrade_precheck", "PRODUCT_UPGRADE", "blocked"),
+        ("product_upgrade_precheck", "PRODUCT_UPGRADE_PRE_VALIDATE", "already_running"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_running_upgrade_or_precheck_of_the_product_stops_the_start(
+    handler: str, running_type: str, status: str
+) -> None:
+    """A pre-check is not an upgrade: it blocks the upgrade, it does not stand in for it."""
+    connector = _connector()
+    input_map = {"environmentId": _ENV, "productId": _PRODUCT}
+    rows = [_request_row("INPROGRESS", running_type, input_map)]
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        mock.get(_REQUESTS_URL).respond(200, json=rows)
+        start = mock.route(method="POST").respond(200, json={"requestId": _REQ})
+        result = await getattr(connector, handler)(_operator(), _target(), dict(_UPGRADE_PARAMS))
+    assert result["status"] == status
+    assert result["request_id"] == _RUNNING_REQ
+    assert result["status_read"]["params"] == {"request_id": _RUNNING_REQ}
+    if status == "blocked":
+        assert "still running" in result["reason"]
+    assert not start.called
+    await connector.aclose()
+
+
 @pytest.mark.asyncio
 async def test_upgrade_ignores_a_running_request_on_another_environment() -> None:
     connector = _connector()
@@ -389,6 +440,34 @@ async def test_upgrade_refuses_a_licence_key_value() -> None:
             await connector.product_upgrade(_operator(), _target(), params)
     assert not start.called
     await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_the_status_read_of_a_start_dispatches_without_a_spec(
+    _stub_embedding: None, session: AsyncSession
+) -> None:
+    """A start, then its returned status call: both run on the typed registration."""
+    instance = await _register_and_bind()
+    try:
+        async with respx.mock(base_url=_BASE) as mock:
+            mock.get(_REQUESTS_URL).respond(200, json=[])
+            mock.post(_UPGRADE_URL).respond(200, json={"requestId": _REQ})
+            mock.get(f"{_REQUESTS_URL}/{_REQ}").respond(
+                200, json={"vmid": _REQ, "state": "INPROGRESS", "requestType": "PRODUCT_UPGRADE"}
+            )
+            started = await instance.product_upgrade(_operator(), _target(), dict(_UPGRADE_PARAMS))
+            result = await dispatch(
+                operator=_operator(),
+                connector_id=FLEET_CONNECTOR_ID,
+                op_id=started["status_read"]["op_id"],
+                target=_target(),
+                params=started["status_read"]["params"],
+            )
+        assert result.status == "ok", result.error
+        assert result.result["request_id"] == _REQ
+        assert result.result["outcome"] == "running"
+    finally:
+        await instance.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -454,6 +533,44 @@ async def test_binary_map_failure_at_step_one_lists_the_step_not_run() -> None:
         {"step": "find", "result": "failed", "error": "made-up vendor failure text"},
         {"step": "map", "result": "not_run"},
     ]
+    assert not map_route.called
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_binary_map_timeout_at_step_two_says_the_outcome_is_unknown() -> None:
+    """A lost answer of the map step keeps the step report; the map may have run."""
+    connector = _connector()
+    async with respx.mock(base_url=_BASE) as mock:
+        mock.post(_BINARIES_URL).respond(200, json=_FOUND)
+        mock.post(f"{_BINARIES_URL}/download").mock(side_effect=httpx.ReadTimeout("timed out"))
+        result = await connector.binary_map(
+            _operator(), _target(), {"source_location": "/data/depot", "source_type": "NFS"}
+        )
+    assert result["status"] == "unknown"
+    assert result["steps"][0] == {"step": "find", "result": "ok", "found": 2}
+    assert result["steps"][1]["step"] == "map"
+    assert result["steps"][1]["result"] == "unknown"
+    assert "ReadTimeout" in result["steps"][1]["error"]
+    assert result["binaries"] == _FOUND
+    assert "fleet.binary.list" in result["reason"]
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_binary_map_connection_loss_at_step_one_lists_the_step_not_run() -> None:
+    connector = _connector()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        mock.post(_BINARIES_URL).mock(side_effect=httpx.ConnectError("no route"))
+        map_route = mock.post(f"{_BINARIES_URL}/download").respond(200, json={"requestId": _REQ})
+        result = await connector.binary_map(
+            _operator(), _target(), {"source_location": "/data/depot", "source_type": "NFS"}
+        )
+    assert result["status"] == "failed"
+    assert result["steps"][0]["step"] == "find"
+    assert result["steps"][0]["result"] == "failed"
+    assert "ConnectError" in result["steps"][0]["error"]
+    assert result["steps"][1] == {"step": "map", "result": "not_run"}
     assert not map_route.called
     await connector.aclose()
 
@@ -559,6 +676,54 @@ async def test_environment_spec_with_a_clear_secret_is_refused(bad: dict[str, An
 
 def test_locker_references_pass_the_secret_check() -> None:
     assert spec_secret_problem(_SPEC) is None
+    assert environment_spec_check({"spec": _SPEC}) is None
+
+
+def test_the_params_check_names_the_field_and_not_the_value() -> None:
+    bad = {**_SPEC, "infrastructure": {"properties": {"defaultPassword": "plain-text-pw"}}}
+    problem = environment_spec_check({"spec": bad})
+    assert problem is not None
+    assert problem["path"] == "spec.infrastructure.properties.defaultPassword"
+    assert problem["validator"] == "params_check"
+    assert "plain-text-pw" not in json.dumps(problem)
+
+
+@pytest.mark.parametrize("op_id", ["fleet.environment.precheck", "fleet.environment.create"])
+@pytest.mark.asyncio
+async def test_a_clear_secret_is_refused_before_the_call_waits_for_approval(
+    _stub_embedding: None, session: AsyncSession, op_id: str
+) -> None:
+    """The dispatcher refuses the spec as invalid params: no approval row, no vendor call."""
+    instance = await _register_and_bind()
+    bad = {**_SPEC, "infrastructure": {"properties": {"defaultPassword": "plain-text-pw"}}}
+    rows_before = (
+        await session.execute(select(func.count()).select_from(ApprovalRequest))
+    ).scalar_one()
+    try:
+        async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+            route = mock.route().respond(200, json={"requestId": _REQ})
+            result = await dispatch(
+                operator=_operator(),
+                connector_id=FLEET_CONNECTOR_ID,
+                op_id=op_id,
+                target=_target(),
+                params={"spec": bad},
+            )
+        assert result.status == "error", result
+        assert result.extras["error_code"] == "invalid_params"
+        assert result.extras["validation_errors"][0]["validator"] == "params_check"
+        assert "plain-text-pw" not in str(result.extras)
+        assert not route.called
+    finally:
+        await instance.aclose()
+    rows_after = (
+        await session.execute(select(func.count()).select_from(ApprovalRequest))
+    ).scalar_one()
+    assert rows_after == rows_before
+    stored = (
+        await session.execute(select(ApprovalRequest).where(ApprovalRequest.op_id == op_id))
+    ).scalars()
+    assert all("plain-text-pw" not in json.dumps(row.params or {}) for row in stored)
 
 
 @pytest.mark.asyncio

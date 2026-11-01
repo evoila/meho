@@ -45,16 +45,24 @@ CHANGE_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
 _ACCEPTED_PROPERTIES: dict[str, Any] = {
     "status": {
         "type": "string",
-        "enum": ["accepted", "already_running"],
+        "enum": ["accepted", "already_running", "blocked"],
         "description": (
             "accepted: the appliance took the job. already_running: a request of the "
-            "same kind runs on the same object, so nothing new was started."
+            "same kind runs on the same object, so nothing new was started. blocked: "
+            "a running upgrade (or upgrade pre-check) of the product stops the start; "
+            "see reason."
         ),
     },
     "request_id": {"type": "string", "description": "The vendor's request id of the job."},
     "request_state": {
         "type": "string",
-        "description": "Only with already_running: the vendor state of the running request.",
+        "description": (
+            "With already_running or blocked: the vendor state of the running request."
+        ),
+    },
+    "reason": {
+        "type": "string",
+        "description": "With blocked: which running request stops the start.",
     },
     "status_read": {
         "type": "object",
@@ -127,10 +135,11 @@ _UPGRADE_IDS_OUT: dict[str, Any] = {
 }
 
 _LOST_REPLY = (
-    "After a lost reply, do not start again blindly: read fleet.request.get with the "
-    "request id you have, or call this operation again (it returns the running request "
-    "instead of a second one). Use MEHO's async mode (async: true) so the request id is "
-    "kept under a run handle."
+    "After a lost reply, do not start again blindly. With the request id, read "
+    "fleet.request.get. Without one, read the saved async result (run async: true so "
+    "the request id is kept under a run handle), or fleet.request.list: a request of "
+    "this kind on this product, running or ended, is yours. Start again only when "
+    "there is none. A second call finds a running request, but not one that ended."
 )
 
 _UPGRADE_PRECHECK = FleetTypedOp(
@@ -327,11 +336,18 @@ _BINARY_MAP = FleetTypedOp(
         "properties": {
             "status": {
                 "type": "string",
-                "enum": ["accepted", "failed"],
-                "description": "accepted: mapping started. failed: a step failed; see steps.",
+                "enum": ["accepted", "failed", "unknown"],
+                "description": (
+                    "accepted: mapping started. failed: a step failed; see steps. unknown: "
+                    "the appliance did not answer the map step; it may be mapping."
+                ),
             },
             "request_id": {"type": "string", "description": "The vendor request id of the map."},
             "status_read": _ACCEPTED_PROPERTIES["status_read"],
+            "reason": {
+                "type": "string",
+                "description": "With unknown: what happened and what to read before a new call.",
+            },
             "binaries": {
                 "type": "array",
                 "description": "The binaries sent to the map step.",
@@ -346,7 +362,7 @@ _BINARY_MAP = FleetTypedOp(
                         "step": {"type": "string", "description": "find or map."},
                         "result": {
                             "type": "string",
-                            "description": "ok, accepted, failed or not_run.",
+                            "description": "ok, accepted, failed, unknown or not_run.",
                         },
                         "found": {"type": "integer", "description": "find: files found."},
                         "error": {"type": "string", "description": "The vendor's error text."},
@@ -371,12 +387,14 @@ _BINARY_MAP = FleetTypedOp(
         "output_shape": (
             "{status, request_id, status_read, binaries: [{filePath, name, type}], "
             "steps: [{step, result, found?, error?}]}. A failed step stops the run; "
-            "steps that ran stay done."
+            "steps that ran stay done. unknown: the map step got no answer."
         ),
         "next_step": (
             "Read fleet.request.get with request_id until COMPLETED, then fleet.binary.list. "
-            "After a lost reply, read fleet.binary.list first and map only what is missing."
+            "After a lost reply or an unknown map step, read fleet.request.list and "
+            "fleet.binary.list first and map only what is missing."
         ),
+        "result_scalars": {"keys": ["status", "reason", "request_id", "status_read"]},
     },
 )
 
@@ -505,9 +523,10 @@ _ENV_CREATE = FleetTypedOp(
         ),
         "next_step": (
             "Read fleet.request.get with request_id until COMPLETED or FAILED (a deploy "
-            "takes long), then fleet.environment.list. After a lost reply, read "
-            "fleet.environment.list and the request first; call again only if neither "
-            "shows the environment. Use async: true to keep the request id."
+            "takes long), then fleet.environment.list. After a lost reply, read the saved "
+            "async result (run async: true so the request id is kept), fleet.request.list "
+            "and fleet.environment.list first; call again only when none shows the "
+            "environment or a create request for it, running or ended."
         ),
     },
 )

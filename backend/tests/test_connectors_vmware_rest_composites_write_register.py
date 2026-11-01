@@ -174,6 +174,17 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vcenter.appliance.deploy",
     "vmware.composite.vcenter.install",
     "vmware.composite.vcenter.deployment.answer",
+    # Host membership (#4349): add / move / disconnect dangerous, connect
+    # caution, remove destructive; all wait for approval.
+    "vmware.composite.host.add",
+    "vmware.composite.host.move",
+    "vmware.composite.host.connect",
+    "vmware.composite.host.disconnect",
+    "vmware.composite.host.remove",
+    # Host NTP, DNS and syslog: dangerous + approval.
+    "vmware.composite.host.ntp.set",
+    "vmware.composite.host.dns.set",
+    "vmware.composite.host.syslog.set",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -361,9 +372,37 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
         "meho_backplane.connectors.vmware_rest.composites._vcenter_install."
         "vcenter_install_composite"
     ),
+    "vmware.composite.host.add": (
+        "meho_backplane.connectors.vmware_rest.composites._host_add.host_add_composite"
+    ),
+    "vmware.composite.host.move": (
+        "meho_backplane.connectors.vmware_rest.composites._host_membership.host_move_composite"
+    ),
+    "vmware.composite.host.connect": (
+        "meho_backplane.connectors.vmware_rest.composites._host_membership.host_connect_composite"
+    ),
+    "vmware.composite.host.disconnect": (
+        "meho_backplane.connectors.vmware_rest.composites._host_membership."
+        "host_disconnect_composite"
+    ),
+    "vmware.composite.host.remove": (
+        "meho_backplane.connectors.vmware_rest.composites._host_remove.host_remove_composite"
+    ),
     "vmware.composite.vcenter.deployment.answer": (
         "meho_backplane.connectors.vmware_rest.composites._vcenter_answer."
         "vcenter_deployment_answer_composite"
+    ),
+    "vmware.composite.host.ntp.set": (
+        "meho_backplane.connectors.vmware_rest.composites._host_config_writes."
+        "host_ntp_set_composite"
+    ),
+    "vmware.composite.host.dns.set": (
+        "meho_backplane.connectors.vmware_rest.composites._host_config_writes."
+        "host_dns_set_composite"
+    ),
+    "vmware.composite.host.syslog.set": (
+        "meho_backplane.connectors.vmware_rest.composites._host_config_writes."
+        "host_syslog_set_composite"
     ),
     "vmware.composite.guest.customization_spec.create": (
         "meho_backplane.connectors.vmware_rest.composites._write."
@@ -486,8 +525,16 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vcenter.appliance.deploy": "vcenter_install",
     "vmware.composite.vcenter.install": "vcenter_install",
     "vmware.composite.vcenter.deployment.answer": "vcenter_install",
+    "vmware.composite.host.add": "host",
+    "vmware.composite.host.move": "host",
+    "vmware.composite.host.connect": "host",
+    "vmware.composite.host.disconnect": "host",
+    "vmware.composite.host.remove": "host",
     "vmware.composite.host.evacuate": "host",
     "vmware.composite.host.maintenance.exit": "host",
+    "vmware.composite.host.ntp.set": "host",
+    "vmware.composite.host.dns.set": "host",
+    "vmware.composite.host.syslog.set": "host",
     "vmware.composite.host.detach_from_vds": "host",
     "vmware.composite.network.portgroup.create": "networking",
     "vmware.composite.network.portgroup.security.set": "networking",
@@ -705,6 +752,7 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
         "vmware.composite.vm.disks.consolidate",
         "vmware.composite.content_library.create",
         "vmware.composite.content_library.item.upload",
+        "vmware.composite.host.connect",
     }
     for row in rows:
         if row.op_id in (
@@ -724,6 +772,8 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
             # The VM snapshot deletes.
             "vmware.composite.vm.snapshot.delete",
             "vmware.composite.vm.snapshot.delete_all",
+            # The host remove (#4349).
+            "vmware.composite.host.remove",
         ):
             expected_level = "destructive"
         elif row.op_id in caution_ops:
@@ -1220,6 +1270,24 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "answer_not_allowed",
             "answer_failed",
             "answer_unknown",
+        },
+        # Host membership (#4349): the add answers accepted at once.
+        "vmware.composite.host.add": {
+            "accepted",
+            "already_added",
+            "already_running",
+            "parent_not_found",
+            "needs_vcenter",
+            "start_failed",
+            "start_unknown",
+        },
+        "vmware.composite.host.remove": {
+            "removed",
+            "unchanged",
+            "precondition_failed",
+            "needs_vcenter",
+            "still_present",
+            "timeout",
         },
     }
     for op_id, expected_values in expected_status_values.items():

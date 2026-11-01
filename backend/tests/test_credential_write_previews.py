@@ -195,57 +195,313 @@ async def test_k8s_secret_create_without_labels_omits_them_from_preview() -> Non
     assert "annotations" not in preview
 
 
-@pytest.mark.asyncio
-async def test_k8s_job_create_shows_containers_not_env_values_or_command() -> None:
-    command = ["/bin/sh", "-c", f"curl -H 'Authorization: {_SECRET}' https://example.invalid"]
-    _, preview = await _preview(
-        "k8s.job.create",
-        {
-            "name": "migrate",
-            "namespace": "apps",
-            "spec": {
-                "template": {
-                    "spec": {
-                        "serviceAccountName": "migrator",
-                        "initContainers": [{"name": "wait", "image": "busybox:1.36"}],
-                        "containers": [
-                            {
-                                "name": "run",
-                                "image": "registry.example/migrate:2.1",
-                                "command": command,
-                                "env": [
-                                    {"name": "DB_PASSWORD", "value": _SECRET},
-                                    {
-                                        "name": "API_TOKEN",
-                                        "valueFrom": {
-                                            "secretKeyRef": {"name": "api", "key": "token"}
-                                        },
-                                    },
-                                ],
-                                "envFrom": [
-                                    {"secretRef": {"name": "db-creds"}},
-                                    {"configMapRef": {"name": "settings"}},
-                                ],
-                            }
-                        ],
-                    }
-                }
+def _job_params(container: dict[str, Any], **pod_fields: Any) -> dict[str, Any]:
+    """``k8s.job.create`` params for one container and the given pod fields."""
+    return {
+        "name": "node-check",
+        "namespace": "default",
+        "spec": {
+            "backoffLimit": 0,
+            "template": {
+                "spec": {"restartPolicy": "Never", "containers": [container], **pod_fields}
             },
         },
+    }
+
+
+@pytest.mark.asyncio
+async def test_k8s_job_create_shows_privileges_node_and_command_not_secrets() -> None:
+    """The approver sees what a privileged Job runs and where (#5259)."""
+    command = ["nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "uptime"]
+    effect, preview = await _preview(
+        "k8s.job.create",
+        _job_params(
+            {
+                "name": "check",
+                "image": "busybox:1.36",
+                "command": command,
+                "args": [f"--token={_SECRET}", "--verbose"],
+                "securityContext": {"privileged": True},
+                "env": [
+                    {"name": "API_TOKEN", "value": _SECRET},
+                    {
+                        "name": "DB_PASSWORD",
+                        "valueFrom": {"secretKeyRef": {"name": "db", "key": "password"}},
+                    },
+                ],
+                "envFrom": [{"configMapRef": {"name": "settings"}}],
+                "volumeMounts": [{"name": "host-root", "mountPath": "/host"}],
+            },
+            nodeName="node-01",
+            hostPID=True,
+            serviceAccountName="checker",
+            volumes=[{"name": "host-root", "hostPath": {"path": "/"}}],
+        ),
     )
     assert preview["resource"] == "job"
-    assert preview["name"] == "migrate"
-    assert preview["namespace"] == "apps"
-    assert preview["service_account_name"] == "migrator"
-    assert preview["init_containers"] == [
-        {"name": "wait", "image": "busybox:1.36", "env_var_names": [], "env_from": []}
+    assert preview["name"] == "node-check"
+    assert preview["namespace"] == "default"
+    spec = preview["spec"]
+    assert spec["backoffLimit"] == 0
+    pod = spec["template"]["spec"]
+    assert pod["nodeName"] == "node-01"
+    assert pod["hostPID"] is True
+    assert pod["serviceAccountName"] == "checker"
+    assert pod["volumes"] == [{"name": "host-root", "hostPath": {"path": "/"}}]
+    (container,) = pod["containers"]
+    assert container["image"] == "busybox:1.36"
+    assert container["command"] == command
+    assert container["args"][1] == "--verbose"
+    assert container["securityContext"] == {"privileged": True}
+    assert container["volumeMounts"] == [{"name": "host-root", "mountPath": "/host"}]
+    assert container["env"] == [
+        {"name": "API_TOKEN", "value": "***REDACTED***"},
+        {"name": "DB_PASSWORD", "valueFrom": {"secretKeyRef": {"name": "db", "key": "password"}}},
     ]
-    (container,) = preview["containers"]
-    assert container["name"] == "run"
-    assert container["image"] == "registry.example/migrate:2.1"
-    assert container["env_var_names"] == ["API_TOKEN", "DB_PASSWORD"]
-    assert container["env_from"] == ["secret:db-creds", "config_map:settings"]
-    assert container["command_bytes"] == sum(len(part.encode()) for part in command)
+    assert container["envFrom"] == [{"configMapRef": {"name": "settings"}}]
+    text = json.dumps(effect)
+    assert "privileged" in text
+    assert "nsenter" in text
+
+
+@pytest.mark.asyncio
+async def test_k8s_job_create_hides_secret_shapes_anywhere_in_the_spec() -> None:
+    """Secret-shaped text and probe header values are hidden at any depth."""
+    effect, preview = await _preview(
+        "k8s.job.create",
+        _job_params(
+            {
+                "name": "run",
+                "image": "registry.example/migrate:2.1",
+                "command": ["/bin/sh", "-c", f"curl -H 'Authorization: Bearer {_SECRET}' x"],
+                "args": [f"API_KEY={_SECRET}"],
+                "livenessProbe": {
+                    "httpGet": {
+                        "path": "/health",
+                        "port": 8080,
+                        "httpHeaders": [{"name": "X-Auth", "value": _SECRET}],
+                    }
+                },
+            },
+            initContainers=[
+                {"name": "wait", "image": "busybox:1.36", "env": [{"name": "K", "value": _SECRET}]}
+            ],
+        ),
+    )
+    pod = preview["spec"]["template"]["spec"]
+    (container,) = pod["containers"]
+    assert container["command"][:2] == ["/bin/sh", "-c"]
+    assert container["livenessProbe"]["httpGet"]["httpHeaders"] == [
+        {"name": "X-Auth", "value": "***REDACTED***"}
+    ]
+    assert pod["initContainers"][0]["env"] == [{"name": "K", "value": "***REDACTED***"}]
+    assert "made-up-secret" not in json.dumps(effect)
+
+
+#: A short made-up password: short values must be hidden too.
+_SHORT = "Xq9"
+#: A URL with a user and the short made-up password in it.
+_URL_WITH_PASSWORD = f"https://bob:{_SHORT}@example.invalid"  # trufflehog:ignore
+
+
+@pytest.mark.parametrize(
+    ("args", "kept"),
+    [
+        (["-c", f"export PGPASSWORD={_SECRET} && pg_dump -h db app"], "pg_dump"),
+        (["-c", f"MYSQL_ROOT_PASSWORD='{_SECRET} {_SHORT}' mysqld"], "mysqld"),
+        ([f"AWS_SECRET_ACCESS_KEY={_SECRET}", f"API_KEY={_SHORT}"], "AWS_SECRET_ACCESS_KEY"),
+        ([f"--password={_SHORT}", f"--token={_SHORT}", "--dry-run"], "--dry-run"),
+        (["--password", _SHORT, "--verbose"], "--verbose"),
+        (["--password", f"{_SHORT} phrase", "--verbose"], "--verbose"),
+        (["-c", f"mytool --password '{_SHORT} phrase' run"], "run"),
+        (["-c", f'mytool --password "{_SHORT} phrase" run'], "run"),
+        (["-c", f'mytool --password "{_SHORT}\\" phrase" run'], "run"),
+        (["-c", f"mytool --password {_SHORT}\\ phrase run"], "run"),
+        (["-c", f"mytool --password={_SHORT}\\ phrase run"], "run"),
+        (["-c", f"PGPASSWORD='{_SHORT} phrase pg_dump"], "PGPASSWORD="),
+        (["-c", f'env "PGPASSWORD={_SHORT}" pg_dump app'], "pg_dump app"),
+        (["-c", f"PGPASSWORD={_SHORT};id"], "***REDACTED***;id"),
+        (["-c", f"PGPASSWORD={_SHORT}&&pg_dump app|tee out"], "&&pg_dump app|tee out"),
+        (["-c", f"tool --password {_SHORT} 2>&1; id"], "2>&1; id"),
+        (["-c", f"mysql -u root -p {_SHORT} app"], "mysql"),
+        (["-c", f"curl -u admin:{_SHORT} https://example.invalid"], "admin:"),  # gitleaks:allow
+        (["curl", "--user", f"admin:{_SHORT}", _URL_WITH_PASSWORD], "curl"),
+        (["-c", f"git clone https://ghp_{_SECRET.replace('-', '')}@example.invalid/r"], "clone"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_k8s_job_create_hides_secret_values_on_the_command_line(
+    args: list[str], kept: str
+) -> None:
+    """A secret value on the command line is hidden; the command words stay."""
+    effect, preview = await _preview(
+        "k8s.job.create",
+        _job_params({"name": "run", "image": "busybox:1.36", "command": ["sh"], "args": args}),
+    )
+    text = json.dumps(effect)
+    assert _SHORT not in text
+    assert _SECRET.replace("-", "") not in text
+    assert kept in text
+    (container,) = preview["spec"]["template"]["spec"]["containers"]
+    assert len(container["args"]) == len(args)
+
+
+@pytest.mark.asyncio
+async def test_k8s_job_create_hides_the_whole_argument_after_a_secret_flag() -> None:
+    """A password with a space in it is hidden whole, as a list item or quoted."""
+    _, preview = await _preview(
+        "k8s.job.create",
+        _job_params(
+            {
+                "name": "run",
+                "image": "busybox:1.36",
+                "command": ["sh"],
+                "args": ["--password", f"{_SHORT} phrase", "-c", f"tool -p '{_SHORT} phrase' x"],
+            }
+        ),
+    )
+    (container,) = preview["spec"]["template"]["spec"]["containers"]
+    assert container["args"] == ["--password", "***REDACTED***", "-c", "tool -p ***REDACTED*** x"]
+
+
+@pytest.mark.parametrize(
+    ("shell_string", "shown"),
+    [
+        (
+            f'tool --password "{_SHORT}\\" phrase" run',
+            "tool --password ***REDACTED*** run",
+        ),
+        (f"tool --password {_SHORT}\\ phrase run", "tool --password ***REDACTED*** run"),
+        (
+            f"tool -p '{_SHORT}' --user admin:{_SHORT}\\ phrase run",  # gitleaks:allow
+            "tool -p ***REDACTED*** --user admin:***REDACTED*** run",
+        ),
+        (f'env "PGPASSWORD={_SHORT}" pg_dump app', 'env "PGPASSWORD=***REDACTED***" pg_dump app'),
+        (
+            f"env 'PGPASSWORD={_SHORT} phrase' pg_dump app",
+            "env 'PGPASSWORD=***REDACTED***' pg_dump app",
+        ),
+        (
+            f'env "PGPASSWORD={_SHORT}"suffix pg_dump app',
+            'env "PGPASSWORD=***REDACTED***" pg_dump app',
+        ),
+        (
+            f"env PGPASSWORD='{_SHORT}'suffix pg_dump app",
+            "env PGPASSWORD=***REDACTED*** pg_dump app",
+        ),
+        (f"PGPASSWORD={_SHORT};id", "PGPASSWORD=***REDACTED***;id"),
+        (f'env "PGPASSWORD={_SHORT};id" pg_dump', 'env "PGPASSWORD=***REDACTED***" pg_dump'),
+        (
+            f'sh -c "PGPASSWORD={_SHORT}; id" && echo done',
+            'sh -c "PGPASSWORD=***REDACTED***; id" && echo done',
+        ),
+        (
+            f'sh -c "pg_dump --password {_SHORT} app" && echo done',
+            'sh -c "pg_dump --password ***REDACTED*** app" && echo done',
+        ),
+        (
+            f"sh -c 'curl --user=admin:{_SHORT} x.invalid' && echo done",  # gitleaks:allow
+            "sh -c 'curl --user=admin:***REDACTED*** x.invalid' && echo done",  # gitleaks:allow
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_k8s_job_create_reads_the_string_after_dash_c_as_a_shell_command(
+    shell_string: str, shown: str
+) -> None:
+    """The item after ``-c`` is a shell command string: its secrets are shell words.
+
+    A secret value is one shell word, quotes and backslash escapes included,
+    and text joined after a closing quote (``"PGPASSWORD=x"suffix``) is part
+    of it. An unquoted shell operator (``;``, ``&&``) ends the word, so the
+    command after it stays. A quoted string after a nested ``sh -c`` is read
+    the same way.
+    """
+    _, preview = await _preview(
+        "k8s.job.create",
+        _job_params(
+            {
+                "name": "run",
+                "image": "busybox:1.36",
+                "command": ["sh", "-c"],
+                "args": [shell_string],
+            }
+        ),
+    )
+    (container,) = preview["spec"]["template"]["spec"]["containers"]
+    assert container["args"] == [shown]
+
+
+@pytest.mark.asyncio
+async def test_k8s_job_create_hides_a_direct_argument_to_its_end() -> None:
+    """A list item not after ``-c`` is one argument of the program: no shell splits it.
+
+    So a secret value in it runs to the end of the item. A shell operator
+    (``PGPASSWORD=x;tail``), a space or text joined after a closing quote
+    is part of the value, not a new command.
+    """
+    _, preview = await _preview(
+        "k8s.job.create",
+        _job_params(
+            {
+                "name": "run",
+                "image": "busybox:1.36",
+                "command": ["env", f"PGPASSWORD={_SHORT};tail", "pg_dump", "app"],
+                "args": [
+                    f"PGPASSWORD={_SHORT} tail",
+                    f'env "PGPASSWORD={_SHORT}"suffix pg_dump app',
+                    f"tool --password {_SHORT} tail",
+                    f"tool -p {_SHORT}\\ phrase run",
+                    "--dry-run",
+                ],
+            }
+        ),
+    )
+    (container,) = preview["spec"]["template"]["spec"]["containers"]
+    text = json.dumps(container)
+    assert _SHORT not in text
+    assert "tail" not in text
+    assert "suffix" not in text
+    assert "phrase" not in text
+    assert container["command"] == ["env", "PGPASSWORD=***REDACTED***", "pg_dump", "app"]
+    assert container["args"] == [
+        "PGPASSWORD=***REDACTED***",
+        'env "PGPASSWORD=***REDACTED***"',
+        "tool --password ***REDACTED***",
+        "tool -p ***REDACTED***",
+        "--dry-run",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_k8s_job_create_reads_command_and_args_as_one_command_line() -> None:
+    """A secret flag that ends ``command`` hides the first item of ``args``."""
+    _, preview = await _preview(
+        "k8s.job.create",
+        _job_params(
+            {
+                "name": "run",
+                "image": "busybox:1.36",
+                "command": ["tool", "--password"],
+                "args": [_SHORT, "--user", f"admin:{_SHORT}", "--verbose"],  # gitleaks:allow
+            }
+        ),
+    )
+    (container,) = preview["spec"]["template"]["spec"]["containers"]
+    assert container["command"] == ["tool", "--password"]
+    assert container["args"] == ["***REDACTED***", "--user", "admin:***REDACTED***", "--verbose"]
+
+
+@pytest.mark.asyncio
+async def test_k8s_job_create_keeps_plain_flags_on_the_command_line() -> None:
+    """Flags that carry no secret are shown as they are."""
+    command = ["nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "ps", "-u", "root"]
+    _, preview = await _preview(
+        "k8s.job.create",
+        _job_params({"name": "run", "image": "busybox:1.36", "command": command}),
+    )
+    (container,) = preview["spec"]["template"]["spec"]["containers"]
+    assert container["command"] == command
 
 
 @pytest.mark.parametrize(

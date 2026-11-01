@@ -2214,6 +2214,15 @@ so on the CLI) the token must prove it:
   The window counts from the sign-in: a refreshed token keeps the time of
   the first sign-in (RFC 9470 §6.1), and approving does not move it. A
   token without `auth_time` is refused.
+- **A sign-in that asked for credentials.** The token's `acr` claim
+  (`Operator.acr`) must be set and must not be `"0"`
+  (`asked_for_credentials`). With no level-of-authentication mapping,
+  Keycloak 26 gives `"1"` to a sign-in that asked for the password and
+  `"0"` to one that did not (`AcrProtocolMapper`, from the client
+  session; a refreshed token keeps it). The approval client's own login
+  flow `meho approval sign-in` has only the password form and the
+  conditional one-time code step, so its tokens carry `"1"` or a mapped
+  level. A token without `acr` is refused.
 - **One sign-in, several approvals.** Inside the window one sign-in may
   approve several requests. Each approval is still bound to one request
   id, so to its stored operation, parameters, target and version; the
@@ -2351,8 +2360,9 @@ question, as before.
 
 The Keycloak side — the public client `meho-cli-approve` with standard
 flow, PKCE and `http://127.0.0.1:*` only, no device flow, no
-`offline_access`, and the claim mappers of `meho-cli` without the MCP
-audience — is set by `meho admin keycloak bootstrap-clients`, the
+`offline_access`, the claim mappers of `meho-cli` without the MCP
+audience, and its own login flow `meho approval sign-in`
+(`authenticationFlowBindingOverrides.browser`) — is set by `meho admin keycloak bootstrap-clients`, the
 bundled realm `deploy/charts/meho/charts/keycloak/files/meho-realm.json`
 (new installs; the realm finishing job creates it on a running realm),
 installs), and `docs-site/install/keycloak-realm.md` Step 2. `list`

@@ -101,6 +101,8 @@ for approvals. So `meho approvals approve` opens your browser and asks
 for your password (and your authenticator code, if your realm asks for
 one).
 
+- The browser always asks for your password, even when you are signed in
+  to the console in the same browser.
 - One sign-in covers approvals for 15 minutes. In that time one run of
   the command can approve several requests.
 - An operation marked `destructive` needs a sign-in of its own. The

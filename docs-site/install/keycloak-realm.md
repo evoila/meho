@@ -17,7 +17,8 @@ the end, then return to the trail.
 |---|---|---|
 | `meho-backplane` | Confidential client | The backplane itself — the audience it validates tokens for. If your realm does not have it yet, create it first: a confidential client with ID `meho-backplane` and no login flows enabled — it exists as the resource-server identity whose client ID is the token audience (`keycloak.audience` in the chart values). |
 | `meho-cli` | **Public** client, device-code grant | `meho login` |
-| `meho-cli-approve` | **Public** client, authorization-code + PKCE on a loopback address only | The fresh sign-in of `meho approvals approve`. Only its tokens can approve on the command line. |
+| `meho-cli-approve` | **Public** client, authorization-code + PKCE on a loopback address only, with its own login flow | The fresh sign-in of `meho approvals approve`. Only its tokens can approve on the command line. |
+| `meho approval sign-in` | Login flow, bound to `meho-cli-approve` | Always asks for the password (and the one-time code, when the person has one) |
 | `meho-mcp` | **Public** client, authorization-code + PKCE | Browser-capable MCP clients (Claude Desktop, MCP Inspector, …) |
 | 8 protocol mappers | On the public clients (`meho-cli-approve` without `meho-mcp-audience`) | Make issued tokens carry the claims the backplane validates |
 | 4 default client scopes | On the public clients | Including the `basic` scope that carries the mandatory `sub` claim |
@@ -88,6 +89,9 @@ sign-in:
 - the sign-in is at most 15 minutes old (the `auth_time` claim). Inside
   these 15 minutes one sign-in may approve several waiting changes. Each
   approval is still a separate decision about one request;
+- the sign-in asked for the password (the `acr` claim is set and is not
+  `0`). Keycloak gives `acr` `1` to a sign-in that asked for the
+  password, and `0` to one that did not;
 - an operation marked `destructive` needs a sign-in of its own, at most
   5 minutes old. After it, that sign-in approves nothing more.
 
@@ -112,14 +116,36 @@ Create a second public client with these settings:
 
 Give it the default scopes of Step 4 and the mappers of Step 3, except
 `meho-mcp-audience`: its token is only for the approve call. The `basic`
-scope puts `auth_time` into the access token. Without it every approve
-on the command line is refused.
+scope puts `auth_time` into the access token, and the `acr` scope puts
+`acr` into it. Without both, every approve on the command line is
+refused.
+
+**Its own login flow.** The approval client signs in with its own flow,
+which always asks for the password. Create it under **Authentication →
+Create flow**:
+
+1. Name `meho approval sign-in`, type **Basic flow**.
+2. Add the step **Username Password Form**. Set it to **Required**.
+3. Add a sub-flow `meho approval sign-in - one-time code`. Set it to
+   **Conditional**. In it, add **Condition - user configured** and
+   **OTP Form**, both **Required**. A person who has set up a one-time
+   code then has to enter it.
+4. Add no other step. The flow must not have the **Cookie**,
+   **Kerberos** or **Identity Provider Redirector** step.
+5. Open **Clients → `meho-cli-approve` → Advanced → Authentication flow
+   overrides**. Set **Browser Flow** to `meho approval sign-in`.
+
+People who sign in with a company login see its button on the form and
+click it.
 
 **On an existing realm.** `meho admin keycloak bootstrap-clients` creates
-`meho-cli-approve` when you run it again. The Keycloak that ships with
-the MEHO chart creates it on the next upgrade (the realm finishing job
-adds a client that is missing). Until it exists, approve in the web
-interface.
+`meho-cli-approve` and its login flow when you run it again. The Keycloak
+that ships with the MEHO chart creates the client on the next upgrade
+(the realm finishing job adds a client that is missing). The job makes
+the login flow only when its account `meho-admin` has the
+`manage-realm` role, which it has when the company login is on.
+Otherwise create the flow by hand as above. Until the client exists,
+approve in the web interface.
 
 Two backplane settings control the check:
 
@@ -132,10 +158,10 @@ Two backplane settings control the check:
 
 **Optional one-time code step.** You can ask for a code from an
 authenticator app (a Keycloak one-time password) on top of the password.
-The command line does not ask Keycloak for a level itself. So the browser
-flow must ask for the code at every sign-in:
+The command line does not ask Keycloak for a level itself. So the login
+flow of the approval client must ask for the code at every sign-in:
 
-1. In the browser flow, make **OTP Form** a required step.
+1. In the flow `meho approval sign-in`, make **OTP Form** a required step.
 2. Under **Realm settings → General → ACR to LoA mapping**, map the level
    that flow reaches to an `acr` value, for example `otp`.
 3. Put the same value into `APPROVAL_ONE_TIME_CODE_ACR_VALUES`.
@@ -421,7 +447,7 @@ usually appear:
 | Token issued, every call 401s with `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` | Missing protocol mappers, or the person is in none of the five groups | Step 3 — add all the mappers; Step 5 — put the person in one group. Then log out and back in. |
 | Everyone gets the same role, whatever their group | A fixed-value (Hardcoded claim) `tenant_role` mapper is still on the client | Delete it, or re-run `meho admin keycloak bootstrap-clients`, which replaces it. |
 | Token issued, every call 401s with `invalid_token` or `missing_sub`; the decoded token has no `sub` | The `basic` scope is not a default scope on the client | Step 4 — assign it, re-login (existing tokens stay broken). |
-| `meho approvals approve` fails with `fresh_sign_in_required` right after you signed in again | The access token has no `auth_time` (the `basic` scope is missing), or it was not made for the approval client (the chart's `config.keycloakCliApproveClientId` does not name the client) | Step 4 — assign `basic` to `meho-cli-approve`; check the client ID in Step 2. Or approve in the web interface. |
+| `meho approvals approve` fails with `fresh_sign_in_required` right after you signed in again | The access token has no `auth_time` or no `acr` (the `basic` or `acr` scope is missing), or it was not made for the approval client (the chart's `config.keycloakCliApproveClientId` does not name the client), or the client does not use its own login flow | Step 4 — assign `basic` and `acr` to `meho-cli-approve`; check the client ID and its login flow in Step 2. Or approve in the web interface. |
 | The browser shows "Client not found" or "Invalid parameter: redirect_uri" during `meho approvals approve` | `meho-cli-approve` is missing, or `http://127.0.0.1:*` is not one of its redirect URIs | Step 2 — create it, or re-run `meho admin keycloak bootstrap-clients`. |
 | `meho login` times out before you can approve | An ambient wrapper timeout (CI step, IDE task) shorter than the approval wait | Run `meho login` in a real terminal, or raise the wrapper timeout. |
 | MCP login fails with `invalid_scope` ("Invalid scopes: …") and the Keycloak login page never appears | The client asked for a scope that `meho-mcp` does not offer: `offline_access`, `mcp:read`, `mcp:execute` or `mcp:admin` | Create the scope if it is missing, then assign it as an **optional** scope on `meho-mcp` (see the MCP client table above). Or re-run `meho admin keycloak bootstrap-clients`. |

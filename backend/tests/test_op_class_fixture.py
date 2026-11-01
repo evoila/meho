@@ -3,7 +3,7 @@
 
 """Every known operation keeps the op class it had on 1 November 2026.
 
-``tests/data/op_class_fixture.json`` is a snapshot: the answer of
+``tests/snapshots/op_class_fixture.json`` is a snapshot: the answer of
 :func:`~meho_backplane.broadcast.events.classify_op` for every operation
 that was registered on that day, plus every op id the classifier pinned
 by name. It was taken before the per-connector class declarations
@@ -17,16 +17,21 @@ operation is checked by ``tests/test_operation_op_class.py`` and
 ``tests/test_broadcast_classifier_coverage.py``. Only a conscious change
 of an existing class edits this file.
 
+The file lives under ``tests/snapshots/``, not ``tests/data/``: it is the
+answer of MEHO's own classifier, not a recorded vendor answer, and the
+saved-capture secret scan (``test_capture_secret_scan.py``) would flag op
+ids such as ``keycloak.user.reset_password`` as a secret-named field.
+
 To take the snapshot again (for example after such a change), run from
 ``backend/``::
 
     uv run python -c "import json, sys; sys.path.insert(0, 'tests'); \\
     from test_broadcast_classifier_coverage import _capture_registered_ops; \\
     from meho_backplane.broadcast.events import classify_op; \\
-    old = json.load(open('tests/data/op_class_fixture.json')); \\
+    old = json.load(open('tests/snapshots/op_class_fixture.json')); \\
     ids = set(old) | {op for op, _ in _capture_registered_ops()}; \\
     json.dump({op: classify_op(op) for op in sorted(ids)}, \\
-    open('tests/data/op_class_fixture.json', 'w'), indent=1, sort_keys=True)"
+    open('tests/snapshots/op_class_fixture.json', 'w'), indent=1, sort_keys=True)"
 """
 
 from __future__ import annotations
@@ -39,7 +44,7 @@ import pytest
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors.registry import _eager_import_connectors
 
-_FIXTURE = Path(__file__).parent / "data" / "op_class_fixture.json"
+_FIXTURE = Path(__file__).parent / "snapshots" / "op_class_fixture.json"
 
 
 @pytest.fixture(scope="module")

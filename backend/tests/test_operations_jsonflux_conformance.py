@@ -470,6 +470,12 @@ _PARTS_HELD_BACK: dict[str, str] = {
         "credential_write: the request carries the spec passwords. The main numbers "
         "ride inline as flat result_scalars keys."
     ),
+    "vmware.composite.host.local_user.create": (
+        "credential_write: the request carries the new user's password."
+    ),
+    "vmware.composite.host.local_user.password.set": (
+        "credential_write: the request carries the new password."
+    ),
     "vmware.composite.vm.guest.file.read": (
         "credential_write: it reads guest files, which can hold secrets."
     ),

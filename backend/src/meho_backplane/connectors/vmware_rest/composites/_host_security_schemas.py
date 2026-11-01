@@ -4,7 +4,7 @@
 """Parameters, answers and AI guidance of four host security changes.
 
 Advanced settings, firewall rule set, lockdown mode and lockdown exception
-users. The SNMP and core dump changes are in :mod:`._host_access_schemas`.
+users. The SNMP and core dump changes are in :mod:`._host_snmp_coredump_schemas`.
 The handlers are in :mod:`._host_security_writes` and
 :mod:`._host_access_writes`.
 """

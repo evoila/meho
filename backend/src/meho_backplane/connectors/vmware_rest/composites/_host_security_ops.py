@@ -14,10 +14,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Final
 
-from meho_backplane.connectors.vmware_rest.composites._host_access_schemas import (
-    COREDUMP_SET,
-    SNMP_SET,
-)
 from meho_backplane.connectors.vmware_rest.composites._host_access_writes import (
     OP_ID_COREDUMP_SET,
     OP_ID_LOCKDOWN_EXCEPTIONS_SET,
@@ -59,6 +55,10 @@ from meho_backplane.connectors.vmware_rest.composites._host_security_writes impo
     read_settings,
     requested_settings,
     settings_view,
+)
+from meho_backplane.connectors.vmware_rest.composites._host_snmp_coredump_schemas import (
+    COREDUMP_SET,
+    SNMP_SET,
 )
 from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.host_security import HOST_SECURITY_GROUP_KEY

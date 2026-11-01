@@ -2361,7 +2361,12 @@ vendor call exists in the pinned vCenter 8.0 U1, U2, U3 and 9.0 API files.
   controller and unit), `children` (the VMDK file when `delete_file`, else
   none) and `irreversibility` (`permanent` with `delete_file`, else
   `reversible-file-kept`). It raises when the VM or the disk does not exist,
-  so such a call never waits for approval.
+  so such a call never waits for approval. The approved run checks the disk
+  again: vCenter can give a new disk the key of a removed one, so the handler
+  compares the live disk (file, label, size) with the preview the approver saw
+  (`approved_preview` in `operations/_preview.py`) and answers
+  `precondition_failed` with a `disk_changed` blocker when they differ.
+  Nothing is sent then.
 - **Network adapter remove** (`composites/_vm_nic_remove.py`). Reads the
   adapter first: a 404 gives `not_found` and nothing is sent, so it is safe to
   run twice. HTTP 400 gives `refused` with vCenter's reason. After the

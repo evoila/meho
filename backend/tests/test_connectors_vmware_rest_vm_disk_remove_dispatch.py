@@ -5,9 +5,11 @@
 
 The disk removal is ``destructive``. A call without a matching ``preview_hash``
 is refused and nothing waits. With the hash it waits for a second person, the
-approval card shows the disk, and it runs once after approval. An agent is
-refused. A preview of a disk that does not exist is refused too, so nothing
-waits. vCenter is the shared VIM fake, extended here with ``ReconfigVM_Task``.
+approval card shows the disk, and it runs once after approval. A disk that
+another disk replaced (same key, other file) while the request waited is not
+removed. An agent is refused. A preview of a disk that does not exist is
+refused too, so nothing waits. vCenter is the shared VIM fake, extended here
+with ``ReconfigVM_Task``.
 """
 
 from __future__ import annotations
@@ -105,6 +107,15 @@ class _DiskVimFake(VimFake):
             d for d in props["config.hardware.device"] if d["key"] not in keys
         ]
 
+    def replace_disk(self, key: int, label: str, file_name: str) -> None:
+        """Another disk takes *key*: what a remove-then-add while the request waits looks like."""
+        props = self.objects[("VirtualMachine", _VM)]
+        new = _disk(key, label)
+        new["backing"]["fileName"] = file_name
+        props["config.hardware.device"] = [
+            new if d["key"] == key else d for d in props["config.hardware.device"]
+        ]
+
     def disk_keys(self) -> list[int]:
         return [d["key"] for d in self.objects[("VirtualMachine", _VM)]["config.hardware.device"]]
 
@@ -141,6 +152,27 @@ def _person(sub: str, kind: PrincipalKind = PrincipalKind.USER) -> Operator:
         tenant_role=TenantRole.OPERATOR,
         principal_kind=kind,
     )
+
+
+async def _park(requester: Operator, args: dict[str, Any]) -> UUID:
+    """Preview, then call with the hash: the request waits. Returns its id."""
+    preview = await preview_operation(requester, args)
+    assert preview["status"] == "ok", preview
+    call = await call_operation(requester, {**args, "preview_hash": preview["preview_hash"]})
+    assert call["status"] == "awaiting_approval", call
+    return UUID(call["extras"]["approval_request_id"])
+
+
+async def _approve_and_run(request_id: UUID) -> Any:
+    approver = _person("op-approver")
+    async with get_sessionmaker()() as s:
+        approved = await approve_request(s, request_id, operator=approver, params=None)
+        await s.commit()
+    assert approved.status == "approved"
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        return await resume_dispatch_after_approval(operator=approver, request=row, params=None)
 
 
 async def _bootstrap(conn: _DiskVimFake) -> None:
@@ -215,12 +247,8 @@ async def test_remove_needs_a_preview_then_a_second_person() -> None:
     assert refused["extras"]["error_code"] == "preview_binding_required"
     assert await _approval_count() == 0
 
-    preview = await preview_operation(requester, args)
-    assert preview["status"] == "ok", preview
-    call = await call_operation(requester, {**args, "preview_hash": preview["preview_hash"]})
-    assert call["status"] == "awaiting_approval", call
+    request_id = await _park(requester, args)
     assert conn.calls_to("ReconfigVM_Task") == []
-    request_id = UUID(call["extras"]["approval_request_id"])
 
     async with get_sessionmaker()() as s:
         row = await s.get(ApprovalRequest, request_id)
@@ -232,19 +260,31 @@ async def test_remove_needs_a_preview_then_a_second_person() -> None:
     assert effect["blast_radius"]["children"] == []
     assert effect["blast_radius"]["irreversibility"] == "reversible-file-kept"
 
-    approver = _person("op-approver")
-    async with get_sessionmaker()() as s:
-        approved = await approve_request(s, request_id, operator=approver, params=None)
-        await s.commit()
-    assert approved.status == "approved"
-    async with get_sessionmaker()() as s:
-        row = await s.get(ApprovalRequest, request_id)
-        assert row is not None
-        resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
+    resume = await _approve_and_run(request_id)
     assert resume.status == "ok", resume.error
     assert resume.result["status"] == "removed"
     assert len(conn.calls_to("ReconfigVM_Task")) == 1
     assert conn.disk_keys() == [2000]
+
+
+@pytest.mark.usefixtures("_dispatch_env")
+async def test_a_disk_replaced_while_the_request_waits_is_not_removed() -> None:
+    """The approver saw one disk; another disk with the same key is there now."""
+    conn = _DiskVimFake()
+    await _bootstrap(conn)
+    args = {**_args("2001"), "params": {"vm": _VM, "disk": "2001", "delete_file": True}}
+    request_id = await _park(_person("op-requester"), args)
+    conn.replace_disk(2001, "Hard disk 3", "[<datastore>] app-vm/app-vm_2001_new.vmdk")
+
+    resume = await _approve_and_run(request_id)
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "precondition_failed"
+    blocker = resume.result["blockers"][0]
+    assert blocker["kind"] == "disk_changed"
+    assert blocker["approved"]["vmdk_file"] == "[<datastore>] app-vm/app-vm_2001.vmdk"
+    assert blocker["now"]["vmdk_file"] == "[<datastore>] app-vm/app-vm_2001_new.vmdk"
+    assert conn.calls_to("ReconfigVM_Task") == []
+    assert conn.disk_keys() == [2000, 2001]
 
 
 @pytest.mark.usefixtures("_dispatch_env")

@@ -18,6 +18,12 @@ handler, so the approver sees the decision the handler makes. The preview
 refuses (raises) when the VM or the disk does not exist, so such a call never
 waits for approval. After the task the handler reads the devices again and
 returns the disks the VM has left.
+
+The approved run checks the disk again. vCenter can give a new disk the key
+of a removed one, so a disk added while the request waited could carry the
+approved key. The handler compares the live disk (its file, label and size)
+with the preview the approver saw (:func:`~meho_backplane.operations._preview.approved_preview`)
+and refuses before any change when they differ.
 """
 
 from __future__ import annotations
@@ -56,7 +62,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
 from meho_backplane.connectors.vmware_rest.composites.schemas import VM_MOID_PATTERN
 from meho_backplane.connectors.vmware_rest.vim_body import VIM_TYPE_NAME_KEY
 from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, poll_vim_task
-from meho_backplane.operations._preview import register_preview_builder
+from meho_backplane.operations._preview import approved_preview, register_preview_builder
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -91,6 +97,10 @@ _FILE_KEPT: Final = "reversible-file-kept"
 
 STATUS_REMOVED: Final = "removed"
 STATUS_NOT_FOUND: Final = "not_found"
+
+#: The fields of the plan's ``object`` that say which disk it is. The approved
+#: run compares them with the approval preview.
+_DISK_IDENTITY_FIELDS: Final[tuple[str, ...]] = ("vmdk_file", "label", "capacity_bytes")
 
 #: Wall-clock bound for the task poll -- the 600 s convention; module-global so
 #: tests can zero it.
@@ -181,6 +191,27 @@ async def plan_disk_remove(
     return plan
 
 
+def _approved_disk_blocker(plan: TeardownPlan) -> dict[str, Any] | None:
+    """The blocker when the live disk is not the one the approver saw, else ``None``.
+
+    ``None`` on an ordinary dispatch (no approval involved) and when the file,
+    label and size of the disk match the approval preview. An approval whose
+    preview shows no disk counts as changed: nothing is removed on a preview
+    MEHO cannot check.
+    """
+    preview = approved_preview(OP_ID_VM_DISK_REMOVE)
+    if preview is None:
+        return None
+    seen = (preview.get("blast_radius") or {}).get("object")
+    approved = (
+        {name: seen.get(name) for name in _DISK_IDENTITY_FIELDS} if isinstance(seen, dict) else None
+    )
+    now = {name: plan.object.get(name) for name in _DISK_IDENTITY_FIELDS}
+    if approved == now:
+        return None
+    return {"kind": "disk_changed", "approved": approved, "now": now}
+
+
 def _remove_body(device: dict[str, Any], *, delete_file: bool) -> dict[str, Any]:
     """The ``ReconfigVM_Task`` body: one ``remove`` of the disk device read before."""
     change: dict[str, Any] = {
@@ -198,6 +229,18 @@ def _result(plan: TeardownPlan, status: str, **fields: Any) -> dict[str, Any]:
     return {**envelope(plan, status, **fields), "remaining_disks": remaining}
 
 
+def _disk_changed_result(plan: TeardownPlan, blocker: dict[str, Any]) -> dict[str, Any]:
+    """The refusal of an approved run whose disk is not the one the approver saw."""
+    plan.blockers = [blocker]
+    approved_file = (blocker["approved"] or {}).get("vmdk_file")
+    guidance = (
+        f"disk {plan.object['disk']!r} of VM {plan.object['vm']!r} is not the disk the approver "
+        f"saw (approved file {approved_file!r}, now {plan.object['vmdk_file']!r}); nothing was "
+        "sent. Preview the call again and ask for a new approval."
+    )
+    return _result(plan, STATUS_PRECONDITION_FAILED, guidance=guidance)
+
+
 async def vm_disk_remove_composite(
     *,
     operator: Operator,
@@ -209,7 +252,9 @@ async def vm_disk_remove_composite(
 
     Op-id: ``vmware.composite.vm.disk.remove``. Plans first: a refusal
     (bad id, unknown VM or disk, shared disk with ``delete_file``) returns
-    before any change. Then the gated ``ReconfigVM_Task`` (a parked or denied
+    before any change. On the approved run, a disk that is not the one the
+    approver saw is refused too (``precondition_failed``, blocker
+    ``disk_changed``). Then the gated ``ReconfigVM_Task`` (a parked or denied
     gate is returned as is), polled to its end. A task fault raises with the
     fault type and text (``connector_error``, audited as failed). After the
     task the devices are read again: ``removed`` when the disk is gone.
@@ -220,6 +265,9 @@ async def vm_disk_remove_composite(
         return _result(plan, status, guidance=guidance)
     vm, disk = plan.object["vm"], plan.object["disk"]
     delete_file = bool(plan.object["delete_file"])
+    blocker = _approved_disk_blocker(plan)
+    if blocker is not None:
+        return _disk_changed_result(plan, blocker)
     gate, task_payload = await _write_vmomi_sub_op(
         connector,
         target,

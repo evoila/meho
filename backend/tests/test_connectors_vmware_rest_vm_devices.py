@@ -38,7 +38,11 @@ from meho_backplane.connectors.vmware_rest.composites._register import (
     _COMPOSITES,
     COMPOSITES_NOT_ON_8_0,
 )
-from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
+from meho_backplane.operations._preview import (
+    _PREVIEW_BUILDERS,
+    PreviewContext,
+    approved_preview_var,
+)
 from meho_backplane.operations._validate import validate_params
 from tests._vmware_teardown_fake import GateRecorder, operator, parked
 
@@ -316,6 +320,83 @@ async def test_disk_remove_of_an_unknown_disk_sends_nothing(gate: GateRecorder) 
     assert out["remaining_disks"] is None
     assert not reconfig.called
     assert gate.calls == []
+
+
+def _approved_disk_preview(disk: dict[str, Any]) -> dict[str, Any]:
+    """The park-time preview of a disk removal, as the approval stores it."""
+    return {
+        "blast_radius": {
+            "object": {
+                "kind": "vm_disk",
+                "vm": _VM,
+                "disk": str(disk["key"]),
+                "label": disk["deviceInfo"]["label"],
+                "capacity_bytes": disk["capacityInBytes"],
+                "vmdk_file": disk["backing"]["fileName"],
+                "present": True,
+            },
+            "children": [],
+            "irreversibility": "permanent",
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "approved",
+    [
+        pytest.param(_approved_disk_preview(_disk(2001, "Hard disk 2")), id="replaced-disk"),
+        pytest.param({}, id="no-preview-stored"),
+    ],
+)
+async def test_an_approved_remove_refuses_a_disk_that_is_not_the_one_approved(
+    gate: GateRecorder, approved: dict[str, Any]
+) -> None:
+    """While the approval waited, another disk took the key the approver saw."""
+    live = _disk(2001, "Hard disk 3")
+    live["backing"]["fileName"] = "[<datastore>] app-vm/app-vm_2001_new.vmdk"
+    token = approved_preview_var.set((_DISK_OP, approved))
+    try:
+        async with _vcenter("9.0.0") as (conn, mock):
+            _retrieve(mock, "/sdk/vim25/9.0.0.0", _vm_with(_disk(2000, "Hard disk 1"), live))
+            reconfig = mock.post(f"/sdk/vim25/9.0.0.0/VirtualMachine/{_VM}/ReconfigVM_Task")
+            out = await _run(
+                _vm_disk_remove.vm_disk_remove_composite,
+                conn,
+                vm=_VM,
+                disk="2001",
+                delete_file=True,
+            )
+    finally:
+        approved_preview_var.reset(token)
+
+    assert out["status"] == "precondition_failed"
+    assert out["blockers"][0]["kind"] == "disk_changed"
+    assert out["blockers"][0]["now"]["vmdk_file"] == "[<datastore>] app-vm/app-vm_2001_new.vmdk"
+    assert "not the disk the approver saw" in out["guidance"]
+    assert out["remaining_disks"] is None
+    assert not reconfig.called
+    assert gate.calls == []
+
+
+async def test_an_approved_remove_runs_on_the_disk_the_approver_saw(gate: GateRecorder) -> None:
+    token = approved_preview_var.set((_DISK_OP, _approved_disk_preview(_disk(2001, "Hard disk 2"))))
+    try:
+        async with _vcenter("9.0.0") as (conn, mock):
+            _retrieve(
+                mock,
+                "/sdk/vim25/9.0.0.0",
+                _vm_with(_disk(2000, "Hard disk 1"), _disk(2001, "Hard disk 2")),
+                _task("success"),
+                _vm_result({"config.hardware.device": _devices(_disk(2000, "Hard disk 1"))}),
+            )
+            path = f"/sdk/vim25/9.0.0.0/VirtualMachine/{_VM}/ReconfigVM_Task"
+            reconfig = mock.post(path).respond(200, json=_TASK_REF)
+            out = await _run(_vm_disk_remove.vm_disk_remove_composite, conn, vm=_VM, disk="2001")
+    finally:
+        approved_preview_var.reset(token)
+
+    assert out["status"] == "removed"
+    assert reconfig.call_count == 1
 
 
 async def test_disk_remove_on_an_unknown_vm_sends_nothing(gate: GateRecorder) -> None:

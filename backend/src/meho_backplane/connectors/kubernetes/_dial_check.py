@@ -16,9 +16,11 @@ module makes those clients use the shared connect-time check
   a blocked server is refused before the first request.
 
 This holds for the target's ``host`` and for a ``server`` the kubeconfig
-names by itself. Through a proxy, MEHO checks the proxy address and the
-destination address, and asks the proxy for a checked address of the
-destination instead of its name. The TLS name check keeps the name.
+names by itself. Through a proxy, MEHO sends only TLS requests: it checks
+the proxy address and the API server address, and asks the proxy for a
+tunnel to a checked address of the API server instead of its name. The
+TLS name check keeps the name. A plain HTTP request through a proxy is
+refused before the proxy is dialed.
 """
 
 from __future__ import annotations

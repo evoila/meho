@@ -655,24 +655,20 @@ async def test_k8s_client_asks_the_proxy_for_the_next_checked_address(
 
 
 @pytest.mark.asyncio
-async def test_k8s_client_refuses_a_redirect_through_a_proxy(_live: pytest.MonkeyPatch) -> None:
-    """A plain request names the checked address; a redirect to a blocked one is not followed."""
-    proxy, port, heads = await _fake_proxy(
-        [b"HTTP/1.1 302 Found\r\nLocation: http://10.0.0.9/redirected\r\nContent-Length: 0\r\n\r\n"]
-    )
+async def test_k8s_client_refuses_plain_http_through_a_proxy(_live: pytest.MonkeyPatch) -> None:
+    """A plain HTTP request through a proxy is refused before the proxy is dialed."""
+    proxy, port, heads = await _fake_proxy([b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"])
     _live.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.1/32")
     api_client = _api_client("http://public.example.test")
     try:
         await check_api_client_dials(api_client)
-        with pytest.raises(TargetDestinationBlockedError):
+        with pytest.raises(TargetDestinationBlockedError, match="must use TLS"):
             await _get_through_proxy(api_client, "http://public.example.test/api", port)
     finally:
         await api_client.close()
         proxy.close()
         await proxy.wait_closed()
-    assert len(heads) == 1
-    assert heads[0].startswith(f"GET http://{_PUBLIC_IP}/api HTTP/1.1\r\n".encode())
-    assert b"Host: public.example.test\r\n" in heads[0]
+    assert heads == []
 
 
 @pytest.mark.asyncio

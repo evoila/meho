@@ -188,14 +188,16 @@ def screen_connector_dials(connector: TCPConnector) -> None:
 
     Through a proxy, aiohttp resolves only the proxy and hands the
     destination to the proxy by name. So the connector's
-    ``_create_proxy_connection`` method is hooked as well: the
-    destination is checked before the proxy is dialed, and the proxy is
-    asked for a checked address instead of the name. The ``Host`` header
-    and the TLS name check keep the destination's name. For a TLS tunnel
-    (``CONNECT``) the next checked address is asked for when the proxy
-    answers that it could not connect. This holds for the first request
-    and for every redirect the client follows through the proxy, because
-    each new destination opens a new connection.
+    ``_create_proxy_connection`` method is hooked as well. A request
+    through a proxy must use TLS: a plain HTTP request is refused before
+    the proxy is dialed. For a TLS request the destination is checked
+    before the proxy is dialed, and the tunnel request (``CONNECT``)
+    names a checked address instead of the name. The ``Host`` header and
+    the TLS name check keep the destination's name. The next checked
+    address is asked for when the proxy answers that it could not
+    connect. This holds for the first request and for every redirect the
+    client follows through the proxy, because each new destination opens
+    a new connection.
 
     aiohttp has no public seam for either hook. It is the same kind of
     private seam :mod:`.pinned_transport` uses for httpcore's network
@@ -216,12 +218,18 @@ def screen_connector_dials(connector: TCPConnector) -> None:
     async def _create_proxy_connection(
         req: ClientRequest, traces: list[Trace], timeout: ClientTimeout
     ) -> tuple[asyncio.BaseTransport, Any]:
+        if not req.is_ssl():
+            raise TargetDestinationBlockedError(
+                "a Kubernetes target behind a proxy must use TLS; MEHO sends "
+                "only TLS requests through a proxy, so the API server address "
+                "must start with https://"
+            )
         host = req.url.raw_host
         assert host is not None
         addresses = await screen_dial_addresses_async(host)
         if addresses is None:
             return await original_proxy_connect(req, traces, timeout)
-        # The TLS name check keeps the name; the proxy gets the address.
+        # The TLS name check keeps the name; the tunnel request gets the address.
         req.server_hostname = req.server_hostname or host.rstrip(".")
         last_exc: ClientHttpProxyError | None = None
         for address in addresses:

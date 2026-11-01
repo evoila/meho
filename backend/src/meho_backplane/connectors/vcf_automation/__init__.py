@@ -50,6 +50,7 @@ from meho_backplane.connectors.vcf_automation.connector import (
     VcfAutomationConfigurationError,
     VcfAutomationConnector,
 )
+from meho_backplane.connectors.vcf_automation.content_ops import VCFA_CONTENT_OPS
 from meho_backplane.connectors.vcf_automation.day2_ops import VCFA_DAY2_OPS
 from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
 from meho_backplane.connectors.vcf_automation.feature_flag_ops import VCFA_FEATURE_FLAG_OPS
@@ -134,6 +135,7 @@ register_typed_op_registrar(register_vcfa_typed_operations)
 
 __all__ = [
     "VCFA_CONNECTOR_ID",
+    "VCFA_CONTENT_OPS",
     "VCFA_DAY2_OPS",
     "VCFA_DEPLOY_OPS",
     "VCFA_FEATURE_FLAG_OPS",

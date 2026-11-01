@@ -402,6 +402,109 @@ handlers, the org-create check and the park-time preview are in
   (`change` / `unchanged` / `invalid_request`). Without a connector it shows
   `would: set_if_different` and no current state.
 
+**Cloud templates and catalog sources.** Eleven ops read, create and
+change cloud templates (blueprints), release template versions, and add
+catalog content sources and sharing. VCF Automation 9 ("VM Apps"
+organisations) and Aria Automation 8 serve the same blueprint and catalog
+APIs, so each op is written once, in `connectors/vmware_shared/`, and
+registered on both connectors:
+
+- on `vcfa-rest-9.0` with the id `vcfa.tenant.<name>`, groups
+  `vcfa-tenant-templates` and `vcfa-tenant-catalog`;
+- on `vcfa-vra8-8.0` with the id `vcfa.vra8.<name>`, groups
+  `vcfa-vra8-templates` and `vcfa-vra8-catalog`.
+
+| op (after the prefix) | what it does and returns | risk level / approval | wire | versions |
+|---|---|---|---|---|
+| `blueprint.get` | one template: its fields, draft YAML (`content`, secret values replaced by a marker), `inputs_schema` and `secrets_replaced` | safe | `GET /blueprint/api/blueprints/{blueprintId}`, `GET …/{blueprintId}/inputs-schema` | 8.18, 9.x |
+| `blueprint.create` | a new draft template in a project; `created` / `unchanged` (same name in the project) | caution, approval | `GET /blueprint/api/blueprints?name=&projects=`, then `POST /blueprint/api/blueprints` | 8.18, 9.x |
+| `blueprint.update` | changes the draft YAML, name, description or org-wide flag; `updated` (with `changed_fields`) / `unchanged` | dangerous, approval | `GET`, then `PUT /blueprint/api/blueprints/{blueprintId}` with the whole template | 8.18, 9.x |
+| `blueprint.delete` | deletes a template and all its versions; `deleted` / `unchanged` (404) | destructive, approval, preview first | `GET …/{blueprintId}`, every page of `GET …/{blueprintId}/versions` (preview), then `DELETE /blueprint/api/blueprints/{blueprintId}` | 8.18, 9.x |
+| `blueprint.version.list` | flat rows `{id, version, status, versionDescription, versionChangeLog, createdAt, createdBy}` | safe | `GET /blueprint/api/blueprints/{blueprintId}/versions` | 8.18, 9.x |
+| `blueprint.version.release` | `release`: makes a new version from the draft and releases it, or releases an existing one; `unrelease`: takes it out of the catalog | dangerous, approval | `GET …/versions?version=`, then `POST …/versions` (`release: true`), `POST …/versions/{version}/actions/release` or `…/unrelease` | 8.18, 9.x |
+| `blueprint.validate` | checks template YAML or a stored template; `{valid, validationMessages}`; saves nothing | safe | `GET …/{blueprintId}/inputs-schema` or `…/versions/{version}/inputs-schema` (only with `inputs` for a stored template), then `POST /blueprint/api/blueprint-validation` | 8.18, 9.x |
+| `catalog.source.list` | flat rows of content sources, with `sourceProjectId` and the last import | safe | `GET /catalog/api/admin/sources` | 8.18, 9.x |
+| `catalog.source.create` | a source of type `com.vmw.blueprint` that imports the released templates of a project; `created` / `unchanged` (same name, type and project; a name used by another type or project is refused) | caution, approval | `GET …/sources?search=`, then `POST /catalog/api/admin/sources` | 8.18, 9.x |
+| `catalog.share.list` | flat rows of shares (entitlements): project and shared source or item | safe | `GET /catalog/api/admin/entitlements` | 8.18, 9.x |
+| `catalog.share.set` | `share` a source (`CatalogSourceIdentifier`) or item (`CatalogItemIdentifier`) with a project, or `unshare`; `shared` / `unshared` / `unchanged` | dangerous, approval | `GET …/entitlements?projectId=`, then `POST /catalog/api/admin/entitlements` or `DELETE …/entitlements/{id}` | 8.18, 9.x |
+
+- **How one op serves two connectors.** `vcfa_content.ContentOpSpec` holds
+  the metadata, with `{ns}` where the id prefix goes; `content_ops.py` in
+  each connector package turns the list into its own op type. The
+  handlers are methods of `VcfaContentOpsMixin`, which both connector
+  classes inherit, so the dispatcher binds them to the connector the
+  target resolves to. They use `_request_json` / `_post_json` and
+  `_content_get` (a `GET` whose answer may be a list; the VCF Automation
+  connector has its own, because its `_request_json` refuses a list).
+- **Plane.** `/catalog/api/*` is a tenant-plane prefix, like
+  `/blueprint/api/*`.
+- **Delete preview.** `vcfa_templates.blueprint_delete_preview` reads the
+  template and every page of its versions (200 per page, at most 50
+  pages) and fills `blast_radius`: `object` (the template), `children`
+  (each version and its state) and `irreversibility: irreversible`, with
+  a note that counts the released versions that leave the catalog. When
+  the template does not exist, or when the versions do not fit in the
+  pages it reads, it raises, so MEHO refuses to queue the delete
+  (`blast_radius_required`): a person must not approve a preview that
+  names only some of the versions.
+- **Secrets.** No op takes or returns a password, token or key. A
+  template should take a password through a secret input, never as a
+  value in the YAML. `blueprint.get` still hides any secret value it
+  finds in the YAML (`vcfa_yaml_secrets.scrub_template_yaml`, line by
+  line, so a `cloudConfig` block is checked too): the value of every
+  secret-named key (the rule of `is_secret_param_name`), the whole
+  cloud-init `chpasswd` value and every PEM private key block become a
+  `[REDACTED:...]` marker. In a cloud-init `chpasswd` block only the
+  `list` part and the passwords of `users` are hidden; `expire` stays. A
+  secret input (an input under `inputs:` with a secret name, or any map
+  with `encrypted: true`, also as a flow map and with quoted keys) keeps
+  its lines; only its `default`, `const`, `enum`, `example` and
+  `examples` become a marker, in the YAML and in `inputs_schema` alike
+  (`vcfa_yaml_secrets.scrub_inputs_schema`). A flow map (`{a: 1, b: 2}`,
+  also JSON without spaces such as `{"password":"x"}`) is read as one
+  value, also when it runs over several lines and at any depth of nesting
+  (a `chpasswd` map inside another map); when it holds a secret, the
+  whole map becomes one marker. A map that a bare `{` opens (a template
+  written as multi-line JSON) keeps its lines: each is checked on its
+  own, and only when a secret is still left after that (a row such as
+  `encrypted: true, default: x`) the whole value becomes one marker. A
+  double-quoted value whose `\n` escapes hold more YAML lines (a
+  `cloudConfig` written on one line) is checked like a block. `secrets_replaced` counts all markers.
+  References such as `${secret.<name>}` or `${input.<name>}` stay. Every
+  other line comes back as written.
+- **No secret value is sent.** `blueprint.create`, `blueprint.update`
+  and `blueprint.validate` run the same check on the `content` they get
+  (`vcfa_templates.refuse_secret_values`) and refuse YAML that holds a
+  secret value or a `[REDACTED:...]` marker, before any call to the
+  vendor. `blueprint.validate` also refuses a value in `inputs` for a
+  secret input (`vcfa_template_inputs.refuse_secret_input_values`): an
+  input with a secret name, or one the template marks `encrypted: true`.
+  For YAML in `content` it reads that mark from the YAML (composed, not
+  loaded, so an alias cannot blow up the parse); for a stored template it
+  reads the vendor's inputs schema first (`GET …/{blueprintId}/inputs-schema`,
+  or `…/versions/{version}/inputs-schema` when a version is named). An
+  object input is checked the same way, against its `properties`, and
+  each item of a list input against its `items`; the YAML is read to the
+  same depth (`inputs.login.properties.pin.encrypted` marks `login.pin`).
+  A reference such as `${secret.<name>}` passes. A template takes a password
+  through `${secret.<name>}` or an `encrypted: true` input without a
+  default; the request fills it in. The approval card of a create or
+  update (`vcfa_templates.blueprint_write_preview`, registered for both
+  connectors) shows the YAML with its secret values hidden and
+  `secret_values_hidden`; when there are any, `refused` tells the
+  approver that MEHO will refuse the call, so they can reject it. The
+  dispatcher has no hook that stops a caution or dangerous call before
+  it waits for approval, so the refusal itself runs when the approved
+  call starts.
+- **No template list on 9.x.** Aria Automation 8 has
+  `vcfa.vra8.blueprint.list`; VCF Automation 9 has no template list op
+  yet, so a 9.x agent gets template ids from `blueprint.create` or from a
+  person.
+- **Reconcile.** The `*_PATH` constants of `vcfa_templates.py` and
+  `vcfa_catalog.py` are checked against `vra-blueprint.json` and
+  `vra-catalog-deployment.json` (`vmware/vra-sdk-go` v0.6.5, on the spec
+  shelf) in both the `vcf-automation` and the `vra8` reconcile lanes.
+
 **Day-2 work: actions, lease, delete, machines and disks.** These ops are
 written once for VCF Automation 9 and Aria Automation 8.18, because both serve
 the same deployment API (`/deployment/api`) and IaaS API (`/iaas/api`). The
@@ -624,7 +727,8 @@ before resolving headers.
 
 Plane classification (`_plane_for_path`):
 
-- `/iaas/api/*`, `/blueprint/api/*`, `/deployment/api/*` → tenant plane.
+- `/iaas/api/*`, `/blueprint/api/*`, `/deployment/api/*`, `/catalog/api/*` →
+  tenant plane.
 - Everything else (`/cloudapi/*`, `/api/*`) → provider plane.
 
 The provider plane Bearer JWT authenticates both `/cloudapi/*` and the

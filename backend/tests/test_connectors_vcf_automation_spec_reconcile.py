@@ -93,6 +93,7 @@ from meho_backplane.connectors.vcf_automation import _paths as _paths_module
 from meho_backplane.connectors.vcf_automation import _routing as _routing_module
 from meho_backplane.connectors.vcf_automation import typed_ops as _typed_ops_module
 from meho_backplane.connectors.vcf_automation._routing import plane_for_path
+from meho_backplane.connectors.vcf_automation.content_ops import VCFA_CONTENT_OPS
 from meho_backplane.connectors.vcf_automation.day2_ops import VCFA_DAY2_OPS
 from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
 from meho_backplane.connectors.vcf_automation.feature_flag_ops import VCFA_FEATURE_FLAG_OPS
@@ -103,6 +104,8 @@ from meho_backplane.connectors.vcf_automation.typed_ops import (
     VCFA_TYPED_OPS,
     provider_regions_path,
 )
+from meho_backplane.connectors.vmware_shared import vcfa_catalog as _catalog_module
+from meho_backplane.connectors.vmware_shared import vcfa_templates as _templates_module
 from tests._spec_shelf import assert_op_ids_served, require_shelf_spec
 
 if TYPE_CHECKING:
@@ -176,6 +179,67 @@ _PATHS_METHODS: dict[str, frozenset[str]] = {
     "TENANT_ZONES_PATH": frozenset({"GET"}),
 }
 
+#: HTTP method(s) per path constant of the cloud template and catalog ops.
+#: These ops are written once for this connector and for ``vra8``
+#: (``connectors/vmware_shared/vcfa_templates.py`` and ``vcfa_catalog.py``),
+#: so the ``vra8`` lane checks the same constants.
+CONTENT_PATHS_METHODS: dict[str, frozenset[str]] = {
+    "BLUEPRINTS_PATH": frozenset({"GET", "POST"}),
+    "BLUEPRINT_PATH": frozenset({"GET", "PUT", "DELETE"}),
+    "BLUEPRINT_INPUTS_SCHEMA_PATH": frozenset({"GET"}),
+    "BLUEPRINT_VERSIONS_PATH": frozenset({"GET", "POST"}),
+    "BLUEPRINT_VERSION_INPUTS_SCHEMA_PATH": frozenset({"GET"}),
+    "BLUEPRINT_VERSION_RELEASE_PATH": frozenset({"POST"}),
+    "BLUEPRINT_VERSION_UNRELEASE_PATH": frozenset({"POST"}),
+    "BLUEPRINT_VALIDATION_PATH": frozenset({"POST"}),
+    "CATALOG_SOURCES_PATH": frozenset({"GET", "POST"}),
+    "CATALOG_ENTITLEMENTS_PATH": frozenset({"GET", "POST"}),
+    "CATALOG_ENTITLEMENT_PATH": frozenset({"DELETE"}),
+}
+
+#: The ``METHOD:/path`` set of the cloud template and catalog ops.
+CONTENT_OP_IDS: frozenset[str] = frozenset(
+    {
+        "GET:/blueprint/api/blueprints",
+        "POST:/blueprint/api/blueprints",
+        "GET:/blueprint/api/blueprints/{blueprintId}",
+        "PUT:/blueprint/api/blueprints/{blueprintId}",
+        "DELETE:/blueprint/api/blueprints/{blueprintId}",
+        "GET:/blueprint/api/blueprints/{blueprintId}/inputs-schema",
+        "GET:/blueprint/api/blueprints/{blueprintId}/versions",
+        "POST:/blueprint/api/blueprints/{blueprintId}/versions",
+        "GET:/blueprint/api/blueprints/{blueprintId}/versions/{version}/inputs-schema",
+        "POST:/blueprint/api/blueprints/{blueprintId}/versions/{version}/actions/release",
+        "POST:/blueprint/api/blueprints/{blueprintId}/versions/{version}/actions/unrelease",
+        "POST:/blueprint/api/blueprint-validation",
+        "GET:/catalog/api/admin/sources",
+        "POST:/catalog/api/admin/sources",
+        "GET:/catalog/api/admin/entitlements",
+        "POST:/catalog/api/admin/entitlements",
+        "DELETE:/catalog/api/admin/entitlements/{id}",
+    }
+)
+
+
+def content_path_constants() -> dict[str, str]:
+    """The live ``*_PATH`` constants of the shared template and catalog modules."""
+    return {**_path_constants(_templates_module), **_path_constants(_catalog_module)}
+
+
+def content_declared_op_ids() -> set[str]:
+    """Every ``METHOD:/path`` the shared template and catalog ops send."""
+    declared: set[str] = set()
+    for name, path in content_path_constants().items():
+        if name not in CONTENT_PATHS_METHODS:
+            raise AssertionError(
+                f"{name} has no entry in CONTENT_PATHS_METHODS — map the new "
+                "constant's HTTP method(s) there consciously so the reconcile "
+                "keeps covering it."
+            )
+        declared.update(f"{method}:{path}" for method in CONTENT_PATHS_METHODS[name])
+    return declared
+
+
 #: HTTP method(s) per ``_day2_paths`` constant: the day-2 ops shared with
 #: Aria Automation 8 (the vRA 8 lane checks the same constants).
 _DAY2_PATHS_METHODS: dict[str, frozenset[str]] = {
@@ -245,7 +309,7 @@ def _declared_op_ids() -> set[str]:
                 "map the new constant's HTTP method there consciously so the "
                 "reconcile keeps covering it."
             )
-    return declared
+    return declared | content_declared_op_ids()
 
 
 def test_path_constant_names_are_pinned() -> None:
@@ -266,6 +330,7 @@ def test_path_constant_names_are_pinned() -> None:
         "TENANT_PROJECTS_PATH",
     ]
     assert sorted(_path_constants(_paths_module)) == sorted(_PATHS_METHODS)
+    assert sorted(content_path_constants()) == sorted(CONTENT_PATHS_METHODS)
     assert sorted(_path_constants(_day2_paths_module)) == sorted(_DAY2_PATHS_METHODS)
     assert sorted(_path_constants(_routing_module)) == [
         "PROVIDER_SESSION_PATH",
@@ -289,6 +354,7 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
         *_path_constants(_paths_module).values(),
         *_path_constants(_day2_paths_module).values(),
         *_path_constants(_routing_module).values(),
+        *content_path_constants().values(),
     }
     unswept = {
         op.op_id: op.path
@@ -299,6 +365,7 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
             *VCFA_NETWORK_OPS,
             *VCFA_DEPLOY_OPS,
             *VCFA_FEATURE_FLAG_OPS,
+            *VCFA_CONTENT_OPS,
             *VCFA_DAY2_OPS,
         )
         if op.path not in swept
@@ -376,6 +443,8 @@ def test_vcfa_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/cloudapi/1.0.0/featureFlags",
         "GET:/cloudapi/1.0.0/featureFlags/{id}",
         "PUT:/cloudapi/1.0.0/featureFlags/{id}",
+        # Cloud templates and catalog sources (shared with vra8).
+        *CONTENT_OP_IDS,
         # Day-2 ops, shared with Aria Automation 8.
         "GET:/deployment/api/deployments/{deploymentId}",
         "GET:/deployment/api/deployments/{deploymentId}/actions",
@@ -390,7 +459,7 @@ def test_vcfa_hand_coded_op_id_manifest_is_pinned() -> None:
     }
 
 
-def _swagger2_served_op_ids(spec_path: Path) -> set[str]:
+def swagger2_served_op_ids(spec_path: Path) -> set[str]:
     """Extract the served ``METHOD:/path`` set from a Swagger 2.0 document.
 
     The pinned tenant spec is Swagger 2.0, which the ingest parser
@@ -438,7 +507,7 @@ def test_tenant_hand_coded_paths_are_served_by_the_pinned_iaas_spec() -> None:
     """
     served: set[str] = set()
     for spec_file in _TENANT_SPEC_FILES:
-        served |= _swagger2_served_op_ids(require_shelf_spec(_SPEC_DIR, spec_file))
+        served |= swagger2_served_op_ids(require_shelf_spec(_SPEC_DIR, spec_file))
     declared = {
         op_id for op_id in _declared_op_ids() if plane_for_path(op_id.partition(":")[2]) == "tenant"
     }

@@ -98,6 +98,7 @@ from meho_backplane.connectors.vcf_automation._op_schemas import (
 )
 from meho_backplane.connectors.vcf_automation._routing import Plane, plane_for_path
 from meho_backplane.connectors.vcf_automation.session import VcfAutomationTargetLike
+from meho_backplane.connectors.vmware_shared.vcfa_content import CONTENT_GROUP_TEXTS, render_text
 
 __all__ = [
     "PROVIDER_ORGS_PATH",
@@ -283,6 +284,9 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "(vcfa.tenant.cloud_account.enumerate_images), and add, re-point or remove one "
         "name (vcfa.tenant.image_profile.mapping.update; a person must approve it)."
     ),
+    # Cloud templates and catalog sources: the same ops as on Aria Automation 8.
+    "vcfa-tenant-templates": render_text(CONTENT_GROUP_TEXTS["templates"], "vcfa.tenant"),
+    "vcfa-tenant-catalog": render_text(CONTENT_GROUP_TEXTS["catalog"], "vcfa.tenant"),
 }
 
 

@@ -69,6 +69,10 @@ from meho_backplane.connectors.vmware_rest.host_access import (
     HOST_ACCESS_GROUP_KEY,
     HOST_ACCESS_WHEN_TO_USE,
 )
+from meho_backplane.connectors.vmware_rest.host_security import (
+    HOST_SECURITY_GROUP_KEY,
+    HOST_SECURITY_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.license_common import (
     LICENSE_GROUP_KEY,
     LICENSE_WHEN_TO_USE,
@@ -271,6 +275,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # registers under the same group key with the same text.
     ALARMS_GROUP_KEY: ALARMS_WHEN_TO_USE,
     "migration": MIGRATION_GROUP_WHEN_TO_USE,
+    # Shared with the typed reads of host advanced settings and firewall.
+    HOST_SECURITY_GROUP_KEY: HOST_SECURITY_WHEN_TO_USE,
     # #4394: shared with the typed read vmware.vcenter.deployment.status.
     INSTALL_GROUP_KEY: INSTALL_WHEN_TO_USE,
     # Shared with the two typed host-access reads: the same key and text.

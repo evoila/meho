@@ -1,0 +1,2773 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Governance backplane for AI agents acting on infrastructure — policy-gated, audit-grade, MCP-native.">
+      
+      
+      
+        <link rel="canonical" href="https://evoila.github.io/meho/0.40/guides/tenant-bootstrap/">
+      
+      
+        <link rel="prev" href="../approvals-and-break-glass/">
+      
+      
+        <link rel="next" href="../topology/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Add a tenant - MEHO</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#add-a-tenant" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="MEHO" class="md-header__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MEHO
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Add a tenant
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../.." class="md-tabs__link">
+          
+  
+  
+  Start here
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../install/" class="md-tabs__link">
+          
+  
+  
+  Install & operate
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../clients/" class="md-tabs__link">
+          
+  
+  
+  Connect clients
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Do real work
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../project/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Project
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="MEHO" class="md-nav__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    MEHO
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment-shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment shapes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install & operate
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Install & operate
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The install trail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/credential-backends/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credential backends
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/keycloak-realm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Keycloak realm setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/company-login-authentik/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Company login with authentik
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/openbao-unseal-key/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenBao unseal key: who keeps what
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/tls-ingress/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS and ingress
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/upgrades/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrades
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/kind-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local kind quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Connect clients
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/mcp-surface-and-scopes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP surface and scopes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The meho CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/claude-desktop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Desktop
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/claude-code/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/mcp-remote-shim/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Other MCP clients (mcp-remote shim)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting auth walls
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Do real work
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../targets-and-secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Register targets and secrets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../first-operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run your first operations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sensors-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Watch your estate with sensors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../approvals-and-break-glass/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Approvals and break-glass
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add a tenant
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add a tenant
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#how-a-person-gets-a-tenant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How a person gets a tenant
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#before-you-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Before you start
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-1-make-the-tenant-uuid" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 1: Make the tenant UUID
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-2-create-the-role-groups" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 2: Create the role groups
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-3-tell-meho-the-new-group-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 3: Tell MEHO the new group names
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-4-create-the-users" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 4: Create the users
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-5-put-each-person-in-exactly-one-group" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 5: Put each person in exactly one group
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-6-give-each-person-access-to-the-tenants-secrets-in-vault" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 6: Give each person access to the tenant's secrets in Vault
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-7-optional-give-the-tenant-its-own-vault-login-role" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 7 (optional): Give the tenant its own Vault login role
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-8-check-the-first-login-and-the-secret-access" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 8: Check the first login and the secret access
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Step 8: Check the first login and the secret access">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#set-up-the-agent-requester" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Set up the agent requester
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#if-the-login-fails" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        If the login fails
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../topology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Topology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../broadcast/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Broadcast
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memory-and-knowledge/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory and knowledge
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audit-forensics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audit forensics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../flight-recorder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Flight recorder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../runbooks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Runbooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../hosted-agents/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hosted agents
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../event-ingestion/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Event ingestion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../satellite-gateway/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Satellite gateway
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../windows-and-guest-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Windows estate and in-guest execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../add-ons/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add-ons
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/whats-new/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    What's new
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/connectors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connectors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/mcp-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP tools
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/maturity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Maturity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../project/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#how-a-person-gets-a-tenant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How a person gets a tenant
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#before-you-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Before you start
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-1-make-the-tenant-uuid" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 1: Make the tenant UUID
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-2-create-the-role-groups" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 2: Create the role groups
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-3-tell-meho-the-new-group-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 3: Tell MEHO the new group names
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-4-create-the-users" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 4: Create the users
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-5-put-each-person-in-exactly-one-group" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 5: Put each person in exactly one group
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-6-give-each-person-access-to-the-tenants-secrets-in-vault" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 6: Give each person access to the tenant's secrets in Vault
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-7-optional-give-the-tenant-its-own-vault-login-role" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 7 (optional): Give the tenant its own Vault login role
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-8-check-the-first-login-and-the-secret-access" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 8: Check the first login and the secret access
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Step 8: Check the first login and the secret access">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#set-up-the-agent-requester" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Set up the agent requester
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#if-the-login-fails" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        If the login fails
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/evoila/meho/edit/main/docs-site/guides/tenant-bootstrap.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="add-a-tenant">Add a tenant<a class="headerlink" href="#add-a-tenant" title="Permanent link">&para;</a></h1>
+<p>A tenant is a separate space in MEHO, with its own systems and
+passwords. This guide adds a new tenant to a running MEHO and lets its
+first people log in.</p>
+<div class="admonition warning">
+<p class="admonition-title">You need a second person</p>
+<p>Every step that changes a Keycloak group runs at the <strong>dangerous</strong>
+risk level. MEHO waits until a <strong>second person</strong> approves each one.
+The self-approval switch (<code>APPROVAL_ALLOW_SELF_APPROVAL</code>) does <strong>not</strong>
+cover the dangerous risk level. So <strong>one operator alone cannot add a
+tenant</strong>, even with that switch on.</p>
+<p>Before you start, pick one of these:</p>
+<ul>
+<li><strong>A second operator</strong> in your current tenant approves each step.</li>
+<li><strong>An agent makes the requests</strong> and you approve them. This is the
+  agent-requester pattern in
+  <a href="../approvals-and-break-glass/#option-1-the-agent-requester-pattern-recommended">Approvals and break-glass</a>.
+  The agent needs a grant with <code>--verdict needs-approval</code> on the
+  <code>keycloak.group.*</code> and <code>vault.identity.*</code> operations, because
+  agents are refused dangerous operations by default.</li>
+</ul>
+<p>This is a decision of 28 October 2026. It stays like this until the
+rules for people who may approve their own changes are done. The
+decision record is
+<a href="https://github.com/evoila/meho/blob/main/docs/decisions/2026-10-28-tenant-groups-stay-dangerous.md">tenant groups stay at the dangerous risk level</a>.</p>
+</div>
+<h2 id="how-a-person-gets-a-tenant">How a person gets a tenant<a class="headerlink" href="#how-a-person-gets-a-tenant" title="Permanent link">&para;</a></h2>
+<p>MEHO has no "create tenant" command. A tenant is only a UUID in the
+login token (the <code>tenant_id</code> value). The person's <strong>role group</strong> in
+Keycloak puts it there:</p>
+<ul>
+<li>A role group carries two attributes: <code>tenant_id</code> (the tenant's UUID)
+  and <code>tenant_role</code> (<code>read_only</code>, <code>operator</code> or <code>tenant_admin</code>).</li>
+<li>The <code>tenant-id</code> and <code>tenant-role</code> mappers copy these values from the
+  person's group into the token.</li>
+<li>A person in <strong>no</strong> role group gets no tenant. MEHO refuses the login
+  with <code>401 missing_tenant_claim</code>.</li>
+<li>A person in <strong>two</strong> role groups is refused with
+  <code>401 multiple_role_groups</code>.</li>
+</ul>
+<p>So adding a tenant means: make role groups that carry the new UUID, and
+put people in them.</p>
+<div class="admonition note">
+<p class="admonition-title">Do not put the tenant on the user</p>
+<p>Do not set <code>tenant_id</code> or <code>tenant_role</code> as attributes of the user
+when you create the user. With Keycloak's default user profile,
+Keycloak drops these values, and the person still gets
+<code>missing_tenant_claim</code>. Always use a role group.</p>
+</div>
+<p>The first tenant of a site is made at install time by
+<code>meho admin keycloak bootstrap-clients</code> (see
+<a href="../../install/keycloak-realm/#step-5-create-the-five-groups">Keycloak realm setup</a>).
+This guide adds the next tenant through MEHO's Keycloak operations, so
+each change is approved and stored in the audit log.</p>
+<h2 id="before-you-start">Before you start<a class="headerlink" href="#before-you-start" title="Permanent link">&para;</a></h2>
+<ul>
+<li>A Keycloak target registered in MEHO (here called <code>keycloak-main</code>).</li>
+<li>A Vault target registered in MEHO (here called <code>vault-main</code>), and the
+  right to write Vault identities and groups.</li>
+<li>An <code>operator</code> or <code>tenant_admin</code> login in your current tenant.</li>
+<li>A second person who can approve, or the agent setup from the box
+  above. Step 8 needs a <code>tenant_admin</code> approver in the new tenant too,
+  because an approval belongs to one tenant. Step 8 explains the
+  choices.</li>
+<li>Today one person has one tenant. A person who should work in two
+  tenants needs a second Keycloak user for now.</li>
+</ul>
+<h2 id="step-1-make-the-tenant-uuid">Step 1: Make the tenant UUID<a class="headerlink" href="#step-1-make-the-tenant-uuid" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code>uuidgen<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span><span class="s1">'A-Z'</span><span class="w"> </span><span class="s1">'a-z'</span>
+</code></pre></div>
+<p>Write the UUID down. The steps below call it <code>&lt;tenant-uuid&gt;</code>. Pick a
+short name for the tenant too, for example <code>acme</code>.</p>
+<h2 id="step-2-create-the-role-groups">Step 2: Create the role groups<a class="headerlink" href="#step-2-create-the-role-groups" title="Permanent link">&para;</a></h2>
+<p>Create one group per role the tenant needs. Name them
+<code>MEHO-&lt;tenant&gt;-&lt;Role&gt;</code>, like the groups that ship today. Each group
+carries the new UUID:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>keycloak<span class="w"> </span>group<span class="w"> </span>create<span class="w"> </span>--target<span class="w"> </span>keycloak-main<span class="w"> </span>--name<span class="w"> </span>MEHO-acme-Readers<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--attribute<span class="w"> </span><span class="nv">tenant_id</span><span class="o">=</span>&lt;tenant-uuid&gt;<span class="w"> </span>--attribute<span class="w"> </span><span class="nv">tenant_role</span><span class="o">=</span>read_only
+meho<span class="w"> </span>keycloak<span class="w"> </span>group<span class="w"> </span>create<span class="w"> </span>--target<span class="w"> </span>keycloak-main<span class="w"> </span>--name<span class="w"> </span>MEHO-acme-Operators<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--attribute<span class="w"> </span><span class="nv">tenant_id</span><span class="o">=</span>&lt;tenant-uuid&gt;<span class="w"> </span>--attribute<span class="w"> </span><span class="nv">tenant_role</span><span class="o">=</span>operator
+meho<span class="w"> </span>keycloak<span class="w"> </span>group<span class="w"> </span>create<span class="w"> </span>--target<span class="w"> </span>keycloak-main<span class="w"> </span>--name<span class="w"> </span>MEHO-acme-Admins<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--attribute<span class="w"> </span><span class="nv">tenant_id</span><span class="o">=</span>&lt;tenant-uuid&gt;<span class="w"> </span>--attribute<span class="w"> </span><span class="nv">tenant_role</span><span class="o">=</span>tenant_admin
+</code></pre></div>
+<p>Each command waits for approval and prints an approval id. The second
+person approves it:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>approvals<span class="w"> </span>list
+meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>&lt;approval-id&gt;
+</code></pre></div>
+<p>Check the groups and their attributes. The plain table shows only the
+name, the path and the id, so ask for JSON:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>keycloak<span class="w"> </span>group<span class="w"> </span>list<span class="w"> </span>--target<span class="w"> </span>keycloak-main<span class="w"> </span>--search<span class="w"> </span>MEHO-acme<span class="w"> </span>--attributes<span class="w"> </span>--json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">'.result.rows[] | {name, attributes}'</span>
+</code></pre></div>
+<p>Each group must show the new UUID under <code>tenant_id</code> and its role under
+<code>tenant_role</code>. <code>tenant_role</code> uses an underscore (<code>read_only</code>), never a
+hyphen.</p>
+<h2 id="step-3-tell-meho-the-new-group-names">Step 3: Tell MEHO the new group names<a class="headerlink" href="#step-3-tell-meho-the-new-group-names" title="Permanent link">&para;</a></h2>
+<p>MEHO checks that a person is in only one role group. It knows the role
+groups by name, from the <code>JWT_ROLE_GROUPS</code> setting. The default is the
+five <code>MEHO-*</code> groups that ship with MEHO.</p>
+<p>Add the new names to the setting, through <code>extraEnv</code> in your Helm
+values. The value replaces the default, so list the five default groups
+too:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">extraEnv</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">JWT_ROLE_GROUPS</span>
+<span class="w">    </span><span class="nt">value</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">&gt;-</span>
+<span class="w">      </span><span class="no">MEHO-Readers,MEHO-Operators,MEHO-SA-Operators,MEHO-Admins,MEHO-Approvers,</span>
+<span class="w">      </span><span class="no">MEHO-acme-Readers,MEHO-acme-Operators,MEHO-acme-Admins</span>
+</code></pre></div>
+<p>Without this step, logins still work, but MEHO does not notice a person
+who is in a default group and in a new group at the same time.</p>
+<h2 id="step-4-create-the-users">Step 4: Create the users<a class="headerlink" href="#step-4-create-the-users" title="Permanent link">&para;</a></h2>
+<p>Create each person with a password that is stored in Vault. Do not put
+<code>tenant_id</code> or <code>tenant_role</code> in the user file.</p>
+<div class="highlight"><pre><span></span><code>cat<span class="w"> </span>&gt;<span class="w"> </span>alice.json<span class="w"> </span><span class="s">&lt;&lt;'EOF'</span>
+<span class="s">{"username": "alice@acme.example", "email": "alice@acme.example", "enabled": true}</span>
+<span class="s">EOF</span>
+meho<span class="w"> </span>keycloak<span class="w"> </span>user<span class="w"> </span>create<span class="w"> </span>--target<span class="w"> </span>keycloak-main<span class="w"> </span>-f<span class="w"> </span>alice.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--password-secret-ref<span class="w"> </span>&lt;vault-path-of-the-password&gt;<span class="w"> </span>--temporary
+</code></pre></div>
+<p>This step waits for approval too (risk level <code>caution</code>).</p>
+<h2 id="step-5-put-each-person-in-exactly-one-group">Step 5: Put each person in exactly one group<a class="headerlink" href="#step-5-put-each-person-in-exactly-one-group" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>keycloak<span class="w"> </span>group<span class="w"> </span>member<span class="w"> </span>add<span class="w"> </span>--target<span class="w"> </span>keycloak-main<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--username<span class="w"> </span>alice@acme.example<span class="w"> </span>--group-name<span class="w"> </span>MEHO-acme-Admins
+</code></pre></div>
+<p>The second person approves it. Check the members:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>keycloak<span class="w"> </span>group<span class="w"> </span>member<span class="w"> </span>list<span class="w"> </span>--target<span class="w"> </span>keycloak-main<span class="w"> </span>--id<span class="w"> </span>&lt;group-id&gt;
+</code></pre></div>
+<h2 id="step-6-give-each-person-access-to-the-tenants-secrets-in-vault">Step 6: Give each person access to the tenant's secrets in Vault<a class="headerlink" href="#step-6-give-each-person-access-to-the-tenants-secrets-in-vault" title="Permanent link">&para;</a></h2>
+<p>MEHO keeps a tenant's passwords in Vault under
+<code>secret/tenants/&lt;tenant-uuid&gt;/&lt;target&gt;</code>. Vault lets a person read that
+path only when the person's <strong>Vault identity</strong> has two things:</p>
+<ul>
+<li>the metadata <code>tenant_id=&lt;tenant-uuid&gt;</code>, and</li>
+<li>membership in a Vault group that carries the policy for the person's
+  role.</li>
+</ul>
+<p>Keycloak groups do not create either. Without this step, the person
+can log in, but every operation that needs a password fails with a
+Vault permission error.</p>
+<p>The policy bodies and the full recipe are in the runbook
+<a href="https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md">per-tenant Vault policies</a>.
+The steps below run that recipe through MEHO's Vault operations, so each
+write is approved and stored in the audit log. <code>vault-main</code> is your
+Vault target. Every identity write runs at the <strong>dangerous</strong> risk level,
+so the second person approves each one.</p>
+<ol>
+<li><strong>Check that the three shared policies exist.</strong> They are written
+   once per site and shared by every tenant:</li>
+</ol>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"> </span>vault-1.x<span class="w"> </span>vault.sys.policy.list<span class="w"> </span>--target<span class="w"> </span>vault-main
+</code></pre></div>
+<p>The list must contain <code>meho-tenant-read-only</code>,
+   <code>meho-tenant-operator</code> and <code>meho-tenant-admin</code>. If one is missing,
+   write it from section 2 of the runbook with <code>vault.sys.policy.write</code>.</p>
+<ol>
+<li><strong>Create the person's Vault identity with the tenant metadata.</strong> The
+   identity name is the person's Keycloak user id (the <code>sub</code> claim).
+   Keycloak's <code>--username</code> filter is a partial match, so <code>alice</code> also
+   finds <code>alice2</code>. The <code>jq</code> filter below keeps only the exact username
+   and stops when it does not find exactly one user:</li>
+</ol>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>keycloak<span class="w"> </span>user<span class="w"> </span>list<span class="w"> </span>--target<span class="w"> </span>keycloak-main<span class="w"> </span>--username<span class="w"> </span>alice@acme.example<span class="w"> </span>--json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'[.result.rows[] | select(.username == "alice@acme.example")]</span>
+<span class="s1">           | if length == 1 then .[0].id else error("expected one user, found \(length)") end'</span>
+meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"> </span>vault-1.x<span class="w"> </span>vault.identity.entity.write<span class="w"> </span>--target<span class="w"> </span>vault-main<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--params<span class="w"> </span><span class="s1">'{"name": "&lt;keycloak-user-id&gt;", "metadata": {"tenant_id": "&lt;tenant-uuid&gt;"}}'</span>
+</code></pre></div>
+<p>Write down the <code>entity_id</code> from the result.</p>
+<ol>
+<li><strong>Link the person's login to that identity.</strong> Vault needs an alias
+   on the JWT auth mount that MEHO logs in with (<code>jwt</code> by default; the
+   setting is <code>VAULT_OIDC_MOUNT_PATH</code>). Without the alias, Vault makes a
+   second, empty identity on the first login, and the metadata from
+   step 2 is not used.</li>
+</ol>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>vault<span class="w"> </span>sys<span class="w"> </span>auth-list<span class="w"> </span>--target<span class="w"> </span>vault-main<span class="w"> </span>--json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.result.auth_methods["jwt/"].accessor'</span>
+meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"> </span>vault-1.x<span class="w"> </span>vault.identity.entity_alias.write<span class="w"> </span>--target<span class="w"> </span>vault-main<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--params<span class="w"> </span><span class="s1">'{"name": "&lt;keycloak-user-id&gt;", "canonical_id": "&lt;entity-id&gt;", "mount_accessor": "&lt;accessor&gt;"}'</span>
+</code></pre></div>
+<ol>
+<li><strong>Put the identity in the tenant's role group.</strong> One group per
+   tenant and role, named <code>meho-tenant-&lt;tenant-uuid&gt;-&lt;role&gt;</code>. The group
+   carries the policy for that role:</li>
+</ol>
+<table>
+<thead>
+<tr>
+<th>Keycloak <code>tenant_role</code></th>
+<th>Vault group</th>
+<th>Policy</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>read_only</code></td>
+<td><code>meho-tenant-&lt;tenant-uuid&gt;-read_only</code></td>
+<td><code>meho-tenant-read-only</code></td>
+</tr>
+<tr>
+<td><code>operator</code></td>
+<td><code>meho-tenant-&lt;tenant-uuid&gt;-operator</code></td>
+<td><code>meho-tenant-operator</code></td>
+</tr>
+<tr>
+<td><code>tenant_admin</code></td>
+<td><code>meho-tenant-&lt;tenant-uuid&gt;-tenant_admin</code></td>
+<td><code>meho-tenant-admin</code></td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"> </span>vault-1.x<span class="w"> </span>vault.identity.group.write<span class="w"> </span>--target<span class="w"> </span>vault-main<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--params<span class="w"> </span><span class="s1">'{"name": "meho-tenant-&lt;tenant-uuid&gt;-tenant_admin", "policies": ["meho-tenant-admin"], "member_entity_ids": ["&lt;entity-id&gt;"]}'</span>
+</code></pre></div>
+<p>The member list replaces the old one. When you add a second person
+   to a group that exists, list every member again.</p>
+<p>Repeat steps 2 to 4 for each person. The Vault group must match the
+<code>tenant_role</code> of the person's Keycloak group from Step 5.</p>
+<h2 id="step-7-optional-give-the-tenant-its-own-vault-login-role">Step 7 (optional): Give the tenant its own Vault login role<a class="headerlink" href="#step-7-optional-give-the-tenant-its-own-vault-login-role" title="Permanent link">&para;</a></h2>
+<p>By default every tenant logs in to Vault with the same role
+(<code>VAULT_OIDC_ROLE</code>, usually <code>meho-mcp</code>). Step 6 already keeps each
+tenant's passwords apart. A separate login role adds a second fence,
+for example a different token lifetime per tenant:</p>
+<ol>
+<li>In Vault, create a JWT login role for the tenant. Bind it to the
+   tenant with <code>bound_claims</code> on <code>tenant_id</code>, and give it the same
+   policies as the shared role.</li>
+<li>Add <code>&lt;tenant-uuid&gt;=&lt;vault-role&gt;</code> to <code>VAULT_OIDC_ROLE_BY_TENANT</code>
+   (comma-separated, through <code>extraEnv</code>), then restart MEHO.</li>
+</ol>
+<p>A wrong entry stops MEHO from starting, so check the value before you
+roll it out. The login-role recipe is in the
+<a href="https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-policy.md">connector Vault policy runbook</a>.</p>
+<h2 id="step-8-check-the-first-login-and-the-secret-access">Step 8: Check the first login and the secret access<a class="headerlink" href="#step-8-check-the-first-login-and-the-secret-access" title="Permanent link">&para;</a></h2>
+<p>The new person logs in and checks the tenant:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>login<span class="w"> </span>https://meho.example.com
+meho<span class="w"> </span>status<span class="w"> </span>--json<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.operator
+</code></pre></div>
+<p>The output must show the new <code>tenant_id</code> and the expected
+<code>tenant_role</code>.</p>
+<p>Then the new <code>tenant_admin</code> checks that Vault accepts the tenant. The
+test write below waits for approval, and so does its cleanup. An
+approval belongs to one tenant: the second person from your current
+tenant cannot see or approve a request made in the new tenant. So the
+new tenant needs its own approver first.</p>
+<p>The approver must be a <code>tenant_admin</code> of the new tenant. An approved
+operation runs as the <strong>approver</strong>, not as the person who asked for it.
+The test write and its cleanup therefore use the approver's Vault
+policy. The <code>operator</code> policy writes only under <code>rotation/*</code> and cannot
+delete anything, so an <code>operator</code> approver fails with
+<code>permission denied</code>. The <code>tenant_admin</code> policy covers both: the write
+under <code>tenants/&lt;tenant-uuid&gt;/*</code> and the cleanup, which needs <code>update</code>
+on <code>secret/delete/tenants/&lt;tenant-uuid&gt;/*</code>. Check that your
+<code>meho-tenant-admin</code> policy has that <code>secret/delete/...</code> grant from
+section 2.3 of the
+<a href="https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md">per-tenant Vault policies runbook</a>.
+A policy written before that grant was added fails the cleanup.</p>
+<p>Pick one of these two ways to get an approver:</p>
+<ul>
+<li><strong>A second person in the new tenant.</strong> Run Steps 4 to 6 again for a
+  second person with the <code>tenant_admin</code> role. You make these requests
+  in your current tenant, so your current approver approves them as
+  before.</li>
+<li><strong>An agent requester in the new tenant.</strong> The new <code>tenant_admin</code> sets
+  up the agent-requester pattern from
+  <a href="../approvals-and-break-glass/#option-1-the-agent-requester-pattern-recommended">Approvals and break-glass</a>
+  in the new tenant. A scheduled run of the agent makes the test write
+  and, later, the delete instead of the person. The <code>tenant_admin</code>
+  approves both. The agent needs the setup below first. MEHO checks the
+  <strong>requester's</strong> own Vault access when it stores an approval request.
+  Without this setup the agent's request is refused with
+  <code>write_capability_denied</code>, and there is nothing to approve.</li>
+</ul>
+<p>The self-approval switch is not enough here. It covers the test write
+(risk level <code>caution</code>), but never the cleanup delete (risk level
+<code>dangerous</code>).</p>
+<p>Both sides need Vault access. The approver needs the Vault identity
+from Step 6, with the <code>tenant_admin</code> Vault group. The approved write
+and the cleanup run under the approver's Vault policy. The requester
+needs a Vault identity too, because MEHO checks the requester's access
+before it stores the request. The read checks the reader's.</p>
+<h3 id="set-up-the-agent-requester">Set up the agent requester<a class="headerlink" href="#set-up-the-agent-requester" title="Permanent link">&para;</a></h3>
+<p>Skip this part if you chose a second person. The agent is registered in
+the new tenant, but its Vault identity is written through your current
+tenant's Vault target, like every identity in Step 6. So the Vault
+writes below wait for your current approver, as before.</p>
+<ol>
+<li><strong>Register the agent and grant it the delete.</strong> The new
+   <code>tenant_admin</code>, logged in to the new tenant, registers the agent
+   principal. Agents are refused <code>dangerous</code> operations by default, so
+   the cleanup (<code>vault.kv.delete</code>) needs a grant with
+   <code>--verdict needs-approval</code>. The test write (<code>vault.kv.put</code>, risk
+   level <code>caution</code>) waits for approval without a grant.</li>
+</ol>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>agent-principal<span class="w"> </span>register<span class="w"> </span>tenant-check
+meho<span class="w"> </span>agent<span class="w"> </span>grant<span class="w"> </span>create<span class="w"> </span>--principal<span class="w"> </span>agent:tenant-check<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--op<span class="w"> </span>vault.kv.delete<span class="w"> </span>--verdict<span class="w"> </span>needs-approval
+</code></pre></div>
+<ol>
+<li><strong>Find the agent's login id.</strong> The agent logs in to Vault with its own
+   Keycloak token. Its <code>sub</code> claim is the id of the Keycloak
+   service-account user, named <code>service-account-agent:&lt;name&gt;</code> in lower
+   case. The <code>jq</code> filter keeps only the exact username:</li>
+</ol>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>keycloak<span class="w"> </span>user<span class="w"> </span>list<span class="w"> </span>--target<span class="w"> </span>keycloak-main<span class="w"> </span>--username<span class="w"> </span>service-account-agent:tenant-check<span class="w"> </span>--json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'[.result.rows[] | select(.username == "service-account-agent:tenant-check")]</span>
+<span class="s1">           | if length == 1 then .[0].id else error("expected one user, found \(length)") end'</span>
+</code></pre></div>
+<ol>
+<li>
+<p><strong>Give the agent a Vault identity with the tenant_admin group.</strong> Run
+   Step 6, parts 2 to 4, with that id in place of the person's user id:
+   the identity with the <code>tenant_id=&lt;tenant-uuid&gt;</code> metadata, the alias
+   on the JWT mount, and membership in
+   <code>meho-tenant-&lt;tenant-uuid&gt;-tenant_admin</code>. The agent's token carries
+   <code>tenant_role=tenant_admin</code>, and only the <code>meho-tenant-admin</code> policy
+   covers both the write under <code>tenants/&lt;tenant-uuid&gt;/*</code> and the
+   <code>secret/delete/...</code> grant for the cleanup. Remember that the group's
+   member list replaces the old one: list the approver's entity id and
+   the agent's entity id together.</p>
+</li>
+<li>
+<p><strong>Create the agent definition and schedule the run.</strong> Follow the
+   four steps of the agent-requester pattern. The run must be a
+   scheduled one. An agent you start by hand acts for you, and the
+   request then carries your <code>sub</code>, so you could not approve it.</p>
+</li>
+</ol>
+<p>The new tenant has no targets yet, so register the Vault target in the
+new tenant first. It needs no password, because MEHO logs in to Vault
+with the person's own token. Then write one test secret, let the
+approver approve it, and read it back:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>add<span class="w"> </span>vault-main<span class="w"> </span>--product<span class="w"> </span>vault<span class="w"> </span>--host<span class="w"> </span>vault.example.com<span class="w"> </span>--no-secret-ref
+meho<span class="w"> </span>vault<span class="w"> </span>kv<span class="w"> </span>put<span class="w"> </span>--target<span class="w"> </span>vault-main<span class="w"> </span>secret<span class="w"> </span>tenants/&lt;tenant-uuid&gt;/smoke-test<span class="w"> </span>--data<span class="w"> </span><span class="s1">'{"ok": "yes"}'</span>
+<span class="c1"># The approver, logged in to the new tenant:</span>
+meho<span class="w"> </span>approvals<span class="w"> </span>list
+meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>&lt;approval-id&gt;
+<span class="c1"># Back as the first person:</span>
+meho<span class="w"> </span>vault<span class="w"> </span>kv<span class="w"> </span><span class="nb">read</span><span class="w"> </span>--target<span class="w"> </span>vault-main<span class="w"> </span>secret<span class="w"> </span>tenants/&lt;tenant-uuid&gt;/smoke-test
+</code></pre></div>
+<p>The read must return <code>{"ok": "yes"}</code>. A <code>permission denied</code> from Vault
+on the write means the identity metadata or the group from Step 6 is
+missing for the approver, or the approver is not a <code>tenant_admin</code>. The
+same error on the read means the identity or group is missing for the
+reader.</p>
+<p>Delete the test secret afterwards. The delete runs at the <code>dangerous</code>
+risk level, so the same <code>tenant_admin</code> approver (or the agent setup) is
+needed again:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>vault<span class="w"> </span>kv<span class="w"> </span>delete<span class="w"> </span>--target<span class="w"> </span>vault-main<span class="w"> </span>secret<span class="w"> </span>tenants/&lt;tenant-uuid&gt;/smoke-test<span class="w"> </span>--versions<span class="w"> </span><span class="m">1</span>
+<span class="c1"># The approver, logged in to the new tenant:</span>
+meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>&lt;approval-id&gt;
+</code></pre></div>
+<h2 id="if-the-login-fails">If the login fails<a class="headerlink" href="#if-the-login-fails" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>What you see</th>
+<th>Cause</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>missing_tenant_claim</code></td>
+<td>The person is in no role group. Or the role group has no <code>tenant_id</code> attribute, or the client has no <code>tenant-id</code> mapper.</td>
+<td>Step 5 (add the person to one group), Step 2 (check the attributes), or <a href="../../install/keycloak-realm/#step-3-add-the-protocol-mappers">Keycloak realm setup, Step 3</a>. Then log in again.</td>
+</tr>
+<tr>
+<td><code>multiple_role_groups</code></td>
+<td>The person is in two role groups.</td>
+<td>Remove the person from one group (<code>meho keycloak group member remove</code>).</td>
+</tr>
+<tr>
+<td><code>malformed_tenant_claim</code></td>
+<td><code>tenant_id</code> on the group is not a UUID.</td>
+<td>Fix it with <code>meho keycloak group update-attributes</code>.</td>
+</tr>
+<tr>
+<td><code>unknown_tenant_role</code></td>
+<td><code>tenant_role</code> on the group is not <code>read_only</code>, <code>operator</code> or <code>tenant_admin</code>.</td>
+<td>Fix it with <code>meho keycloak group update-attributes</code>.</td>
+</tr>
+<tr>
+<td>Login works, but an operation fails with <code>permission denied</code> from Vault</td>
+<td>The person's Vault identity has no <code>tenant_id</code> metadata, or is not in the tenant's Vault group. An approved write runs as the approver, so this can be the approver's identity.</td>
+<td>Step 6 for that person. Check with section 5 of the <a href="https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md">per-tenant Vault policies runbook</a>.</td>
+</tr>
+<tr>
+<td>The approved test write or its cleanup fails with <code>permission denied</code> from Vault</td>
+<td>The approver is an <code>operator</code>, not a <code>tenant_admin</code>. Or the <code>meho-tenant-admin</code> policy lacks the <code>secret/delete/...</code> grant for the cleanup.</td>
+<td>Let a <code>tenant_admin</code> approve. Add the grant from section 2.3 of the <a href="https://github.com/evoila/meho/blob/main/docs/cross-repo/connector-vault-tenant-policy.md">per-tenant Vault policies runbook</a>.</td>
+</tr>
+<tr>
+<td>The test write or the cleanup answers <code>write_capability_denied</code>, and no approval request appears</td>
+<td>The requester's Vault identity has no <code>tenant_id</code> metadata, or is not in the tenant's <code>tenant_admin</code> Vault group. MEHO checks the requester's access before it stores the request.</td>
+<td>Step 6 for the requester. For an agent requester, the agent setup in Step 8.</td>
+</tr>
+<tr>
+<td><code>approve</code> answers <code>self_approval_forbidden</code></td>
+<td>You asked for the change and tried to approve it yourself.</td>
+<td>A second person approves, or use the agent-requester pattern (see the box at the top).</td>
+</tr>
+<tr>
+<td><code>meho approvals list</code> in the new tenant shows nothing, but a request is waiting</td>
+<td>The request was made in another tenant. Approvals belong to one tenant.</td>
+<td>Log in to the tenant where the request was made, or set up an approver in the new tenant (Step 8).</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../approvals-and-break-glass/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Approvals and break-glass">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Approvals and break-glass
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../topology/" class="md-footer__link md-footer__link--next" aria-label="Next: Topology">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Topology
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 evoila Group — Apache 2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

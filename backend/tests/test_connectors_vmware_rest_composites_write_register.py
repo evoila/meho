@@ -171,6 +171,12 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vcenter.appliance.deploy",
     "vmware.composite.vcenter.install",
     "vmware.composite.vcenter.deployment.answer",
+    # VM templates in a content library: deploy, check out, check in (all
+    # dangerous + approval), and the destructive guest customization spec delete.
+    "vmware.composite.library.vm_template.deploy",
+    "vmware.composite.library.vm_template.check_out",
+    "vmware.composite.library.vm_template.check_in",
+    "vmware.composite.guest.customization_spec.delete",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -510,6 +516,10 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.cluster.drs_rule.delete": "cluster",
     "vmware.composite.cluster.drs_group.members.set": "cluster",
     "vmware.composite.cluster.drs_group.delete": "cluster",
+    "vmware.composite.library.vm_template.deploy": "content_library",
+    "vmware.composite.library.vm_template.check_out": "content_library",
+    "vmware.composite.library.vm_template.check_in": "content_library",
+    "vmware.composite.guest.customization_spec.delete": "guest",
 }
 
 
@@ -709,6 +719,8 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
             "vmware.composite.cluster.drs_group.delete",
             # The VM snapshot delete.
             "vmware.composite.vm.snapshot.delete",
+            # The guest customization spec delete.
+            "vmware.composite.guest.customization_spec.delete",
         ):
             expected_level = "destructive"
         elif row.op_id in caution_ops:

@@ -385,6 +385,10 @@ async def host_usage_impl(
 # defined -- to break the import cycle (the sibling modules import both
 # names from this module). E402 is expected: moving these to the top
 # would re-introduce the cycle.
+from meho_backplane.connectors.vmware_rest.customization_specs import (  # noqa: E402
+    GUEST_GROUP_KEY,
+    GUEST_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_alarm_triggered import (  # noqa: E402
     ALARM_TRIGGERED_GROUP_KEY,
     ALARM_TRIGGERED_WHEN_TO_USE,
@@ -408,6 +412,9 @@ from meho_backplane.connectors.vmware_rest.typed_ops_content_library import (  #
 from meho_backplane.connectors.vmware_rest.typed_ops_content_library_find import (  # noqa: E402
     VMWARE_CONTENT_LIBRARY_FIND_OP,
     VMWARE_CONTENT_LIBRARY_ITEM_FIND_OP,
+)
+from meho_backplane.connectors.vmware_rest.typed_ops_customization_spec import (  # noqa: E402
+    CUSTOMIZATION_SPEC_OPS,
 )
 from meho_backplane.connectors.vmware_rest.typed_ops_datacenter_list import (  # noqa: E402
     DATACENTER_LIST_GROUP_KEY,
@@ -548,6 +555,8 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # Shared with the three install composites: the same key and text.
     DEPLOYMENT_STATUS_GROUP_KEY: DEPLOYMENT_STATUS_WHEN_TO_USE,
     PORTGROUP_SHOW_GROUP_KEY: PORTGROUP_SHOW_WHEN_TO_USE,
+    # Shared with the guest customization composites: the same key and text.
+    GUEST_GROUP_KEY: GUEST_WHEN_TO_USE,
 }
 
 VMWARE_HOST_USAGE_OP = VmwareTypedOp(
@@ -635,6 +644,7 @@ VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     *CONTENT_LIBRARY_OPS,
     VMWARE_VCENTER_DEPLOYMENT_STATUS_OP,
     VMWARE_NETWORK_PORTGROUP_SHOW_OP,
+    *CUSTOMIZATION_SPEC_OPS,
 )
 
 

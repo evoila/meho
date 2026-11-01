@@ -5277,6 +5277,59 @@ field the read uses against the pinned 9.0 `vi-json.yaml` and the 8.0 U1,
 U2 and U3 files; the network list filters against the pinned 8.0 U3 and 9.0
 `vcenter.yaml`).
 
+### VM templates in a content library and guest customization specs
+
+Six hand-written operations for two usual jobs: work with VM templates that
+are stored in a content library, and look after the saved guest
+customization specs. They need no spec ingest and are on both catalogs
+(`vmware-rest-8.0` and `vmware-rest-9.0`).
+
+| Operation | What it does | Vendor call | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.composite.library.vm_template.deploy` | Makes a new VM from a VM-template library item: `name`, placement (`cluster`, `host` or `resource_pool`, optional `folder`), optional `datastore`, `powered_on` and `customization_spec_name` (a saved spec name). Returns `vm` and the VM read back (`vm_info`: name, power state, guest OS, CPUs, memory). | REST `POST /vcenter/vm-template/library-items/{item}?action=deploy`, then `GET /vcenter/vm/{vm}` | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.composite.library.vm_template.check_out` | vCenter makes a VM from the template to edit. Returns `vm`, the check-out record (`time`, `user`) and `vm_info`. | REST `POST .../check-outs?action=check-out`, then `GET .../check-outs/{vm}` and `GET /vcenter/vm/{vm}` | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.composite.library.vm_template.check_in` | Saves the checked-out, powered-off VM as the new template version; vCenter keeps the previous version as a backup. Returns `version` and the template read back (`template`: template VM, guest OS, CPUs, memory, disk and NIC count). | REST `POST .../check-outs/{vm}?action=check-in`, then `GET /vcenter/vm-template/library-items/{item}` | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.guest.customization_spec.list` | One flat row per saved spec: `name`, `description`, `os_type`, `last_modified`. Filters `os_type` and a `name` pattern, applied in MEHO. | REST `GET /vcenter/guest/customization-specs` | `safe`, runs at once | 8.0, 9.x |
+| `vmware.guest.customization_spec.get` | One spec in full: `config_kind` (`windows`, `linux` or `cloud_init`), `customization` (guest OS settings, DNS, IP per NIC), `fingerprint` and `hidden_fields`. Passwords, keys, scripts and sysprep XML are never returned. | REST `GET /vcenter/guest/customization-specs/{name}` | `safe`, runs at once | 8.0, 9.x |
+| `vmware.composite.guest.customization_spec.delete` | Deletes one spec by name and reads back that it is gone (`deleted`, `unchanged` or `still_present`). | REST `GET`, then `DELETE /vcenter/guest/customization-specs/{name}`, then `GET` | `destructive`: a preview, then a second person; an agent is always refused | 8.0, 9.x |
+
+- **Inputs are ids.** The template item is a UUID and the VMs and placement
+  objects are moids, so the approved run changes exactly what the approver
+  saw. A template id that is not a UUID, or a check-in `vm` that is not a VM
+  moid, is refused before any call.
+- **Request bodies.** The `/api` surface takes the `DeploySpec`,
+  `CheckOutSpec` and `CheckInSpec` at the top level of the body, not under
+  `spec`. The deploy is synchronous (vCenter answers with the VM id when the
+  copy is done), so it uses the long deploy timeout of `vm.clone`. vCenter
+  HTTP 400 gives `refused` and HTTP 404 gives `not_found`, with vCenter's
+  error type and text; nothing changed. A failed read after a change keeps
+  the change and says why in `read_note`.
+- **Approval previews.** The three template changes show the inputs and the
+  template as it is now; the check-in also shows the check-out record and
+  the VM power state. The delete preview is the blast radius: the spec
+  (name, description, last change), no children (no VM keeps a link to a
+  spec) and `irreversibility: permanent`. For a spec that does not exist the
+  preview builder raises, so the call is refused before it waits.
+- **Secrets.** `customization_specs.hide_secrets` replaces every field with a
+  secret name (`password`, `domain_password`, `product_key`, ...) and the
+  free-text fields that can hold one (`sysprep_xml`, `gui_run_once_commands`,
+  `script_text`, cloud-init `userdata`) with the redaction marker, and lists
+  their paths in `hidden_fields`. The delete answer and its preview carry
+  only the name, the description and the last change.
+- **Group texts.** The reads and the delete are in the `guest` group; its one
+  text (`GUEST_WHEN_TO_USE`) is shared by the typed reads and the composites.
+  The template changes are in the `content_library` group.
+
+Code: `composites/_vm_template.py` (handlers, previews, registration rows),
+`composites/_vm_template_schemas.py`, `composites/_customization_spec_delete.py`,
+`customization_specs.py` (reads, secret hiding, group text) and
+`typed_ops_customization_spec.py`. Tests use made-up answers only:
+`tests/test_connectors_vmware_rest_vm_template.py` (REST fake; the governed
+flow on both catalogs), `tests/test_connectors_vmware_rest_customization_spec.py`
+(mocked HTTP on vCenter 8.0.3 and 9.0; the delete with preview and approval)
+and `tests/test_connectors_vmware_rest_vm_template_reconcile.py` (every call
+and every body field against the pinned 8.0 U3 and 9.0 `vcenter.yaml`).
+
 ## Dependencies
 
 - `meho_backplane.connectors.adapters.http.HttpConnector` (G0.2-T3

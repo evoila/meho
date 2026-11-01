@@ -50,9 +50,12 @@ CONTENT_LIBRARY_WHEN_TO_USE: Final = (
     "content_library.subscribed.create and .sync (both wait for approval), "
     "subscribed.status and subscribed.items.list. Deletes (always wait for approval): "
     "content_library.delete (a whole library) and content_library.item.delete (one item "
-    "of a local library). To get the id of a library or an item from its name, use the "
-    "safe reads vmware.content_library.find and vmware.content_library.item.find. To "
-    "deploy a VM from an item, use vm.deploy_from_library in the vm group."
+    "of a local library). VM templates in a library (all three wait for approval): "
+    "library.vm_template.deploy makes a new VM from one, library.vm_template.check_out "
+    "makes a VM from one to edit, and library.vm_template.check_in saves that VM back as "
+    "the new template version. To get the id of a library or an item from its name, use "
+    "the safe reads vmware.content_library.find and vmware.content_library.item.find. To "
+    "deploy a VM from an OVF item, use vm.deploy_from_library in the vm group."
 )
 
 _NULL_TEXT: Final[dict[str, Any]] = {"type": ["string", "null"]}

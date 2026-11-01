@@ -66,6 +66,9 @@ from meho_backplane.connectors.vmware_rest.composites._alarm_schemas import (
     ALARM_RESET_PARAMETER_SCHEMA,
     ALARM_RESET_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vmware_rest.composites._customization_spec_delete import (
+    CUSTOMIZATION_SPEC_DELETE_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
     datastore_dir_create_composite,
     datastore_file_delete_composite,
@@ -198,6 +201,9 @@ from meho_backplane.connectors.vmware_rest.composites._vm_cdrom_tools import (
 )
 from meho_backplane.connectors.vmware_rest.composites._vm_llm_instructions import (
     VM_LLM_INSTRUCTIONS,
+)
+from meho_backplane.connectors.vmware_rest.composites._vm_template import (
+    VM_TEMPLATE_COMPOSITES,
 )
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
@@ -380,6 +386,10 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
     VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vmware_rest.customization_specs import (
+    GUEST_GROUP_KEY,
+    GUEST_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.license_common import (
     LICENSE_GROUP_KEY,
     LICENSE_KEY_TAG,
@@ -549,15 +559,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "name or moref. Pair with 'networking' before host.detach_from_vds, and "
         "with 'cluster' or 'vm' for the reads before a change."
     ),
-    "guest": (
-        "Use for guest OS customization: how a cloned VM gets its host name and "
-        "IP address on first boot. Changes: save a named customization spec "
-        "with host name, IP per NIC, gateway and DNS, or a Windows sysprep spec "
-        "(guest.customization_spec.create, dangerous); apply a saved spec to a "
-        "powered-off VM, and power it on if asked (vm.customize, dangerous). "
-        "Use it after a 'vm' clone or create. A spec can hold admin passwords; "
-        "they never reach a reviewer."
-    ),
+    # Shared with the typed customization spec reads: the same key and text.
+    GUEST_GROUP_KEY: GUEST_WHEN_TO_USE,
     "guest_ops": (
         "Use to work inside a running VM's guest OS through VMware Tools, "
         "instead of 'govc guest.run'. Reads: list the guest's processes "
@@ -2075,6 +2078,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # Mount and unmount a content-library ISO on a VM; the rows live in their
     # own module.
     *(_CompositeSpec(**row) for row in VM_CDROM_LIBRARY_ISO_COMPOSITES),
+    # VM templates in a content library (deploy, check out, check in) and the
+    # guest customization spec delete; the rows live in their own modules.
+    *(_CompositeSpec(**row) for row in VM_TEMPLATE_COMPOSITES),
+    *(_CompositeSpec(**row) for row in CUSTOMIZATION_SPEC_DELETE_COMPOSITES),
     # ----------------------------------------------------------------
     # Licence write -- dangerous / approval. The full key never leaves
     # the handler; the license-key tag keeps the vCenter bodies out of

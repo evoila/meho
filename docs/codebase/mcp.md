@@ -1123,6 +1123,24 @@ tools (working or operator: the four working docs tools plus the three
 operator-surface doc-collection lifecycle tools all stay hidden). The
 gates are independent axes.
 
+**Advertised scopes (#5514).** MEHO tells MCP clients which scopes to ask
+for in two places: `scopes_supported` in `/.well-known/oauth-protected-resource`
+(`api/well_known.py`) and the `scope` parameter of the 401
+`WWW-Authenticate` challenge (`www_authenticate_header` in `mcp/auth.py`).
+Both use `MCP_SCOPES_SUPPORTED` in `mcp/auth.py`:
+`mcp:read mcp:execute offline_access`. MCP 2025-11-25 ("Scope Selection
+Strategy") has a client ask for the challenge `scope` first, then for
+`scopes_supported`. `offline_access` is in the list so a client gets a
+login that renews itself; without it, the login ends at the realm's short
+SSO idle limit. `mcp:admin` is deliberately not advertised: elevation
+stays an explicit request. The `meho-mcp` client in the shipped realm
+offers `offline_access` as an optional scope, so a client that asks for
+it is not refused. The MEHO plugin and the Claude Desktop bundle (both
+`mcp-remote` 0.1.39) still send their own scope list in the browser login
+(`--static-oauth-client-metadata`, which `mcp-remote` puts into the login
+URL after the advertised scopes), so `MEHO_MCP_SCOPES` with `mcp:admin`
+keeps working.
+
 ### Blast radius
 
 The surface filter lives entirely in `all_tools_for` (the only

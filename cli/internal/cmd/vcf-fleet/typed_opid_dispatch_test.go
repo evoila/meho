@@ -65,6 +65,15 @@ var typedOpCLICoverage = map[string]string{
 	"fleet.health":                 "",
 	"fleet.request.retry":          "",
 	"fleet.product.inventory_sync": "",
+	// Upgrades, binaries and environments: changes that wait for approval.
+	// Agent surface only for now; run them with "meho operation call" or MCP call_operation.
+	"fleet.binary.list":              "",
+	"fleet.binary.map":               "",
+	"fleet.product.upgrade.precheck": "",
+	"fleet.product.upgrade":          "",
+	"fleet.environment.precheck":     "",
+	"fleet.environment.create":       "",
+	"fleet.environment.delete":       "",
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed Fleet

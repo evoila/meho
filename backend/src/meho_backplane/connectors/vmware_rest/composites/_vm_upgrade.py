@@ -565,6 +565,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_HARDWARE_UPGRADE_LLM_INSTRUCTIONS,
         preview=_vm_hardware_upgrade_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id=OP_ID_VM_TOOLS_UPGRADE,
@@ -583,5 +584,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_TOOLS_UPGRADE_LLM_INSTRUCTIONS,
         preview=_vm_tools_upgrade_preview,
+        classifier_other=True,
     ),
 )

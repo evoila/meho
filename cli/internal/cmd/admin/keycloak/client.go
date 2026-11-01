@@ -189,24 +189,27 @@ func (c *adminClient) do(
 // attributes and json-typed slices so a re-PUT preserves keys the
 // admin console may have added (e.g. `clientAuthenticatorType`).
 type clientRep struct {
-	ID                        string                     `json:"id,omitempty"`
-	ClientID                  string                     `json:"clientId"`
-	Name                      string                     `json:"name,omitempty"`
-	Description               string                     `json:"description,omitempty"`
-	Enabled                   *bool                      `json:"enabled,omitempty"`
-	PublicClient              *bool                      `json:"publicClient,omitempty"`
-	StandardFlowEnabled       *bool                      `json:"standardFlowEnabled,omitempty"`
-	ImplicitFlowEnabled       *bool                      `json:"implicitFlowEnabled,omitempty"`
-	DirectAccessGrantsEnabled *bool                      `json:"directAccessGrantsEnabled,omitempty"`
-	ServiceAccountsEnabled    *bool                      `json:"serviceAccountsEnabled,omitempty"`
-	FrontchannelLogout        *bool                      `json:"frontchannelLogout,omitempty"`
-	Attributes                map[string]string          `json:"attributes,omitempty"`
-	RedirectURIs              []string                   `json:"redirectUris"`
-	WebOrigins                []string                   `json:"webOrigins"`
-	DefaultClientScopes       []string                   `json:"defaultClientScopes,omitempty"`
-	OptionalClientScopes      []string                   `json:"optionalClientScopes,omitempty"`
-	ProtocolMappers           []protocolMapperRep        `json:"-"` // never marshalled on create — installed separately
-	Extra                     map[string]json.RawMessage `json:"-"` // preserved from GET
+	ID                        string            `json:"id,omitempty"`
+	ClientID                  string            `json:"clientId"`
+	Name                      string            `json:"name,omitempty"`
+	Description               string            `json:"description,omitempty"`
+	Enabled                   *bool             `json:"enabled,omitempty"`
+	PublicClient              *bool             `json:"publicClient,omitempty"`
+	StandardFlowEnabled       *bool             `json:"standardFlowEnabled,omitempty"`
+	ImplicitFlowEnabled       *bool             `json:"implicitFlowEnabled,omitempty"`
+	DirectAccessGrantsEnabled *bool             `json:"directAccessGrantsEnabled,omitempty"`
+	ServiceAccountsEnabled    *bool             `json:"serviceAccountsEnabled,omitempty"`
+	FrontchannelLogout        *bool             `json:"frontchannelLogout,omitempty"`
+	Attributes                map[string]string `json:"attributes,omitempty"`
+	RedirectURIs              []string          `json:"redirectUris"`
+	WebOrigins                []string          `json:"webOrigins"`
+	DefaultClientScopes       []string          `json:"defaultClientScopes,omitempty"`
+	OptionalClientScopes      []string          `json:"optionalClientScopes,omitempty"`
+	// AuthenticationFlowBindingOverrides binds the client to its own
+	// login flow ("browser" -> flow id). Only the approval client sets it.
+	AuthenticationFlowBindingOverrides map[string]string          `json:"authenticationFlowBindingOverrides,omitempty"`
+	ProtocolMappers                    []protocolMapperRep        `json:"-"` // never marshalled on create — installed separately
+	Extra                              map[string]json.RawMessage `json:"-"` // preserved from GET
 }
 
 // protocolMapperRep mirrors ProtocolMapperRepresentation closely
@@ -563,6 +566,31 @@ func (c *adminClient) addClientOptionalScope(
 	if status != http.StatusNoContent {
 		return &errKeycloakAPI{
 			method:     http.MethodPut,
+			url:        "clients/" + clientUUID + "/optional-client-scopes/" + scopeID,
+			statusCode: status, body: string(body),
+		}
+	}
+	return nil
+}
+
+// removeClientOptionalScope DELETEs /optional-client-scopes/{scopeId}
+// to take one optional scope off a client. Keycloak answers 204 also
+// when the scope was not assigned, so the caller does the
+// check-then-DELETE pattern only to report what it changed.
+func (c *adminClient) removeClientOptionalScope(
+	ctx context.Context, clientUUID, scopeID string,
+) error {
+	status, body, err := c.do(
+		ctx, http.MethodDelete,
+		"clients/"+clientUUID+"/optional-client-scopes/"+scopeID,
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusNoContent {
+		return &errKeycloakAPI{
+			method:     http.MethodDelete,
 			url:        "clients/" + clientUUID + "/optional-client-scopes/" + scopeID,
 			statusCode: status, body: string(body),
 		}

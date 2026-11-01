@@ -553,6 +553,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=MOUNT_LIBRARY_ISO_LLM_INSTRUCTIONS,
         preview=_mount_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id=OP_ID_UNMOUNT_LIBRARY_ISO,
@@ -570,5 +571,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=UNMOUNT_LIBRARY_ISO_LLM_INSTRUCTIONS,
         preview=_unmount_preview,
+        classifier_other=True,
     ),
 )

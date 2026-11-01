@@ -83,19 +83,35 @@ meho approvals approve --filter-work-ref <ticket> --in-order
 
 Each step is an ordinary approval and runs at once. MEHO goes on to the
 next step only when the run was OK. It stops at the first step that fails
-or is refused, and names that step and the steps it did not run. At a
-dangerous or destructive step it shows what the step changes and asks
-you to type `yes` first. In the console, filter the Pending tab to the
-change ticket and use **Approve group in order**.
+or is refused, and names that step and the steps it did not run. At each
+step it shows what the step does and asks you to type `yes` first. In
+the console, filter the Pending tab to the change ticket and use
+**Approve group in order**.
+
+You can also approve several requests by id in one run:
+`meho approvals approve <id> <id> ...`. The command shows each request
+(what it does, the operation, the connector and its version, the target,
+the risk level and the parameters) and asks you to type `yes` for each
+one. Anything else skips that request.
 
 **Approving on the command line asks you to sign in again.** An approval
 must come from a person who is present. In the console your click is the
-proof. On the command line and REST, MEHO needs a sign-in from the last 5
-minutes, and one sign-in allows one approval. So `meho approvals approve`
-opens your browser and asks for your password (and your authenticator
-code, if your realm asks for one). It uses that sign-in for this one
-approval only and does not store it. Your normal `meho login` stays as it
-is. A plain API token never approves. Reject needs no new sign-in.
+proof. On the command line and REST, MEHO needs a fresh sign-in made only
+for approvals. So `meho approvals approve` opens your browser and asks
+for your password (and your authenticator code, if your realm asks for
+one).
+
+- The browser always asks for your password, even when you are signed in
+  to the console in the same browser.
+- One sign-in covers approvals for 15 minutes. In that time one run of
+  the command can approve several requests.
+- An operation marked `destructive` needs a sign-in of its own. The
+  command opens the browser again for it.
+- The command keeps the sign-in in memory for this one run. It never
+  stores it.
+- Your normal `meho login` stays as it is, but it never approves. An MCP
+  token or an agent token never approves either.
+- Reject needs no new sign-in.
 
 Without a browser (for example over SSH), the command prints the sign-in
 link and stops. Approve in the console instead: it is the normal place to

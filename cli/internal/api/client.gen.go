@@ -2124,9 +2124,10 @@ type AuditTraceResult struct {
 // empty-string from absent-key and emits the same actionable
 // public-client error in both cases.
 type AuthConfigResponse struct {
-	Audience       string `json:"audience"`
-	CliClientId    string `json:"cli_client_id"`
-	KeycloakIssuer string `json:"keycloak_issuer"`
+	Audience           string  `json:"audience"`
+	CliApproveClientId *string `json:"cli_approve_client_id,omitempty"`
+	CliClientId        string  `json:"cli_client_id"`
+	KeycloakIssuer     string  `json:"keycloak_issuer"`
 }
 
 // AuthModel Per-target identity model per v0.1-spec L447-454.

@@ -52,6 +52,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS[
             "vmware.composite.network.portgroup.create"
         ],
+        no_preview=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.network.portgroup.security.set",
@@ -71,6 +72,8 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS[
             "vmware.composite.network.portgroup.security.set"
         ],
+        no_preview=True,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.network.portgroup.vlan.set",
@@ -91,5 +94,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS[
             "vmware.composite.network.portgroup.vlan.set"
         ],
+        no_preview=True,
+        classifier_other=True,
     ),
 )

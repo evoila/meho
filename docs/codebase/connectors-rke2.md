@@ -360,7 +360,10 @@ The posture tier reads **no secret material**. The join-token entry reports
 presence + mode only — the handler `stat`s the path and never `cat`s its
 content, so the token value cannot appear in the result envelope, the audit
 `raw_payload`, or the logs. Every token entry carries `redacted: true` to
-make the guarantee explicit to agents reading the schema. This is the T1
+make the guarantee explicit to agents reading the schema. The module
+declares the `token` entry as a plain field (`register_plain_fields`), so
+the default view of every answer (`docs/codebase/redaction.md`) keeps the
+file's mode and owner instead of hiding the entry for its name. This is the T1
 foundation for the load-bearing Initiative #2172 rule: a secret-returning
 handler must never return the secret (the audit `raw_payload` stores the raw
 result).

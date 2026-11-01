@@ -272,13 +272,25 @@ func printListTable(w io.Writer, status string, r *connectorListEnvelope) {
 		}
 		fmt.Fprintf(w, "%-32s %-10s %-23s %-10s %5d %5d\n",
 			truncate(c.ConnectorID, 32),
-			deriveRollupLabel(c.StagedGroupCount, c.EnabledGroupCount, c.DisabledGroupCount),
+			statusCell(c),
 			kindCell(c.Kind, c.Dispatchable),
 			truncate(tenant, 10),
 			c.GroupCount,
 			c.OperationCount,
 		)
 	}
+}
+
+// statusCell renders the table's status column. A connector whose
+// operations all come from a connector package that is not installed
+// (`state="package_not_installed"`, #5560) shows "no-package"; its
+// `next_step` names the package. Every other row shows the review
+// rollup from deriveRollupLabel.
+func statusCell(c listEntry) string {
+	if c.State == "package_not_installed" {
+		return "no-package"
+	}
+	return deriveRollupLabel(c.StagedGroupCount, c.EnabledGroupCount, c.DisabledGroupCount)
 }
 
 // kindCell renders the authoring-mode `kind` plus a dispatchability

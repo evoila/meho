@@ -164,6 +164,39 @@ def test_example_that_does_not_validate_fails() -> None:
     assert all(p.startswith("example 0 does not validate") for p in problems)
 
 
+_ID_PARAMS: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "vm": {"type": "string", "pattern": r"^vm-[0-9]+$", "description": "VM id."},
+        "disks": {
+            "type": "array",
+            "description": "Disk ids.",
+            "items": {"type": "string", "pattern": r"^[0-9]+$", "description": "Disk id."},
+        },
+    },
+    "required": ["vm"],
+}
+
+
+def test_a_placeholder_may_stand_in_a_pattern_field() -> None:
+    params = {**_ID_PARAMS, "examples": [{"vm": "<vm-id>", "disks": ["<disk-id>"]}]}
+    assert check_operation(_good_op(parameter_schema=params)) == {}
+
+
+def test_a_real_looking_value_must_still_match_the_pattern() -> None:
+    params = {**_ID_PARAMS, "examples": [{"vm": "app-vm", "disks": ["<disk-id>"]}]}
+    problems = _only_rule(_good_op(parameter_schema=params), "examples")
+    assert problems == [
+        'example 0 does not validate: $.vm expects string matching pattern "^vm-[0-9]+$"'
+    ]
+
+
+def test_a_placeholder_passes_only_the_pattern_check() -> None:
+    params = {**_ID_PARAMS, "examples": [{"vm": "<vm-id>", "disks": "<disk-id>"}]}
+    problems = _only_rule(_good_op(parameter_schema=params), "examples")
+    assert problems == ["example 0 does not validate: $.disks expects type: array"]
+
+
 def test_ticket_number_in_guidance_fails() -> None:
     guidance = {
         "when_to_call": "Added by #1234.",

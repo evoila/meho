@@ -154,6 +154,9 @@ class HostSecurityVim:
         self.fail: dict[str, Exception] = {}
         #: When False, change calls are accepted but change nothing.
         self.apply = True
+        #: When True, ``ReconfigureSnmpAgent`` applies everything but keeps the
+        #: old communities (read-only and per trap target).
+        self.keep_communities = False
         self.calls: list[tuple[str, Any]] = []
 
     # -- REST host lookup --------------------------------------------------
@@ -247,7 +250,15 @@ class HostSecurityVim:
         elif method == "UpdateLockdownExceptions":
             self.exceptions = list(body["users"])
         elif method == "ReconfigureSnmpAgent":
+            old_communities = self.snmp["readOnlyCommunities"]
+            old_trap_communities = [t["community"] for t in self.snmp["trapTargets"]]
             self.snmp = copy.deepcopy(body["spec"])
+            if self.keep_communities:
+                self.snmp["readOnlyCommunities"] = old_communities
+                for trap, community in zip(
+                    self.snmp["trapTargets"], old_trap_communities, strict=False
+                ):
+                    trap["community"] = community
         elif method == "SelectActivePartition":
             part = body["partition"]
             self.active = _partition(part["diskName"], part["partition"])

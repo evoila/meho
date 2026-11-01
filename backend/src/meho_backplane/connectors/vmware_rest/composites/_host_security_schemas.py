@@ -154,11 +154,39 @@ ADVANCED_SETTINGS_SET: Final[dict[str, Any]] = op_parts(
                             ],
                             "description": (
                                 "New value, of the setting's value_type from "
-                                "vmware.host.advanced_settings.show."
+                                "vmware.host.advanced_settings.show. Not for a setting that "
+                                "holds a secret: give value_secret_ref instead."
+                            ),
+                        },
+                        "value_secret_ref": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 512,
+                            "description": (
+                                "Vault path of the secret that holds the new value. Required "
+                                "for a setting whose key names a password, secret, token or "
+                                "community; allowed for any string setting. Give value or "
+                                "value_secret_ref, not both. Never put the secret itself here."
+                            ),
+                        },
+                        "value_secret_mount": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "description": (
+                                "Vault KV version 2 mount of the secret (default 'secret')."
+                            ),
+                        },
+                        "value_secret_key": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "description": (
+                                "Key in the secret that holds the value (default 'value')."
                             ),
                         },
                     },
-                    "required": ["key", "value"],
+                    "required": ["key"],
                     "additionalProperties": False,
                 },
             },
@@ -166,12 +194,27 @@ ADVANCED_SETTINGS_SET: Final[dict[str, Any]] = op_parts(
         "required": ["host", "settings"],
         "additionalProperties": False,
         "examples": [
-            {"host": "<host-name>", "settings": [{"key": "Example.Setting.Key", "value": 1}]}
+            {"host": "<host-name>", "settings": [{"key": "Example.Setting.Key", "value": 1}]},
+            {
+                "host": "<host-name>",
+                "settings": [
+                    {
+                        "key": "Example.Setting.Password",
+                        "value_secret_ref": "<vault-path-of-the-value>",
+                    }
+                ],
+            },
         ],
     },
     response=response_schema(
         _SETTINGS_STATE,
-        ["unknown_setting", "read_only_setting", "invalid_value"],
+        [
+            "unknown_setting",
+            "read_only_setting",
+            "invalid_value",
+            "secret_value_required",
+            "value_secret_unusable",
+        ],
         {
             "keys": {
                 "type": "array",
@@ -189,16 +232,23 @@ ADVANCED_SETTINGS_SET: Final[dict[str, Any]] = op_parts(
             "Read the settings first with vmware.host.advanced_settings.show to learn each "
             "key's value_type and range. MEHO checks every key before it sends anything: an "
             "unknown key, a read-only setting, a wrong value type or a key given twice stops "
-            "the whole call. "
+            "the whole call. A setting that holds a secret (its key names a password, secret, "
+            "token or community) takes its value from Vault: store it first and give "
+            "value_secret_ref; a plain value for it is refused. "
             "Some settings need a host reboot to take effect. The change waits for approval."
         ),
         "parameter_hints": {
-            "settings": "e.g. [{'key': '<setting-key>', 'value': <value of its value_type>}].",
+            "settings": (
+                "e.g. [{'key': '<setting-key>', 'value': <value of its value_type>}] or "
+                "[{'key': '<secret-setting-key>', 'value_secret_ref': '<vault-path>'}]."
+            ),
         },
         "output_shape": (
-            "{status: applied|unchanged|unknown_setting|read_only_setting|invalid_value|failed|"
-            "not_verified|<host refusal>, host, requested: {settings}, before and after: "
-            "{<key>: <value>}, keys (on a refusal), applied_steps, fault, guidance, issues}."
+            "{status: applied|unchanged|unknown_setting|read_only_setting|invalid_value|"
+            "secret_value_required|value_secret_unusable|failed|not_verified|<host refusal>, "
+            "host, requested: {settings}, before and after: {<key>: <value>}, keys (on a "
+            "refusal), applied_steps, fault, guidance, issues}. A secret setting shows "
+            "'<hidden>' instead of its value."
         ),
         "next_step": NEXT_STEP_TAIL,
     },

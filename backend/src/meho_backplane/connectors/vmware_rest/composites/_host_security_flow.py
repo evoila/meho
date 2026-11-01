@@ -135,8 +135,14 @@ async def finish(
     base: dict[str, Any],
     read: Callable[[], Awaitable[Any]],
     matches: Callable[[Any], bool],
+    shown: Callable[[Any], Any] | None = None,
 ) -> dict[str, Any]:
-    """Read the setting back and set ``applied`` or ``not_verified``."""
+    """Read the setting back and set ``applied`` or ``not_verified``.
+
+    *matches* sees what *read* returns, so a change can compare a secret it
+    sent. *shown* turns that into the ``after`` of the answer (without the
+    secret); ``None`` returns it as it is.
+    """
     try:
         after = await read()
     except _READ_ERRORS as exc:
@@ -147,7 +153,10 @@ async def finish(
             f"({type(exc).__name__}). Read the setting again to check it.",
             "issues": [issue("connector", "error", "the change could not be read back")],
         }
-    if not matches(after):
+    matched = matches(after)
+    if shown is not None:
+        after = shown(after)
+    if not matched:
         return {
             **base,
             "status": "not_verified",

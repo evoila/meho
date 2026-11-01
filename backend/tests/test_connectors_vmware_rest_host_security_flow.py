@@ -33,7 +33,7 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
-from meho_backplane.connectors.vmware_rest.composites import _write
+from meho_backplane.connectors.vmware_rest.composites import _host_security_writes, _write
 from meho_backplane.connectors.vmware_rest.composites._host_security_writes import (
     host_firewall_ruleset_set_composite,
 )
@@ -49,7 +49,12 @@ from meho_backplane.connectors.vmware_rest.typed_ops_host_security import (
     advanced_settings_show_impl,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor, OperationGroup
+from meho_backplane.db.models import (
+    ApprovalRequest,
+    AuditLog,
+    EndpointDescriptor,
+    OperationGroup,
+)
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
@@ -59,7 +64,7 @@ from meho_backplane.operations.approval_queue import (
 )
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.settings import get_settings
-from tests._vmware_host_security_fake import HOST, HostSecurityVim
+from tests._vmware_host_security_fake import HOST, SECRET_PASSWORD, HostSecurityVim
 from tests._vmware_teardown_fake import GateRecorder
 from tests.test_operation_contracts import OperationContract, check_operation
 
@@ -368,6 +373,88 @@ async def test_a_lockdown_change_waits_for_approval_then_runs_once() -> None:
     assert resume.result["status"] == "applied"
     assert resume.result["after"] == {"mode": "normal"}
     assert vim.writes() == ["ChangeLockdownMode"]
+
+
+_SECRET_KEY = "UserVars.ExamplePassword"
+_NEW_PASSWORD = "new-password-value"
+_SECRET_PARAMS = {
+    "host": "esxi-a",
+    "settings": [{"key": _SECRET_KEY, "value_secret_ref": "esxi/example"}],
+}
+
+
+def _assert_no_secret(label: str, blob: str) -> None:
+    for secret in (_NEW_PASSWORD, SECRET_PASSWORD):
+        assert secret not in blob, f"a secret setting value appears in {label}"
+
+
+@pytest.mark.usefixtures("_db_env")
+async def test_a_secret_setting_waits_for_approval_and_the_value_is_stored_nowhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The waiting request keeps its params in the handoff store; no row holds the value."""
+
+    async def read(operator: Any, target: Any, params: Any, *, prefix: str) -> str:
+        return _NEW_PASSWORD
+
+    monkeypatch.setattr(_host_security_writes, "read_secret_param", read)
+    vim = HostSecurityVim()
+    await _bootstrap(vim)
+    call = await call_operation(
+        _operator("op-requester"),
+        {
+            "connector_id": "vmware-rest-9.0",
+            "op_id": "vmware.composite.host.advanced_settings.set",
+            "target": _TARGET_NAME,
+            "params": dict(_SECRET_PARAMS),
+        },
+    )
+    assert call["status"] == "awaiting_approval", call
+    assert vim.writes() == []
+    request_id = UUID(call["extras"]["approval_request_id"])
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        assert row.params is None  # kept in the encrypted handoff store
+        preview = row.proposed_effect["preview"]
+    assert preview["current"] == {_SECRET_KEY: "<hidden>"}
+    assert preview["requested"] == {"settings": {_SECRET_KEY: "<hidden>"}}
+
+    approver = _operator("op-approver")
+    async with get_sessionmaker()() as s:
+        approved = await approve_request(s, request_id, operator=approver, params=None)
+        await s.commit()
+    assert approved.status == "approved"
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "applied"
+    assert resume.result["after"] == {_SECRET_KEY: "<hidden>"}
+    assert vim.writes() == ["UpdateOptions"]
+    assert vim.options[_SECRET_KEY] == ("string", _NEW_PASSWORD)
+
+    _assert_no_secret("the result", resume.model_dump_json())
+    async with get_sessionmaker()() as s:
+        approval = await s.get(ApprovalRequest, request_id)
+        audit_rows = (await s.execute(select(AuditLog))).scalars().all()
+    assert approval is not None
+    assert audit_rows
+    _assert_no_secret(
+        "the approval request",
+        json.dumps(
+            {c.name: getattr(approval, c.name) for c in ApprovalRequest.__table__.columns},
+            default=str,
+        ),
+    )
+    _assert_no_secret(
+        "the audit rows",
+        json.dumps(
+            [{c.name: getattr(r, c.name) for c in AuditLog.__table__.columns} for r in audit_rows],
+            default=str,
+        ),
+    )
 
 
 @pytest.mark.usefixtures("_db_env")

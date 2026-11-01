@@ -85,8 +85,8 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.host.disk_mark_flash",
         "vmware.composite.host.service_control",
         # ``.set`` is not a classifier suffix -> ``other``. The SNMP change
-        # sends a community string: it is credential_write.
-        "vmware.composite.host.advanced_settings.set",
+        # sends a community string, and the advanced settings change can send
+        # a secret value: both are credential_write.
         "vmware.composite.host.firewall.ruleset.set",
         "vmware.composite.host.lockdown.set",
         "vmware.composite.host.lockdown.exceptions.set",

@@ -9,6 +9,14 @@
   setting's type (and be inside its range or one of its choices). The value
   is sent with the type vSphere expects (``int``, ``long``, ``boolean``,
   ``float`` or ``string``); a ``long`` setting refuses an ``int`` value.
+  A setting whose key names a secret (a password, token or community) takes
+  its value only from Vault (``value_secret_ref``); a plain ``value`` for it
+  is refused before anything is read. A value from Vault goes only into the
+  vCenter request body and shows as ``<hidden>`` in every answer. The op is
+  pinned ``credential_write`` (``broadcast/events.py``), so the flight
+  recorder keeps no body (the read-back answers hold the value too), the
+  broadcast keeps no params, and a waiting approval keeps its params in the
+  encrypted handoff store.
 * ``vmware.composite.host.firewall.ruleset.set`` --
   ``HostFirewallSystem.UpdateRuleset`` (allowed IP addresses), then
   ``EnableRuleset`` or ``DisableRuleset``. A required rule set is never turned
@@ -43,6 +51,10 @@ from meho_backplane.connectors.vmware_rest.host_security import (
     query_options,
     read_property,
 )
+from meho_backplane.connectors.vmware_rest.vcenter_deployment import (
+    SecretValueError,
+    read_secret_param,
+)
 from meho_backplane.connectors.vmware_rest.vim_body import unwrap_vim_value
 
 if TYPE_CHECKING:
@@ -55,10 +67,13 @@ __all__ = [
     "OP_ID_FIREWALL_RULESET_SET",
     "VIM_SUB_OPS_ADVANCED_SETTINGS_SET",
     "VIM_SUB_OPS_FIREWALL_RULESET_SET",
+    "hidden_keys",
     "host_advanced_settings_set_composite",
     "host_firewall_ruleset_set_composite",
     "read_ruleset",
     "read_settings",
+    "requested_settings",
+    "settings_view",
 ]
 
 OP_ID_ADVANCED_SETTINGS_SET: Final = "vmware.composite.host.advanced_settings.set"
@@ -117,31 +132,106 @@ def _coerce(value: Any, definition: dict[str, Any]) -> tuple[Any, str | None]:
     return value, None
 
 
-def _shown(key: str, value: Any) -> Any:
-    return HIDDEN_VALUE if is_secret_key(key) else value
+_SECRET_REF: Final = "value_secret_ref"
+_DEFAULT_VALUE_KEY: Final = "value"
+
+
+def _is_hidden(setting: dict[str, Any]) -> bool:
+    """A setting whose value never shows: a secret key, or a value from Vault."""
+    return is_secret_key(setting["key"]) or _SECRET_REF in setting
+
+
+def hidden_keys(settings: Any) -> set[str]:
+    """The keys of *settings* (raw params) whose value never shows."""
+    return {
+        s["key"]
+        for s in (settings if isinstance(settings, list) else [])
+        if isinstance(s, dict) and isinstance(s.get("key"), str) and _is_hidden(s)
+    }
+
+
+def settings_view(values: dict[str, Any], hidden: set[str]) -> dict[str, Any]:
+    """``{key: value}``, with ``<hidden>`` for each key in *hidden*."""
+    return {key: HIDDEN_VALUE if key in hidden else value for key, value in values.items()}
+
+
+def requested_settings(settings: Any) -> dict[str, Any]:
+    """What the call asks for, from the raw params: ``{key: value}``, secrets hidden."""
+    rows = [
+        s
+        for s in (settings if isinstance(settings, list) else [])
+        if isinstance(s, dict) and isinstance(s.get("key"), str)
+    ]
+    return settings_view({s["key"]: s.get("value") for s in rows}, hidden_keys(rows))
 
 
 def _check_settings(
     settings: list[dict[str, Any]], definitions: dict[str, dict[str, Any]]
 ) -> tuple[dict[str, Any], tuple[str, str, list[str]] | None]:
-    """The wanted values by key, or ``(status, guidance, keys)`` of the first problem."""
+    """The wanted plain values by key, or ``(status, guidance, keys)`` of the first problem.
+
+    A setting given with ``value_secret_ref`` is checked (it must exist, be
+    writable and be a string setting) but its value is read from Vault later.
+    """
     wanted: dict[str, Any] = {}
     keys = [s["key"] for s in settings]
     repeated = sorted({key for key in keys if keys.count(key) > 1})
     if repeated:
         return wanted, ("invalid_value", "Give each key only once.", repeated)
+    both = [s["key"] for s in settings if ("value" in s) == (_SECRET_REF in s)]
+    if both:
+        return wanted, ("invalid_value", "Give value or value_secret_ref, one of them.", both)
+    plain_secret = [s["key"] for s in settings if "value" in s and is_secret_key(s["key"])]
+    if plain_secret:
+        return wanted, (
+            "secret_value_required",
+            "This setting holds a secret. Store the value in Vault and give value_secret_ref.",
+            plain_secret,
+        )
     unknown = [s["key"] for s in settings if s["key"] not in definitions]
     if unknown:
         return wanted, ("unknown_setting", "The host has no setting with this key.", unknown)
     read_only = [s["key"] for s in settings if definitions[s["key"]]["read_only"]]
     if read_only:
         return wanted, ("read_only_setting", "These settings cannot be changed.", read_only)
+    not_text = [
+        s["key"]
+        for s in settings
+        if _SECRET_REF in s and definitions[s["key"]]["value_type"] != "string"
+    ]
+    if not_text:
+        return wanted, (
+            "invalid_value",
+            "A value from Vault is text, so value_secret_ref fits only a string setting.",
+            not_text,
+        )
     for setting in settings:
+        if _SECRET_REF in setting:
+            continue
         value, reason = _coerce(setting["value"], definitions[setting["key"]])
         if reason is not None:
             return wanted, ("invalid_value", f"{setting['key']}: {reason}.", [setting["key"]])
         wanted[setting["key"]] = value
     return wanted, None
+
+
+async def _read_secret_values(
+    operator: Operator, target: Any, settings: list[dict[str, Any]]
+) -> tuple[dict[str, str], tuple[str, str] | None]:
+    """The Vault values by key, or ``(key, reason)`` of the first unusable secret."""
+    values: dict[str, str] = {}
+    for setting in settings:
+        if _SECRET_REF not in setting:
+            continue
+        secret_params = {**setting}
+        secret_params.setdefault("value_secret_key", _DEFAULT_VALUE_KEY)
+        try:
+            values[setting["key"]] = await read_secret_param(
+                operator, target, secret_params, prefix="value"
+            )
+        except SecretValueError as exc:
+            return values, (setting["key"], str(exc).removesuffix(" Nothing was sent."))
+    return values, None
 
 
 async def read_settings(
@@ -159,10 +249,6 @@ async def read_settings(
     return values
 
 
-def _settings_view(values: dict[str, Any]) -> dict[str, Any]:
-    return {key: _shown(key, value) for key, value in values.items()}
-
-
 async def host_advanced_settings_set_composite(
     *,
     operator: Operator,
@@ -170,9 +256,10 @@ async def host_advanced_settings_set_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any] | OperationResult:
-    """Set one or more advanced settings of one host."""
+    """Set one or more advanced settings of one host; a secret comes from Vault."""
     settings = list(params["settings"])
-    requested = {"settings": {s["key"]: _shown(s["key"], s["value"]) for s in settings}}
+    hidden = hidden_keys(settings)
+    requested = {"settings": requested_settings(settings)}
     host_moid, manager, refusal = await locate(
         connector, operator, target, params.get("host"), "advancedOption"
     )
@@ -187,9 +274,19 @@ async def host_advanced_settings_set_composite(
     if problem is not None:
         status, guidance, keys = problem
         return stop(envelope(host_moid, requested, None), status, guidance, keys=keys)
-    keys = list(wanted)
+    secret_values, unusable = await _read_secret_values(operator, target, settings)
+    if unusable is not None:
+        key, reason = unusable
+        return stop(
+            envelope(host_moid, requested, None),
+            "value_secret_unusable",
+            f"{key}: {reason}",
+            keys=[key],
+        )
+    keys = [s["key"] for s in settings]
+    wanted = {key: {**wanted, **secret_values}[key] for key in keys}
     before = await read_settings(connector, operator, target, manager, keys)
-    base = envelope(host_moid, requested, _settings_view(before))
+    base = envelope(host_moid, requested, settings_view(before, hidden))
     changed = {key: value for key, value in wanted.items() if before.get(key) != value}
     if not changed:
         return unchanged(base)
@@ -207,19 +304,22 @@ async def host_advanced_settings_set_composite(
         _OP_UPDATE_OPTIONS,
         f"/OptionManager/{manager}/UpdateOptions",
         body,
-        {"host": host_moid, "settings": _settings_view(changed)},
+        {"host": host_moid, "settings": settings_view(changed, hidden)},
     )
-    stopped = await run_steps(connector, operator, target, [step], base)
+    secrets = tuple(secret_values.values())
+    stopped = await run_steps(connector, operator, target, [step], base, secrets)
     if stopped is not None:
         return stopped
 
     async def read() -> dict[str, Any]:
         return await read_settings(connector, operator, target, manager, keys)
 
-    result = await finish(base, read, lambda after: all(after[k] == wanted[k] for k in keys))
-    if isinstance(result.get("after"), dict):
-        result["after"] = _settings_view(result["after"])
-    return result
+    return await finish(
+        base,
+        read,
+        lambda after: all(after[k] == wanted[k] for k in keys),
+        shown=lambda after: settings_view(after, hidden),
+    )
 
 
 # ---------------------------------------------------------------------------

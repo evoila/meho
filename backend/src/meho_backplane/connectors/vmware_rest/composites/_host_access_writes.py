@@ -265,16 +265,31 @@ def snmp_plan(params: dict[str, Any]) -> dict[str, Any]:
     return plan
 
 
-def _snmp_spec(
-    current: dict[str, Any], params: dict[str, Any], community: str | None
-) -> dict[str, Any]:
-    """The full ``HostSnmpConfigSpec``: the current settings with the asked fields changed."""
+def _communities(current: dict[str, Any]) -> list[str]:
+    """The read-only communities of the raw agent settings."""
     communities = current.get("readOnlyCommunities")
-    current_communities = (
+    return (
         [c for c in communities if isinstance(c, str) and c]
         if isinstance(communities, list)
         else []
     )
+
+
+def _trap_communities(current: dict[str, Any]) -> list[Any]:
+    """The community of each trap target of the raw agent settings."""
+    raw_traps = current.get("trapTargets")
+    return [
+        t.get("community")
+        for t in (raw_traps if isinstance(raw_traps, list) else [])
+        if isinstance(t, dict) and t.get("hostName")
+    ]
+
+
+def _snmp_spec(
+    current: dict[str, Any], params: dict[str, Any], community: str | None
+) -> dict[str, Any]:
+    """The full ``HostSnmpConfigSpec``: the current settings with the asked fields changed."""
+    current_communities = _communities(current)
     trap_community = community or (current_communities[0] if current_communities else "")
     raw_traps = current.get("trapTargets")
     traps = [
@@ -315,15 +330,10 @@ def _spec_communities(spec: dict[str, Any]) -> tuple[str, ...]:
 
 
 def _same_communities(current: dict[str, Any], spec: dict[str, Any]) -> bool:
-    raw_traps = current.get("trapTargets")
-    current_traps = [
-        t.get("community")
-        for t in (raw_traps if isinstance(raw_traps, list) else [])
-        if isinstance(t, dict) and t.get("hostName")
-    ]
+    """The raw agent settings hold the communities of *spec* (read-only and per trap)."""
     return bool(
-        current.get("readOnlyCommunities") == spec["readOnlyCommunities"]
-        and current_traps == [t["community"] for t in spec["trapTargets"]]
+        _communities(current) == spec["readOnlyCommunities"]
+        and _trap_communities(current) == [t["community"] for t in spec["trapTargets"]]
     )
 
 
@@ -383,9 +393,14 @@ async def host_snmp_set_composite(
         return stopped
 
     async def read() -> dict[str, Any]:
-        return await read_snmp(connector, operator, target, manager)
+        return await _raw_snmp(connector, operator, target, manager)
 
-    return await finish(base, read, lambda after: _snmp_matches(after, spec))
+    # The read-back is compared with the communities it holds: a host that
+    # keeps the old community is ``not_verified``. The answer shows counts only.
+    def matches(after: dict[str, Any]) -> bool:
+        return _same_communities(after, spec) and _snmp_matches(snmp_state(after), spec)
+
+    return await finish(base, read, matches, shown=snmp_state)
 
 
 # ---------------------------------------------------------------------------

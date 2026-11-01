@@ -19,8 +19,13 @@ import httpx
 import pytest
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.broadcast.events import classify_op, redact_payload
 from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors.vmware_rest.composites import _host_access_writes, _write
+from meho_backplane.connectors.vmware_rest.composites import (
+    _host_access_writes,
+    _host_security_writes,
+    _write,
+)
 from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
     _GOVERNED_SUBOP_MANIFEST,
 )
@@ -38,7 +43,9 @@ from meho_backplane.connectors.vmware_rest.typed_ops_host_security import (
     advanced_settings_show_impl,
     firewall_show_impl,
 )
+from meho_backplane.connectors.vmware_rest.vcenter_deployment import SecretValueError
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
+from meho_backplane.redaction.flight_recorder import classify_body_exclusion
 from tests._vmware_host_security_fake import (
     HOST,
     OLD_COMMUNITY,
@@ -48,6 +55,8 @@ from tests._vmware_host_security_fake import (
 from tests._vmware_teardown_fake import GateRecorder
 
 NEW_COMMUNITY = "new-community-value"
+NEW_PASSWORD = "new-password-value"
+SECRET_KEY = "UserVars.ExamplePassword"
 _CHANGES = (
     "vmware.composite.host.advanced_settings.set",
     "vmware.composite.host.firewall.ruleset.set",
@@ -106,6 +115,19 @@ def vault(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
         return NEW_COMMUNITY
 
     monkeypatch.setattr(_host_access_writes, "read_secret_param", read)
+    return seen
+
+
+@pytest.fixture
+def settings_vault(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Stand-in for the Vault read of a secret advanced setting."""
+    seen: list[dict[str, Any]] = []
+
+    async def read(operator: Any, target: Any, params: Any, *, prefix: str) -> str:
+        seen.append({"prefix": prefix, **params})
+        return NEW_PASSWORD
+
+    monkeypatch.setattr(_host_security_writes, "read_secret_param", read)
     return seen
 
 
@@ -298,17 +320,156 @@ async def test_advanced_settings_set_refuses_a_key_given_twice(gate: GateRecorde
     assert vim.writes() == []
 
 
-async def test_advanced_settings_set_hides_a_secret_value(gate: GateRecorder) -> None:
+async def test_advanced_settings_set_refuses_a_plain_secret_value(
+    gate: GateRecorder, settings_vault: list[dict[str, Any]]
+) -> None:
     vim = HostSecurityVim()
     out = await _call(
         host_advanced_settings_set_composite,
         vim,
-        {"host": "esxi-a", "settings": [{"key": "UserVars.ExamplePassword", "value": "new-pw"}]},
+        {"host": "esxi-a", "settings": [{"key": SECRET_KEY, "value": "new-pw"}]},
     )
-    assert out["status"] == "applied"
+    assert out["status"] == "secret_value_required", out
+    assert out["keys"] == [SECRET_KEY]
+    assert "value_secret_ref" in out["guidance"]
+    assert vim.writes() == []
+    assert settings_vault == []
     text = json.dumps(out) + json.dumps(gate.calls, default=str)
-    assert SECRET_PASSWORD not in text
     assert "new-pw" not in text
+    assert SECRET_PASSWORD not in text
+
+
+async def test_advanced_settings_set_reads_a_secret_from_vault_and_never_shows_it(
+    gate: GateRecorder, settings_vault: list[dict[str, Any]]
+) -> None:
+    vim = HostSecurityVim()
+    out = await _call(
+        host_advanced_settings_set_composite,
+        vim,
+        {
+            "host": "esxi-a",
+            "settings": [
+                {"key": SECRET_KEY, "value_secret_ref": "esxi/example"},
+                {"key": "Net.BlockGuestBPDU", "value": 0},
+            ],
+        },
+    )
+    assert out["status"] == "applied", out
+    assert settings_vault == [
+        {
+            "prefix": "value",
+            "key": SECRET_KEY,
+            "value_secret_ref": "esxi/example",
+            "value_secret_key": "value",
+        }
+    ]
+    body = vim.body_of("UpdateOptions")
+    assert body["changedValue"][0] == {
+        "_typeName": "OptionValue",
+        "key": SECRET_KEY,
+        "value": {"_typeName": "string", "_value": NEW_PASSWORD},
+    }
+    assert vim.options[SECRET_KEY] == ("string", NEW_PASSWORD)
+    assert out["requested"]["settings"] == {SECRET_KEY: "<hidden>", "Net.BlockGuestBPDU": 0}
+    assert out["before"] == {SECRET_KEY: "<hidden>", "Net.BlockGuestBPDU": 1}
+    assert out["after"] == {SECRET_KEY: "<hidden>", "Net.BlockGuestBPDU": 0}
+    assert gate.calls[0]["params"]["settings"] == {SECRET_KEY: "<hidden>", "Net.BlockGuestBPDU": 0}
+    text = json.dumps(out) + json.dumps(gate.calls, default=str)
+    assert NEW_PASSWORD not in text
+    assert SECRET_PASSWORD not in text
+
+
+async def test_advanced_settings_set_unchanged_secret_sends_nothing(
+    gate: GateRecorder, settings_vault: list[dict[str, Any]]
+) -> None:
+    vim = HostSecurityVim()
+    vim.options[SECRET_KEY] = ("string", NEW_PASSWORD)
+    out = await _call(
+        host_advanced_settings_set_composite,
+        vim,
+        {"host": "esxi-a", "settings": [{"key": SECRET_KEY, "value_secret_ref": "esxi/example"}]},
+    )
+    assert out["status"] == "unchanged", out
+    assert out["after"] == {SECRET_KEY: "<hidden>"}
+    assert vim.writes() == []
+    assert NEW_PASSWORD not in json.dumps(out)
+
+
+@pytest.mark.parametrize(
+    ("setting", "status"),
+    [
+        ({"key": "Net.BlockGuestBPDU", "value_secret_ref": "esxi/example"}, "invalid_value"),
+        ({"key": SECRET_KEY, "value": "x", "value_secret_ref": "esxi/example"}, "invalid_value"),
+        ({"key": SECRET_KEY}, "invalid_value"),
+        ({"key": "No.Such.Key", "value_secret_ref": "esxi/example"}, "unknown_setting"),
+    ],
+)
+async def test_advanced_settings_set_checks_a_secret_ref_before_vault(
+    gate: GateRecorder,
+    settings_vault: list[dict[str, Any]],
+    setting: dict[str, Any],
+    status: str,
+) -> None:
+    vim = HostSecurityVim()
+    out = await _call(
+        host_advanced_settings_set_composite, vim, {"host": "esxi-a", "settings": [setting]}
+    )
+    assert out["status"] == status, out
+    assert out["keys"] == [setting["key"]]
+    assert vim.writes() == []
+    assert settings_vault == []
+
+
+async def test_advanced_settings_set_unusable_secret_sends_nothing(
+    gate: GateRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def read(operator: Any, target: Any, params: Any, *, prefix: str) -> str:
+        raise SecretValueError(
+            "the Vault secret at value_secret_ref='esxi/example' (mount='secret') has no text "
+            "under the key 'value'. Store the value under that key, or set value_secret_key. "
+            "Nothing was sent."
+        )
+
+    monkeypatch.setattr(_host_security_writes, "read_secret_param", read)
+    vim = HostSecurityVim()
+    out = await _call(
+        host_advanced_settings_set_composite,
+        vim,
+        {"host": "esxi-a", "settings": [{"key": SECRET_KEY, "value_secret_ref": "esxi/example"}]},
+    )
+    assert out["status"] == "value_secret_unusable", out
+    assert out["keys"] == [SECRET_KEY]
+    assert out["guidance"].startswith(f"{SECRET_KEY}: the Vault secret")
+    assert out["guidance"].endswith("Nothing was sent.")
+    assert vim.methods() == ["RetrievePropertiesEx", "RetrievePropertiesEx"]
+
+
+async def test_advanced_settings_set_hides_the_secret_in_a_fault(
+    gate: GateRecorder, settings_vault: list[dict[str, Any]]
+) -> None:
+    vim = HostSecurityVim()
+    vim.fail["UpdateOptions"] = _fault("InvalidArgument", f"bad value {NEW_PASSWORD}")
+    out = await _call(
+        host_advanced_settings_set_composite,
+        vim,
+        {"host": "esxi-a", "settings": [{"key": SECRET_KEY, "value_secret_ref": "esxi/example"}]},
+    )
+    assert out["status"] == "failed", out
+    text = json.dumps(out) + json.dumps(gate.calls, default=str)
+    assert NEW_PASSWORD not in text
+    assert "InvalidArgument" not in out["fault"] or NEW_PASSWORD not in out["fault"]
+
+
+def test_advanced_settings_set_is_a_credential_write() -> None:
+    """The pin keeps the params off the broadcast and the bodies out of the trace."""
+    op_id = "vmware.composite.host.advanced_settings.set"
+    params = {"host": "esxi-a", "settings": [{"key": SECRET_KEY, "value_secret_ref": "x"}]}
+    assert classify_op(op_id) == "credential_write"
+    assert redact_payload("credential_write", params, "ok") == {
+        "op_class": "credential_write",
+        "result_status": "ok",
+    }
+    assert classify_body_exclusion(op_id).excluded is True
 
 
 async def test_advanced_settings_set_fault_and_not_verified(gate: GateRecorder) -> None:
@@ -475,6 +636,23 @@ async def test_snmp_set_reads_the_community_from_vault_and_never_shows_it(
     assert out["after"]["trap_targets"] == [{"host_name": "trap-new.example.invalid", "port": 162}]
 
 
+async def test_snmp_set_is_not_verified_when_the_host_keeps_the_old_community(
+    gate: GateRecorder, vault: list[dict[str, Any]]
+) -> None:
+    vim = HostSecurityVim()
+    vim.keep_communities = True
+    params = {"host": "esxi-a", "enabled": True, "community_secret_ref": "snmp/example"}
+    out = await _call(host_snmp_set_composite, vim, params)
+    assert out["status"] == "not_verified", out
+    assert vim.writes() == ["ReconfigureSnmpAgent"]
+    assert out["after"]["enabled"] is True
+    assert out["after"]["read_only_community_count"] == 1
+    assert out["issues"][0]["severity"] == "error"
+    text = json.dumps(out) + json.dumps(gate.calls, default=str)
+    assert NEW_COMMUNITY not in text
+    assert OLD_COMMUNITY not in text
+
+
 async def test_snmp_set_keeps_fields_left_out(gate: GateRecorder) -> None:
     vim = HostSecurityVim()
     out = await _call(host_snmp_set_composite, vim, {"host": "esxi-a", "enabled": True})
@@ -614,8 +792,13 @@ def _preview_ctx(vim: HostSecurityVim, params: dict[str, Any]) -> PreviewContext
         ("vmware.composite.host.lockdown.exceptions.set", {"users": []}, {"users": ["svc-old"]}),
         (
             "vmware.composite.host.advanced_settings.set",
-            {"settings": [{"key": "UserVars.ExamplePassword", "value": "x"}]},
-            {"UserVars.ExamplePassword": "<hidden>"},
+            {"settings": [{"key": SECRET_KEY, "value_secret_ref": "esxi/example"}]},
+            {SECRET_KEY: "<hidden>"},
+        ),
+        (
+            "vmware.composite.host.advanced_settings.set",
+            {"settings": [{"key": "Syslog.global.logDir", "value_secret_ref": "esxi/example"}]},
+            {"Syslog.global.logDir": "<hidden>"},
         ),
     ],
 )
@@ -628,6 +811,16 @@ async def test_previews_show_the_current_setting(
     assert preview["host"] == HOST
     assert preview["current"] == current
     assert vim.writes() == []
+
+
+async def test_the_advanced_settings_preview_shows_no_secret() -> None:
+    vim = HostSecurityVim()
+    params = {"host": "esxi-a", "settings": [{"key": SECRET_KEY, "value_secret_ref": "esxi/x"}]}
+    builder = _PREVIEW_BUILDERS["vmware.composite.host.advanced_settings.set"]
+    preview = await builder(_preview_ctx(vim, params))
+    assert preview is not None
+    assert preview["requested"] == {"settings": {SECRET_KEY: "<hidden>"}}
+    assert SECRET_PASSWORD not in json.dumps(preview)
 
 
 async def test_the_snmp_preview_shows_no_community() -> None:

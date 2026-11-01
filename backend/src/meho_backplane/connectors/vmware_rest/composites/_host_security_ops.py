@@ -52,17 +52,16 @@ from meho_backplane.connectors.vmware_rest.composites._host_security_writes impo
     OP_ID_FIREWALL_RULESET_SET,
     VIM_SUB_OPS_ADVANCED_SETTINGS_SET,
     VIM_SUB_OPS_FIREWALL_RULESET_SET,
+    hidden_keys,
     host_advanced_settings_set_composite,
     host_firewall_ruleset_set_composite,
     read_ruleset,
     read_settings,
+    requested_settings,
+    settings_view,
 )
 from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
-from meho_backplane.connectors.vmware_rest.host_security import (
-    HIDDEN_VALUE,
-    HOST_SECURITY_GROUP_KEY,
-    is_secret_key,
-)
+from meho_backplane.connectors.vmware_rest.host_security import HOST_SECURITY_GROUP_KEY
 from meho_backplane.operations._preview import PreviewBuilder
 
 if TYPE_CHECKING:
@@ -88,23 +87,16 @@ HOST_SECURITY_GOVERNED_SUBOPS: Final[dict[str, tuple[str, ...]]] = {
 # ---------------------------------------------------------------------------
 
 
-def _advanced_settings_requested(params: dict[str, Any]) -> dict[str, Any]:
-    settings = params.get("settings") or []
-    return {
-        s["key"]: HIDDEN_VALUE if is_secret_key(s["key"]) else s.get("value")
-        for s in settings
-        if isinstance(s, dict) and isinstance(s.get("key"), str)
-    }
-
-
 def _advanced_settings_reader(params: dict[str, Any]) -> Reader:
-    keys = list(_advanced_settings_requested(params))
+    """Reads the current values; a secret setting shows ``<hidden>``."""
+    keys = list(requested_settings(params.get("settings")))
+    hidden = hidden_keys(params.get("settings"))
 
     async def read(
         connector: VmwareRestConnector, operator: Operator, target: Any, manager: str
     ) -> Any:
         values = await read_settings(connector, operator, target, manager, keys)
-        return {k: HIDDEN_VALUE if is_secret_key(k) else v for k, v in values.items()}
+        return settings_view(values, hidden)
 
     return read
 
@@ -145,7 +137,7 @@ def _fields(*names: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
 _advanced_settings_preview = _builder(
     "advancedOption",
     _advanced_settings_reader,
-    lambda p: {"settings": _advanced_settings_requested(p)},
+    lambda p: {"settings": requested_settings(p.get("settings"))},
 )
 _firewall_ruleset_preview = _builder(
     "firewallSystem", _ruleset_reader, _fields("ruleset", "enabled", "allowed")
@@ -195,7 +187,9 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         ADVANCED_SETTINGS_SET,
         "Set one or more advanced settings of one ESXi host.",
         "Sets advanced settings of one host. Checks each key, its type and range before "
-        "sending; sends only the values that differ and reads them back. Waits for approval.",
+        "sending; sends only the values that differ and reads them back. A setting that "
+        "holds a secret takes its value from a Vault path and never shows it. Waits for "
+        "approval.",
         ["advanced-settings"],
         _advanced_settings_preview,
     ),

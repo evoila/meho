@@ -5607,7 +5607,7 @@ with no spec ingest. All eight are in the group `vmware-host-security`
 |---|---|---|---|---|
 | `vmware.host.advanced_settings.show` | One row per advanced setting: `key`, `value`, `default`, `is_default`, `value_type`, `read_only`, `label`. Filter by a key or a prefix that ends with a dot (`prefix`), or only the changed ones (`changed_only`). About 1000 rows for all settings, so a long list comes back as a result handle. | VIM `OptionManager.QueryOptions`; `RetrievePropertiesEx` of `OptionManager.supportedOption` (type, default, read-only flag) | `safe` | 8.0, 9.x |
 | `vmware.host.firewall.show` | The default policy and one row per rule set: on or off, required, service, ports (`rules`), allowed IP addresses (`allowed`). Filter by one rule set or `enabled_only`. | VIM `RetrievePropertiesEx` of `HostFirewallSystem.firewallInfo` | `safe` | 8.0, 9.x |
-| `vmware.composite.host.advanced_settings.set` | Sets up to 20 settings. Checks first that each key exists, is not read-only, and that the value has the setting's type and is in its range or choices; then sends only the values that differ, with the type vSphere expects (`int`, `long`, `boolean`, `float`, `string`). | VIM `OptionManager.UpdateOptions` | `dangerous`; waits for approval | 8.0, 9.x |
+| `vmware.composite.host.advanced_settings.set` | Sets up to 20 settings. Checks first that each key exists, is not read-only, and that the value has the setting's type and is in its range or choices; then sends only the values that differ, with the type vSphere expects (`int`, `long`, `boolean`, `float`, `string`). A setting that holds a secret (its key names a password, secret, token or community) takes its value from Vault (`value_secret_ref`); a plain `value` for it is refused (`secret_value_required`). | VIM `OptionManager.UpdateOptions` | `dangerous`; waits for approval | 8.0, 9.x |
 | `vmware.composite.host.firewall.ruleset.set` | Turns one rule set on or off and sets who may connect (`allowed`: `all_ip`, `ip_addresses`, `networks`). A required rule set is never turned off. The allowed list is sent before the rule set is turned on. | VIM `HostFirewallSystem.UpdateRuleset`, `EnableRuleset`, `DisableRuleset` | `dangerous`; waits for approval | 8.0, 9.x |
 | `vmware.composite.host.lockdown.set` | Sets lockdown mode: `disabled`, `normal` or `strict`. | VIM `HostAccessManager.ChangeLockdownMode` | `dangerous`; waits for approval | 8.0, 9.x |
 | `vmware.composite.host.lockdown.exceptions.set` | Replaces the users who keep access in lockdown mode; `[]` removes all. | VIM `HostAccessManager.QueryLockdownExceptions`, `UpdateLockdownExceptions` | `dangerous`; waits for approval | 8.0, 9.x |
@@ -5651,10 +5651,21 @@ refuses a change it does not allow (the answer is `failed` with the fault).
   identity (after an approval: the approver) and goes only into the
   `ReconfigureSnmpAgent` request body. `host.snmp.set` is pinned
   `credential_write` in `broadcast/events.py`, so the flight recorder keeps
-  no body and the broadcast keeps no params. Answers and previews count the
+  no body, the broadcast keeps no params, and a waiting approval keeps its
+  params in the encrypted handoff store. Answers and previews count the
   communities and never show one; a fault text that holds any community of
-  the request is replaced. An advanced setting whose key names a password, secret, token or
-  community shows `<hidden>` in every answer and preview.
+  the request is replaced. The read-back after the change is compared with
+  the communities it holds, so a host that keeps the old community answers
+  `not_verified`; the answer still shows counts only. An advanced setting
+  whose key names a password, secret, token or community takes its value
+  only from Vault (`value_secret_ref`, with `value_secret_mount` and
+  `value_secret_key`, default key `value`); a plain `value` for it is
+  refused before anything is read. Any string setting may take its value
+  from Vault this way. Such a value goes only into the `UpdateOptions`
+  request body and shows `<hidden>` in every answer and preview, and a
+  fault text that holds it is replaced. `host.advanced_settings.set` is
+  pinned `credential_write` too, because the `QueryOptions` read-back
+  answers hold the value as well: no body of the change is recorded.
 - **SNMP fields left out.** MEHO reads the current agent settings and sends
   them back with only the asked fields changed, so a call that only turns
   the agent on keeps the port, communities, trap targets and options. A new

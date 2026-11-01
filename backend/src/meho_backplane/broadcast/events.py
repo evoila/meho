@@ -506,6 +506,13 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # ``ReconfigureSnmpAgent`` request BODY. The pin keeps that body out of
         # the flight recorder and the params out of the broadcast.
         "vmware.composite.host.snmp.set",
+        # The ESXi advanced settings change. A setting that holds a secret takes
+        # its value from a Vault *path* (``value_secret_ref``); the value goes
+        # into the ``UpdateOptions`` request BODY and comes back in the
+        # ``QueryOptions`` read-back. The pin keeps both bodies out of the
+        # flight recorder, the params out of the broadcast, and a waiting
+        # approval's params in the encrypted handoff store.
+        "vmware.composite.host.advanced_settings.set",
         # The three Cloud Builder changes that send a bring-up spec. Their
         # params carry only Vault paths (``secrets``); the passwords are read
         # in-process and go only into the Cloud Builder request BODY. The pin

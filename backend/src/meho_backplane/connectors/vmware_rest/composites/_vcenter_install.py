@@ -68,7 +68,6 @@ from meho_backplane.connectors.vmware_rest.vcenter_deployment import (
     unreachable_reason,
     vendor_detail,
 )
-from meho_backplane.operations._preview import register_preview_builder
 from meho_backplane.operations.composite import enforce_subop_policy
 
 if TYPE_CHECKING:
@@ -383,6 +382,3 @@ async def vcenter_install_preview(ctx: PreviewContext) -> dict[str, Any] | None:
             "passes. It cannot be undone."
         ),
     }
-
-
-register_preview_builder(INSTALL_OP_ID, vcenter_install_preview)

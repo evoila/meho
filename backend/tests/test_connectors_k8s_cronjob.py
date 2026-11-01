@@ -338,6 +338,7 @@ async def test_cronjob_run_preview_shows_job_template_and_active_jobs_not_values
         f'tool --password "{_SHORT}\\" phrase" run',
         f"tool --password {_SHORT}\\ phrase run",
         f'env "PGPASSWORD={_SHORT}" pg_dump app',
+        f'env "PGPASSWORD={_SHORT}"suffix pg_dump app',
         f'sh -c "pg_dump --password={_SHORT} app" && echo done',
     ]
     ctx = PreviewContext(
@@ -356,6 +357,7 @@ async def test_cronjob_run_preview_shows_job_template_and_active_jobs_not_values
     assert _SECRET not in json.dumps(effect)
     assert _SHORT not in json.dumps(effect)
     assert "phrase" not in json.dumps(effect)
+    assert "suffix" not in json.dumps(effect)
     assert "pg_dump -h db app" in json.dumps(effect)
     preview = effect["preview"]
     assert preview["resource"] == "cronjob_run"
@@ -375,9 +377,10 @@ async def test_cronjob_run_preview_shows_job_template_and_active_jobs_not_values
     assert container["image"] == "registry.example/backup:1.2"
     assert container["command"] == ["run-backup", "--password"]
     assert container["args"][0] == "***REDACTED***"
-    assert container["args"][-4:-1] == [
+    assert container["args"][-5:-1] == [
         "tool --password ***REDACTED*** run",
         "tool --password ***REDACTED*** run",
+        'env "PGPASSWORD=***REDACTED***" pg_dump app',
         'env "PGPASSWORD=***REDACTED***" pg_dump app',
     ]
     assert container["args"][-1].endswith(' app" && echo done')

@@ -494,9 +494,11 @@ do and with which rights: `command`, `args`, image, pod and container
 `args` are read as one command line, the way Kubernetes runs them. The
 words stay, but these values are hidden: the value of a `NAME=VALUE` or
 `--name=value` whose name holds a secret word (`PGPASSWORD=...`,
-`AWS_SECRET_ACCESS_KEY=...`, `--password=...`, any length; inside a quoted
-part, `"PGPASSWORD=..."`, the value ends at the closing quote, so the
-commands after it stay visible), the argument after a secret flag (`--password x`, `--token x`, `-p x`; the whole list
+`AWS_SECRET_ACCESS_KEY=...`, `--password=...`, any length; the value is the
+rest of the shell word, quotes, escapes and text joined after a closing
+quote included, so `"PGPASSWORD=x"suffix` hides `suffix` too, and the
+commands after the word stay visible; a quoted shell string, `sh -c "..."`,
+is read as its own command line), the argument after a secret flag (`--password x`, `--token x`, `-p x`; the whole list
 item or the whole shell word, quotes and backslash escapes included, also
 when the flag ends `command` and the value starts `args`), the password in
 `user:password` after `-u` or `--user`, the password in a URL that carries

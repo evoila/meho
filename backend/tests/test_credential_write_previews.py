@@ -389,7 +389,12 @@ async def test_k8s_job_create_hides_a_password_with_shell_escapes_whole() -> Non
 
 @pytest.mark.asyncio
 async def test_k8s_job_create_keeps_the_commands_after_a_quoted_assignment() -> None:
-    """A value inside a quoted part ends at the closing quote, not at the string's end."""
+    """The whole shell word after ``NAME=`` is hidden; the commands after the word stay.
+
+    Text joined to the word after a closing quote (``"PGPASSWORD=x"suffix``)
+    is part of the value for the shell, so it is hidden too. A quoted shell
+    string (``sh -c "..."``) is read as its own command line.
+    """
     _, preview = await _preview(
         "k8s.job.create",
         _job_params(
@@ -400,6 +405,8 @@ async def test_k8s_job_create_keeps_the_commands_after_a_quoted_assignment() -> 
                 "args": [
                     f'env "PGPASSWORD={_SHORT}" pg_dump app',
                     f"env 'PGPASSWORD={_SHORT} phrase' pg_dump app",
+                    f'env "PGPASSWORD={_SHORT}"suffix pg_dump app',
+                    f"env PGPASSWORD='{_SHORT}'suffix pg_dump app",
                     f'sh -c "pg_dump --password={_SHORT} app" && echo done',
                     f"sh -c 'curl --user=admin:{_SHORT} x.invalid' && echo done",  # gitleaks:allow
                 ],
@@ -409,12 +416,15 @@ async def test_k8s_job_create_keeps_the_commands_after_a_quoted_assignment() -> 
     (container,) = preview["spec"]["template"]["spec"]["containers"]
     assert _SHORT not in json.dumps(container)
     assert "phrase" not in json.dumps(container)
-    assert container["args"][:2] == [
+    assert "suffix" not in json.dumps(container)
+    assert container["args"][:4] == [
         'env "PGPASSWORD=***REDACTED***" pg_dump app',
         "env 'PGPASSWORD=***REDACTED***' pg_dump app",
+        'env "PGPASSWORD=***REDACTED***" pg_dump app',
+        "env PGPASSWORD=***REDACTED*** pg_dump app",
     ]
-    assert container["args"][2].endswith(' app" && echo done')
-    assert container["args"][3] == (
+    assert container["args"][4].endswith(' app" && echo done')
+    assert container["args"][5] == (
         "sh -c 'curl --user=admin:***REDACTED*** x.invalid' && echo done"  # gitleaks:allow
     )
 

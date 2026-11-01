@@ -49,9 +49,11 @@ What is never shown
   are read as one command line, the way Kubernetes runs them. The words
   stay, but these values are hidden: the value of a ``NAME=VALUE`` or
   ``--name=value`` whose name holds a secret word (``PGPASSWORD=...``,
-  ``AWS_SECRET_ACCESS_KEY=...``, ``--password=...``, any length; inside a
-  quoted part, ``"PGPASSWORD=..."``, the value ends at the closing quote,
-  so the commands after it stay visible), the
+  ``AWS_SECRET_ACCESS_KEY=...``, ``--password=...``, any length; the value
+  is the rest of the shell word, quotes, escapes and text joined after a
+  closing quote included, so ``"PGPASSWORD=x"suffix`` hides ``suffix`` too,
+  and the commands after the word stay visible; a quoted shell string,
+  ``sh -c "..."``, is read as its own command line), the
   argument after a secret flag (``--password x``, ``--token x``, ``-p x``;
   the whole list item, or the whole shell word in a shell string, quotes
   and backslash escapes included, also when the flag ends ``command`` and
@@ -185,35 +187,27 @@ _COMMAND_SECRET_WORDS = ("PASS", "PWD", "SECRET", "TOKEN", "KEY", "CREDENTIAL", 
 _USER_FLAGS = frozenset({"u", "user"})
 
 
-def _shell_word(stop: str = "") -> str:
-    """Regex for one shell word, read the way a POSIX shell reads it.
+#: Regex for one shell word, read the way a POSIX shell reads it. A word is
+#: bare text, escaped characters (``\\ `` and ``\\"`` are part of the word, not
+#: an end of it), single-quoted parts and double-quoted parts in which
+#: ``\\"`` does not close the quote, in any mix. So ``"PGPASSWORD=x"suffix`` is
+#: one word, as it is for the shell. A quote that is never closed runs to the
+#: end of the string, as in a shell.
+_SHELL_WORD = r"""(?:[^\s'"\\]+|\\(?:[\s\S]|\Z)|'[^']*(?:'|\Z)|"(?:[^"\\]|\\[\s\S])*(?:"|\Z))+"""
 
-    A word is bare text, escaped characters (``\\ `` and ``\\"`` are part of
-    the word, not an end of it), single-quoted parts and double-quoted parts
-    in which ``\\"`` does not close the quote, in any mix. So a password with
-    an escaped space or an escaped quote in it is one word. A quote that is
-    never closed runs to the end of the string, as in a shell. *stop* names
-    more characters that end bare text (shell operators, for a value).
-    """
-    return (
-        rf"""(?:[^\s'"\\{stop}]+|\\(?:[\s\S]|\Z)|'[^']*(?:'|\Z)|"(?:[^"\\]|\\[\s\S])*(?:"|\Z))+"""
-    )
+#: One token of a shell string: whitespace, or a shell word in which a quoted
+#: or escaped part may hold spaces (``--password 'my phrase'``,
+#: ``--password my\\ phrase``). Joined back, the tokens give the string as
+#: it was.
+_TOKEN = re.compile(rf"""\s+|{_SHELL_WORD}|\S+""")
 
+#: A shell word that is one quoted part and nothing else: a shell string, as
+#: the one after ``sh -c``, or a quoted value.
+_QUOTED_STRING = re.compile(r"'[^']*'|" r'"(?:[^"\\]|\\[\s\S])*"')
 
-#: The ``NAME=`` of a ``NAME=VALUE``, also as ``--name=``, at the start of a
-#: word or of a quoted part.
+#: The ``NAME=`` of a ``NAME=VALUE``, also as ``--name=``, where a word or a
+#: quoted part starts, or after another ``=`` (``--env=PGPASSWORD=x``).
 _ASSIGNMENT_NAME = re.compile(r"(?<![A-Za-z0-9_.-])(?P<name>-{0,2}[A-Za-z_][A-Za-z0-9_.-]*)=")
-
-#: The value of an assignment, by the quote that is open where it starts.
-#: Outside quotes it is one shell word, so a quoted or escaped value may hold
-#: spaces. Inside quotes it ends at the closing quote; a word of a quoted
-#: shell string (``sh -c "tool --password=x run"``) ends at a space too.
-_BARE_VALUE = re.compile(_shell_word(";&|"))
-_QUOTED_PART_VALUE = {"'": re.compile(r"[^']*"), '"': re.compile(r'(?:[^"\\]|\\[\s\S])*')}
-_QUOTED_WORD_VALUE = {
-    "'": re.compile(r"""(?:"[^"']*"|[^\s'])*"""),
-    '"': re.compile(r"""(?:'[^'"]*'|[^\s"\\]|\\[\s\S])*"""),
-}
 
 #: The password in a URL that carries a user and password before the ``@``.
 _URL_PASSWORD = re.compile(r"(?P<head>[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@]*:)[^\s/@]+@")
@@ -226,12 +220,6 @@ _KNOWN_TOKEN = re.compile(
 
 #: A command-line flag: ``-u``, ``--password``.
 _FLAG = re.compile(r"^--?(?P<name>[A-Za-z][A-Za-z0-9_-]*)$")
-
-#: One token of a shell string: whitespace, or a shell word in which a quoted
-#: or escaped part may hold spaces (``--password 'my phrase'``,
-#: ``--password my\\ phrase``). Joined back, the tokens give the string as
-#: it was.
-_TOKEN = re.compile(rf"""\s+|{_shell_word()}|\S+""")
 
 
 def _secret_shaped_name(name: str) -> bool:
@@ -246,68 +234,45 @@ def _hide_user_password(value: str) -> str:
     return f"{user}:{_HIDDEN}" if sep else value
 
 
-def _assignment_value_end(text: str, start: int, quote: str, whole_part: bool) -> int:
-    """Index after the value of an assignment that starts at *start*.
-
-    *quote* is the quote open at *start* (``""`` outside quotes). The
-    value of a quoted part that is one assignment (``"PGPASSWORD=a b"``,
-    *whole_part*) runs to the closing quote, spaces included. A word of a
-    quoted shell string ends at a space or at the closing quote. Neither
-    runs past the closing quote.
-    """
-    if not quote:
-        pattern = _BARE_VALUE
-    elif whole_part:
-        pattern = _QUOTED_PART_VALUE[quote]
-    else:
-        pattern = _QUOTED_WORD_VALUE[quote]
-    match = pattern.match(text, start)
-    return start if match is None else match.end()
-
-
-def _hide_assignments(text: str) -> str:
-    """Hide the value of every ``NAME=VALUE`` with a secret-shaped name.
-
-    The scan tracks the quote that is open at each point, so a value that
-    starts inside a quoted part ends at the closing quote: the commands
-    after ``env "PGPASSWORD=x" pg_dump app`` stay visible. After ``-u`` or
-    ``--user`` as ``--user=name:password`` only the password is hidden.
-    """
-    out: list[str] = []
-    pos = 0
-    quote = ""
-    opened_at = -1
-    while pos < len(text):
-        char = text[pos]
-        if char == "\\" and quote != "'":
-            out.append(text[pos : pos + 2])
-            pos += 2
-            continue
-        if quote and char == quote:
-            quote = ""
-        elif not quote and char in "'\"":
-            quote, opened_at = char, pos
-        match = _ASSIGNMENT_NAME.match(text, pos)
-        if match is None:
-            out.append(char)
-            pos += 1
-            continue
-        name = match["name"]
-        out.append(match[0])
-        pos = match.end()
-        if _secret_shaped_name(name) or name.lstrip("-") in _USER_FLAGS:
-            end = _assignment_value_end(text, pos, quote, whole_part=opened_at == match.start() - 1)
-            value = text[pos:end]
-            out.append(_HIDDEN if _secret_shaped_name(name) else _hide_user_password(value))
-            pos = end
-    return "".join(out)
-
-
 def _hide_in_text(text: str) -> str:
-    """Hide secret values inside one command-line string."""
-    text = _hide_assignments(text)
+    """Hide the secret values with a shape of their own in one command-line string.
+
+    The password in a URL and tokens with a known vendor prefix are found
+    wherever they are. The other values are hidden word by word, by
+    :func:`_hide_command_text`.
+    """
     text = _URL_PASSWORD.sub(lambda match: f"{match['head']}{_HIDDEN}@", text)
     return _KNOWN_TOKEN.sub(_HIDDEN, text)
+
+
+def _secret_assignment(word: str) -> re.Match[str] | None:
+    """The first ``NAME=`` in a shell word whose value must be hidden, or ``None``.
+
+    That is a secret-shaped name, or ``-u`` / ``--user``, whose value holds
+    ``user:password``.
+    """
+    for match in _ASSIGNMENT_NAME.finditer(word):
+        name = match["name"]
+        if _secret_shaped_name(name) or name.lstrip("-") in _USER_FLAGS:
+            return match
+    return None
+
+
+def _hide_assignment(word: str, match: re.Match[str]) -> str:
+    """*word* with all that follows its ``NAME=`` at *match* hidden.
+
+    The value is the rest of the shell word, whatever quotes and escapes it
+    holds: ``"PGPASSWORD=x"suffix`` is one word, and the shell gives the
+    variable ``xsuffix``, so ``suffix`` is hidden too. No quote is read.
+    A quote right before the name is closed after the marker, so the line
+    still reads as a command line. After ``-u`` or ``--user`` only the
+    password of ``user:password`` is hidden.
+    """
+    rest = word[match.end() :]
+    hidden = _hide_user_password(rest) if match["name"].lstrip("-") in _USER_FLAGS else _HIDDEN
+    quote = word[match.start() - 1] if match.start() > 0 else ""
+    closing = quote if quote in "'\"" else ""
+    return f"{word[: match.end()]}{hidden}{closing}"
 
 
 def _hide_flag_value(pending: str, value: str) -> str:
@@ -315,18 +280,64 @@ def _hide_flag_value(pending: str, value: str) -> str:
     return _HIDDEN if pending == "secret" else _hide_user_password(value)
 
 
+def _hide_command_text(text: str, pending: str | None) -> tuple[str, str | None]:
+    """One command-line string with its secret values hidden, word by word.
+
+    *pending* is the secret flag that still waits for its value when the
+    string starts (``--password`` ended the item before). Returned with the
+    text is the flag that waits at its end, for the next item. For each
+    shell word, in this order:
+
+    * After a secret flag, the whole word is the value: hidden.
+    * A word that is one quoted part and starts with a secret-named
+      assignment (``"PGPASSWORD=a b"``) is that assignment: hidden whole.
+    * Any other word that is one quoted part is read as its own command
+      line (``sh -c "tool --password=x run"``), so its words stay.
+    * A word that holds a secret-named assignment anywhere (``PGPASSWORD=x``,
+      ``"PGPASSWORD=x"suffix``, ``--env=PGPASSWORD=x``) is hidden from the
+      ``NAME=`` to its end.
+    * A secret flag makes the next word its value.
+    """
+    words = _TOKEN.findall(text)
+    for index, word in enumerate(words):
+        if word.isspace():
+            continue
+        if pending is not None and not word.startswith("-"):
+            words[index] = _hide_flag_value(pending, word)
+            pending = None
+            continue
+        pending = None
+        assignment = _secret_assignment(word)
+        if _QUOTED_STRING.fullmatch(word) and (assignment is None or assignment.start() != 1):
+            inner, pending = _hide_command_text(word[1:-1], None)
+            words[index] = f"{word[0]}{inner}{word[0]}"
+            continue
+        if assignment is not None:
+            words[index] = _hide_assignment(word, assignment)
+            continue
+        flag = _FLAG.match(word)
+        if flag is None:
+            continue
+        name = flag["name"]
+        if name in _USER_FLAGS:
+            pending = "user"
+        elif name == "p" or _secret_shaped_name(name):
+            pending = "secret"
+    return "".join(words), pending
+
+
 def _hide_command_secrets(parts: list[Any]) -> list[Any]:
     """Copy one command line (``command`` + ``args``) with its secret values hidden.
 
     The words stay, so the approver still reads what runs. Hidden are: the
-    value of a ``NAME=VALUE`` (or ``--name=value``) with a secret-shaped
-    name, the password in a URL, tokens with a known vendor prefix, the
-    argument after a secret-shaped flag (``--password x``, ``-p x``) and
-    the password in ``user:password`` after ``-u`` or ``--user``. A flag
-    and its value may be two list items or two words of one string
-    (``sh -c "..."``). The argument after a flag is hidden whole: the
-    whole list item, or the whole shell word in a string, quotes and
-    backslash escapes included (``"a\\" b"``, ``a\\ b``), so a password
+    rest of a shell word after a ``NAME=`` (or ``--name=``) with a
+    secret-shaped name, the password in a URL, tokens with a known vendor
+    prefix, the argument after a secret-shaped flag (``--password x``,
+    ``-p x``) and the password in ``user:password`` after ``-u`` or
+    ``--user``. A flag and its value may be two list items or two words of
+    one string (``sh -c "..."``). The argument after a flag is hidden
+    whole: the whole list item, or the whole shell word in a string, quotes
+    and backslash escapes included (``"a\\" b"``, ``a\\ b``), so a password
     with a space or a quote in it does not leak in part.
     """
     hidden: list[Any] = []
@@ -339,24 +350,8 @@ def _hide_command_secrets(parts: list[Any]) -> list[Any]:
             hidden.append(_hide_flag_value(pending, part))
             pending = None
             continue
-        words = _TOKEN.findall(_hide_in_text(part))
-        for index, word in enumerate(words):
-            if word.isspace():
-                continue
-            if pending is not None and not word.startswith("-"):
-                words[index] = _hide_flag_value(pending, word)
-                pending = None
-                continue
-            pending = None
-            flag = _FLAG.match(word)
-            if flag is None:
-                continue
-            name = flag["name"]
-            if name in _USER_FLAGS:
-                pending = "user"
-            elif name == "p" or _secret_shaped_name(name):
-                pending = "secret"
-        hidden.append("".join(words))
+        text, pending = _hide_command_text(_hide_in_text(part), pending)
+        hidden.append(text)
     return hidden
 
 

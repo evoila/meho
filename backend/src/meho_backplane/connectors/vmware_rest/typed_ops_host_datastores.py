@@ -72,7 +72,9 @@ if TYPE_CHECKING:
 __all__ = [
     "HOST_DATASTORES_GROUP_KEY",
     "HOST_DATASTORES_WHEN_TO_USE",
+    "TYPED_OPS",
     "VMWARE_HOST_DATASTORES_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "build_datastore_summary_retrieve_params",
     "build_host_datastores_retrieve_params",
     "host_datastores_impl",

@@ -57,9 +57,11 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 
 __all__ = [
+    "TYPED_OPS",
     "VMWARE_VSAN_CLUSTER_INFO_OP",
     "VSAN_CLUSTER_GET_CONFIG",
     "VSAN_GET_WITNESS_HOSTS",
+    "WHEN_TO_USE_BY_GROUP",
     "vsan_cluster_info_impl",
     "vsan_hosts",
 ]

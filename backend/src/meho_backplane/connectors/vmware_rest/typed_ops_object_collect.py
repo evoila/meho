@@ -54,7 +54,9 @@ if TYPE_CHECKING:
 __all__ = [
     "OBJECT_COLLECT_GROUP_KEY",
     "OBJECT_COLLECT_WHEN_TO_USE",
+    "TYPED_OPS",
     "VMWARE_OBJECT_COLLECT_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "build_object_collect_retrieve_params",
     "object_collect_impl",
 ]

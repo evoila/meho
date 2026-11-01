@@ -53,8 +53,10 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 
 __all__ = [
+    "TYPED_OPS",
     "VMWARE_VSAN_CAPACITY_OP",
     "VSAN_QUERY_SPACE_USAGE",
+    "WHEN_TO_USE_BY_GROUP",
     "vsan_capacity_impl",
 ]
 

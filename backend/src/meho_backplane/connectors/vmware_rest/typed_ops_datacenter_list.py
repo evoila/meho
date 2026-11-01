@@ -38,7 +38,9 @@ __all__ = [
     "DATACENTER_LIST_GROUP_KEY",
     "DATACENTER_LIST_PATH",
     "DATACENTER_LIST_WHEN_TO_USE",
+    "TYPED_OPS",
     "VMWARE_DATACENTER_LIST_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "datacenter_list_impl",
 ]
 

@@ -53,7 +53,9 @@ if TYPE_CHECKING:
 __all__ = [
     "TASKS_RECENT_GROUP_KEY",
     "TASKS_RECENT_WHEN_TO_USE",
+    "TYPED_OPS",
     "VMWARE_TASKS_RECENT_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "build_recent_tasks_retrieve_params",
     "build_task_info_retrieve_params",
     "tasks_recent_impl",

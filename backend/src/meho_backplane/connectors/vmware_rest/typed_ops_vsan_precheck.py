@@ -65,9 +65,11 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CHECK_TIMEOUT_SECONDS",
+    "TYPED_OPS",
     "VMWARE_VSAN_MAINTENANCE_PRECHECK_OP",
     "VSAN_GET_RESOURCE_CHECK_STATUS",
     "VSAN_PERFORM_RESOURCE_CHECK",
+    "WHEN_TO_USE_BY_GROUP",
     "build_resource_check_body",
     "vsan_maintenance_precheck_impl",
 ]

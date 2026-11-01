@@ -65,10 +65,12 @@ if TYPE_CHECKING:
 
 __all__ = [
     "HEALTH_GROUP_HEALTHY",
+    "TYPED_OPS",
     "VMWARE_VSAN_OBJECT_HEALTH_OP",
     "VMWARE_VSAN_RESYNC_STATUS_OP",
     "VSAN_QUERY_OBJECT_IDENTITIES",
     "VSAN_QUERY_SYNCING_OBJECTS",
+    "WHEN_TO_USE_BY_GROUP",
     "health_group",
     "vsan_object_health_impl",
     "vsan_resync_status_impl",

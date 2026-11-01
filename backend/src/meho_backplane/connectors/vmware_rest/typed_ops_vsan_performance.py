@@ -50,8 +50,10 @@ if TYPE_CHECKING:
 
 __all__ = [
     "PERF_ENTITY_TYPES",
+    "TYPED_OPS",
     "VMWARE_VSAN_PERFORMANCE_OP",
     "VSAN_PERF_QUERY_PERF",
+    "WHEN_TO_USE_BY_GROUP",
     "build_perf_query_body",
     "vsan_performance_impl",
 ]

@@ -48,10 +48,12 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
+    "TYPED_OPS",
     "VMWARE_VM_QUESTION_ANSWER_OP",
     "VMWARE_VM_QUESTION_GET_OP",
     "VM_QUESTION_GROUP_KEY",
     "VM_QUESTION_WHEN_TO_USE",
+    "WHEN_TO_USE_BY_GROUP",
     "vm_question_answer_impl",
     "vm_question_get_impl",
 ]

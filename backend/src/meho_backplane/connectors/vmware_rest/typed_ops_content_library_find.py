@@ -46,8 +46,10 @@ __all__ = [
     "CONTENT_LIBRARY_FIND_REST_CALLS",
     "CONTENT_LIBRARY_GROUP_KEY",
     "CONTENT_LIBRARY_WHEN_TO_USE",
+    "TYPED_OPS",
     "VMWARE_CONTENT_LIBRARY_FIND_OP",
     "VMWARE_CONTENT_LIBRARY_ITEM_FIND_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "content_library_find_impl",
     "content_library_item_find_impl",
 ]

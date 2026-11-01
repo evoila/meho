@@ -52,7 +52,9 @@ __all__ = [
     "CLUSTER_PROPERTY_PATHS",
     "CLUSTER_SUMMARY_FIELDS",
     "DATACENTER_LIST_PATH",
+    "TYPED_OPS",
     "VMWARE_CLUSTER_LIST_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "cluster_list_impl",
 ]
 

@@ -47,7 +47,9 @@ if TYPE_CHECKING:
 __all__ = [
     "HOST_NETWORK_UPLINKS_GROUP_KEY",
     "HOST_NETWORK_UPLINKS_WHEN_TO_USE",
+    "TYPED_OPS",
     "VMWARE_HOST_NETWORK_UPLINKS_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "build_host_network_uplinks_retrieve_params",
     "host_network_uplinks_impl",
 ]

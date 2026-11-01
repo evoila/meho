@@ -61,7 +61,9 @@ if TYPE_CHECKING:
 __all__ = [
     "TASK_INFO_OP_ID",
     "TASK_MOID_PATTERN",
+    "TYPED_OPS",
     "VMWARE_TASK_INFO_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "task_info_impl",
 ]
 

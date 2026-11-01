@@ -39,7 +39,9 @@ if TYPE_CHECKING:
 __all__ = [
     "ALARM_TRIGGERED_GROUP_KEY",
     "ALARM_TRIGGERED_WHEN_TO_USE",
+    "TYPED_OPS",
     "VMWARE_ALARM_TRIGGERED_LIST_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "alarm_triggered_list_impl",
 ]
 

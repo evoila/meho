@@ -51,7 +51,9 @@ if TYPE_CHECKING:
 __all__ = [
     "HOST_CONFIG_GROUP_KEY",
     "HOST_CONFIG_WHEN_TO_USE",
+    "TYPED_OPS",
     "VMWARE_HOST_CONFIG_SHOW_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "host_config_show_impl",
 ]
 

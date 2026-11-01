@@ -47,7 +47,9 @@ if TYPE_CHECKING:
 __all__ = [
     "DEPLOYMENT_STATUS_GROUP_KEY",
     "DEPLOYMENT_STATUS_WHEN_TO_USE",
+    "TYPED_OPS",
     "VMWARE_VCENTER_DEPLOYMENT_STATUS_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "deployment_status_impl",
 ]
 

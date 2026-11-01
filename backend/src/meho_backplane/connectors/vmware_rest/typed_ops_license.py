@@ -48,8 +48,10 @@ if TYPE_CHECKING:
 __all__ = [
     "LICENSE_GROUP_KEY",
     "LICENSE_WHEN_TO_USE",
+    "TYPED_OPS",
     "VMWARE_LICENSE_ASSIGNED_LIST_OP",
     "VMWARE_LICENSE_LIST_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "license_assigned_list_impl",
     "license_list_impl",
 ]

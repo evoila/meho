@@ -37,6 +37,7 @@ from sqlalchemy import func, select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector, VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.composites import (
@@ -50,6 +51,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
 from meho_backplane.connectors.vmware_rest.composites._vapp_schemas import (
     VAPP_CREATE_PARAMETER_SCHEMA,
     VAPP_CREATE_RESPONSE_SCHEMA,
+    VAPP_DELETE_PARAMETER_SCHEMA,
     VAPP_DELETE_RESPONSE_SCHEMA,
     VAPP_POWER_PARAMETER_SCHEMA,
     VAPP_POWER_RESPONSE_SCHEMA,
@@ -60,14 +62,20 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations import jsonflux_reducer as reducer_module
+from meho_backplane.operations import result_query as rq
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, blast_radius_missing_reason
 from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
 )
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
+from meho_backplane.operations.result_query import ResultQuerySpec, run_result_query
 from meho_backplane.settings import get_settings
+from tests._example_placeholders import with_synthetic_ids
+from tests._result_store_helpers import MemoryValkey
 from tests._vmware_teardown_fake import (
     GateRecorder,
     VimFake,
@@ -244,11 +252,31 @@ async def _delete(conn: Any, vapp: str = _VAPP) -> Any:
         VAPP_CREATE_PARAMETER_SCHEMA,
         VAPP_POWER_PARAMETER_SCHEMA,
         VAPP_START_ORDER_SET_PARAMETER_SCHEMA,
+        VAPP_DELETE_PARAMETER_SCHEMA,
     ],
 )
-def test_parameter_examples_validate(schema: dict[str, Any]) -> None:
+def test_parameter_examples_validate_with_synthetic_ids(schema: dict[str, Any]) -> None:
+    """The examples hold id placeholders; they validate once the ids are made up."""
+    validator = Draft202012Validator(schema)
     for example in schema["examples"]:
-        Draft202012Validator(schema).validate(example)
+        validator.validate(with_synthetic_ids(example))
+        assert not validator.is_valid(example), "an id placeholder must not pass as real input"
+
+
+def test_examples_use_placeholders_not_real_looking_ids() -> None:
+    schemas = [
+        VAPP_CREATE_PARAMETER_SCHEMA,
+        VAPP_POWER_PARAMETER_SCHEMA,
+        VAPP_START_ORDER_SET_PARAMETER_SCHEMA,
+        VAPP_DELETE_PARAMETER_SCHEMA,
+    ]
+    for schema in schemas:
+        for example in schema["examples"]:
+            for key in ("cluster", "resource_pool", "folder", "vapp"):
+                if key in example:
+                    assert example[key].startswith("<") and example[key].endswith(">")
+            for row in example.get("vms", []):
+                assert row["vm"].startswith("<") and row["vm"].endswith(">")
 
 
 def test_create_takes_either_a_cluster_or_a_pool_not_both() -> None:
@@ -702,6 +730,95 @@ async def test_delete_preview_of_a_missing_vapp(gate: GateRecorder) -> None:
     assert preview is not None
     assert preview["blast_radius"]["object"]["present"] is False
     assert preview["blast_radius"]["irreversibility"] == "none-object-already-absent"
+
+
+# A vApp with more VMs than the shared list cap (50): nothing is cut.
+
+_BIG = 60
+
+
+def _seed_big(conn: VappVimFake, *, power: str = "poweredOff") -> list[str]:
+    """A stopped vApp of ``_BIG`` VMs (``vm-1`` .. ``vm-60``); returns their ids."""
+    moids = [f"vm-{i}" for i in range(1, _BIG + 1)]
+    conn.add(
+        "VirtualApp",
+        _VAPP,
+        name="big-stack",
+        summary={"_typeName": "VirtualAppSummary", "vAppState": "stopped"},
+        vm=[moref("VirtualMachine", m) for m in moids],
+        resourcePool=[],
+        **{"vAppConfig.entityConfig": [_entity(m, i) for i, m in enumerate(moids, 1)]},
+    )
+    for i, moid in enumerate(moids, 1):
+        conn.add("VirtualMachine", moid, name=f"node-{i:02d}", **{"runtime.powerState": power})
+    return moids
+
+
+async def test_delete_of_a_large_vapp_lists_every_vm(gate: GateRecorder) -> None:
+    conn = VappVimFake()
+    moids = _seed_big(conn)
+    out = await _delete(conn)
+
+    assert out["status"] == "deleted"
+    assert out["object"]["vm_count"] == _BIG
+    assert [c["moid"] for c in out["children"]] == moids
+    assert "children_note" not in out["object"]
+    assert len(conn.calls_to("Destroy_Task")) == 1
+    Draft202012Validator(VAPP_DELETE_RESPONSE_SCHEMA).validate(out)
+
+
+async def test_delete_preview_of_a_large_vapp_shows_every_vm(gate: GateRecorder) -> None:
+    conn = VappVimFake()
+    moids = _seed_big(conn)
+    preview = await _PREVIEW_BUILDERS[_DELETE_OP](preview_ctx({"vapp": _VAPP}, conn))
+    assert preview is not None
+    radius = preview["blast_radius"]
+    assert radius["object"]["vm_count"] == _BIG
+    assert [c["moid"] for c in radius["children"]] == moids
+    assert "refusal" not in radius
+
+
+async def test_delete_of_a_large_running_vapp_names_every_blocker(gate: GateRecorder) -> None:
+    conn = VappVimFake()
+    moids = _seed_big(conn, power="poweredOn")
+    out = await _delete(conn)
+    assert out["status"] == "precondition_failed"
+    assert [b["moid"] for b in out["blockers"]] == moids
+    assert conn.calls_to("Destroy_Task") == []
+
+
+@pytest.fixture
+def result_store(monkeypatch: pytest.MonkeyPatch) -> ResultHandleStore:
+    """The real result store on an in-memory stand-in for Valkey."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    store = ResultHandleStore(MemoryValkey())  # type: ignore[arg-type]
+    monkeypatch.setattr(rq, "get_result_handle_store", lambda: store)
+    monkeypatch.setattr(reducer_module, "get_result_handle_store", lambda: store)
+    return store
+
+
+@pytest.mark.usefixtures("result_store")
+async def test_a_large_delete_result_is_stored_and_read_back_whole(gate: GateRecorder) -> None:
+    """JSONFlux keeps the whole result; ``result_query`` pages ``children`` past row 50."""
+    conn = VappVimFake()
+    moids = _seed_big(conn)
+    out = await _delete(conn)
+    op = operator()
+    context = {"op_id": _DELETE_OP, "tenant_id": str(op.tenant_id), "operator_sub": op.sub}
+
+    reduced, handle = await JsonFluxReducer().reduce(out, VAPP_DELETE_RESPONSE_SCHEMA, context)
+
+    assert handle is not None
+    assert reduced["status"] == "deleted"
+    read = await run_result_query(
+        op, handle.handle_id, ResultQuerySpec(path="/children"), offset=50, limit=50
+    )
+    assert read["coverage"] == "complete"
+    assert read["total_rows"] == _BIG
+    assert [row["moid"] for row in read["rows"]] == moids[50:]
 
 
 # ===========================================================================

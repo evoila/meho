@@ -13,6 +13,11 @@ it is not powered off, or when it holds other vApps or resource pools (their
 VMs would go too, and the plan does not list them). A vApp that does not
 exist is ``unchanged``. After the task MEHO reads the vApp again: ``deleted``
 only when it is gone.
+
+``children`` and ``blockers`` carry every VM, however many: the approval card
+shows all that goes, and the stored result keeps the whole list (JSONFlux
+stores a long list under a result handle; ``result_query`` with ``path``
+``/children`` pages it). Nothing is cut before approval or storage.
 """
 
 from __future__ import annotations
@@ -21,12 +26,10 @@ from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest.composites._teardown import (
-    LIST_CAP,
     STATUS_INVALID_REQUEST,
     STATUS_PRECONDITION_FAILED,
     TeardownPlan,
     blast_radius,
-    capped,
     destroy_outcome,
     destroy_task,
     pre_write_outcome,
@@ -92,11 +95,10 @@ async def plan_vapp_delete(
         {"kind": "vm", "moid": r["vm"], "name": r["name"], "power_state": r["power_state"]}
         for r in rows
     ]
-    plan = TeardownPlan(object=obj, present=True, children=capped(children))
-    plan.blockers = capped(
-        [c for c in children if c["power_state"] != _POWERED_OFF]
-        + [{"kind": kind, "moid": moid} for kind, moid in child_pools(props)]
-    )
+    plan = TeardownPlan(object=obj, present=True, children=children)
+    plan.blockers = [c for c in children if c["power_state"] != _POWERED_OFF] + [
+        {"kind": kind, "moid": moid} for kind, moid in child_pools(props)
+    ]
     if not complete:
         plan.refusal = (
             STATUS_PRECONDITION_FAILED,
@@ -115,8 +117,6 @@ async def plan_vapp_delete(
             "the vApp holds other vApps or resource pools (see 'blockers'); delete or move "
             "them first",
         )
-    if len(children) > LIST_CAP:
-        obj["children_note"] = f"{len(children)} VMs; 'children' shows the first {LIST_CAP}"
     return plan
 
 

@@ -148,8 +148,8 @@ VAPP_CREATE_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "oneOf": [{"required": ["cluster"]}, {"required": ["resource_pool"]}],
     "additionalProperties": False,
     "examples": [
-        {"name": "<vapp-name>", "cluster": "domain-c7", "folder": "group-v3"},
-        {"name": "<vapp-name>", "resource_pool": "resgroup-8", "folder": "group-v3"},
+        {"name": "<vapp-name>", "cluster": "<cluster-id>", "folder": "<vm-folder-id>"},
+        {"name": "<vapp-name>", "resource_pool": "<resource-pool-id>", "folder": "<vm-folder-id>"},
     ],
 }
 
@@ -232,8 +232,8 @@ VAPP_POWER_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "required": ["vapp", "action"],
     "additionalProperties": False,
     "examples": [
-        {"vapp": "resgroup-v42", "action": "power_on"},
-        {"vapp": "resgroup-v42", "action": "power_off", "force": False},
+        {"vapp": "<vapp-id>", "action": "power_on"},
+        {"vapp": "<vapp-id>", "action": "power_off", "force": False},
     ],
 }
 
@@ -376,10 +376,10 @@ VAPP_START_ORDER_SET_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "additionalProperties": False,
     "examples": [
         {
-            "vapp": "resgroup-v42",
+            "vapp": "<vapp-id>",
             "vms": [
-                {"vm": "vm-41", "start_order": 1, "start_delay": 60},
-                {"vm": "vm-42", "start_order": 2, "stop_action": "guestShutdown"},
+                {"vm": "<vm-id>", "start_order": 1, "start_delay": 60},
+                {"vm": "<other-vm-id>", "start_order": 2, "stop_action": "guestShutdown"},
             ],
         }
     ],
@@ -441,7 +441,7 @@ VAPP_DELETE_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "properties": {"vapp": _VAPP_PROPERTY},
     "required": ["vapp"],
     "additionalProperties": False,
-    "examples": [{"vapp": "resgroup-v42"}],
+    "examples": [{"vapp": "<vapp-id>"}],
 }
 
 VAPP_DELETE_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
@@ -479,7 +479,10 @@ VAPP_DELETE_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
         },
         "children": {
             "type": "array",
-            "description": "The VMs deleted with the vApp (first 50).",
+            "description": (
+                "Every VM deleted with the vApp. A long list is stored whole; "
+                "result_query with path /children pages it."
+            ),
             "items": {
                 "type": "object",
                 "properties": {

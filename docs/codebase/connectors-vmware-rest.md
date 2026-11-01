@@ -2807,7 +2807,10 @@ whole, because `vAppState` is on the `VirtualAppSummary` subtype only). The
 delete uses the plan-then-act seam of `_teardown.py`: one read-only plan
 feeds the approval-card `blast_radius` (`object`, `children`,
 `irreversibility`) and the handler. A person calls `preview_operation` first,
-and an agent is always refused. The other three have approval previews that
+and an agent is always refused. `children` and `blockers` carry every VM,
+however many: the approval card shows all that goes, and a long result goes
+through JSONFlux whole under a result handle (`result_query` with `path`
+`/children` pages it). The other three have approval previews that
 show the objects now and whether the call would stop before the change.
 Code: `composites/_vapp.py` (shared reads, views and write steps),
 `_vapp_change.py` (create, power), `_vapp_start_order.py`, `_vapp_delete.py`

@@ -313,14 +313,12 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
 
 #: Curated ``when_to_use`` blurb for the tasks-recent group.
 TASKS_RECENT_WHEN_TO_USE = (
-    "Use to read the recent vCenter Task objects for change-window "
-    "monitoring: what operations ran, on which entity, their state "
-    "(queued / running / success / error), progress, and the queued / "
-    "started / completed timestamps. The 'what changed here, and did it "
-    "finish?' read -- distinct from event.tail, which reads the event "
-    "log, not the Task list. Reads TaskManager.recentTask then Task.info "
-    "via PropertyCollector directly on the connector session, so it works "
-    "with zero catalog ingest. Read-only."
+    "Use to read vCenter tasks. Reads only: the recent tasks for "
+    "change-window monitoring -- what ran, on which object, the state "
+    "(queued / running / success / error), progress and times "
+    "(vmware.tasks.recent); and one task by its id, to follow a change "
+    "that answered with a task id until it ends (vmware.task.info). "
+    "Distinct from event.tail, which reads the event log, not the task list."
 )
 
 VMWARE_TASKS_RECENT_OP = VmwareTypedOp(

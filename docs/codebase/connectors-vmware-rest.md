@@ -4896,6 +4896,72 @@ splits an answer only between objects, so those reads do not use the helper.
 `_retrieve_props_by_moid` and `read_many` read in groups of 50 and refuse an
 answer that still carries a token, so they never return a short list either.
 
+### vSAN cluster work: HCL database, cluster shut down and start, tests, repair (`#4446`)
+
+Six hand-written operations for work on a whole vSAN cluster. They need no
+spec ingest. They are on both vCenter catalogs (`vmware-rest-8.0` and
+`vmware-rest-9.0`), in the group `vsan_cluster`. The code is in
+`composites/_vsan_*.py`; the rows are in `composites/_vsan_ops.py`.
+
+| Operation | What it does | What it returns | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.vsan.cluster.power.precheck` | Can the whole cluster be shut down now, and what blocks it. Runs `VsanQueryVcClusterHealthSummary` with the `clusterPowerOffPrecheck` view and reads `QueryClusterPowerContext`. | `ready_to_shut_down`, the red checks (`blocking`), the yellow ones (`warnings`), and `power`: the power state and the task of the last power action with its state. | read (`safe`) | 8.0, 9.x |
+| `vmware.composite.vsan.hcl.update` | Replaces the HCL database (vCenter downloads it with `VsanVcUpdateHclDbFromWeb`, from the vendor or a given `url`; or MEHO sends a datastore file with `VsanVcUploadHclDb`) and the release catalog (a datastore file, `VsanVumSystem.VsanVcUploadReleaseDb`). | `updated`, or `failed` / `partly_done` with `steps_ran`, `failed_step` (step, vendor fault type and text) and `steps_not_run`. | change (`caution`) | 8.0, 9.x |
+| `vmware.composite.vsan.cluster.shutdown` | `PerformClusterPowerAction` with `clusterPoweredOff`. | `accepted` with the vCenter task id and `status_read` (`vmware.task.info`); `already_running`; `unchanged`. | change (`dangerous`) | 8.0, 9.x |
+| `vmware.composite.vsan.cluster.start` | `PerformClusterPowerAction` with `clusterPoweredOn`. | Same as the shut down. | change (`dangerous`) | 8.0, 9.x |
+| `vmware.composite.vsan.proactive_test.run` | One proactive test: `vm_creation` (`VsanQueryVcClusterCreateVmHealthTest`), `network_performance` (`VsanQueryVcClusterNetworkPerfTest`) or `storage_load` (`VsanQueryVcClusterVmdkWorkloadTypes`, then `VsanVcClusterRunVmdkLoadTest`, a task MEHO follows to its end). | `completed` with `overall_status` and one row per host (storage: per test disk). | change (`dangerous`) | 8.0, 9.x |
+| `vmware.composite.vsan.object.repair` | `VsanHealthRepairClusterObjectsImmediate`: puts objects with reduced redundancy (all, or given UUIDs) into the repair queue now. MEHO follows the task, which ends when the objects are queued. | `repair_queued`, or `failed` / `not_confirmed` with the task id and vCenter's error. | change (`dangerous`) | 8.0, 9.x |
+
+How the calls go:
+
+- Every vSAN method is a `VsanMethod` constant in `composites/_vsan_common.py`
+  and goes through `VmwareRestConnector._post_vsan`: VI-JSON
+  `/sdk/vim25/{release}/vsan/<Type>/<moId>/<Method>` on vCenter 9.x, SOAP to
+  `/vsanHealth` on vCenter 8.0. The vSAN objects have fixed ids:
+  `vsan-cluster-health-system`, `vsan-cluster-power-system`,
+  `vsan-vum-system`. The reconcile lanes check every constant against the
+  9.0 `vi-json.yaml` and the 8.0 vSAN SDK method lists.
+- The vSAN SOAP writer (`soap_vsan.py`) now also writes whole numbers, texts,
+  lists and data objects (a dict with `_typeName` gets `xsi:type`).
+- Every change goes through the sub-call gate (`enforce_subop_policy`)
+  before its vSAN call. A held or denied gate comes back as is; nothing is
+  sent. Each change has an approval preview. The shut down preview runs the
+  pre-check, so the approver sees the blocking checks.
+- The HCL update reads a datastore file through vCenter's datastore file
+  access: `GET /folder/<path>?dcPath=<datacenter path>&dsName=<datastore>`,
+  with the cookie of a vCenter SOAP login (logs in again once on 401 or 403).
+  A file is at most 64 MiB. A plain JSON HCL file is gzipped and sent as
+  base64, as the vendor call asks.
+- The two short tests answer in one call. MEHO waits at most 30 seconds for
+  one answer, so their test time is 5 to 25 seconds.
+
+Shut down and start are vendor jobs:
+
+- The start returns as soon as vCenter accepted the job: `accepted`, the
+  task id, and `status_read` = `vmware.task.info` with that id. It never
+  says the work is done.
+- Before it starts, it reads `QueryClusterPowerContext`. When the task of
+  the last power action still runs (`queued` or `running`), it answers
+  `already_running` with that task id and starts nothing. This is a help,
+  not a lock: two callers can both check before either starts.
+- After a lost reply, do not call again blindly. Call
+  `vmware.vsan.cluster.power.precheck`: it shows the power state and the
+  last power task with its state.
+- Use async mode (`async: true`, `docs/codebase/async-governed-dispatch.md`)
+  for the start, so MEHO keeps the answer with the task id under a run
+  handle.
+- The status read `vmware.task.info` (typed read, `typed_ops_task_info.py`,
+  group `tasks_recent`) gives the vendor's state, the progress and the error
+  text, logs in again after an expired login, and answers `not_reachable`
+  (not `failed`) when vCenter does not answer. MEHO keeps no job state
+  between calls.
+- A shut down also stops a vCenter that runs on the cluster. The start then
+  needs a vCenter that runs again.
+
+Tests: `tests/test_connectors_vmware_rest_vsan_cluster_ops.py` (respx, both
+transports, made-up answers in the shape of the vendor types). No live lab
+was used.
+
 ### Version check for typed operations (`_version_gate.py`, #4316)
 
 Some vCenter calls exist only from a given version on. Examples: the

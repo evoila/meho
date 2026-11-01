@@ -511,8 +511,10 @@ class VcfFleetConnector(FleetLifecycleOps):
     async def locker_certificate_import(self, operator: Operator, target: Any, params: Any) -> Any:
         return await _locker.certificate_import(self, operator, target, params)
 
-    async def product_certificate_replace(self, operator: Operator, target: Any, p: Any) -> Any:
-        return await _replace_certificate(self, operator, target, p)
+    async def product_certificate_replace(
+        self, operator: Operator, target: Any, params: Any
+    ) -> Any:
+        return await _replace_certificate(self, operator, target, params)
 
     @classmethod
     async def register_operations(cls) -> None:

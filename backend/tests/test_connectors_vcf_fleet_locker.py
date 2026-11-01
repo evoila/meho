@@ -20,12 +20,16 @@ What is checked:
 * the vendor's error text reaches the answer (minus any secret);
 * the replace job: accepted, a request that already runs, a failed
   pre-validation, a vendor error and a lost reply at the replace step, an
-  appliance that does not answer, and a pre-validation that does not end.
+  appliance that does not answer, and a pre-validation that does not end;
+* the approved replace through the dispatcher, then the status read of its
+  request (``fleet.request.get``), and the recovery after a lost reply
+  (``fleet.request.list``, then ``fleet.request.get``).
 """
 
 from __future__ import annotations
 
 import html
+import inspect
 import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -152,6 +156,13 @@ def test_examples_are_valid_calls(op: Any) -> None:
     validator = Draft202012Validator(op.parameter_schema)
     for example in op.parameter_schema["examples"]:
         assert list(validator.iter_errors(example)) == [], example
+
+
+@pytest.mark.parametrize("op", FLEET_LOCKER_OPS, ids=lambda op: op.op_id)
+def test_each_handler_takes_the_names_the_dispatcher_uses(op: Any) -> None:
+    """The dispatcher calls ``handler(operator=, target=, params=)``, by name."""
+    handler = getattr(VcfFleetConnector, op.handler_attr)
+    assert list(inspect.signature(handler).parameters) == ["self", "operator", "target", "params"]
 
 
 def test_import_schema_needs_the_fields_of_its_mode() -> None:
@@ -635,7 +646,10 @@ async def _registered(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
     from meho_backplane.db.engine import get_sessionmaker
     from meho_backplane.db.models import Target as TargetORM
     from meho_backplane.operations import reset_dispatcher_caches
-    from meho_backplane.operations._handler_resolve import reset_handler_cache
+    from meho_backplane.operations._handler_resolve import (
+        get_or_create_connector_instance,
+        reset_handler_cache,
+    )
 
     monkeypatch.setattr(
         "meho_backplane.operations.typed_register.encode_endpoint_text",
@@ -648,6 +662,9 @@ async def _registered(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
         product="fleet", version="9.0", impl_id="fleet-rest", cls=VcfFleetConnector
     )
     await VcfFleetConnector.register_operations()
+    instance = get_or_create_connector_instance(VcfFleetConnector)
+    assert isinstance(instance, VcfFleetConnector)
+    instance._creds = type(instance._creds)(_stub_loader, product_label="fleet")
     async with get_sessionmaker()() as session:
         session.add(
             TargetORM(
@@ -709,6 +726,115 @@ async def test_each_change_waits_for_approval(
     assert dumped["status"] == "awaiting_approval", dumped
     assert dumped["extras"].get("approval_request_id")
     assert not sent.called
+
+
+# ---------------------------------------------------------------------------
+# The approved replace through the dispatcher, and the request reads after it
+# ---------------------------------------------------------------------------
+
+
+async def _dispatch_approved(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Run an op the way the approval queue resumes it after a person approved."""
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations import dispatch
+    from meho_backplane.targets.resolver import resolve_target
+
+    async with get_sessionmaker()() as session:
+        target = await resolve_target(session, _OPERATOR.tenant_id, "fleet-locker")
+    result = await dispatch(
+        operator=_OPERATOR,
+        connector_id="fleet-rest-9.0",
+        op_id=op_id,
+        target=target,
+        params=params,
+        _approved=True,
+    )
+    dumped: dict[str, Any] = result.model_dump(mode="json")
+    return dumped
+
+
+def _vendor_request(vmid: str, state: str) -> dict[str, Any]:
+    return {
+        "vmid": vmid,
+        "requestName": "Update product certificate",
+        "requestType": "PRODUCT_CERTIFICATE_UPDATE",
+        "requestReason": "replace the certificate",
+        "state": state,
+        "executionStatus": state,
+        "errorCause": None,
+        "createdBy": "<user>",
+        "lastUpdatedOn": 7,
+        "inputMap": {"environmentId": _ENV, "productId": _PRODUCT},
+    }
+
+
+def _mock_replace_calls(mock: respx.MockRouter) -> Any:
+    mock.get(_REQUESTS).respond(200, json=[])
+    mock.post(_PRE).respond(200, json={"requestId": "pre-0001"})
+    mock.get(_REPORT).respond(200, json=_REPORT_OK)
+    return mock.put(_PUT)
+
+
+async def test_approved_replace_runs_through_the_dispatcher(
+    _registered: None, _fast_poll: None
+) -> None:
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        put = _mock_replace_calls(mock).respond(200, json={"requestId": "req-0001"})
+        dumped = await _dispatch_approved("fleet.product.certificate.replace", _REPLACE)
+    assert dumped["status"] == "ok", dumped
+    assert dumped["result"]["status"] == "accepted"
+    assert dumped["result"]["request_id"] == "req-0001"
+    assert put.called
+
+
+async def test_replace_then_status_read_follows_the_request(
+    _registered: None, _fast_poll: None
+) -> None:
+    """The start answer names the status read; its request id works there as is."""
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_replace_calls(mock).respond(200, json={"requestId": "req-0001"})
+        started = await _dispatch_approved("fleet.product.certificate.replace", _REPLACE)
+        request_id = started["result"]["request_id"]
+        status_read = started["result"]["status_read"]
+        mock.get(f"{_REQUESTS}/{request_id}").respond(
+            200, json=_vendor_request(request_id, "INPROGRESS")
+        )
+        running = await _dispatch_approved(status_read, {"request_id": request_id})
+        mock.get(f"{_REQUESTS}/{request_id}").respond(
+            200, json=_vendor_request(request_id, "COMPLETED")
+        )
+        ended = await _dispatch_approved(status_read, {"request_id": request_id})
+    assert status_read == "fleet.request.get"
+    assert running["status"] == "ok", running
+    assert running["result"]["request_id"] == request_id
+    assert running["result"]["outcome"] == "running"
+    assert ended["status"] == "ok", ended
+    assert ended["result"]["outcome"] == "succeeded"
+
+
+async def test_lost_reply_is_recovered_with_the_request_list_and_read(
+    _registered: None, _fast_poll: None
+) -> None:
+    """After a lost reply, the request list finds the certificate request; the read follows it."""
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        _mock_replace_calls(mock).mock(side_effect=httpx.ReadTimeout("read timed out"))
+        lost = await _dispatch_approved("fleet.product.certificate.replace", _REPLACE)
+        assert lost["status"] == "ok", lost
+        assert lost["result"]["status"] == "unknown"
+        assert "request_id" not in lost["result"]
+        # The appliance did start the request although the reply was lost.
+        started = _vendor_request("req-0002", "INPROGRESS")
+        mock.get(_REQUESTS).respond(200, json=[started])
+        listed = await _dispatch_approved("fleet.request.list", {"outcome": "running"})
+        rows = listed["result"]["requests"]
+        found = next(row for row in rows if "CERTIFICATE" in str(row["type"]).upper())
+        mock.get(f"{_REQUESTS}/{found['request_id']}").respond(200, json=started)
+        read = await _dispatch_approved("fleet.request.get", {"request_id": found["request_id"]})
+    assert listed["status"] == "ok", listed
+    assert found["request_id"] == "req-0002"
+    assert read["status"] == "ok", read
+    assert read["result"]["request_id"] == "req-0002"
+    assert read["result"]["outcome"] == "running"
 
 
 # ---------------------------------------------------------------------------

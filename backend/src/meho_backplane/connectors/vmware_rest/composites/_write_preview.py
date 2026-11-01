@@ -53,6 +53,9 @@ resolved VM + host group sets).
 ``vm.snapshot.delete``    live-read: the mandatory ``blast_radius`` from the
                           handler's plan -- the snapshot, the snapshots below
                           it when ``remove_children`` is set
+``vm.snapshot.delete_all`` live-read: the mandatory ``blast_radius`` from the
+                          handler's plan -- the VM and every snapshot it has
+``vm.disks.consolidate``  echo: vm
 ``vm.migrate``            echo: vm, cluster, target_host + resolution source
 ``vm.power``              live-read: vm, name, power_state, verb,
                           power_kind (hard vs Tools-soft); a failed read

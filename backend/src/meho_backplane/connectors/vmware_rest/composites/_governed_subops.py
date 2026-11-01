@@ -44,6 +44,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _license,
     _namespace,
     _snapshot,
+    _snapshot_cleanup,
     _storage_policy,
     _supervisor,
     _teardown,
@@ -95,6 +96,11 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     # The RemoveSnapshot_Task child is delete-shaped, so the discovery surface
     # flags it un-grantable -- a human always decides.
     "vmware.composite.vm.snapshot.delete": _snapshot._VIM_SUB_OPS_VM_SNAPSHOT_DELETE,
+    # RemoveAllSnapshots_Task is delete-shaped too: a human always decides.
+    "vmware.composite.vm.snapshot.delete_all": (
+        _snapshot_cleanup._VIM_SUB_OPS_VM_SNAPSHOT_DELETE_ALL
+    ),
+    "vmware.composite.vm.disks.consolidate": _snapshot_cleanup._VIM_SUB_OPS_VM_DISKS_CONSOLIDATE,
     "vmware.composite.vm.destroy": _write._SUB_OPS_VM_DESTROY + _write._VIM_SUB_OPS_VM_DESTROY,
     "vmware.composite.vm.migrate": _write._SUB_OPS_VM_MIGRATE + _write._VIM_SUB_OPS_VM_MIGRATE,
     "vmware.composite.vm.power.bulk": _write._SUB_OPS_VM_POWER_BULK,

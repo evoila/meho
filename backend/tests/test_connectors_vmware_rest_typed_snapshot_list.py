@@ -224,7 +224,7 @@ async def test_list_reads_name_and_snapshot_of_one_vm() -> None:
     assert promote is True
     spec = body["specSet"][0]
     assert spec["propSet"][0]["type"] == "VirtualMachine"
-    assert spec["propSet"][0]["pathSet"] == ["name", "snapshot"]
+    assert spec["propSet"][0]["pathSet"] == ["name", "snapshot", "layoutEx"]
     assert spec["objectSet"][0]["obj"]["value"] == "vm-42"
 
     assert out["vm"] == "vm-42"
@@ -243,6 +243,7 @@ async def test_list_of_a_vm_without_snapshots_is_empty() -> None:
         "vm_name": "app-vm",
         "current_snapshot_id": None,
         "snapshot_count": 0,
+        "read_note": None,
         "snapshots": [],
     }
     Draft202012Validator(VMWARE_SNAPSHOT_LIST_OP.response_schema).validate(out)
@@ -333,10 +334,12 @@ def test_op_is_a_safe_typed_read_in_its_own_group() -> None:
     assert callable(getattr(VmwareRestConnector, op.handler_attr))
 
 
-def test_schema_needs_a_vm_and_nothing_else() -> None:
+def test_schema_takes_an_optional_vm_and_age() -> None:
     schema = VMWARE_SNAPSHOT_LIST_OP.parameter_schema
     for example in schema["examples"]:
         assert validate_params(schema, example) == []
     assert validate_params(schema, {"vm": "vm-42"}) == []
-    assert validate_params(schema, {}) != []
+    assert validate_params(schema, {}) == []
+    assert validate_params(schema, {"older_than_days": 7}) == []
+    assert validate_params(schema, {"older_than_days": -1}) != []
     assert validate_params(schema, {"vm": "vm-42", "name": "x"}) != []

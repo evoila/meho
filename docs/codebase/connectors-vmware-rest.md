@@ -4911,6 +4911,8 @@ with vCenter's fault type and text; a missing cluster gives `not_found`. An
 empty answer, a capacity answer without `limitHealth`, an object-health answer
 without `objectHealth`, and a finished pre-check without a result all raise.
 A failed pre-check task raises with the task's error text.
+A pre-check whose task ended but whose status is not `resourceCheckCompleted`
+(for example `resourceCheckFailed`) raises and names the status.
 
 **Modules.** `typed_ops_vsan_common.py` (group text, readers that accept the
 VI-JSON and the SOAP form of a value, `vsan_call`, `read_properties`),

@@ -571,6 +571,22 @@ async def test_precheck_host_outside_a_cluster_fails() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_instant_poll")
+async def test_precheck_check_that_did_not_complete_fails_with_the_status() -> None:
+    failed = {"_typeName": "VsanResourceCheckStatus", "status": "resourceCheckFailed"}
+    fake = FakeVcenter(
+        RELEASE_91,
+        {
+            "VsanPerformResourceCheck": moref("Task", _TASK),
+            "VsanGetResourceCheckStatus": failed,
+        },
+        _precheck_props("success"),
+    )
+    with pytest.raises(RuntimeError, match="resourceCheckFailed"):
+        await _run(fake, "vsan_maintenance_precheck", {"host": "host-21"})
+
+
+@pytest.mark.asyncio
 async def test_precheck_completed_without_result_fails_loudly() -> None:
     completed = {"_typeName": "VsanResourceCheckStatus", "status": "resourceCheckCompleted"}
     fake = FakeVcenter(

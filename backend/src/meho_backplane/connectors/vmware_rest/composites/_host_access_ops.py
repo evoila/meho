@@ -4,8 +4,9 @@
 """Registry rows of the host local-user and Active Directory changes.
 
 ``_register.py`` collects :data:`COMPOSITES`. Each row names the vendor calls
-the change may make. Every change has ``requires_approval=True``. They share the group of the two typed reads
-(``host_access.HOST_ACCESS_GROUP_KEY``), with the same text.
+the change may make. Every change has ``requires_approval=True``. They share
+the group of the two typed reads (``host_access.HOST_ACCESS_GROUP_KEY``), with
+the same text.
 """
 
 from __future__ import annotations

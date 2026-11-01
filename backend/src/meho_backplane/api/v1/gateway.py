@@ -66,7 +66,12 @@ from fastapi import status as http_status
 from pydantic import BaseModel, ConfigDict, Field
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.runner_guard import assert_runner_scope, require_runner
+from meho_backplane.auth.runner_guard import (
+    assert_runner_scope,
+    require_runner,
+    runner_package_set,
+    runner_wire_version,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GatewayCommand, GatewayCommandStatus
 from meho_backplane.gateway.deadman import clear_runner_stale
@@ -99,6 +104,8 @@ router = APIRouter(prefix="/api/v1/gateway", tags=["gateway"])
 #: (FastAPI-idiomatic singleton) and avoids ruff B008. Same pattern as
 #: :mod:`meho_backplane.api.v1.approvals`'s ``_require_operator``.
 _require_runner = Depends(require_runner())
+_runner_wire_version = Depends(runner_wire_version)
+_runner_package_set = Depends(runner_package_set)
 
 #: Seconds between claim attempts while a long-poll holds an empty queue.
 #: Sized so an idle hold costs ~1 claim query/second; the runner re-polls
@@ -244,6 +251,8 @@ async def poll_next_command(
         ),
     ] = GATEWAY_LONGPOLL_DEFAULT_WAIT_SECONDS,
     operator: Operator = _require_runner,
+    wire_version: str = _runner_wire_version,
+    package_set: str = _runner_package_set,
 ) -> GatewayCommandEnvelope | Response:
     """Long-poll for the next command queued for ``{runner}``.
 
@@ -268,7 +277,13 @@ async def poll_next_command(
     # ``expire_on_commit=False`` keeps the attribute readable after the
     # scope gate commits its heartbeat and the session block closes.
     async with sessionmaker() as session:
-        principal = await assert_runner_scope(operator, runner_name=runner, session=session)
+        principal = await assert_runner_scope(
+            operator,
+            runner_name=runner,
+            session=session,
+            wire_version=wire_version,
+            package_set=package_set,
+        )
         runner_revoked = principal.revoked
 
     effective_wait = clamp_longpoll_wait(wait)
@@ -310,6 +325,8 @@ async def report_command_result(
     runner: str,
     body: GatewayResultBody,
     operator: Operator = _require_runner,
+    wire_version: str = _runner_wire_version,
+    package_set: str = _runner_package_set,
 ) -> GatewayResultAck:
     """Report the outcome of a delivered command for ``{runner}``.
 
@@ -328,7 +345,13 @@ async def report_command_result(
         async with sessionmaker() as session:
             # Scope gate first (#2502), then consume + record + audit on the
             # same session (#2500's accept path).
-            await assert_runner_scope(operator, runner_name=runner, session=session)
+            await assert_runner_scope(
+                operator,
+                runner_name=runner,
+                session=session,
+                wire_version=wire_version,
+                package_set=package_set,
+            )
             command = await accept_command_result(
                 session,
                 operator=operator,

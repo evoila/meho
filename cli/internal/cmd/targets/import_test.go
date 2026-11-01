@@ -126,8 +126,11 @@ func TestMapEntryUnknownSpillsToExtras(t *testing.T) {
 		"kubeconfig_field": "/etc/rancher/rke2/rke2.yaml",
 		"sso_realm":        "evba.lab",
 	})
-	if len(warnings) != 0 {
-		t.Errorf("warnings: got %v; want none", warnings)
+	// #3649: each spilled key gets a warning, in sorted key order.
+	if len(warnings) != 2 ||
+		!strings.Contains(warnings[0], `"kubeconfig_field"`) ||
+		!strings.Contains(warnings[1], `"sso_realm"`) {
+		t.Errorf("warnings: got %v; want one per unknown key, sorted", warnings)
 	}
 	extras, ok := body["extras"].(map[string]any)
 	if !ok {
@@ -138,6 +141,60 @@ func TestMapEntryUnknownSpillsToExtras(t *testing.T) {
 	}
 	if extras["kubeconfig_field"] != "/etc/rancher/rke2/rke2.yaml" {
 		t.Errorf("extras.kubeconfig_field: got %v", extras["kubeconfig_field"])
+	}
+}
+
+// TestMapEntryVersionIsTopLevel pins #3649: `version` maps to the
+// target's version column on both CREATE and PATCH, and an explicit
+// `extras:` block next to it is kept as-is with no warning.
+func TestMapEntryVersionIsTopLevel(t *testing.T) {
+	t.Parallel()
+	entry := map[string]any{
+		"name":    "addon",
+		"product": "demo-product",
+		"host":    "addon.example.test",
+		"version": "0.1.0",
+		"extras":  map[string]any{"scheme": "http"},
+	}
+	for label, mapper := range map[string]func(map[string]any) (map[string]any, []string){
+		"create": entryToCreateBody,
+		"update": entryToUpdateBody,
+	} {
+		body, warnings := mapper(entry)
+		if body["version"] != "0.1.0" {
+			t.Errorf("%s: body[version]: got %v; want 0.1.0", label, body["version"])
+		}
+		if len(warnings) != 0 {
+			t.Errorf("%s: warnings: got %v; want none", label, warnings)
+		}
+		extras, ok := body["extras"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: extras: got %T; want map[string]any", label, body["extras"])
+		}
+		if _, leaked := extras["version"]; leaked {
+			t.Errorf("%s: version must not be in extras: %v", label, extras)
+		}
+		if extras["scheme"] != "http" || len(extras) != 1 {
+			t.Errorf("%s: extras: got %v; want {scheme: http}", label, extras)
+		}
+	}
+}
+
+func TestParseTargetsYAMLNonStringVersionFails(t *testing.T) {
+	t.Parallel()
+	in := []byte(`
+targets:
+  - name: addon
+    product: demo-product
+    host: addon.example.test
+    version: 8.0
+`)
+	_, err := parseTargetsYAML(in)
+	if err == nil {
+		t.Fatal("parseTargetsYAML: want error on unquoted numeric version")
+	}
+	if !strings.Contains(err.Error(), "version") || !strings.Contains(err.Error(), "quote") {
+		t.Errorf("error should name `version` and say to quote it: got %q", err.Error())
 	}
 }
 
@@ -911,4 +968,137 @@ func TestRunImportNonexistentFileSurfacesUnexpected(t *testing.T) {
 	// non-nil errors are acceptable shapes — the important property
 	// is that the call doesn't panic. Assert on stderr instead.
 	_ = err
+}
+
+// TestMapEntrySecretFieldMapIsTopLevel pins that a YAML
+// secret_field_map lands at the top level, not in extras (#3711).
+func TestMapEntrySecretFieldMapIsTopLevel(t *testing.T) {
+	t.Parallel()
+	body, _ := mapEntry(map[string]any{
+		"name": "ssh-01", "product": "ssh", "host": "ssh-01.example.com",
+		"secret_field_map": map[string]any{"ssh_private_key": "private_key"},
+	})
+	m, ok := body["secret_field_map"].(map[string]any)
+	if !ok || m["ssh_private_key"] != "private_key" {
+		t.Errorf("secret_field_map: got %#v", body["secret_field_map"])
+	}
+	if _, spilled := body["extras"]; spilled {
+		t.Errorf("secret_field_map must not spill into extras; got %v", body["extras"])
+	}
+}
+
+// TestApplySecretFieldMapMergesFlagOverYAML pins that --secret-field
+// entries are added to every entry and win over a YAML entry with the
+// same connector field, while other YAML entries are kept.
+func TestApplySecretFieldMapMergesFlagOverYAML(t *testing.T) {
+	t.Parallel()
+	entries := []map[string]any{
+		{"name": "a", "secret_field_map": map[string]any{"username": "login", "ssh_private_key": "old"}},
+		{"name": "b"},
+	}
+	applySecretFieldMap(entries, map[string]any{"ssh_private_key": "private_key"})
+
+	a := entries[0]["secret_field_map"].(map[string]any)
+	if a["username"] != "login" || a["ssh_private_key"] != "private_key" || len(a) != 2 {
+		t.Errorf("entry a: got %v", a)
+	}
+	b := entries[1]["secret_field_map"].(map[string]any)
+	if b["ssh_private_key"] != "private_key" || len(b) != 1 {
+		t.Errorf("entry b: got %v", b)
+	}
+}
+
+// TestApplySecretFieldMapNoFlagsLeavesEntries pins that without
+// --secret-field the entries are not touched.
+func TestApplySecretFieldMapNoFlagsLeavesEntries(t *testing.T) {
+	t.Parallel()
+	entries := []map[string]any{{"name": "a"}}
+	applySecretFieldMap(entries, map[string]any{})
+	if _, ok := entries[0]["secret_field_map"]; ok {
+		t.Errorf("entry should have no secret_field_map; got %v", entries[0])
+	}
+}
+
+// TestRunImportAppliesVersionAndExtrasFromOneFile is the #3649
+// round trip on the CLI side: one import file registers a versioned
+// target with `extras.scheme`. The POST body carries `version` at the
+// top level (not in extras) and keeps the extras payload. An unknown
+// key on a second entry is still stored in extras, and the apply
+// prints a warning for it.
+func TestRunImportAppliesVersionAndExtrasFromOneFile(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "targets.yaml")
+	yaml := []byte(`
+targets:
+  - name: addon
+    product: demo-product
+    version: "0.1.0"
+    host: addon.example.test
+    port: 8000
+    extras:
+      scheme: http
+  - name: other
+    product: demo-product
+    host: other.example.test
+    site_code: north
+`)
+	if err := os.WriteFile(path, yaml, 0o600); err != nil {
+		t.Fatalf("write yaml: %v", err)
+	}
+
+	var posts []map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/targets", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			_, _ = w.Write([]byte(`{"items":[],"next_cursor":null}`))
+		case http.MethodPost:
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode POST body: %v", err)
+			}
+			posts = append(posts, body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			t.Errorf("unexpected %s", r.Method)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newRunCmd(t)
+	if err := runImport(cmd, importOptions{File: path, BackplaneOverride: srv.URL}); err != nil {
+		t.Fatalf("runImport: %v\nstderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "2 created") {
+		t.Errorf("stdout: got %q; want 2 created", stdout.String())
+	}
+	if len(posts) != 2 {
+		t.Fatalf("POSTs: got %d; want 2", len(posts))
+	}
+
+	addon := posts[0]
+	if addon["version"] != "0.1.0" {
+		t.Errorf("addon version column: got %v; want 0.1.0", addon["version"])
+	}
+	extras, _ := addon["extras"].(map[string]any)
+	if extras["scheme"] != "http" || len(extras) != 1 {
+		t.Errorf("addon extras: got %v; want {scheme: http}", addon["extras"])
+	}
+
+	otherExtras, _ := posts[1]["extras"].(map[string]any)
+	if otherExtras["site_code"] != "north" {
+		t.Errorf("other extras: got %v; want site_code spilled", posts[1]["extras"])
+	}
+	errOut := stderr.String()
+	if !strings.Contains(errOut, `warning: other: unknown field "site_code"`) {
+		t.Errorf("stderr should warn about site_code: got %q", errOut)
+	}
+	if strings.Contains(errOut, "warning: addon") {
+		t.Errorf("addon should have no warnings: got %q", errOut)
+	}
 }

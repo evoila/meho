@@ -26,6 +26,10 @@ owned by #2500):
   centrally is still refused if the edge config disagrees — failing closed at
   every step until the runner is authorised for the tier; only a ``SAFE``
   item proceeds.
+* **connector package set** (#5038) — an item for an op that a connector
+  package provides names the package set it needs (``package_set``). The
+  runner refuses it when its own package set digest differs, with a text
+  that names both digests, instead of a vague ``handler_unresolved``.
 * **connector-tree-only** — a ``handler_ref`` that does not resolve inside
   ``meho_backplane.connectors.*`` is refused. The lexical prefix is
   checked *before* import (an import has module-load side effects) and the
@@ -48,11 +52,13 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.wrapped_creds import screen_remote_write_credential
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
     get_or_create_connector_instance,
     import_handler,
     is_unbound_method,
 )
 from meho_backplane.runner.effect_audit import EffectAuditChain
+from meho_backplane.runner.package_set import local_package_set, package_set_mismatch_message
 from meho_backplane.runner.satellite_tier import (
     SatelliteMintTier,
     classify_satellite_tier,
@@ -146,6 +152,16 @@ def _screen_item(item: RunnerWorkItem) -> str | None:
     if not item.handler_ref.startswith(_CONNECTOR_MODULE_PREFIX):
         return f"handler_ref {item.handler_ref!r} is outside {_CONNECTOR_MODULE_PREFIX}*"
     return None
+
+
+def _package_set_refusal(item: RunnerWorkItem) -> str | None:
+    """Refuse an item that needs another connector package set than this runner has (#5038)."""
+    if item.package_set is None:
+        return None
+    runner_digest = local_package_set().digest
+    if item.package_set == runner_digest:
+        return None
+    return package_set_mismatch_message(runner_digest, item.package_set)
 
 
 def _verify_remote_write_signature(item: RunnerWorkItem) -> str | None:
@@ -343,7 +359,7 @@ async def execute_work_item(
     intent/outcome pair on the runner's store-and-forward effect chain (#3193);
     a ``safe`` item or an omitted chain executes exactly as before.
     """
-    refusal = _screen_item(item)
+    refusal = _package_set_refusal(item) or _screen_item(item)
     if refusal is not None:
         _log.warning(
             "runner_item_refused",
@@ -379,6 +395,11 @@ async def execute_work_item(
             payload=None,
             error=f"handler_ref {item.handler_ref!r} resolved outside {_CONNECTOR_MODULE_PREFIX}*",
         )
+
+    # #3879: the central update route cannot reach this process. Drop the
+    # login kept for the target when its row changed since the runner saw it.
+    if item.target_descriptor is not None:
+        await forget_target_if_changed(item.target_descriptor)
 
     return await _invoke_recording_effect(
         _maybe_bind_method(handler, item),

@@ -31,8 +31,13 @@ resources that make up a running backplane:
 - ServiceAccount — Pod identity, `automountServiceAccountToken: false`.
 - NetworkPolicy — default-deny ingress + explicit egress allow-list to
   Postgres, Vault, Keycloak, the broadcast subchart, and CoreDNS only.
-- Migration Job — `pre-install,pre-upgrade` Helm hook running
-  `python -m meho_backplane.db.migrate` before the Deployment rolls forward.
+- Database migration — `python -m meho_backplane.db.migrate`. With a
+  bring-your-own PostgreSQL it is a `pre-install,pre-upgrade` Helm hook Job
+  that runs before the Deployment rolls forward. With the built-in
+  PostgreSQL (`corePostgres.enabled: true`) it is the `migrate` init
+  container of the backplane Deployment instead, and the Job is not
+  rendered (#5233; see
+  [Migration Job](#migration-job-templatesmigration-jobyaml)).
 - Broadcast subchart — in-tree Valkey 9.x Deployment + Service + ConfigMap
   per ADR 0005, plus its **own** ingress NetworkPolicy and a chart-managed
   `requirepass` Secret (#276) so the store is ingress-isolated and
@@ -203,6 +208,13 @@ and every pod uses `meho.core.imagePullSecrets` (both in
 `backend/tests/test_chart_image_registry.py` fails. The recipe is in
 [`../deploying.md`](../deploying.md#install-with-no-internet).
 
+`deploy/charts/meho/images.txt` is the list the customer copies: every
+image of the chart except MEHO's own, one per line, as `<image@digest>
+<path in your registry>:<tag>`. Every image must be pinned by digest. The
+same test fails when the list and a render with every part on differ, and
+prints the lines the chart now wants. A new image, or a new digest, means
+a new line in `images.txt`.
+
 ### Probes
 
 The Deployment renders `startupProbe`, `livenessProbe`, and
@@ -347,6 +359,42 @@ the chart's least-privilege egress story — only do it when an
 equivalent control is enforced upstream.
 
 ### Migration Job (`templates/migration-job.yaml`)
+
+**Where the migration runs.** The Job below renders only when the install
+brings its own PostgreSQL (`corePostgres.enabled: false`). With the
+built-in PostgreSQL on, Helm would run this pre-install hook before it
+creates the database, so the Job would wait for a database that does not
+exist yet and a fresh `helm install` could never finish (#5233). In that
+mode the chart renders no Job; the backplane Deployment
+(`templates/deployment.yaml`) gets the init container `migrate` instead:
+
+- Same container as the Job: image (with the digest pin), command,
+  `envFrom` the backplane ConfigMap, `DATABASE_URL` from
+  `postgres.credentialsSecret`, `extraEnv`, the `tmp` emptyDir,
+  `extraVolumeMounts`, the container `securityContext` and
+  `migrationJob.resources`. It runs in the backplane pod, so it has the
+  pod's security context (`runAsNonRoot`, `seccompProfile: RuntimeDefault`;
+  with the container's `drop: [ALL]` and no privilege escalation it meets
+  the `restricted` Pod Security Standard) and the pod's NetworkPolicy,
+  which already lets the backplane reach the database.
+  `backend/tests/test_chart_migrate_init_container.py` compares the two
+  container specs and checks both modes.
+- Every replica runs it before the backplane container starts. The runner
+  waits for the database (`MIGRATION_DB_WAIT_SECONDS`, default 300 s) and
+  holds a PostgreSQL advisory lock while it migrates, so a second replica
+  waits and then changes nothing. An older image (after `helm rollback`)
+  leaves a newer schema alone. Details:
+  [migrations.md](migrations.md) § "Where the migration runs".
+- `migrationJob.backoffLimit` and `ttlSecondsAfterFinished` do not apply;
+  the kubelet restarts a failed init container with back-off.
+- **Failure semantics.** A failed migration keeps the pod out of Ready.
+  `helm install --wait` / `helm upgrade --wait` fail at their timeout, and
+  on an upgrade the old pods keep serving. Without `--wait`, Helm reports
+  success and only the pod status shows the failure, so install the
+  built-in core with `--wait` (the form-2 installer does). Logs:
+  `kubectl logs <pod> -c migrate`.
+
+The rest of this section describes the bring-your-own Job.
 
 A Kubernetes `Job` runs as a Helm hook before the Deployment is created
 (install) or rolled forward (upgrade). The container executes
@@ -634,8 +682,9 @@ Design: the internal core design note, §2 (one database server) and §1
 - **Probes.** `pg_isready` on `127.0.0.1:5432` for startup (up to 5 min
   for a first setup), readiness and liveness.
 - **NetworkPolicy.** Its own ingress-only policy admits tcp/5432 from the
-  backplane pods (`networkPolicy.backplanePodLabels`; the migration Job and
-  the helm test pod carry the same labels) and the Keycloak pods
+  backplane pods (`networkPolicy.backplanePodLabels`; the `migrate` init
+  container runs in the backplane pod, and the helm test pod carries the
+  same labels) and the Keycloak pods
   (`networkPolicy.keycloakPodLabels`) of the release. The parent policy's
   egress rule to the built-in database (by pod, not CIDR) comes with #4050.
 - **Disk lifetime.** The PVC outlives `helm uninstall` (StatefulSet default).
@@ -644,9 +693,10 @@ Design: the internal core design note, §2 (one database server) and §1
   dump. Restart the pod after a restore: the sidecar then sets the
   passwords from the Secrets again (it also does so on the next Secret
   change, but not on its own clock).
-- **What wires it to the backplane.** Not this subchart: the
-  `DATABASE_URL` default, the schema conditionals and the migration as an
-  init container come with #4041 and #4047.
+- **What wires it to the backplane.** Not this subchart. The migration
+  runs as the backplane's `migrate` init container in this mode (#5233,
+  see [Migration Job](#migration-job-templatesmigration-jobyaml)). The
+  `DATABASE_URL` default and the schema conditionals come with #4047.
 
 **Helm test.** `templates/tests/test-pgvector.yaml` runs on the same
 image (`corePostgres.image`), in both modes, as user 999. It needs no
@@ -667,12 +717,35 @@ testcontainers database tests the chart's image (`repository@digest` from
 through the registry mirror, and a test keeps the two equal.
 
 **CI.** `chart.yml` validates a `corePostgres.enabled=true` render (also
-with `global.openshift=true`) with kubeconform. The kind job starts the
-subchart (`--show-only` its templates, with the three Secrets made the way
-the secrets Job makes them), installs the release in bring-your-own mode
-against it so the migration Job runs every migration as `meho`, runs
-`helm test`, and then checks the roles, the fencing, `vector` and a
+with `global.openshift=true`) with kubeconform. The kind job installs the
+release with `corePostgres.enabled=true` in one `helm install --wait
+--wait-for-jobs` (#5233): the secrets Job makes the Secrets, and the
+backplane's `migrate` init container waits for the new database and runs
+every migration as `meho`. No step starts the database by hand. The job
+points the readiness probe at `/healthz`, because the kind cluster has no
+Keycloak and no Vault and `/ready` stays 503 there; it then checks that
+the init container exited 0 and that the `db` check of `/ready` is ok,
+runs `helm test`, and checks the roles, the fencing, `vector` and a
 reconcile after a changed Secret plus a pod restart.
+
+A second kind job, `helm-test-byo` (#5412), installs the bring-your-own
+way at the same time, so the hook Job runs in CI too. It applies the
+chart's PostgreSQL objects outside the release (`helm template
+--show-only`, plus the three Secrets made with `kubectl`), checks that
+`meho` is not a superuser, and installs with `corePostgres` off, as the
+namespace admin, with `--wait --wait-for-jobs`. The other flags are the
+same as in `helm-test`. One more flag, `broadcast.image.digest=`, lets
+kind use the Valkey image the job loaded. The `pre-install` hook Job
+runs every migration as `meho`. Helm deletes the Job once it succeeds, so
+the job reads Helm's record of the hook run (`helm status -o json`,
+`last_run.phase` is `Succeeded`). It also checks that the Deployment has
+no init container and that the `db` check of `/ready` reports
+`revision=<head>`, then runs `helm test`. The required `helm-test-gate`
+needs this job as well as `helm-test`, so a broken bring-your-own install
+stops a chart PR. The render tests (the golden render,
+`test_chart_migrate_job_no_sa.py`) and
+`backend/tests/migrations/test_migrate_runner.py` still cover the Job's
+render and its runner.
 
 ### Built-in Keycloak subchart (`charts/keycloak/`)
 
@@ -715,7 +788,7 @@ until all five exist.
 | ConfigMap `<release>-keycloak-realm` | `meho-realm.json`, mounted at `/opt/keycloak/data/import` |
 | Service `<release>-keycloak` | port 8080, plain HTTP inside the namespace |
 | two more paths on the backplane's Ingress (parent chart, `templates/_core-keycloak.tpl`) | on `ingress.host`: `/auth/realms/meho` and `/auth/resources` only (`Prefix`), to the Keycloak Service; `coreKeycloak.ingress.exposeAdmin: true` adds `/auth/admin` and `/auth/realms/master`. One Ingress keeps one set of annotations and one TLS certificate for the host |
-| NetworkPolicy `<release>-keycloak` | off by default; admits port 8080 from the backplane pods and `networkPolicy.extraFrom` |
+| NetworkPolicy `<release>-keycloak` | off by default; admits port 8080 from the backplane pods, the core hook Jobs, the built-in OpenBao and its `vault-init` Job, and `networkPolicy.extraFrom` |
 
 **Addresses.** Browsers, the CLI and the `iss` claim use the public URL
 `https://<coreKeycloak.hostname>/auth` (`KC_HOSTNAME`,
@@ -762,6 +835,7 @@ The file holds **no secret and no host name**. Keycloak fills every
 | --- | --- |
 | `MEHO_REALM_PUBLIC_URL` | `https://<coreKeycloak.hostname>` |
 | `MEHO_REALM_TENANT_ID` | `coreKeycloak.firstTenantId` (a UUID; pick one per install and keep it for a move) |
+| `MEHO_REALM_TENANT_NAME` | `coreKeycloak.tenantName` (the first tenant's short name, default `main`; goes into `meho_tenant`) |
 | `MEHO_REALM_ADMIN_CLIENT_SECRET`, `MEHO_REALM_WEB_CLIENT_SECRET`, `MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET` | the three client Secrets above |
 
 **Groups.** Each group carries the first tenant id and a role:
@@ -788,17 +862,19 @@ on a person directly: the claim always comes from the group.
 | `meho-cli` | public, device flow | `meho login`; no `offline_access` (as `bootstrap-clients` without `--cli-offline-access`) |
 | `meho-mcp` | public, authorization code + PKCE (S256) | redirect URIs `http://localhost:*`, `http://127.0.0.1:*`; optional scopes `offline_access`, `mcp:read`, `mcp:execute`, `mcp:admin`; offline login idle limit 48 hours |
 | `meho-web` | confidential, authorization code + PKCE (S256) | redirect `https://<host>/ui/auth/callback`, after logout `https://<host>/ui/auth/login` |
-| `meho-admin` | confidential, service account | realm-management roles `manage-clients` and `manage-users` |
+| `meho-admin` | confidential, service account | realm-management roles `manage-clients` and `manage-users`; with the company login on, the chart adds `manage-identity-providers` and `manage-realm` (#4592) |
 | `meho-check-runner` | confidential, service account | its tokens carry the audience `meho-check-runner`, not `meho-backplane` |
 
 The three clients people log in with (`meho-cli`, `meho-mcp`, `meho-web`)
 have the default scopes `basic`, `roles`, `web-origins`, `acr`,
-`profile`, `email` and the six mappers `meho admin keycloak
-bootstrap-clients` sets: `tenant_id`, `tenant_role` and `approver` with the
-stock User Attribute mapper (`aggregate.attrs` and `multivalued` false; into
-the access token and userinfo; `approver` as a boolean), the audience
-mappers for `meho-backplane` and `https://<host>/mcp`, and the `groups`
-claim. No client has a fixed-value tenant or role mapper. The group model is
+`profile`, `email` and the eight mappers `meho admin keycloak
+bootstrap-clients` sets: `tenant_id`, `tenant_role`, `approver` and
+`platform_admin` with the stock User Attribute mapper (`aggregate.attrs`
+and `multivalued` false; into the access token and userinfo; `approver`
+and `platform_admin` as booleans), `meho-tenants` (the `meho_tenant`
+values of all the person's groups as the list `meho_tenants`;
+`aggregate.attrs` and `multivalued` true), the audience mappers for
+`meho-backplane` and `https://<host>/mcp`, and the `groups` claim. No client has a fixed-value tenant or role mapper. The group model is
 the decision in `docs/decisions/login-role-groups.md`.
 
 **Realm settings.** Offline sessions end after 7 days at most
@@ -940,9 +1016,11 @@ The `vault:` block stays for a Vault you bring yourself. MEHO's names stay
 `vault` (`coreVault`, `<release>-vault`, `VAULT_ADDR`): they name the job,
 not the product.
 
-**Not yet:** the setup Job `vault-init-<hash>` (the first start, the key
-and login setup, the policies). Until it lands, the server runs empty and
-locked, and nothing makes the Secret `<release>-core-vault-unseal`.
+**Setup.** The Job `<release>-vault-init-<hash>` starts OpenBao the first
+time, stores the unseal key in `<release>-core-vault-unseal`, sets up the
+logins, the policies and the tenant separation, and revokes the root token.
+The chart refuses `coreVault` without `coreKeycloak`. Details:
+docs/codebase/core-vault-init.md.
 
 **What it renders.**
 
@@ -952,7 +1030,7 @@ locked, and nothing makes the Secret `<release>-core-vault-unseal`.
 | ConfigMap `<release>-vault-config` | `server.hcl` at `/openbao/config`: raft storage, a plain-HTTP listener on 8200 (`tls_disable`), `ui = false`, the `file` audit device with `file_path = "stdout"`. A changed config restarts the pod (checksum annotation) |
 | Service `<release>-vault` | port 8200; `publishNotReadyAddresses: true` |
 | Service `<release>-vault-internal` | headless, ports 8200 and 8201; `publishNotReadyAddresses: true`. It gives the pod its DNS name, which sets `BAO_API_ADDR` and `BAO_CLUSTER_ADDR` |
-| NetworkPolicy `<release>-vault` | off by default; admits port 8200 from the backplane pods and `networkPolicy.extraFrom` |
+| NetworkPolicy `<release>-vault` | off by default; admits port 8200 from the backplane pods, the `vault-init` Job and `networkPolicy.extraFrom` |
 | ServiceAccount `<release>-vault` and ClusterRoleBinding `<namespace>-<release>-vault-auth-delegator` | only with `coreVault.authDelegator: true` (default false); the chart's only cluster-wide object |
 
 **A locked pod is not ready.** The readiness check is `bao status`, which
@@ -973,7 +1051,7 @@ every 5 seconds. When the server is sealed and `/unseal/key` exists, it runs
 `127.0.0.1:8200`. The key file is the Secret `<release>-core-vault-unseal`,
 mounted only in this container, `optional: true` and without `subPath`.
 The Secret's `key` value is the key alone. White space around it (such as
-the line break `echo` adds) is dropped, so the setup Job (#4044 part 2),
+the line break `echo` adds) is dropped, so the setup Job (`vault-init`),
 the installers and an operator restoring by hand can write it either way;
 without the `tr`, a key with a line break never unseals.
 
@@ -1003,7 +1081,7 @@ kubelet rotates; they count against the container's `ephemeral-storage`.
 **A Vault image (tests only).** `coreVault.binary: vault` with a matching
 `image` switches the program name, the variables (`VAULT_*`), the paths
 (`/vault/...`) and the config: `disable_mlock = true` is written, and the
-audit device is left out (the setup Job turns it on through the API).
+audit device is left out; the setup Job does not turn one on either.
 
 **`authDelegator`.** A Kubernetes login method checks tokens through the
 cluster's TokenReview API, which needs the cluster-wide binding to
@@ -1409,9 +1487,9 @@ form 3). Two checks keep it that way:
   `scripts/ci/check_chart_namespace_scope.py`. It fails on any object whose
   kind is not in the script's `NAMESPACED_KINDS` allow-list, and on any
   object in another namespace. A new namespaced kind is added to that list.
-- `helm-test` binds the user `meho-installer` to the built-in `admin` role
-  in `meho-test` only, then runs `helm install` and `helm test` with
-  `--kube-as-user meho-installer`.
+- `helm-test` and `helm-test-byo` bind the user `meho-installer` to the
+  built-in `admin` role in `meho-test` only, then run `helm install` and
+  `helm test` with `--kube-as-user meho-installer`.
 
 ### Version stamping
 
@@ -1486,7 +1564,7 @@ incidents #634 / #697.
 Since #3251 the required unit lane is **sharded**: the required context
 `Python (ruff + mypy + pytest)` no longer maps to one monolithic job but
 to a **fan-in** (`python-unit-lane`) over a lint job (`python-lint`) and a
-4-way pytest matrix (`python-unit-shard`). The required-context
+5-way pytest matrix (`python-unit-shard`). The required-context
 _string_ is unchanged, so branch protection / the ruleset are untouched —
 see [Sharded unit lane (#3251)](#sharded-unit-lane-3251) below.
 
@@ -1530,7 +1608,7 @@ hangs the queue forever:
 | Required context | Owning workflow | Reports on `merge_group`? |
 | --- | --- | --- |
 | `Python (ruff + mypy + pytest)` | `ci.yml` | yes (#769) |
-| `Python (integration testcontainers)` | `ci.yml` | yes (#769) |
+| `Python (integration testcontainers)` | `ci.yml` | yes (#769) — since #5384 the `python-integration` fan-in over four integration shards carries it |
 | `Python (database migrations)` | `ci.yml` | yes (#769) — `changes` job emits `true` on non-PR events |
 | `Go (golangci-lint + go test)` | `ci.yml` | yes (#769) |
 | `Helm (lint + template + kubeconform)` | `ci.yml` | yes (#769) |
@@ -1539,7 +1617,7 @@ hangs the queue forever:
 | `Python License Check` | `dependency-license-check.yml` | yes — `changes` + job-level `if:` |
 | `NPM License Check` | `dependency-license-check.yml` | yes — same shape |
 | `helm install + helm test (pgvector preflight)` | `chart.yml` | **yes (#3253)** — the `helm-test-gate` aggregator (`if: always()`) is the required context and fails closed |
-| `Migration chain (single head)` | `migration-heads.yml` | yes (#4204) — no path filter; when a migration lands on `main`, the push run also posts a fresh check run under this name on every open PR that adds a migration (`scripts/ci/recheck_migration_prs.py`). **Operator registers the context after #4204 lands.** |
+| `Migration chain (single head)` | `migration-heads.yml` | yes (#4204) — no path filter; when a migration lands on `main`, the push run also posts a fresh check run under this name on every open PR that adds a migration (`scripts/ci/recheck_migration_prs.py`). The operator registered the context after #4204 landed. |
 | `DCO` | **external GitHub App** (`app_id 1861`), not a workflow | **operator must verify** — see caveat below |
 
 Two shapes are load-bearing for queue compatibility and appear across
@@ -1563,6 +1641,22 @@ these workflows:
   cancelled queue check fails the merge attempt and drops the PR out of
   the queue, so `merge_group` runs are never cancelled; `pull_request` /
   `push` runs still cancel their own predecessors as before.
+- **The runs of a dropped group are cancelled.** GitHub does not stop the
+  runs of a group that leaves the queue. Two helpers do it, so the runs
+  stop using our runners:
+  - The `merge-queue-watchdog` job in `ci.yml` (#4732) stops its own CI
+    run about a minute after the drop.
+  - `merge-queue-cleanup.yml` (#5292) runs
+    `scripts/ci/merge_queue_cleanup.sh` every 5 minutes on a GitHub-hosted
+    runner and covers every workflow. It cancels an open merge-queue run
+    only when the run's commit is not in the queue (GraphQL `mergeQueue`),
+    its queue branch is gone, and its commit is not on `main` (the merge
+    base of the commit and `main` is not the commit itself). Right before
+    each cancel it reads the queue and the run's branch once more, in case
+    a new group took the same commit or branch. A failed read stops the
+    sweep. The reads and the cancel are separate calls, so a wrong cancel
+    is very unlikely, not impossible. Only the sweep job may cancel; the
+    dry run on a pull request has a read-only token.
 - **Third-party actions that derive their own scan range must be told
   the `merge_group` range explicitly.** A `merge_group` trigger makes the
   workflow *run*, but an action that computes its diff from the event
@@ -1647,27 +1741,32 @@ workflow files, this doc, and the changelog.
 | Job | Surface | Steps |
 | --- | --- | --- |
 | `python-lint` (`Python lint + typecheck (ruff + mypy)`) | `backend/src/` + `backend/tests/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict`. Non-required; whole-tree, unshardable-by-file, runs once on a GitHub-hosted runner (#3251, #4626). |
-| `python-unit-shard` (`Python unit shard N/4`) | `backend/` unit + acceptance subtree, split 4 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). |
-| `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252). |
-| `python-integration` (`Python (integration testcontainers)`) | `backend/tests/integration/` | `uv sync --locked --all-groups` -> `pytest tests/integration/` against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. **Required merge gate (#698)** so the lane that exercises real connector dispatch can no longer ship red. |
+| `python-unit-shard` (`Python unit shard N/5`) | `backend/` unit + acceptance subtree, split 5 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). A pull request that changes one connector runs one leg instead (`Python unit tests for connector <name>`, see [One-connector unit run](#one-connector-unit-run-5297)). |
+| `python-outside-backend` (`Python tests that read files outside backend`) | the backend tests that read files outside `backend/` | Runs only on a PR with no `backend/` change (`backend_python=false`) that is not docs-only. `pytest -n 3` over the fixed list in `backend/tests/_outside_backend_tests.py`, on a GitHub-hosted runner. Non-required; the fan-in requires it on that path (#5296). See [No-backend path (#5296)](#no-backend-path-5296). |
+| `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252); on a no-backend diff it requires `python-outside-backend` to pass (#5296). |
+| `python-integration-shard` (`Python integration shard N/4`) | `backend/tests/integration/` + the G0.7 vSphere canary module, split 4 ways | `uv sync --locked --all-groups` -> `pytest -x -rs` over a file set split by measured time, against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. No xdist inside a shard. Non-required matrix (#5384). |
+| `python-integration` (`Python (integration testcontainers)`) | fan-in | `needs: [changes, python-integration-shard]`; **required check (#698)** so the lane that exercises real connector dispatch can no longer ship red. Fails when any shard failed or was cancelled, or the detector is not green; reports success-by-skip on a docs-only diff and on a no-backend diff (#5296). Same rules as `python-unit-lane` (#5384). |
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
 
-The four `python-unit-shard` legs run on `meho-runners-ci-heavy`
-(dedicated ARC scale set, 6000m requests=limits, max 5 pods — #761 /
-rdc-gitops#55; four shards fit the 5-pod ceiling). `python-integration`,
-`python-migration-tests` and the nightly `python-coverage-combine` run
-on the dense `meho-runners-ci` pool (4-core): they pull their test images
-from the internal image mirror or read the private vendor spec shelf.
+The five `python-unit-shard` legs run on `meho-runners-ci-heavy`
+(dedicated ARC scale set, 6000m requests=limits — #761 /
+rdc-gitops#55; the pool size lives outside this repo). The four
+`python-integration-shard` legs, `python-migration-tests` and the
+nightly `python-coverage-combine` run on the dense `meho-runners-ci` pool
+(4-core): they pull their test images from the internal image mirror or
+read the private vendor spec shelf.
 
 Since #4626 (step 1), the six small jobs that need nothing from the
-internal network run on GitHub-hosted `ubuntu-latest` runners:
+internal network run on GitHub-hosted `ubuntu-latest` runners. The
+`python-integration` fan-in (#5384) joined them later:
 
 | Job | Runs on | Why it can leave the internal pool |
 | --- | --- | --- |
 | `changes` | `ubuntu-latest` | one `git diff`, 12 s of work |
 | `python-lint` | `ubuntu-latest` | `uv sync` from PyPI + ruff + mypy |
 | `python-unit-lane` | `ubuntu-latest` | one bash step over `needs.*.result` |
+| `python-integration` | `ubuntu-latest` | the integration fan-in (#5384): one bash step over `needs.*.result` |
 | `go-lint-test` | `ubuntu-latest` | Go toolchain + public egress; gcc and make are preinstalled, so the "install if missing" steps are no-ops |
 | `cli-api-snapshot-freshness` | `ubuntu-latest` | Go + uv + `make`; regenerates committed artifacts offline |
 | `helm-lint-template` | `ubuntu-latest` | helm + kubeconform from public releases |
@@ -1692,12 +1791,13 @@ from the old 1320 s whole-suite budget) is the PR-level early-warning
 gate that fires well below the cap. `python-lint` and the fan-in carry
 10 and 5 minutes.
 `go-lint-test` and `helm-lint-template` carry 10 minutes;
-`python-integration` carries 60 minutes for the container-pull + DinD
-spin-up + testcontainers sweep (xdist loadgroup parallelisation tracked
-in #564). Wall-clock for a green PR is the slowest job's elapsed time
-because the jobs never block each other — since #3251 sharded the unit
-lane, `python-integration` is typically the dominant lane and the
-dispatch surface for the Goal #11 budget conversation.
+each `python-integration-shard` carries 30 minutes (hang backstop; the
+slowest shard is about 10 minutes of pytest plus about 2 minutes of
+setup) and its fan-in 5 minutes. Wall-clock for a green PR is the
+slowest job's elapsed time because the jobs never block each other.
+Until #5384 the serial integration job (60-minute cap, about 28 minutes
+of pytest) was the slowest job of every merge-queue run; see
+[Sharded integration lane (#5384)](#sharded-integration-lane-5384).
 
 ### Sharded unit lane (#3251)
 
@@ -1711,25 +1811,25 @@ shape (deterministic file-level matrix + fan-in):
   checks that cannot be split by test file and cost ~1-2 min, so they run
   **once** on the light pool rather than N times per shard. Only pytest
   fans out.
-- **`python-unit-shard`** — the pytest sweep as a **4-way matrix split by
+- **`python-unit-shard`** — the pytest sweep as a **5-way matrix split by
   measured file time**. Each shard lists the test files with `find tests
   -name 'test_*.py' -not -path 'tests/integration/*' -not -path
   'tests/migrations/*' | sort` and pipes the list into
-  `tests/_unit_shard_split.py --shard N --total 4`. The splitter reads the
+  `tests/_unit_shard_split.py --shard N --total 5`. The splitter reads the
   measured seconds per test file from `tests/_unit_shard_durations.json`,
   sorts the files slowest first, and gives each file to the shard with
   the least time so far (a file without a measurement counts as the
   median; every file also carries a small fixed cost for import and
   collection, so files whose tests all skip still spread out). The same
-  list always gives the same split, and the four shards partition the
+  list always gives the same split, and the five shards partition the
   file set **exactly** (union == full, pairwise disjoint;
   `tests/test_unit_shard_split.py` pins both). The splitter prints the
   file count and the predicted seconds per shard on stderr, so the shard
   log shows when the measurements drift from the real wall. Each shard
   writes its per-test times with `-o junit_family=xunit1 --junitxml` and
   uploads them as the artifact `python-unit-shard-junit-<N>`. To refresh
-  the measurements, download the four artifacts of one green run and
-  pass them to `tests/_unit_shard_split.py --measure`; the module
+  the measurements, download the artifacts of one green run (one per
+  shard) and pass them to `tests/_unit_shard_split.py --measure`; the module
   docstring has the exact commands. Take the numbers from CI, not from a
   laptop: tests that need Docker or the spec shelf skip locally but run
   in CI, and a local measurement put all of them into one shard (584 s
@@ -1749,8 +1849,19 @@ shape (deterministic file-level matrix + fan-in):
   passed every test took 674-710 s, and the merge queue dropped good pull
   requests. With few runners busy, the four shards of one run took
   448-515 s. So the extra time came from the busy runners, not from
-  slower tests. To change the count, edit the
-  matrix and `TOTAL` in the pytest step together. File-level sharding is
+  slower tests. On 2026-10-30 the busy runners pushed the shards over
+  900 s 16 times in 18 hours, only shards 1 and 3, with every test
+  passing (#5433). Real per-test times from seven runs on `main` that
+  day showed two causes. The file times were a week old, and 181 newer
+  files had no measurement, so one shard carried up to 14% more test
+  time than the average. But even in a run that was well balanced, all
+  four shards took 783-805 s. Fresh file times alone would leave the
+  busiest run near 850 s per shard, so #5433 refreshed the file times
+  (now the mean of those seven runs) and raised the count to 5. In the
+  busiest of those runs the slowest shard carried 2,497 s of test time
+  with the old split and would carry 1,924 s with the new one. To
+  change the count, edit the matrix and `TOTAL` in the pytest step
+  together; `tests/test_unit_shard_split.py` checks that they match. File-level sharding is
   strictly coarser than what xdist `--dist loadscope` already does across
   workers (whole modules stay together, conftest semantics identical to a
   full run), so an xdist-safe suite is shard-safe — proven live by the
@@ -1772,7 +1883,8 @@ shape (deterministic file-level matrix + fan-in):
   render tests really run there and fail, not skip, if helm is missing.
 - **`python-unit-lane`** — the **fan-in** carrying the exact
   branch-protection required context `Python (ruff + mypy + pytest)`. It
-  `needs: [changes, python-lint, python-unit-shard]` and, via `if: always()
+  `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`
+  and, via `if: always()
   && <fork guard>`, runs regardless of upstream results, then inspects
   `needs.*.result`. `always()` is load-bearing: a plain `needs:` gate would
   be *skipped* when a shard fails, and a skipped required check counts as
@@ -1782,10 +1894,15 @@ shape (deterministic file-level matrix + fan-in):
   guard skips this job (and the shards), reporting the required context as
   Success exactly as the old single job did. Since #3252 the step first
   fails CLOSED if the `changes` detector did not itself succeed, then
-  branches on `needs.changes.outputs.docs_only`: on the **docs-only fast
-  path** it accepts the detect-driven `skipped` lint/shards as pass; on a
-  **full run** it requires strict `success` (a `skipped` lint/shard there is
-  anomalous and fails the gate). See [Docs-only fast path
+  branches on `needs.changes.outputs.docs_only` (and, since #5296,
+  `backend_python`): on the **docs-only fast
+  path** it accepts the detect-driven `skipped` lint/shards as pass. Since
+  #5296, when no `backend/` file changed (`backend_python=false`), it accepts
+  the skipped lint/shards and passes only if `python-outside-backend` passes
+  (see [No-backend path (#5296)](#no-backend-path-5296)). On a **full run**
+  it requires strict `success` from lint and shards (a `skipped` lint/shard
+  there is anomalous and fails the gate), and `python-outside-backend` must
+  be skipped or passed. See [Docs-only fast path
   (#3252)](#docs-only-fast-path-3252).
 
 Because the required context string is unchanged and stays on a job, the
@@ -1796,6 +1913,49 @@ byte-identical). No escape-hatch label (the coverage lane's
 `ci-coverage-validate`) is needed: the coverage lane runs once a night and
 must be *forced* onto a PR, whereas the unit lane runs on every PR by default,
 so a sharding PR self-validates through its own `pull_request` run.
+
+### Sharded integration lane (#5384)
+
+The integration tests ran as one serial job. By October 2026 its pytest
+step took about 28 minutes, and the job finished last in every
+merge-queue run (median 32 minutes to the last required check). #5384
+split it the same way as the unit lane:
+
+- **`python-integration-shard`** — a **4-way matrix** on
+  `meho-runners-ci` (not the heavy pool: the tests run serially and
+  mostly wait on containers). Each shard lists `find tests/integration
+  -name 'test_*.py'` plus `tests/acceptance/test_g07_vsphere_canary.py`,
+  sorts the list, and pipes it into `tests/_unit_shard_split.py
+  --durations tests/_integration_shard_durations.json --shard N --total
+  4`. Same splitter as the unit shards, with its own measurements. Every
+  file lands in exactly one shard; `tests/test_unit_shard_split.py` pins
+  that, and also checks that the matrix size matches `TOTAL` and that the
+  file list in the workflow is the one the test uses. Each shard keeps
+  `-x -rs` and runs without xdist (the container fixtures were never
+  checked under xdist). Every shard has the full set-up of the old job:
+  the spec-shelf checkout and its layout check (for the canary), the
+  Docker Hub login, the test image variables, Go (for the Keycloak CLI
+  test) and `uv sync`. `fail-fast: false`, so one red shard does not
+  cancel the others. Each shard uploads its per-test times
+  (`python-integration-shard-junit-<N>`, xunit1); refresh
+  `tests/_integration_shard_durations.json` from the four artifacts of a
+  green run with `--measure`, as for the unit file.
+- **`python-integration`** — the **fan-in** with the exact required
+  name `Python (integration testcontainers)`, so branch protection and
+  the rulesets need no change. Same rules as `python-unit-lane`:
+  `if: always() && <fork guard>`, fails closed when `changes` did not
+  succeed, accepts `skipped` shards only on a docs-only diff or a
+  no-backend diff (#5296), and needs strict `success` on every other run.
+  It runs on `ubuntu-latest`.
+
+The first measurements (`tests/_integration_shard_durations.json`) are
+the median of four green merge-queue runs of the serial job (29 October
+2026), taken from the time of each file's log line. The slowest file,
+`tests/integration/test_connectors_k8s_k3d.py`, takes about 9 minutes on
+its own, so it gets a shard to itself, and it sets the lower limit of
+the integration wall. The other three shards are predicted at about 7
+minutes each. To change the shard count, edit the matrix and `TOTAL` in
+the pytest step together.
 
 ### Docs-only fast path (#3252)
 
@@ -1823,12 +1983,12 @@ completes CI in minutes.
   fail-safe defaults (`docs_only=false`). `merge_group` and `push` NEVER
   fast-path (a queue batch may mix docs + code; a `main` push must always run
   the full matrix).
-- **What skips.** `python-lint`, the four `python-unit-shard` legs, and
-  `python-integration` gain `needs: changes` and an `if:` that skips them when
-  `docs_only == 'true'` (same #2140 shape as the `python-migration-tests`
-  gate). A job skipped by its own `if:` reports **Success**, so the required
-  contexts `Python (ruff + mypy + pytest)` (via the fan-in) and
-  `Python (integration testcontainers)` stay green without running.
+- **What skips.** `python-lint`, the five `python-unit-shard` legs, and
+  the four `python-integration-shard` legs gain `needs: changes` and an
+  `if:` that skips them when `docs_only == 'true'` (same #2140 shape as the
+  `python-migration-tests` gate). The required contexts `Python (ruff +
+  mypy + pytest)` and `Python (integration testcontainers)` come from
+  fan-ins that still run and pass on these skips.
 - **What still runs.** `go-lint-test`, `helm-lint-template`, and the sibling
   workflows' required contexts (`Semgrep SAST`, `TruffleHog Secret Scan`,
   `Python License Check`, `NPM License Check`, `helm install + helm test`,
@@ -1839,12 +1999,103 @@ completes CI in minutes.
   docs-only; (2) if the detector itself does not succeed, the
   `python-unit-lane` fan-in fails **CLOSED** (it asserts
   `needs.changes.result == 'success'` before trusting `docs_only`), which
-  blocks a code PR even though `python-integration` would skip-cascade to
-  green off the failed `needs`. The integration lane deliberately stays on the
-  plain `needs:`+`if:` shape (no `always()`) to preserve cancel-in-progress on
-  the heavy 60-min lane; its detect-crash exposure is identical to the
-  pre-existing migration gate and is neutralised for code PRs by the unit
-  lane's fail-closed guard above.
+  blocks a code PR. Since #5384 the `python-integration` fan-in has the
+  same guard. The integration shards stay on the plain `needs:`+`if:`
+  shape (no `always()`) to keep cancel-in-progress on the heavy legs; if
+  the detector crashes they skip-cascade, and the fan-in fails closed.
+
+### No-backend path (#5296)
+
+A PR that changes no file under `backend/` (for example a Go CLI change, a
+chart change, or a workflow other than `ci.yml`) cannot change the Python code.
+It used to pay the four unit shards and the integration job anyway. Now it
+runs one short job instead.
+
+- **Classification (fail-closed).** The `changes` job has a third output,
+  `backend_python`. It starts `true` and is `false` only when the event is
+  `pull_request`, the diff could be computed, no changed path apart from
+  `.md` files is under `backend/`, and `.github/workflows/ci.yml` did not
+  change. `push` and `merge_group` always keep it `true`. It uses the same
+  `HEAD^1..HEAD` diff as `docs_only`. The diff runs with
+  `core.quotePath=false`, so a path with non-ASCII characters (for example
+  `café.json`) is printed as is and the `backend/` check sees it. Git still
+  quotes a path that holds a double quote, a backslash or a control
+  character; such a line keeps every fail-safe default (full run and
+  migration gate on).
+- **What skips.** `python-lint`, the five `python-unit-shard` legs and
+  the four `python-integration-shard` legs skip by their own `if:` when
+  `backend_python` is `false`, the same way as on a docs-only PR. The
+  `python-integration` fan-in accepts the skipped legs on this path.
+- **What runs instead.** Some backend tests read files outside `backend/`:
+  the Helm chart, the Go CLI, the workflows, the docs and the examples. A PR
+  that changes no backend file can still break them. The job
+  `python-outside-backend` runs exactly these test files. The list lives in
+  `backend/tests/_outside_backend_tests.py`; the job reads it with
+  `uv run python tests/_outside_backend_tests.py`. It runs on a GitHub-hosted
+  runner with Helm installed and `MEHO_REQUIRE_HELM=1`.
+- **The list stays complete.** `backend/tests/test_outside_backend_tests.py`
+  scans the unit test files (everything under `backend/tests/` except
+  `integration/` and `migrations/`). A file reads outside `backend/` when it
+  climbs from `Path(__file__)` to the repository root with `.parents[N]` or a
+  `.parent` chain, calls a local `_repo_root` helper, or imports a helper
+  module in `tests/` that does. The test fails when the scan and the list
+  differ. Add a new file to the list in the same PR that adds it.
+- **The fan-in.** On this path `python-unit-lane` accepts the skipped lint and
+  shards and requires `python-outside-backend` to pass. On a full run that job
+  is skipped and lint and shards must pass, as before. The required check name
+  does not change.
+- **What is not covered.** The migration tests have their own detector
+  (`migrations`). A few integration tests read files outside `backend/` (the
+  Keycloak sub-chart, `examples/`, the CLI). They need containers, so on a
+  no-backend PR only the merge queue runs them.
+- **Tests.** `backend/tests/test_ci_backend_python_skip.py` runs the real
+  detect script and the real fan-in script from `ci.yml` for each case.
+
+### One-connector unit run (#5297)
+
+A pull request that changes only one connector folder runs **one** unit
+job instead of the five `python-unit-shard` legs. The job is named
+`Python unit tests for connector <name>`. It runs that connector's tests
+plus a fixed contract set. The merge queue and pushes to `main` always run
+the five shards, so every test still runs before a change lands on `main`.
+
+- **Who decides.** The `changes` job sets the output `single_connector`.
+  It pipes the changed files into
+  `python3 backend/tests/_unit_connector_select.py detect` (standard
+  library only, because the job installs nothing). Empty means the full
+  run. It is only computed on a `pull_request` that is not docs-only.
+- **When it is set.** Every changed file that is not `.md` is in one folder
+  `backend/src/meho_backplane/connectors/<name>/`, or is that connector's
+  test file (`backend/tests/test_connectors_<name>_*.py`,
+  `test_connectors_<name>.py`, `_<name>_fixtures.py`). The folder is a real
+  connector (not `_shared`, `adapters` or `profiles`). And no code outside
+  the connector folders uses the connector, directly or through another
+  connector that uses it. Core code is shared by many tests, so a connector
+  that core code uses (for example `vault`, `kubernetes`, `vmware_rest`)
+  always gets the full run. Anything else, including a change to `ci.yml`
+  or to the tool itself, gives the full run.
+- **What runs.** The matrix of `python-unit-shard` becomes `[1]`. Its
+  pytest step calls `tests/_unit_connector_select.py select --connector
+  <name>`. That picks: the test files that use the connector, or any
+  connector that uses it (found by scanning imports and
+  `meho_backplane.connectors.<name>` names, also through test helper
+  modules); and the fixed list `CONTRACT_TESTS` in the same file
+  (registry, catalog, operation contract, flight recorder, reference docs,
+  MCP tool list and app start tests, plus the tests that scan the source of
+  every connector or all docs: read-back hints, broadcast and audit calls,
+  sandbox mode, one unique class name, `sudo` command lines, and imports of
+  a leaving VMware folder). A missing contract file fails the job.
+- **The required check.** The fan-in `python-unit-lane` is unchanged: the
+  matrix result is `success` only if its one leg passed, so the required
+  check `Python (ruff + mypy + pytest)` keeps its name and its strict rule.
+  The one-connector job does not upload its per-test times, so a partial
+  run never feeds the shard split.
+- **Tests.** `tests/test_unit_connector_select.py` checks the rules on a
+  small fake tree and checks the wiring in `ci.yml`. It also fails when a
+  unit test walks a folder tree (`rglob`, `os.walk`) and is neither in
+  `CONTRACT_TESTS` nor in its short list of tests that walk something else.
+  So a new test that scans every connector cannot be left out of the
+  short run by mistake.
 
 ### Runner-CPU rule
 
@@ -1878,8 +2129,8 @@ ingest + op_id reconciliation against the **real** Broadcom/VMware-licensed
 `vcenter.yaml` / `vi-json.yaml`, which are deliberately not in this public
 repo. `ci.yml` provisions them at runtime, gated on a secret:
 
-- Both Python test jobs (`python-unit-shard` — every shard — and
-  `python-integration`) carry a
+- Both Python test jobs (`python-unit-shard` and
+  `python-integration-shard` — every shard of each) carry a
   secret-gated "Checkout vendor vCenter spec-shelf" step: a cone-mode sparse
   checkout of `docs/vcenter-9.0/` from the private
   `evoila-bosnia/claude-rdc-hetzner-dc` shelf repo into
@@ -1897,7 +2148,7 @@ repo. `ci.yml` provisions them at runtime, gated on a secret:
   drift into a job failure instead of a silent regression to lane-skip.
 - Lane placement (#2980): the seconds-cheap reconcile lanes run armed in
   the unit sweep; the canary's full-ingest tests run armed only in
-  `python-integration` — its pytest step selects
+  `python-integration-shard` — its pytest step selects
   `tests/acceptance/test_g07_vsphere_canary.py` explicitly, and the unit
   sweep opts out via `MEHO_SKIP_SPEC_INGEST_TESTS=1` (a collection-time
   `skipif` marker on the canary's full-ingest tests, backstopped in its
@@ -1971,7 +2222,7 @@ fails only on a finding from an error-level rule.
 ### Coverage handoff to SonarCloud
 
 Coverage runs **once a night**, not after every merge (#4910). `ci.yml`
-has a `schedule` trigger (`cron: '17 6 * * *'`, UTC). That run is a full
+has a `schedule` trigger (`cron: '17 2 * * *'`, 02:17 UTC). That run is a full
 CI run on `main`. The 8 `python-coverage` shards and the
 `python-coverage-combine` job run only in that run, or on a PR that
 carries the `ci-coverage-validate` label; their `if:` conditions allow

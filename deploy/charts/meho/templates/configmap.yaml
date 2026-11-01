@@ -200,6 +200,12 @@ data:
   # unconditionally, like the self-approval switch above; the default
   # `"false"` refuses decisions made on someone else's instruction.
   APPROVAL_ALLOW_DELEGATED_DECISION: {{ .Values.config.approvalAllowDelegatedDecision | quote }}
+  # How old a sign-in may be for an action that needs a fresh sign-in:
+  # turning approval off for an operation (#4711), and approving on the
+  # command line or REST (#3979). Then which `acr` values count as a
+  # one-time code step for an approve. The web interface is not affected.
+  FRESH_SIGN_IN_MAX_AGE_SECONDS: {{ .Values.config.freshSignInMaxAgeSeconds | quote }}
+  APPROVAL_ONE_TIME_CODE_ACR_VALUES: {{ .Values.config.approvalOneTimeCodeAcrValues | quote }}
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
   # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that
@@ -244,6 +250,11 @@ data:
   {{- end }}
   MEHO_SANDBOX_MODE: "true"
   MEHO_SANDBOX_MODE_CONFIRM: {{ .Values.sandboxMode.confirmHost | quote }}
+  {{- /* #5251 -- REST and the CLI may create delete grants too. Only with
+       sandbox mode on; outside it the setting is never rendered. */}}
+  {{- if .Values.sandboxMode.deleteGrantsFromApi }}
+  MEHO_SANDBOX_DELETE_GRANTS_FROM_API: "true"
+  {{- end }}
   {{- end }}
   # #3997 — most output tokens the agent asks the model for in one answer.
   # Rendered always; it only matters when the agent runtime is in use.

@@ -19,8 +19,9 @@ Companion to
 (the NSX counterpart this runbook mirrors) and
 [`docs/cross-repo/connector-ingestion.md`](./connector-ingestion.md)
 (the connector-agnostic ingest runbook). The Hetzner-Robot-specific
-delta is the HTTP Basic auth flow, the single-spec ingest layout
-(`robot-api.yaml`), the curated 12-op core, and the form-field writes.
+delta is the HTTP Basic auth flow, the single-spec ingest layout (the
+packaged `hetzner_robot_minimal.yaml`), the curated 12-op core, and the
+form-field writes.
 
 ## What this canary proves
 
@@ -29,9 +30,11 @@ End-to-end correctness of the G0.7 ingestion pipeline driven against the
 
 1. **Parse.** The T1 parser
    ([`meho_backplane.operations.ingest.parse_openapi`](../../backend/src/meho_backplane/operations/ingest/openapi.py))
-   ingests `hetzner-robot-2026-04/<robot-api>.yaml` (the Robot Webservice
-   OpenAPI spec, containing the full set of dedicated-server management
-   endpoints) under one `connector_id="hetzner-rest-2026.04"`.
+   ingests the spec that ships with MEHO,
+   [`hetzner_robot_minimal.yaml`](../../backend/src/meho_backplane/operations/ingest/specs/hetzner_robot_minimal.yaml)
+   (Hetzner publishes no OpenAPI file, so MEHO writes and ships a small
+   one; it covers every op of the curated core), under one
+   `connector_id="hetzner-rest-2026.04"`.
 2. **Register.** T2's
    [`register_ingested_operations`](../../backend/src/meho_backplane/operations/ingest/register_ingested.py)
    bulk-upserts every parsed operation into the `endpoint_descriptor`
@@ -41,7 +44,7 @@ End-to-end correctness of the G0.7 ingestion pipeline driven against the
    [`HetznerRobotConnector`](../../backend/src/meho_backplane/connectors/hetzner_robot/connector.py)
    already registered (G3.7-T6 #846); the auto-shim's idempotency check
    (`ensure_connector_class_registered`) short-circuits. Every row carries
-   a `spec:hetzner-robot-2026-04/robot-api.yaml` tag.
+   a `spec:` tag that names the ingested spec.
 3. **Group.** T3's
    [`run_llm_grouping`](../../backend/src/meho_backplane/operations/ingest/llm_groups.py)
    pass derives operation groups with operator-readable `when_to_use`
@@ -60,13 +63,13 @@ End-to-end correctness of the G0.7 ingestion pipeline driven against the
 
 ## Prerequisites
 
-- **The Hetzner Robot OpenAPI spec checked out locally.** The spec lives
-  in the consumer's `docs/hetzner-robot-2026-04/` shelf. Set:
-  - `MEHO_ROBOT_OPENAPI` — absolute path to
-    `hetzner-robot-2026-04/<robot-api>.yaml`.
-  - `MEHO_CONSUMER_DOCS_ROOT` — directory containing
-    `hetzner-robot-2026-04/<robot-api>.yaml`. The consumer's spec-shelf
-    repo is the conventional source.
+- **The packaged Robot spec.** Hetzner publishes no OpenAPI file. The
+  spec to ingest is the one MEHO ships,
+  [`hetzner_robot_minimal.yaml`](../../backend/src/meho_backplane/operations/ingest/specs/hetzner_robot_minimal.yaml).
+  Use it from a MEHO checkout of the same release as the backplane. The
+  consumer's `docs/hetzner-robot-2026-04/` shelf holds only the vendor
+  reference page (`webservice-en.md`); the spec-reconcile test reads it
+  through `MEHO_CONSUMER_DOCS_ROOT`, but it is not a spec to ingest.
 
   The env-gated automated canary acceptance test that drives the full
   ingest against `IngestionPipelineService` is a follow-up to G3.7-T8;
@@ -147,19 +150,12 @@ the auth_failed posture.
 
 ### Step 1 — ingest the spec
 
-```bash
-meho connector ingest \
-  --product hetzner --version 2026.04 --impl hetzner-rest \
-  --spec docs:hetzner-robot-2026-04/<robot-api>.yaml \
-  --json
-```
-
-Or using the absolute path form:
+Ingest the packaged spec from a MEHO checkout of the same release:
 
 ```bash
 meho connector ingest \
   --product hetzner --version 2026.04 --impl hetzner-rest \
-  --spec /path/to/hetzner-robot-2026-04/<robot-api>.yaml \
+  --spec file:///path/to/meho/backend/src/meho_backplane/operations/ingest/specs/hetzner_robot_minimal.yaml \
   --json
 ```
 
@@ -169,7 +165,7 @@ Expected (paraphrased) response:
 {
   "ingestion": {
     "connector_id": "hetzner-rest-2026.04",
-    "inserted_count": 50,
+    "inserted_count": 17,
     "updated_count": 0,
     "skipped_count": 0,
     "connector_registered": false,
@@ -177,19 +173,19 @@ Expected (paraphrased) response:
   },
   "grouping": {
     "connector_id": "hetzner-rest-2026.04",
-    "groups_created": 6,
-    "operations_assigned": 45,
-    "operations_unassigned": 5,
+    "groups_created": 4,
+    "operations_assigned": 17,
+    "operations_unassigned": 0,
     "llm_call_count": 3,
     "llm_duration_ms": 8000.0
   }
 }
 ```
 
-Numbers are approximate (the Robot API surface is smaller than NSX or
-vSphere). The load-bearing checks are `inserted_count >= 30`,
-`4 <= groups_created <= 10`, and
-`operations_unassigned / inserted_count < 30%`. `connector_registered`
+The packaged spec has 17 operations, so a first ingest shows
+`inserted_count: 17`. The grouping numbers depend on the LLM and are
+approximate. The load-bearing checks are `inserted_count == 17` and
+`3 <= groups_created <= 10`. `connector_registered`
 is `false` because `HetznerRobotConnector` is already registered at
 module-import time (G3.7-T6 #846) — the auto-shim finds the existing
 entry and short-circuits.
@@ -240,6 +236,11 @@ Then for every entry in `ROBOT_CORE_OPS`:
 3. `ReviewService.edit_op(op_id, llm_instructions=…)` — lands the per-op
    JSON blob the agent inlines into reasoning context when the op surfaces
    in `search_operations` hits.
+
+Before it changes anything, the helper checks that every op in
+`ROBOT_CORE_OPS` was ingested. If one or more is missing, it raises
+`RobotCoreOpsMissingError`, which names every missing op, and nothing is
+changed. Ingest the packaged spec again (Step 1), then repeat this step.
 
 Each op's `llm_instructions` is the canonical three-key blob
 (`when_to_call` / `output_shape` / `next_step`) matching the typed-
@@ -339,7 +340,7 @@ G3.7-T8 (#849) ships the operator-review substrate
 (`apply_robot_core_curation` helper, `edit_op(llm_instructions=…)`
 extension), the curated 10-op data (`ROBOT_CORE_OPS`), the substrate unit
 tests, and this runbook. The env-gated automated canary that drives the
-full ingest of `robot-api.yaml` through `IngestionPipelineService` against
+full ingest of `hetzner_robot_minimal.yaml` through `IngestionPipelineService` against
 a real LLM stub or live Anthropic adapter is a follow-up requiring the
 Robot spec file reachable from CI.
 
@@ -356,13 +357,6 @@ Since #3973 the curated core holds two writes: add servers to a vSwitch and
 remove them, both behind a human approval. Boot, reset, WoL, order, the
 firewall set, the vSwitch rename and cancel, and every other write remain
 off. Ordering and cancelling servers and add-ons stay manual by policy.
-
-### 4. Four curated reads are missing from the shipped spec
-
-`GET:/ip`, `GET:/subnet`, `GET:/failover` and `GET:/key` are curated but not
-in the shipped minimal spec. An install that ingests only that spec has no
-rows for them, and `apply_robot_core_curation` stops at the first missing
-one. Ingest a spec that covers them first.
 
 ## References
 

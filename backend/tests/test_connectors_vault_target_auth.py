@@ -19,9 +19,11 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
 
+import hvac.exceptions
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.vault import VaultRoleDeniedError
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vault.target_auth import (
     VaultTargetAuth,
@@ -31,7 +33,7 @@ from meho_backplane.connectors.vault.target_auth import (
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.schemas import Target
 
-from ._vault_fakes import install_fake_vault
+from ._vault_fakes import install_fake_client, install_fake_vault
 
 
 @pytest.fixture(autouse=True)
@@ -267,4 +269,101 @@ async def test_write_preflight_runs_under_target_role(
     assert result["will_be_denied"] is False
     assert fake.auth.jwt.login_calls == [
         {"role": "meho-teardown", "jwt": "op-jwt", "path": "jwt-meho"},
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Policy, identity and token groups log in under the target's role (#4970)
+# ---------------------------------------------------------------------------
+
+
+async def _run_policy_write(operator: Operator, target: Target | None) -> dict[str, Any]:
+    from meho_backplane.connectors.vault.ops_sys_policy import vault_sys_policy_write
+
+    return await vault_sys_policy_write(
+        operator, target, {"name": "meho-token-issuer", "policy": 'path "x" {}'}
+    )
+
+
+async def _run_identity_group_write(operator: Operator, target: Target | None) -> dict[str, Any]:
+    from meho_backplane.connectors.vault.ops_identity import vault_identity_group_write
+
+    return await vault_identity_group_write(operator, target, {"name": "ops-admins"})
+
+
+async def _run_token_lookup_accessor(operator: Operator, target: Target | None) -> dict[str, Any]:
+    from meho_backplane.connectors.vault.ops_token import vault_token_lookup_accessor
+
+    return await vault_token_lookup_accessor(operator, target, {"accessor": "acc-1"})
+
+
+_TARGET_ROLE_HANDLERS = pytest.mark.parametrize(
+    "run_handler",
+    [_run_policy_write, _run_identity_group_write, _run_token_lookup_accessor],
+    ids=["vault.sys.policy.write", "vault.identity.group.write", "vault.token.lookup_accessor"],
+)
+
+
+@_TARGET_ROLE_HANDLERS
+@pytest.mark.asyncio
+async def test_target_role_ops_log_in_under_target_role(
+    monkeypatch: pytest.MonkeyPatch,
+    run_handler: Any,
+) -> None:
+    """A target with ``extras["vault_role"]`` logs in under that role and mount."""
+    get_settings.cache_clear()
+    fake = install_fake_vault(monkeypatch)
+    fake.auth.token.lookup_accessor_payload = {"data": {"accessor": "acc-1"}}
+    target = _make_vault_target(
+        extras={"vault_role": "meho-identity-admin", "vault_mount": "jwt-meho"},
+    )
+
+    await run_handler(_make_operator(jwt="op-jwt"), target)
+
+    assert fake.auth.jwt.login_calls == [
+        {"role": "meho-identity-admin", "jwt": "op-jwt", "path": "jwt-meho"},
+    ]
+
+
+@_TARGET_ROLE_HANDLERS
+@pytest.mark.parametrize("with_target", [True, False], ids=["target-without-role", "no-target"])
+@pytest.mark.asyncio
+async def test_target_role_ops_without_target_role_use_settings_role(
+    monkeypatch: pytest.MonkeyPatch,
+    run_handler: Any,
+    with_target: bool,
+) -> None:
+    """A target without ``vault_role``, or no target, keeps the deployment-wide role."""
+    get_settings.cache_clear()
+    fake = install_fake_vault(monkeypatch)
+    fake.auth.token.lookup_accessor_payload = {"data": {"accessor": "acc-1"}}
+    target = _make_vault_target() if with_target else None
+
+    await run_handler(_make_operator(jwt="op-jwt"), target)
+
+    assert fake.auth.jwt.login_calls == [
+        {"role": "meho-mcp", "jwt": "op-jwt", "path": "jwt"},
+    ]
+
+
+@_TARGET_ROLE_HANDLERS
+@pytest.mark.asyncio
+async def test_target_role_ops_refused_target_role_fails_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    run_handler: Any,
+) -> None:
+    """When Vault refuses the target's role, the call fails and never retries.
+
+    The single login call, pinned to the target's role, proves there is no
+    second login under the deployment-wide ``meho-mcp`` role.
+    """
+    get_settings.cache_clear()
+    fake = install_fake_client(monkeypatch, login_exc=hvac.exceptions.Forbidden("role denied"))
+    target = _make_vault_target(extras={"vault_role": "meho-identity-admin"})
+
+    with pytest.raises(VaultRoleDeniedError):
+        await run_handler(_make_operator(jwt="op-jwt"), target)
+
+    assert fake.auth.jwt.login_calls == [
+        {"role": "meho-identity-admin", "jwt": "op-jwt", "path": "jwt"},
     ]

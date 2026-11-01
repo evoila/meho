@@ -6,7 +6,8 @@
   Task #2589). Extends ``base.html`` so the chrome matches the rest of the
   console. One glance answers "which runners are alive?": each row shows a
   runner's name, its liveness badge (revoked / dead-man UNKNOWN / live), the
-  relative ``last_seen_at``, whether it is revoked, and when it was created.
+  relative ``last_seen_at``, the wire version and connector package set
+  digest it sent last, whether it is revoked, and when it was created.
 
   Auto-refresh: the table arms an ``hx-trigger="every 30s"`` poll that
   re-fetches ``GET /ui/runners`` (the ``HX-Request`` branch returns the
@@ -48,6 +49,8 @@
           <th>Runner</th>
           <th>Liveness</th>
           <th>Last seen</th>
+          <th>Wire version</th>
+          <th>Connector packages</th>
           <th>Revoked</th>
           <th>Created</th>
         </tr>

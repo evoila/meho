@@ -90,7 +90,9 @@ def client() -> Iterator[TestClient]:
 
 
 def _token(key: Any, *, role: TenantRole, sub: str = "op-test") -> str:
-    return mint_token(key, sub=sub, tenant_role=role.value, tenant_id=str(_TENANT_A))
+    return mint_token(
+        key, sub=sub, tenant_role=role.value, tenant_id=str(_TENANT_A), fresh_sign_in=True
+    )
 
 
 # Every approval route+method gated by ``_require_operator``.
@@ -473,6 +475,7 @@ def _approve_only_token(key: Any, *, sub: str = "approve-only") -> str:
         tenant_role=TenantRole.READ_ONLY.value,
         tenant_id=str(_TENANT_A),
         approver=True,
+        fresh_sign_in=True,
     )
 
 
@@ -984,3 +987,122 @@ def test_ordinary_decision_has_no_delegation_on_get(client: TestClient) -> None:
 
     assert decided.status_code == 200, decided.text
     assert shown.json()["delegation"] is None
+
+
+# ---------------------------------------------------------------------------
+# #5129 — `status=all` lists every state; no `status` still means pending
+# only; `limit` / `offset` page through the newest-first list.
+# ---------------------------------------------------------------------------
+
+
+def _seed_requests_in_every_state(tenant_id: uuid.UUID) -> dict[str, uuid.UUID]:
+    """Insert one request per state in *tenant_id*, oldest first; return ids by state."""
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
+    from meho_backplane.operations._validate import compute_params_hash
+
+    states = [s.value for s in ApprovalRequestStatus]
+    ids = {state: uuid.uuid4() for state in states}
+    base = datetime.now(UTC)
+
+    async def _seed() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            for i, state in enumerate(states):
+                session.add(
+                    ApprovalRequest(
+                        id=ids[state],
+                        tenant_id=tenant_id,
+                        run_id=None,
+                        principal_sub="svc-parker",
+                        op_id="vault.kv.put",
+                        connector_id="vault-1.x",
+                        target_id=None,
+                        params_hash=compute_params_hash({}),
+                        params={},
+                        proposed_effect={"op_id": "vault.kv.put", "connector_id": "vault-1.x"},
+                        status=state,
+                        created_at=base + timedelta(seconds=i),
+                    )
+                )
+
+    asyncio.run(_seed())
+    return ids
+
+
+def _list_ids(client: TestClient, tenant_id: uuid.UUID, query: str) -> list[str]:
+    key = make_rsa_keypair("kid-op-list")
+    token = mint_token(
+        key, sub="op-test", tenant_role=TenantRole.OPERATOR.value, tenant_id=str(tenant_id)
+    )
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        response = client.get(
+            f"/api/v1/approvals{query}", headers={"Authorization": f"Bearer {token}"}
+        )
+    assert response.status_code == 200, response.text
+    return [item["id"] for item in response.json()]
+
+
+def test_list_without_status_returns_pending_only(client: TestClient) -> None:
+    """No ``status`` keeps the documented default: waiting requests only."""
+    tenant_id = uuid.uuid4()
+    ids = _seed_requests_in_every_state(tenant_id)
+
+    assert _list_ids(client, tenant_id, "") == [str(ids["pending"])]
+
+
+def test_list_status_all_returns_every_state_newest_first(client: TestClient) -> None:
+    """``status=all`` drops the state filter, like ``meho_approvals_list``."""
+    tenant_id = uuid.uuid4()
+    ids = _seed_requests_in_every_state(tenant_id)
+
+    newest_first = [str(i) for i in reversed(list(ids.values()))]
+    assert _list_ids(client, tenant_id, "?status=all") == newest_first
+
+
+def test_list_limit_and_offset_page_the_result(client: TestClient) -> None:
+    """``limit`` / ``offset`` pick a window of the newest-first list."""
+    tenant_id = uuid.uuid4()
+    ids = _seed_requests_in_every_state(tenant_id)
+
+    newest_first = [str(i) for i in reversed(list(ids.values()))]
+    assert _list_ids(client, tenant_id, "?status=all&limit=2&offset=1") == newest_first[1:3]
+
+
+def test_list_order_oldest_returns_oldest_first(client: TestClient) -> None:
+    """``order=oldest`` lists ``created_at ASC`` (#3596); paging follows it."""
+    tenant_id = uuid.uuid4()
+    ids = _seed_requests_in_every_state(tenant_id)
+
+    oldest_first = [str(i) for i in ids.values()]
+    assert _list_ids(client, tenant_id, "?status=all&order=oldest") == oldest_first
+    clear_jwks_cache()  # ``_list_ids`` mints a fresh key per call.
+    page = _list_ids(client, tenant_id, "?status=all&order=oldest&limit=2&offset=1")
+    assert page == oldest_first[1:3]
+
+
+def test_list_without_order_is_newest_first_like_order_newest(client: TestClient) -> None:
+    """Omitting ``order`` keeps the newest-first default (back-compat, #3596)."""
+    tenant_id = uuid.uuid4()
+    ids = _seed_requests_in_every_state(tenant_id)
+
+    newest_first = [str(i) for i in reversed(list(ids.values()))]
+    assert _list_ids(client, tenant_id, "?status=all") == newest_first
+    clear_jwks_cache()  # ``_list_ids`` mints a fresh key per call.
+    assert _list_ids(client, tenant_id, "?status=all&order=newest") == newest_first
+
+
+@pytest.mark.parametrize(
+    "query", ["?status=bogus", "?limit=0", "?limit=501", "?offset=-1", "?order=random"]
+)
+def test_list_rejects_bad_query_values(client: TestClient, query: str) -> None:
+    """Unknown states and out-of-range paging values are a 422."""
+    key = make_rsa_keypair("kid-op-list-bad")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        response = client.get(f"/api/v1/approvals{query}", headers=headers)
+    assert response.status_code == 422, response.text

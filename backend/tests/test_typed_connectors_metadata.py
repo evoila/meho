@@ -22,12 +22,10 @@ Coverage matrix:
   contain the substring ``"Operations grouped under"`` -- the
   template-literal shape T4a is killing.
 
-First-write-wins on the existing-row branch is contractual (see
-:func:`~meho_backplane.operations.typed_register._resolve_or_create_group`
-+ sibling PR #757): curation iteration is a code-review + redeploy
-flow, not a re-register-against-live-DB flow. No test exercises the
-post-restart curation update path because that path no longer
-exists.
+A changed code text reaches an existing row at start-up unless an
+operator edited it (#4332, see
+:func:`~meho_backplane.operations.typed_register._resolve_or_create_group`);
+``test_operations_group_text_refresh.py`` covers that path.
 
 The tests reuse the project's autouse SQLite engine plus a per-test
 embedding-service stub so neither the real ONNX model nor a network
@@ -75,6 +73,7 @@ _K8S_GROUPS: Final[frozenset[str]] = frozenset(
         "exec",
         "storage",
         "custom_resources",
+        "access",
     }
 )
 _VAULT_GROUPS: Final[frozenset[str]] = frozenset({"auth", "kv", "sys"})
@@ -94,6 +93,10 @@ _VMWARE_COMPOSITE_GROUPS: Final[frozenset[str]] = frozenset(
         # Shared with the two typed licence reads.
         "vmware-licensing",
         "alarms",
+        # The migration inventory read.
+        "migration",
+        # Install a new vCenter; shared with the typed status read.
+        "vcenter_install",
     }
 )
 _BIND9_GROUPS: Final[frozenset[str]] = frozenset({"identity", "zone", "record", "config"})

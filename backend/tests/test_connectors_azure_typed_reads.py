@@ -11,6 +11,7 @@ made up.
 
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -421,13 +422,14 @@ async def test_the_operation_is_stored_as_typed_and_enabled(
         .scalars()
         .all()
     )
+    table = {op.op_id: op for op in AZURE_TYPED_OPS}
     by_op = {row.op_id: row for row in rows}
-    assert set(by_op) == {"azure.about", "azure.location.list", "azure.operation.status"}
+    assert set(by_op) == set(table)
     for row in rows:
         assert row.source_kind == "typed"
         assert row.is_enabled is True
-        assert row.safety_level == "safe"
-        assert row.requires_approval is False
+        assert row.safety_level == table[row.op_id].safety_level
+        assert row.requires_approval is table[row.op_id].requires_approval
     about_ref = by_op["azure.about"].handler_ref
     status_ref = by_op["azure.operation.status"].handler_ref
     location_ref = by_op["azure.location.list"].handler_ref
@@ -437,7 +439,7 @@ async def test_the_operation_is_stored_as_typed_and_enabled(
 
 
 @pytest.mark.asyncio
-async def test_the_account_group_is_enabled_with_its_text(
+async def test_every_group_is_enabled_with_its_text(
     _stub_embedding: AsyncMock, session: AsyncSession
 ) -> None:
     await register_azure_typed_operations()
@@ -454,9 +456,10 @@ async def test_the_account_group_is_enabled_with_its_text(
         .scalars()
         .all()
     )
-    assert {group.group_key for group in groups} == {"account"}
-    assert all(group.review_status == "enabled" for group in groups)
-    assert groups[0].when_to_use == AZURE_TYPED_WHEN_TO_USE_BY_GROUP["account"]
+    assert {group.group_key for group in groups} == set(AZURE_TYPED_WHEN_TO_USE_BY_GROUP)
+    for group in groups:
+        assert group.review_status == "enabled"
+        assert group.when_to_use == AZURE_TYPED_WHEN_TO_USE_BY_GROUP[group.group_key]
 
 
 @pytest.mark.asyncio
@@ -473,17 +476,35 @@ async def test_search_operations_finds_azure_about(
     assert "azure.about" in {hit["op_id"] for hit in found["hits"]}
 
 
-def test_every_operation_is_a_safe_read_with_guidance() -> None:
-    assert [op.op_id for op in AZURE_TYPED_OPS] == [
-        "azure.about",
-        "azure.location.list",
-        "azure.operation.status",
-    ]
-    for op in AZURE_TYPED_OPS:
+def test_the_account_reads_come_first_and_every_op_id_is_unique() -> None:
+    account_ids = ["azure.about", "azure.location.list", "azure.operation.status"]
+    op_ids = [op.op_id for op in AZURE_TYPED_OPS]
+    assert op_ids[: len(account_ids)] == account_ids
+    assert len(op_ids) == len(set(op_ids))
+    for op in AZURE_TYPED_OPS[: len(account_ids)]:
         assert op.safety_level == "safe" and op.requires_approval is False
         assert "read-only" in op.tags
-        assert op.group_key in AZURE_TYPED_WHEN_TO_USE_BY_GROUP
+
+
+def test_every_operation_has_a_closed_schema_and_guidance() -> None:
+    for op in AZURE_TYPED_OPS:
         assert op.parameter_schema["additionalProperties"] is False
         assert op.llm_instructions is not None
         for key in ("when_to_call", "output_shape", "next_step"):
             assert str(op.llm_instructions[key]).strip()
+
+
+def test_every_operation_has_its_own_method_and_a_group_text() -> None:
+    handler_attrs = [op.handler_attr for op in AZURE_TYPED_OPS]
+    assert len(handler_attrs) == len(set(handler_attrs))
+    modules_by_group: dict[str, set[str]] = {}
+    for op in AZURE_TYPED_OPS:
+        handler = getattr(AzureConnector, op.handler_attr, None)
+        assert inspect.iscoroutinefunction(handler), op.op_id
+        assert AZURE_TYPED_WHEN_TO_USE_BY_GROUP.get(op.group_key, "").strip(), op.op_id
+        modules_by_group.setdefault(op.group_key, set()).add(handler.__module__)
+    assert set(AZURE_TYPED_WHEN_TO_USE_BY_GROUP) == {op.group_key for op in AZURE_TYPED_OPS}
+    # The group texts of all families are merged into one dict, so two families
+    # with the same group key would silently keep only one text.
+    shared = {group: modules for group, modules in modules_by_group.items() if len(modules) > 1}
+    assert not shared, f"one group key used by several family modules: {shared}"

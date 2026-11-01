@@ -111,7 +111,12 @@ from typing import Any, Final
 import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 from meho_backplane.mcp.tools._memory_evidence import (
     SEARCH_OUTPUT_SCHEMA,
@@ -441,6 +446,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="memory_knowledge",
         name="search_memory",
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         description=(
             "Search the operator's accessible memories (own user-scoped "
@@ -527,51 +533,22 @@ register_mcp_tool(
         name="add_to_memory",
         surface=ToolSurface.WORKING,
         description=(
-            "Add a new memory entry. Use when you (or the operator "
-            "working with you) learn something worth retaining beyond "
-            "this session: an operator preference, a tenant convention, "
-            "a target-specific gotcha. Reach for this proactively — the "
-            "moment you learn a durable preference, convention, or "
-            "gotcha (especially right after resolving an error or a "
-            "retry), record it here before the session ends and the "
-            "context is lost, not only when the operator asks you to "
-            "remember it. "
-            "Pick the NARROWEST scope that captures intent: "
-            "'user' (personal across tenants) when the note is about "
-            "you the operator, regardless of which tenant you're "
-            "working in; "
-            "'user-tenant' (personal within this tenant) when the note "
-            "is your own preference for one specific tenant; "
-            "'user-target' (personal scoped to one target) when the "
-            "note applies to your interaction with one infrastructure "
-            "target — requires `target_name`; "
-            "'tenant' (shared with the team — tenant_admin role only) "
-            "when the note is a team-wide convention every operator in "
-            "the tenant should see; "
-            "'target' (shared with anyone touching this target) when the "
-            "note is a target-specific gotcha every operator should see "
-            "— requires `target_name`. "
-            "An operator without tenant_admin role attempting a 'tenant' "
-            "write is denied (INVALID_PARAMS); promote via the operator-"
-            "driven `meho promote` verb (G5.2) instead. "
-            "ALWAYS call `search_memory` FIRST with the topic you're "
-            "about to capture: re-adding under a different slug "
-            "fragments the corpus. If a matching entry already exists, "
-            "prefer extending its body (re-add with same slug, body-hash "
-            "short-circuit updates in place). "
-            "TTL is optional, formatted as ISO 8601 duration ('P7D' = "
-            "7 days, 'PT1H' = 1 hour). Omit on a 'user'-scope write to "
-            "accept the backend default (7-day expiry from "
-            "MEMORY_USER_DEFAULT_TTL_DAYS); pass explicit null to "
-            "persist forever; tenant- and target-scope writes default "
-            "to no expiry. "
-            "Compatibility shim (v0.6.x only): the body field is also "
-            "accepted under its pre-v0.6 name `content`. Prefer `body`; "
-            "`content` emits a deprecation log line and is removed in "
-            "v0.7. If both are supplied, `body` wins. "
-            "Do NOT use this for durable, generalizable team knowledge — "
-            "that belongs in `add_to_knowledge`. Memory is for shorter-"
-            "lived, operator/tenant/target-scoped state."
+            "Save a memory: something worth keeping after this session, "
+            "such as an operator preference, a tenant convention or a "
+            "gotcha for one target. Do it on your own, right when you "
+            "learn it (for example after fixing an error), not only when "
+            "asked. Call `search_memory` FIRST; if an entry exists, re-add "
+            "with the same `slug` to update it instead of making a copy.\n\n"
+            "SCOPE (pick the narrowest): 'user' = about you, in any "
+            "tenant; 'user-tenant' = your preference in this tenant; "
+            "'user-target' = yours, for one target; 'tenant' = shared with "
+            "the whole team (tenant_admin only; others get INVALID_PARAMS); "
+            "'target' = shared, for one target. 'user-target' and 'target' "
+            "need `target_name`.\n\n"
+            "TTL: an ISO 8601 duration ('P7D', 'PT1H'). A 'user' memory "
+            "without `ttl` expires after the 7-day default; null keeps it "
+            "forever. Other scopes do not expire by default. Put lasting "
+            "team knowledge in `add_to_knowledge` instead."
         ),
         inputSchema={
             "type": "object",
@@ -580,81 +557,43 @@ register_mcp_tool(
                     "type": "string",
                     "minLength": 1,
                     "maxLength": _MAX_BODY_CHARS,
-                    "description": (
-                        "Memory body. Markdown is fine; stored as-is. "
-                        f"Capped at {_MAX_BODY_CHARS} characters. "
-                        "The retrieval substrate indexes it as a single "
-                        "document (BM25 over tsvector + 384-dim embedding "
-                        "for cosine). Field name aligned with "
-                        "`add_to_knowledge` and the REST `POST /api/v1/memory` "
-                        "body schema (G0.9.1-T7, #779)."
-                    ),
+                    "description": "Required. The memory text. Markdown is fine.",
                 },
                 "content": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": _MAX_BODY_CHARS,
-                    "description": (
-                        "DEPRECATED v0.6.x alias for `body`; removed in "
-                        "v0.7. Provided so v0.3.x clients pinned to the "
-                        "pre-rename field continue to work for one cycle. "
-                        "Prefer `body`; `body` wins if both are supplied. "
-                        "Supplying `content` emits a structured "
-                        "`add_to_memory_field_deprecated` warning log "
-                        'with `replacement="body"`.'
-                    ),
+                    "description": "DEPRECATED alias for `body`. Use `body`.",
                 },
                 "scope": {
                     "type": "string",
                     "enum": _SCOPE_ENUM,
-                    "description": (
-                        "One of 'user', 'user-tenant', 'user-target', "
-                        "'tenant', 'target'. Pick the narrowest scope "
-                        "that captures intent; see the tool description "
-                        "for the matrix. 'user-target' and 'target' "
-                        "require `target_name`."
-                    ),
+                    "description": "Who sees the memory. See the tool description.",
                 },
                 "ttl": {
                     "type": ["string", "null"],
                     "description": (
-                        "Optional ISO 8601 duration ('P7D', 'PT1H', "
-                        "'PT30M'). Months and years are not accepted "
-                        "(variable-length). Omit on a 'user'-scope write "
-                        "to accept the backend default (7 days from "
-                        "MEMORY_USER_DEFAULT_TTL_DAYS); pass null to "
-                        "persist forever (the CLI --persist opt-out); "
-                        "tenant/target writes default to no expiry."
+                        "Optional ISO 8601 duration ('P7D', 'PT30M'); no months "
+                        "or years. Null keeps it forever."
                     ),
                 },
                 "target_name": {
                     "type": ["string", "null"],
                     "minLength": 1,
-                    "description": (
-                        "Target name, required when scope is "
-                        "'user-target' or 'target'. Ignored for other "
-                        "scopes (server-side write boundary clears it)."
-                    ),
+                    "description": "Target name. Required for 'user-target' and 'target'.",
                 },
                 "slug": {
                     "type": ["string", "null"],
                     "minLength": 1,
                     "description": (
-                        "Operator-facing identifier within the scope. "
-                        "Allowed characters: letters, digits, hyphen, "
-                        "underscore, dot. Omit to let the backend "
-                        "auto-generate a 12-char UUID hex prefix."
+                        "Name of the entry within its scope: letters, digits, "
+                        "'-', '_' and '.'. Omit to get a generated one."
                     ),
                 },
                 "tags": {
                     "type": ["array", "null"],
                     "items": {"type": "string", "minLength": 1},
-                    "description": (
-                        "Optional list of tag strings. Stored in "
-                        "metadata.tags and filterable via the `list` REST "
-                        "verb; the MCP search surface does not filter on "
-                        "tags directly in v0.2."
-                    ),
+                    "description": "Optional tags.",
                 },
             },
             "required": ["scope"],

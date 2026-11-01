@@ -63,9 +63,43 @@ meho approvals approve <id>         # runs the parked write now
 meho approvals reject <id>          # terminal; the requester must re-file
 ```
 
+After approval, the person who sent the request reads what the operation
+printed with one command. Only that person can read it:
+
+```bash
+meho approvals result <id>          # the output of the approved run
+```
+
 The operator console exposes the same queue at **`/ui/approvals`**: a
 bell with the live pending count, a request-detail modal with the
 proposed effect, and Approve / Deny buttons.
+
+When several requests belong to one change ticket and depend on each
+other, approve them as a group, oldest first:
+
+```bash
+meho approvals approve --filter-work-ref <ticket> --in-order
+```
+
+Each step is an ordinary approval and runs at once. MEHO goes on to the
+next step only when the run was OK. It stops at the first step that fails
+or is refused, and names that step and the steps it did not run. At a
+dangerous or destructive step it shows what the step changes and asks
+you to type `yes` first. In the console, filter the Pending tab to the
+change ticket and use **Approve group in order**.
+
+**Approving on the command line asks you to sign in again.** An approval
+must come from a person who is present. In the console your click is the
+proof. On the command line and REST, MEHO needs a sign-in from the last 5
+minutes, and one sign-in allows one approval. So `meho approvals approve`
+opens your browser and asks for your password (and your authenticator
+code, if your realm asks for one). It uses that sign-in for this one
+approval only and does not store it. Your normal `meho login` stays as it
+is. A plain API token never approves. Reject needs no new sign-in.
+
+Without a browser (for example over SSH), the command prints the sign-in
+link and stops. Approve in the console instead: it is the normal place to
+approve.
 
 ## The rule: requester and approver must differ
 
@@ -82,9 +116,13 @@ self_approval_forbidden: operator '<your-sub>' may not approve approval_request
 ```
 
 That is a REST `403`, an MCP invalid-params error, and a disabled
-**Approve** button in the console — all naming the same flag. Rejecting
-your *own* request is always allowed: withdrawing a write you asked for
-is not a privilege escalation.
+**Approve** button in the console — all naming the same flag. To take
+back your *own* pending request, withdraw it:
+`meho approvals withdraw <id> [--reason TEXT]` (or
+`POST /api/v1/approvals/{id}/withdraw`). The request then shows
+"withdrawn by the sender", nobody can approve it, and the operation does
+not run. A person, an agent or a service account can each withdraw its
+own request.
 
 On a team this is invisible: your colleague approves your write. On a
 **one-operator** deploy it looks like a dead end — you are both the
@@ -264,8 +302,11 @@ What stays the same on a sandbox:
 
 How delete grants work:
 
-- Only a tenant admin creates one, and only in the web console. The REST
-  API and the CLI refuse it, also with a person's token.
+- Only a tenant admin creates one, in the web console. The REST API and
+  the CLI refuse it, also with a person's token, unless the instance has
+  the chart value `sandboxMode.deleteGrantsFromApi: true`. Then a tenant
+  admin who signed in with `meho login` may create one through REST or
+  `meho service-principals grants create`, with the same checks.
 - Every delete grant expires within 30 days. MEHO never renews one by
   itself; the banner on every console page counts the delete grants that
   expire within 7 days. A tenant admin renews the delete grants of one
@@ -400,7 +441,16 @@ single-account hole for every operation.
 
 **The Approve button is greyed out in the console.** Same cause: you are
 the requester. The modal names both options inline and links back here.
-Deny stays enabled — you can always withdraw your own request.
+Deny stays enabled. To take back your own request, use
+`meho approvals withdraw <id>` instead.
+
+**`approve` fails with `fresh_sign_in_required` or
+`fresh_sign_in_already_used`.** The command line or REST call did not show
+a fresh, unused sign-in. Run `meho approvals approve <id>` in a terminal
+where a browser can open, and sign in when asked. If it still fails right
+after you signed in, the realm is not set up for it yet: see
+[Keycloak realm setup, Step 2](../install/keycloak-realm.md#step-2-create-the-public-meho-cli-client).
+Or approve in the console.
 
 **I set the flag but `/ready` still says `four_eyes_enforced`.** The
 backplane reads `APPROVAL_ALLOW_SELF_APPROVAL` at startup. Confirm the

@@ -17,7 +17,7 @@ the render helpers stay unit-testable without a live FastAPI
 Big-payload guard
 -----------------
 
-The vmware-rest review payload is thousands of ops, so the drawer shell
+A big ingested connector's review payload is thousands of ops, so the drawer shell
 (:func:`render_review_drawer`) renders the groups as **collapsed**
 ``<details>`` carrying only ``name`` / ``review_status`` / ``op_count``
 -- it does NOT render the per-op rows. Each group's body lazy-loads via
@@ -31,7 +31,7 @@ In-process BFF
 The per-op edit (:func:`submit_op_edit`) builds an
 :class:`~meho_backplane.operations.ingest.api_schemas.EditOpBody` and
 calls the shipped REST handler
-:func:`~meho_backplane.api.v1.connectors_ingest.edit_op_endpoint`
+:func:`~meho_backplane.api.v1.connectors_ingest.apply_op_edit`
 **in-process** (the ``forms_router.py`` pattern) so the UI write and the
 Bearer-API write share one validation + audit + warnings code path --
 never an HTTP call back to ``/api/v1``. The read drawer calls
@@ -44,10 +44,10 @@ same way.
 ``connector_id`` (``<impl_id>-<version>``) and ``group_key`` (snake_case,
 max 64) are slash-free, so the drawer + group-body routes use plain
 string path params. ``op_id`` is the natural key ``f"{method}:{path}"``
-(e.g. ``GET:/api/vcenter/cluster``) which CONTAINS slashes, so the per-op
+(e.g. ``GET:/repos/{owner}/{repo}/issues``) which CONTAINS slashes, so the per-op
 PATCH route uses the ``{op_id:path}`` converter -- the only param here
 that needs it -- and this module passes the captured ``op_id`` straight
-through to ``edit_op_endpoint`` intact.
+through to ``apply_op_edit`` intact.
 
 Governance footgun
 ------------------
@@ -69,7 +69,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from meho_backplane.api.v1.connectors_ingest import (
-    edit_op_endpoint,
+    apply_op_edit,
     get_review_endpoint,
 )
 from meho_backplane.auth.operator import Operator
@@ -171,7 +171,9 @@ def _op_context(op: ConnectorReviewOp) -> dict[str, Any]:
         "custom_description": op.custom_description,
         "safety_level": op.safety_level,
         "requires_approval": op.requires_approval,
+        "classified_safety_level": op.classified_safety_level or "safe",
         "is_enabled": op.is_enabled,
+        "tenant_enabled": op.tenant_enabled,
         "tags": op.tags,
     }
 
@@ -214,7 +216,7 @@ def _panel_from_http_exception(
     raise: ``get_review_endpoint`` raises ``409`` with a
     ``connector_scope_ambiguous`` dict carrying ``candidates`` (a label
     mapping to both a tenant + a built-in row), or ``404`` with a plain
-    string; ``edit_op_endpoint`` raises ``404`` (unknown op / connector)
+    string; ``apply_op_edit`` raises ``404`` (unknown op / connector)
     or ``400`` (empty body / out-of-enum) with a plain string. Anything
     else re-raises unchanged so an unexpected fault still surfaces as a
     real error rather than a mislabelled panel.
@@ -248,12 +250,17 @@ def _panel_from_http_exception(
             ),
             status_code=404,
         )
-    if exc.status_code == 400:
+    if exc.status_code == 400 or (
+        exc.status_code == 403 and str(detail).startswith("approval_off_needs_platform_admin")
+    ):
+        # #4711: a refused risk level / approval edit (a level below the
+        # classification, a missing reason, a destructive op, or a tenant
+        # admin turning approval off) is a panel, not an error page.
         return _render_error_panel(
             request,
             title="Edit rejected",
             message=str(detail),
-            status_code=400,
+            status_code=exc.status_code,
         )
     raise exc
 
@@ -437,13 +444,19 @@ async def submit_op_edit(
     is_enabled: bool | None,
     session_ctx: UISessionContext,
     operator: Operator,
+    reason: str | None = None,
 ) -> HTMLResponse:
     """Apply one per-op edit, then re-render just that op row.
 
+    The console counts as a person (#4711): it calls the shared edit with
+    ``person_present=True``, so a platform admin can turn approval off here
+    with a reason, without a fresh sign-in. That is the same rule approvals
+    follow: in the web session, the click is the proof.
+
     Builds an :class:`EditOpBody` from the submitted controls and calls
-    :func:`edit_op_endpoint` in-process (TENANT_ADMIN -- the route gates
+    :func:`apply_op_edit` in-process (TENANT_ADMIN -- the route gates
     it). The ``op_id`` arrives intact from the ``{op_id:path}`` route (a
-    key like ``GET:/api/vcenter/cluster`` round-trips without URL-encoding
+    key like ``GET:/repos/{owner}/{repo}/issues`` round-trips without URL-encoding
     breakage) and is passed straight through.
 
     On success the response's ``warnings`` (the ``unreplaced_auto_shim``
@@ -465,6 +478,7 @@ async def submit_op_edit(
             safety_level=safety_level,
             requires_approval=requires_approval,
             is_enabled=is_enabled,
+            reason=reason,
         )
     except ValueError as exc:
         # An out-of-enum safety_level (Pydantic ``Literal`` violation)
@@ -477,12 +491,7 @@ async def submit_op_edit(
         )
 
     try:
-        result = await edit_op_endpoint(
-            connector_id=connector_id,
-            op_id=op_id,
-            body=body,
-            operator=operator,
-        )
+        result = await apply_op_edit(connector_id, op_id, body, operator, person_present=True)
     except HTTPException as exc:
         return _panel_from_http_exception(request, exc, connector_id=connector_id)
 
@@ -510,6 +519,7 @@ def _build_edit_body(
     safety_level: str | None,
     requires_approval: bool | None,
     is_enabled: bool | None,
+    reason: str | None = None,
 ) -> EditOpBody:
     """Build an :class:`EditOpBody` from the submitted controls.
 
@@ -524,6 +534,7 @@ def _build_edit_body(
         safety_level=_coerce_safety_level(safety_level),
         requires_approval=requires_approval,
         is_enabled=is_enabled,
+        reason=(reason or "").strip() or None,
     )
 
 

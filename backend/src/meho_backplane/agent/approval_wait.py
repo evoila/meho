@@ -79,10 +79,10 @@ __all__ = [
 _log = structlog.get_logger(__name__)
 
 #: One :class:`Literal` return shape per outcome the caller switches on.
-#: ``approved`` / ``rejected`` / ``expired`` mirror the terminal states of the
+#: ``approved`` / ``rejected`` / ``expired`` / ``withdrawn`` mirror the terminal states of the
 #: stored approval row; ``timeout`` means no decision was seen before the
 #: deadline (the row was still ``pending``, or could not be read).
-ApprovalDecision = Literal["approved", "rejected", "expired", "timeout"]
+ApprovalDecision = Literal["approved", "rejected", "expired", "withdrawn", "timeout"]
 
 #: Gap between two reads of the stored approval row while the wait runs.
 #: Bounds how late an agent sees a decision. One primary-key read per
@@ -126,7 +126,7 @@ async def _read_stored_decision(
             error_class=type(exc).__name__,
         )
         return None
-    if status in ("approved", "rejected", "expired"):
+    if status in ("approved", "rejected", "expired", "withdrawn"):
         _log.info(
             "approval_wait_durable_decision_observed",
             approval_request_id=str(approval_request_id),
@@ -158,7 +158,8 @@ async def wait_for_approval_decision(
 
     Returns:
         ``"approved"`` (the caller tries the resume claim and re-dispatches),
-        ``"rejected"`` or ``"expired"`` (the caller never dispatches), or
+        ``"rejected"``, ``"expired"`` or ``"withdrawn"`` (the caller never
+        dispatches), or
         ``"timeout"`` (the final read still found the row ``pending``, or
         could not read it).
 
@@ -313,6 +314,29 @@ def _build_expired_envelope(
     return annotated
 
 
+def _build_withdrawn_envelope(
+    *,
+    original_envelope: dict[str, Any],
+    approval_request_id: uuid.UUID,
+) -> dict[str, Any]:
+    """Annotate the original envelope when the sender withdrew the request.
+
+    Same shape as :func:`_build_rejected_envelope`: ``status`` stays
+    ``"awaiting_approval"``, ``extras["error_code"] = "approval_withdrawn"``
+    and ``extras["decision"] = "withdrawn"``. The op was not run (#4987).
+    """
+    annotated = dict(original_envelope)
+    annotated["error"] = (
+        f"awaiting_approval: the sender withdrew approval request {approval_request_id}. "
+        "The operation was not run."
+    )
+    extras = dict(original_envelope.get("extras") or {})
+    extras["error_code"] = "approval_withdrawn"
+    extras["decision"] = "withdrawn"
+    annotated["extras"] = extras
+    return annotated
+
+
 def _build_already_resumed_envelope(
     *,
     original_envelope: dict[str, Any],
@@ -390,16 +414,26 @@ async def _resume_approved_or_already_resumed(
     re-entry runs as the agent principal (the operator surface runs as the
     reviewer); any other governed sub-op is checked against the agent's own
     grants, and one that would need a second approval fails closed
-    (``composite_resume_multi_gate_unsupported``). The re-entry dispatches
-    against the target the row saved by id
+    (``composite_resume_multi_gate_unsupported``). A direct park
+    (``resume_parent IS NULL``) re-dispatches the agent's original
+    *call_arguments*, with ``connector_id`` taken from the row (see
+    :func:`_redispatch_approved`).
+
+    Both kinds dispatch against the target the row saved by id
     (:func:`~meho_backplane.operations.approval_queue.rehydrate_resume_target`,
     the operator surface's check), never the name in *call_arguments*: a
     target renamed, or deleted and re-created under the same name, while the
     request waited must not receive the approved write. A saved target that
-    no longer resolves fails closed with a ``denied`` envelope before the
-    claim. A direct park (``resume_parent IS NULL``) keeps the re-dispatch of
-    the agent's original *call_arguments*, with ``connector_id`` taken from
-    the row (see :func:`_redispatch_approved`).
+    no longer resolves, or whose connection settings changed since the
+    request was made, fails closed with a ``denied`` envelope before the
+    claim. A per-call ``fqdn`` in the agent's original ``target`` dict is
+    applied to that loaded target again
+    (:func:`~meho_backplane.operations.meta_tools.apply_target_fqdn_override`),
+    as it was for the call that parked, so the approved call reaches the
+    same virtual host; the stored settings are checked first, and the row
+    is never changed. A request with a preview hash must still build the same preview
+    (:func:`~meho_backplane.operations.approval_queue.refuse_resume_if_preview_changed`);
+    else the run is refused and the refusal is stored as its result.
 
     Local imports mirror each other (and the wider module convention):
     ``meta_tools`` imports from ``operations.dispatcher`` which imports back
@@ -414,8 +448,11 @@ async def _resume_approved_or_already_resumed(
         claim_resume,
         get_request,
         persist_resume_result,
+        refuse_resume_if_preview_changed,
+        refuse_resume_if_release_changed,
         rehydrate_resume_target,
     )
+    from meho_backplane.operations.meta_tools import apply_target_fqdn_override
 
     # Load the parked row (tenant-isolated). Its pre-generated
     # ``approval.request`` audit id is bound below so the resumed dispatch
@@ -430,16 +467,32 @@ async def _resume_approved_or_already_resumed(
             request_id=approval_request_id,
         )
 
-    # A composite re-entry dispatches against the target the row saved by id,
-    # the same check the operator surface runs, not the name the agent used
-    # when it parked: that name may point at another target by now. A saved
-    # target that no longer resolves fails closed here, before the claim, so
-    # the refused resume does not burn the one-resumer claim.
-    resolved_target: Any = None
-    if request.resume_parent is not None:
-        resolved_target, denied = await rehydrate_resume_target(operator, request)
-        if denied is not None:
-            return cast("dict[str, Any]", denied.model_dump(mode="json"))
+    # #5030: an approval covers one exact MEHO release. A request made under
+    # another release is refused here and never runs.
+    release_refusal = await refuse_resume_if_release_changed(operator, request)
+    if release_refusal is not None:
+        if release_refusal.status == "already_resumed":
+            return _build_already_resumed_envelope(
+                original_envelope=awaiting_envelope,
+                approval_request_id=approval_request_id,
+            )
+        return release_refusal.model_dump(mode="json")
+
+    # The re-dispatch runs against the target the row saved by id, the same
+    # check the operator surface runs, not the name the agent used when it
+    # parked: that name may point at another target by now. A saved target
+    # that no longer resolves, or whose connection settings changed, fails
+    # closed here, before the claim, so the refused resume does not burn the
+    # one-resumer claim.
+    resolved_target, denied = await rehydrate_resume_target(operator, request)
+    if denied is not None:
+        return cast("dict[str, Any]", denied.model_dump(mode="json"))
+    # The agent's call may name a per-call ``fqdn`` (the virtual host the
+    # connector sends in the HTTP Host header and the TLS server name). The
+    # park ran with it, so the approved run must too. Applied after the
+    # stored settings were checked, in memory only, before the preview is
+    # built again and before the re-dispatch.
+    apply_target_fqdn_override(resolved_target, call_arguments.get("target"))
 
     if not await claim_resume(approval_request_id):
         _log.info(
@@ -469,6 +522,12 @@ async def _resume_approved_or_already_resumed(
             await discard_handoff(session, approval_request_id, operator.tenant_id)
         await session.commit()
 
+    preview_refusal = await refuse_resume_if_preview_changed(
+        operator, request, resolved_target, call_arguments.get("params") or {}
+    )
+    if preview_refusal is not None:
+        return preview_refusal.model_dump(mode="json")
+
     # The re-dispatch threads ``_approved=True`` through the policy gate, so
     # the durable approval-decision row is the authorization.
     envelope = await _redispatch_approved(
@@ -481,7 +540,7 @@ async def _resume_approved_or_already_resumed(
     # #3486: store the outcome, as the operator resume does, so the list and
     # show views move the request from ``started`` to ``executed`` or
     # ``failed``. Fail-soft: the dispatch's own audit row already committed.
-    await persist_resume_result(approval_request_id, envelope)
+    await persist_resume_result(approval_request_id, envelope, parked_op_id=request.op_id)
     return envelope
 
 
@@ -500,7 +559,9 @@ async def _redispatch_approved(
     composite re-entry as the operator surface. A composite sub-op park
     re-enters its parent composite with the approved sub-op cleared; a direct
     park (``resume_parent IS NULL``) re-dispatches the agent's original call
-    with one change: ``connector_id`` is the catalog the row stored. The park
+    with two changes: the target is *resolved_target*, the one the row saved
+    by id (with the per-call ``fqdn`` of the agent's call applied again by
+    the caller), and ``connector_id`` is the catalog the row stored. The park
     may have run on a sibling catalog of the one the agent named (#3600), and
     that stored catalog is the one policy checked and the approver saw. The
     dispatcher never switches catalogs on an approved call, so the resume
@@ -518,10 +579,16 @@ async def _redispatch_approved(
             subop_params_hash=request.params_hash,
             resume_parent=resume_parent,
             requester=requester_of(request),
+            proposed_effect=request.proposed_effect,
         ) as parent_call:
             if parent_call is None:
+                # ``target`` is cleared so the name is never looked up again;
+                # the target the row saved by id (or ``None`` for a
+                # tenant-wide op) is passed as is.
                 return await call_operation_with_approval(
-                    operator, {**call_arguments, "connector_id": request.connector_id}
+                    operator,
+                    {**call_arguments, "connector_id": request.connector_id, "target": None},
+                    resolved_target=resolved_target,
                 )
             parent_op_id, parent_params = parent_call
             _log.info(
@@ -624,14 +691,18 @@ async def resume_or_surface_awaiting_approval(
             approval_request_id=approval_request_id,
         )
 
-    if decision in ("rejected", "expired"):
+    if decision in ("rejected", "expired", "withdrawn"):
         _log.info(
             f"approval_wait_{decision}_surfaced_to_agent",
             approval_request_id=str(approval_request_id),
             tenant_id=str(operator.tenant_id),
             op_id=awaiting_envelope.get("op_id"),
         )
-        build = _build_rejected_envelope if decision == "rejected" else _build_expired_envelope
+        build = {
+            "rejected": _build_rejected_envelope,
+            "expired": _build_expired_envelope,
+            "withdrawn": _build_withdrawn_envelope,
+        }[decision]
         return build(original_envelope=awaiting_envelope, approval_request_id=approval_request_id)
 
     # decision == "timeout"

@@ -70,6 +70,7 @@ from meho_backplane.operations.meta_tools import (
 )
 from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
 from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES, get_settings
+from meho_backplane.untrusted_text import VENDOR_TEXT_RULE
 
 # ---------------------------------------------------------------------------
 # Settings + isolation fixtures
@@ -1584,7 +1585,8 @@ async def test_call_operation_with_target_resolves_and_dispatches(
             "connector_id": "vault-1.x",
             "op_id": "vault.kv.read",
             "target": {"name": "rdc-vault"},
-            "params": {"path": "secret/foo"},
+            # vault.kv.read hides values by default; the echo needs them.
+            "params": {"path": "secret/foo", "reveal_secret": True},
         },
     )
 
@@ -1624,7 +1626,8 @@ async def test_call_operation_without_target_uses_none(
             "connector_id": "vault-1.x",
             "op_id": "vault.kv.read",
             "target": None,
-            "params": {"hello": "world"},
+            # vault.kv.read hides values by default; the echo needs them.
+            "params": {"hello": "world", "reveal_secret": True},
         },
     )
 
@@ -1780,7 +1783,8 @@ async def test_call_operation_with_bare_string_target_resolves_and_dispatches(
             "connector_id": "vault-1.x",
             "op_id": "vault.kv.read",
             "target": "rdc-vault",
-            "params": {"path": "secret/foo"},
+            # vault.kv.read hides values by default; the echo needs them.
+            "params": {"path": "secret/foo", "reveal_secret": True},
         },
     )
 
@@ -1812,6 +1816,10 @@ async def test_call_operation_empty_string_target_returns_target_required_envelo
     )
     assert result["status"] == "error"
     assert result["extras"]["error_code"] == "target_required"
+    # #4139: the message says what is missing and where a name comes from.
+    assert result["error"] == (
+        "target_required: this operation needs a target; call list_targets and pass a target name"
+    )
 
 
 @pytest.mark.asyncio
@@ -2147,6 +2155,7 @@ async def test_search_operations_exact_op_returns_contract(
     assert contract["target"]["required"] is False
     assert contract["target"]["resolves_by"] == "name"
     assert "result_query" in contract["result_shape"]["guidance"]
+    assert VENDOR_TEXT_RULE in contract["result_shape"]["guidance"]
     assert "handle" in contract["result_shape"]["envelope_fields"]
     assert contract["pagination_hint"] == pagination_hint
     assert any("awaiting_approval" in rule for rule in contract["recovery"])
@@ -2180,6 +2189,8 @@ async def test_search_operations_exact_op_target_and_destructive_guidance(
     assert contract["pagination_hint"] is None
     assert any("preview_operation" in rule for rule in contract["recovery"])
     assert any("target_required" in rule for rule in contract["recovery"])
+    # #5032: every contract says vendor text is data, not only reads.
+    assert VENDOR_TEXT_RULE in contract["result_shape"]["guidance"]
 
 
 @pytest.mark.asyncio

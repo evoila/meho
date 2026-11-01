@@ -24,9 +24,9 @@ description: |
   Default-safe Tier-1 redaction policy applied at the dispatcher's
   connector-result boundary whenever no more-specific policy is
   registered for the call's (connector_id, tenant, op). Targets
-  credentials and kubeconfig blobs; identifier-shaped patterns
-  (UUID / IP / FQDN) are excluded to keep operator-facing summaries
-  legible by default.
+  credentials, private keys, password hashes and kubeconfig blobs;
+  identifier-shaped patterns (UUID / IP / FQDN) are excluded to keep
+  operator-facing summaries legible by default.
 
 rules:
   # This rule runs first. BIND allows a comment between the ``secret``
@@ -38,6 +38,14 @@ rules:
     pattern: bind_key_secret
     action: redact
     reason: "TSIG / rndc key secret in a BIND config file"
+
+  # Before the api_key rule: a ``private_key=-----BEGIN ...`` pair would
+  # otherwise lose only its first line to that rule, and the key body
+  # would stay.
+  - name: strip-pem-private-key
+    pattern: pem_private_key
+    action: redact
+    reason: "PEM private key block in payload"
 
   - name: strip-authorization-header
     pattern: authorization_header
@@ -63,3 +71,8 @@ rules:
     pattern: kubeconfig
     action: redact
     reason: "kubeconfig blob in payload"
+
+  - name: strip-password-hash
+    pattern: password_hash
+    action: redact
+    reason: "crypt(3) password hash, as in /etc/shadow"

@@ -176,13 +176,16 @@ func ParkedApprovalID(extras json.RawMessage) string {
 // render path shares: the ParkedHint one-liner, then — when the parked
 // envelope carried extras.approval_request_id — the approval id plus a
 // `meho approvals show <id>` inspect hint so the operator never has to
-// hunt the request via `meho approvals list`. Centralised so the
+// hunt the request via `meho approvals list`, and the
+// `meho approvals result <id>` command that prints the run's output
+// after approval (#5313). Centralised so the
 // dispatch.Render path and the parallel operation/call.go path stay
 // byte-identical.
 func WriteParkedHint(w io.Writer, extras json.RawMessage) {
 	fmt.Fprintf(w, "  %s\n", ParkedHint)
 	if id := ParkedApprovalID(extras); id != "" {
 		fmt.Fprintf(w, "  approval id: %s — inspect with: meho approvals show %s\n", id, id)
+		fmt.Fprintf(w, "  after approval, read the output with: meho approvals result %s\n", id)
 	}
 }
 
@@ -711,13 +714,10 @@ func WriteNotFoundIDs(w io.Writer, extras json.RawMessage) {
 
 // WriteAuditReceipt writes the `audit receipt: <id>` line, or nothing
 // when auditID is nil. Shared by WriteErrorTrailer and the parallel
-// operation/call.go render path so the line stays byte-identical
-// everywhere.
+// operation/call.go render path; it calls output.WriteAuditReceipt so
+// the line stays byte-identical with the other CLI writes.
 func WriteAuditReceipt(w io.Writer, auditID *string) {
-	if auditID == nil || *auditID == "" {
-		return
-	}
-	fmt.Fprintf(w, "audit receipt: %s\n", *auditID)
+	output.WriteAuditReceipt(w, auditID)
 }
 
 // PrettyJSON pretty-prints a json.RawMessage with 2-space indent.

@@ -7,7 +7,8 @@ The file ``deploy/charts/meho/charts/keycloak/files/meho-realm.json`` is what
 Keycloak imports at its first start. These checks pin the realm the product
 owner decided (``docs/decisions/login-role-groups.md``): five role groups that
 carry ``tenant_id`` and ``tenant_role`` (plus ``approver`` on MEHO-Approvers),
-the platform group that carries only ``platform_admin`` (#4043), the six
+the platform group that carries only ``platform_admin`` (#4043), the
+``meho_tenant`` attribute and ``meho-tenants`` mapper for several tenants, the six
 clients, the mappers ``meho admin keycloak bootstrap-clients`` puts on the
 clients people log in with, and no secret or host name written into the
 file.
@@ -39,6 +40,7 @@ _HUMAN_CLIENTS = ("meho-cli", "meho-mcp", "meho-web")
 _PLACEHOLDERS = {
     "MEHO_REALM_PUBLIC_URL",
     "MEHO_REALM_TENANT_ID",
+    "MEHO_REALM_TENANT_NAME",
     "MEHO_REALM_ADMIN_CLIENT_SECRET",
     "MEHO_REALM_WEB_CLIENT_SECRET",
     "MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET",
@@ -72,29 +74,38 @@ def test_no_company_login_yet(realm: dict[str, Any]) -> None:
     assert realm["identityProviderMappers"] == []
 
 
+def _meho_tenant(role: str) -> list[str]:
+    return [f"${{MEHO_REALM_TENANT_ID}}:${{MEHO_REALM_TENANT_NAME}}:{role}"]
+
+
 def test_role_groups_with_tenant_attributes_and_the_platform_group(realm: dict[str, Any]) -> None:
     groups = {g["name"]: g["attributes"] for g in realm["groups"]}
     assert groups == {
         "MEHO-Readers": {
             "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
             "tenant_role": ["read_only"],
+            "meho_tenant": _meho_tenant("Readers"),
         },
         "MEHO-Operators": {
             "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
             "tenant_role": ["operator"],
+            "meho_tenant": _meho_tenant("Operators"),
         },
         "MEHO-SA-Operators": {
             "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
             "tenant_role": ["operator"],
+            "meho_tenant": _meho_tenant("SA-Operators"),
         },
         "MEHO-Admins": {
             "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
             "tenant_role": ["tenant_admin"],
+            "meho_tenant": _meho_tenant("Admins"),
         },
         "MEHO-Approvers": {
             "tenant_id": ["${MEHO_REALM_TENANT_ID}"],
             "tenant_role": ["read_only"],
             "approver": ["true"],
+            "meho_tenant": _meho_tenant("Approvers"),
         },
         # Not a role group: it carries no tenant and no role, only the right
         # to act across tenants. The bootstrap Job puts the first admin here.
@@ -123,6 +134,7 @@ def test_human_clients_read_claims_from_groups(realm: dict[str, Any], client_id:
         "tenant-role",
         "approver",
         "platform-admin",
+        "meho-tenants",
         "groups-claim",
     }
     for name, attribute, json_type in (
@@ -144,6 +156,21 @@ def test_human_clients_read_claims_from_groups(realm: dict[str, Any], client_id:
         assert config["access.token.claim"] == "true"
         assert config["id.token.claim"] == "false"
         assert config["userinfo.token.claim"] == "true"
+    # One person may be in role groups of several tenants: this mapper lists
+    # the meho_tenant value of every group of the person.
+    tenants = mappers["meho-tenants"]
+    assert tenants["protocolMapper"] == "oidc-usermodel-attribute-mapper"
+    assert tenants["config"] == {
+        "user.attribute": "meho_tenant",
+        "claim.name": "meho_tenants",
+        "jsonType.label": "String",
+        "aggregate.attrs": "true",
+        "multivalued": "true",
+        "id.token.claim": "false",
+        "access.token.claim": "true",
+        "introspection.token.claim": "true",
+        "userinfo.token.claim": "true",
+    }
     assert mappers["groups-claim"]["protocolMapper"] == "oidc-group-membership-mapper"
     assert mappers["audience-meho-backplane"]["config"]["included.client.audience"] == (
         "meho-backplane"
@@ -175,7 +202,6 @@ def test_human_clients_default_scopes(realm: dict[str, Any], client_id: str) -> 
 def test_cli_client_uses_device_flow(realm: dict[str, Any]) -> None:
     client = _client(realm, "meho-cli")
     assert client["publicClient"] is True
-    assert client["standardFlowEnabled"] is False
     assert client["directAccessGrantsEnabled"] is False
     assert client["attributes"]["oauth2.device.authorization.grant.enabled"] == "true"
     assert client["optionalClientScopes"] == []
@@ -261,3 +287,17 @@ def test_no_secret_or_host_written_in_the_file(realm: dict[str, Any]) -> None:
     # public-URL placeholder.
     for url in re.findall(r"https?://[^\"\s]+", _REALM_FILE.read_text()):
         assert url.startswith(("http://localhost:", "http://127.0.0.1:")), url
+
+
+def test_cli_client_allows_the_fresh_sign_in_for_an_approval(realm: dict[str, Any]) -> None:
+    """``meho approvals approve`` signs in again in the browser (#3979).
+
+    The browser flow is on with PKCE and a 127.0.0.1 loopback redirect only;
+    ``meho login`` keeps the device flow. Same as the bootstrap recipe.
+    """
+    client = _client(realm, "meho-cli")
+    assert client["standardFlowEnabled"] is True
+    assert client["attributes"]["pkce.code.challenge.method"] == "S256"
+    assert client["attributes"]["oauth2.device.authorization.grant.enabled"] == "true"
+    assert client["redirectUris"] == ["http://127.0.0.1:*"]
+    assert client["webOrigins"] == []

@@ -36,7 +36,9 @@ layer of defence by returning **value-free** confirmations for the
 write ops (username/role + assigned policies, never the password); the
 ``generate_secret_id`` handler is the one exception -- it returns the
 minted SecretID to the caller's ``OperationResult`` (the whole point of
-minting), which classification keeps out of audit + broadcast.
+minting). For a ``credential_mint`` op the dispatcher replaces the
+secret-named values in the audit row's raw copy, so the SecretID stays
+out of audit and broadcast.
 
 Handler shape mirrors
 :mod:`meho_backplane.connectors.vault.ops_auth` verbatim: each is a
@@ -298,8 +300,8 @@ async def vault_auth_approle_generate_secret_id(
     Each call mints a brand-new SecretID -- the op is non-idempotent.
     The SecretID lands in the *response*, so the op classifies
     ``credential_mint``: the broadcast collapses to aggregate-only and
-    the audit row holds only a params_hash, so the minted SecretID never
-    reaches the feed or the audit store. The caller's
+    the dispatcher replaces the SecretID in the audit row's raw copy, so
+    it never reaches the feed or the audit store. The caller's
     ``OperationResult`` still carries it (the whole point of minting) --
     it must be stored immediately.
 

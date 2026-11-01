@@ -133,8 +133,9 @@ but the 9.0 and 9.1 documents are differently named service artifacts, so no
 removal is inferred without lineage evidence.
 
 The Installer advertises `>=9.0,<10.0`. Every path it calls is in the pinned
-9.0 installer file, and the 9.0 case of its spec-reconcile lane checks that in
-CI. The [Installer page](connectors-vcf-installer.md#installer-90) lists what
+9.0 installer file, except SDDC Manager discovery (9.1 only). That op checks
+the target version first and answers "not available on this version" on 9.0.
+The 9.0 case of its spec-reconcile lane checks the rest in CI. The [Installer page](connectors-vcf-installer.md#installer-90) lists what
 differs on 9.0.
 VCF Automation Native Public Cloud endpoints in 9.1.1 are disabled by default;
 that is a target capability/configuration gate, not a class fork. VCD API 38.0
@@ -231,13 +232,24 @@ the ingested-catalog boundary.
   audit row and any approval request name the catalog that really ran
   (`vmware-rest-8.0`), not the one the caller named. If no sibling qualifies,
   or the op is missing or disabled there, the result is still
-  `unqualified_target_version` with the same fields. Typed and composite
+  `unqualified_target_version` with the same fields. When the sibling
+  serves the target but does not have the op turned on, the reason does
+  not say "use connector ..." (#5069). It says the op is not available
+  for the target's version and points at `search_operations` on the
+  sibling, where a typed operation may do the same work. The same call on
+  the sibling answers `unknown_op`, and its `extras.connectors_with_op`
+  leaves out every connector whose catalog check refuses the target, so
+  neither error sends the caller to a connector that refuses the call.
+  Typed and composite
   descriptors are not affected. The params are checked once, after this
   choice, against the schema of the catalog that runs. So for a guarded
   op, `unqualified_target_version` is reported before `invalid_params`.
   `preview_operation` makes the same choice (without an audit row), so its
   envelope names the sibling's `connector_id` and its `preview_hash` matches
-  the call. A destructive op can then use the fallback too. The fallback
+  the call. A destructive op can then use the fallback too. When no
+  catalog serves the target, the preview is refused with the same
+  `unqualified_target_version` error, reason and target fields as the call
+  (#4984). It writes no audit row and gives no `preview_hash`. The fallback
   is for a fresh call only. When an approved request resumes, the call
   stays on the catalog the approval request stored. If the target's
   detected version moved while the request waited and that catalog no

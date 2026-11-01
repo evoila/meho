@@ -459,6 +459,64 @@ async def test_reduce_keeps_oversized_string_shaped_payload_as_document() -> Non
     assert reduced["top_level_fields"]["stdout"] == "string (200000 chars)"
 
 
+async def test_reduce_result_document_always_stores_a_small_payload() -> None:
+    """``result_document: {always: true}`` keeps even a small payload as a document.
+
+    The migration inventory reads register the hint: other operations load
+    the inventory by its handle, so a one-record inventory needs one too.
+    Without the hint the same payload passes through inline, and its single
+    list would make it a rows record.
+    """
+    store = ResultHandleStore(_ResultStoreRedis())  # type: ignore[arg-type]
+    reducer = JsonFluxReducer(store=store)
+    payload = {"schema_version": "1", "records": [{"source_id": "a:1"}], "counts": {"server": 1}}
+    context = {
+        "op_id": "vmware.migration.inventory",
+        "tenant_id": str(uuid.uuid4()),
+        "operator_sub": "operator:fixture",
+    }
+
+    plain, no_handle = await reducer.reduce(payload, None, context)
+    reduced, handle = await reducer.reduce(
+        payload, None, {**context, "result_document": {"always": True}}
+    )
+
+    assert (plain, no_handle) == (payload, None)
+    assert handle is not None
+    assert reduced["result_record"] == "document"
+    assert reduced["schema_version"] == "1"
+    assert handle.fetch_more.drill_in.available is True
+    stored = await store.fetch_document(
+        tenant_id=uuid.UUID(context["tenant_id"]),
+        operator_sub=context["operator_sub"],
+        handle_id=handle.handle_id,
+    )
+    assert stored is not None
+    assert stored.document == payload
+
+
+async def test_reduce_result_document_hint_malformed_or_false_keeps_the_size_rule() -> None:
+    reducer = JsonFluxReducer()
+    payload = {"schema_version": "1", "records": [{"source_id": "a:1"}]}
+    base = {"op_id": "vmware.migration.inventory"}
+
+    for hint in ({"always": False}, {"always": "yes"}, "always", {}):
+        reduced, handle = await reducer.reduce(payload, None, {**base, "result_document": hint})
+        assert (reduced, handle) == (payload, None), hint
+
+
+async def test_reduce_result_document_small_payload_passes_through_when_not_stored() -> None:
+    """Without a tenant in the context nothing is stored; a small payload still arrives whole."""
+    reducer = JsonFluxReducer()
+    payload = {"schema_version": "1", "records": []}
+
+    reduced, handle = await reducer.reduce(
+        payload, None, {"op_id": "vmware.migration.inventory", "result_document": {"always": True}}
+    )
+
+    assert (reduced, handle) == (payload, None)
+
+
 async def test_reduce_rows_summary_stays_under_threshold_with_large_scalar_siblings() -> None:
     """A list plus many big scalar siblings: the summary stays small (#3633).
 
@@ -667,8 +725,8 @@ async def test_reduce_scalar_hint_skips_reserved_non_scalar_and_absent_keys() ->
 
     * ``total`` collides with reducer bookkeeping — the reduction contract
       wins (the vendor value is dropped with a warning).
-    * ``additionalProperties`` is a nested object — copying it inline would
-      defeat the reduction the hint rides on.
+    * ``additionalProperties`` is a nested object — the scalar hint skips it;
+      the parts rule (#5139) keeps it whole instead.
     * ``missing`` is absent from the payload — a poll-shape variance, not
       an error.
     * ``validationChecks`` is the collection itself — already represented
@@ -700,7 +758,7 @@ async def test_reduce_scalar_hint_skips_reserved_non_scalar_and_absent_keys() ->
     assert reduced["id"] == payload["id"]
     assert reduced["resultStatus"] is None
     assert reduced["total"] == 60, "reducer bookkeeping must win over a colliding vendor field"
-    assert "additionalProperties" not in reduced
+    assert reduced["additionalProperties"] == {"nested": "object"}
     assert "missing" not in reduced
     assert "validationChecks" not in reduced
 
@@ -3045,8 +3103,8 @@ async def test_default_rule_is_bounded() -> None:
     assert len(_serialize(scalars)) <= reducer_module._DEFAULT_SCALAR_BYTE_BUDGET
 
 
-async def test_default_rule_never_copies_object_or_list_siblings() -> None:
-    """Objects stay behind the bounded ``result_objects`` opt-in (#3592)."""
+async def test_default_rule_copies_small_object_and_list_siblings_whole() -> None:
+    """Small objects and lists next to the rows ride inline whole (#5139)."""
     payload = {
         "items": [{"i": i} for i in range(60)],
         "leaf": {"subject": "CN=x", "pem": "-----BEGIN CERTIFICATE-----"},
@@ -3058,8 +3116,9 @@ async def test_default_rule_never_copies_object_or_list_siblings() -> None:
     reduced, _handle = await reducer.reduce(payload, None, {"op_id": "example.list"})
 
     assert reduced["name"] == "inventory"
-    assert "leaf" not in reduced
-    assert "tags" not in reduced
+    assert reduced["leaf"] == payload["leaf"]
+    assert reduced["tags"] == ["a", "b"]
+    assert "parts_not_inline" not in reduced
 
 
 def test_object_seam_constants_are_unchanged() -> None:
@@ -3083,7 +3142,7 @@ async def test_default_rule_does_not_apply_to_a_bare_list() -> None:
 async def test_hinted_scalars_are_kept_on_top_of_the_default_copy() -> None:
     """A hint keeps its keys outside the default budget; the rest still apply."""
     payload: dict[str, Any] = {"items": [{"i": i} for i in range(60)]}
-    payload["report"] = "r" * 20_000  # over the default budget on its own
+    payload["report"] = "r" * 2_000  # over the default budget on its own
     payload["state"] = "done"
     context = {"op_id": "example.list", "result_scalars": {"keys": ["report"]}}
     reducer = JsonFluxReducer(sample_size=5)
@@ -3093,3 +3152,25 @@ async def test_hinted_scalars_are_kept_on_top_of_the_default_copy() -> None:
     assert reduced["report"] == payload["report"]
     assert reduced["state"] == "done"
     assert "omitted_scalar_count" not in reduced
+
+
+async def test_a_hinted_scalar_over_the_summary_limit_is_moved_out() -> None:
+    """The whole summary stays under 4,096 bytes, hint or not (#5139).
+
+    The hint lifts the default per-value and total budgets, not the limit of
+    the whole summary. A hinted value that would push the summary over is
+    counted under ``omitted_scalar_count`` and stored with the rows (see
+    ``test_operations_jsonflux_reducer_parts.py`` for the read-back).
+    """
+    payload: dict[str, Any] = {"items": [{"i": i} for i in range(60)]}
+    payload["report"] = "r" * 20_000
+    payload["state"] = "done"
+    context = {"op_id": "example.list", "result_scalars": {"keys": ["report"]}}
+    reducer = JsonFluxReducer(sample_size=5)
+
+    reduced, _handle = await reducer.reduce(payload, None, context)
+
+    assert "report" not in reduced
+    assert reduced["state"] == "done"
+    assert reduced["omitted_scalar_count"] == 1
+    assert len(_serialize(reduced)) < reducer_module._INLINE_SUMMARY_BYTE_LIMIT

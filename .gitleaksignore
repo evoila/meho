@@ -5,4 +5,22 @@
 # not a credential. The hook sees it in every merge commit that brings
 # the chart workflow and its test in from main.
 .github/workflows/chart.yml:generic-api-key:300
+.github/workflows/chart.yml:generic-api-key:693
 backend/tests/test_chart_core_secrets.py:generic-api-key:65
+backend/tests/test_chart_core_openbao.py:generic-api-key:72
+#
+# The example certificate thumbprint in the Entra ID test fixtures. It is
+# base64 for the words "EXAMPLETHUMBPRINT", not a credential. The hook sees
+# it in every merge commit that brings the fixtures in from main.
+backend/tests/_entra_fixtures.py:generic-api-key:217
+#
+# The made-up storage account key in the Azure storage test. It is a
+# fixture that checks no secret reaches a result, not a credential. The
+# hook sees it in every merge commit that brings the test in from main.
+backend/tests/test_connectors_azure_storage.py:generic-api-key:114
+#
+# The same placeholder tenant UUID, in the chart OpenBao workflow job and
+# its test. It is a fixture, not a credential. The hook sees it in every
+# merge commit that brings the OpenBao job and its test in from main.
+.github/workflows/chart.yml:generic-api-key:693
+backend/tests/test_chart_core_openbao.py:generic-api-key:72

@@ -5,7 +5,9 @@
 
 CI runs the unit tests as ``TOTAL`` parallel jobs (shards). Each shard
 gets a set of test files. This tool decides which files go to which
-shard so that every shard needs about the same time.
+shard so that every shard needs about the same time. The integration
+tests use the same tool with their own measurements (``--durations``,
+see below).
 
 Rule: sort the files by their measured seconds, slowest first. Give each
 file to the shard that has the least time so far. A file that has no
@@ -20,8 +22,8 @@ them after the suite changed a lot, or when one shard is much slower
 than the others again. Take them from CI, not from a laptop: tests that
 need Docker or the spec shelf skip locally but run in CI. Every unit
 shard uploads its per-test times as the artifact
-``python-unit-shard-junit-<N>``. Download the four files of one green
-run and pass them all to ``--measure``::
+``python-unit-shard-junit-<N>``. Download the files of one green run
+(one per shard) and pass them all to ``--measure``::
 
     gh run download <run-id> --repo evoila/meho \\
         --pattern 'python-unit-shard-junit-*' --dir /tmp/unit-junit
@@ -32,7 +34,12 @@ run and pass them all to ``--measure``::
 CI usage (see the ``python-unit-shard`` job in ``.github/workflows/ci.yml``)::
 
     find tests -name 'test_*.py' ... | sort \\
-        | uv run python tests/_unit_shard_split.py --shard 2 --total 4
+        | uv run python tests/_unit_shard_split.py --shard 2 --total 5
+
+Integration tests: the ``python-integration-shard`` job passes
+``--durations tests/_integration_shard_durations.json``. Its shards
+upload ``python-integration-shard-junit-<N>``; refresh that file the
+same way, with those artifacts and ``pytest-integration-shard.xml``.
 
 This is CI tooling, not a test (the leading underscore keeps pytest
 from collecting it).
@@ -121,6 +128,12 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--shard", type=int, help="1-based shard number to print")
     parser.add_argument("--total", type=int, default=4, help="number of shards")
     parser.add_argument(
+        "--durations",
+        type=Path,
+        default=DURATIONS_FILE,
+        help="JSON file with the measured seconds per test file (default: the unit tests' file)",
+    )
+    parser.add_argument(
         "--measure",
         type=Path,
         nargs="+",
@@ -143,7 +156,7 @@ def _main(argv: list[str] | None = None) -> int:
     if args.shard is None or not 1 <= args.shard <= args.total:
         parser.error("--shard must be between 1 and --total")
     files = [line.strip() for line in sys.stdin if line.strip()]
-    durations = load_durations()
+    durations = load_durations(args.durations)
     shards = split(files, durations, args.total)
     unmeasured = sum(1 for name in files if name not in durations)
     predicted = predicted_seconds(shards, durations)

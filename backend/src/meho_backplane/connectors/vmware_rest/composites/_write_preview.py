@@ -54,7 +54,10 @@ resolved VM + host group sets).
                           handler's plan -- the snapshot, the snapshots below
                           it when ``remove_children`` is set
 ``vm.migrate``            echo: vm, cluster, target_host + resolution source
-``vm.power``              echo: vm, verb, power_kind (hard vs Tools-soft)
+``vm.power``              live-read: vm, name, power_state, verb,
+                          power_kind (hard vs Tools-soft); a failed read
+                          is listed under ``unavailable``, never blocks
+                          the park (#3942)
 ``vm.disk.grow``          live-read: vm, name, disk, disk_label,
                           current_capacity_bytes, requested_capacity_bytes,
                           delta_bytes
@@ -69,7 +72,9 @@ resolved VM + host group sets).
 ``vm.nic.repoint``        live-read: ``{vm, name, nic, mac_address,
                           current_backing, requested_backing}`` network from->to
 ``vm.device.cdrom``       live-read: ``{vm, name, cdrom, action,
-                          current_backing, state}`` (the host-local ISO path)
+                          current_backing, state, requested_backing}``
+                          drive from->to (``requested_backing`` is
+                          ``None`` for ``remove`` / ``disconnect``)
 ``guest.customization_``  echo: spec_name, os_type, hostname_scheme,
 ``spec.create``           nic_count, static_ip_summary (IDENTITY only --
                           never the Windows admin / product-key /
@@ -82,6 +87,10 @@ teardown deletes (#3339)  live-read: the mandatory ``blast_radius`` built from
 ``cluster.drs_rule.``     live-read: the same ``blast_radius`` from the
 ``delete``                handler's plan -- the rule's type, enabled,
                           mandatory, VMs or groups
+``cluster.drs_group.``    live-read: the handler's plan -- members before,
+``members.set``           added, removed, the rules that use the group
+``cluster.drs_group.``    live-read: the ``blast_radius`` from the handler's
+``delete``                plan -- the group, its members, blocking rules
 ``datastore.dir.create``  echo: datastore, path, create_parents
 ========================  ====================================================
 
@@ -122,14 +131,17 @@ Two preview depths, chosen per composite
   requested change. Declines (``None`` -> identifier-only default) when no
   connector resolved or the VM read returns no dict, and fails-soft on a
   resolution fault exactly like the fan-out builders.
+* **Best-effort name read** for ``vm.power`` (#3942): the params name the
+  VM only by moid, so the builder reads the VM's display name and current
+  power state and echoes the verb plus ``power_kind`` (hard vs
+  Tools-soft). A failed read does not block the park: the moid stays and
+  the gap is listed under ``unavailable``.
 * **Param echo** (no I/O — the ``secret.move`` precedent, #1580) for the
-  six single-entity composites whose params fully name the blast
+  single-entity composites whose params fully name the blast
   radius. ``vm.clone_from_template`` echoes only the customization spec
   *name*, never its secret-bearing contents (#1503), so the GOSC keystone
   composes without leaking sysprep/password material onto the reviewer
-  surface. ``vm.power`` additionally echoes ``power_kind`` so the approver
-  sees the soft-vs-hard distinction (a Tools-mediated ``guest_shutdown``
-  is a very different blast radius from a hard ``off``).
+  surface.
   ``vm.migrate`` deliberately does **not** pre-resolve a DRS
   recommendation: DRS output is point-in-time and the approved dispatch
   re-consults it, so echoing a predicted host could mislead the reviewer
@@ -189,8 +201,17 @@ from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
     datastore_dir_create_preview,
     datastore_file_delete_preview,
 )
+from meho_backplane.connectors.vmware_rest.composites._drs_group import (
+    cluster_drs_group_members_set_preview,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_group_delete import (
+    cluster_drs_group_delete_preview,
+)
 from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
     cluster_drs_rule_delete_preview,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_vm_host_rule_existing import (
+    existing_groups_preview,
 )
 from meho_backplane.connectors.vmware_rest.composites._library_delete import (
     content_library_delete_preview,
@@ -660,24 +681,56 @@ async def _vm_migrate_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 
 
 async def _vm_power_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Preview ``vm.power`` — echo the VM + verb + hard-vs-soft power kind (no I/O).
+    """Preview ``vm.power`` — the VM's name + power state, the verb, hard vs soft (#3942).
 
-    The params fully name the blast radius (one VM, one verb), so no
-    resolution read is needed. ``power_kind`` makes the soft-vs-hard
-    distinction explicit for the approver: a Tools-mediated
-    ``guest_shutdown`` cleanly quiesces the guest, while a hard ``off`` /
-    ``reset`` yanks power and may lose in-flight state — the reviewer should
-    see which one they are approving.
+    A moid such as ``vm-42`` means nothing to a person, so the builder reads
+    the VM's display ``name`` and current ``power_state`` (one read-only
+    ``GET:/vcenter/vm/{vm}`` via :func:`._write._read_vm_info`) and echoes
+    the verb. ``power_kind`` makes the soft-vs-hard distinction explicit: a
+    Tools-mediated ``guest_shutdown`` cleanly quiesces the guest, while a
+    hard ``off`` / ``reset`` yanks power and may lose in-flight state.
+
+    The read is best-effort. When it fails (or no connector resolved) the
+    preview keeps the moid, leaves ``name`` / ``power_state`` as ``None``
+    and names the gap under ``unavailable`` (the fault class only, never the
+    fault text), so the approval request is still created. The power verb
+    never fires here. Declines (``None``) only on malformed params.
     """
     vm = ctx.params.get("vm")
     verb = ctx.params.get("verb")
     if not isinstance(vm, str) or not isinstance(verb, str):
         return None
-    return {
+    preview: dict[str, Any] = {
         "vm": vm,
+        "name": None,
+        "power_state": None,
         "verb": verb,
         "power_kind": "guest" if verb in _GUEST_POWER_VERBS else "hard",
     }
+    reason: str | None = None
+    if ctx.connector_instance is None:
+        reason = "no connector session to read the VM"
+    else:
+        try:
+            info = await _read_vm_info(
+                connector=ctx.connector_instance,  # type: ignore[arg-type]
+                target=ctx.target,
+                operator=ctx.operator,
+                vm_moid=vm,
+            )
+        except Exception as exc:
+            reason = f"the VM read failed ({type(exc).__name__})"
+        else:
+            if info is None:
+                reason = "the VM read returned no data"
+            else:
+                name = info.get("name")
+                power_state = info.get("power_state")
+                preview["name"] = name if isinstance(name, str) else None
+                preview["power_state"] = power_state if isinstance(power_state, str) else None
+    if reason is not None:
+        preview["unavailable"] = [f"the VM name and power state: {reason}"]
+    return preview
 
 
 async def _vm_disk_grow_preview(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -952,8 +1005,11 @@ async def _cluster_drs_vm_host_rule_create_preview(ctx: PreviewContext) -> dict[
     — capped at :data:`_PREVIEW_RESOLVED_CAP` with the uncapped ``total_*``
     counts, plus the best-effort cluster display name. The reconfigure write
     never fires here. Declines without a resolved connector or on malformed
-    params.
+    params. With ``use_existing_groups=true`` it shows the members of the two
+    existing groups instead.
     """
+    if ctx.params.get("use_existing_groups"):
+        return await existing_groups_preview(ctx)
     cluster = ctx.params.get("cluster")
     rule_name = ctx.params.get("rule_name")
     vm_group_name = ctx.params.get("vm_group_name")
@@ -1106,14 +1162,29 @@ async def _vm_nic_repoint_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-async def _vm_device_cdrom_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Preview ``vm.device.cdrom`` — live-read the current backing + state.
+_CDROM_BACKING_PREVIEW_KEYS = ("type", "iso_file", "host_device", "device_access_type")
 
-    The host-local ISO path in the current backing is exactly what the
-    approver needs to see before removing / updating / disconnecting the
-    device. Reads the CD-ROM via :func:`._write._read_cdrom` and the VM
-    ``name`` via :func:`._write._read_vm_info`; no DELETE / PATCH /
-    disconnect fires here.
+
+def _cdrom_requested_backing(action: str, backing: Any) -> dict[str, Any] | None:
+    """Return the new CD-ROM backing an ``update`` sets, or ``None``.
+
+    ``remove`` and ``disconnect`` set no new backing. An ``update`` without
+    a ``backing`` object is refused by the handler before any write, so it
+    also previews as ``None``.
+    """
+    if action != "update" or not isinstance(backing, dict):
+        return None
+    return {key: backing[key] for key in _CDROM_BACKING_PREVIEW_KEYS if key in backing}
+
+
+async def _vm_device_cdrom_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.device.cdrom`` — live-read the current backing, show the new one.
+
+    The approver sees the drive from->to: the current backing (with the
+    host-local ISO path) and state, read via :func:`._write._read_cdrom`,
+    next to ``requested_backing`` -- the new backing an ``update`` sets
+    (``None`` for ``remove`` / ``disconnect``). The VM ``name`` comes from
+    :func:`._write._read_vm_info`; no DELETE / PATCH / disconnect fires here.
     """
     vm = ctx.params.get("vm")
     cdrom = ctx.params.get("cdrom")
@@ -1145,6 +1216,7 @@ async def _vm_device_cdrom_preview(ctx: PreviewContext) -> dict[str, Any] | None
         "action": action,
         "current_backing": cdrom_info.get("backing") if cdrom_info else None,
         "state": cdrom_info.get("state") if cdrom_info else None,
+        "requested_backing": _cdrom_requested_backing(action, ctx.params.get("backing")),
     }
 
 
@@ -1837,6 +1909,11 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     # The DRS rule delete is destructive too: its blast radius is the
     # handler's own plan (the rule, its type, its VMs or groups).
     "vmware.composite.cluster.drs_rule.delete": cluster_drs_rule_delete_preview,
+    # The DRS group ops: the handler's own plan. The member change shows the
+    # members before, what is added and removed, and the rules that use the
+    # group; the destructive delete shows the group as its blast radius.
+    "vmware.composite.cluster.drs_group.members.set": cluster_drs_group_members_set_preview,
+    "vmware.composite.cluster.drs_group.delete": cluster_drs_group_delete_preview,
     # Licence assign: live-read of the asset's licence now and the licence it
     # would get, from the handler's own plan. Keys are masked.
     "vmware.composite.license.assign": license_assign_preview,
@@ -1848,7 +1925,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 52 write-composite park-time preview builders. Import-time.
+    """Wire the 54 write-composite park-time preview builders. Import-time.
 
     The read composites register no builder here. The one read that can
     wait for approval, the ``caution`` ``vm.guest.file.read``, registers

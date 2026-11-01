@@ -11,12 +11,19 @@
 //   - `meho approvals show <id> [--json]` — inspect one request via
 //     GET /api/v1/approvals/{id}. Role: operator. Renders proposed_effect
 //     and elicitation_url; --json for the raw envelope.
+//   - `meho approvals result <id> [--json]` — the sender reads the output
+//     of its approved run via GET /api/v1/approvals/{id}/result (#5313).
+//     Any principal kind, but only for a request it sent.
 //   - `meho approvals approve <id> [--reason TEXT] [--json]` — approve via
 //     POST /api/v1/approvals/{id}/decide. Role: operator. Resumes the
 //     paused agent run via the T4 path.
 //   - `meho approvals reject <id> [--reason TEXT] [--json]` — reject via
 //     POST /api/v1/approvals/{id}/decide. Role: operator. Aborts the
 //     paused agent run.
+//   - `meho approvals withdraw <id> [--reason TEXT] [--json]` — the sender
+//     takes back its own pending request via
+//     POST /api/v1/approvals/{id}/withdraw (#4987). Any principal kind,
+//     but only for a request it sent.
 //
 // Authentication piggybacks on the token meho login wrote — same pattern
 // as `meho agent`, `meho audit`, `meho conventions`.
@@ -34,9 +41,12 @@ package approvals
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -87,21 +97,26 @@ func routeRequestError(
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "approvals",
-		Short: "Manage approval requests (list / show / approve / reject)",
+		Short: "Manage approval requests (list / show / result / approve / reject / withdraw)",
 		Long: "Manage pending approval requests wired by G11.2-T5. An " +
 			"approval request is created when the policy gate issues a " +
 			"needs-approval verdict on a connector operation. Use list " +
 			"to see pending requests, show to inspect the proposed " +
 			"effect, and approve or reject to decide. On approve, the " +
 			"paused agent run resumes. On reject, the run aborts. Both " +
-			"read and write verbs require the operator role. Tenant " +
+			"read and write verbs require the operator role. The " +
+			"sender of a pending request can take it back with " +
+			"withdraw, and read the output of its approved run with result; " +
+			"both need no role, only that you sent the request. Tenant " +
 			"scoping is enforced server-side via the JWT.",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newShowCmd())
+	cmd.AddCommand(newResultCmd())
 	cmd.AddCommand(newApproveCmd())
 	cmd.AddCommand(newRejectCmd())
+	cmd.AddCommand(newWithdrawCmd())
 	return cmd
 }
 
@@ -155,6 +170,10 @@ func renderClientError(
 // right structured-error category. The typed-client surface returns
 // `(nil, err)` for these; non-2xx HTTP responses arrive as
 // `(*Response, nil)` and are routed through `renderHTTPStatus` instead.
+//
+// A JSON decode error from a generated parser means the server answered
+// with a body the CLI could not read. That is unexpected_response
+// (exit 4), not unreachable: the network is fine (#5134).
 func renderTransportError(
 	cmd *cobra.Command,
 	backplaneURL string,
@@ -167,6 +186,16 @@ func renderTransportError(
 				"stored token rejected and no refresh_token present; run `meho login %s`",
 				backplaneURL,
 			)),
+			jsonOut,
+		)
+	}
+	var syntaxErr *json.SyntaxError
+	var unmarshalErr *json.UnmarshalTypeError
+	if errors.As(err, &syntaxErr) ||
+		errors.As(err, &unmarshalErr) ||
+		errors.Is(err, io.ErrUnexpectedEOF) {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("call %s: %v", backplaneURL, err)),
 			jsonOut,
 		)
 	}
@@ -194,6 +223,11 @@ func renderHTTPStatus(
 	bodyStr := trimmedBody(body)
 	switch statusCode {
 	case http.StatusUnauthorized:
+		if strings.Contains(bodyStr, "fresh_sign_in_") {
+			// The approval still found no fresh sign-in (#3979). Show
+			// the server's text: it names the web interface.
+			return output.RenderError(cmd.ErrOrStderr(), output.AuthExpired(bodyStr), jsonOut)
+		}
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
 				"backplane rejected the stored token; run `meho login %s`",

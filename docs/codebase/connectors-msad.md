@@ -45,30 +45,26 @@ single Vault secret is the SSH credential), and no consumer needs it yet. When a
 consumer does, the follow-up adds an optional `-Server` + Vault-brokered
 `-Credential` seam; until then, point `msad` targets directly at a DC.
 
-### Password provisioning / reset is deferred (secret-hygiene contract)
+### Passwords: never in a parameter, never in the script
 
-The shared pwsh transport's safety contract **forbids credential material in the
-`-EncodedCommand` script** — the encoded payload lands on the remote process argv
-and is visible to a privileged remote observer (see `_shared/pwsh`). A plaintext
-AD password therefore cannot ride the transport. Consequences, mirroring winsrv's
-passwordless-create:
+The shared pwsh transport puts the script on the remote command line
+(`-EncodedCommand`). A privileged person on the server can see it there (see
+`_shared/pwsh`). So no password may be part of a script.
 
-- **`user.create` creates a disabled, passwordless account.** Per `New-ADUser`'s
-  documented behaviour an account created without `-AccountPassword` is disabled
-  and "cannot be enabled until a password is set." Set the password out of band,
-  then `user.enable`.
-- **`user.set` never touches the password**, and there is **no `password-reset`
-  op.** Password provisioning / reset is a Vault-brokered follow-up (the `rke2`
-  `token.rotate` mint-and-stash mold, so no secret enters the script).
+- **`user.create` creates a disabled account without a password.** Per
+  `New-ADUser`, an account created without `-AccountPassword` is disabled and
+  "cannot be enabled until a password is set."
+- **`user.set` never touches the password.**
+- **`msad.user.set-password` sets the password** (see the section below). It
+  takes a reference into the secret store, not the password. The value goes to
+  PowerShell on standard input, not on the command line.
 
-A unit test (`test_no_op_exposes_a_secret_value_field` +
-`test_no_op_id_is_password_reset`) pins this at the schema level: no op declares a
-`password` / `secret` / `credential` parameter, and no op id is a password reset
-or password set. The one op id that mentions a password is the
-`msad.user.password-expiry` read below; it returns no password or hash. This is the "password-bearing params provably redacted" acceptance
-criterion, satisfied the winsrv way — there are none, proven at the schema level.
+A unit test (`test_no_op_exposes_a_secret_value_field`) checks the schemas: no
+op has a `password` / `secret` / `credential` parameter. The only op id that
+sets a password is `msad.user.set-password`, and its one secret-related
+parameter is the reference `password_ref` (`test_password_op_ids`).
 
-## Op surface (28 ops across five groups)
+## Op surface (35 ops across six groups)
 
 Safety tier is a reach decision per the Initiative #3259 satellite table: reads =
 `safe` (ride satellite runners); recoverable writes = `caution` (satellite-
@@ -87,6 +83,7 @@ central-dial / on-site only).
 | `msad.user.get` | safe | no | `Get-ADUser -Identity` |
 | `msad.user.search` | safe | no | `Get-ADUser -Filter {name/sam -like}` (capped) |
 | `msad.user.password-expiry` | safe | no | `Get-ADUser -Identity -Properties pwdLastSet, PasswordNeverExpires, PasswordExpired, msDS-UserPasswordExpiryTimeComputed` |
+| `msad.user.set-password` | caution | **yes** | `Set-ADAccountPassword -Reset` + `Enable-ADAccount` (password from the secret store, over standard input) |
 | `msad.user.create` | caution | no | `New-ADUser` (disabled, no password) |
 | `msad.user.set` | caution | no | `Set-ADUser` (never a password) |
 | `msad.user.enable` | caution | no | `Enable-ADAccount` |
@@ -106,6 +103,12 @@ central-dial / on-site only).
 | `msad.ou.list` | safe | no | `Get-ADOrganizationalUnit -Filter *` (capped) |
 | `msad.ou.create` | caution | no | `New-ADOrganizationalUnit` |
 | `msad.ou.move` | caution | no | `Move-ADObject` |
+| `msad.group.create` | caution | **yes** | `New-ADGroup` (returns an existing group with `created: false`) |
+| `msad.ou.grant-create-child` | caution | **yes** | `Get-Acl` / `Set-Acl` on `AD:\<dn>` with an `ActiveDirectoryAccessRule` (like `dsacls /I:T /G group:CC;<class>`) |
+| `msad.ou.revoke-create-child` | caution | **yes** | removes that rule again |
+| `msad.domain.settings` | safe | no | `Get-ADDefaultDomainPasswordPolicy` + `ms-DS-MachineAccountQuota` |
+| `msad.domain.password-policy.set` | caution | **yes** | `Set-ADDefaultDomainPasswordPolicy` |
+| `msad.domain.machine-account-quota.set` | caution | **yes** | `Set-ADDomain -Replace @{'ms-DS-MachineAccountQuota' = <n>}` |
 
 The three `dangerous` ops (`user.delete`, `group.delete`, `computer.delete`) are
 `requires_approval=True` — a dispatch parks at `needs-approval` for a human
@@ -128,6 +131,103 @@ domain join from the directory side: the machine can no longer authenticate to
 the domain, but its account object is retained (re-enable restores trust). A full
 object removal is the separate `dangerous` `computer.delete`. This keeps the
 `caution` (recoverable) / `dangerous` (destructive) split honest.
+
+## Building a new domain (`domain-config` group, group create, OU access rules)
+
+These ops cover the AD steps of a domain controller build. Every change waits
+for a person to approve it, reads the result back, and is safe to run twice.
+
+- **`msad.domain.settings`** returns the default password rules and the join
+  limit (how many computers a normal user may join) in one answer. DNS
+  settings come from the `windns` connector (`windns.zone.get`,
+  `windns.forwarder.list`) and the time source from `winsrv.time.get`,
+  because those run against their own targets.
+- **`msad.domain.password-policy.set`** changes only the rules you give:
+  `min_length`, `history_count`, `max_age_days` (0 = never expires),
+  `min_age_days`, `complexity_enabled`, `lockout_threshold`,
+  `lockout_duration_minutes`, `lockout_window_minutes`. Every value is a
+  checked integer or boolean, so no operator text reaches the script.
+  Reversible password encryption is not offered on purpose. The op sets rules;
+  it never takes or returns a password.
+- **`msad.domain.machine-account-quota.set`** sets the join limit (0 to 1000).
+  With 0, give a group the right to create computers with
+  `msad.ou.grant-create-child`, or prestage accounts with
+  `msad.computer.join-prestage`.
+- **`msad.group.create`** looks the sAMAccountName up first (a script-block
+  filter binds it as a variable) and runs `New-ADGroup` only when it is
+  missing. An existing group is returned with `created: false` and is not
+  changed. `msad.group.delete` is the undo.
+- **`msad.ou.grant-create-child`** adds an "allow create child" rule for one
+  class (`computer`, `user` or `group`) to an OU or container, for that object
+  and everything below it. It is the fixed form of `dsacls "<OU>" /I:T /G
+  "<group>:CC;computer"`. The class's schema GUID is read from the schema
+  partition. A rule counts as "the same" only when its whole scope matches:
+  group, class GUID, allow, inherit to all objects below, and no inherited
+  object type (a rule that reaches only one child type is narrower and is
+  left alone). The rule is added only when no such rule already holds the
+  right (`changed: false` otherwise). **`msad.ou.revoke-create-child`** takes
+  only the "create child" right away from the rules with that scope. A rule
+  that also holds other rights (for example "delete child") is written back
+  without the "create child" bit, so the other rights stay. Every other rule
+  stays as it is. Both ops read the permissions back after the save, fail when
+  the saved state is not what they set, and return it as `rule_present`.
+  Tests check the PowerShell text the ops build; there is no Windows server
+  in the test run.
+
+Code: `ops_domain_config.py`, `ops_groups.py`, `ops_ou_access.py`. Tests:
+`backend/tests/test_connectors_windows_dc_build_ops.py`.
+
+### Steps of a build that are not here yet
+
+- **Making the server the first DC of a new forest** (`Install-ADDSForest`).
+  It needs the recovery-mode password. The password can now travel on
+  standard input (`pwsh_run(stdin=...)`, as `msad.user.set-password` does).
+  What is still missing is the multi-step part: check the prerequisites,
+  promote, wait for the restart, check the domain.
+- **A certificate for LDAP on port 636.** A self-signed certificate is only
+  useful when the clients trust it, and how the DC picks it up could not be
+  checked without a Windows server. It needs its own decision.
+
+## Set a password (`msad.user.set-password`)
+
+Sets a new password on one account and, by default, enables it. This is the
+step after `msad.user.create`, which makes a disabled account without a
+password. It also resets a password.
+
+| Parameter | Meaning |
+|---|---|
+| `identity` | The account: sAMAccountName, DN, GUID or SID. |
+| `password_ref` | Where the password is in the secret store: `"<vault-path>#<field>"`, the same form as `secret_env` of `linux.script.run`. Never the password itself. |
+| `enable` | Run `Enable-ADAccount` after the password is set. Default `true`. |
+
+How the password travels:
+
+1. The call waits for a person to approve it. The approval row, the audit row
+   and the broadcast hold only `password_ref`. The op is pinned as a
+   credential write (`_CREDENTIAL_WRITE_OPS` in `broadcast/events.py`), so the
+   approval input is stored encrypted and the broadcast shows no params. Its
+   own preview shows the approver the account, the reference and `enable`.
+2. When the approved call runs, the handler reads the value from Vault under
+   the operator's identity, through `SshConnector._resolve_secret` (the one
+   Vault seam of the SSH connectors). A missing path or field stops the op
+   before anything runs on the server. The error names the reference, never a
+   value.
+3. The value is base64-encoded and sent on standard input
+   (`pwsh_run(stdin=...)` -> `SshConnector._run_command(stdin=...)`). Base64
+   keeps non-ASCII characters safe from the server's console code page. The
+   value is not on the command line, not in a log line and not in the flight
+   recorder span (the span records only the command and the result).
+4. The fixed script reads the line with `$input`, makes a `SecureString` and
+   runs `Set-ADAccountPassword -Reset`, then `Enable-ADAccount`, then reads the
+   account back.
+
+The result is `{identity, sam_account_name, enabled, password_last_set,
+op_class: "write"}`. It holds no password. An admin reset does not check the
+password history or minimum age, so the same call can run twice with the same
+result. The password must still meet the domain's password rules; if it does
+not, the cmdlet fails and the op returns the error.
+
+Code: `ops_password.py`. Tests: `backend/tests/test_connectors_msad_set_password.py`.
 
 ## Password age and expiry (`msad.user.password-expiry`)
 
@@ -209,7 +309,7 @@ carry `PasswordLastSet` and `PasswordExpires` as ISO 8601 text (see
   attributes: `product="msad"`, `version="2022.x"`, `impl_id="msad-ssh"`,
   `POWERSHELL_EXECUTABLE="powershell"`, `POWERSHELL_SCRIPT_PREFIX` (the
   `$ProgressPreference` guard), `POWERSHELL_LOG_EVENT="msad_pwsh_executed"`. Ships
-  `fingerprint`, `probe`, `about`, the 28 bound-method op shims,
+  `fingerprint`, `probe`, `about`, the 33 bound-method op shims,
   `register_operations`, and the operator-less `execute` dispatcher shim.
 - **Shared pwsh transport** (`_shared/pwsh.py`, #3260) — `pwsh_run`,
   `ps_single_quote` (the `shlex.quote` analogue), `encode_pwsh_command`,
@@ -344,13 +444,13 @@ credential material in any script; and destructive ops on the `dangerous` +
 (`_StubTarget`, `_completed_process`, `patch.object(connector, "_run_command",
 AsyncMock(...))`); assertions decode the `-EncodedCommand` base64 back to the
 script text. Covers the transport (`powershell` + `$ProgressPreference`), the
-registry-triple round-trip, the 28-op surface + safety-tier + group-coverage
+registry-triple round-trip, the 35-op surface + safety-tier + group-coverage
 invariants, every op group's script construction, the injection-safety escape on
 every parameterized script (identity / member / search query / OU DN —
 single-quote doubling), the `user.search` script-block filter form, the
 `limit`/`-ResultSetSize` validation, the password-expiry date math (both special
 values, an expired password, missing values), the secret-hygiene invariant (no
-secret-value parameter on any op; no `password-reset` op; passwordless create),
+secret-value parameter on any op; passwordless create; the password set takes only a reference),
 the `about` fingerprint mapping, and the full six-reason probe matrix. The global
 `test_flight_recorder_typed_spans.py` conformance sweep lists `msad-ssh` in
 `_EXPECTED_TYPED_IMPLS`. **No spec-reconcile lane** — the cmdlet surface ships no
@@ -368,14 +468,10 @@ generated Go client knows the token).
 
 ## Known issues / scope
 
-- **Password provisioning / reset** is not shipped (create is passwordless →
-  disabled; there is no `password-reset` op) — a Vault-minted-password flow
-  (rke2 `token.rotate` mold) is a follow-up. See the in-task decision above.
 - **Jump-host / `-Server` targeting** is deferred — the SSH target must itself be
   a domain controller. See the in-task decision above.
-- **Group creation** and **OU deletion** are out of scope for this cut (the issue
-  enumerates group add/remove-member + delete, and ou list/create/move); they are
-  natural follow-ups when a consumer needs them.
+- **OU deletion** is out of scope for this cut; it is a natural follow-up when a
+  consumer needs it.
 - **Consumer proof against the live `c1sql-dc1` DC is an OPEN acceptance
   criterion** — the c1sql1 domain-controller VM/probe path is not reachable from
   this build; the probe + governed guarded-write (e.g. group-member add) proof is

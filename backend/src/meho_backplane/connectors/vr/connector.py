@@ -9,7 +9,7 @@ at ``/api/rest/vr/v2``.
 
 The login, the session cache, the version read and both operations are
 shared with the SRM connector: both APIs are served by the same REST API
-gateway (:class:`~meho_backplane.connectors._shared.dr_rest.DrRestConnector`).
+gateway (:class:`~meho_backplane.connectors.vmware_shared.dr_rest.DrRestConnector`).
 This class sets the vSphere Replication paths.
 
 Login
@@ -17,13 +17,16 @@ Login
 
 1. ``POST /api/rest/vr/v2/session`` with HTTP Basic: the vCenter single
    sign-on account of the vSphere Replication site, read from Vault.
-2. The JSON answer carries ``session_id``. It is cached per target and
-   tenant (``target_cache_key``), so on a 9.1 appliance registered once
-   as ``srm`` and once as ``vr`` the two targets never share a session.
+2. The JSON answer carries ``session_id``. It is cached per credential
+   (``credential_cache_key``: tenant, secret and login host), so two
+   ``vr`` targets that share one credential share one session. The
+   ``srm`` and ``vr`` connectors keep separate caches, so a 9.1 appliance
+   registered once as ``srm`` and once as ``vr`` keeps two sessions.
 3. Every later call sends the id in the ``x-dr-session`` header.
 4. On ``401`` from a later call the dispatcher calls
-   ``invalidate_session``, which drops only this target's session, and
-   dispatches once more; the next call logs in again.
+   ``invalidate_session`` with the rejected request. The session is
+   dropped only when that request sent it, so a late ``401`` never drops
+   a newer session. The dispatcher then runs the call once more.
 
 Version
 -------
@@ -36,13 +39,16 @@ backs ``fingerprint`` and the ``vr.api_file.get`` answer. The operation
 Operations
 ----------
 
-``vr.about`` and ``vr.api_file.get``. The entry methods are defined on
-this class and call the shared code (``server_about`` on the base class
-and :func:`~meho_backplane.connectors._shared.dr_api_file.dr_api_file_get`).
-Defining them here, not on the base class, is what keeps a ``vr.*``
-operation from running on an ``srm`` target: the stored handler names
-this class, and the dispatcher binds it only to a ``VrConnector``. Both
-operations exist on 8.8, 9.0 and 9.1, so no operation needs a version
+``vr.about`` and ``vr.api_file.get`` call the shared code
+(``server_about`` on the base class and
+:func:`~meho_backplane.connectors.vmware_shared.dr_api_file.dr_api_file_get`).
+``vr.pairing.list``, ``vr.replication.list``, ``vr.replication.issues``,
+``vr.vm.check`` and ``vr.task.get`` call the bodies in
+:mod:`meho_backplane.connectors.vr.reads`. The entry methods are defined
+on this class, not on the base class: that is what keeps a ``vr.*``
+operation from running on an ``srm`` target. The stored handler names
+this class, and the dispatcher binds it only to a ``VrConnector``. Every
+operation exists on 8.8, 9.0 and 9.1, so no operation needs a version
 check yet.
 """
 
@@ -51,8 +57,8 @@ from __future__ import annotations
 from typing import Any
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.dr_api_file import dr_api_file_get
-from meho_backplane.connectors._shared.dr_rest import DrRestConnector, DrTargetLike
+from meho_backplane.connectors.vmware_shared.dr_api_file import dr_api_file_get
+from meho_backplane.connectors.vmware_shared.dr_rest import DrRestConnector, DrTargetLike
 
 __all__ = ["API_BASE", "API_FILES", "VrConnector"]
 
@@ -91,5 +97,45 @@ class VrConnector(DrRestConnector):
     async def api_file_get(
         self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
-        """``vr.api_file.get``; the body is :func:`dr_api_file_get` in ``_shared/dr_api_file``."""
+        """``vr.api_file.get``; the body is ``vmware_shared.dr_api_file.dr_api_file_get``."""
         return await dr_api_file_get(self, operator, target, params)
+
+    async def pairing_list(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vr.pairing.list``; the body is ``vr.reads.pairing_list_impl``."""
+        from meho_backplane.connectors.vr.reads import pairing_list_impl
+
+        return await pairing_list_impl(self, operator, target, params)
+
+    async def replication_list(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vr.replication.list``; the body is ``vr.reads.replication_list_impl``."""
+        from meho_backplane.connectors.vr.reads import replication_list_impl
+
+        return await replication_list_impl(self, operator, target, params)
+
+    async def replication_issues(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vr.replication.issues``; the body is ``vr.reads.replication_issues_impl``."""
+        from meho_backplane.connectors.vr.reads import replication_issues_impl
+
+        return await replication_issues_impl(self, operator, target, params)
+
+    async def vm_check(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vr.vm.check``; the body is ``vr.reads.vm_check_impl``."""
+        from meho_backplane.connectors.vr.reads import vm_check_impl
+
+        return await vm_check_impl(self, operator, target, params)
+
+    async def task_get(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vr.task.get``; the body is ``vr.reads.task_get_impl``."""
+        from meho_backplane.connectors.vr.reads import task_get_impl
+
+        return await task_get_impl(self, operator, target, params)

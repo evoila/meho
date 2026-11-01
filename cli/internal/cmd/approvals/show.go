@@ -172,14 +172,30 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 	}
 	fmt.Fprintf(w, "Params hash:  %s\n", d.ParamsHash)
 	fmt.Fprintf(w, "Created:      %s\n", d.CreatedAt)
+	// The MEHO release the request was made under (#5030). An approval
+	// covers one exact release; an update ends waiting requests.
+	if d.ReleaseId != nil && *d.ReleaseId != "" {
+		fmt.Fprintf(w, "Release:      %s\n", *d.ReleaseId)
+	}
 	if d.ExpiresAt != nil {
 		fmt.Fprintf(w, "Expires:      %s\n", *d.ExpiresAt)
+	}
+	// Why an expired request expired, with the advice to ask again (#5030).
+	if d.ExpiredMessage != nil && *d.ExpiredMessage != "" {
+		fmt.Fprintf(w, "Expired:      %s\n", *d.ExpiredMessage)
 	}
 	if d.ReviewedBy != nil {
 		fmt.Fprintf(w, "Reviewed by:  %s\n", principalLabel(*d.ReviewedBy, d.ReviewedByName))
 	}
 	if d.DecidedAt != nil {
 		fmt.Fprintf(w, "Decided at:   %s\n", *d.DecidedAt)
+	}
+	// Withdrawn by the sender (#4987): not a decision, so no reviewer.
+	if d.WithdrawnAt != nil {
+		fmt.Fprintf(w, "Withdrawn:    by the sender at %s\n", *d.WithdrawnAt)
+	}
+	if d.WithdrawReason != nil && *d.WithdrawReason != "" {
+		fmt.Fprintf(w, "Reason:       %s\n", *d.WithdrawReason)
 	}
 	// Delegated decision (#3692): the reviewer acted on another human's
 	// written instruction, read off the decision audit row.
@@ -189,6 +205,7 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 		fmt.Fprintf(w, "Refs:         %s\n", strings.Join(dl.Refs, ", "))
 	}
 	printRunOutcome(w, d)
+	printResultHint(w, d)
 	if d.ProposedEffect != nil {
 		b, _ := json.MarshalIndent(d.ProposedEffect, "  ", "  ")
 		fmt.Fprintf(w, "Effect:\n  %s\n", string(b))
@@ -217,8 +234,25 @@ func printRunOutcome(w io.Writer, d *api.ApprovalRequestView) {
 	if o.ErrorCode != nil {
 		fmt.Fprintf(w, "Error code:   %s\n", *o.ErrorCode)
 	}
+	// The next step a failed multi-step operation names (#5377), for
+	// example the VM question that holds the change.
+	if o.Guidance != nil && *o.Guidance != "" {
+		fmt.Fprintf(w, "Next step:    %s\n", *o.Guidance)
+	}
 	if o.AuditId != nil {
 		fmt.Fprintf(w, "Run audit:    %s (meho audit show %s)\n", o.AuditId.String(), o.AuditId.String())
+	}
+}
+
+// printResultHint names the command that prints the output of a run
+// that is done (#5313). Only the sender can read it.
+func printResultHint(w io.Writer, d *api.ApprovalRequestView) {
+	if d.ResultState == nil {
+		return
+	}
+	switch *d.ResultState {
+	case api.ApprovalResultStateExecuted, api.ApprovalResultStateFailed:
+		fmt.Fprintf(w, "Run output:   meho approvals result %s (only the sender can read it)\n", d.Id.String())
 	}
 }
 

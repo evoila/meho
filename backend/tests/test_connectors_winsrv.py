@@ -158,7 +158,7 @@ def test_connector_id_triple_round_trips() -> None:
 
 def test_op_surface_ids_and_safety_tiers() -> None:
     by_id = {op.op_id: op for op in WINSRV_OPS}
-    assert len(by_id) == 23
+    assert len(by_id) == 26
     safe = {k for k, v in by_id.items() if v.safety_level == "safe"}
     caution = {k for k, v in by_id.items() if v.safety_level == "caution"}
     dangerous = {k for k, v in by_id.items() if v.safety_level == "dangerous"}
@@ -171,17 +171,32 @@ def test_op_surface_ids_and_safety_tiers() -> None:
         # blast-radius preview is required at this tier).
         "winsrv.feature.remove",
     }
-    # Every dangerous op requires approval; nothing else does.
-    assert {k for k, v in by_id.items() if v.requires_approval} == dangerous
+    # Every dangerous op requires approval, and so does the time-source change.
+    assert {k for k, v in by_id.items() if v.requires_approval} == dangerous | {"winsrv.time.set"}
+    assert "winsrv.time.set" in caution
+    assert "winsrv.time.get" in safe
     assert "winsrv.feature.install" in caution
     assert "winsrv.feature.remove" not in caution
     assert "winsrv.storage.disk.format" in caution
-    assert {"winsrv.about", "winsrv.service.list", "winsrv.storage.disk.list"} <= safe
+    assert {
+        "winsrv.about",
+        "winsrv.service.list",
+        "winsrv.storage.disk.list",
+        "winsrv.system.hardware",
+    } <= safe
 
 
 def test_every_group_has_a_curated_when_to_use() -> None:
     groups = {op.group_key for op in WINSRV_OPS}
-    assert groups == {"system", "services", "features", "power", "localusers", "storage"}
+    assert groups == {
+        "system",
+        "services",
+        "features",
+        "power",
+        "localusers",
+        "storage",
+        "time",
+    }
     assert groups <= set(WINSRV_WHEN_TO_USE_BY_GROUP)
 
 
@@ -395,7 +410,7 @@ async def test_power_rejects_negative_delay() -> None:
 
 #: Messages that break the ``shutdown.exe`` message rule: a double quote (ASCII
 #: or typographic), a backslash, a control character (C0, DEL, C1), a leading
-#: ``/`` or ``-``, or more than 512 characters.
+#: whitespace, ``/`` or ``-``, or more than 512 characters.
 _BAD_POWER_MESSAGES: tuple[str, ...] = (
     'say "hi"',
     "curly \u201chi\u201d",
@@ -410,6 +425,11 @@ _BAD_POWER_MESSAGES: tuple[str, ...] = (
     "c1\x9fhere",
     "/starts with a slash",
     "-starts with a dash",
+    " /f",
+    " -f",
+    "  /starts after spaces",
+    " starts with a space",
+    "\u00a0/no-break space first",
     "x" * 513,
 )
 
@@ -465,6 +485,16 @@ async def test_power_good_message_is_one_quoted_argument(message: str) -> None:
         await winsrv_power_reboot(connector, _TARGET, {"message": message})
     script = _script_from_call(run_mock)
     assert f"shutdown.exe /r /t 15 /c {ps_single_quote(message)}; " in script
+
+
+@pytest.mark.parametrize("op_id", ["winsrv.power.reboot", "winsrv.power.shutdown"])
+def test_power_message_hint_states_the_rule(op_id: str) -> None:
+    """The agent hint names the same message rule as the parameter schema."""
+    op = next(op for op in WINSRV_OPS if op.op_id == op_id)
+    hint = op.llm_instructions["parameter_hints"]["message"]
+    for part in ("512 characters", "double quotes", "backslashes", "control characters"):
+        assert part in hint
+    assert "must not start with whitespace, / or -" in hint
 
 
 # ---------------------------------------------------------------------------

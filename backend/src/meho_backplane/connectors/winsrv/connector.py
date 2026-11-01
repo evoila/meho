@@ -275,6 +275,14 @@ class WinsrvConnector(SshConnector):
 
         return await _h(self, target, params, operator)
 
+    async def winsrv_hardware(
+        self, target: Target, params: dict[str, Any], operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``winsrv.system.hardware``."""
+        from meho_backplane.connectors.winsrv.ops_hardware import winsrv_hardware as _h
+
+        return await _h(self, target, params, operator)
+
     async def winsrv_uptime(
         self, target: Target, params: dict[str, Any], operator: Operator | None = None
     ) -> dict[str, Any]:
@@ -450,6 +458,24 @@ class WinsrvConnector(SshConnector):
     ) -> dict[str, Any]:
         """Bound-method shim for ``winsrv.storage.disk.format`` (caution)."""
         from meho_backplane.connectors.winsrv.ops_storage import winsrv_disk_format as _h
+
+        return await _h(self, target, params, operator)
+
+    # -- time group shims ---------------------------------------------------
+
+    async def winsrv_time_get(
+        self, target: Target, params: dict[str, Any], operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``winsrv.time.get``."""
+        from meho_backplane.connectors.winsrv.ops_time import winsrv_time_get as _h
+
+        return await _h(self, target, params, operator)
+
+    async def winsrv_time_set(
+        self, target: Target, params: dict[str, Any], operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``winsrv.time.set`` (caution, approval)."""
+        from meho_backplane.connectors.winsrv.ops_time import winsrv_time_set as _h
 
         return await _h(self, target, params, operator)
 

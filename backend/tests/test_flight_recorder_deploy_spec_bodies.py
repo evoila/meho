@@ -12,7 +12,9 @@ These operations send a body with passwords to the appliance:
   ``installer.sddc.bringup.start``, ``installer.sddc.bringup.retry`` and the
   multi-step ``installer.composite.sddc.bringup`` send the SddcSpec, which
   holds the core passwords. ``installer.system.depot.set`` sends the depot
-  password, and the answer can echo it.
+  password, and the answer can echo it. ``installer.system.proxy.set`` sends
+  the proxy password and ``installer.sddc.resources.calculate`` the SddcSpec
+  passwords; both read them from Vault (faked here).
 
 Each of these operations carries the tag ``credential``. Its word is a secret
 tag word of the flight recorder, so a trace keeps no request or answer body of
@@ -30,8 +32,9 @@ checks:
   value.
 
 A control runs the same case after it removes the tag from the stored
-operation. Then the made-up password is in the trace and in the agent's copy,
-so the checks above are not empty.
+operation. Then the trace keeps the bodies, so the checks above are not
+empty. The made-up password is still not in the trace: it sits under a
+secret-named field, and the trace scrub replaces such values (#5031).
 
 All values are made up, the hosts use the reserved ``.invalid`` domain, and no
 live system is called.
@@ -76,9 +79,14 @@ from meho_backplane.connectors.vcf_installer import (
     INSTALLER_SPEC_VALIDATE_OP_ID,
     INSTALLER_VERSION,
     InstallerConnector,
+    _secret_refs,
     register_installer_composite_operations,
     register_installer_typed_operations,
 )
+from meho_backplane.connectors.vcf_installer.resources_calc import (
+    INSTALLER_RESOURCES_CALCULATE_OP_ID,
+)
+from meho_backplane.connectors.vcf_installer.system_settings import INSTALLER_PROXY_SET_OP_ID
 from meho_backplane.connectors.vcf_installer.typed_writes import INSTALLER_DEPOT_SET_OP_ID
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
@@ -253,6 +261,46 @@ _CASES = (
         _Call("PUT", "/v1/system/settings/depot", 200, _depot_settings()),
         approved=True,
     ),
+    # The proxy password comes from Vault and rides the request body.
+    _installer_case(
+        INSTALLER_PROXY_SET_OP_ID,
+        {
+            "enabled": True,
+            "host": "proxy.test.invalid",
+            "port": 3128,
+            "username": "<proxy-user>",
+            "password_secret_ref": "kv/proxy",
+        },
+        _Call("PATCH", "/v1/system/proxy-configuration", 202, _TASK),
+        approved=True,
+    ),
+    # The SddcSpec passwords come from Vault and ride the request body.
+    _installer_case(
+        INSTALLER_RESOURCES_CALCULATE_OP_ID,
+        {
+            "spec": {"sddcId": "<sddc-id>", "vcenterSpec": {"vcenterHostname": "<vcenter-fqdn>"}},
+            "password_refs": [
+                {"pointer": "/vcenterSpec/rootVcenterPassword", "secret_ref": "kv/vc-root"}
+            ],
+        },
+        _Call(
+            "POST",
+            "/v1/sddcs/resources-calculation",
+            202,
+            {"id": "calc-0001", "executionStatus": "COMPLETED", "resultStatus": "SUCCEEDED"},
+        ),
+        approved=False,
+    ),
+)
+
+
+#: The cases where the tag alone keeps the body out. The proxy change and the
+#: resource calculation are also pinned as credential writes in
+#: ``broadcast/events.py``, which keeps their bodies out without the tag too.
+_TAG_ONLY_CASES = tuple(
+    case
+    for case in _CASES
+    if case.op_id not in {INSTALLER_PROXY_SET_OP_ID, INSTALLER_RESOURCES_CALCULATE_OP_ID}
 )
 
 
@@ -288,6 +336,16 @@ def _reset_module_state() -> Iterator[None]:
     reset_handler_cache()
     clear_registry()
     reset_flight_recorder_config_cache_for_testing()
+
+
+@pytest.fixture(autouse=True)
+def _fake_vault(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every Vault path an operation names holds the made-up password."""
+
+    async def _load(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"password": _PASSWORD}
+
+    monkeypatch.setattr(_secret_refs, "load_param_secret_data", _load)
 
 
 @pytest.fixture(autouse=True)
@@ -373,6 +431,7 @@ async def _dispatch(case: _Case) -> Any:
     target = _Target(product=case.product, version=case.version, host=case.host)
     async with respx.mock(base_url=f"https://{case.host}", assert_all_called=False) as mock:
         mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "spec-trace-access-token"})
+        mock.get("/v1/tasks").respond(200, json={"elements": []})
         routes = [
             mock.request(call.method, call.path).respond(call.status, json=call.answer)
             for call in case.calls
@@ -487,12 +546,16 @@ async def _drop_the_tag(op_id: str) -> None:
         await s.commit()
 
 
-@pytest.mark.parametrize("case", _CASES, ids=lambda case: case.op_id)
+@pytest.mark.parametrize("case", _TAG_ONLY_CASES, ids=lambda case: case.op_id)
 @pytest.mark.asyncio
 async def test_without_the_tag_the_trace_would_hold_the_body(
     case: _Case, session: AsyncSession, result_store: MemoryResultStore
 ) -> None:
-    """Control: the tag is what keeps the body out, so the test above is not empty."""
+    """Control: the tag is what keeps the body out, so the test above is not empty.
+
+    Without the tag the bodies are recorded. The password is still masked,
+    because it sits under a secret-named field (#5031).
+    """
     await _register_operations(session)
     await _drop_the_tag(case.op_id)
 
@@ -501,5 +564,6 @@ async def test_without_the_tag_the_trace_would_hold_the_body(
     assert result.audit_id is not None
     _, spans = await _stored_trace(result.audit_id)
     assert all(span.attributes["body_recorded"] for span in _vendor_spans(spans, case))
-    assert _PASSWORD in _as_text(spans)
-    assert _PASSWORD in await _agent_copy(result)
+    assert "[REDACTED:param_name]" in _as_text(spans)
+    assert _PASSWORD not in _as_text(spans)
+    assert _PASSWORD not in await _agent_copy(result)

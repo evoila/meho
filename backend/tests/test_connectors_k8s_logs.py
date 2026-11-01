@@ -52,6 +52,7 @@ from meho_backplane.connectors.kubernetes.ops_logs import (
     PodNotFoundError,
     k8s_logs,
     parse_duration,
+    resolve_pod_and_container,
     truncate_lines_to_byte_cap,
 )
 
@@ -113,15 +114,23 @@ def _make_operator() -> Operator:
     )
 
 
-def _pod_obj(name: str, containers: list[str]) -> MagicMock:
+def _named_mocks(names: list[str]) -> list[MagicMock]:
+    # ``MagicMock(name=...)`` sets the mock's repr-name, not its
+    # ``.name`` attribute; assign explicitly.
+    mocks = [MagicMock() for _ in names]
+    for mock_container, cname in zip(mocks, names, strict=True):
+        mock_container.name = cname
+    return mocks
+
+
+def _pod_obj(
+    name: str, containers: list[str], init_containers: list[str] | None = None
+) -> MagicMock:
     """Stub for ``V1Pod`` -- just the attrs the handler reads."""
     pod = MagicMock()
     pod.metadata.name = name
-    pod.spec.containers = [MagicMock(name=c) for c in containers]
-    # ``MagicMock(name=...)`` sets the mock's repr-name, not its
-    # ``.name`` attribute; assign explicitly.
-    for mock_container, cname in zip(pod.spec.containers, containers, strict=True):
-        mock_container.name = cname
+    pod.spec.containers = _named_mocks(containers)
+    pod.spec.init_containers = _named_mocks(init_containers or [])
     return pod
 
 
@@ -381,6 +390,65 @@ async def test_k8s_logs_unknown_container_in_multi_container_pod_errors() -> Non
             },
         )
     assert exc.value.containers == ["discovery", "istio-proxy"]
+
+
+@pytest.mark.asyncio
+async def test_k8s_logs_init_container_name_is_accepted() -> None:
+    """An init container (e.g. a migration step) can be named to read its logs."""
+    connector = _make_connector()
+    pods = _pod_list([_pod_obj("api-1", ["api", "proxy"], init_containers=["migrate"])])
+    config_patch, core_v1_patch, core_v1 = _patch_api(list_pods=pods, log_body="migrated\n")
+    with config_patch, core_v1_patch:
+        result = await k8s_logs(
+            connector,
+            _TARGET,
+            _make_operator(),
+            {"pod_name": "api-1", "namespace": "app", "container": "migrate"},
+        )
+    assert result["container"] == "migrate"
+    assert result["lines"] == ["migrated"]
+    assert core_v1.read_namespaced_pod_log.call_args.kwargs["container"] == "migrate"
+
+
+@pytest.mark.asyncio
+async def test_k8s_logs_ambiguity_error_lists_init_containers_after_app_containers() -> None:
+    connector = _make_connector()
+    pods = _pod_list([_pod_obj("api-1", ["api", "proxy"], init_containers=["migrate"])])
+    config_patch, core_v1_patch, _core_v1 = _patch_api(list_pods=pods, log_body="x\n")
+    with config_patch, core_v1_patch, pytest.raises(MultiContainerAmbiguityError) as exc:
+        await k8s_logs(
+            connector,
+            _TARGET,
+            _make_operator(),
+            {"pod_name": "api-1", "namespace": "app", "container": "nope"},
+        )
+    assert exc.value.containers == ["api", "proxy", "migrate"]
+
+
+@pytest.mark.asyncio
+async def test_k8s_logs_one_app_container_with_init_container_auto_picks_app() -> None:
+    """Init containers never make the pick ambiguous; the app container is still chosen."""
+    connector = _make_connector()
+    pods = _pod_list([_pod_obj("api-1", ["api"], init_containers=["migrate"])])
+    config_patch, core_v1_patch, core_v1 = _patch_api(list_pods=pods, log_body="x\n")
+    with config_patch, core_v1_patch:
+        result = await k8s_logs(
+            connector, _TARGET, _make_operator(), {"pod_name": "api-1", "namespace": "app"}
+        )
+    assert result["container"] == "api"
+    assert core_v1.read_namespaced_pod_log.call_args.kwargs["container"] == "api"
+
+
+@pytest.mark.asyncio
+async def test_resolve_pod_and_container_rejects_init_container_by_default() -> None:
+    """Other callers (k8s.exec) keep the app-container-only set."""
+    core_v1 = MagicMock()
+    core_v1.list_namespaced_pod = AsyncMock(
+        return_value=_pod_list([_pod_obj("api-1", ["api"], init_containers=["migrate"])])
+    )
+    with pytest.raises(MultiContainerAmbiguityError) as exc:
+        await resolve_pod_and_container(core_v1, "app", "api-1", "migrate")
+    assert exc.value.containers == ["api"]
 
 
 # ---------------------------------------------------------------------------

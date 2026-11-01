@@ -57,8 +57,12 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import (
+    credential_cache_key,
+    target_cache_key,
+)
 from meho_backplane.connectors._shared.profile_auth import SESSION_SCHEME_SPECS
+from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -71,6 +75,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.vcf_installer import typed_lifecycle as _lifecycle
 from meho_backplane.connectors.vcf_installer.profile import INSTALLER_EXECUTION_PROFILE
 from meho_backplane.connectors.vcf_installer.session import (
     InstallerCredentialsLoader,
@@ -148,7 +153,7 @@ class InstallerConnector(HttpConnector):
         super().__init__()
         self._creds_cache: dict[tuple[str, str], dict[str, str]] = {}
         self._creds_lock = asyncio.Lock()
-        self._session_tokens: dict[tuple[str, str], str] = {}
+        self._session_tokens: dict[tuple[str, ...], str] = {}
         self._session_lock = asyncio.Lock()
         self._credentials_loader: InstallerCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
@@ -179,7 +184,7 @@ class InstallerConnector(HttpConnector):
         always re-establishes and its token is never written to the shared cache
         (#1008).
         """
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None and not is_system_operator(operator):
@@ -202,14 +207,23 @@ class InstallerConnector(HttpConnector):
             _log.info("installer_session_established", target=target.name, host=target.host)
             return token
 
-    async def invalidate_session(self, target: InstallerTargetLike) -> None:
+    async def invalidate_session(
+        self, target: InstallerTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Public duck-typed session-eviction hook for the dispatch path (#2067)."""
-        await self._invalidate_session(target)
+        await self._invalidate_session(target, rejected=rejected)
 
-    async def _invalidate_session(self, target: InstallerTargetLike) -> None:
+    async def _invalidate_session(
+        self, target: InstallerTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Drop the cached session token for *target* (credential cache left intact)."""
         async with self._session_lock:
-            self._session_tokens.pop(target_cache_key(target), None)
+            drop_rejected_token(
+                self._session_tokens,
+                credential_cache_key(target),
+                rejected,
+                lambda token: {"Authorization": f"Bearer {token}"},
+            )
 
     async def invalidate_credentials(self, target: InstallerTargetLike) -> None:
         """Public duck-typed credential-eviction hook for the dispatch path (#2396)."""
@@ -230,7 +244,7 @@ class InstallerConnector(HttpConnector):
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code not in _SESSION_EXPIRED_STATUSES:
                 raise
-            await self._invalidate_session(target)
+            await self._invalidate_session(target, rejected=exc.request)
         try:
             return await self._get_json(target, path, operator=operator, params=params)
         except httpx.HTTPStatusError as exc:
@@ -259,13 +273,16 @@ class InstallerConnector(HttpConnector):
         auth **before** the server processed it, so the first attempt had no
         effect and re-issuing once after a re-login cannot double-apply the write.
         Any other status propagates unretried.
+
+        With *rejected*, the token is dropped only when that request sent it;
+        a newer token another call just logged in for stays (#5033).
         """
         try:
             return await self._post_json(target, path, operator=operator, verb=verb, json=json)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code not in _SESSION_EXPIRED_STATUSES:
                 raise
-            await self._invalidate_session(target)
+            await self._invalidate_session(target, rejected=exc.request)
         try:
             return await self._post_json(target, path, operator=operator, verb=verb, json=json)
         except httpx.HTTPStatusError as exc:
@@ -528,6 +545,104 @@ class InstallerConnector(HttpConnector):
         )
 
         return await installer_bundles_download_impl(self, operator, target, params)
+
+    async def discovery_vcenter(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.discovery.vcenter`` shim — reuse check of a running vCenter."""
+        return await _lifecycle.installer_discovery_vcenter_impl(self, operator, target, params)
+
+    async def discovery_sddc_manager(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.discovery.sddc_manager`` shim — reuse check of an SDDC Manager."""
+        return await _lifecycle.installer_discovery_sddcm_impl(self, operator, target, params)
+
+    async def discovery_vcf_operations(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.discovery.vcf_operations`` shim — reuse check of VCF Operations."""
+        return await _lifecycle.installer_discovery_vcfops_impl(self, operator, target, params)
+
+    async def sddc_cancel(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.sddc.cancel`` shim — cancel a running bring-up task."""
+        return await _lifecycle.installer_sddc_cancel_impl(self, operator, target, params)
+
+    async def sddc_spec_get(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.sddc.spec.get`` shim — bring-up spec read, secrets replaced."""
+        return await _lifecycle.installer_sddc_spec_get_impl(self, operator, target, params)
+
+    async def appliance_info(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.appliance.info`` shim — appliance info read."""
+        return await _lifecycle.installer_appliance_info_impl(self, operator, target, params)
+
+    async def release_list(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.release.list`` shim — release list read."""
+        return await _lifecycle.installer_release_list_impl(self, operator, target, params)
+
+    async def system_proxy_get(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.proxy.get`` shim — proxy settings read (and job state)."""
+        from meho_backplane.connectors.vcf_installer.system_settings import installer_proxy_get_impl
+
+        return await installer_proxy_get_impl(self, operator, target, params)
+
+    async def system_proxy_set(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.proxy.set`` shim — proxy change."""
+        from meho_backplane.connectors.vcf_installer.system_settings import installer_proxy_set_impl
+
+        return await installer_proxy_set_impl(self, operator, target, params)
+
+    async def system_settings_get(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.settings.get`` shim — CEIP and system settings read."""
+        from meho_backplane.connectors.vcf_installer.system_settings import (
+            installer_settings_get_impl,
+        )
+
+        return await installer_settings_get_impl(self, operator, target, params)
+
+    async def system_settings_set(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.settings.set`` shim — CEIP and system settings change."""
+        from meho_backplane.connectors.vcf_installer.system_settings import (
+            installer_settings_set_impl,
+        )
+
+        return await installer_settings_set_impl(self, operator, target, params)
+
+    async def system_trusted_certificate_remove(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.trusted-certificates.remove`` shim — trust store remove."""
+        from meho_backplane.connectors.vcf_installer.system_settings import (
+            installer_trusted_certificate_remove_impl,
+        )
+
+        return await installer_trusted_certificate_remove_impl(self, operator, target, params)
+
+    async def sddc_resources_calculate(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.sddc.resources.calculate`` shim — resource calculation (9.1+)."""
+        from meho_backplane.connectors.vcf_installer.resources_calc import (
+            installer_resources_calculate_impl,
+        )
+
+        return await installer_resources_calculate_impl(self, operator, target, params)
 
     async def aclose(self) -> None:
         """Clear cached session tokens + credentials, then tear down the httpx pool."""

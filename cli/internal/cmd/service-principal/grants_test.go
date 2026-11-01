@@ -61,9 +61,6 @@ func TestBuildGrantCreateBodyRejectsUnsafeInput(t *testing.T) {
 	cases := []struct{ name, op, connector, target, product, pattern, wantMsg string }{
 		{"glob operation", "vmware.*", "vmware-rest-9.0", "", "", "", "globs are not allowed"},
 		{"glob connector", "vmware.vm.power", "vmware-*", "", "", "", "globs are not allowed"},
-		{"delete operation", "DELETE:/vcenter/vm", "vmware-rest-9.0", "", "", "", "delete grant is made in the web console"},
-		{"typed delete operation", "vmware.vm.delete", "vmware-rest-9.0", "", "", "", "only on an instance in sandbox mode"},
-		{"composite operation", "vmware.composite.vm.power", "vmware-rest-9.0", "", "", "", "is a composite"},
 		{"selector plus target", "vmware.vm.power", "vmware-rest-9.0", testGrantID, "vmware", "dc-*", "mutually exclusive"},
 		{"invalid target", "vmware.vm.power", "vmware-rest-9.0", "not-a-uuid", "", "", "not a valid UUID"},
 	}
@@ -75,6 +72,144 @@ func TestBuildGrantCreateBodyRejectsUnsafeInput(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantMsg) {
 				t.Fatalf("error %q does not say %q", err.Error(), tc.wantMsg)
+			}
+		})
+	}
+}
+
+func TestBuildGrantCreateBodyAllowsComposite(t *testing.T) {
+	body, err := buildGrantCreateBody("svc:automation", "vmware.composite.vm.create", "vmware-rest-9.0", "", "", "", "unattended build", "")
+	if err != nil {
+		t.Fatalf("a grant on a multi-step operation must be accepted: %v", err)
+	}
+	if body.OpId != "vmware.composite.vm.create" {
+		t.Errorf("body: %+v", body)
+	}
+	if !isCompositeOp(body.OpId) || isCompositeOp("vmware.vm.power") {
+		t.Error("isCompositeOp must match only op ids with .composite.")
+	}
+}
+
+func TestCreateCompositePrintsStepNote(t *testing.T) {
+	const note = "Each of its write steps needs its own grant too"
+	for _, tc := range []struct {
+		name     string
+		opID     string
+		jsonOut  bool
+		wantNote bool
+	}{
+		{name: "composite human output", opID: "vmware.composite.vm.create", wantNote: true},
+		{name: "composite json output", opID: "vmware.composite.vm.create", jsonOut: true, wantNote: true},
+		{name: "plain operation", opID: "vmware.vm.power", wantNote: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				if body["op_id"] != tc.opID {
+					t.Fatalf("op_id sent: %#v", body["op_id"])
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(`{"id":"` + testGrantID + `","tenant_id":"22222222-2222-2222-2222-222222222222","principal_sub":"svc:automation","op_id":"` + tc.opID + `","connector_id":"vmware-rest-9.0","target_id":null,"target_product":null,"target_name_pattern":null,"reason":"unattended build","created_by_sub":"operator","created_at":"2026-09-17T00:00:00Z","expires_at":null,"revoked_at":null,"revoked_by_sub":null}`))
+			}))
+			defer srv.Close()
+			seedCredentials(t, srv.URL)
+			cmd := NewGrantsCmd()
+			args := []string{"create", "--principal", "svc:automation", "--op-id", tc.opID, "--connector-id", "vmware-rest-9.0", "--reason", "unattended build"}
+			if tc.jsonOut {
+				args = append(args, "--json")
+			}
+			cmd.SetArgs(args)
+			var stdout, stderr bytes.Buffer
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("create: %v stderr=%s", err, stderr.String())
+			}
+			if tc.jsonOut {
+				var parsed map[string]any
+				if err := json.Unmarshal(stdout.Bytes(), &parsed); err != nil {
+					t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+				}
+				if got := strings.Contains(stderr.String(), note); got != tc.wantNote {
+					t.Errorf("note on stderr: got %v want %v; stderr=%q", got, tc.wantNote, stderr.String())
+				}
+				return
+			}
+			if !strings.Contains(stdout.String(), "created grant "+testGrantID) {
+				t.Errorf("stdout: %q", stdout.String())
+			}
+			if got := strings.Contains(stdout.String(), note); got != tc.wantNote {
+				t.Errorf("note on stdout: got %v want %v; stdout=%q", got, tc.wantNote, stdout.String())
+			}
+			if tc.wantNote && !strings.Contains(stdout.String(), "governed-subops?op_id="+tc.opID+"&connector_id=vmware-rest-9.0") {
+				t.Errorf("note must say where to list the steps: %q", stdout.String())
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("stderr must stay empty in human mode: %q", stderr.String())
+			}
+		})
+	}
+}
+
+// A delete operation is no longer refused by the CLI: only the server knows
+// whether MEHO_SANDBOX_DELETE_GRANTS_FROM_API is on, so the CLI sends the
+// request and shows the server's answer.
+func TestCreateDeleteGrantGoesToTheServer(t *testing.T) {
+	const opID = "DELETE:/vcenter/vm/{vm}"
+	const consoleOnly = "delete_grant_console_only: op 'DELETE:/vcenter/vm/{vm}' has a delete sign, so this is a delete grant. REST and the CLI refuse it unless MEHO_SANDBOX_DELETE_GRANTS_FROM_API is on."
+	for _, tc := range []struct {
+		name       string
+		status     int
+		wantStdout string
+		wantStderr string
+	}{
+		{name: "setting on", status: http.StatusCreated, wantStdout: "created grant " + testGrantID},
+		{name: "setting off", status: http.StatusForbidden, wantStderr: "MEHO_SANDBOX_DELETE_GRANTS_FROM_API"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				if body["op_id"] != opID || body["reason"] != "disposable test run" || body["expires_at"] != "2026-11-20T00:00:00Z" {
+					t.Fatalf("body sent: %#v", body)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				if tc.status == http.StatusForbidden {
+					detail, _ := json.Marshal(map[string]string{"detail": consoleOnly})
+					_, _ = w.Write(detail)
+					return
+				}
+				_, _ = w.Write([]byte(`{"id":"` + testGrantID + `","tenant_id":"22222222-2222-2222-2222-222222222222","principal_sub":"svc:test-runner","op_id":"DELETE:/vcenter/vm/{vm}","connector_id":"vmware-rest-9.0","target_id":null,"target_product":null,"target_name_pattern":null,"reason":"disposable test run","created_by_sub":"admin","created_at":"2026-10-28T00:00:00Z","expires_at":"2026-11-20T00:00:00Z","revoked_at":null,"revoked_by_sub":null,"delete_grant":true}`))
+			}))
+			defer srv.Close()
+			seedCredentials(t, srv.URL)
+			cmd := NewGrantsCmd()
+			cmd.SetArgs([]string{"create", "--principal", "svc:test-runner", "--op-id", opID, "--connector-id", "vmware-rest-9.0", "--reason", "disposable test run", "--expires", "2026-11-20T00:00:00Z"})
+			var stdout, stderr bytes.Buffer
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			err := cmd.Execute()
+			if tc.status == http.StatusCreated {
+				if err != nil {
+					t.Fatalf("create: %v stderr=%s", err, stderr.String())
+				}
+				if !strings.Contains(stdout.String(), tc.wantStdout) {
+					t.Errorf("stdout: %q", stdout.String())
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected an error for a 403 answer")
+			}
+			if !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr must show the server's text: %q", stderr.String())
 			}
 		})
 	}

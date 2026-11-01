@@ -146,6 +146,7 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     "k8s.deployment.info",
     "k8s.job.list",
     "k8s.job.info",
+    "k8s.workload.list",
     "k8s.service.list",
     "k8s.ingress.list",
     "k8s.configmap.list",
@@ -182,6 +183,16 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     # destructive and needs a preview hash).
     "k8s.secret.update",
     "k8s.secret.delete",
+    # List Secrets and look at one Secret: key names only, never a value.
+    "k8s.secret.list",
+    "k8s.secret.info",
+    # Check a Secret key against its Vault copy (safe; answers only
+    # same or different).
+    "k8s.secret.compare_to_ref",
+    # #3840 access checks and admission webhook read (safe reads).
+    "k8s.auth.can_i",
+    "k8s.auth.rules",
+    "k8s.admission_webhook.list",
 )
 
 

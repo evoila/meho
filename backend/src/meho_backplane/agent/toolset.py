@@ -29,7 +29,7 @@ Why the agent surface is meta-tools, not per-op tools
 =====================================================
 
 CLAUDE.md postulate 5 is load-bearing: the agent never sees vendor-specific
-tools (no ``vsphere.vm.list`` in the tool list). All execution flows through
+tools (no ``k8s.pod.list`` in the tool list). All execution flows through
 ``call_operation(connector_id, op_id, ...)``. So "connector-ops ∩ identity
 permissions" is **not** "register one Pydantic AI tool per connector op" —
 that would put vendor identifiers in tool names, which the architecture
@@ -52,7 +52,7 @@ can grow without a migration — the T2 design constraint):
 
     {
       "meta_tools": ["list_operation_groups", "search_operations", "call_operation"],
-      "connectors": ["vmware-rest-9.0", "vault-1.x"]
+      "connectors": ["k8s-1.x", "vault-1.x"]
     }
 
 * ``meta_tools`` — the allow-list of meta-tool names to register. Omitted /
@@ -143,6 +143,7 @@ from meho_backplane.agent.toolset_discovery import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import role_at_least
+from meho_backplane.mcp.tools.connector_admin import reduce_connector_list
 from meho_backplane.operations.meta_tools import (
     call_operation,
     list_operation_groups,
@@ -196,7 +197,7 @@ _OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = (
             "which operation to invoke: it narrows hundreds of operations to "
             "a handful of relevant groups, each with a `when_to_use` blurb. "
             "Argument: `connector_id` in `<impl_id>-<version>` form (e.g. "
-            '"vmware-rest-9.0", "vault-1.x") — not the bare product name.'
+            '"k8s-1.x", "vault-1.x") — not the bare product name.'
         ),
         parameter_schema={
             "type": "object",
@@ -206,7 +207,7 @@ _OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = (
                     "minLength": 1,
                     "description": (
                         "Connector identifier in `<impl_id>-<version>` form "
-                        '(e.g. "vmware-rest-9.0", "vault-1.x").'
+                        '(e.g. "k8s-1.x", "vault-1.x").'
                     ),
                 },
             },
@@ -378,6 +379,51 @@ def _extract_str_list(spec: dict[str, Any], key: str) -> list[str] | None:
     return value
 
 
+def _refuse_disallowed_connector(
+    tool_name: str,
+    connector_id: Any,
+    allowed_connectors: frozenset[str],
+    operator: Operator,
+) -> None:
+    """Raise :class:`ToolRefusedRetry` when *connector_id* is not allowed.
+
+    Mirrors the dispatcher's ``denied`` envelope shape but raises it as a
+    ModelRetry, so the model receives a tool-level retry prompt it can
+    reason about (pick an allowed connector) rather than a tool-execution
+    crash.
+    """
+    if connector_id in allowed_connectors:
+        return
+    _log.info(
+        "agent_tool_connector_denied",
+        meta_tool=tool_name,
+        connector_id=connector_id,
+        operator_sub=operator.sub,
+        tenant_id=str(operator.tenant_id),
+    )
+    raise ToolRefusedRetry(
+        f"connector_id {connector_id!r} is not in this agent's "
+        f"allowed connectors {sorted(allowed_connectors)!r}. Pick "
+        f"an allowed connector or stop."
+    )
+
+
+async def _finish_connector_list(
+    operator: Operator,
+    result: dict[str, Any],
+    allowed_connectors: frozenset[str] | None,
+) -> dict[str, Any]:
+    """Apply the allow-list to ``meho_connector_list`` rows, then reduce them.
+
+    The list is reduced like the MCP tool does: a long list comes back as a
+    result handle (#4121). The filter runs first, so the handle holds only
+    allowed rows.
+    """
+    if allowed_connectors is not None:
+        result = keep_allowed_connectors(result, allowed_connectors)
+    return await reduce_connector_list(operator, result)
+
+
 def _make_meta_tool(
     meta: MetaToolSpec,
     *,
@@ -442,29 +488,14 @@ def _make_meta_tool(
                 f"forbidden: {meta.name!r} requires a higher role. Do not retry it."
             )
         if is_connector_scoped and allowed_connectors is not None:
-            connector_id = arguments.get(_CONNECTOR_ID_ARG)
-            if connector_id not in allowed_connectors:
-                # Mirror the dispatcher's `denied` envelope shape but raise
-                # it as a ModelRetry so the model receives a tool-level
-                # retry prompt it can reason about (pick an allowed
-                # connector) rather than a tool-execution crash.
-                _log.info(
-                    "agent_tool_connector_denied",
-                    meta_tool=meta.name,
-                    connector_id=connector_id,
-                    operator_sub=ctx.deps.sub,
-                    tenant_id=str(ctx.deps.tenant_id),
-                )
-                raise ToolRefusedRetry(
-                    f"connector_id {connector_id!r} is not in this agent's "
-                    f"allowed connectors {sorted(allowed_connectors)!r}. Pick "
-                    f"an allowed connector or stop."
-                )
+            _refuse_disallowed_connector(
+                meta.name, arguments.get(_CONNECTOR_ID_ARG), allowed_connectors, ctx.deps
+            )
         call_arguments = dict(arguments)
         with connector_errors_reach_model():
             result = await handler(ctx.deps, call_arguments)
-        if is_connector_list and allowed_connectors is not None:
-            result = keep_allowed_connectors(result, allowed_connectors)
+        if is_connector_list:
+            result = await _finish_connector_list(ctx.deps, result, allowed_connectors)
         if is_call_operation and result.get("status") == "awaiting_approval":
             settings = get_settings()
             return await resume_or_surface_awaiting_approval(

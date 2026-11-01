@@ -40,9 +40,13 @@ dedupe where a dedupe applies.
   per-tenant enablement resolver.
 - `tenant.announce_gate_enabled` — the structured per-tenant policy flag
   (Boolean, default `False`), migration `0077`.
-- `caller_has_active_announce_claim(operator, *, op_id, target_name)`
-  (`broadcast/history.py`) — the shared active-claim scanner used by both
-  the advisory's announce heuristic and the gate.
+- `announce_claim_gap(operator, *, op_id, target_name)`
+  (`broadcast/history.py`) — the shared active-claim lookup. Returns
+  `None` when an active claim of the caller covers the op, else the
+  reason (`ClaimGap`): `no_claim`, `expired`, `other_target` or
+  `other_op_class`. The advisory uses the reason in its message.
+- `caller_has_active_announce_claim(operator, *, op_id, target_name)` —
+  the yes/no form of the same lookup, used by the gate.
 - `result_announce_required(op_id, remediation, duration_ms)`
   (`operations/_errors.py`) — the `denied` envelope the gate returns,
   `extras.error_code = "announce_required"`.
@@ -55,7 +59,7 @@ dedupe where a dedupe applies.
 dispatcher._reduce_and_audit_success(...)   # after audit + broadcast
   → build_target_activity_advisory(...)     # #2550 fragment (write-gated)
   → build_checks_alert_advisory(...)        # #2718 fragment (all classes)
-  → build_reflex_advisory(operator, op_id, target_name)   # this fragment
+  → build_reflex_advisory(operator, op_class, target_name)   # this fragment
       [gate — returns {} without any I/O when:]
         · settings.reflex_advisory_window_minutes == 0
         · resolve_agent_session_id() is None   # no MCP session (CLI etc.)
@@ -64,9 +68,9 @@ dispatcher._reduce_and_audit_success(...)   # after audit + broadcast
             agent_session_id == session AND
             path == "/mcp/tools/call/meho_broadcast_recent"
           → claim (session, "read_before_act") via SET NX EX → _READ_NUDGE
-        · announce-before-mutate:  classify_op(op_id) is write-class AND
-            not caller_has_active_announce_claim(...)
-          → claim (session, "announce_before_mutate") → _ANNOUNCE_NUDGE
+        · announce-before-mutate:  op_class is write-class AND
+            gap = announce_claim_gap(...) is not None
+          → claim (session, "announce_before_mutate") → _ANNOUNCE_NUDGES[gap]
   → wrap_ok_result(..., extras={**activity, **checks, **reflex})
 ```
 
@@ -80,9 +84,9 @@ response falls through to announce on the next.
 
 ```text
 dispatch(...)   # Step 4, verdict == AUTO_EXECUTE, not the _approved resume
-  → announce_gate_blocks(operator, op_id, safety_level, target_name)
+  → announce_gate_blocks(operator, op_class, safety_level, target_name)
       [returns None — no block — in order, cheapest first:]
-        · classify_op(op_id) not in WRITE_OP_CLASSES
+        · op_class not in WRITE_OP_CLASSES
         · _SAFETY_RANK[safety_level] < _SAFETY_RANK["caution"]
         · not announce_gate_enabled(tenant_id)        # cached, fail-open
         · caller_has_active_announce_claim(...)         # active claim covers it
@@ -123,14 +127,45 @@ dispatch(...)   # Step 4, verdict == AUTO_EXECUTE, not the _approved resume
   opted in AND the claim is absent.
 - **Bounded.** The read heuristic is one indexed `EXISTS` probe on
   `audit_log` (the `audit_log_agent_session_id_idx` b-tree). The announce
-  heuristic and the gate share one bounded newest-first `XREVRANGE`
-  (`caller_has_active_announce_claim`), capped at 100 entries over a
-  1440-minute window. The enablement flag is read through a 60s per-tenant
-  TTL cache. A read-class dispatch or a disabled tenant pays nothing on
-  the gate.
+  heuristic and the gate share one archive query (`announce_claim_gap`):
+  the caller's own `agent_announcement` rows of the last 1440 minutes,
+  newest first, at most 500 rows. The enablement flag is read through a
+  60s per-tenant TTL cache. A read-class dispatch or a disabled tenant
+  pays nothing on the gate.
 - **`0` disables the advisory.** `REFLEX_ADVISORY_WINDOW_MINUTES` (default
   30) short-circuits before session resolution or I/O when `0`. The gate
   has no global knob — it is OFF unless a tenant opts in.
+
+## Which claims count (#4091)
+
+The claim lookup reads the `agent_announcement` archive, the same record
+`meho_broadcast_recent` reads. So a claim that `meho_broadcast_recent`
+shows as active (`filter.active_only=true`) also silences the advisory
+and passes the gate.
+
+Before #4091 the lookup read the newest 100 entries of the tenant's
+Valkey stream. Those entries belong to every principal of the tenant (and
+before #3758 to every audited operation, sensor runs included). On a busy
+tenant the caller's claim dropped out of those 100 entries within
+minutes, and the advisory told the agent to announce again although its
+claim was still active. The stream is now only a wake-up signal for live
+watchers, and its write is allowed to fail, so it cannot be the record.
+
+A claim covers the op when it was published for the caller's principal,
+has not expired, declared the op's class (or no class), and names the
+op's target in `target` or `targets` (or names no target). Matching runs
+on the stored values, not on the untrusted-text wrap the read tools add.
+
+When no claim covers the op, the advisory says why, so the agent knows
+what to fix. If several reasons apply, the one closest to a covering
+claim wins:
+
+| Reason | What the agent has | What the message asks |
+|---|---|---|
+| `expired` | a claim for this op whose TTL ran out | announce again |
+| `other_op_class` | an active claim for this target, another `planned_op_class` | announce with the op's class |
+| `other_target` | active claims, none naming this target | announce with this target |
+| `no_claim` | no active claim at all | announce first |
 
 ## Enablement store — why a `tenant` column
 
@@ -153,16 +188,20 @@ administration, and a management verb is a clean follow-up.
   issue names). A session that only tailed the feed via
   `meho_broadcast_watch` still gets the read nudge.
 - **Coarse claim coverage (v1).** A claim covers an op when its declared
-  `planned_op_class` matches the op's `classify_op` class (or the claim
-  declared no class) and its target attribution covers the op (or either
-  is target-agnostic). A claim declared for a different write-class (e.g.
+  `planned_op_class` matches the op's class (or the claim declared no
+  class) and its target attribution covers the op (or either is
+  target-agnostic). The op's class is the class its audit row stores
+  (`descriptor_op_class`, see [broadcast.md](broadcast.md)). A claim declared for a different write-class (e.g.
   `write` vs `credential_write`) does not cover — a deliberate, documented
   v1 strictness.
-- **Bounded claim scan.** `caller_has_active_announce_claim` reads the
-  newest 100 stream entries in the 1440-minute window; a caller who
-  announced more than 100 events ago in a very busy tenant may fall off
-  the tail (an acceptable false-negative for an awareness nudge, and
-  unlikely for the announce-then-write flow the gate targets).
+- **Bounded claim lookup.** `announce_claim_gap` reads at most the
+  caller's newest 500 announcements of the last 1440 minutes. Other
+  principals' announcements never count toward that cap. Only a principal
+  that announces close to the rate limit all day can miss a claim it made
+  more than 500 announcements ago.
+- **Completed claims still count.** A claim whose `completion` step was
+  published still covers the op until its TTL runs out, the same as the
+  `active_only` filter of `meho_broadcast_recent`.
 - **Session identity.** Both the dedupe key and the read query use
   `resolve_agent_session_id()`, which prefers the agent-run id and falls
   back to the MCP header session. A direct MCP agent session (the primary
@@ -237,4 +276,6 @@ surface on the human render.
   `backend/src/meho_backplane/operations/_errors.py`,
   `tenant.announce_gate_enabled` (migration `0077`).
 - Tests: `backend/tests/test_reflex_advisory.py`,
-  `backend/tests/test_announce_gate.py`.
+  `backend/tests/test_announce_gate.py`,
+  `backend/tests/test_announce_claim_lookup.py` (the archive claim lookup,
+  #4091).

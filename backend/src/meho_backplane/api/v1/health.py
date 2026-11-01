@@ -83,12 +83,14 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.jwt import verify_jwt_allow_unchosen
+from meho_backplane.auth.operator import Operator, TenantRole, group_grant
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.checks.watchdog import sensor_runner_liveness
+from meho_backplane.connector_packages import ConnectorPackage, installed_connector_packages
 from meho_backplane.connectors._shared.credential_backend import (
     UnknownCredentialBackendError,
     resolve_credential_backend,
@@ -111,8 +113,10 @@ from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations import dispatch
 from meho_backplane.operations.addon_pairing import AddonPairingService
 from meho_backplane.operations.addon_pairing_contract import is_contract_compatible
+from meho_backplane.operations.catalog_release import catalog_release_status
 from meho_backplane.sandbox_mode import sandbox_mode_label
 from meho_backplane.settings import get_settings
+from meho_backplane.version import build_git_sha
 
 __all__ = ["build_health_response", "router"]
 
@@ -146,6 +150,20 @@ _FEDERATION_PROOF_GSM_SECRET: str = "meho-test-federation"
 _FEDERATION_PROOF_TARGET_NAME: str = "health-federation-proof"
 
 
+class TenantEntry(BaseModel):
+    """One tenant of the person, with the role there (#5239).
+
+    ``current`` is ``True`` for the tenant this request works in.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    tenant_id: UUID
+    name: str
+    tenant_role: TenantRole
+    current: bool
+
+
 class OperatorIdentity(BaseModel):
     """Operator identity surface exposed to the CLI and MCP ``meho_status``.
 
@@ -163,6 +181,12 @@ class OperatorIdentity(BaseModel):
     they serialise as a UUID string / role value under
     ``model_dump(mode="json")`` — the same wire shape the
     ``meho://tenant/<id>/info`` resource returns.
+
+    ``tenants`` (#5239) lists every tenant of the person, with the role
+    in each, when the token carries a tenant list (empty otherwise). A
+    login with several tenants that chose none gets ``tenant_id`` and
+    ``tenant_role`` as ``None``: the status answer then only lists the
+    tenants.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -170,8 +194,30 @@ class OperatorIdentity(BaseModel):
     sub: str
     name: str | None
     email: str | None
-    tenant_id: UUID
-    tenant_role: TenantRole
+    tenant_id: UUID | None
+    tenant_role: TenantRole | None
+    tenants: list[TenantEntry] = []
+
+
+def _operator_identity(operator: Operator) -> OperatorIdentity:
+    """Build the identity block, with the person's tenants (#5239)."""
+    chosen = operator.tenant_chosen
+    return OperatorIdentity(
+        sub=operator.sub,
+        name=operator.name,
+        email=operator.email,
+        tenant_id=operator.tenant_id if chosen else None,
+        tenant_role=operator.tenant_role if chosen else None,
+        tenants=[
+            TenantEntry(
+                tenant_id=entry.tenant_id,
+                name=entry.name,
+                tenant_role=group_grant(entry.group).role,
+                current=chosen and entry.tenant_id == operator.tenant_id,
+            )
+            for entry in operator.tenants
+        ],
+    )
 
 
 class VaultStatus(BaseModel):
@@ -292,6 +338,35 @@ class FeatureStatus(BaseModel):
     name: str
     configured: bool
     missing_env: list[str] = []
+
+
+class OperationCatalogStatus(BaseModel):
+    """Which release wrote the shared operation rows (#5019).
+
+    The operation rows hold, for each built-in operation, which code
+    runs, the parameter rules, the risk level and the approval flag.
+    Every start writes them, and all pods share them. ``state`` is:
+
+    * ``same_release`` -- this pod's release wrote them.
+    * ``other_release`` -- another release wrote them, so this pod
+      serves settings that were not made for its code. Usually a sign
+      that two releases run at the same time; see
+      ``docs/acceptance/rollback.md`` for what to do.
+    * ``not_recorded`` -- no start since this check shipped has written
+      them yet.
+    * ``unknown`` -- the database could not be read (the ``db`` field
+      says more).
+
+    ``this_release`` and ``written_by_release`` are commit hashes, the
+    ``git_sha`` value of ``GET /version``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    state: str
+    this_release: str
+    written_by_release: str | None = None
+    written_at: datetime | None = None
 
 
 class SensorRunnerStatus(BaseModel):
@@ -445,6 +520,15 @@ class HealthResponse(BaseModel):
     OPERATOR-gated, so unlike ``/ready`` no metrics token is needed.
     ``None`` / empty defaults keep older response decoders working; the
     handler always fills them.
+
+    ``connector_packages`` (#5036) lists the connector packages this image
+    carries, the same list ``GET /version`` shows. It is empty for the
+    plain public image.
+
+    ``operation_catalog`` (#5019) names the release that wrote the shared
+    operation rows and says whether it is this pod's release
+    (:class:`OperationCatalogStatus`). The ``None`` default keeps older
+    response decoders working; the handler always fills it.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -462,6 +546,8 @@ class HealthResponse(BaseModel):
     readiness: ReadinessStatus | None = None
     approvals: ApprovalsStatus | None = None
     features: list[FeatureStatus] = []
+    connector_packages: list[ConnectorPackage] = []
+    operation_catalog: OperationCatalogStatus | None = None
 
 
 class LivenessResponse(BaseModel):
@@ -501,7 +587,7 @@ router = APIRouter(prefix="/api/v1", tags=["health"])
 #: Module-level dependency singleton (sibling-router convention, and
 #: what keeps ruff B008 happy): resolves the OPERATOR rank once at
 #: import time so a typo'd role fails at boot, not per-request.
-_require_operator = Depends(require_role(TenantRole.OPERATOR))
+_operator_role_check = require_role(TenantRole.OPERATOR)
 
 
 #: Vault exception class names that indicate a login-phase failure (the
@@ -841,18 +927,14 @@ async def build_health_response(operator: Operator) -> HealthResponse:
     this directly with the :class:`Operator` the MCP dispatcher already
     resolved.
     """
+    if not operator.tenant_chosen:
+        return await _tenant_not_chosen_response(operator)
     log = structlog.get_logger()
     vault_status = await _probe_federation(operator, log)
     db_state = await db_migration_status()
     approvals, features = _approvals_and_features()
     return HealthResponse(
-        operator=OperatorIdentity(
-            sub=operator.sub,
-            name=operator.name,
-            email=operator.email,
-            tenant_id=operator.tenant_id,
-            tenant_role=operator.tenant_role,
-        ),
+        operator=_operator_identity(operator),
         vault=vault_status,
         db=_db_status(db_state),
         mcp_session_id_capture=mcp_session_id_capture_mode(),
@@ -865,6 +947,46 @@ async def build_health_response(operator: Operator) -> HealthResponse:
         readiness=await _readiness_status(),
         approvals=approvals,
         features=features,
+        connector_packages=list(installed_connector_packages()),
+        operation_catalog=await _operation_catalog_status(),
+    )
+
+
+async def _tenant_not_chosen_response(operator: Operator) -> HealthResponse:
+    """The status answer for a login with several tenants that chose none (#5239).
+
+    It lists the person's tenants with the role in each, plus the database
+    state. It runs no tenant work: no credential check, no add-on
+    pairings, no tool list. The ``vault`` detail says why the check was
+    skipped.
+    """
+    db_state = await db_migration_status()
+    return HealthResponse(
+        operator=_operator_identity(operator),
+        vault=VaultStatus(reachable=False, read_ok=False, detail="tenant_not_chosen"),
+        db=_db_status(db_state),
+        mcp_session_id_capture=mcp_session_id_capture_mode(),
+    )
+
+
+async def _operation_catalog_status() -> OperationCatalogStatus:
+    """Compare the release that wrote the operation rows with this pod's (#5019).
+
+    A database error gives ``unknown`` instead of failing the whole health
+    answer; the ``db`` field reports the database problem itself.
+    """
+    try:
+        status = await catalog_release_status()
+    except Exception as exc:
+        structlog.get_logger(__name__).warning(
+            "operation_catalog_status_unreadable", error_class=type(exc).__name__
+        )
+        return OperationCatalogStatus(state="unknown", this_release=build_git_sha())
+    return OperationCatalogStatus(
+        state=status.state,
+        this_release=status.this_release,
+        written_by_release=status.written_by_release,
+        written_at=status.written_at,
     )
 
 
@@ -886,32 +1008,46 @@ async def liveness(
     """
     db_state = await db_migration_status()
     return LivenessResponse(
-        operator=OperatorIdentity(
-            sub=operator.sub,
-            name=operator.name,
-            email=operator.email,
-            tenant_id=operator.tenant_id,
-            tenant_role=operator.tenant_role,
-        ),
+        operator=_operator_identity(operator),
         db=_db_status(db_state),
         sensor_runner=_sensor_runner_status(),
     )
 
 
+async def _status_operator(
+    request: Request,
+    operator: Operator = Depends(verify_jwt_allow_unchosen),
+) -> Operator:
+    """The caller of ``GET /api/v1/health``, which may have no current tenant (#5239).
+
+    With a current tenant: the usual bind step and the OPERATOR role
+    check. A login with several tenants and no ``Meho-Tenant`` header is
+    passed on with ``tenant_chosen=False`` and nothing bound: the answer
+    only lists the person's tenants, so there is no tenant to record.
+    """
+    if not operator.tenant_chosen:
+        return operator
+    bound = await verify_jwt_and_bind(request, operator)
+    return _operator_role_check(bound)
+
+
 @router.get("/health", response_model=HealthResponse)
 async def authenticated_health(
-    operator: Operator = _require_operator,
+    operator: Operator = Depends(_status_operator),
 ) -> HealthResponse:
     """Federation-proof authenticated health check (OPERATOR-gated).
 
     See module docstring for the four-step chain this exercises. The
-    ``Depends(require_role(TenantRole.OPERATOR))`` dependency wraps
-    ``verify_jwt_and_bind`` — the JWT is validated *and*
+    :func:`_status_operator` dependency runs ``verify_jwt_and_bind`` and
+    the ``require_role(TenantRole.OPERATOR)`` check — the JWT is validated *and*
     ``operator_sub`` is bound into structlog contextvars before the
     role check runs — and then enforces least privilege: every call
     here federates a live per-operator Vault credential and reads a
     KV secret, which is not a ``read_only``-rank capability. Callers
     below OPERATOR receive 403 ``insufficient_role`` before any Vault
     interaction; monitoring principals poll ``/health/live`` instead.
+
+    A login with several tenants and no chosen tenant (#5239) skips the
+    role check and gets only its tenants and roles (no Vault call).
     """
     return await build_health_response(operator)

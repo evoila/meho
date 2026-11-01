@@ -8,9 +8,14 @@ here with its method, introspected from the live module constants:
 
 * the login, ``POST /hybridity/api/sessions``;
 * the version call, ``POST /hybridity/api/hcspAppliances``;
-* the calls of the eight reads (``typed_reads.VENDOR_CALLS``): the local
+* the calls of the reads (``typed_reads.VENDOR_CALLS``): the local
   site list, site pairings, service meshes, appliances, the service mesh
-  diagnostics, one job, alerts and the resource containers;
+  diagnostics, one job, alerts and the inventory;
+* the calls of the service mesh changes and the task read
+  (``service_mesh_writes.VENDOR_CALLS``);
+* the calls of the network extension operations
+  (``network_extension.VENDOR_CALLS``): list, extend, unextend, Mobility
+  Optimized Networking and the policy routes;
 * the documentation path, ``GET /hybridity/docs`` -- marked
   "documentation path, not in the API file" and left out of the served
   check, because the Manager serves it as a web page, not as an API call.
@@ -31,6 +36,8 @@ import pytest
 
 from meho_backplane.connectors.hcx import api_file as _api_file_module
 from meho_backplane.connectors.hcx import connector as _connector_module
+from meho_backplane.connectors.hcx import network_extension as _network_extension_module
+from meho_backplane.connectors.hcx import service_mesh_writes as _service_mesh_writes_module
 from meho_backplane.connectors.hcx import typed_reads as _typed_reads_module
 from tests._spec_shelf import (
     assert_op_ids_served,
@@ -52,7 +59,8 @@ def _declared_api_op_ids() -> set[str]:
     """The hand-coded API calls.
 
     Every ``*_PATH`` constant of the connector module (``POST``), plus every
-    ``(method, path)`` pair of ``typed_reads.VENDOR_CALLS``.
+    ``(method, path)`` pair of ``typed_reads.VENDOR_CALLS`` and
+    ``service_mesh_writes.VENDOR_CALLS`` and ``network_extension.VENDOR_CALLS``.
     """
     connector_calls = {
         f"POST:{value}"
@@ -60,7 +68,11 @@ def _declared_api_op_ids() -> set[str]:
         if name.endswith("_PATH") and isinstance(value, str) and value.startswith("/")
     }
     read_calls = {f"{method}:{path}" for method, path in _typed_reads_module.VENDOR_CALLS}
-    return connector_calls | read_calls
+    mesh_calls = {f"{method}:{path}" for method, path in _service_mesh_writes_module.VENDOR_CALLS}
+    extension_calls = {
+        f"{method}:{path}" for method, path in _network_extension_module.VENDOR_CALLS
+    }
+    return connector_calls | read_calls | mesh_calls | extension_calls
 
 
 def test_hcx_hand_coded_op_id_manifest_is_pinned() -> None:
@@ -81,6 +93,18 @@ def test_hcx_hand_coded_op_id_manifest_is_pinned() -> None:
         "POST:/hybridity/api/service/inventory/vc/list",
         "POST:/hybridity/api/service/inventory/vc/datastores/query",
         "POST:/hybridity/api/service/inventory/networks",
+        "POST:/hybridity/api/interconnect/serviceMesh",
+        "GET:/hybridity/api/interconnect/serviceMesh/{serviceMeshId}",
+        "PUT:/hybridity/api/interconnect/serviceMesh/{serviceMeshId}",
+        "DELETE:/hybridity/api/interconnect/serviceMesh/{serviceMeshId}",
+        "POST:/hybridity/api/interconnect/serviceMesh/{serviceMeshId}/resync",
+        "GET:/hybridity/api/interconnect/tasks/{interconnectTaskId}",
+        "POST:/hybridity/api/interconnect/tasks/query",
+        "GET:/hybridity/api/l2Extensions",
+        "POST:/hybridity/api/l2Extensions",
+        "DELETE:/hybridity/api/l2Extensions/{extensionId}",
+        "PUT:/hybridity/api/networkExtensions/{extensionId}",
+        "PUT:/hybridity/api/l2Extensions/policyRoutes",
     }
     assert {"GET:/hybridity/docs"} == _DOCUMENTATION_OP_IDS
 

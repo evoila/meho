@@ -99,6 +99,17 @@ dispatcher's `connector_error` branch.
   mount)` holds the KV-v2 API-path guard, the operator-context Vault read,
   and the structural unwrap. The loaders dispatch to it; direct callers
   should keep using `load_basic_credentials` / `load_vault_secret_data`.
+  For the check runner's operator (`check_runner_dispatch`) it also runs
+  the tenant path check on every read.
+- **`check_param_secret_ref(operator, secret_ref, *, param, mount)`** —
+  checks a secret ref taken from the op params before any read: a Vault
+  ref must sit in the caller's tenant subtree (`enforce_tenant_scope`), a
+  `gsm:` ref must name a project in `GSM_PARAM_ALLOWED_PROJECTS` (empty by
+  default, so all are refused), any other store kind is refused. Raises
+  `SecretRefScopeError` (a `SecretRefReadError`, so the dispatcher answers
+  `vault_credentials_read_error`). `load_param_secret_data` calls it
+  first. See `connectors-vault-tenant-scope.md`, "Secret refs in
+  operation parameters".
 
 ## Control flow
 
@@ -236,6 +247,13 @@ address). The same `credential_backend` setting also drives the
 second backend on the seam, so a GCP-native adopter runs Vault-free. The
 `_shared` package `__init__` imports the module so the `register_credential_backend("gsm", ...)`
 call runs eagerly, exactly as `vault_creds` does for `vault`.
+
+**`gsm:` refs named in op params.** A target's own `gsm:` ref is read as
+described below. A `gsm:` ref taken from an op parameter (for example a
+`password_secret_ref`) is read only when its project is listed in
+`GSM_PARAM_ALLOWED_PROJECTS` (`Settings.gsm_param_allowed_projects`,
+comma-separated, empty by default). With the default every such ref is
+refused before any Google call (`check_param_secret_ref`).
 
 **Auth model — SA-direct under GKE Workload Identity (Phase 1).** The read
 runs under MEHO's *own* identity: the pod's Application Default Credentials
@@ -401,7 +419,8 @@ with no further provisioning and hands it the full policy. Enabling
 calls cannot perform an operator-context Vault read" carve-out for *all*
 background dispatch, not just for Sensors. Operators are told to bound the
 role first — a distinct audience plus a dedicated narrower role (the backplane
-points the check-runner's background dispatch at it via `VAULT_CHECK_RUNNER_ROLE`,
+points the check-runner's background dispatch, and the inbound event
+intake's secret read, at it via `VAULT_CHECK_RUNNER_ROLE`,
 #2757, leaving interactive logins on `VAULT_OIDC_ROLE`), or an
 **exact-match** `bound_claims` on `meho-mcp` keyed on a claim value only
 operator tokens carry (a `bound_claims_type=glob` `"*"` is not one: it
@@ -411,6 +430,12 @@ matches any present value, including the runner service account's
 principal", in the `checkRunner` block of `deploy/charts/meho/values.yaml`,
 and in a `helm install` NOTES warning the chart prints whenever
 `checkRunner.enabled` meets `config.credentialBackend: vault`.
+
+Since then the runner itself enforces the dedicated role: with a principal
+on an install that sets `VAULT_ADDR`, it does not start unless
+`VAULT_CHECK_RUNNER_ROLE` names a role other than `VAULT_OIDC_ROLE`
+(`checks.runner.sensor_runner_refusal`). Each of its Vault reads also
+passes the tenant path check for the sensor's tenant.
 
 **Error hierarchy (#2642).** `credential_backend.CredentialsReadError` is
 the backend-neutral base; `VaultCredentialsReadError` and
@@ -433,6 +458,27 @@ real `identity_pool.Credentials` builder) so the unit suite drives parse /
 decode / impersonation / WIF-selection / STS-exchange / error /
 no-secret-in-logs behaviour with a canned payload and a mocked STS endpoint
 — no live GCP (`tests/test_connectors_gsm_creds.py`).
+
+## Secret field map (#3711)
+
+`load_basic_credentials` and `load_vault_secret_data` apply the target's
+optional `secret_field_map` (`{connector_field: source_field}`) to the
+secret before the connector sees it: a read of field `X` returns the
+secret's `map.get(X, X)`. `secret_field_map_of(target)` reads the map with
+`getattr`, so stand-in targets built around another secret ref (op
+parameter refs, `guest_secret_ref`) have no map and are never remapped.
+`missing_secret_field_map_sources` is the probe-time check. Field names
+only, never a value.
+
+The map is applied exactly once between the centre and a satellite runner.
+`broker_wrapped_credential` reads the target's secret through
+`load_vault_secret_data`, so the wrapped payload is already the connector's
+view. When a target's `secret_ref` is a `wrapped:` token, the two loaders
+therefore skip the map (`_field_map_for_read`). Without this, two entries
+that chain (for example `username -> host_login` and
+`guest_username -> username`) would give `guest_username` the host login
+on the runner. Full description:
+[`targets.md`](targets.md#secret-field-map-3711).
 
 ## SSH host-key trust (F08 / #270)
 
@@ -470,6 +516,79 @@ rotation), update the `known_hosts` field in Vault; the next pool miss
 picks up the new pin. Because the pin lives in the secret, host-key
 rotation follows the same reviewed Vault-write path as credential
 rotation — no code change, no redeploy.
+
+## Connector cache keys (tokens per credential)
+
+Connector caches are process-wide and shared by all tenants. The keys come
+from `connectors/_shared/cache_key.py`:
+
+- **`target_cache_key(target)`** = `(tenant_id, id)`. One entry per target.
+  Used for the HTTP client pool, SSH connections and the caches of read
+  secrets. These carry per-target settings (TLS check, CA pin, server
+  name), so they must never be shared between targets.
+- **`credential_cache_key(target, *login_inputs, secret_ref=None)`** =
+  `(tenant_id, secret_ref, scheme, host, port, *login_inputs)`. One
+  entry per credential. Used for login tokens and sessions, and for the
+  lock and the renewal around them (#5033).
+
+Why the token key is the credential: some vendors allow only one active
+session per user, so a second login with the same user ends the first
+one. With a token per target, two targets that use the same secret
+against the same login host would end each other's token on every login.
+With a token per credential they share one token, one login and one
+renewal: when one target logs in again, the other target uses the new
+token on its next call.
+
+Rules for the key:
+
+- The tenant is always part of the key, so tenants never share a token.
+- `scheme`, `host` and `port` name the login address the same way the HTTP
+  adapter builds the base URL: the scheme comes from `extras["scheme"]`
+  (`https` when unset) and an unset port is the default port of the scheme.
+  So a target with no port and a target with port 443 share one key, and an
+  HTTP target never shares a token with an HTTPS target. Only the host name
+  is case-folded. A service path carried on `host` keeps its case, because
+  the adapter sends it as is and paths are case-sensitive.
+- The target's `fqdn` is not in the shared key. Most logins never send it,
+  so two targets that differ only in the `fqdn` log in the same way and
+  share one token. VCF Automation sends it as the `Host` header, and the
+  appliance picks the organisation from it, so that connector passes the
+  `fqdn` as a login input of both plane keys.
+- `secret_ref=` replaces the target's own secret reference when the login
+  uses another secret. The VCF Automation provider plane logs in with
+  `provider_secret_ref`, so two targets with different tenant secrets and
+  one provider secret share one provider session.
+- VCF Fleet logs in at `vcf_ops_url` from the secret when it is set. Its key
+  is built from that resolved login address, not from the target's own
+  host, so two fleet targets on different hosts with one secret and one
+  `vcf_ops_url` share one token. The connector remembers which key each
+  target used, so a `401` finds the token without reading the secret again.
+- `login_inputs` are the other target values the login reads, for example
+  the login domain (vra8, VCF Automation tenant plane), the provider user
+  (VCF Automation provider plane, which reads the domain only when no
+  `provider_username` is set), the auth source (VCF
+  Operations), the login provider (VCF Operations for Logs), the login
+  mode (vRO), the API version (Cloud Director) or the `fqdn` sent as the
+  `Host` header (VCF Automation). Two targets that differ in one of them
+  log in differently and keep separate tokens.
+- A target with no `secret_ref` falls back to `target_cache_key`: there is
+  nothing to compare, so the token stays per target.
+
+Connectors that key their tokens this way: the ingested (profiled)
+connectors, SRM and vSphere Replication (`vmware_shared/dr_rest.py`), HCX, Salt,
+vRO, vra8, VCF Automation, VCF Operations, VCF Operations for Logs, VCF
+Fleet, VCF Installer, SDDC Manager (VCF 5 and 9), Cloud Director and the
+Proxmox ticket.
+
+Not changed, on purpose:
+
+- **NSX** and **vSphere (`vmware_rest`)**: part of the session lives in the
+  per-target HTTP client (the NSX `JSESSIONID` cookie, the vSphere SOAP
+  cookies and the many per-target session maps). Sharing the token alone
+  would not share the session.
+- **Keycloak, GitHub, Google Cloud, Azure**: OAuth-style tokens. A new
+  token does not end the old one, and the Keycloak token also depends on
+  the realm set on the target.
 
 ## Dependencies
 

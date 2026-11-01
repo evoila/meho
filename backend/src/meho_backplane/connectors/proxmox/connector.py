@@ -51,7 +51,10 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import (
+    credential_cache_key,
+    target_cache_key,
+)
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -114,9 +117,11 @@ def _is_acceptable_auth_model(value: Any) -> bool:
 class ProxmoxConnector(HttpConnector):
     """Proxmox VE 8.x REST connector — token/ticket auth, approval-gated writes.
 
-    Per-target credential material and (for ticket auth) the minted session
-    are cached under the tenant-unique ``(tenant_id, target.id)`` key so two
-    same-named targets in different tenants never share a token or ticket.
+    Per-target credential material is cached under the tenant-unique
+    ``(tenant_id, target.id)`` key. The minted ticket (ticket auth) is cached
+    per credential (``credential_cache_key``: tenant, secret and login host),
+    so two targets that share one credential share one ticket. The tenant in
+    both keys keeps tenants apart.
     """
 
     product = "proxmox"
@@ -133,7 +138,7 @@ class ProxmoxConnector(HttpConnector):
         super().__init__()
         self._creds_cache: dict[tuple[str, str], ProxmoxCredentials] = {}
         #: Ticket-auth session cache: ``{"ticket": ..., "csrf": ...}`` per target.
-        self._ticket_cache: dict[tuple[str, str], dict[str, str]] = {}
+        self._ticket_cache: dict[tuple[str, ...], dict[str, str]] = {}
         self._creds_lock = asyncio.Lock()
         self._ticket_lock = asyncio.Lock()
         self._credentials_loader: ProxmoxCredentialsLoader = (
@@ -209,7 +214,7 @@ class ProxmoxConnector(HttpConnector):
         itself sends no auth header. The system-operator fast-path carve-out
         mirrors :meth:`_resolve_creds`.
         """
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._ticket_lock:
             cached = self._ticket_cache.get(cache_key)
             if cached is not None and not is_system_operator(operator):
@@ -567,16 +572,21 @@ class ProxmoxConnector(HttpConnector):
         )
 
     async def invalidate_credentials(self, target: ProxmoxTargetLike) -> None:
-        """Duck-typed credential-eviction hook for the dispatch path (#2396).
+        """Duck-typed credential-eviction hook for the dispatch path (#2396, #3879).
 
         Drops the cached credentials for *target* so the next credential read
-        re-reads Vault. Called by the dispatcher on an establish-auth failure
-        so an operator's out-of-band restage converges on the next dispatch
-        without a backplane restart. Holds :attr:`_creds_lock` so the pop is
-        serialised against an in-flight load.
+        re-reads Vault, and the login ticket minted from them so the next
+        call logs in again with the new username and password. Without the
+        ticket drop a narrower credential would still send the old ticket
+        until it expires. Called by the dispatcher on an establish-auth
+        failure and by the target update route after a target change. Each
+        pop holds its own lock so it is serialised against an in-flight load
+        or login.
         """
         async with self._creds_lock:
             self._creds_cache.pop(target_cache_key(target), None)
+        async with self._ticket_lock:
+            self._ticket_cache.pop(credential_cache_key(target), None)
 
     async def aclose(self) -> None:
         """Clear cached credentials + tickets, then tear down the httpx pool."""

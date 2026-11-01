@@ -45,6 +45,28 @@
           {% endif %}
         </td>
         <td class="text-xs">
+          {% if row.wire_version_mismatch %}
+            <span class="badge badge-warning badge-sm" title="central MEHO needs wire version {{ row.central_wire_version }}">
+              {{ row.wire_version }} (central needs {{ row.central_wire_version }})
+            </span>
+          {% elif row.wire_version %}
+            <span>{{ row.wire_version }}</span>
+          {% else %}
+            <span class="opacity-40">—</span>
+          {% endif %}
+        </td>
+        <td class="text-xs font-mono">
+          {% if row.package_set_mismatch %}
+            <span class="badge badge-warning badge-sm" title="runner {{ row.package_set_digest }}, central MEHO {{ row.central_package_set_digest }}">
+              {{ row.package_set_digest[:19] }}… (differs from central)
+            </span>
+          {% elif row.package_set_digest %}
+            <span title="{{ row.package_set_digest }}">{{ row.package_set_digest[:19] }}…</span>
+          {% else %}
+            <span class="opacity-40">—</span>
+          {% endif %}
+        </td>
+        <td class="text-xs">
           {% if row.revoked %}
             <span class="badge badge-neutral badge-sm">revoked</span>
           {% else %}
@@ -62,7 +84,7 @@
     {% endfor %}
   {% else %}
     <tr>
-      <td colspan="5" class="text-center text-sm opacity-60 py-6">
+      <td colspan="7" class="text-center text-sm opacity-60 py-6">
         No runners registered yet. Register one via
         <code>meho runner-principal register &lt;name&gt;</code>.
       </td>

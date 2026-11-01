@@ -71,6 +71,7 @@ __all__ = [
     "PLATFORM_EXEMPT_PATHS",
     "VaultTenantScopeError",
     "enforce_tenant_scope",
+    "is_plain_kv_path",
     "rendered_tenant_prefix",
 ]
 
@@ -99,6 +100,16 @@ _SYSTEM_TENANT_ID: UUID = UUID(int=0)
 #: backend reads under MEHO's own deployment identity, not a per-operator
 #: tenant scope, so its probe secret is reachable without an entry here.
 PLATFORM_EXEMPT_PATHS: frozenset[str] = frozenset({"secret/meho/test/federation"})
+
+#: Path segments the guard refuses. ``.`` and ``..`` would let a path that
+#: starts with the tenant prefix point somewhere else once the HTTP client
+#: or Vault resolves them.
+_REFUSED_SEGMENTS: frozenset[str] = frozenset({".", ".."})
+
+#: Characters the guard refuses anywhere in the path. ``%`` starts a
+#: URL-encoded character (``%2e%2e`` is ``..``, ``%2f`` is ``/``), and a
+#: backslash can act as a path separator. A KV path never needs either.
+_REFUSED_CHARACTERS: frozenset[str] = frozenset({"%", "\\"})
 
 
 class VaultTenantScopeError(Exception):
@@ -147,6 +158,19 @@ def _normalised_logical_path(mount: str, path: str) -> str:
     return f"{clean_mount}/{clean_path}"
 
 
+def is_plain_kv_path(candidate: str) -> bool:
+    """Return ``True`` when *candidate* has no segment or character that could move it.
+
+    Refuses a ``.`` or ``..`` segment and any character in
+    :data:`_REFUSED_CHARACTERS`. Without this, ``tenants/<own>/../<other>/x``
+    starts with the caller's prefix but reads another tenant's path once the
+    HTTP client resolves the dot segments.
+    """
+    if any(char in candidate for char in _REFUSED_CHARACTERS):
+        return False
+    return not any(segment in _REFUSED_SEGMENTS for segment in candidate.split("/"))
+
+
 def enforce_tenant_scope(operator: Operator, *, mount: str, path: str, read_only: bool) -> None:
     """Deny a ``vault.kv.*`` call whose path escapes the operator's tenant namespace.
 
@@ -159,7 +183,8 @@ def enforce_tenant_scope(operator: Operator, *, mount: str, path: str, read_only
     (shared non-tenant platform secrets, e.g. the federation-proof health
     read). Otherwise renders the operator's tenant prefix from the template
     and raises :class:`VaultTenantScopeError` unless the normalised
-    ``<mount>/<path>`` begins with it.
+    ``<mount>/<path>`` begins with it and has no ``.`` / ``..`` segment, no
+    ``%`` (a URL-encoded character) and no backslash.
 
     Parameters
     ----------
@@ -212,12 +237,16 @@ def enforce_tenant_scope(operator: Operator, *, mount: str, path: str, read_only
     # Match on a path-segment boundary so a "tenant-1" prefix cannot be
     # satisfied by a "tenant-12/..." path. The candidate is normalised to
     # "<mount>/<path>"; an in-namespace request is the prefix itself or the
-    # prefix followed by "/".
-    if candidate == normalised_prefix or candidate.startswith(normalised_prefix + "/"):
+    # prefix followed by "/". A "." or ".." segment, a URL-encoded
+    # character or a backslash is refused even after the prefix: the HTTP
+    # client or Vault could resolve it to a path outside the prefix.
+    in_prefix = candidate == normalised_prefix or candidate.startswith(normalised_prefix + "/")
+    if in_prefix and is_plain_kv_path(candidate):
         return
 
     raise VaultTenantScopeError(
         "vault.kv request outside tenant namespace: "
         f"requested {candidate!r} is not within tenant prefix "
-        f"{normalised_prefix!r} (tenant_id={operator.tenant_id})"
+        f"{normalised_prefix!r} (tenant_id={operator.tenant_id}); a path with a "
+        "'.' or '..' segment, a '%' or a backslash is always refused"
     )

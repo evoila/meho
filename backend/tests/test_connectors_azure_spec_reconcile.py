@@ -62,11 +62,102 @@ _SWAGGER2_METHODS = frozenset({"get", "put", "post", "delete", "options", "head"
 #: Per path constant: the HTTP method(s) the connector sends and the name of
 #: the API version constant it sends with them. A path string carries no
 #: method, so it is written here; the guard test keeps this table and the
-#: constants in step.
+#: constants in step. Each family adds its lines under its own comment, so two
+#: families never add a line at the same place.
 _DECLARED: dict[str, tuple[tuple[str, ...], str]] = {
+    # account and shared paths
     "SUBSCRIPTION_PATH": (("GET",), "SUBSCRIPTIONS_API_VERSION"),
     "LOCATIONS_PATH": (("GET",), "SUBSCRIPTIONS_API_VERSION"),
     "RESOURCE_GRAPH_PATH": (("POST",), "RESOURCE_GRAPH_API_VERSION"),
+    # aks (Task #5087)
+    "AKS_CLUSTERS_PATH": (("GET",), "AKS_API_VERSION"),
+    "AKS_CLUSTER_PATH": (("GET",), "AKS_API_VERSION"),
+    "AKS_UPGRADE_PROFILE_PATH": (("GET",), "AKS_API_VERSION"),
+    "AKS_NODE_POOLS_PATH": (("GET",), "AKS_API_VERSION"),
+    "AKS_KUBERNETES_VERSIONS_PATH": (("GET",), "AKS_API_VERSION"),
+    # arc (Task #5084)
+    "ARC_MACHINES_PATH": (("GET",), "ARC_API_VERSION"),
+    "ARC_MACHINE_PATH": (("GET",), "ARC_API_VERSION"),
+    "ARC_ASSESS_PATCHES_PATH": (("POST",), "ARC_API_VERSION"),
+    "VM_ASSESS_PATCHES_PATH": (("POST",), "VM_ASSESS_API_VERSION"),
+    # automation (Task #5092)
+    "AUTOMATION_ACCOUNTS_PATH": (("GET",), "AUTOMATION_API_VERSION"),
+    "AUTOMATION_RUNBOOKS_PATH": (("GET",), "AUTOMATION_API_VERSION"),
+    "AUTOMATION_JOBS_PATH": (("GET",), "AUTOMATION_API_VERSION"),
+    "AUTOMATION_SCHEDULES_PATH": (("GET",), "AUTOMATION_API_VERSION"),
+    "AUTOMATION_JOB_SCHEDULES_PATH": (("GET",), "AUTOMATION_API_VERSION"),
+    # avs (Task #5091)
+    "AVS_PRIVATE_CLOUDS_PATH": (("GET",), "AVS_API_VERSION"),
+    "AVS_CLUSTERS_PATH": (("GET",), "AVS_API_VERSION"),
+    "AVS_HOSTS_PATH": (("GET",), "AVS_API_VERSION"),
+    "AVS_QUOTA_PATH": (("POST",), "AVS_API_VERSION"),
+    # compute (Task #5083)
+    "VIRTUAL_MACHINES_PATH": (("GET",), "COMPUTE_API_VERSION"),
+    "RESOURCE_GROUP_VIRTUAL_MACHINES_PATH": (("GET",), "COMPUTE_API_VERSION"),
+    "VIRTUAL_MACHINE_PATH": (("GET",), "COMPUTE_API_VERSION"),
+    "IMAGES_PATH": (("GET",), "COMPUTE_API_VERSION"),
+    "RESOURCE_GROUP_IMAGES_PATH": (("GET",), "COMPUTE_API_VERSION"),
+    "SCALE_SETS_PATH": (("GET",), "COMPUTE_API_VERSION"),
+    "RESOURCE_GROUP_SCALE_SETS_PATH": (("GET",), "COMPUTE_API_VERSION"),
+    "DISKS_PATH": (("GET",), "DISKS_API_VERSION"),
+    "RESOURCE_GROUP_DISKS_PATH": (("GET",), "DISKS_API_VERSION"),
+    "COMPUTE_SKUS_PATH": (("GET",), "COMPUTE_SKUS_API_VERSION"),
+    # cost (Task #5088)
+    "COST_QUERY_PATH": (("POST",), "COST_MANAGEMENT_API_VERSION"),
+    "COST_FORECAST_PATH": (("POST",), "COST_MANAGEMENT_API_VERSION"),
+    "BUDGETS_PATH": (("GET",), "CONSUMPTION_API_VERSION"),
+    "ADVISOR_RECOMMENDATIONS_PATH": (("GET",), "ADVISOR_API_VERSION"),
+    # inventory (Task #5082)
+    "SUBSCRIPTIONS_PATH": (("GET",), "SUBSCRIPTIONS_API_VERSION"),
+    "RESOURCE_GROUPS_PATH": (("GET",), "RESOURCES_API_VERSION"),
+    "RESOURCES_PATH": (("GET",), "RESOURCES_API_VERSION"),
+    "RESOURCE_GROUP_RESOURCES_PATH": (("GET",), "RESOURCES_API_VERSION"),
+    "TAG_NAMES_PATH": (("GET",), "RESOURCES_API_VERSION"),
+    "TAGS_AT_SCOPE_PATH": (("GET", "PATCH"), "RESOURCES_API_VERSION"),
+    "LOCKS_PATH": (("GET",), "LOCKS_API_VERSION"),
+    # migrate (Task #5093)
+    "MIGRATE_PROJECTS_PATH": (("GET",), "MIGRATE_API_VERSION"),
+    "MIGRATE_MACHINES_PATH": (("GET",), "MIGRATE_API_VERSION"),
+    "MIGRATE_GROUPS_PATH": (("GET",), "MIGRATE_API_VERSION"),
+    "MIGRATE_ASSESSMENTS_PATH": (("GET",), "MIGRATE_API_VERSION"),
+    "MIGRATE_ASSESSMENT_PATH": (("GET",), "MIGRATE_API_VERSION"),
+    "MIGRATE_ASSESSED_MACHINES_PATH": (("GET",), "MIGRATE_API_VERSION"),
+    "OFFAZURE_VMWARE_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
+    "OFFAZURE_HYPERV_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
+    "OFFAZURE_SERVER_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
+    "OFFAZURE_IMPORT_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
+    "OFFAZURE_MASTER_SITES_PATH": (("GET",), "OFFAZURE_API_VERSION"),
+    # monitor (Task #5090)
+    # network (Task #5085)
+    "VIRTUAL_NETWORKS_PATH": (("GET",), "NETWORK_API_VERSION"),
+    "VIRTUAL_NETWORK_PATH": (("GET",), "NETWORK_API_VERSION"),
+    "NETWORK_SECURITY_GROUPS_PATH": (("GET",), "NETWORK_API_VERSION"),
+    "NETWORK_SECURITY_GROUP_PATH": (("GET",), "NETWORK_API_VERSION"),
+    "LOAD_BALANCERS_PATH": (("GET",), "NETWORK_API_VERSION"),
+    "PUBLIC_IP_ADDRESSES_PATH": (("GET",), "NETWORK_API_VERSION"),
+    "VIRTUAL_NETWORK_GATEWAYS_PATH": (("GET",), "NETWORK_API_VERSION"),
+    "EXPRESS_ROUTE_CIRCUITS_PATH": (("GET",), "NETWORK_API_VERSION"),
+    "ROUTE_TABLES_PATH": (("GET",), "NETWORK_API_VERSION"),
+    "PRIVATE_DNS_ZONES_PATH": (("GET",), "PRIVATE_DNS_API_VERSION"),
+    # security (Task #5089)
+    "SECURE_SCORES_PATH": (("GET",), "SECURE_SCORE_API_VERSION"),
+    "SECURE_SCORE_CONTROLS_PATH": (("GET",), "SECURE_SCORE_API_VERSION"),
+    "SECURITY_ASSESSMENTS_PATH": (("GET",), "SECURITY_ASSESSMENTS_API_VERSION"),
+    "SECURITY_ASSESSMENT_METADATA_PATH": (("GET",), "SECURITY_ASSESSMENT_METADATA_API_VERSION"),
+    "SECURITY_ALERTS_PATH": (("GET",), "SECURITY_ALERTS_API_VERSION"),
+    "DEFENDER_PLANS_PATH": (("GET",), "DEFENDER_PLANS_API_VERSION"),
+    "POLICY_STATES_SUMMARY_PATH": (("POST",), "POLICY_INSIGHTS_API_VERSION"),
+    "POLICY_ASSIGNMENTS_PATH": (("GET",), "POLICY_ASSIGNMENTS_API_VERSION"),
+    "ROLE_ASSIGNMENTS_PATH": (("GET",), "AUTHORIZATION_API_VERSION"),
+    "ROLE_DEFINITIONS_PATH": (("GET",), "AUTHORIZATION_API_VERSION"),
+    "ACTIVITY_LOG_PATH": (("GET",), "ACTIVITY_LOG_API_VERSION"),
+    # storage (Task #5086)
+    "STORAGE_ACCOUNTS_PATH": (("GET",), "STORAGE_API_VERSION"),
+    "BLOB_CONTAINERS_PATH": (("GET",), "STORAGE_API_VERSION"),
+    # Data-plane paths, relative to the account's blob host. The check cuts the
+    # fixed query part, so List Blobs compares as GET /{container}.
+    "BLOB_LIST_PATH": (("GET",), "BLOB_API_VERSION"),
+    "BLOB_PATH": (("GET", "HEAD"), "BLOB_API_VERSION"),
 }
 
 _PARAMETER = re.compile(r"\{[^}]*\}")
@@ -139,12 +230,133 @@ def test_every_path_constant_has_a_method_and_an_api_version() -> None:
 
 
 def test_the_checked_paths_are_pinned() -> None:
-    """The list of checked paths, so a change to it is always on purpose."""
-    assert sorted(_declared_op_ids()) == [
+    """The list of checked paths, so a change to it is always on purpose.
+
+    The list has one block per family, like the ``_DECLARED`` table. A line
+    that starts with ``"# "`` starts a block: it names the family and holds no
+    path. Each family adds its paths under its own line, so two families never
+    add a line at the same place, even when their paths come from the same spec
+    file. Inside each block the paths are sorted.
+    """
+    pinned = [
+        "# account and shared paths",
         "GET:/subscriptions/{}/locations@2022-12-01",
         "GET:/subscriptions/{}@2022-12-01",
         "POST:/providers/microsoft.resourcegraph/resources@2024-04-01",
+        "# aks (Task #5087)",
+        "GET:/subscriptions/{}/providers/microsoft.containerservice/locations/{}/kubernetesversions@2026-08-01",
+        "GET:/subscriptions/{}/providers/microsoft.containerservice/managedclusters@2026-08-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.containerservice/managedclusters/{}/agentpools@2026-08-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.containerservice/managedclusters/{}/upgradeprofiles/default@2026-08-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.containerservice/managedclusters/{}@2026-08-01",
+        "# arc (Task #5084)",
+        "GET:/subscriptions/{}/providers/microsoft.hybridcompute/machines@2026-09-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.hybridcompute/machines/{}@2026-09-01",
+        "POST:/subscriptions/{}/resourcegroups/{}/providers/microsoft.compute/virtualmachines/{}/assesspatches@2026-04-01",
+        "POST:/subscriptions/{}/resourcegroups/{}/providers/microsoft.hybridcompute/machines/{}/assesspatches@2026-09-01",
+        "# automation (Task #5092)",
+        "GET:/subscriptions/{}/providers/microsoft.automation/automationaccounts@2024-10-23",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.automation/automationaccounts/{}/jobs@2024-10-23",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.automation/automationaccounts/{}/jobschedules@2024-10-23",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.automation/automationaccounts/{}/runbooks@2024-10-23",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.automation/automationaccounts/{}/schedules@2024-10-23",
+        "# avs (Task #5091)",
+        "GET:/subscriptions/{}/providers/microsoft.avs/privateclouds@2026-03-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.avs/privateclouds/{}/clusters/{}/hosts@2026-03-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.avs/privateclouds/{}/clusters@2026-03-01",
+        "POST:/subscriptions/{}/providers/microsoft.avs/locations/{}/checkquotaavailability@2026-03-01",
+        "# compute (Task #5083)",
+        "GET:/subscriptions/{}/providers/microsoft.compute/disks@2026-03-02",
+        "GET:/subscriptions/{}/providers/microsoft.compute/images@2026-04-01",
+        "GET:/subscriptions/{}/providers/microsoft.compute/skus@2021-07-01",
+        "GET:/subscriptions/{}/providers/microsoft.compute/virtualmachines@2026-04-01",
+        "GET:/subscriptions/{}/providers/microsoft.compute/virtualmachinescalesets@2026-04-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.compute/disks@2026-03-02",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.compute/images@2026-04-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.compute/virtualmachines/{}@2026-04-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.compute/virtualmachines@2026-04-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.compute/virtualmachinescalesets@2026-04-01",
+        "# cost (Task #5088)",
+        "GET:/subscriptions/{}/providers/microsoft.advisor/recommendations@2026-10-01",
+        "GET:/{}/providers/microsoft.consumption/budgets@2026-06-01",
+        "POST:/{}/providers/microsoft.costmanagement/forecast@2026-06-01",
+        "POST:/{}/providers/microsoft.costmanagement/query@2026-06-01",
+        "# inventory (Task #5082)",
+        "GET:/subscriptions/{}/providers/microsoft.authorization/locks@2020-05-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/resources@2021-04-01",
+        "GET:/subscriptions/{}/resourcegroups@2021-04-01",
+        "GET:/subscriptions/{}/resources@2021-04-01",
+        "GET:/subscriptions/{}/tagnames@2021-04-01",
+        "GET:/subscriptions@2022-12-01",
+        "GET:/{}/providers/microsoft.resources/tags/default@2021-04-01",
+        "PATCH:/{}/providers/microsoft.resources/tags/default@2021-04-01",
+        "# migrate (Task #5093)",
+        "GET:/subscriptions/{}/providers/microsoft.migrate/assessmentprojects@2024-01-15",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
+        + "assessmentprojects/{}/groups/{}/assessments/{}/assessedmachines@2024-01-15",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
+        + "assessmentprojects/{}/groups/{}/assessments/{}@2024-01-15",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
+        + "assessmentprojects/{}/groups/{}/assessments@2024-01-15",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
+        + "assessmentprojects/{}/groups@2024-01-15",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.migrate/"
+        + "assessmentprojects/{}/machines@2024-01-15",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
+        + "hypervsites@2023-06-06",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
+        + "importsites@2023-06-06",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
+        + "mastersites@2023-06-06",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
+        + "serversites@2023-06-06",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.offazure/"
+        + "vmwaresites@2023-06-06",
+        "# monitor (Task #5090)",
+        "# network (Task #5085)",
+        "GET:/subscriptions/{}/providers/microsoft.network/expressroutecircuits@2026-01-01",
+        "GET:/subscriptions/{}/providers/microsoft.network/loadbalancers@2026-01-01",
+        "GET:/subscriptions/{}/providers/microsoft.network/networksecuritygroups@2026-01-01",
+        "GET:/subscriptions/{}/providers/microsoft.network/privatednszones@2024-06-01",
+        "GET:/subscriptions/{}/providers/microsoft.network/publicipaddresses@2026-01-01",
+        "GET:/subscriptions/{}/providers/microsoft.network/routetables@2026-01-01",
+        "GET:/subscriptions/{}/providers/microsoft.network/virtualnetworks@2026-01-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.network/networksecuritygroups/{}@2026-01-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.network/virtualnetworkgateways@2026-01-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.network/virtualnetworks/{}@2026-01-01",
+        "# security (Task #5089)",
+        "GET:/subscriptions/{}/providers/microsoft.authorization/policyassignments@2026-07-01",
+        "GET:/subscriptions/{}/providers/microsoft.insights/eventtypes/management/values@2015-04-01",
+        "GET:/subscriptions/{}/providers/microsoft.security/alerts@2022-01-01",
+        "GET:/subscriptions/{}/providers/microsoft.security/assessmentmetadata@2025-05-04",
+        "GET:/subscriptions/{}/providers/microsoft.security/securescorecontrols@2020-01-01",
+        "GET:/subscriptions/{}/providers/microsoft.security/securescores@2020-01-01",
+        "GET:/{}/providers/microsoft.authorization/roleassignments@2022-04-01",
+        "GET:/{}/providers/microsoft.authorization/roledefinitions@2022-04-01",
+        "GET:/{}/providers/microsoft.security/assessments@2020-01-01",
+        "GET:/{}/providers/microsoft.security/pricings@2024-01-01",
+        "POST:/subscriptions/{}/providers/microsoft.policyinsights/policystates/{}/summarize@2024-10-01",
+        "# storage (Task #5086)",
+        "GET:/subscriptions/{}/providers/microsoft.storage/storageaccounts@2026-09-01",
+        "GET:/subscriptions/{}/resourcegroups/{}/providers/microsoft.storage/storageaccounts/{}/blobservices/default/containers@2026-09-01",
+        "GET:/{}/{}@2026-10-06",
+        "GET:/{}@2026-10-06",
+        "HEAD:/{}/{}@2026-10-06",
     ]
+    blocks: list[tuple[str, list[str]]] = []
+    for line in pinned:
+        if line.startswith("# "):
+            blocks.append((line, []))
+        else:
+            assert blocks, f"{line!r} is above the first block line"
+            blocks[-1][1].append(line)
+    names = [name for name, _ in blocks]
+    assert len(names) == len(set(names)), f"a block line is there twice: {names}"
+    for name, block in blocks:
+        assert ":/" not in name, f"{name!r} starts a block, so it must not hold a path"
+        assert block == sorted(block), f"the paths under {name!r} are not sorted"
+    checked = [path for _, block in blocks for path in block]
+    assert sorted(checked) == sorted(_declared_op_ids())
 
 
 @pytest.mark.parametrize(

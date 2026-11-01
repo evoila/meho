@@ -74,7 +74,7 @@
       <span class="label-text mb-1 text-xs opacity-70">Target</span>
       <input
         type="search" name="target" value="{{ target_filter }}"
-        placeholder="e.g. rdc-vcenter"
+        placeholder="e.g. prod-k8s"
         class="input input-bordered input-sm w-full"
         aria-label="Filter by target" autocomplete="off"
       />
@@ -94,7 +94,7 @@
       <span class="label-text mb-1 text-xs opacity-70">Operation (op_id)</span>
       <input
         type="search" name="op_id" value="{{ op_id_filter }}"
-        placeholder="e.g. vsphere.vm.* (glob)"
+        placeholder="e.g. k8s.pod.* (glob)"
         class="input input-bordered input-sm w-full font-mono"
         aria-label="Filter by op_id glob" autocomplete="off"
       />
@@ -204,7 +204,8 @@
               gated_op_classes=drawer.gated_op_classes,
               references=drawer.references, trace=drawer.trace,
               is_execution=drawer.is_execution,
-              event_class_label=drawer.event_class_label %}
+              event_class_label=drawer.event_class_label,
+              tenant_label=drawer.tenant_label %}
         {% include "audit/_drawer.html" %}
       {% endwith %}
     {% else %}

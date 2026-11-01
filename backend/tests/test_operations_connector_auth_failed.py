@@ -1413,7 +1413,7 @@ class _RecoveringConnector(_Http401Connector):
     ) -> dict[str, Any]:
         return self._next(target, verb, path)
 
-    async def invalidate_session(self, target: Any) -> None:
+    async def invalidate_session(self, target: Any, *, rejected: Any = None) -> None:
         self.invalidations.append(
             (str(getattr(target, "tenant_id", "")), str(getattr(target, "id", "")))
         )
@@ -1913,7 +1913,7 @@ class _RetryThenEstablishAuthConnector(_Http401Connector):
     ) -> dict[str, Any]:
         return self._next(target)
 
-    async def invalidate_session(self, target: Any) -> None:
+    async def invalidate_session(self, target: Any, *, rejected: Any = None) -> None:
         self.session_invalidations.append(self._key(target))
 
     async def invalidate_credentials(self, target: Any) -> None:

@@ -163,6 +163,20 @@ two tool descriptions therefore cross-reference the `kb` REST/CLI surface
 and note that entry deletion is REST/CLI-only (`DELETE /api/v1/kb/{slug}`
 or `meho kb delete` — there is no MCP delete tool).
 
+### No issue numbers or planning codes in model text
+
+A model reads every tool description, every schema field description and
+every operation-group text. It cannot open an issue link, and a code like
+`G0.18-T5` means nothing to it. So these texts hold no issue numbers
+(`#1234`), planning codes (`G11.2-T6`) or design-doc section marks
+(`§6`). Say the meaning in plain words instead. A change-ticket example
+such as `gh:org/repo#7` is fine: the `#` follows a word.
+`tests/test_model_text_no_internal_refs.py` checks every tool's
+`to_wire()` text and every group registered at start-up. It uses the
+same pattern (`_INTERNAL_REF`) that
+`backend/scripts/generate_reference_docs.py` uses to strip these codes
+from the public reference page.
+
 ### Proactive-trigger wording on the coordination levers (#3132)
 
 The three coordination levers — knowledge (`search_knowledge` /
@@ -188,6 +202,47 @@ is a behavioural regression, and the substring guards in
 `tests/test_mcp_tools_knowledge.py` / `test_mcp_tools_memory.py` pin
 the load-bearing pieces. The maturity prefix (#2675) and the kb
 REST/CLI cross-references (#2486) are unchanged by this wording pass.
+
+### Tool text size limit on the default list (#4112)
+
+Every session gets the default tool list before the user's question. The
+tool text (name, description and input schema) uses up the model's
+context window. A small open model often has a 32,768-token window, so
+this text must stay short.
+
+`tests/test_mcp_tool_text_budget.py` sets two limits. It measures a tool
+as its name plus description plus input schema as compact JSON, taken
+from `ToolDefinition.to_wire()`. Output schemas are not counted.
+
+- One tool: at most 6,000 characters.
+- The whole default list (26 tools, docs add-on on): at most 70,000
+  characters, about 17,500 tokens.
+
+When #4112 set the limits, the default list went from 96,804 to 66,092
+characters. The largest tool, `query_topology`, went from 16,302 to
+5,537.
+
+What a description keeps:
+
+- what the tool is for, and when to call it (the proactive-trigger
+  sentences above stay);
+- its arguments, and which are required for which option, because the
+  wire schema drops top-level `allOf` / `anyOf`;
+- the one or two rules that stop wrong calls.
+
+What moved out:
+
+- Return shapes. Tools with an output schema already describe them there.
+- Help that matters only after a certain answer. Example: the
+  `query_topology` closure answer with `status: "node_untracked"` now
+  carries a `detail` text that says the answer is not "safe to delete"
+  and how to add the missing data. The description keeps only the
+  short rule.
+- Background and history (issue numbers, internal table names, server
+  internals). These stay in this file and in the code comments.
+
+If the test fails, shorten the text first. Raise a limit only with a
+reason in the pull request.
 
 ### Runbook family canonicalisation (#1612)
 
@@ -375,6 +430,55 @@ Tests: `tests/test_operations_meta_tools.py` (enum lock),
 `tests/test_api_v1_operations.py`
 (`test_post_call_rate_limited_rides_200_envelope`).
 
+### The audit status of `call_operation` and `preview_operation` (#4751)
+
+Some calls fail before any operation runs: the `op_id` or the connector
+does not exist, or the params do not match the schema. The dispatcher
+writes no operation row for them. So the MCP tool-call row must say that
+the call failed. `handle_tools_call` sets the row's `status_code` from
+the envelope `status`, with the same rule as `isError`
+(`_operation_result_audit` in `mcp/handlers.py`):
+
+| `status` | `extras.error_code` | row `status_code` |
+|---|---|---|
+| `ok`, `awaiting_approval`, anything else | any | `200` |
+| `error`, with an `audit_id` (the call ran) | any | `500` |
+| `error`, no `audit_id` | `unknown_op`, `unknown_connector` | `404` |
+| `error`, no `audit_id` | any other code | `400` |
+| `denied` | any | `403` |
+| `rate_limited` | any | `429` |
+
+The row's payload also carries `result_status` (the envelope `status`)
+and `error_code` (from `extras.error_code`, when there is one), so a
+query can filter on them. A call that did run keeps its own operation
+row from the dispatcher; that row still holds the exact result. When
+such a call fails (for example the vendor times out), the result carries
+the `audit_id` of that row, and the tool-call row says `500`, the same
+as the operation row. Every other tool keeps `status_code = 200` when
+its handler returns.
+
+The reflex adoption numbers and the working-surface check query (later
+in this file) read only `status_code = 200` tool-call rows, so they no
+longer count a `call_operation` that failed or was refused. The
+retrieval usage numbers do not change: they filter on
+`status_code = 200` only for the search tools.
+
+With `AUDIT_WRAPPER_ROWS_RETIRED=true` the cut-over rules in
+`audit_cutover.py` decide what is written:
+
+- `500`: no tool-call row. The dispatcher already wrote its operation
+  row for the caller.
+- `404`, `400` and `429`: no tool-call row (`call_operation` is a
+  routine tool, and other 4xx write nothing). The request usage event
+  holds the real outcome: `not_found`, `client_error` or
+  `rate_limited`.
+- `403`: no tool-call row when the dispatcher already wrote its policy
+  row for the caller. Otherwise one `policy_decision` row.
+- `200`: no tool-call row. A call that ran or waits for approval has
+  the dispatcher's own row.
+
+Tests: `tests/test_mcp_call_operation_audit_status.py`.
+
 ### Response wire ceiling (#3641)
 
 A completed `call_operation` response is also checked against a wire ceiling,
@@ -470,7 +574,7 @@ The full rules, bounds, and errors are in
 ### Long calls: `call_operation` async mode (#3695)
 
 A long call (a deploy, a multi-step operation that runs for minutes) should
-not hold one MCP request open the whole time. `call_operation` takes two
+not hold one MCP request open the whole time. `call_operation` takes three
 optional arguments for this. They are MCP controls and never reach the
 dispatcher:
 
@@ -489,6 +593,18 @@ dispatcher:
   `status="ok"` and its `audit_id` and gets `delivery="partial"` or
   `"unavailable"`. A failed or cancelled run gives `status="error"` and `extras.error_code`
   `run_failed` / `run_cancelled`. Checking never runs the call again.
+- **`wait_seconds`** (only with `run_id`, #5264) makes the check wait up to
+  that many seconds for the run to end. The answer comes as soon as the run
+  ends, or after the wait with `pending` / `running` as before. `0` or no
+  value answers at once. An agent with only MCP tools has no shell, so it
+  cannot sleep between checks; with this it does not have to send check
+  after check. The limit is 50 seconds (`MAX_RUN_WAIT_SECONDS`), below the
+  usual 60-second read limit of HTTP proxies. The `inputSchema` holds the
+  range, so a larger value gets `-32602` with a message that names the
+  maximum. `wait_seconds` without `run_id` gives
+  `data.reason="wait_without_run_id"`. The wait holds no database
+  connection: see
+  [`async-governed-dispatch.md`](async-governed-dispatch.md#waiting-for-a-run-to-end-5264).
 
 An unknown run, a run of another tenant, or a run of a different
 `connector_id` / `op_id` gives the same `-32602` error with
@@ -510,7 +626,10 @@ what to do next:
   (sorted, at most 10), and the message names them, for example "This
   operation exists on connector(s) vmware-rest-9.0". When the list is
   empty, the message tells the caller to use `search_operations` on the
-  connector. `extras.known_op_count` still carries the connector's op
+  connector. When the call has a target, a connector whose catalog check
+  refuses that target is not listed (#5069): for example
+  `vmware-rest-9.0` for a vCenter 8.0.x target, for a generic call that
+  only its catalog has. `extras.known_op_count` still carries the connector's op
   count. A common cause is the other version of the same product; op ids
   can also be spelled differently between versions.
 - **`unknown_connector`** — the `connector_id` matches no connector the
@@ -525,6 +644,41 @@ each connector: a connector of another tenant is never named, and a
 built-in op hidden by the tenant's own connector row is not named
 either. The extra lookups run only on this error path
 (`operations/_op_miss.py`). Tests: `tests/test_operations_op_miss.py`.
+
+### Close ids for an unknown connector (#4136)
+
+Every unknown-connector error names up to 5 close connector ids, so a
+model that guessed a near-miss id (`vmware-rest`, `linux-ssh-1.0`) can
+fix its call at once. It does not have to read the whole
+`meho_connector_list` first.
+
+- **Which ids.** `close_connector_ids` in `operations/_lookup.py`. An id
+  is close when it starts with the given text, or has a close spelling
+  (`difflib`, ratio 0.6 or more). Case is ignored. The closest come first.
+- **Who sees what.** Only built-in connectors and the caller's own
+  tenant, the same rule as `connector_exists`. A connector of another
+  tenant is never named. A built-in connector class with no operation
+  rows yet is named too: a hand-coded class, or the profiled class that
+  startup stamps for a catalog row shipped with a profile (for example
+  `mehoauto-rest-0.1.0` before its first ingest). The class that ingest
+  registers (an auto-shim, or a profiled class for a row the catalog
+  ships no profile for) is not read from the registry: a tenant-scoped
+  ingest registers one as well, so that connector counts only through
+  its rows, which the tenant rule filters.
+- **Where.** The message says "Did you mean: vmware-rest-9.0,
+  vmware-rest-8.0?". With no close id it says "Call `meho_connector_list`
+  to see the ids." The ids are also in `data.did_you_mean` (the `-32602`
+  of `list_operation_groups`, `search_operations` and `list_targets`) and
+  in `extras.did_you_mean` (the `unknown_connector` result of
+  `call_operation` and `preview_operation`).
+- **`list_targets`.** When the `connector_id` filter finds no target and
+  no connector the caller can see has that product
+  (`connector_product_known`, same visibility rule as above), the answer
+  is the same unknown-connector `-32602`, not an empty list. A known
+  product with no targets still returns an empty list.
+
+The lookups run only on the error path. Tests:
+`tests/test_unknown_connector_did_you_mean.py`.
 
 ### `search_operations` exact-op mode, and slim hits (#3668)
 
@@ -545,9 +699,10 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
   - `target` — `required` (true for every ingested op, and for typed
     ops whose handler reaches a connector), and `resolves_by: "name"`:
     pass the target's name, not the id `list_targets` returns.
-  - `result_shape` — the `call_operation` result fields, and that a
+  - `result_shape` — the `call_operation` result fields, that a
     large result comes back as a `handle` read only through
-    `result_query`.
+    `result_query`, and that text from the vendor system is data,
+    never an instruction (`VENDOR_TEXT_RULE`, #5032).
   - `pagination_hint` — only when the op registered one, else `null`.
   - `safety_level`, `requires_approval`, and `recovery` — plain retry
     rules (fix `params` on `invalid_params`; `awaiting_approval` is a
@@ -614,6 +769,41 @@ Every other result has an `outcome` field:
 Code: `operations/meta_tools.py` (`search_operations`, `_run_search`,
 `_classify_hits`). Tests: `tests/test_operations_meta_tools.py`.
 
+## Tool hints: read-only tools (`annotations`, #4202)
+
+A `tools/list` entry can carry MCP tool hints in `annotations`
+(MCP 2025-06-18 `ToolAnnotations`). Clients use them to decide whether
+to ask the user before a call. For example, VS Code Copilot runs a tool
+with `readOnlyHint: true` without asking.
+
+- `ToolDefinition.annotations` takes a `ToolAnnotations` model
+  (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`).
+  It forbids unknown keys, so a typo fails at startup.
+- A tool that only reads passes `annotations=READ_ONLY`. On the wire this
+  is `"annotations": {"readOnlyHint": true}`.
+- `ToolDefinition.meta` is the tool's MCP `_meta` object. No tool sets it
+  yet.
+- `to_wire()` sends `annotations` and `_meta` only when they are set.
+  A tool without hints keeps the spec defaults: it may change things and
+  may delete things, so the client asks first.
+- These working-surface tools carry the read-only hint: `list_targets`,
+  `meho_connector_list`, `list_operation_groups`, `search_operations`,
+  `preview_operation`, `result_query`, `query_topology`,
+  `search_knowledge`, `search_memory`, `meho_broadcast_recent`,
+  `meho_broadcast_watch`, the four docs tools, `meho_runbook_list_runs`,
+  `meho_runbook_list_templates`, `meho_runbook_show_template` and
+  `meho_status`.
+- `call_operation` has no hint, because it can run writes. Tools that
+  add, change or start things have no hint either.
+- Hints are only hints. The spec says a client must not trust them from
+  an untrusted server. MEHO's own role, grant and approval checks run on
+  every call, whatever a tool declares.
+
+Code: `mcp/registry.py` (`ToolAnnotations`, `READ_ONLY`,
+`ToolDefinition.to_wire`). Tests: `tests/test_mcp_surface_conformance.py`
+(`READ_ONLY_HINT_TOOLS`, the exact set on the wire) and
+`tests/test_mcp_registry.py` (the wire shape).
+
 ## Agent-surface scoping (working vs. operator, #3154)
 
 `tools/list` is filtered by **four orthogonal gates**, all AND-composed
@@ -668,6 +858,60 @@ explicitly.
   authoring**, broadcast overrides, topology **mutations**, target
   registration, doc-collection create/delete, memory promotion,
   approvals **read**, and audit query.
+
+## The current tenant of a session (#5239)
+
+One login can list several tenants (the `meho_tenants` claim). An MCP
+session works in **one** tenant, fixed at the start by the `Meho-Tenant`
+request header (a tenant name or UUID). To switch, the client changes the
+setting and starts a new session. There is no tool to switch tenants, so
+the working surface stays at its size.
+
+The two connection helpers send the header (#5242): the Claude Code plugin
+shim from `MEHO_TENANT` (`clients/claude-code-plugin/bin/meho-mcp-remote`),
+and the Claude Desktop bundle from its optional `tenant` setting
+(`clients/claude-desktop-mcpb/`, see `claude-desktop-mcpb.md`). Both pass it
+to `mcp-remote` as `--header "Meho-Tenant: <value>"` and send nothing when it
+is not set.
+
+- `verify_mcp_jwt` (`mcp/auth.py`) reads the header and calls
+  `verify_jwt_for_audience(..., requested_tenant=..., allow_unchosen=True)`.
+  The rules are the ones of REST (`auth/current_tenant.py`): a header for a
+  tenant the person is not in is `403 tenant_not_member`; a platform admin
+  may name any existing tenant (`403 tenant_not_found` for an unknown one).
+  These refusals are 403, not 401, so they carry no `WWW-Authenticate`.
+- A login with several tenants and **no** header gets an `Operator` with
+  `tenant_chosen=False`. `mcp/tenant_gate.py` then allows only
+  `initialize`, `ping`, `notifications/*`, `tools/list` and
+  `tools/call` of `meho_status`. Every other request gets a JSON-RPC
+  `-32600` error whose message starts with `tenant_not_chosen:` and names
+  the person's tenants. The check is an allow list: a new method or tool
+  is refused until it is added there.
+- The allowed requests do no tenant work. The bind step
+  (`verify_mcp_jwt_and_bind`) binds nothing for such a session, so the
+  chassis audit middleware writes no row and the usage collector no
+  event. `initialize` skips the per-tenant session cap and the tenant
+  preamble; its `instructions` text is the `tenant_not_chosen` message
+  plus how to pick a tenant. `tools/call` of `meho_status` writes no
+  wrapper row and reads no broadcast setting. The operator's tenant
+  fields hold only a placeholder (the first entry) and are never
+  recorded.
+- `tools/list` for such a session lists only `meho_status`.
+- `meho_status` (and `GET /api/v1/health`) then answers with
+  `operator.tenant_id` and `operator.tenant_role` set to `null`,
+  `operator.tenants` (each tenant's `tenant_id`, `name`, `tenant_role`,
+  `current`), `vault.detail = "tenant_not_chosen"` and the database
+  state. It runs no tenant work (no credential check, no add-on
+  pairings, no tool comparison). With a current tenant, `meho_status`
+  answers as before and also lists `operator.tenants`, with `current`
+  set on the current one.
+- MEHO keeps no MCP session store (the session id only correlates audit
+  rows), so nothing is kept per session that could mix tenants. Result
+  links are stored per tenant and per person
+  (`connectors/result_handle_store.py`), so a link made in tenant A is a
+  miss while the session works in tenant B.
+
+Tests: `tests/test_mcp_tenant_gate.py`, `tests/test_auth_current_tenant.py`.
 
 ## Dual-surface tool inventory
 
@@ -744,7 +988,7 @@ add-on-family gate.
 | `meho_runbook_next` | operator | — | Advance one step of an in-progress run (opacity contract). |
 | `meho_runbook_show_template` | operator | — | Read a runbook template's full body. |
 | `meho_runbook_start` | operator | — | Start a new runbook run (self-assigned). |
-| `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666); since #4830 also the database migration revision (`db.revision` / `db.head`), the `/ready` checks (`readiness`), the approval settings in force (`approvals`) and the gated features (`features`). |
+| `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666); since #4830 also the database migration revision (`db.revision` / `db.head`), the `/ready` checks (`readiness`), the approval settings in force (`approvals`) and the gated features (`features`). Since #5239 also the person's tenants with the role in each (`operator.tenants`); it is the one tool a session without a current tenant may call. |
 | `preview_operation` | operator | — | Preview an operation without running it. |
 | `query_topology` | operator | — | Query the topology graph (dependents, blast radius, timeline). |
 | `read_docs` | operator | `meho-docs` | Read the text around a docs hit, its whole page or its section, through the hit's `read_handle` (#3948). |
@@ -989,10 +1233,12 @@ Five synthetic connectors follow this mould (natural key
 | Wire `connector_id` | Op | MCP front | Since |
 |---|---|---|---|
 | `secret-broker-1.x` | `secret.move` | (dispatch-only) | #1577 |
+| `secret-broker-1.x` | `secret.handoff.export` / `secret.handoff.import` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves on each instance) | #5228 |
 | `topology-graph-1.x` | `topology.create_node` / `.annotate` / … | `meho_topology_create_node` / `_annotate` / … | #2537 |
 | `targets-registry-1.x` | `targets.register` | `meho_targets_register` | #2861 |
+| `targets-registry-1.x` | `targets.remove` | (dispatch-only; `dangerous` + `requires_approval`, a second person approves) | #4623 |
 | `audit-integrity-1.x` | `audit.loose_rows` | (dispatch-only; a `safe` read a Sensor pins) | #4670 |
-| `migration-assess-1.x` | `migration.inventory.csv` | (dispatch-only; a `safe` read of stored inventories) | #5099 |
+| `inventory-1.x` | `inventory.export` | (dispatch-only; a `safe` read that turns stored or inline inventories into a file in a named format) | #5218 |
 
 `meho_targets_register` (#2861,
 `mcp/tools/targets_register.py` + `connectors/targets/`) closes the last
@@ -1012,6 +1258,18 @@ host, tenant_id}` payload and the `awaiting_approval` envelope conform
 model's `ValidationError` to `ValueError` at its boundary so the
 dispatcher's `connector_error` maps them to `-32602` with a clean
 message.
+
+`targets.remove` (#4623) is the opposite write and does not follow the
+`caution` dial above. Like `DELETE /api/v1/targets/{name}`, it needs the
+`tenant_admin` role; after approval, the approver's role counts. It is
+`dangerous` with `requires_approval=True`, and
+its name ends in `.remove`, so the rules for deletes apply: a person's call
+waits until a second person approves it, an agent login is refused, a
+service principal waits for a person and cannot get a standing grant for
+it, and only in sandbox mode can a delete grant made in the web console let
+a service principal run it at once. It is reached through
+`call_operation` only; there is no `meho_*` tool for it. See
+[`targets.md`](targets.md#removing-a-target-targetsremove).
 
 ## Audit URI redaction for query-bearing resources
 
@@ -1058,6 +1316,26 @@ The redaction helper is `redacted_audit_uri(template)` in
 contextvar pattern rather than special-casing the dispatcher per
 resource.
 
+## Empty optional text on read tools (#4110)
+
+Small models often send an unused filter as empty text, for example
+`list_targets` with `connector_id: ""`. A filter on empty text matches
+nothing, so the tool used to answer with an empty list and no warning.
+
+`handle_tools_call` (`mcp/handlers.py`) now drops these values for read
+tools (`op_class == "read"`) just before the `inputSchema` check:
+
+* A top-level argument whose value is empty text, or only spaces, is
+  removed, so the handler sees it as "not given".
+* A key in the schema's top-level `required` list is kept, so an empty
+  required field is still refused with `-32602`. A key that a
+  conditional rule (`anyOf` / `if`-`then`) needs is removed and then
+  fails the schema check as missing, for example `search_operations`
+  with only `query: ""`.
+* Write tools, the REST API, and the CLI are not changed.
+* The audit row's `params_hash` is still computed over the arguments
+  the client sent.
+
 ## Request-size bounds
 
 The `/mcp` transport bounds every request body at
@@ -1087,6 +1365,26 @@ The transport cap is deliberately sized with headroom above the
 largest legitimate tool payload (64 KiB body + envelope + JSON
 escaping) so the schema-level caps, not the transport, are the
 operative limit for well-formed calls.
+
+## Extra arguments on read tools with no arguments (#4137)
+
+Small models often send arguments to a tool that takes none, for
+example `meho_status` with `{"input": {}}` or `{"": ""}`. The schema
+(`properties: {}`, `additionalProperties: false`) used to refuse each
+call with `-32602`, and the model had to try again.
+
+`handle_tools_call` (`mcp/handlers.py`) now replaces the arguments with
+`{}` just before the `inputSchema` check when both are true:
+
+* the tool is a read tool (`op_class == "read"`), and
+* its `inputSchema` has no `properties`.
+
+Today this covers `meho_status`, `meho_automation_list`, and
+`meho_agents_list`. Tools that take arguments, and every write tool,
+still refuse an unknown argument with `-32602`: a wrong argument name
+there can mean a wrong answer. The tool schemas, the REST API, and the
+CLI are not changed. The audit row's `params_hash` is still computed
+over the arguments the client sent.
 
 ## Dependencies
 

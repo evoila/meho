@@ -54,9 +54,13 @@ reads the two keys (product-gated to `product == "vault"`; a blank /
 whitespace / non-string value normalises to "no override"), and
 `vault_client_for_target(operator, target)` forwards them to
 `auth.vault.vault_client_for_operator(operator, role=…, mount_path=…)`.
-Every KV handler (`ops.py`) and auth handler (`ops_auth.py`,
-`ops_auth_write.py`) opens its client through that one helper, so a target
-naming a role governs its whole KV/auth dispatch. Role selection
+Every KV handler (`ops.py`), auth handler (`ops_auth.py`,
+`ops_auth_write.py`), identity handler (`ops_identity.py`), token handler
+(`ops_token.py`, `ops_token_role.py`) and ACL-policy handler
+(`ops_sys_policy.py`, #3945) opens its client through that one helper, so a
+target naming a role governs its whole KV, auth, identity, token and policy
+dispatch (#4970). The other sys ops still log in through
+`vault_client_for_operator` and ignore the target's role. Role selection
 precedence at the login site (`auth.vault._resolve_login_role`) is:
 **per-target override (#3274) → check-runner role (#2757) → per-tenant role
 (#3852) → deployment-global `vault_oidc_role`**.
@@ -219,8 +223,14 @@ target registration) is documented in
   | `vault.sys.policy.write` | `sys.create_or_update_policy` | dangerous | True | `write` |
   | `vault.sys.policy.delete` | `sys.delete_policy` | dangerous | True | `write` |
 
-  All four forward the operator JWT via `vault_client_for_operator` and
-  offload the sync `hvac` call with `asyncio.to_thread`. `policy.read`
+  All four forward the operator JWT via `vault_client_for_target`, so the
+  target's `extras["vault_role"]` picks the Vault role (#3945), and
+  offload the sync `hvac` call with `asyncio.to_thread`. `policy.delete`
+  also registers a park-time permission preflight: `sys/capabilities-self`
+  must grant `delete` on `sys/policy/<name>` to that role, or the call is
+  refused with `write_capability_denied` before an approval row is written.
+  The tenant removal runbook that uses it is
+  `docs/cross-repo/vault-remove-tenant.md`. `policy.read`
   unwraps the `data.rules` (or `data.policy`) envelope, falling back to
   the legacy top-level keys → `{name, rules}` (rules `None` when
   absent). `policy.list` returns `{policies: [...]}` from the
@@ -311,15 +321,71 @@ target registration) is documented in
   handlers also return a value-free confirmation (username/mount/policies,
   never the password). `generate_secret_id` mints a SecretID in its
   **response** → `credential_mint`; it is **non-idempotent** (a fresh
-  SecretID per call), flagged as such in its `llm_instructions`, and the
-  minted value reaches only the caller's `OperationResult` (never the
-  audit row or broadcast). `delete` / `approle.write` carry no secret and
+  SecretID per call), flagged as such in its `llm_instructions`. The
+  caller's `OperationResult` carries the SecretID; the audit row's raw
+  copy has it replaced (`[REDACTED:param_name]`, the `credential_mint`
+  rule in `dispatcher._apply_redaction_middleware`), and the broadcast is
+  aggregate-only. `delete` / `approle.write` carry no secret and
   classify plain `write` off their suffix. Registered from its own
   module via the `register_vault_auth_write_operations()` call at the end
   of `register_vault_typed_operations()`. `_reclassify_not_found` /
   `VaultAuthBackendNotMountedError` are reused from `ops_auth.py` so a
   404 from an unmounted backend surfaces the same error class as the
   read ops.
+- **`auth` group, JWT/OIDC login roles** (`ops_auth_jwt.py` /
+  `ops_auth_jwt_schemas.py`, #3694). The JWT/OIDC login method is how
+  people and services log in to Vault with a token from an identity
+  provider; MEHO itself logs in this way. Four ops in the `auth` group:
+
+  | op_id | Vault call | safety_level | approval | op_class (broadcast) |
+  |---|---|---|---|---|
+  | `vault.auth.jwt.role.list` | `LIST /v1/auth/<mount>/role` | safe | no | `read` |
+  | `vault.auth.jwt.role.read` | `GET /v1/auth/<mount>/role/<name>` | safe | no | `other` |
+  | `vault.auth.jwt.role.write` | `POST /v1/auth/<mount>/role/<name>` | dangerous | yes | `write` |
+  | `vault.auth.jwt.config.read` | `GET /v1/auth/<mount>/config` | safe | no | `other` |
+
+  - The mount is a parameter (`mount`, default `jwt`). One plugin serves
+    both `jwt` and `oidc` mounts, and a site often runs one of each.
+    The schema allows only letters, digits, `_`, `-`, `.` and `/`
+    between parts, and no part may start with `.`, so a call cannot
+    leave `auth/<mount>/`.
+  - All four handlers call `client.adapter` (`list` / `get` / `post`)
+    on the same paths hvac uses. A role write must keep every field the
+    caller does not give. Vault keeps most fields that are not in the
+    body, but sets a missing `role_type` back to `oidc` and a missing
+    `bound_claims_type` back to `string`. So a `token_ttl` change alone
+    would turn a `jwt` role into an `oidc` role (and Vault then refuses
+    it, because an `oidc` role needs redirect URIs). The write therefore
+    reads the current role first and sends those two values again when
+    the caller did not give them; the answer lists them under
+    `kept_from_current_role`. A new role (`404` on the read) gets only
+    the given fields. hvac's `auth.jwt.create_role` is not used because
+    it always sends `role_type`, `bound_claims_type` and
+    `verbose_oidc_logging` with its own defaults. The dev-Vault test
+    checks this: after a one-field write, only that field differs.
+  - Tokens issued before a role write keep their old lease. The write's
+    answer carries a `note` that says only new logins get the new
+    settings, so a read-back with an old token is not taken for a failed
+    write.
+  - `config.read` returns only the fields in
+    `VAULT_AUTH_JWT_CONFIG_FIELDS`. `oidc_client_secret` and
+    `provider_config` (which can hold a provider key) are never
+    returned, and a field a later Vault adds is dropped until it is
+    reviewed and added to that list.
+  - `role.list` turns Vault's `404` into `{"keys": []}`. Vault answers
+    `404` both for a mount with no roles and for a path with no JWT/OIDC
+    method, so the guidance points to `vault.sys.auth.list` when the
+    list is empty. `role.read` and `config.read` let the `404` surface
+    as a `connector_error` with `exception_class="InvalidPath"`.
+  - The write has a park-time permission preflight (see below) on
+    `auth/<mount>/role/<name>`.
+  - Registered by `register_vault_auth_jwt_operations()`, its own
+    lifespan registrar entry queued after `register_vault_typed_operations`
+    (which creates the `auth` group). The group text is the shared
+    `AUTH_WHEN_TO_USE` in `ops_auth.py`, which names all three login
+    methods. Group text is first-write-wins: a database whose `auth`
+    group row already exists keeps its old text until an operator edits
+    the group. Unit coverage in `test_connectors_vault_auth_jwt.py`.
 - **`identity` op group** (`ops_identity.py` / `ops_identity_schemas.py`,
   G3.15-T4 #1412) — entity / entity-alias / group lifecycle on the core
   `identity/` engine, group key `identity`:
@@ -344,6 +410,36 @@ target registration) is documented in
   `list` classifies `read` via the `.list` suffix and normalises an
   empty-store 404 to `{"keys": []}`. None of the identity objects carry
   secret material.
+
+  **Identity token roles and keys** (`ops_identity_oidc.py` /
+  `ops_identity_oidc_schemas.py`) are in the same `identity` group. Vault
+  signs identity tokens (JWTs) that another system trusts: a role under
+  `identity/oidc/role/<name>` names the key under
+  `identity/oidc/key/<name>` that signs its tokens, the audience
+  (`client_id`), `ttl` and `template`. These are not the login roles of
+  the JWT/OIDC auth method (`auth/<mount>/role`).
+
+  | op_id | hvac call | safety_level | approval | op_class |
+  |---|---|---|---|---|
+  | `vault.identity.oidc.role.list` | `secrets.identity.list_roles` | safe | False | `read` |
+  | `vault.identity.oidc.role.read` | `secrets.identity.read_role` | safe | False | `other` |
+  | `vault.identity.oidc.role.delete` | `secrets.identity.delete_role` | dangerous | True | `write` |
+  | `vault.identity.oidc.key.list` | `secrets.identity.list_named_keys` | safe | False | `read` |
+  | `vault.identity.oidc.key.read` | `secrets.identity.read_named_key` | safe | False | `other` |
+  | `vault.identity.oidc.key.delete` | `secrets.identity.delete_named_key` | dangerous | True | `write` |
+
+  Lists turn the empty-store 404 into `{"keys": []}`; a read of an
+  unknown name surfaces `InvalidPath`. Nothing is a secret (a key read
+  never returns the private key). Vault refuses to delete a key that a
+  role (or an OIDC provider client or a mount) still uses; the key delete
+  turns that 400 into `VaultOidcKeyInUseError` (a `ConnectorUpstreamError`)
+  whose `remediation` names the roles. Unlike the older identity ops, all
+  six log in through `vault_client_for_target`, so the target's
+  `extras["vault_role"]` decides which Vault role runs the call. Both
+  deletes register a park-time permission preflight for `delete` on their
+  path (see the preflight section below). The policy rules are in
+  [`connector-vault-policy.md`](../cross-repo/connector-vault-policy.md)
+  §6.7.
 - **`token` op group** (`ops_token.py` / `ops_token_schemas.py`,
   G3.15-T4 #1412) — token lifecycle on the core `token` backend, group
   key `token`:
@@ -357,11 +453,17 @@ target registration) is documented in
   | `vault.token.role.write` | `adapter.post` on `/v1/auth/token/roles/<role_name>` | dangerous | True | `write` |
   | `vault.token.role.read` | `auth.token.read_role` | safe | False | `other` |
   | `vault.token.role.list` | `auth.token.list_roles` | safe | False | `read` |
+  | `vault.token.create_and_store` | `auth.token.create(role_name=...)` / `auth.token.create_orphan`, then the `vault.kv.patch` / `vault.kv.put` or `k8s.secret.update` handler | dangerous | True | `credential_mint` |
 
-  `token.create` mints a client token in its **response** →
-  `credential_mint` (aggregate-only broadcast; the token reaches only the
-  caller's `OperationResult`, never the audit row or feed). It is
-  **non-idempotent** (a fresh token per call). `revoke_accessor` is
+  `token.create` makes a client token but **never returns it**: the
+  handler keeps only the `accessor` and the `policies` from Vault's
+  answer, so the token is in no result, audit row, approval result or run
+  record. MEHO makes the token under its own Vault login for the call, and
+  Vault revokes a child token when that login is revoked at the end of the
+  call. To get a token you can use, call `vault.token.create_and_store`
+  (an orphan token, written to a Vault KV path or a Kubernetes Secret).
+  The op classifies `credential_mint` (aggregate-only broadcast). It is
+  **non-idempotent** (a new token per call). `revoke_accessor` is
   **surgical** — it revokes exactly one token by accessor; there is
   intentionally **no bulk-revoke op** (the vault skill's loudest
   Don't-rule). Token accessors are non-secret reference handles, so they
@@ -412,8 +514,69 @@ target registration) is documented in
   target's `extras["vault_role"]` decides which Vault role makes the
   change.
 
-  Both groups register from `ops_identity.py` / `ops_token.py` /
-  `ops_token_role.py` spec tables, composed by the thin
+  **Make a token and store it** (`ops_token_store.py`, with
+  `ops_token_store_schemas.py` and `ops_token_store_preview.py`).
+  `vault.token.create_and_store` makes a token and writes it straight to
+  the place the caller names, so nobody sees it: a KV v2 path on the same
+  Vault target (`store.vault_kv`: `path`, `field` default `token`, `mount`
+  default `secret`), or one key of an existing Kubernetes Secret
+  (`store.k8s_secret`: `target`, `namespace`, `name`, `key`). The steps:
+
+  1. Check the destination before the token exists. `vault_kv`: the path
+     shape and the tenant check. `k8s_secret`: the target exists in the
+     caller's tenant and resolves to the Kubernetes connector, MEHO policy
+     allows `k8s.secret.update` on it (the shared second-target check,
+     `operations/secondary_target_policy.py`: the caller's `deny` refuses,
+     a `needs-approval` verdict counts only on this op's own approved
+     run, and when a reviewer runs the approved request the requester's
+     policy on that target is checked again), and the Secret exists and
+     is not immutable (key names only).
+  2. Make the token under the target's Vault role
+     (`vault_client_for_target`): `POST auth/token/create/<role_name>`,
+     or `auth/token/create-orphan` when no role is given.
+  3. Check `auth.orphan`. **Why the token must be an orphan:** MEHO's own
+     Vault login token is revoked when the login block ends
+     (`vault_client_for_operator` calls `revoke-self`), and Vault revokes
+     every child token with its parent. A token with a parent would die
+     right after the call. So when Vault answers `orphan: false`, MEHO
+     revokes the token at once (still inside the login) and stops; the
+     error says the token role must set `orphan=true`.
+  4. Write the token by calling the handlers directly: `vault_kv_patch`
+     (`vault_kv_put` with `cas=0` when the path is new, so Vault creates
+     it only when it is still missing; a path another writer made in the
+     meantime is kept and the call fails), or `k8s_secret_update` in
+     `patch` mode. No second operation is started, so the token is never
+     in any operation's parameters or audit row.
+  5. On any failure after step 2, also a cancellation, revoke the new token
+     with the token itself (`auth/token/revoke-self`, in Vault's `default`
+     policy), shielded from cancellation. A cancellation that arrives
+     while Vault is still making the token waits for Vault's answer
+     (`_create_token`), so the token Vault may have made is revoked too.
+     When that revoke also fails, the error names the accessor and
+     `vault.token.revoke_accessor`.
+  6. Return `{accessor, expire_time, ttl_seconds, policies, stored_to}`;
+     `expire_time` is the creation time plus `auth.lease_duration`. A
+     `credential_mint` op keeps a part of its answer only through its own
+     hint, so a `result_scalars` hint keeps the three scalars inline and a
+     `result_objects` hint keeps `stored_to` when a long policy list is
+     moved behind a result handle.
+
+  The op is pinned `credential_mint` (aggregate-only broadcast, no
+  flight-recorder bodies) and its tags mark it secret-bearing, so the
+  dispatcher withholds error message text; every error carries MEHO's own
+  text as `remediation`. A preview builder shows the token settings and
+  the destination. A permission preflight probes, under the target's role,
+  `update` on the create path and, for a `vault_kv` store, `create` +
+  `read` + `update` on `<mount>/data/<path>` (what `vault.kv.put` and
+  `vault.kv.patch` need). For a `k8s_secret` store it also records the
+  requester's policy for `k8s.secret.update` on that target on the
+  approval card (`requester_denied`). The token role and policy setup is in
+  [`docs/cross-repo/connector-vault-policy.md`](../cross-repo/connector-vault-policy.md)
+  §6.8. Coverage in `test_connectors_vault_token_store.py` and the
+  dev-mode lane of `tests/integration/test_connectors_vault_dev_e2e.py`.
+
+  Both groups register from `ops_identity.py` / `ops_identity_oidc.py` / `ops_token.py` /
+  `ops_token_role.py` / `ops_token_store.py` spec tables, composed by the thin
   `register_vault_identity_token_operations()` registrar
   (`ops_identity_token.py`), which is queued from the package `__init__`
   as its own lifespan registrar entry (independent of the KV / sys / auth
@@ -433,8 +596,97 @@ target registration) is documented in
 | `vault.kv.patch` | `patch` | caution | `credential_write` |
 | `vault.kv.delete` | `delete_secret_versions` | dangerous | `write` |
 | `vault.kv.metadata.delete` | `delete_metadata_and_all_versions` | destructive | `write` |
+| `vault.kv.folder.delete` | `list_secrets` + `read_secret_metadata` + `delete_secret_versions` | dangerous | `write` |
+| `vault.kv.compare` | `read_secret_version` (per copy) | safe | `credential_read` |
 
-All seven register into operation group `kv`.
+All nine register into operation group `kv`.
+
+**Folder delete (`vault.kv.folder.delete`, `ops_kv_folder.py`).** Soft-deletes
+many secrets under one folder with one approval. Before it, each secret
+needed its own `vault.kv.delete` call and its own approval.
+
+- The caller first runs `vault.kv.list` with `recursive=true`. That walks
+  every sub-folder (`kv_tree.list_kv_tree`) and returns the secret paths
+  relative to the folder (`run1/token`), without folder entries.
+- The caller passes the folder (`mount`, `path`) and that list (`keys`).
+  The list is part of the params, so the approval is bound to it: the call
+  can only delete what the approver saw. The preview builder
+  (`_folder_delete_preview`) reads only the params, so `preview_operation`
+  and the approval card show the same block: every key path and the count
+  (`key_paths`, `key_count`). Never a value.
+- When it runs, the handler lists the folder again. For each listed key that
+  is still there it reads the version metadata and soft-deletes every
+  version that is not yet deleted or destroyed (the same soft delete as
+  `vault.kv.delete`; Vault can undelete). A version counts as deleted only
+  when its `deletion_time` has passed: Vault also fills that field for a
+  deletion it has only scheduled (`delete_version_after`), and such a
+  version is still live, so the op deletes it now. Each key gets a status:
+  `deleted` (with `versions`), `already_deleted` (no live version left, so
+  it is safe to run twice), `not_found`, or `failed` (with the error type;
+  one failure does not stop the others). A secret in the folder that is not
+  listed (for example one added after the approval) is left alone and
+  reported as `not_on_list`. The result carries the counts plus one row
+  per key under `results`, so a long result comes back as a result handle.
+- Guards: the mount root and an empty path fail the param check. Keys must
+  be relative paths without empty, `.` or `..` parts. The setting
+  `vault_kv_folder_max_keys` (`VAULT_KV_FOLDER_MAX_KEYS`, default 500) caps
+  the `keys` list in the param schema (read at start-up), so a longer list
+  is refused before the call waits for approval. The same limit stops the
+  recursive list and the walk when the call runs
+  (`VaultFolderTooLargeError`; nothing is deleted then).
+- Permission check before approval (`_folder_delete_preflight`): it first
+  runs the folder, key and tenant checks the delete itself runs
+  (`_folder_and_keys`, `enforce_tenant_scope`), before it opens a Vault
+  client. A folder outside the caller's tenant, or a bad folder or key, is
+  refused right there with `write_capability_denied` (the `reason` names
+  the error), with no Vault call and no approval request. So the walk below
+  never lists a folder of another tenant. Then it walks the folder
+  (`kv_tree.list_kv_folders`, the same walk the delete does) to find every
+  sub-folder the delete will list, also one no listed key is in. A
+  sub-folder Vault refuses to list is kept and not entered. Then it needs
+  `list` on `<mount>/metadata/<folder>` and on every one of
+  these sub-folders (plus every sub-folder a listed key is in), and for
+  every listed key `read` on its metadata path and `update` on its delete
+  path. Vault rights can differ per key and per sub-folder, so all paths
+  are probed, in one `sys/capabilities-self` call
+  (`vault_capabilities_preflight`). When one is missing the call is refused
+  with `write_capability_denied` naming that path, and no approval is
+  requested.
+**Compare copies (`vault.kv.compare`, `kv_compare.py`).** Checks that 2 to
+10 copies of one secret hold the same value, without showing it. Params:
+`paths`, a list of `{path, key, mount?}`. The first item is the reference.
+
+- Each copy is read with the caller's own Vault login (same role and same
+  tenant guard as `vault.kv.read`).
+- The value under `key` becomes a `StoredValue`: its kind (`text` for a
+  string, `json` for any other JSON value) and its bytes (UTF-8 text, or
+  canonical JSON). Two copies match only when the kind and the bytes
+  match, compared by `hmac.compare_digest` (constant time); then the value
+  is dropped. So the string `"123"` never matches the number `123`, and
+  `"null"` never matches `null`.
+- Answer: `{same, copies: [{mount, path, key, found, matches_first,
+  version, reason}]}`. `same` is true only when every copy was found and
+  matches. Never a value, never a hash: a hash of a short password can be
+  guessed offline.
+- A copy that cannot be read does not fail the call. It answers
+  `found: false` with `reason` `forbidden` (Vault 403, or a path outside
+  the caller's tenant), `not_found` (no secret, or the latest version is
+  deleted) or `key_not_found`. A login failure, an unreachable Vault or a
+  path that repeats the mount segment still fails the whole call.
+- The op id is on `_CREDENTIAL_READ_OPS`. The backplane reads secret
+  values to answer it, so the flight recorder never stores a vendor body
+  for it and the broadcast feed shows only the outcome.
+- `read_kv_copy`, `compare_copies` and `text_value` are shared with
+  `k8s.secret.compare_to_ref` (a Kubernetes Secret key against one Vault
+  copy; see `connectors-kubernetes.md`).
+
+**Empty folder (`vault.kv.list`, #5231).** Vault answers a LIST on an
+empty or missing folder with a `404`, which hvac raises as
+`InvalidPath`. Like `vault.identity.list`, `vault.token.list_accessors`
+and `vault.token.role.list`, `vault.kv.list` turns that `404` into
+`{"keys": []}` with `status: ok`, so an agent can tell "the folder is
+empty" from "something broke". A permission denial (`Forbidden`) is
+still an error.
 
 **Permanent delete (`vault.kv.metadata.delete`, #3424).** `kv.delete` is a
 soft delete: Vault keeps the data and an undelete brings it back.
@@ -546,7 +798,8 @@ The G6 broadcast publisher emits an aggregate-only payload for
 `credential_read` and `audit_query` ops. The sensitivity class is
 derived **from the op-id**, not a per-descriptor field:
 `broadcast.events.classify_op` consults the `_CREDENTIAL_READ_OPS`
-allowlist (currently `{vault.kv.read, vault.kv.list}`), the
+allowlist (for this connector `{vault.kv.read, vault.kv.list,
+vault.kv.compare}`), the
 `_CREDENTIAL_WRITE_OPS` allowlist (G11.7-T1 #1401 / G3.15-T1 #1409 —
 `{vault.kv.put, vault.kv.patch, vault.auth.userpass.write,
 vault.auth.userpass.update_password, k8s.secret.create, k8s.job.create}`),
@@ -570,11 +823,14 @@ secret in full. The auth-write ops (G3.15-T3 #1411)
 `vault.auth.userpass.write` / `vault.auth.userpass.update_password` are
 also `credential_write` — the password is in their request params.
 Response-side secret-mint ops (`vault.token.create`,
-`vault.auth.approle.generate_secret_id`) classify `credential_mint`
-alongside `harbor.robot.create`: the minted value is in the response, so
-the broadcast collapses to aggregate-only and the audit row keeps only a
-`params_hash`, while the caller's `OperationResult` still carries the
-secret. See `docs/codebase/broadcast.md` for the full sensitivity
+`vault.auth.approle.generate_secret_id`, and
+`vault.token.create_and_store`, which never returns its token) classify
+`credential_mint`
+alongside `harbor.robot.create`: the broadcast collapses to aggregate-only,
+and the audit row's raw copy has every secret-named value replaced.
+`vault.auth.approle.generate_secret_id` and `harbor.robot.create` still
+return the secret in the caller's `OperationResult`; `vault.token.create`
+and `vault.token.create_and_store` return no token at all. See `docs/codebase/broadcast.md` for the full sensitivity
 taxonomy.
 
 `vault.sys.policy.write` (G3.15-T2 #1410) classifies `write` via the
@@ -595,7 +851,7 @@ broadcast is the consistent, safe direction (same rationale as the
 
 The mutating KV ops — `vault.kv.put` (`caution`), `vault.kv.patch`
 (`caution`), `vault.kv.delete` (`dangerous`), `vault.kv.metadata.delete`
-(`destructive`, #3424) — register `requires_approval=True` (G3.15-T1
+(`destructive`, #3424), `vault.kv.folder.delete` (`dangerous`) — register `requires_approval=True` (G3.15-T1
 #1409). The flag became meaningful
 once G11.7-T1 (#1401) routed human principals hitting a
 `requires_approval` op to the **approval queue** (park for review)
@@ -628,15 +884,18 @@ exercised by calling it directly in the unit suite. The policy reads
 (`policy.read` / `policy.list`) stay `requires_approval=False`.
 
 The identity write ops (`identity.entity.write` / `entity_alias.write` /
-`group.write` / `group.delete`) and the token write ops
+`group.write` / `group.delete`, and `oidc.role.delete` /
+`oidc.key.delete`) and the token write ops
 (`token.create` / `token.revoke_accessor`, and `token.role.write`, whose
 `allowed_policies` decide what a token made from the role can do)
 (G3.15-T4 #1412) likewise
 register `requires_approval=True` — each is a privilege assignment,
 privilege-plumbing membership change, irreversible removal, or a secret
 mint. `requires_approval` / `safety_level` are carried per-op in the
-`IDENTITY_OP_SPECS` / `TOKEN_OP_SPECS` / `TOKEN_ROLE_OP_SPECS` rows. The
-identity reads (`entity.read` / `group.read` / `list`),
+`IDENTITY_OP_SPECS` / `IDENTITY_OIDC_OP_SPECS` / `TOKEN_OP_SPECS` /
+`TOKEN_ROLE_OP_SPECS` rows. The
+identity reads (`entity.read` / `group.read` / `list`, and the
+`oidc.role` / `oidc.key` list and read),
 `token.list_accessors` and the token-role reads (`token.role.read` /
 `token.role.list`) stay `requires_approval=False`, registered `safe` so
 create-if-absent flows do not stall. The integration tests drive the gated writes via the
@@ -724,7 +983,11 @@ integration coverage in `test_connectors_vault.py`,
 The probe itself is the shared `vault_capability_preflight(operator,
 op_id, auth_path, required, target)` in `ops.py`;
 `vault_kv_write_capability_preflight` only picks the KV path and
-requirement and calls it. **`vault.token.role.write`** registers a second
+requirement and calls it. It is a one-path wrapper around
+`vault_capabilities_preflight(operator, op_id, checks, target)`, which
+probes a list of `(path, required)` pairs in one `sys/capabilities-self`
+call and returns the first denied path (`vault.kv.folder.delete` uses it
+for every listed key). **`vault.token.role.write`** registers a second
 preflight on the same hook (`ops_token_role.py`, wired at import time
 like the KV preview builders): it probes `auth/token/roles/<role_name>`
 under the target's role for `create` + `update` (Vault asks for `create`
@@ -734,6 +997,13 @@ approval request is written, exactly like a KV write. The policy lines a
 deployment adds are in
 [`docs/cross-repo/connector-vault-policy.md`](../cross-repo/connector-vault-policy.md)
 §6.4. Coverage in `test_connectors_vault_token_role.py`.
+**`vault.auth.jwt.role.write`** registers a third preflight
+(`ops_auth_jwt.py`) on `auth/<mount>/role/<name>`. It needs `create`,
+`read` and `update`, because the write reads the current role first. Coverage in
+`test_connectors_vault_auth_jwt.py`. `vault.identity.oidc.role.delete` and `vault.identity.oidc.key.delete`
+register the same kind of preflight (`ops_identity_oidc.py`): `delete` on
+`identity/oidc/role/<name>` or `identity/oidc/key/<name>` (policy doc
+§6.7, coverage in `test_connectors_vault_identity_oidc.py`).
 
 ## JSONFlux result-handle path (`vault.kv.list`)
 
@@ -754,6 +1024,9 @@ reducer is the threshold-aware
 pages the spilled rows by `offset` / `limit` (#1507 / #3179); server-side
 filtering / aggregation over a handle is not available.
 
+`vault.kv.list` with `recursive=true` and `vault.kv.folder.delete` (its
+`results` rows) take the same path, so a big folder comes back as a handle.
+
 `tests/test_vault_kv_list_jsonflux.py` (G3.3-T4) pins both halves of
 the contract: ≤50 keys stays inline with no handle, and >50 keys
 produces `{sample, ...}` on `result` plus a `ResultHandle` whose
@@ -765,15 +1038,16 @@ raw >50-key list once a handle is produced.
 
 1. Importing `connectors.vault` (package `__init__.py`) registers
    `VaultConnector` against the v2 registry synchronously and queues
-   three typed-op registrars (`register_vault_typed_operations`,
+   four typed-op registrars (`register_vault_typed_operations`,
    `register_vault_sys_typed_operations`,
-   `register_vault_identity_token_operations`) onto the lifespan-driven
+   `register_vault_identity_token_operations`,
+   `register_vault_auth_jwt_operations`) onto the lifespan-driven
    registrar list. `register_vault_typed_operations` registers the
    KV-v2 group and then calls `register_vault_auth_operations` (auth
    read) + `register_vault_auth_write_operations` (auth write).
    `register_vault_identity_token_operations` composes the `identity` +
    `token` groups from their per-module spec tables (`ops_identity.py`,
-   `ops_token.py`, `ops_token_role.py`).
+   `ops_identity_oidc.py`, `ops_token.py`, `ops_token_role.py`).
 2. At FastAPI lifespan startup, `run_typed_op_registrars()` invokes
    all registrars, which upsert the `endpoint_descriptor` rows. Upsert
    is idempotent: a restart against unchanged descriptions is a no-op
@@ -853,6 +1127,11 @@ and a real Postgres audit store (reusing the integration conftest's
   `current_version == 2`), and a `bulk/` folder with > 50 child keys
   (the set-shape fixture G3.3-T4's threshold test also consumes). It
   enables `userpass` + `approle` and seeds one user / one role.
+- **Permanent delete.** The `kv.metadata.delete` case seeds two
+  versions at its own path, checks `status: "deleted"`, then checks
+  with the root client that a metadata read and a read of each
+  version find nothing. A second run on the same path must return
+  `status: "unchanged"` (safe to run twice).
 - **Client seam.** Dev mode has no OIDC method, so the test
   monkeypatches `vault_client_for_operator` to yield a root-token
   client bound to the container and pins `VAULT_ADDR` for the
@@ -862,7 +1141,7 @@ and a real Postgres audit store (reusing the integration conftest's
 - **Assertions.** Each op asserts the live response shape, a single
   synchronously-committed `audit_log` row (postulate 7), and the
   broadcast `op_class` — `credential_write` for `kv.put` (G11.7-T1
-  #1401) and `write` for `kv.delete`,
+  #1401) and `write` for `kv.delete` / `kv.metadata.delete`,
   `credential_read` for `kv.read` / `kv.list`, `read` for the
   KV-v2 / sys metadata reads and the `.list` auth ops
   (`auth.userpass.list` / `auth.approle.list`), and `other` for the

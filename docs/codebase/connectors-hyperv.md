@@ -46,7 +46,7 @@ The write surface is the seed and the cutover: `hyperv.export.vm` (the migration
 seed) and `hyperv.power.start` / `hyperv.power.stop` (source-side cutover
 verbs), plus checkpoint create / revert / delete.
 
-## Op surface (18 ops across six groups)
+## Op surface (19 ops across six groups, plus one multi-step read)
 
 Safety tiers follow the Initiative #3259 satellite table: reads are `safe` (ride
 satellite runners into un-dialable customer networks); recoverable writes are
@@ -64,7 +64,8 @@ by the tier ladder — central-dial / on-site only).
 | `hyperv.vms.get` | vms | safe | `Get-VM -Name` |
 | `hyperv.vms.config` | vms | safe | `Get-VM` (+ `Get-VMFirmware` on Gen 2) |
 | `hyperv.vms.state` | vms | safe | `Get-VM -Name` (runtime state) |
-| `hyperv.disks.vm.list` | disks | safe | `Get-VMHardDiskDrive -VMName` |
+| `hyperv.vms.guest.list` | vms | safe | WMI `Msvm_ComputerSystem` + `Msvm_VirtualSystemSettingData.BIOSGUID` + `Msvm_KvpExchangeComponent` (BIOS GUID and guest OS per VM) |
+| `hyperv.disks.vm.list` | disks | safe | `Get-VMHardDiskDrive -VMName` (also `DiskNumber` of a pass-through disk and `SupportPersistentReservations` of a shared disk) |
 | `hyperv.disks.vhd.get` | disks | safe | `Get-VHD -Path` |
 | `hyperv.disks.vhd.chain` | disks | safe | `Get-VHD` (follows `ParentPath` leaf→base) |
 | `hyperv.checkpoints.list` | checkpoints | safe | `Get-VMSnapshot -VMName` |
@@ -75,9 +76,18 @@ by the tier ladder — central-dial / on-site only).
 | `hyperv.power.start` | power | caution | `Start-VM` |
 | `hyperv.power.stop` | power | caution | `Stop-VM` (`shutdown` / `turnoff` / `save`) |
 
-12 `safe`, 4 `caution`, 2 `dangerous` + `requires_approval`. Every op carries an
+13 `safe`, 4 `caution`, 2 `dangerous` + `requires_approval`. Every op carries an
 `llm_instructions` block; every group carries a `_WHEN_TO_USE_BY_GROUP` entry
 (registration fails closed without one).
+
+`hyperv.vms.guest.list` reads the values the guest's integration services
+push to the host. They are empty while a VM is off. `BIOSGUID` is the UUID the
+guest sees as its BIOS UUID, so it matches the same machine read through its
+guest OS.
+
+The multi-step read `hyperv.migration.inventory` (group `migration`, `safe`)
+collects every VM in the common migration inventory shape. It lives in
+`connectors/inventory/source_hyperv.py`; see `connectors-inventory.md`.
 
 ### Explicit non-goals (this increment)
 

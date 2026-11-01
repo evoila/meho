@@ -16,7 +16,7 @@ Two registry layers coexist:
   :func:`all_connectors`.
 * **v2** — three-tuple key ``dict[(product, version, impl_id), type[Connector]]``
   added in G0.6-T2 (#393) so multiple implementations per product can
-  coexist (e.g. ``vmware-pyvmomi-7.0`` and ``vmware-rest-9.0``). Public
+  coexist (e.g. ``bind9-ssh-9.x`` and a future ``bind9-rndc-9.x``). Public
   surface: :func:`register_connector_v2`, :func:`list_connector_impls`,
   :func:`all_connectors_v2`.
 
@@ -34,6 +34,7 @@ condition, and should surface as a deploy failure.
 
 import importlib
 import pkgutil
+from types import ModuleType
 
 import structlog
 
@@ -119,8 +120,8 @@ def register_connector_v2(
     """Register a connector under the v2 three-tuple key.
 
     Keyword-only so the call site reads as
-    ``register_connector_v2(product="vmware", version="9.0",
-    impl_id="vmware-rest", cls=VmwareRestConnector)`` — three positional
+    ``register_connector_v2(product="harbor", version="2.x",
+    impl_id="harbor-rest", cls=HarborConnector)`` — three positional
     strings would invite ordering bugs.
 
     Raises :exc:`TypeError` when ``cls`` is not a :class:`Connector` subclass.
@@ -173,7 +174,7 @@ def _assert_product_impl_id_round_trips(
     receives a ``connector_id`` string and recovers the product via
     :func:`~meho_backplane.operations._lookup.parse_connector_id`, which
     derives it from the first hyphen-segment of ``impl_id``
-    (``"vrli-rest" -> "vrli"``). When a connector registers a ``product``
+    (``"harbor-rest" -> "harbor"``). When a connector registers a ``product``
     that differs from that derived spelling, an operator target carrying
     the natural (parser-derived) product token resolves a *different*
     namespace than the registration — the silent product-namespace
@@ -205,8 +206,8 @@ def _assert_product_impl_id_round_trips(
     is about the *product* segment, and it is only meaningful when
     :func:`~meho_backplane.operations._lookup.parse_connector_id` can
     actually recover the triple. The parser's version segment must be
-    digit-leading (``vmware-rest-9.0`` -> ``("vmware", "9.0",
-    "vmware-rest")``); a non-numeric version label (``vmware-rest-rest``,
+    digit-leading (``harbor-rest-2.x`` -> ``("harbor", "2.x",
+    "harbor-rest")``); a non-numeric version label (``harbor-rest-rest``,
     a synthetic discriminator some impls register under) doesn't match,
     so the parser falls back to ``(connector_id, "", "")`` — it didn't
     derive a *different product*, it failed to parse at all. In that case
@@ -261,7 +262,7 @@ def product_impl_id_round_trips(*, product: str, version: str, impl_id: str) -> 
       it is a resolver-internal padding row, never an operator-addressable
       connector.
     * the parse is **lossy** — a connector_id whose version label is not
-      digit-leading (``vmware-rest-rest``) parses back to
+      digit-leading (``harbor-rest-rest``) parses back to
       ``(connector_id, "", "")``, losing ``version`` / ``impl_id``. There
       is no meaningfully-derived product to compare; the resolver matches
       such a connector on its ``supported_version_range``, not on a parsed
@@ -420,12 +421,27 @@ def _eager_import_connectors() -> None:
     today, but deterministic ordering keeps deploy diffs comparable and
     avoids surprises if a future connector ever takes a registration-
     time side-effect on another connector's presence.
+
+    The folders were already checked against the connector package list
+    when :mod:`meho_backplane.connectors` itself was imported (see
+    :func:`~meho_backplane.connector_packages.check_connector_folders`).
+    That import is a precondition of reaching this function, so the walk
+    only imports.
     """
     import meho_backplane.connectors as pkg
 
-    for _, name, ispkg in sorted(pkgutil.iter_modules(pkg.__path__), key=lambda m: m[1]):
-        if ispkg:
-            importlib.import_module(f"{pkg.__name__}.{name}")
+    _import_connector_subpackages(pkg)
+
+
+def _import_connector_subpackages(pkg: ModuleType) -> None:
+    """Import every subpackage of ``pkg`` in name order."""
+    names = [
+        name
+        for _, name, ispkg in sorted(pkgutil.iter_modules(pkg.__path__), key=lambda m: m[1])
+        if ispkg
+    ]
+    for name in names:
+        importlib.import_module(f"{pkg.__name__}.{name}")
 
 
 def clear_registry() -> None:

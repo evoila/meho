@@ -3,13 +3,17 @@
 
 """Typed-op metadata + registrar for :class:`VrConnector`.
 
-Two reads ship here, on vSphere Replication 8.8 and 9.0 and VCF 9.1
-Protection and Recovery:
+Seven reads, on vSphere Replication 8.8 and 9.0 and VCF 9.1 Protection
+and Recovery:
 
 * ``vr.about`` -- ``GET /api/rest/vr/v2/info``: the server's name,
   status, version, build and local vCenter;
 * ``vr.api_file.get`` -- ``GET`` one of the two API files the appliance
-  serves; the body lives in :mod:`meho_backplane.connectors._shared.dr_api_file`.
+  serves; the body lives in :mod:`meho_backplane.connectors.vmware_shared.dr_api_file`;
+* ``vr.pairing.list``, ``vr.replication.list``, ``vr.replication.issues``,
+  ``vr.vm.check`` and ``vr.task.get`` -- metadata in
+  :mod:`meho_backplane.connectors.vr.read_ops`, bodies in
+  :mod:`meho_backplane.connectors.vr.reads`.
 
 The dataclass + tuple + registrar shape mirrors
 :mod:`meho_backplane.connectors.srm.typed_ops`.
@@ -17,10 +21,9 @@ The dataclass + tuple + registrar shape mirrors
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING
 
-from meho_backplane.connectors._shared.dr_rest_schemas import (
+from meho_backplane.connectors.vmware_shared.dr_rest_schemas import (
     API_FILE_NEXT_STEP,
     API_FILE_OUTPUT_SHAPE,
     API_FILE_RESULT_SCALARS,
@@ -28,6 +31,8 @@ from meho_backplane.connectors._shared.dr_rest_schemas import (
     api_file_response_schema,
     server_info_response_schema,
 )
+from meho_backplane.connectors.vr.op_types import GROUP_API_DOCS, GROUP_SERVER, VrTypedOp
+from meho_backplane.connectors.vr.read_ops import VR_READ_OPS, VR_READ_WHEN_TO_USE_BY_GROUP
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -39,36 +44,15 @@ __all__ = [
     "register_vr_typed_operations",
 ]
 
-_GROUP_SERVER = "vr-server"
-_GROUP_API_DOCS = "vr-api-docs"
-
-
-@dataclass(frozen=True)
-class VrTypedOp:
-    """Metadata for one vSphere Replication typed op registered at lifespan startup."""
-
-    op_id: str
-    handler_attr: str
-    summary: str
-    description: str
-    parameter_schema: dict[str, Any]
-    response_schema: dict[str, Any] | None
-    group_key: str | None
-    tags: tuple[str, ...]
-    safety_level: Literal["safe", "caution", "dangerous", "destructive"]
-    requires_approval: bool
-    llm_instructions: dict[str, Any] | None
-
-
 #: Curated ``when_to_use`` text per group. Says what the group holds; it
 #: makes no claim about the safety of the whole group.
 VR_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
-    _GROUP_SERVER: (
+    GROUP_SERVER: (
         "Use to see which vSphere Replication server a target is: its name, status, "
         "version, build and the vCenter it is registered with, plus a short view of "
         "its certificates (vr.about). One read."
     ),
-    _GROUP_API_DOCS: (
+    GROUP_API_DOCS: (
         "Use to read an API description file that a running vSphere Replication "
         "appliance serves: the vSphere Replication API file or the appliance setup "
         "API file (vr.api_file.get). The read returns a checked copy of the file with "
@@ -76,6 +60,7 @@ VR_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "behind a result handle, so a vendor API file can be pinned and compared. "
         "One read."
     ),
+    **VR_READ_WHEN_TO_USE_BY_GROUP,
 }
 
 _ABOUT = VrTypedOp(
@@ -96,7 +81,7 @@ _ABOUT = VrTypedOp(
     response_schema=server_info_response_schema(
         "vSphere Replication", "the local vCenter the server is registered with"
     ),
-    group_key=_GROUP_SERVER,
+    group_key=GROUP_SERVER,
     tags=("read-only", "vr", "vsphere-replication", "live-recovery", "probe"),
     safety_level="safe",
     requires_approval=False,
@@ -142,7 +127,7 @@ _API_FILE_GET = VrTypedOp(
         "examples": [{"file": "vr"}],
     },
     response_schema=api_file_response_schema("vSphere Replication"),
-    group_key=_GROUP_API_DOCS,
+    group_key=GROUP_API_DOCS,
     tags=("read-only", "vr", "vsphere-replication", "live-recovery", "api-docs", "documentation"),
     safety_level="safe",
     requires_approval=False,
@@ -158,7 +143,7 @@ _API_FILE_GET = VrTypedOp(
     },
 )
 
-VR_TYPED_OPS: tuple[VrTypedOp, ...] = (_ABOUT, _API_FILE_GET)
+VR_TYPED_OPS: tuple[VrTypedOp, ...] = (_ABOUT, _API_FILE_GET, *VR_READ_OPS)
 
 
 async def register_vr_typed_operations(

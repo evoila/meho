@@ -78,6 +78,13 @@ type importDoc struct {
 // right hostname. The column composes with `verify_tls` / `tls_ca_pin`
 // (no mutual-exclusion validator); the server caps it at 512 chars and
 // returns 422 on overflow, which the import path already surfaces.
+//
+// #3649 amendment: `version` is the operator-asserted product version
+// (the same column `meho targets add --version` writes). The resolver
+// reads it before the first probe, and a versioned, profile-backed
+// connector cannot match a target without it. Spilling it into
+// `extras` left the column empty, so the target could neither run an
+// operation nor be probed.
 var knownTopLevel = map[string]struct{}{
 	"aliases":                 {},
 	"auth_model":              {},
@@ -90,10 +97,12 @@ var knownTopLevel = map[string]struct{}{
 	"port":                    {},
 	"preferred_impl_id":       {},
 	"product":                 {},
+	"secret_field_map":        {},
 	"secret_ref":              {},
 	"tls_ca_pin":              {},
 	"tls_server_name":         {},
 	"verify_tls":              {},
+	"version":                 {},
 	"vpn_required":            {},
 }
 
@@ -167,6 +176,7 @@ func (p *plan) summary() string {
 //	  [--update]              # PATCH existing targets instead of erroring on duplicates
 //	  [--dry-run]             # print the plan (read-only: one GET, no writes)
 //	  [--json]                # output the plan as JSON (use with --dry-run)
+//	  [--secret-field c=s]    # add a secret field map entry to every target (repeatable)
 //	  [--backplane <url>]     # override the backplane URL
 //
 // Exit codes:
@@ -181,6 +191,7 @@ func newImportCmd() *cobra.Command {
 		updateMode        bool
 		dryRun            bool
 		jsonOut           bool
+		secretFields      []string
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
@@ -191,9 +202,11 @@ func newImportCmd() *cobra.Command {
 			"Mapping rules. Top-level columns recognised on the API's " +
 			"TargetCreate / TargetUpdate models are mapped 1:1: name, aliases, " +
 			"product, host, port, fqdn, secret_ref, auth_model, vpn_required, " +
-			"notes, preferred_impl_id, verify_tls, tls_ca_pin, tls_server_name, " +
-			"flight_recorder_capture. Any other field " +
-			"is spilled into the `extras` JSONB column. `fingerprint` is " +
+			"notes, version, preferred_impl_id, verify_tls, tls_ca_pin, " +
+			"tls_server_name, flight_recorder_capture, secret_field_map. Any " +
+			"other field is stored in the `extras` JSONB column, with a warning " +
+			"for each one (put it under an explicit `extras:` block to silence " +
+			"the warning). `version` must be a quoted string. `fingerprint` is " +
 			"server-managed and skipped with a warning if present in the YAML " +
 			"(the probe verb is the only legitimate writer).\n\n" +
 			"Idempotency. Default mode aborts the whole import if any entry's " +
@@ -205,6 +218,12 @@ func newImportCmd() *cobra.Command {
 			"render UPDATE, new ones CREATE — then returns before any " +
 			"POST/PATCH. `--json` formats the plan as a structured object " +
 			"(use with --dry-run).\n\n" +
+			"Secret field map. `--secret-field <connector_field>=<source_field>` " +
+			"(repeatable) adds that entry to the `secret_field_map` of every " +
+			"target in the file. It wins over an entry with the same " +
+			"connector field in the YAML. Use it when all targets in the file " +
+			"use secrets with the same key names, for example " +
+			"`--secret-field ssh_private_key=private_key`.\n\n" +
 			"Authentication. Uses the token `meho login` wrote, with the same " +
 			"401-refresh-retry behaviour as `meho status` and `meho operation " +
 			"call`. The tenant is the operator's JWT-bound tenant — there is no " +
@@ -213,11 +232,16 @@ func newImportCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			fieldMap, perr := parseSecretFieldFlags(secretFields, false)
+			if perr != nil {
+				return output.RenderError(cmd.ErrOrStderr(), perr, jsonOut)
+			}
 			return runImport(cmd, importOptions{
 				File:              args[0],
 				Update:            updateMode,
 				DryRun:            dryRun,
 				JSONOut:           jsonOut,
+				SecretFieldMap:    fieldMap,
 				BackplaneOverride: backplaneOverride,
 			})
 		},
@@ -228,16 +252,21 @@ func newImportCmd() *cobra.Command {
 		"print the plan (read-only: one GET, no writes); does not apply")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"output the plan as JSON (use with --dry-run)")
+	cmd.Flags().StringArrayVar(&secretFields, "secret-field", nil,
+		"connector_field=source_field to add to every target's secret field map (repeatable)")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to import into (defaults to the URL recorded by `meho login`)")
 	return cmd
 }
 
 type importOptions struct {
-	File              string
-	Update            bool
-	DryRun            bool
-	JSONOut           bool
+	File    string
+	Update  bool
+	DryRun  bool
+	JSONOut bool
+	// SecretFieldMap holds the `--secret-field` entries added to every
+	// entry's `secret_field_map` (see applySecretFieldMap).
+	SecretFieldMap    map[string]any
 	BackplaneOverride string
 }
 
@@ -255,6 +284,7 @@ func runImport(cmd *cobra.Command, opts importOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(err.Error()), opts.JSONOut)
 	}
+	applySecretFieldMap(entries, opts.SecretFieldMap)
 
 	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
@@ -294,10 +324,40 @@ func runImport(cmd *cobra.Command, opts importOptions) error {
 			opts.JSONOut)
 	}
 
+	if !opts.JSONOut {
+		printPlanWarnings(cmd.ErrOrStderr(), p)
+	}
 	if err := executePlan(cmd.Context(), doer, p); err != nil {
 		return renderImportRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	return renderApplyResult(cmd, p, opts.JSONOut)
+}
+
+// applySecretFieldMap adds the `--secret-field` entries to the
+// `secret_field_map` of every entry. A flag entry wins over a YAML entry
+// with the same connector field; other YAML entries are kept. A YAML
+// `secret_field_map` that is not a map is left alone, so the server
+// rejects it with a 422 that names the target.
+func applySecretFieldMap(entries []map[string]any, flagMap map[string]any) {
+	if len(flagMap) == 0 {
+		return
+	}
+	for _, entry := range entries {
+		merged := map[string]any{}
+		switch existing := entry["secret_field_map"].(type) {
+		case nil:
+		case map[string]any:
+			for k, v := range existing {
+				merged[k] = v
+			}
+		default:
+			continue
+		}
+		for k, v := range flagMap {
+			merged[k] = v
+		}
+		entry["secret_field_map"] = merged
+	}
 }
 
 // --- YAML parsing ------------------------------------------------------
@@ -337,6 +397,14 @@ func parseTargetsYAML(data []byte) ([]map[string]any, error) {
 		}
 		if _, ok := e["host"].(string); !ok {
 			return nil, fmt.Errorf("entry %q: missing or non-string `host` field", name)
+		}
+		// YAML reads an unquoted `version: 8.0` as the number 8, which
+		// the API rejects (and which has already lost the ".0"). Fail
+		// here with a hint instead of guessing the string.
+		if v, ok := e["version"]; ok {
+			if _, isStr := v.(string); !isStr {
+				return nil, fmt.Errorf("entry %q: `version` must be a string; quote it (for example version: \"8.0\")", name)
+			}
 		}
 	}
 	return doc.Targets, nil
@@ -403,7 +471,14 @@ func mapEntry(entry map[string]any) (map[string]any, []string) {
 	}
 
 	// Second pass: partition every other key per the mapping rules.
-	for k, v := range entry {
+	// Sorted so the per-key warnings come out in a stable order.
+	keys := make([]string, 0, len(entry))
+	for k := range entry {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := entry[k]
 		if k == "extras" {
 			// Handled in the pre-pass above. Skip here so the
 			// extras dict isn't double-counted.
@@ -418,8 +493,12 @@ func mapEntry(entry map[string]any) (map[string]any, []string) {
 			body[k] = v
 			continue
 		}
-		// Unknown key → spill into extras.
+		// Unknown key → spill into extras, and say so. A silent spill
+		// hid typos and missing columns (#3649: `version` used to land
+		// here and left the target unable to resolve its connector).
 		extras[k] = v
+		warnings = append(warnings,
+			fmt.Sprintf("unknown field %q: not a target column, stored in extras", k))
 	}
 
 	if len(extras) > 0 {
@@ -553,6 +632,7 @@ func sendRequest(
 	}
 	req.Header.Set("Authorization", "Bearer "+bearer)
 	api.SetWorkRefHeader(req)
+	api.SetTenantHeader(req)
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -647,6 +727,19 @@ func renderPlan(cmd *cobra.Command, p *plan, jsonOut bool) error {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Run without --dry-run to apply.")
 	return nil
+}
+
+// printPlanWarnings writes every per-entry warning to w before apply,
+// so an operator sees skipped or unknown fields even when the apply
+// fails part-way. The JSON output already carries them in the plan.
+func printPlanWarnings(w io.Writer, p *plan) {
+	for _, group := range [][]planEntry{p.Create, p.Update} {
+		for _, e := range group {
+			for _, msg := range e.Warnings {
+				fmt.Fprintf(w, "warning: %s: %s\n", e.Name, msg)
+			}
+		}
+	}
 }
 
 func renderApplyResult(cmd *cobra.Command, p *plan, jsonOut bool) error {

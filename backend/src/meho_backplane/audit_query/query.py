@@ -85,7 +85,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.broadcast.events import classify_op
-from meho_backplane.db.models import AuditEventClass, AuditLog, DispatchTrace, Target
+from meho_backplane.db.models import AuditEventClass, AuditLog, DispatchTrace, Target, Tenant
 
 from .cursor import CursorPosition, decode_cursor, encode_cursor
 from .schemas import AuditEntry, AuditQueryFilters, AuditQueryResult, EventClassCounts
@@ -167,9 +167,15 @@ async def query_audit(
     so a cross-tenant ``target_id`` (allowed today because ``audit_log``
     keeps no FK on the column per v0.2's soft-FK discipline) resolves to
     ``target_name=None`` rather than leaking the other tenant's target name.
+    The LEFT JOIN to ``tenant`` fills ``tenant_name`` (#5238); every row is
+    already in ``tenant_id``, so it only ever names the caller's own tenant.
     """
     stmt = (
-        sa.select(AuditLog, Target.name.label("target_name"))
+        sa.select(
+            AuditLog,
+            Target.name.label("target_name"),
+            Tenant.name.label("tenant_name"),
+        )
         .outerjoin(
             Target,
             sa.and_(
@@ -177,6 +183,7 @@ async def query_audit(
                 Target.tenant_id == tenant_id,
             ),
         )
+        .outerjoin(Tenant, AuditLog.tenant_id == Tenant.id)
         .where(AuditLog.tenant_id == tenant_id)
     )
 
@@ -191,7 +198,10 @@ async def query_audit(
     has_more = len(raw_rows) > filters.limit
     page = raw_rows[: filters.limit]
 
-    entries = [_build_audit_entry(row.AuditLog, row.target_name) for row in page]
+    entries = [
+        _build_audit_entry(row.AuditLog, row.target_name, tenant_name=row.tenant_name)
+        for row in page
+    ]
 
     next_cursor: str | None = None
     if has_more and entries:
@@ -383,8 +393,13 @@ def _result_status_predicate(result_status: str) -> sa.ColumnElement[bool]:
     return sa.false()
 
 
-def _build_audit_entry(row: AuditLog, target_name: str | None) -> AuditEntry:
-    """Construct an :class:`AuditEntry` from one audit-log row + denormalized name.
+def _build_audit_entry(
+    row: AuditLog,
+    target_name: str | None,
+    *,
+    tenant_name: str | None = None,
+) -> AuditEntry:
+    """Construct an :class:`AuditEntry` from one audit-log row + denormalized names.
 
     Computes the three derived fields — ``op_id``, ``op_class``,
     ``result_status`` — exactly as the broadcast middleware would on the
@@ -423,6 +438,7 @@ def _build_audit_entry(row: AuditLog, target_name: str | None) -> AuditEntry:
         id=row.id,
         ts=row.occurred_at,
         tenant_id=row.tenant_id,
+        tenant_name=tenant_name,
         principal_sub=row.operator_sub,
         principal_name=principal_name,
         target_id=row.target_id,
@@ -441,6 +457,7 @@ def _build_audit_entry(row: AuditLog, target_name: str | None) -> AuditEntry:
         work_ref=row.work_ref,
         policy_decision=row.policy_decision,
         event_class=row.event_class,
+        sandbox_mode=row.sandbox_mode,
         broadcast_event_id=None,
     )
 

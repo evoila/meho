@@ -34,20 +34,21 @@ What this harness proves (issue #551 DoD)
   (CLAUDE.md postulate 7), and that the audit row's
   ``op_class`` is correct — ``credential_write`` for ``vault.kv.put``
   and ``vault.kv.patch`` (their KV-v2 secret rides in the request
-  params, per G11.7-T1 #1401 / G3.15-T1 #1409), ``write`` for ``vault.kv.delete``,
+  params, per G11.7-T1 #1401 / G3.15-T1 #1409), ``write`` for ``vault.kv.delete``
+  and ``vault.kv.metadata.delete``,
   ``credential_read`` for ``vault.kv.read`` /
   ``vault.kv.list``, ``read`` for the KV-v2 / sys metadata reads and
-  the ``.list`` auth ops, and ``other`` for the two ``.read``
-  auth-config ops (``vault.auth.userpass.read`` /
-  ``vault.auth.approle.read``). ``.read`` is deliberately absent from
-  ``_READ_SUFFIXES`` so the suffix check never over-matches the
-  ``credential_read``-allowlisted ``vault.kv.read``; the auth-config
-  ``.read`` ops therefore classify ``other``, the safe
-  over-broadcast direction for non-secret auth-method metadata
-  (decision #3). ``vault.sys.policy.read`` (G3.15-T2 #1410) shares
-  this ``other`` classification for the same reason — its only param
-  is the policy name — while ``vault.sys.policy.list`` is ``read`` via
-  the ``.list`` suffix. The test assertions below encode this split.
+  the ``.list`` auth ops, ``read`` for the ``safe`` config reads
+  (``vault.auth.userpass.read`` / ``vault.auth.approle.read`` /
+  ``vault.sys.policy.read`` / ``vault.token.role.read`` /
+  ``vault.auth.jwt.role.read`` / ``vault.auth.jwt.config.read``), and ``write``
+  for the sys bootstrap writes (``vault.sys.auth.enable`` / ``.tune``,
+  ``vault.sys.mounts.enable`` / ``.tune``). ``.read`` / ``.enable`` /
+  ``.tune`` are not verb suffixes ``classify_op`` knows; a typed op's
+  class follows its risk level (``resolve_operation_op_class``): ``safe``
+  is ``read``, ``caution`` or higher is ``write``. ``vault.kv.read``
+  stays ``credential_read`` because the credential classes always win.
+  The test assertions below encode this split.
 * The dev-root token is generated into the container via
   ``VAULT_DEV_ROOT_TOKEN_ID`` and only ever held in the fixture's
   return value — it is never written to a workflow log, a committed
@@ -94,6 +95,7 @@ import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vault import (
     VaultConnector,
+    register_vault_auth_jwt_operations,
     register_vault_identity_token_operations,
     register_vault_sys_typed_operations,
     register_vault_typed_operations,
@@ -229,6 +231,23 @@ def vault_dev_addr() -> Iterator[str]:
         container.stop()
 
 
+#: Mount of the JWT/OIDC login method the seed enables.
+_JWT_MOUNT: str = "jwt-e2e"
+
+
+def _throwaway_public_key_pem() -> str:
+    """A fresh RSA public key in PEM form, only for the dev Vault's jwt config."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return (
+        key.public_key()
+        .public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+        .decode()
+    )
+
+
 def _root_client(addr: str) -> hvac.Client:
     """Construct a root-token hvac client bound to the dev container."""
     return hvac.Client(url=addr, token=_DEV_ROOT_TOKEN)
@@ -303,6 +322,19 @@ def _seed_vault(addr: str) -> None:
         policy='path "secret/data/app/*" {\n  capabilities = ["read", "list"]\n}\n',
     )
 
+    # --- JWT/OIDC login method (#3694) -----------------------------
+    # A ``jwt`` mount checked against one public key made for this run,
+    # so the config holds no identity-provider address to reach.
+    client.sys.enable_auth_method(method_type="jwt", path=_JWT_MOUNT)
+    client.write_data(
+        f"auth/{_JWT_MOUNT}/config",
+        data={
+            "jwt_validation_pubkeys": [_throwaway_public_key_pem()],
+            "bound_issuer": "https://issuer.example.test",
+            "default_role": "e2e-login",
+        },
+    )
+
 
 # ---------------------------------------------------------------------------
 # Per-test wiring: seam swap, descriptor registration
@@ -363,6 +395,7 @@ async def vault_e2e(
     await register_vault_typed_operations(embedding_service=stub_embedding_service)
     await register_vault_sys_typed_operations(embedding_service=stub_embedding_service)
     await register_vault_identity_token_operations(embedding_service=stub_embedding_service)
+    await register_vault_auth_jwt_operations(embedding_service=stub_embedding_service)
 
     @asynccontextmanager
     async def _root_client_cm(
@@ -451,7 +484,7 @@ async def _assert_audited(
 
 
 # ---------------------------------------------------------------------------
-# KV-v2 group — read / list / put / versions / delete
+# KV-v2 group — read / list / put / versions / delete / metadata.delete
 # ---------------------------------------------------------------------------
 
 
@@ -459,7 +492,7 @@ async def _assert_audited(
 async def test_kv_read_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
 ) -> None:
-    """``vault.kv.read`` returns the seeded secret; audited; credential_read."""
+    """``vault.kv.read`` returns the seeded key names; audited; credential_read."""
     target, _ = vault_e2e
     operator = _make_operator(sub="op-kv-read")
     result = await dispatch(
@@ -470,8 +503,9 @@ async def test_kv_read_against_dev_vault(
         params={"path": "app/config"},
     )
     assert result.status == "ok", result.error
+    # The values are hidden by default; the key names and the version stay.
     assert result.result == {
-        "data": {"db_url": "postgres://example", "feature_flag": "on"},
+        "data": {"db_url": "[REDACTED:secret_value]", "feature_flag": "[REDACTED:secret_value]"},
         "version": 1,
     }
     await _assert_audited(
@@ -684,6 +718,91 @@ async def test_kv_delete_against_dev_vault(
     )
 
 
+@pytest.mark.asyncio
+async def test_kv_metadata_delete_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+) -> None:
+    """``vault.kv.metadata.delete`` removes every version for good; safe to run twice.
+
+    The handler decides ``deleted`` / ``unchanged`` from how Vault answers a
+    metadata read of a missing path (404, which hvac raises as
+    ``InvalidPath``). The unit suite proves this with a fake client; this
+    case proves it against a real Vault. A second run on the same path must
+    report ``unchanged``. Each run is audited with op_class=write.
+    """
+    target, addr = vault_e2e
+    path = "app/to-purge"
+    root = _root_client(addr)
+    # Seed a dedicated secret with two versions so the delete doesn't
+    # perturb other tests and has more than one version to remove.
+    for value in ("v1", "v2"):
+        root.secrets.kv.v2.create_or_update_secret(
+            path=path,
+            secret={"x": value},
+            mount_point=_KV_MOUNT,
+        )
+    seeded = root.secrets.kv.v2.read_secret_metadata(path=path, mount_point=_KV_MOUNT)
+    assert seeded["data"]["current_version"] == 2
+
+    operator = _make_operator(sub="op-kv-metadata-delete")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.metadata.delete",
+        target=target,
+        params={"path": path},
+        # ``vault.kv.metadata.delete`` is approval-gated (requires_approval=True,
+        # #3424); resume via the approvals-API flag so the delete executes.
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {
+        "status": "deleted",
+        "object": {"kind": "kv_secret", "mount": _KV_MOUNT, "path": path},
+        "guidance": None,
+    }
+    # A direct read with the root client finds no metadata and no version.
+    # ``raise_on_deleted_version=False`` returns a soft-deleted version
+    # instead of raising, so the raise proves the versions are gone for good.
+    with pytest.raises(hvac.exceptions.InvalidPath):
+        root.secrets.kv.v2.read_secret_metadata(path=path, mount_point=_KV_MOUNT)
+    for version in (1, 2):
+        with pytest.raises(hvac.exceptions.InvalidPath):
+            root.secrets.kv.v2.read_secret_version(
+                path=path,
+                version=version,
+                mount_point=_KV_MOUNT,
+                raise_on_deleted_version=False,
+            )
+    await _assert_audited(
+        "vault.kv.metadata.delete",
+        operator_sub="op-kv-metadata-delete",
+        expected_op_class="write",
+    )
+
+    # Second run on the now-missing path: nothing to delete. A separate
+    # operator keeps the one-audit-row-per-operator check exact.
+    again_operator = _make_operator(sub="op-kv-metadata-delete-again")
+    again = await dispatch(
+        operator=again_operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.metadata.delete",
+        target=target,
+        params={"path": path},
+        _approved=True,
+    )
+    assert again.status == "ok", again.error
+    assert again.result is not None
+    assert again.result["status"] == "unchanged"
+    assert again.result["object"] == {"kind": "kv_secret", "mount": _KV_MOUNT, "path": path}
+    assert "Nothing was deleted" in again.result["guidance"]
+    await _assert_audited(
+        "vault.kv.metadata.delete",
+        operator_sub="op-kv-metadata-delete-again",
+        expected_op_class="write",
+    )
+
+
 # ---------------------------------------------------------------------------
 # sys group — health / seal_status / mounts.list / auth.list
 # ---------------------------------------------------------------------------
@@ -815,10 +934,8 @@ async def test_sys_policy_read_against_dev_vault(
     await _assert_audited(
         "vault.sys.policy.read",
         operator_sub="op-policy-read",
-        # ``.read`` is not a read-suffix; policy.read's only param is the
-        # policy name, so it broadcasts ``other`` (full params) like the
-        # vault.auth.*.read ops.
-        expected_op_class="other",
+        # A ``safe`` typed op: its class follows its risk level.
+        expected_op_class="read",
     )
 
 
@@ -852,8 +969,9 @@ async def test_sys_policy_list_against_dev_vault(
 # sys bootstrap writes — auth/mount enable + tune (G3.15-T5 #1413). These
 # are approval-gated, so each dispatch passes ``_approved=True`` (the
 # approvals-API resume flag) to drive the authorized-execution path.
-# ``.enable`` / ``.tune`` are not write/read suffixes, so all four
-# broadcast ``other`` (full params; no secret material in the params).
+# ``.enable`` / ``.tune`` are not write/read suffixes, but all four are
+# ``caution`` or higher, so their class is ``write`` (no secret material
+# in the params).
 # ---------------------------------------------------------------------------
 
 
@@ -861,7 +979,7 @@ async def test_sys_policy_list_against_dev_vault(
 async def test_sys_auth_enable_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
 ) -> None:
-    """``vault.sys.auth.enable`` mounts a new auth method; op_class=other."""
+    """``vault.sys.auth.enable`` mounts a new auth method; op_class=write."""
     target, addr = vault_e2e
     operator = _make_operator(sub="op-auth-enable")
     result = await dispatch(
@@ -884,7 +1002,7 @@ async def test_sys_auth_enable_against_dev_vault(
     await _assert_audited(
         "vault.sys.auth.enable",
         operator_sub="op-auth-enable",
-        expected_op_class="other",
+        expected_op_class="write",
     )
 
 
@@ -916,7 +1034,7 @@ async def test_sys_auth_enable_idempotent_on_existing_path(
 async def test_sys_mounts_enable_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
 ) -> None:
-    """``vault.sys.mounts.enable`` mounts a new secret engine; op_class=other."""
+    """``vault.sys.mounts.enable`` mounts a new secret engine; op_class=write."""
     target, addr = vault_e2e
     operator = _make_operator(sub="op-mount-enable")
     result = await dispatch(
@@ -934,7 +1052,7 @@ async def test_sys_mounts_enable_against_dev_vault(
     await _assert_audited(
         "vault.sys.mounts.enable",
         operator_sub="op-mount-enable",
-        expected_op_class="other",
+        expected_op_class="write",
     )
 
 
@@ -942,7 +1060,7 @@ async def test_sys_mounts_enable_against_dev_vault(
 async def test_sys_auth_tune_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
 ) -> None:
-    """``vault.sys.auth.tune`` reconfigures the seeded userpass mount; op_class=other."""
+    """``vault.sys.auth.tune`` reconfigures the seeded userpass mount; op_class=write."""
     target, addr = vault_e2e
     operator = _make_operator(sub="op-auth-tune")
     result = await dispatch(
@@ -961,7 +1079,7 @@ async def test_sys_auth_tune_against_dev_vault(
     await _assert_audited(
         "vault.sys.auth.tune",
         operator_sub="op-auth-tune",
-        expected_op_class="other",
+        expected_op_class="write",
     )
 
 
@@ -969,7 +1087,7 @@ async def test_sys_auth_tune_against_dev_vault(
 async def test_sys_mounts_tune_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
 ) -> None:
-    """``vault.sys.mounts.tune`` reconfigures the dev ``secret/`` mount; op_class=other."""
+    """``vault.sys.mounts.tune`` reconfigures the dev ``secret/`` mount; op_class=write."""
     target, addr = vault_e2e
     operator = _make_operator(sub="op-mount-tune")
     result = await dispatch(
@@ -987,7 +1105,7 @@ async def test_sys_mounts_tune_against_dev_vault(
     await _assert_audited(
         "vault.sys.mounts.tune",
         operator_sub="op-mount-tune",
-        expected_op_class="other",
+        expected_op_class="write",
     )
 
 
@@ -1026,14 +1144,9 @@ async def test_auth_userpass_read_against_dev_vault(
 ) -> None:
     """``vault.auth.userpass.read`` returns the user's policies.
 
-    ``op_class`` is ``other``, not ``read``: ``classify_op`` keys the
-    read class off an explicit suffix allowlist (``.list`` / ``.get`` /
-    ``.info`` / … / ``.versions``) and ``.read`` is deliberately absent
-    so the generic suffix never over-matches ``vault.kv.read`` (which
-    is in the ``credential_read`` allowlist instead). A userpass-config
-    read returns policy/TTL metadata, not set-shaped data or secret
-    values, so the ``other`` full-detail broadcast is the intended
-    classification per decision #3.
+    ``op_class`` is ``read``: ``.read`` is not a read suffix
+    ``classify_op`` knows, but the op is ``safe``, so its class follows
+    its risk level. It returns policy/TTL metadata, no secret values.
     """
     target, _ = vault_e2e
     operator = _make_operator(sub="op-up-read")
@@ -1050,7 +1163,7 @@ async def test_auth_userpass_read_against_dev_vault(
     await _assert_audited(
         "vault.auth.userpass.read",
         operator_sub="op-up-read",
-        expected_op_class="other",
+        expected_op_class="read",
     )
 
 
@@ -1084,12 +1197,9 @@ async def test_auth_approle_read_against_dev_vault(
 ) -> None:
     """``vault.auth.approle.read`` returns the role config.
 
-    ``op_class`` is ``other`` for the same reason as
-    ``vault.auth.userpass.read``: ``.read`` is not in
-    ``classify_op``'s read-suffix allowlist (kept narrow so it never
-    over-matches the ``credential_read``-classified ``vault.kv.read``),
-    and a role-config read carries no secret-id / set-shaped payload,
-    so the full-detail ``other`` broadcast is intended.
+    ``op_class`` is ``read`` for the same reason as
+    ``vault.auth.userpass.read``: the op is ``safe``, so its class
+    follows its risk level. It carries no secret id.
     """
     target, _ = vault_e2e
     operator = _make_operator(sub="op-ar-read")
@@ -1106,7 +1216,7 @@ async def test_auth_approle_read_against_dev_vault(
     await _assert_audited(
         "vault.auth.approle.read",
         operator_sub="op-ar-read",
-        expected_op_class="other",
+        expected_op_class="read",
     )
 
 
@@ -1299,8 +1409,9 @@ async def test_auth_approle_generate_secret_id_redacts_against_dev_vault(
     The minted SecretID lands in the *response*, so the op classifies
     ``credential_mint``. The caller's OperationResult carries the SecretID
     (the point of minting), but the test checks that exact value is absent
-    from the stored audit row. Non-idempotent: a second call mints
-    a distinct SecretID.
+    from the stored audit row, its ``payload`` and its raw copy
+    (``raw_payload``). Non-idempotent: a second call mints a distinct
+    SecretID.
     """
     target, addr = vault_e2e
     _root_client(addr).auth.approle.create_or_update_approle(
@@ -1324,9 +1435,10 @@ async def test_auth_approle_generate_secret_id_redacts_against_dev_vault(
         operator_sub="op-ar-sid",
         expected_op_class="credential_mint",
     )
-    # The secret must not reach the stored audit row.
-    assert minted_secret_id not in json.dumps(row.payload, default=str), (
-        "secret leaked into the audit row for vault.auth.approle.generate_secret_id"
+    # The secret is in neither copy of the stored audit row.
+    assert row.raw_payload is not None
+    assert minted_secret_id not in json.dumps([row.payload, row.raw_payload], default=str), (
+        "secret found in the audit row for vault.auth.approle.generate_secret_id"
     )
     # Non-idempotent: a second mint yields a distinct SecretID.
     second = await dispatch(
@@ -1347,8 +1459,8 @@ async def test_auth_approle_generate_secret_id_redacts_against_dev_vault(
 # The writes (identity entity/alias/group + token create/revoke_accessor)
 # register requires_approval=True, so these tests pass ``_approved=True``
 # (the approvals-API resume flag) to drive the authorized execution path.
-# token.create's minted client token is response-side secret material;
-# the test checks that exact value is absent from the stored audit row.
+# token.create returns only the accessor of the new token; the test checks
+# that no token is in the result or the stored audit row.
 # The identity/token core backends are always mounted on a dev Vault.
 # ---------------------------------------------------------------------------
 
@@ -1499,16 +1611,14 @@ async def test_identity_entity_alias_write_against_dev_vault(
 
 
 @pytest.mark.asyncio
-async def test_token_create_redacts_token_against_dev_vault(
+async def test_token_create_returns_no_token_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
 ) -> None:
-    """token.create mints a token in the response; absent from the audit row.
+    """token.create returns the accessor of a real token, never the token.
 
-    The minted client_token lands in the *response*, so the op classifies
-    ``credential_mint``. The caller's OperationResult carries the token
-    (the point of minting), but the test checks that exact value is absent
-    from the stored audit row. Non-idempotent: a second call mints a
-    distinct token.
+    The token is in neither copy of the audit row (``payload`` and
+    ``raw_payload``). Vault knows the token by its accessor. Non-idempotent:
+    a second call makes a token with another accessor.
     """
     target, addr = vault_e2e
     result = await dispatch(
@@ -1520,21 +1630,19 @@ async def test_token_create_redacts_token_against_dev_vault(
         _approved=True,
     )
     assert result.status == "ok", result.error
-    minted_token = result.result["client_token"]
-    assert minted_token, "the minted token must reach the caller's OperationResult"
-    assert result.result["accessor"]
-    # The minted token actually works against the live Vault.
-    assert _root_client(addr).sys.read_health_status(method="GET") is not None
+    assert "client_token" not in result.result
+    accessor = result.result["accessor"]
+    assert accessor
+    looked_up = _root_client(addr).auth.token.lookup_accessor(accessor)["data"]
+    assert looked_up["accessor"] == accessor
     row = await _assert_audited(
         "vault.token.create",
         operator_sub="op-token-create",
         expected_op_class="credential_mint",
     )
-    # The secret must not reach the stored audit row.
-    assert minted_token not in json.dumps(row.payload, default=str), (
-        "secret leaked into the audit row for vault.token.create"
-    )
-    # Non-idempotent: a second create yields a distinct token.
+    assert row.raw_payload is not None
+    assert "client_token" not in json.dumps([row.payload, row.raw_payload], default=str)
+    # Non-idempotent: a second create makes another token.
     second = await dispatch(
         operator=_make_operator(sub="op-token-create-2"),
         connector_id="vault-1.x",
@@ -1544,7 +1652,7 @@ async def test_token_create_redacts_token_against_dev_vault(
         _approved=True,
     )
     assert second.status == "ok", second.error
-    assert second.result["client_token"] != minted_token
+    assert second.result["accessor"] != accessor
 
 
 @pytest.mark.asyncio
@@ -1666,7 +1774,7 @@ async def test_token_role_write_read_list_against_dev_vault(
     await _assert_audited(
         "vault.token.role.read",
         operator_sub="op-token-role-read",
-        expected_op_class="other",
+        expected_op_class="read",
     )
 
     listing = await dispatch(
@@ -1698,3 +1806,290 @@ async def test_token_role_write_read_list_against_dev_vault(
     assert after["renewable"] is False
     assert after["orphan"] is True
     assert after["token_period"] == 3600
+
+
+# ---------------------------------------------------------------------------
+# token group — make a token and store it (vault.token.create_and_store)
+# ---------------------------------------------------------------------------
+
+#: Policy for MEHO's own login in the create-and-store tests: make tokens from
+#: the two test roles and write the KV path. No root, no sudo.
+_STORE_LOGIN_POLICY = """
+path "auth/token/create/e2e-store" { capabilities = ["update"] }
+path "auth/token/create/e2e-with-parent" { capabilities = ["update"] }
+path "secret/data/e2e-store/*" { capabilities = ["create", "read", "update"] }
+"""
+
+
+def _seed_token_store(addr: str) -> None:
+    """Two token roles (orphan and not) and the policy MEHO's login gets."""
+    root = _root_client(addr)
+    root.sys.create_or_update_policy(name="e2e-store-login", policy=_STORE_LOGIN_POLICY)
+    root.sys.create_or_update_policy(
+        name="e2e-store-reader",
+        policy='path "secret/data/e2e-store/*" {\n  capabilities = ["read"]\n}\n',
+    )
+    for role_name, orphan in (("e2e-store", True), ("e2e-with-parent", False)):
+        root.auth.token.create_or_update_role(
+            role_name=role_name, allowed_policies=["e2e-store-reader"], orphan=orphan
+        )
+
+
+def _production_like_login(addr: str) -> Any:
+    """MEHO's login as in production: a normal token with no parent, revoked at the end.
+
+    A JWT login token has no parent token, and ``vault_client_for_operator``
+    revokes it when the block ends. So does this one; only the way the token
+    is obtained differs (dev mode has no JWT auth method).
+    """
+
+    @asynccontextmanager
+    async def _login(
+        _operator: Any, *, role: str | None = None, mount_path: str | None = None
+    ) -> AsyncIterator[hvac.Client]:
+        login = _root_client(addr).auth.token.create_orphan(policies=["e2e-store-login"], ttl="10m")
+        client = hvac.Client(url=addr, token=login["auth"]["client_token"])
+        try:
+            yield client
+        finally:
+            client.auth.token.revoke_self()
+
+    return _login
+
+
+def _live_accessors(addr: str) -> set[str]:
+    listing = _root_client(addr).auth.token.list_accessors()
+    return set(listing["data"]["keys"]) if listing else set()
+
+
+@pytest.mark.asyncio
+async def test_token_create_and_store_keeps_the_token_valid_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stored token works after the call; it is in no result or audit row.
+
+    MEHO's own login (not root) ends, and is revoked, when the call ends. The
+    new token is an orphan, so it stays valid: ``lookup-self`` with it works.
+    """
+    target, addr = vault_e2e
+    _seed_token_store(addr)
+    monkeypatch.setattr(_auth_vault, "vault_client_for_operator", _production_like_login(addr))
+
+    result = await dispatch(
+        operator=_make_operator(sub="op-token-store"),
+        connector_id="vault-1.x",
+        op_id="vault.token.create_and_store",
+        target=target,
+        params={
+            "role_name": "e2e-store",
+            "ttl": "30m",
+            "store": {"vault_kv": {"path": "e2e-store/app"}},
+        },
+        _approved=True,
+    )
+
+    assert result.status == "ok", result.error
+    assert result.result["stored_to"]["kind"] == "vault_kv"
+    assert "e2e-store-reader" in result.result["policies"]
+    stored = _root_client(addr).secrets.kv.v2.read_secret_version(
+        path="e2e-store/app", mount_point=_KV_MOUNT, raise_on_deleted_version=True
+    )["data"]["data"]
+    token = stored["token"]
+    looked_up = hvac.Client(url=addr, token=token).auth.token.lookup_self()["data"]
+    assert looked_up["accessor"] == result.result["accessor"]
+    assert looked_up["orphan"] is True
+    assert token not in json.dumps(result.model_dump(mode="json"))
+    row = await _assert_audited(
+        "vault.token.create_and_store",
+        operator_sub="op-token-store",
+        expected_op_class="credential_mint",
+    )
+    assert token not in json.dumps([row.payload, row.raw_payload], default=str)
+
+
+@pytest.mark.asyncio
+async def test_token_create_and_store_with_a_parent_leaves_no_token_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A role without ``orphan=true``: the call fails and no new token is left."""
+    target, addr = vault_e2e
+    _seed_token_store(addr)
+    monkeypatch.setattr(_auth_vault, "vault_client_for_operator", _production_like_login(addr))
+    before = _live_accessors(addr)
+
+    result = await dispatch(
+        operator=_make_operator(sub="op-token-store-parent"),
+        connector_id="vault-1.x",
+        op_id="vault.token.create_and_store",
+        target=target,
+        params={
+            "role_name": "e2e-with-parent",
+            "store": {"vault_kv": {"path": "e2e-store/parent"}},
+        },
+        _approved=True,
+    )
+
+    assert result.status == "error"
+    assert "orphan=true" in result.extras["remediation"]
+    assert _live_accessors(addr) <= before
+
+
+@pytest.mark.asyncio
+async def test_token_create_and_store_keeps_a_path_made_in_the_meantime_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new path is created with ``cas=0``: a path another writer made first is kept.
+
+    The patch handler is replaced by one that reads the path as missing,
+    which is what happens when the other writer lands right after the
+    read. The put then runs with ``cas=0`` against the real Vault, which
+    refuses it; the other writer's fields stay and no new token is left.
+    """
+    from meho_backplane.connectors.vault import ops as kv_ops
+
+    target, addr = vault_e2e
+    _seed_token_store(addr)
+    monkeypatch.setattr(_auth_vault, "vault_client_for_operator", _production_like_login(addr))
+    root = _root_client(addr)
+    root.secrets.kv.v2.create_or_update_secret(
+        path="e2e-store/raced", secret={"owner": "other-writer"}, mount_point=_KV_MOUNT
+    )
+    before = _live_accessors(addr)
+
+    async def _read_as_missing(*_args: Any) -> dict[str, Any]:
+        raise hvac.exceptions.InvalidPath("no secret")
+
+    monkeypatch.setattr(kv_ops, "vault_kv_patch", _read_as_missing)
+
+    result = await dispatch(
+        operator=_make_operator(sub="op-token-store-raced"),
+        connector_id="vault-1.x",
+        op_id="vault.token.create_and_store",
+        target=target,
+        params={
+            "role_name": "e2e-store",
+            "store": {"vault_kv": {"path": "e2e-store/raced"}},
+        },
+        _approved=True,
+    )
+
+    assert result.status == "error"
+    assert "could not be written" in result.extras["remediation"]
+    stored = root.secrets.kv.v2.read_secret_version(
+        path="e2e-store/raced", mount_point=_KV_MOUNT, raise_on_deleted_version=True
+    )["data"]["data"]
+    assert stored == {"owner": "other-writer"}
+    assert _live_accessors(addr) <= before
+
+
+# ---------------------------------------------------------------------------
+# auth group — JWT/OIDC login roles and mount config
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auth_jwt_role_write_read_list_and_config_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+) -> None:
+    """role.write creates a login role; a later write of one field keeps the rest.
+
+    The second write gives only ``token_ttl``. Vault would set a missing
+    ``role_type`` back to ``oidc`` (and then refuse the write, because an
+    oidc role needs redirect URIs), so MEHO sends the current ``role_type``
+    and ``bound_claims_type`` again. Every other field reads back as before. config.read returns the
+    seeded issuer and default role. Audit classes: ``write`` for the write,
+    ``other`` for the two single reads, ``read`` for the list.
+    """
+    target, addr = vault_e2e
+    role_path = f"auth/{_JWT_MOUNT}/role/e2e-login"
+    created = await dispatch(
+        operator=_make_operator(sub="op-jwt-role-write"),
+        connector_id="vault-1.x",
+        op_id="vault.auth.jwt.role.write",
+        target=target,
+        params={
+            "mount": _JWT_MOUNT,
+            "role_name": "e2e-login",
+            "role_type": "jwt",
+            "user_claim": "sub",
+            "groups_claim": "groups",
+            "bound_audiences": ["meho-e2e"],
+            "token_policies": ["default"],
+            "token_ttl": "1h",
+        },
+        _approved=True,
+    )
+    assert created.status == "ok", created.error
+    assert created.result["written"] is True
+    assert "new logins" in created.result["note"]
+    await _assert_audited(
+        "vault.auth.jwt.role.write", operator_sub="op-jwt-role-write", expected_op_class="write"
+    )
+
+    before = _root_client(addr).read(role_path)["data"]
+    assert before["token_ttl"] == 3600
+
+    changed = await dispatch(
+        operator=_make_operator(sub="op-jwt-role-change"),
+        connector_id="vault-1.x",
+        op_id="vault.auth.jwt.role.write",
+        target=target,
+        params={"mount": _JWT_MOUNT, "role_name": "e2e-login", "token_ttl": "4h"},
+        _approved=True,
+    )
+    assert changed.status == "ok", changed.error
+    assert changed.result["settings"] == {"token_ttl": "4h"}
+    assert changed.result["kept_from_current_role"] == {
+        "role_type": "jwt",
+        "bound_claims_type": "string",
+    }
+    after = _root_client(addr).read(role_path)["data"]
+    assert set(after) == set(before)
+    assert {k for k in before if before[k] != after[k]} == {"token_ttl"}
+    assert after["token_ttl"] == 4 * 3600
+
+    read = await dispatch(
+        operator=_make_operator(sub="op-jwt-role-read"),
+        connector_id="vault-1.x",
+        op_id="vault.auth.jwt.role.read",
+        target=target,
+        params={"mount": _JWT_MOUNT, "role_name": "e2e-login"},
+    )
+    assert read.status == "ok", read.error
+    assert read.result == after
+    await _assert_audited(
+        "vault.auth.jwt.role.read", operator_sub="op-jwt-role-read", expected_op_class="read"
+    )
+
+    listing = await dispatch(
+        operator=_make_operator(sub="op-jwt-role-list"),
+        connector_id="vault-1.x",
+        op_id="vault.auth.jwt.role.list",
+        target=target,
+        params={"mount": _JWT_MOUNT},
+    )
+    assert listing.status == "ok", listing.error
+    assert listing.result == {"mount": _JWT_MOUNT, "keys": ["e2e-login"]}
+    await _assert_audited(
+        "vault.auth.jwt.role.list", operator_sub="op-jwt-role-list", expected_op_class="read"
+    )
+
+    config = await dispatch(
+        operator=_make_operator(sub="op-jwt-config-read"),
+        connector_id="vault-1.x",
+        op_id="vault.auth.jwt.config.read",
+        target=target,
+        params={"mount": _JWT_MOUNT},
+    )
+    assert config.status == "ok", config.error
+    assert config.result["bound_issuer"] == "https://issuer.example.test"
+    assert config.result["default_role"] == "e2e-login"
+    assert "oidc_client_secret" not in config.result
+    await _assert_audited(
+        "vault.auth.jwt.config.read",
+        operator_sub="op-jwt-config-read",
+        expected_op_class="read",
+    )

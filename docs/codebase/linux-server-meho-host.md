@@ -1,10 +1,12 @@
-# Form-2 host command: `deploy/linux-server/meho-host` (#4737)
+# Form-2 host command: `deploy/linux-server/meho-host` (#4737, #4638)
 
 ## Overview
 
 `meho-host` is the customer's tool for the work on a form-2 machine after
 the install. `install.sh` copies it to `/usr/local/sbin/meho-host` in
-step 2, and every later run installs the version of its download. The
+step 2, with the two files of `lib/` it sources in
+`/usr/local/lib/meho-host/`, and every later run installs the version of
+its download. The
 customer never needs kubectl: that is ADR 0007 decision 2 (the support rule)
 and the form-2 design, section 5, the `meho-host` table (meho-internal
 `docs/design/2026-10-10-install-forms/form-2-linux-server.md`).
@@ -13,7 +15,9 @@ This version has four commands:
 
 - **`meho-host check [--json]`** prints a red/green list of the built-in
   Kubernetes (RKE2): the node, the pods, the disk and RKE2's certificates.
-  Every line that is not ok ends with `Fix:` and what to do.
+  Three more lines show the hardening of the machine (#4638): the MEHO
+  host firewall, RKE2's CIS profile and the console certificate. Every
+  line that is not ok ends with `Fix:` and what to do.
 - **`meho-host support-bundle`** writes one file for evoila support to
   `/var/lib/meho/support/` and prints its path. Passwords, tokens and keys
   are removed from it. The customer sends the file to support and then
@@ -25,8 +29,13 @@ This version has four commands:
   works. Only the SSH rule changes. Over SSH, the command asks first when
   the new range does not hold the admin's own address.
 - **`meho-host uninstall`** (#4739) removes MEHO and the built-in Kubernetes
-  from the machine, with all their data. It asks twice. The MEHO firewall
-  stays on, and the last line names the command that removes it.
+  from the machine, with all their data. It asks twice. It also removes the
+  host changes of RKE2's CIS profile (#5133): the kernel settings file, and
+  the `etcd` user and group when the install created them. An `etcd` user
+  or group that existed before the install stays. The MEHO firewall stays
+  on, and a line names the command that removes it. The last line says
+  that a restart of the machine brings back the operating system's own
+  kernel values.
 
 All need root. Exit codes: `check` exits 0 when every line is ok or a
 warning, and 1 when a line is red; the other commands exit 0 when they are
@@ -34,20 +43,24 @@ done. Any command exits 1 with one `[FAIL]` line when it cannot do its job,
 or with `Stopped. Nothing was changed.` when the admin answers a question
 with anything but `yes`, and 2 for wrong usage.
 
-Later Tasks add to this file: the hardening lines of `check` (#4638) and
-the commands `certificate`, `keyholder` and `unseal` (#4738). `meho doctor`
-runs `check --json` when it runs on the server (#4740).
+A later Task adds the commands `certificate`, `keyholder` and `unseal`
+(#4738). `meho doctor` runs `check --json` as root on the server and shows
+its lines (#4740, see below). The fourth hardening line of #4638, a scan of
+the operating system against the CIS Linux benchmark, is not built yet
+(see Known issues).
 
 ## Key files
 
 | File | What it holds |
 | --- | --- |
-| `meho-host` | One self-contained bash script: the output helpers, the four checks, the bundle and its scrub, the SSH rule rewrite and the uninstall. It sources nothing, because `lib/` is not on the machine after the install, so it carries its own copies of the IPv4 helpers of `lib/net.sh` and of the firewall paths of `lib/firewall.sh`. |
-| `lib/prepare.sh` | `install_meho_host`: the copy to `/usr/local/sbin`, mode 0755. |
-| `lib/common.sh` | `MEHO_HOST_FILE`, `MEHO_HOST_PATH`, and `meho-host` in `DOWNLOAD_FILES`. |
+| `meho-host` | One bash script: the output helpers, the seven checks with the rule for the console certificate (`certificate_state`), the bundle and its scrub, the SSH rule rewrite and the uninstall. It sources `lib/firewall.sh` and `lib/cis.sh` (see [How meho-host finds its lib files](#how-meho-host-finds-its-lib-files)). It carries its own copies of the IPv4 helpers of `lib/net.sh` and of the paths of `lib/common.sh` that it needs. |
+| `lib/firewall.sh` | `firewall_state` (the firewall line) and the firewall paths `MEHO_FIREWALL_FILE`, `MEHO_FIREWALL_UNIT` and the others. |
+| `lib/cis.sh` | `cis_state` (the CIS profile line), and for the uninstall the paths of the CIS host changes and the `etcd` look-ups (`etcd_user_exists`, `etcd_group_exists`, `etcd_account_recorded`). It reads `RKE2_CONFIG_FILE`, which `meho-host` defines as `lib/common.sh` does. |
+| `lib/prepare.sh` | `install_meho_host`: the copy to `/usr/local/sbin`, mode 0755, and of the two lib files to `/usr/local/lib/meho-host`, mode 0644. |
+| `lib/common.sh` | `MEHO_HOST_FILE`, `MEHO_HOST_PATH`, `MEHO_HOST_LIB_DIR`, `MEHO_HOST_LIB_FILES`, and `meho-host` in `DOWNLOAD_FILES`. |
 | `packaging/parts.sh`, `packaging/common.sh` | The download ships `meho-host` next to `install.sh`, executable. |
-| `tests/host_harness.py` | A fake installed machine: stub `kubectl`, `rke2`, `journalctl`, `df`, `free`, `ip`, `date`, `nft`, `systemctl` and friends. `run()` takes the answers to the questions (`stdin`) and an SSH session (`ssh_client`). |
-| `tests/test_meho_host.py` | The tests of the four commands, and of the install by `install.sh`. |
+| `tests/host_harness.py` | A fake installed machine: stub `kubectl`, `rke2`, `journalctl`, `df`, `free`, `ip`, `date`, `nft`, `systemctl`, `userdel`, `groupdel` and friends, the files of RKE2's CIS profile, and the real `openssl`. `console_certificate()` makes test certificates with fixed dates. `run()` takes the answers to the questions (`stdin`) and an SSH session (`ssh_client`). |
+| `tests/test_meho_host.py` | The tests of the four commands and of each hardening line, of the install by `install.sh`, and of the `etcd` record from the install through an update to `uninstall`. |
 | `tests/fixtures/firewall-admin-network.nft` | The firewall file `install.sh` writes with `--admin-network 10.0.50.0/24`; the `admin-network` and `uninstall` tests start from it. |
 
 The script has the same shape as `install.sh`: `set -Eeuo pipefail`, an ERR
@@ -58,7 +71,7 @@ trap that prints one `[FAIL]` line, `fail` and `usage_error`, and the
 
 ### `check`
 
-Each check calls `result <name> <status> <detail> [fix]`. The four results
+Each check calls `result <name> <status> <detail> [fix]`. The seven results
 are printed at the end, as text or as JSON, in this order:
 
 | Line | ok when | warn when | red when | Source of the facts |
@@ -67,6 +80,51 @@ are printed at the end, as text or as JSON, in this order:
 | `pods` | every pod in `meho`, `kube-system` and `local-path-storage` is Running and Ready, or Succeeded | a pod the kubelet evicted (phase Failed, reason Evicted) while the other pods run | a pod is in another state, there is no pod in `meho`, or RKE2 does not answer | `kubectl get pods -A -o jsonpath=...` |
 | `disk` | `/var/lib/rancher` and `/var/lib/meho` both have 20 % or more free | the lower of the two is below 20 % | below 15 %, or a path cannot be read | `df -P -k <path>` |
 | `certificates` | every row of RKE2's list expires in 30 days or more | a row has less than 30 days left | a row is EXPIRED or its date has passed; a row is NOT YET VALID (the clock or the certificate is wrong; its EXPIRES column holds the start date); the command did not run; the list is empty | `/usr/local/bin/rke2 certificate check --output table` (by its path: sudo's `PATH` on RHEL has no `/usr/local/bin`) |
+| `firewall` | `firewall_state` says `on`: the table `inet meho` is loaded, its chain `prerouting` filters the hook `prerouting` with `policy drop`, and `meho-firewall.service` is enabled | never | `firewall_state` says `off: <reason>`, also `off: nft not found` when `nft` is missing | `nft list table inet meho`, `nft list chain inet meho prerouting`, `systemctl is-enabled meho-firewall.service` |
+| `cis-profile` | `cis_state` says `on`: `config.yaml` sets `profile: cis`, the pod security file exists, the `etcd` user and group exist, `/etc/sysctl.d/60-rke2-cis.conf` exists and the kernel has its values | never | `cis_state` says `off: <reason>` | the files of [RKE2's CIS profile](linux-server-install.md#rke2s-cis-profile) and `/proc/sys` |
+| `console-certificate` | the rule below holds and more than 30 days are left | the rule holds, but 30 days or less are left | the certificate breaks the rule; the Secret cannot be read; the host name is not in `/etc/meho/install.json`; `openssl` is missing | the Secret `meho-core-tls` (`tls.crt`, `ca.crt`), `/etc/meho/install.json`, `openssl` |
+
+**The rule for the console certificate.** `certificate_state` holds the
+rule in one place. The certificate is the one the console, the API and the
+login show: the TLS Secret of the Ingress, `meho-core-tls`
+(`ingress.tls.secretName` in `values-single-node.yaml`). The install makes
+it for the host name, and `meho-host certificate` (#4738) puts the
+customer's own certificate into the same Secret. The check reads only
+`tls.crt` (the server certificate, then the intermediate certificates) and
+`ca.crt` (the CA the clients trust), with one `kubectl` call: one Go
+template prints `tls.crt`, the line `#ca.crt`, then `ca.crt`. One call,
+because `meho doctor` gives the whole check 60 seconds. It never reads
+`tls.key`. The host name comes from `options.hostname` in
+`/etc/meho/install.json`. The rule:
+
+1. The server certificate is valid now: not before its start date, and not
+   at or after its end date.
+2. It names the host name. This is OpenSSL's host check
+   (`openssl x509 -checkhost`): the DNS names of the subject alternative
+   names, a wildcard only in the first label, and the common name only when
+   there is no DNS name.
+3. Its chain ends at `ca.crt`, and every certificate of the chain is valid
+   now: `openssl verify -attime <now> -partial_chain -no-CApath -no-CAstore
+   -CAfile <ca.crt> -untrusted <tls.crt> <tls.crt>`. `-partial_chain` lets
+   `ca.crt` be an intermediate CA. `-no-CApath` and `-no-CAstore` stop
+   OpenSSL from also trusting the machine's own CA folder and store, so a
+   certificate from a public CA does not pass with an unrelated `ca.crt`.
+   Without `ca.crt`, the trust store of the machine is the anchor.
+4. More than 30 days are left.
+
+Points 1 to 3 make a red line, which names every problem it finds. Point 4
+alone makes a warning. Every time check uses one "now", `date -u +%s`, so
+the tests can fix it. The first-start list (#4042) checks the console
+certificate in the backplane, in Python. It must use the same rule, with
+the same 30 days, so the two lists never disagree. `meho-host certificate`
+(#4738) can call `certificate_state` to check a new certificate before it
+writes the Secret.
+
+**The fix lines of the hardening lines.** The firewall line names the two
+`systemctl` commands that load the MEHO firewall and keep it on, and its
+log. The CIS profile line asks to set back what it names, as `install.sh`
+set it up, and to restart RKE2. The certificate line sends the customer to support until
+`meho-host certificate` (#4738) exists; that Task changes the hint.
 
 **Why Succeeded counts as fine.** RKE2's `helm-install-*` Jobs in
 `kube-system` and the core's bootstrap Job leave finished pods behind. They
@@ -104,6 +162,15 @@ form is
 ```
 
 with `status` one of `ok`, `warn` and `fail`. `hint` is empty on an ok line.
+
+`meho doctor` reads this form (#4740). When `/usr/local/sbin/meho-host`
+exists and the doctor runs as root, it runs `meho-host check --json` with
+a 60-second limit and shows each line in its server layer, after its own
+lines. It maps `ok`, `warn` and `fail` (and `skip`) to its own statuses.
+A line with another status word becomes a red line in the doctor, so a
+new status word needs a change in `cli/internal/cmd/doctor_server.go`
+too. Output that is not this JSON gives one red doctor line. See
+[cli.md](cli.md), section "Server layer".
 
 ### `support-bundle`
 
@@ -210,20 +277,77 @@ with `status` one of `ok`, `warn` and `fail`. `hint` is empty on an ok line.
    command stops before the MEHO files, and a second run goes on. When the
    script is not there, RKE2 is already gone, and the command says so and
    goes on.
-3. Remove `/var/lib/meho` (the volumes and the one-time files) and every
+3. Remove the host changes of RKE2's CIS profile (#4636, #5133). RKE2's
+   script does not remove them. They go before `/etc/meho`, because the
+   record of the `etcd` account is in that folder.
+   - The kernel settings file `/etc/sysctl.d/60-rke2-cis.conf`. Removing
+     the file does not change the running kernel: `systemd-sysctl` sets
+     only the values that a file names, and it does not set others back.
+     So the kernel keeps RKE2's values until the machine restarts, and the
+     last line of the command says that a restart brings back the
+     operating system's own kernel values. The file must not stay after
+     MEHO is gone: with two of its values, `kernel.panic_on_oops=1` and
+     `kernel.panic=10`, the machine restarts by itself 10 seconds after a
+     kernel error.
+   - The parts of the `etcd` account that the install created. The install
+     writes them to `/etc/meho/etcd-account`, one per line: `user`,
+     `group` or both ([linux-server-install.md](linux-server-install.md),
+     "The host steps"). Only a part that the record names is removed:
+     `userdel etcd` for the user, `groupdel etcd` for the group when it is
+     still there. `userdel` also removes the user's group of the same name
+     when `USERGROUPS_ENAB` is `yes` in `/etc/login.defs`, the default of
+     Ubuntu and RHEL. So when the install created only the user, and the
+     group existed before, both stay, and a `[note]` line says how to
+     remove them.
+   - A part that the record does not name stays: it existed before the
+     install, or an install.sh from before #5133 created it and wrote no
+     record. A `[note]` line names it and the command that removes it, for
+     when nothing else uses it.
+   - A failed `userdel` or `groupdel` is a `[WARN]` line with the command,
+     and the uninstall goes on.
+4. Remove `/var/lib/meho` (the volumes and the one-time files) and every
    entry of `/etc/meho` except `firewall.nft`, and the drop-in
    `/etc/systemd/system/rke2-server.service.d/meho-firewall.conf`, which
    would stop a later RKE2 install once the firewall is gone, with its
    folder when that is empty (RKE2's script removes only the
    `rke2-*.service` files). Then `systemctl daemon-reload`.
-4. Remove the two commands `install.sh` put on the machine:
-   `/usr/local/bin/meho` and `/usr/local/sbin/meho-host`. bash keeps the
-   running script open, so `meho-host` can remove itself and still print
-   its last lines.
-5. The firewall file, its boot unit and the loaded table stay, so the
-   machine is never without a firewall (ADR 0009). The last line names the
+5. Remove the two commands `install.sh` put on the machine,
+   `/usr/local/bin/meho` and `/usr/local/sbin/meho-host`, and the folder
+   `/usr/local/lib/meho-host`. bash keeps the running script open and has
+   read the two lib files at its start, so `meho-host` can remove itself
+   and them and still print its last lines.
+6. The firewall file, its boot unit and the loaded table stay, so the
+   machine is never without a firewall (ADR 0009). A line names the
    command that removes them, for when the customer's own firewall is
-   ready.
+   ready. The line about the kernel values comes after it, as the last
+   line.
+
+RKE2's script removes `/etc/rancher/rke2`, so the pod security file of the
+CIS profile, `meho-pss.yaml`, goes with it.
+
+### How meho-host finds its lib files
+
+`meho-host` sources `lib/firewall.sh` and `lib/cis.sh`, the files that
+`install.sh` uses too, so the firewall line and the CIS line have one
+source of truth with the install. Both files only define constants and
+functions when they are sourced. `meho-host` looks for them in two places,
+both relative to its own folder (`cd -P` and `pwd -P` of
+`dirname "${BASH_SOURCE[0]}"`):
+
+1. `lib/` next to it: the download and the repository;
+2. `../lib/meho-host/`: on the machine, `/usr/local/sbin/../lib/meho-host`,
+   which is `/usr/local/lib/meho-host`.
+
+Step 2 of `install.sh` (`install_meho_host`) copies the files of
+`MEHO_HOST_LIB_FILES` there, so every install and every later run of
+`install.sh` brings the versions of its download. It takes the first
+place that holds both files. When neither does, `meho-host` stops at once
+with a `[FAIL]` line that names both places and the folder to copy the
+files to. Because `lib/firewall.sh` defines the
+firewall paths as `readonly`, `meho-host` takes them from there and keeps
+no copy of its own. A function that `meho-host` defines after the
+`source` lines would replace a function of the same name from `lib/`;
+there is none today.
 
 ## Testing
 
@@ -244,7 +368,39 @@ real one; a stubbed `nft` that refuses the file proves the old file stays.
 too, in a user and network namespace, on the file `install.sh` wrote, for
 a range and for `none`. CI requires it (`MEHO_REQUIRE_NFT_CHECK=1`).
 The `uninstall` tests put a fake `rke2-uninstall.sh` on the fake machine,
-which removes RKE2's unit and data the way the real one does.
+which removes RKE2's unit and data the way the real one does. The `userdel`
+and `groupdel` stubs remove their lines from the fake `/etc/passwd` and
+`/etc/group`; like the real `userdel` with `USERGROUPS_ENAB yes`, the
+`userdel` stub also removes the group of the same name, and the answer
+`usergroups_enab` turns that off. The tests cover each content of the
+record (both parts, only the group, only the user, no record), a failed
+`userdel` and `groupdel`, and the last line. `InstallUpdateUninstallTests`
+runs `install.sh`, then the update, then the `meho-host` that the install
+put on the machine, so it proves that the update keeps the record of the
+first install and that `uninstall` then removes the account. It also
+proves that an `etcd` user and group from before the install stay through
+all three.
+
+For the hardening lines, the fake machine has the files of RKE2's CIS
+profile as `install.sh` writes them, the kernel values in `/proc/sys`, an
+`nft` stub that answers `list table` and `list chain` from files, and a
+`systemctl` stub that answers `is-enabled`. The check tests add the
+install record. The console certificate is checked by the real `openssl`.
+`console_certificate()` makes the test certificates with `openssl ca`,
+which takes fixed start and end dates around the fixed "now" of the
+`date` stub, so no test depends on the day it runs. The tests cover each
+line on and off: the firewall without `nft`, without the table, with a
+chain `prerouting` that does not drop, and with the unit disabled; the CIS
+profile without `profile: cis`, without the `etcd` user and with another
+kernel value; a valid certificate, one with an intermediate CA in
+`tls.crt`, 20, 30 and 31 days left, another host name, an expired one, one
+not yet valid, one of another CA, no `ca.crt`, no certificate, an
+unreadable Secret, no install record and no `openssl`. They also prove
+that no call reads `tls.key`. `test_firewall_nft.py` runs `firewall_state`
+with the real `nft` on the loaded file, so its check of the chain
+`prerouting` matches the real output of `nft`. `InstallTests` runs the
+installed `meho-host --help` from the fake root, which proves that it
+finds the files at `../lib/meho-host`.
 
 The parent-process walk of `admin-network` reads `/proc` below the fake
 root, so the test process must not be PID 1: in a container, run the tests
@@ -265,13 +421,29 @@ in the folder.
 
 On the machine: bash, coreutils (`date`, `df`, `find`, `mktemp`), `sed`,
 `awk`, `grep`, `tar`, `gzip`, `hostname`, `free` (procps), `ip` (iproute2),
+`userdel` and `groupdel` (shadow-utils, the `passwd` package on Ubuntu),
 `journalctl`, `systemctl` and `timedatectl` (systemd), `nft` (nftables,
-which `install.sh` step 1 requires), RKE2's own `kubectl` at
+which `install.sh` step 1 requires), `openssl` (Ubuntu's `ca-certificates`
+package depends on it), RKE2's own `kubectl` at
 `/var/lib/rancher/rke2/bin/kubectl` with `/etc/rancher/rke2/rke2.yaml`,
 `rke2` at `/usr/local/bin/rke2` and `rke2-uninstall.sh` next to it. Ubuntu
 24.04 has all of them.
 
 ## Known issues
+
+- **The CIS Linux benchmark scan is not built.** #4638 asks for a fourth
+  hardening line: a scan of the customer's operating system against the
+  CIS benchmark, Level 1, with known exceptions such as IP forwarding. It
+  needs a scanner and its rules in the download. The research and the
+  recommendation are on #4638; the line comes with a later change.
+- **The certificate line reads one Secret by name.** It reads
+  `meho-core-tls`, the name of `values-single-node.yaml`. `meho-host
+  certificate` (#4738) keeps that name. A change of
+  `ingress.tls.secretName` needs a change of `CONSOLE_TLS_SECRET`.
+- **The certificate line checks the Secret, not the connection.** It does
+  not connect to port 443, so it does not prove that Traefik serves this
+  Secret. The first-start list (#4042) fetches the certificate through the
+  console address.
 
 - **The Traefik pods are found by name.** The bundle takes the `kube-system`
   pods whose name starts with `rke2-traefik-`, which is how RKE2's
@@ -297,6 +469,18 @@ which `install.sh` step 1 requires), RKE2's own `kubectl` at
   wrote it.
 - **`uninstall` leaves the OS packages that RKE2's installer added** (out
   of scope in #4739).
+- **`uninstall` does not set the kernel values back.** It removes RKE2's
+  kernel settings file, but the running kernel keeps RKE2's values until
+  the machine restarts (#5133 decision). The last line says so.
+- **An `etcd` account without a record stays.** An install.sh from before
+  #5133 wrote no `/etc/meho/etcd-account`, and an update does not write
+  one later, because it cannot know who created the account. On such a
+  machine `uninstall` keeps the `etcd` user and group and prints the
+  commands that remove them.
+- **A user that the install created can stay.** When the `etcd` group
+  existed before the install and the install created only the user,
+  `userdel` would remove the group too, so `uninstall` keeps both and says
+  so.
 
 ## References
 
@@ -329,6 +513,25 @@ which `install.sh` step 1 requires), RKE2's own `kubectl` at
 - The MEHO firewall file and its unit: `docs/codebase/linux-server-install.md`, "The host firewall"
   (#4635), `lib/firewall.sh`.
 - RKE2 uninstall (`/usr/local/bin/rke2-uninstall.sh` for a tarball install):
-  https://docs.rke2.io/install/uninstall
+  https://docs.rke2.io/install/uninstall. The script of v1.37.1 removes
+  `/etc/rancher/rke2` and RKE2's `share/rke2` folder, not `/etc/sysctl.d`
+  and not the `etcd` user and group.
+- `userdel(8)`: with `USERGROUPS_ENAB yes` it removes the group with the
+  same name as the user, unless it is the primary group of another user;
+  exit code 8 when a process of the user runs.
+  https://man7.org/linux/man-pages/man8/userdel.8.html
+- `groupdel(8)`: refuses the primary group of an existing user (exit code
+  8). https://man7.org/linux/man-pages/man8/groupdel.8.html
+- `systemd-sysctl.service(8)`: applies the settings of the `sysctl.d`
+  files; it does not set unnamed values back.
+  https://www.freedesktop.org/software/systemd/man/latest/systemd-sysctl.service.html
 - `nft(8)`: `-c`, `--check` checks a rule file without applying it; `-f`
-  reads the rules from a file.
+  reads the rules from a file; `list table` and `list chain` print a base
+  chain with its `type`, `hook`, `priority` and `policy` on one line.
+- OpenSSL 3.0 `openssl-verify(1)` and `openssl-verification-options(1)`:
+  `-attime`, `-partial_chain`, `-CAfile`, `-untrusted`; the verify error
+  codes 9 (not yet valid) and 10 (expired).
+- OpenSSL 3.0 `openssl-x509(1)`: `-checkhost`, `-startdate`, `-enddate`;
+  `X509_check_host(3)` for the host name rules.
+- OpenSSL 3.0 `openssl-ca(1)`: `-startdate` and `-enddate`, which the tests
+  use to make certificates with fixed dates.

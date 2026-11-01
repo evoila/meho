@@ -271,7 +271,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: broadcast
-          image: "valkey/valkey:9.0-alpine"
+          image: "valkey/valkey@sha256:2d04268dfa26ab31cfa3fdc538866e76438b2d00e41db41b8cb86d780ac5a416"
           imagePullPolicy: IfNotPresent
           # With auth on, the Secret-sourced password must reach Valkey
           # without landing in the ConfigMap OR on the process command line
@@ -385,7 +385,7 @@ spec:
         # means any change to what the pod consumes — config.*, memory.*,
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
-        checksum/config: 73bbf05ff66b94aae8e39b84e89332002bdc151c6c84333c2850c82d7558f7b0
+        checksum/config: e03da30270957196b86bb3985e56152c635b907dc5b1b3b4fa90d377efa01dd7
       labels:
         app.kubernetes.io/name: meho
         app.kubernetes.io/instance: test
@@ -853,6 +853,12 @@ data:
   # unconditionally, like the self-approval switch above; the default
   # `"false"` refuses decisions made on someone else's instruction.
   APPROVAL_ALLOW_DELEGATED_DECISION: "false"
+  # How old a sign-in may be for an action that needs a fresh sign-in:
+  # turning approval off for an operation (#4711), and approving on the
+  # command line or REST (#3979). Then which `acr` values count as a
+  # one-time code step for an approve. The web interface is not affected.
+  FRESH_SIGN_IN_MAX_AGE_SECONDS: "300"
+  APPROVAL_ONE_TIME_CODE_ACR_VALUES: ""
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
   # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that

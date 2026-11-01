@@ -56,7 +56,7 @@ EXPOSURE_STATES = {
     "not-yet-integrated",
 }
 REQUIRED_DELTA_KEYS = {"endpoint", "schema", "auth", "feature_state"}
-REQUIRED_SUBSET_KEYS = {"advertised_range", "auth", "typed_source", "typed_op_ids", "feature_gate"}
+REQUIRED_SUBSET_KEYS = {"advertised_range", "auth", "typed_source", "feature_gate"}
 
 
 class ManifestError(ValueError):
@@ -266,10 +266,10 @@ def _validate_regression_subsets(subsets: object) -> None:
             raise ManifestError(
                 f"MEHO regression subset {subset_id} misses fields: {sorted(missing)}"
             )
-        for key in REQUIRED_SUBSET_KEYS - {"typed_op_ids"}:
+        for key in REQUIRED_SUBSET_KEYS:
             _require_text(record.get(key), f"MEHO regression subset {subset_id}.{key}")
-        op_ids = record["typed_op_ids"]
-        if (
+        op_ids = record.get("typed_op_ids")
+        if op_ids is not None and (
             not isinstance(op_ids, list)
             or not op_ids
             or not all(isinstance(op_id, str) and op_id for op_id in op_ids)

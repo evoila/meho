@@ -149,11 +149,11 @@ func TestPrintCallResultOkRendersResult(t *testing.T) {
 		DurationMs: 23.4,
 	}
 	var buf bytes.Buffer
-	printCallResult(&buf, "vault-1.x", "vault.kv.read", r)
+	PrintCallResult(&buf, "vault-1.x", "vault.kv.read", r)
 	out := buf.String()
 	for _, want := range []string{"status=ok", "vault.kv.read", `"value"`, `"secret"`} {
 		if !strings.Contains(out, want) {
-			t.Errorf("printCallResult ok missing %q in output:\n%s", want, out)
+			t.Errorf("PrintCallResult ok missing %q in output:\n%s", want, out)
 		}
 	}
 }
@@ -171,11 +171,11 @@ func TestPrintCallResultErrorRendersErrorString(t *testing.T) {
 		DurationMs: 5.0,
 	}
 	var buf bytes.Buffer
-	printCallResult(&buf, "vault-1.x", "vault.bogus", r)
+	PrintCallResult(&buf, "vault-1.x", "vault.bogus", r)
 	out := buf.String()
 	for _, want := range []string{"status=error", "unknown_op: vault.bogus", "extras:", "known_op_count"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("printCallResult error missing %q in output:\n%s", want, out)
+			t.Errorf("PrintCallResult error missing %q in output:\n%s", want, out)
 		}
 	}
 }
@@ -191,7 +191,7 @@ func TestPrintCallResultOkNullResult(t *testing.T) {
 		DurationMs: 12.0,
 	}
 	var buf bytes.Buffer
-	printCallResult(&buf, "k8s-1.x", "k8s.about", r)
+	PrintCallResult(&buf, "k8s-1.x", "k8s.about", r)
 	out := buf.String()
 	if !strings.Contains(out, "status=ok") {
 		t.Errorf("null-result ok render missing status header; got:\n%s", out)
@@ -256,7 +256,7 @@ func TestPrintPreviewResultOkRendersPolicyLine(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"/vswitch/4321/server",
-		"Risk level: dangerous. This call waits for approval.",
+		"Risk level: dangerous. This call waits for approval. A second person must approve it.",
 		`"server"`,
 	} {
 		if !strings.Contains(out, want) {
@@ -281,7 +281,8 @@ func TestPrintPreviewResultOkRendersPolicyLine(t *testing.T) {
 
 // TestPolicyLine — the plain line for each verdict, the deny reason, the
 // fallback to requires_approval on an older backplane, and nothing when
-// the op did not resolve (#4923).
+// the op did not resolve (#4923). Only a dangerous or destructive call
+// says a second person must approve (#4963).
 func TestPolicyLine(t *testing.T) {
 	reason := "agent has no grant for this op"
 	yes := true
@@ -293,13 +294,21 @@ func TestPolicyLine(t *testing.T) {
 		{"auto", PreviewResult{SafetyLevel: "caution", PolicyVerdict: "auto-execute"},
 			"Risk level: caution. This call runs at once."},
 		{"approval", PreviewResult{SafetyLevel: "dangerous", PolicyVerdict: "needs-approval"},
-			"Risk level: dangerous. This call waits for approval."},
+			"Risk level: dangerous. This call waits for approval. A second person must approve it."},
+		{"approval destructive", PreviewResult{SafetyLevel: "destructive", PolicyVerdict: "needs-approval"},
+			"Risk level: destructive. This call waits for approval. A second person must approve it."},
+		{"approval caution", PreviewResult{SafetyLevel: "caution", PolicyVerdict: "needs-approval"},
+			"Risk level: caution. This call waits for approval."},
+		{"approval safe", PreviewResult{SafetyLevel: "safe", PolicyVerdict: "needs-approval"},
+			"Risk level: safe. This call waits for approval."},
 		{"deny with reason", PreviewResult{SafetyLevel: "dangerous", PolicyVerdict: "deny", PolicyReason: &reason},
 			"Risk level: dangerous. This call is refused: agent has no grant for this op"},
 		{"deny without reason", PreviewResult{SafetyLevel: "safe", PolicyVerdict: "deny"},
 			"Risk level: safe. This call is refused."},
 		{"older backplane", PreviewResult{SafetyLevel: "dangerous", RequiresApproval: &yes},
-			"Risk level: dangerous. This call waits for approval."},
+			"Risk level: dangerous. This call waits for approval. A second person must approve it."},
+		{"older backplane caution", PreviewResult{SafetyLevel: "caution", RequiresApproval: &yes},
+			"Risk level: caution. This call waits for approval."},
 		{"older backplane no approval", PreviewResult{SafetyLevel: "safe"}, "Risk level: safe."},
 		{"op did not resolve", PreviewResult{Status: "error"}, ""},
 	}

@@ -56,7 +56,7 @@ from meho_backplane.broadcast import (
 from meho_backplane.broadcast.announce_gate import reset_announce_gate_cache_for_testing
 from meho_backplane.broadcast.history import ADVISORY_EXTRAS_KEY
 from meho_backplane.broadcast.reflex import (
-    _ANNOUNCE_NUDGE,
+    _ANNOUNCE_NUDGES,
     _READ_NUDGE,
     REFLEX_ADVISORY_EXTRAS_KEY,
     build_reflex_advisory,
@@ -261,7 +261,9 @@ async def test_window_zero_short_circuits_no_session_no_io(
         patch.object(get_broadcast_client(), "set", new=set_stub),
         _bound_session(_SESSION),
     ):
-        advisory = await build_reflex_advisory(_operator(), op_id="vault.kv.list", target_name=None)
+        advisory = await build_reflex_advisory(
+            _operator(), op_class="credential_read", target_name=None
+        )
     assert advisory == {}
     db_stub.assert_not_called()
 
@@ -273,7 +275,9 @@ async def test_no_agent_session_yields_empty_and_no_io() -> None:
         patch("meho_backplane.broadcast.reflex.get_sessionmaker", new=db_stub),
         _bound_session(None),
     ):
-        advisory = await build_reflex_advisory(_operator(), op_id="vault.kv.list", target_name=None)
+        advisory = await build_reflex_advisory(
+            _operator(), op_class="credential_read", target_name=None
+        )
     assert advisory == {}
     db_stub.assert_not_called()
 
@@ -287,8 +291,12 @@ async def test_read_nudge_fires_when_session_never_read_broadcast() -> None:
     """No prior broadcast_recent row for the session -> the read nudge fires."""
     store = _FakeSetStore()
     with _patch_set(store), _bound_session(_SESSION):
-        first = await build_reflex_advisory(_operator(), op_id="vault.kv.list", target_name=None)
-        second = await build_reflex_advisory(_operator(), op_id="vault.kv.list", target_name=None)
+        first = await build_reflex_advisory(
+            _operator(), op_class="credential_read", target_name=None
+        )
+        second = await build_reflex_advisory(
+            _operator(), op_class="credential_read", target_name=None
+        )
     assert first == {REFLEX_ADVISORY_EXTRAS_KEY: _READ_NUDGE}
     # Deduped: same (session, heuristic) is nudged once per window; the
     # read op does not qualify for the announce heuristic, so no fragment.
@@ -301,7 +309,9 @@ async def test_read_nudge_silent_once_session_has_read_broadcast() -> None:
     await _seed_broadcast_recent(_SESSION)
     store = _FakeSetStore()
     with _patch_set(store), _bound_session(_SESSION):
-        advisory = await build_reflex_advisory(_operator(), op_id="vault.kv.list", target_name=None)
+        advisory = await build_reflex_advisory(
+            _operator(), op_class="credential_read", target_name=None
+        )
     assert advisory == {}
     # Heuristic did not qualify, so no claim was ever attempted.
     assert store.calls == 0
@@ -317,7 +327,9 @@ async def test_read_recorded_only_as_usage_event_counts() -> None:
     )
     store = _FakeSetStore()
     with _patch_set(store), _bound_session(_SESSION):
-        advisory = await build_reflex_advisory(_operator(), op_id="vault.kv.list", target_name=None)
+        advisory = await build_reflex_advisory(
+            _operator(), op_class="credential_read", target_name=None
+        )
     assert advisory == {}
     assert store.calls == 0
 
@@ -328,7 +340,9 @@ async def test_read_nudge_is_per_session() -> None:
     other = UUID("44444444-4444-4444-4444-444444444444")
     store = _FakeSetStore()
     with _patch_set(store), _bound_session(other):
-        advisory = await build_reflex_advisory(_operator(), op_id="vault.kv.list", target_name=None)
+        advisory = await build_reflex_advisory(
+            _operator(), op_class="credential_read", target_name=None
+        )
     assert advisory == {REFLEX_ADVISORY_EXTRAS_KEY: _READ_NUDGE}
 
 
@@ -348,7 +362,9 @@ async def test_read_nudge_fires_for_direct_mcp_session_via_header_fallback() -> 
     """
     store = _FakeSetStore()
     with _patch_set(store), _bound_session(None), _bound_mcp_session(_SESSION):
-        advisory = await build_reflex_advisory(_operator(), op_id="vault.kv.list", target_name=None)
+        advisory = await build_reflex_advisory(
+            _operator(), op_class="credential_read", target_name=None
+        )
     assert advisory == {REFLEX_ADVISORY_EXTRAS_KEY: _READ_NUDGE}
     assert store.ex_values[0] == 30 * 60
 
@@ -358,22 +374,32 @@ async def test_read_nudge_fires_for_direct_mcp_session_via_header_fallback() -> 
 # ---------------------------------------------------------------------------
 
 
-async def test_announce_nudge_fires_for_write_without_claim() -> None:
-    """A write-class op with no covering claim fires the announce nudge."""
+@pytest.mark.parametrize(
+    ("gap", "says"),
+    [
+        ("no_claim", "without an active announce claim"),
+        ("expired", "has expired"),
+        ("other_target", "on a target that none of your active announce claims name"),
+        ("other_op_class", "planned_op_class 'write'"),
+    ],
+)
+async def test_announce_nudge_fires_for_write_without_claim(gap: str, says: str) -> None:
+    """A write-class op with no covering claim fires the nudge naming why (#4091)."""
     await _seed_broadcast_recent(_SESSION)  # satisfy read so announce is reached
     store = _FakeSetStore()
     with (
         _patch_set(store),
         patch(
-            "meho_backplane.broadcast.reflex.caller_has_active_announce_claim",
-            new=AsyncMock(return_value=False),
+            "meho_backplane.broadcast.reflex.announce_claim_gap",
+            new=AsyncMock(return_value=gap),
         ),
         _bound_session(_SESSION),
     ):
-        advisory = await build_reflex_advisory(
-            _operator(), op_id="vault.kv.delete", target_name="vault-1"
-        )
-    assert advisory == {REFLEX_ADVISORY_EXTRAS_KEY: _ANNOUNCE_NUDGE}
+        advisory = await build_reflex_advisory(_operator(), op_class="write", target_name="vault-1")
+    nudge = advisory[REFLEX_ADVISORY_EXTRAS_KEY]
+    assert says in nudge
+    assert "meho_broadcast_announce" in nudge
+    assert "{op_class}" not in nudge
 
 
 async def test_announce_nudge_silent_when_claim_covers_op() -> None:
@@ -383,14 +409,12 @@ async def test_announce_nudge_silent_when_claim_covers_op() -> None:
     with (
         _patch_set(store),
         patch(
-            "meho_backplane.broadcast.reflex.caller_has_active_announce_claim",
-            new=AsyncMock(return_value=True),
+            "meho_backplane.broadcast.reflex.announce_claim_gap",
+            new=AsyncMock(return_value=None),
         ),
         _bound_session(_SESSION),
     ):
-        advisory = await build_reflex_advisory(
-            _operator(), op_id="vault.kv.delete", target_name="vault-1"
-        )
+        advisory = await build_reflex_advisory(_operator(), op_class="write", target_name="vault-1")
     assert advisory == {}
     assert store.calls == 0
 
@@ -399,14 +423,14 @@ async def test_read_class_op_never_trips_announce() -> None:
     """A read-class op never trips announce, even with no claim."""
     await _seed_broadcast_recent(_SESSION)
     store = _FakeSetStore()
-    claim = AsyncMock(return_value=False)
+    claim = AsyncMock(return_value="no_claim")
     with (
         _patch_set(store),
-        patch("meho_backplane.broadcast.reflex.caller_has_active_announce_claim", new=claim),
+        patch("meho_backplane.broadcast.reflex.announce_claim_gap", new=claim),
         _bound_session(_SESSION),
     ):
         advisory = await build_reflex_advisory(
-            _operator(), op_id="vault.kv.list", target_name="vault-1"
+            _operator(), op_class="credential_read", target_name="vault-1"
         )
     assert advisory == {}
     # Read-class short-circuits before the (expensive) claim scan.
@@ -424,24 +448,20 @@ async def test_read_has_priority_then_announce_on_next_call() -> None:
     with (
         _patch_set(store),
         patch(
-            "meho_backplane.broadcast.reflex.caller_has_active_announce_claim",
-            new=AsyncMock(return_value=False),
+            "meho_backplane.broadcast.reflex.announce_claim_gap",
+            new=AsyncMock(return_value="no_claim"),
         ),
         _bound_session(_SESSION),
     ):
         # First write-class dispatch: read qualifies (no prior recent) AND
         # announce qualifies, but read wins and the announce key is left
         # unclaimed.
-        first = await build_reflex_advisory(
-            _operator(), op_id="vault.kv.delete", target_name="vault-1"
-        )
+        first = await build_reflex_advisory(_operator(), op_class="write", target_name="vault-1")
         # Second dispatch: read is now deduped, so it falls through to the
         # still-unclaimed announce heuristic.
-        second = await build_reflex_advisory(
-            _operator(), op_id="vault.kv.delete", target_name="vault-1"
-        )
+        second = await build_reflex_advisory(_operator(), op_class="write", target_name="vault-1")
     assert first == {REFLEX_ADVISORY_EXTRAS_KEY: _READ_NUDGE}
-    assert second == {REFLEX_ADVISORY_EXTRAS_KEY: _ANNOUNCE_NUDGE}
+    assert second == {REFLEX_ADVISORY_EXTRAS_KEY: _ANNOUNCE_NUDGES["no_claim"]}
 
 
 # ---------------------------------------------------------------------------
@@ -459,7 +479,9 @@ async def test_fail_open_on_db_error() -> None:
         patch("meho_backplane.broadcast.reflex._log") as mock_log,
         _bound_session(_SESSION),
     ):
-        advisory = await build_reflex_advisory(_operator(), op_id="vault.kv.list", target_name=None)
+        advisory = await build_reflex_advisory(
+            _operator(), op_class="credential_read", target_name=None
+        )
     assert advisory == {}
     assert any(
         call.args and call.args[0] == "reflex_advisory_failed"
@@ -480,7 +502,9 @@ async def test_fail_open_on_valkey_error() -> None:
         patch("meho_backplane.broadcast.reflex._log") as mock_log,
         _bound_session(_SESSION),
     ):
-        advisory = await build_reflex_advisory(_operator(), op_id="vault.kv.list", target_name=None)
+        advisory = await build_reflex_advisory(
+            _operator(), op_class="credential_read", target_name=None
+        )
     assert advisory == {}
     assert any(
         call.args and call.args[0] == "reflex_advisory_failed"
@@ -671,3 +695,62 @@ async def test_three_advisory_fragments_coexist_on_one_response(
     assert result.extras[ADVISORY_EXTRAS_KEY][0]["principal_sub"] == "peer-a"
     assert result.extras[CHECKS_ADVISORY_EXTRAS_KEY][0]["state"] == "critical"
     assert result.extras[REFLEX_ADVISORY_EXTRAS_KEY] == _READ_NUDGE
+
+
+async def test_write_with_an_unknown_last_word_gets_both_write_warnings(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A ``caution`` op is a write by its risk level, not by its last word.
+
+    ``vault.kv.purge`` ends in a word :func:`classify_op` does not know, so
+    the op id alone says ``other``. The dispatcher gives the two warnings the
+    class it stores on the audit row, so the announce reminder and the
+    target activity warning both fire.
+    """
+    await _seed_tenant()
+    await _seed_broadcast_recent(_SESSION)  # no read nudge, so announce is reached
+    await _register_op("vault.kv.purge", stub_embedding_service, safety_level="caution")
+    peer_event = BroadcastEvent(
+        event_id=uuid.uuid4(),
+        ts=datetime.now(UTC),
+        tenant_id=_TENANT,
+        principal_sub="peer-a",
+        target_name="vault-1",
+        op_id="vault.kv.purge",
+        op_class="write",
+        result_status="ok",
+        audit_id=uuid.uuid4(),
+        actor_sub=None,
+        payload={"op_class": "write", "params": {}, "result_status": "ok"},
+    )
+
+    async def _xrevrange(name: str, **kwargs: Any) -> list[tuple[str, dict[str, str]]]:
+        return [("1747800001000-0", {"event": peer_event.model_dump_json()})]
+
+    claim_gap = AsyncMock(return_value="no_claim")
+    bc = get_broadcast_client()
+    with (
+        _patch_set(_FakeSetStore()),
+        patch.object(bc, "pipeline", new=_FakeNxPipeline().pipeline),
+        patch.object(bc, "xrevrange", new=_xrevrange),
+        patch("meho_backplane.broadcast.reflex.announce_claim_gap", new=claim_gap),
+        _bound_session(_SESSION),
+    ):
+        result = await dispatch(
+            operator=_operator(),
+            connector_id="vault-1.x",
+            op_id="vault.kv.purge",
+            target=_FakeTarget(),
+            params={},
+        )
+    assert result.status == "ok"
+    assert result.extras[ADVISORY_EXTRAS_KEY][0]["principal_sub"] == "peer-a"
+    assert result.extras[REFLEX_ADVISORY_EXTRAS_KEY] == _ANNOUNCE_NUDGES["no_claim"].format(
+        op_class="write"
+    )
+    assert claim_gap.await_args is not None
+    assert claim_gap.await_args.kwargs["op_class"] == "write"
+    async with get_sessionmaker()() as session:
+        row = await session.get(AuditLog, result.audit_id)
+    assert row is not None
+    assert row.payload["op_class"] == "write"

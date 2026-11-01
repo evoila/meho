@@ -5,6 +5,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -60,6 +61,10 @@ func newStatusCmd() *cobra.Command {
 			"force (who must approve, approval key state) and the gated " +
 			"features that still need a setting. After an upgrade this is " +
 			"how to confirm the database reached the new revision.\n\n" +
+			"With the read_only role in the current tenant, the deep check " +
+			"is not allowed. status then shows the identity, the tenants and " +
+			"the database state from /api/v1/health/live, and says that the " +
+			"other checks need the operator role.\n\n" +
 			"With --watch the command subscribes to /api/v1/feed and streams " +
 			"one rendered line per broadcast event until the operator hits " +
 			"Ctrl-C. Filters (--op-class, --principal, --target) forward to " +
@@ -136,6 +141,9 @@ func runOneShot(cmd *cobra.Command, backplaneURL string, jsonOut bool) error {
 	}
 
 	resp, err := client.GetHealth(cmd.Context())
+	if msg, ok := noTenantMessage(resp); ok {
+		return output.RenderError(cmd.ErrOrStderr(), output.AuthExpired(msg), jsonOut)
+	}
 	if err != nil {
 		if api.IsRefreshRejected(err) {
 			// A refresh_token was present but the IdP rejected it as
@@ -161,6 +169,12 @@ func runOneShot(cmd *cobra.Command, backplaneURL string, jsonOut bool) error {
 			output.AuthExpired(fmt.Sprintf("backplane rejected stored credentials; run `meho login %s`", backplaneURL)),
 			jsonOut)
 	}
+	if msg, ok := tenantRefusedMessage(resp); ok {
+		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(msg), jsonOut)
+	}
+	if resp.StatusCode() == http.StatusForbidden {
+		return runLiveness(cmd, client, backplaneURL, jsonOut)
+	}
 	if resp.JSON200 == nil {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("HTTP %d from %s", resp.StatusCode(), backplaneURL)),
@@ -173,6 +187,82 @@ func runOneShot(cmd *cobra.Command, backplaneURL string, jsonOut bool) error {
 		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
 	}
 	return output.PrintHealth(cmd.OutOrStdout(), resp.JSON200)
+}
+
+// runLiveness is the status answer for a login with the read_only role
+// in the current tenant (#5241). The deep check stays behind the
+// operator role on the backplane (it checks the credential store under
+// the person's identity), so the CLI reads the liveness route instead:
+// identity, tenants with the current one marked, and the database
+// state. A person who switched to a tenant where they only read still
+// sees where they are.
+func runLiveness(cmd *cobra.Command, client *api.AuthedClient, backplaneURL string, jsonOut bool) error {
+	live, err := client.GetLiveness(cmd.Context())
+	if err != nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, redactedError(err))),
+			jsonOut)
+	}
+	if live.JSON200 == nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("HTTP %d from %s", live.StatusCode(), backplaneURL)),
+			jsonOut)
+	}
+	printVersionSkew(cmd.Context(), client.HTTPClient(), backplaneURL, cmd.ErrOrStderr())
+	if jsonOut {
+		return output.PrintJSON(cmd.OutOrStdout(), live.JSON200)
+	}
+	return output.PrintLiveness(cmd.OutOrStdout(), live.JSON200)
+}
+
+// tenantBootstrapGuideURL is the guide that explains how a person gets
+// a tenant: through exactly one MEHO role group.
+const tenantBootstrapGuideURL = "https://evoila.github.io/meho/latest/guides/tenant-bootstrap/"
+
+// noTenantMessage returns the message for a 401 whose detail starts with
+// missing_tenant_claim (#3872). The login worked, but the token carries
+// no tenant, so "run meho login" would not help. Older backplanes send
+// the bare code, so the CLI writes its own text instead of passing the
+// server detail through.
+func noTenantMessage(resp *api.AuthenticatedHealthApiV1HealthGetResponse) (string, bool) {
+	if resp == nil || resp.StatusCode() != http.StatusUnauthorized {
+		return "", false
+	}
+	var body struct {
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		return "", false
+	}
+	if body.Detail != "missing_tenant_claim" && !strings.HasPrefix(body.Detail, "missing_tenant_claim:") {
+		return "", false
+	}
+	return "missing_tenant_claim: your login has no tenant. Usually you are in no " +
+		"MEHO role group. Logging in again does not help: ask your admin to put " +
+		"you in exactly one role group, then run `meho login` again. Guide: " +
+		tenantBootstrapGuideURL, true
+}
+
+// tenantRefusedMessage returns the message for a 403 whose detail starts
+// with tenant_not_member or tenant_not_found (#5239): the tenant from
+// `meho tenants use` or MEHO_TENANT is not one the login may work in,
+// for example after the person left it. The backplane's detail lists
+// the person's tenants; the CLI adds how to pick another one.
+func tenantRefusedMessage(resp *api.AuthenticatedHealthApiV1HealthGetResponse) (string, bool) {
+	if resp == nil || resp.StatusCode() != http.StatusForbidden {
+		return "", false
+	}
+	var body struct {
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		return "", false
+	}
+	if !strings.HasPrefix(body.Detail, "tenant_not_member:") && !strings.HasPrefix(body.Detail, "tenant_not_found:") {
+		return "", false
+	}
+	return body.Detail + " Run `meho tenants use` to list your tenants, then " +
+		"`meho tenants use <name>` (or change " + api.TenantEnv + ").", true
 }
 
 // versionCheckTimeout caps the GET /version call so a slow backplane

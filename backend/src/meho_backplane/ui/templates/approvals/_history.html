@@ -23,6 +23,12 @@
       button's ``offset`` advances to the next page. It must NOT re-fetch the
       whole ``_history.html`` console -- that would nest a second console and
       duplicate ids inside the ``<ul>``.
+    * The "Oldest first" / "Newest first" toggle (#3596) re-fetches the
+      active tab with an explicit ``order``. Without one, the Pending tab
+      lists oldest first when a change ticket has two or more pending
+      requests (so a chain reads in the order it was sent) and every other
+      view lists newest first. The region refresh and the work_ref box keep
+      the operator's choice; a tab switch goes back to the default.
     * The whole region re-fetches the ACTIVE tab on the body-wide
       ``meho:approval-bump`` / ``meho:approval-decided`` events the
       app-shell bell dispatches, so a decision made elsewhere (or in this
@@ -44,11 +50,16 @@
     page_size         -- int: rows per page
     next_offset       -- int: offset for the next "Load more" fetch
     has_more          -- bool: whether a further page exists
+    order             -- str: the order in use, "oldest" or "newest" (#3596)
+    order_choice      -- str: the operator's explicit choice, "" when none
+    in_order_work_ref -- str | None: the change ticket the "Approve group in
+                         order" button runs (#3597); None hides the button
 -#}
+{%- set order_q = "&order=" ~ order_choice if order_choice else "" -%}
 <div
   id="approvals-history"
   class="space-y-4"
-  hx-get="/ui/approvals/list?tab={{ active_tab }}"
+  hx-get="/ui/approvals/list?tab={{ active_tab }}{{ order_q }}"
   hx-target="#approvals-history"
   hx-swap="outerHTML"
   hx-trigger="meho:approval-bump from:body, meho:approval-decided from:body"
@@ -86,13 +97,51 @@
       class="input input-bordered input-sm w-full"
       aria-label="Filter by change ticket"
       autocomplete="off"
-      hx-get="/ui/approvals/list?tab={{ active_tab }}"
+      hx-get="/ui/approvals/list?tab={{ active_tab }}{{ order_q }}"
       hx-target="#approvals-history"
       hx-swap="outerHTML"
       hx-trigger="keyup changed delay:300ms, search"
-      hx-push-url="/ui/approvals?tab={{ active_tab }}{% if work_ref %}&work_ref={{ work_ref | urlencode }}{% endif %}"
+      hx-push-url="/ui/approvals?tab={{ active_tab }}{{ order_q }}{% if work_ref %}&work_ref={{ work_ref | urlencode }}{% endif %}"
     />
   </label>
+
+  {# ---------- Sort order toggle (#3596) ---------- #}
+  <div class="join" role="group" aria-label="Sort order">
+    {% for value, label in [("oldest", "Oldest first"), ("newest", "Newest first")] %}
+      <button
+        type="button"
+        class="btn btn-sm join-item{% if value == order %} btn-active{% endif %}"
+        aria-pressed="{{ 'true' if value == order else 'false' }}"
+        data-approval-order="{{ value }}"
+        hx-get="/ui/approvals/list?tab={{ active_tab }}&order={{ value }}"
+        hx-target="#approvals-history"
+        hx-swap="outerHTML"
+        hx-include="[name='work_ref']"
+        hx-push-url="/ui/approvals?tab={{ active_tab }}&order={{ value }}{% if work_ref %}&work_ref={{ work_ref | urlencode }}{% endif %}"
+      >
+        {{ label }}
+      </button>
+    {% endfor %}
+  </div>
+
+  {# ---------- Approve group in order (#3597) ---------- #}
+  {% if in_order_work_ref %}
+    <div class="flex flex-wrap items-center gap-3">
+      <button
+        type="button"
+        class="btn btn-sm btn-primary"
+        data-approval-in-order-open
+        hx-get="/ui/approvals/in-order?work_ref={{ in_order_work_ref | urlencode }}"
+        hx-target="#meho-approvals-modal-container"
+        hx-swap="innerHTML"
+      >
+        Approve group in order
+      </button>
+      <span class="text-xs text-base-content/60">
+        Approves the steps oldest first and stops at the first failure.
+      </span>
+    </div>
+  {% endif %}
 
   {# ---------- Rows ---------- #}
   {% if requests %}

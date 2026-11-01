@@ -128,6 +128,9 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.content_library.item.delete",
         # The destructive DRS rule delete: blast_radius from its own plan.
         "vmware.composite.cluster.drs_rule.delete",
+        # The DRS group ops: the handler's own plan.
+        "vmware.composite.cluster.drs_group.members.set",
+        "vmware.composite.cluster.drs_group.delete",
         # Licence assign: live-read of the asset's licence now and the new one.
         "vmware.composite.license.assign",
         # The two alarm changes (#4383): a live read of the alarm, or of the
@@ -775,14 +778,106 @@ async def test_vm_migrate_preview_names_target_host_resolution() -> None:
     }
 
 
-async def test_vm_power_preview_names_the_hard_vs_soft_power_kind() -> None:
-    """The single-VM power echo surfaces the soft-vs-hard distinction to the approver."""
-    hard = await _write_preview._vm_power_preview(_make_preview_ctx({"vm": "vm-1", "verb": "off"}))
-    assert hard == {"vm": "vm-1", "verb": "off", "power_kind": "hard"}
-    soft = await _write_preview._vm_power_preview(
-        _make_preview_ctx({"vm": "vm-1", "verb": "guest_shutdown"})
+async def test_vm_power_preview_shows_name_power_state_and_power_kind() -> None:
+    """The power card names the VM and its power state, not only the moid (#3942)."""
+    recorder = _RecordingConnector()
+    recorder.responses["/vcenter/vm/vm-1"] = {
+        "value": {"name": "web-01", "power_state": "POWERED_ON"}
+    }
+    hard = await _write_preview._vm_power_preview(
+        _make_preview_ctx({"vm": "vm-1", "verb": "off"}, connector_instance=recorder)
     )
-    assert soft == {"vm": "vm-1", "verb": "guest_shutdown", "power_kind": "guest"}
+    assert hard == {
+        "vm": "vm-1",
+        "name": "web-01",
+        "power_state": "POWERED_ON",
+        "verb": "off",
+        "power_kind": "hard",
+    }
+    soft = await _write_preview._vm_power_preview(
+        _make_preview_ctx({"vm": "vm-1", "verb": "guest_shutdown"}, connector_instance=recorder)
+    )
+    assert soft is not None
+    assert soft["power_kind"] == "guest"
+    assert soft["name"] == "web-01"
+    # Only the VM read fired -- never the power verb.
+    assert recorder.calls == [("GET", "/vcenter/vm/vm-1", None)] * 2
+
+
+async def test_vm_power_preview_keeps_the_moid_when_the_vm_read_fails() -> None:
+    """A failed name read keeps the moid and names the gap; it never raises."""
+    recorder = _RecordingConnector()
+    recorder.failures["/vcenter/vm/vm-1"] = "vCenter refused the read"
+    preview = await _write_preview._vm_power_preview(
+        _make_preview_ctx({"vm": "vm-1", "verb": "reset"}, connector_instance=recorder)
+    )
+    assert preview == {
+        "vm": "vm-1",
+        "name": None,
+        "power_state": None,
+        "verb": "reset",
+        "power_kind": "hard",
+        "unavailable": ["the VM name and power state: the VM read failed (RuntimeError)"],
+    }
+    # The fault text never reaches the durable row.
+    assert "refused" not in str(preview)
+
+
+async def test_vm_power_preview_without_a_connector_names_the_gap() -> None:
+    """No connector session: the card still shows the moid and says the name is missing."""
+    preview = await _write_preview._vm_power_preview(
+        _make_preview_ctx({"vm": "vm-1", "verb": "on"}, connector_instance=None)
+    )
+    assert preview == {
+        "vm": "vm-1",
+        "name": None,
+        "power_state": None,
+        "verb": "on",
+        "power_kind": "hard",
+        "unavailable": ["the VM name and power state: no connector session to read the VM"],
+    }
+
+
+async def test_vm_power_park_shows_the_vm_name_and_power_state(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A person's power-off waits for approval; the row names the VM (#3942)."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses["/vcenter/vm/vm-42"] = {
+        "value": {"name": "app-42", "power_state": "POWERED_ON"}
+    }
+
+    _, row = await _park("vmware.composite.vm.power", {"vm": "vm-42", "verb": "off"})
+
+    preview = row.proposed_effect["preview"]
+    assert preview == {
+        "vm": "vm-42",
+        "name": "app-42",
+        "power_state": "POWERED_ON",
+        "verb": "off",
+        "power_kind": "hard",
+    }
+    assert all(verb == "GET" for verb, _, _ in recorder.calls)
+
+
+async def test_vm_power_park_is_still_created_when_the_vm_read_fails(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A failed name read does not block the approval request."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.failures["/vcenter/vm/vm-42"] = "vCenter unavailable"
+
+    _, row = await _park("vmware.composite.vm.power", {"vm": "vm-42", "verb": "off"})
+
+    effect = row.proposed_effect
+    assert effect["preview_populated"] is True
+    assert "preview_unavailable" not in effect
+    assert effect["preview"]["vm"] == "vm-42"
+    assert effect["preview"]["name"] is None
+    assert effect["preview"]["unavailable"] == [
+        "the VM name and power state: the VM read failed (RuntimeError)"
+    ]
+    assert "vCenter unavailable" not in str(effect)
 
 
 async def test_echo_builders_decline_on_malformed_params() -> None:
@@ -1792,8 +1887,77 @@ async def test_vm_device_cdrom_preview_live_reads_current_backing() -> None:
         "action": "remove",
         "current_backing": {"type": "ISO_FILE", "iso_file": "[esx-1-local] installer.iso"},
         "state": "CONNECTED",
+        "requested_backing": None,
     }
     assert recorder.specs == ["/vcenter/vm/vm-1", "/vcenter/vm/vm-1/hardware/cdrom/16000"]
+
+
+def _cdrom_recorder() -> _RecordingConnector:
+    recorder = _RecordingConnector()
+    recorder.responses.update(
+        {
+            "/vcenter/vm/vm-1": {"value": {"name": "web-1"}},
+            "/vcenter/vm/vm-1/hardware/cdrom/16000": {
+                "value": {
+                    "backing": {"type": "ISO_FILE", "iso_file": "[esx-1-local] installer.iso"},
+                    "state": "NOT_CONNECTED",
+                }
+            },
+        }
+    )
+    return recorder
+
+
+@pytest.mark.parametrize(
+    ("backing", "expected"),
+    [
+        ({"type": "CLIENT_DEVICE"}, {"type": "CLIENT_DEVICE"}),
+        (
+            {"type": "ISO_FILE", "iso_file": "[ds] a.iso"},
+            {"type": "ISO_FILE", "iso_file": "[ds] a.iso"},
+        ),
+        (
+            {"type": "HOST_DEVICE", "host_device": "cdrom0", "device_access_type": "PASSTHRU"},
+            {"type": "HOST_DEVICE", "host_device": "cdrom0", "device_access_type": "PASSTHRU"},
+        ),
+    ],
+)
+async def test_vm_device_cdrom_preview_update_shows_requested_backing(
+    backing: dict[str, str], expected: dict[str, str]
+) -> None:
+    """An ``update`` preview shows the new backing next to the current one (#5378)."""
+    recorder = _cdrom_recorder()
+    preview = await _write_preview._vm_device_cdrom_preview(
+        _make_preview_ctx(
+            {"vm": "vm-1", "cdrom": "16000", "action": "update", "backing": backing},
+            connector_instance=recorder,
+        )
+    )
+    assert preview is not None
+    assert preview["current_backing"] == {
+        "type": "ISO_FILE",
+        "iso_file": "[esx-1-local] installer.iso",
+    }
+    assert preview["requested_backing"] == expected
+
+
+@pytest.mark.parametrize("action", ["remove", "disconnect"])
+async def test_vm_device_cdrom_preview_no_requested_backing_without_update(action: str) -> None:
+    """``remove`` and ``disconnect`` set no new backing, even if one is passed (#5378)."""
+    recorder = _cdrom_recorder()
+    preview = await _write_preview._vm_device_cdrom_preview(
+        _make_preview_ctx(
+            {
+                "vm": "vm-1",
+                "cdrom": "16000",
+                "action": action,
+                "backing": {"type": "CLIENT_DEVICE"},
+            },
+            connector_instance=recorder,
+        )
+    )
+    assert preview is not None
+    assert preview["requested_backing"] is None
 
 
 async def test_hardware_builders_decline_on_malformed_params() -> None:
@@ -1946,11 +2110,53 @@ async def test_vm_device_cdrom_park_carries_current_backing(
             "action": "remove",
             "current_backing": {"type": "ISO_FILE", "iso_file": "[esx-1-local] pinned.iso"},
             "state": "CONNECTED",
+            "requested_backing": None,
         },
         "preview_populated": True,
         "safety_level": "dangerous",
     }
     # Only the read-only backing GETs fired — no DELETE.
+    assert recorder.specs == ["/vcenter/vm/vm-1", "/vcenter/vm/vm-1/hardware/cdrom/16000"]
+
+
+async def test_vm_device_cdrom_update_park_carries_requested_backing(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The parked ``update`` row carries the new backing next to the current one (#5378).
+
+    ``meho approvals show`` and the console render ``proposed_effect`` as
+    stored, so this row is what the approver sees.
+    """
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses.update(
+        {
+            "/vcenter/vm/vm-1": {"value": {"name": "web-1"}},
+            "/vcenter/vm/vm-1/hardware/cdrom/16000": {
+                "value": {
+                    "backing": {"type": "ISO_FILE", "iso_file": "[esx-1-local] pinned.iso"},
+                    "state": "NOT_CONNECTED",
+                }
+            },
+        }
+    )
+
+    _, row = await _park(
+        "vmware.composite.vm.device.cdrom",
+        {
+            "vm": "vm-1",
+            "cdrom": "16000",
+            "action": "update",
+            "backing": {"type": "CLIENT_DEVICE"},
+        },
+    )
+
+    preview = row.proposed_effect["preview"]
+    assert preview["current_backing"] == {
+        "type": "ISO_FILE",
+        "iso_file": "[esx-1-local] pinned.iso",
+    }
+    assert preview["requested_backing"] == {"type": "CLIENT_DEVICE"}
+    # Only the read-only backing GETs fired — no PATCH.
     assert recorder.specs == ["/vcenter/vm/vm-1", "/vcenter/vm/vm-1/hardware/cdrom/16000"]
 
 

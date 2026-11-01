@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import quote
 
 from meho_backplane.connectors._shared.vault_creds import (
+    check_param_secret_ref,
     load_vault_secret_data,
     strip_credential_value,
 )
@@ -51,6 +52,7 @@ __all__ = [
     "find_by_field",
     "find_by_odata_name",
     "find_global_role",
+    "find_global_role_to_delete",
     "find_org",
     "find_org_user",
     "find_project",
@@ -177,6 +179,33 @@ async def find_global_role(
 ) -> dict[str, Any] | None:
     """The global role named *name*, or ``None``."""
     return await find_by_field(connector, target, operator, PROVIDER_GLOBAL_ROLES_PATH, name)
+
+
+async def find_global_role_to_delete(
+    connector: VcfAutomationConnector,
+    target: VcfAutomationTargetLike,
+    operator: Operator,
+    name: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """The one global role named exactly *name*, or why the delete must stop.
+
+    Only an exact name match counts. A role whose name differs by case alone
+    is never taken, so repeating a delete cannot remove a second role once
+    the exact match is gone. Returns ``(role, None)`` for one match,
+    ``(None, None)`` for no match, and ``(None, reason)`` when several roles
+    carry exactly this name. A delete must never guess between two roles.
+    """
+    params = {"filter": f"name=={name}"} if fiql_safe(name) else None
+    rows = await list_all(connector, target, operator, PROVIDER_GLOBAL_ROLES_PATH, params=params)
+    exact = [row for row in rows if row.get("name") == name]
+    if len(exact) == 1:
+        return exact[0], None
+    if not exact:
+        return None, None
+    return None, (
+        f"{len(exact)} global roles are named {name!r}; nothing was deleted. "
+        "Remove the duplicate in the VCF Automation console first."
+    )
 
 
 def tenant_context_headers(org: Mapping[str, Any]) -> dict[str, str]:
@@ -307,6 +336,7 @@ async def read_password(
     propagate. The value never enters a log event, result or error.
     """
     secret_ref, mount, key = password_ref(params)
+    check_param_secret_ref(operator, secret_ref, param="password_secret_ref", mount=mount)
     data = await load_vault_secret_data(
         _SecretRefTarget(name=target.name, host=target.host, secret_ref=secret_ref),
         operator,

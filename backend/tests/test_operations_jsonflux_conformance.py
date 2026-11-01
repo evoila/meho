@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -450,3 +451,178 @@ async def test_reduced_page_is_never_labeled_source_complete() -> None:
     assert handle.fetch_more.drill_in.available is True
     assert "full result set" not in rationale
     assert "may hold more rows" in rationale
+
+
+# ---------------------------------------------------------------------------
+# Objects and lists next to a reduced list survive reduction (#5139)
+# ---------------------------------------------------------------------------
+
+#: Ops whose parts are deliberately NOT kept when their list spills. Each
+#: entry needs a reason. Keep this list short: a new op belongs here only if
+#: it is credential-class and its parts are secret-shaped.
+_PARTS_HELD_BACK: dict[str, str] = {
+    "installer.cb.sddc.retry": "credential_write: the request carries bring-up passwords.",
+    "installer.cb.sddc.start": "credential_write: the request carries bring-up passwords.",
+    "installer.cb.validation.start": "credential_write: the request carries bring-up passwords.",
+    "sddc.credential.list": "credential_read: the page lists stored passwords.",
+    "sddc.host.commission": "credential_write: the request carries host passwords.",
+    "installer.sddc.resources.calculate": (
+        "credential_write: the request carries the spec passwords. The main numbers "
+        "ride inline as flat result_scalars keys."
+    ),
+    "vmware.composite.vm.guest.file.read": (
+        "credential_write: it reads guest files, which can hold secrets."
+    ),
+}
+
+_SAMPLE_PART_OBJECT: dict[str, Any] = {"note": "sample"}
+
+
+def _rows_plus_parts_payload(
+    schema: Any, digest_hint: Any
+) -> tuple[dict[str, Any], set[str]] | None:
+    """Build an over-threshold payload for a "rows plus parts" schema.
+
+    Every declared array gets 60 rows, every declared object a small value,
+    every declared scalar a sample. Returns the payload and its parts (the
+    objects and lists next to the rows the reducer picks), or ``None`` when
+    the schema is not that shape. The rows key is picked with the reducer's
+    own rules, so the sweep checks exactly the answers that reduce.
+    """
+    from meho_backplane.operations import jsonflux_reducer as reducer_module
+
+    if not isinstance(schema, dict) or not _schema_type_includes(schema, "object"):
+        return None
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return None
+    payload: dict[str, Any] = {}
+    for key, definition in properties.items():
+        if not isinstance(definition, dict):
+            continue
+        if _schema_type_includes(definition, "array"):
+            payload[key] = [{"i": i} for i in range(60)]
+        elif _schema_type_includes(definition, "object"):
+            payload[key] = dict(_SAMPLE_PART_OBJECT)
+        elif (kind := _first_scalar_type(definition)) is not None:
+            payload[key] = _SAMPLE_SCALARS[kind]
+    spec = reducer_module._resolve_digest_hint(
+        {"result_digest": digest_hint} if digest_hint is not None else None
+    )
+    rows_key, rows = reducer_module._detect_collection(payload, spec)
+    if rows is None or rows_key is None:
+        return None
+    parts = {
+        key for key, value in payload.items() if key != rows_key and isinstance(value, dict | list)
+    }
+    return (payload, parts) if parts else None
+
+
+async def _lost_parts(descriptors: list[Any]) -> dict[str, list[str]]:
+    """Reduce a synthetic payload per qualifying descriptor; list lost parts.
+
+    A part is kept when it rides inline whole, or when a ``path`` read on
+    the handle returns it whole. The reducer context is built from the
+    descriptor exactly as the dispatcher builds it.
+    """
+    from meho_backplane.connectors.result_handle_store import (
+        ResultHandleStore,
+        ResultRecordKindError,
+    )
+    from meho_backplane.operations.dispatcher import (
+        _result_digest_from_descriptor,
+        _result_objects_from_descriptor,
+        _result_scalars_from_descriptor,
+    )
+    from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+
+    tenant_id = "00000000-0000-0000-0000-00000000c0c0"
+    store = ResultHandleStore(_ValkeyDouble())  # type: ignore[arg-type]
+    reducer = JsonFluxReducer(store=store)
+    lost: dict[str, list[str]] = {}
+    for descriptor in descriptors:
+        digest_hint = _result_digest_from_descriptor(descriptor)
+        built = _rows_plus_parts_payload(descriptor.response_schema, digest_hint)
+        if built is None:
+            continue
+        payload, parts = built
+        context: dict[str, Any] = {
+            "op_id": descriptor.op_id,
+            "operator_sub": "op-sweep",
+            "tenant_id": tenant_id,
+        }
+        for key, hint in (
+            ("result_scalars", _result_scalars_from_descriptor(descriptor)),
+            ("result_objects", _result_objects_from_descriptor(descriptor)),
+            ("result_digest", digest_hint),
+        ):
+            if hint is not None:
+                context[key] = hint
+        summary, handle = await reducer.reduce(payload, descriptor.response_schema, context)
+        assert handle is not None, f"{descriptor.op_id}: the synthetic payload did not reduce"
+        try:
+            stored = await store.fetch_document(
+                tenant_id=uuid.UUID(tenant_id), operator_sub="op-sweep", handle_id=handle.handle_id
+            )
+        except ResultRecordKindError:
+            stored = None
+        document = stored.document if stored is not None else {}
+        missing = sorted(
+            key
+            for key in parts
+            if summary.get(key) != payload[key] and document.get(key) != payload[key]
+        )
+        if missing:
+            lost[descriptor.op_id] = missing
+    return lost
+
+
+@pytest.mark.asyncio
+async def test_registered_rows_plus_parts_ops_keep_their_parts_on_reduction(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """#5139: no registered typed or multi-step op loses a part when it spills."""
+    from meho_backplane.operations.dispatcher import _result_digest_from_descriptor
+
+    _eager_import_connectors()
+    await run_typed_op_registrars(embedding_service=stub_embedding_service)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        descriptors = list(
+            (
+                await session.execute(
+                    select(EndpointDescriptor).where(
+                        EndpointDescriptor.source_kind.in_(("typed", "composite"))
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    qualifying = [
+        d
+        for d in descriptors
+        if _rows_plus_parts_payload(d.response_schema, _result_digest_from_descriptor(d))
+    ]
+    assert len(qualifying) >= 50, "the sweep found too few rows-plus-parts ops to check"
+    assert any(d.source_kind == "composite" for d in qualifying)
+    qualifying_ids = {d.op_id for d in qualifying}
+    stale = sorted(set(_PARTS_HELD_BACK) - qualifying_ids)
+    assert not stale, f"remove stale _PARTS_HELD_BACK entries: {stale}"
+    lost = await _lost_parts([d for d in qualifying if d.op_id not in _PARTS_HELD_BACK])
+    assert not lost, f"rows-plus-parts ops lose parts when the list spills: {lost}"
+
+
+@pytest.mark.asyncio
+async def test_rows_plus_parts_sweep_catches_a_lost_part() -> None:
+    """The sweep fails for a credential-class op, whose parts are never kept."""
+    descriptor = type("Descriptor", (), {})()
+    descriptor.op_id = "vault.kv.list"
+    descriptor.response_schema = {
+        "type": "object",
+        "properties": {"keys": {"type": "array"}, "metadata": {"type": "object"}},
+    }
+    descriptor.llm_instructions = {}
+
+    assert await _lost_parts([descriptor]) == {"vault.kv.list": ["metadata"]}

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -275,15 +276,12 @@ func TestListOmitsStatusWhenUnset(t *testing.T) {
 			if got := r.URL.Query().Get("status"); got != "" {
 				t.Errorf("unset StatusFilter should omit query param; got status=%q", got)
 			}
-			// Confirm we don't accidentally send limit/offset either —
-			// the generated client's params struct doesn't expose them,
-			// so they should never reach the wire even though the CLI
-			// flags accept them.
+			// Unset --limit / --offset (0) stay off the wire too.
 			if got := r.URL.Query().Get("limit"); got != "" {
-				t.Errorf("limit should not reach wire (generator omits it); got limit=%q", got)
+				t.Errorf("unset Limit should omit query param; got limit=%q", got)
 			}
 			if got := r.URL.Query().Get("offset"); got != "" {
-				t.Errorf("offset should not reach wire (generator omits it); got offset=%q", got)
+				t.Errorf("unset Offset should omit query param; got offset=%q", got)
 			}
 			writeJSON(t, w, http.StatusOK, []api.ApprovalRequestView{})
 		},
@@ -291,11 +289,60 @@ func TestListOmitsStatusWhenUnset(t *testing.T) {
 	defer srv.Close()
 	client := newTestClient(t, srv)
 
-	// Even when --limit and --offset are set, they're a no-op at the
-	// typed-client layer (the backend doesn't accept them and the
-	// generator agrees).
-	if _, err := fetchList(context.Background(), client, listOpts{Limit: 10, Offset: 5}); err != nil {
+	if _, err := fetchList(context.Background(), client, listOpts{}); err != nil {
 		t.Fatalf("fetchList: %v", err)
+	}
+}
+
+// TestListSendsStatusAllAndPaging confirms `--status all --limit 10
+// --offset 5` reaches the wire as status=all&limit=10&offset=5 (#5129).
+func TestListSendsStatusAllAndPaging(t *testing.T) {
+	var seen url.Values
+	srv := mockBackplane(t, map[string]mockHandler{
+		"GET /api/v1/approvals": func(w http.ResponseWriter, r *http.Request) {
+			seen = r.URL.Query()
+			writeJSON(t, w, http.StatusOK, []api.ApprovalRequestView{
+				newApprovalView(t, "approved", ""),
+			})
+		},
+	})
+	defer srv.Close()
+
+	stderr, err := runListWithMock(t, srv, listOpts{StatusFilter: "all", Limit: 10, Offset: 5})
+	if err != nil {
+		t.Fatalf("runList: %v (stderr: %s)", err, stderr.String())
+	}
+	for key, want := range map[string]string{"status": "all", "limit": "10", "offset": "5"} {
+		if got := seen.Get(key); got != want {
+			t.Errorf("expected %s=%s on the wire, got %q", key, want, got)
+		}
+	}
+}
+
+// TestListRejectsUnknownStatus — a value outside the five accepted
+// ones fails before any request, and the error names `all`.
+func TestListRejectsUnknownStatus(t *testing.T) {
+	cmd := &cobra.Command{Use: "list"}
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	cmd.SetContext(context.Background())
+	err := runList(cmd, listOpts{StatusFilter: "done", JSONOut: true})
+	if err == nil {
+		t.Fatal("expected an error for --status done")
+	}
+	if !strings.Contains(stderr.String(), "pending, approved, rejected, expired, withdrawn, all") {
+		t.Errorf("error should list every accepted value; got:\n%s", stderr.String())
+	}
+}
+
+// TestListStatusHelpNamesDefaultAndAll pins the --status help text:
+// the server default is pending, and `all` is offered (#5129).
+func TestListStatusHelpNamesDefaultAndAll(t *testing.T) {
+	usage := newListCmd().Flags().Lookup("status").Usage
+	for _, want := range []string{"withdrawn", "all", "(default: pending)"} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("--status help missing %q: %q", want, usage)
+		}
 	}
 }
 
@@ -618,12 +665,161 @@ func TestPrintDetailRendersOptionalFields(t *testing.T) {
 	}
 }
 
-// TestPrintListTableEmpty — zero items renders the empty-tenant line.
+// TestPrintDetailRendersReleaseAndExpiredReason confirms show prints the
+// release a request was made under, and why an expired request expired
+// with the advice to ask again (#5030).
+func TestPrintDetailRendersReleaseAndExpiredReason(t *testing.T) {
+	d := newApprovalView(t, "expired", "")
+	release := "0123456789abcdef0123456789abcdef01234567 (chart 0.40.0)"
+	reason := api.ApprovalExpiredReasonReleaseChanged
+	message := "MEHO was updated while the request waited, and an approval covers one exact release. Ask again."
+	d.ReleaseId = &release
+	d.ExpiredReason = &reason
+	d.ExpiredMessage = &message
+
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	out := stdout.String()
+	for _, want := range []string{
+		"Release:      " + release,
+		"Expired:      " + message,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printDetail render missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintDetailOmitsReleaseWhenUnset confirms a request with no release
+// and no expiry reason prints neither line (#5030).
+func TestPrintDetailOmitsReleaseWhenUnset(t *testing.T) {
+	d := newApprovalView(t, "pending", "")
+
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	out := stdout.String()
+	for _, banned := range []string{"Release:", "Expired:"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("printDetail render included %q for nil field in:\n%s", banned, out)
+		}
+	}
+}
+
+// TestPrintListTableEmpty — an empty list names the state filter that
+// produced it and how to see more; only --status all with no --filter-work-ref
+// and no offset says "none at all". With --filter-work-ref, the message names
+// the change ticket and points to removing the filter, so an empty match
+// for one ticket is not read as an empty tenant. With an --offset, the
+// page is empty because the offset skipped every match, so the message
+// says so and points to a smaller --offset.
 func TestPrintListTableEmpty(t *testing.T) {
-	var buf bytes.Buffer
-	printListTable(&buf, nil)
-	if !strings.Contains(buf.String(), "no approval requests in this tenant") {
-		t.Errorf("empty list: missing empty-line; got:\n%s", buf.String())
+	cases := []struct {
+		status  string
+		workRef string
+		offset  int
+		want    string
+	}{
+		{"", "", 0, "no pending approval requests (use --status all to see every request)"},
+		{"pending", "", 0, "no pending approval requests (use --status all to see every request)"},
+		{"approved", "", 0, "no approved approval requests (use --status all to see every request)"},
+		{"all", "", 0, "no approval requests in this tenant"},
+		{"all", "", 15, "no approval requests after skipping 15 (this page is empty; use a smaller --offset)"},
+		{"", "", 15, "no pending approval requests after skipping 15 (this page is empty; use a smaller --offset)"},
+		{"pending", "", 3, "no pending approval requests after skipping 3 (this page is empty; use a smaller --offset)"},
+		{"rejected", "", 1, "no rejected approval requests after skipping 1 (this page is empty; use a smaller --offset)"},
+		{"all", "gh:evoila/meho#1", 0, `no approval requests for change ticket "gh:evoila/meho#1" (remove --filter-work-ref to see every request)`},
+		{"", "gh:evoila/meho#1", 0, `no pending approval requests for change ticket "gh:evoila/meho#1" (use --status all or remove --filter-work-ref to see more)`},
+		{"approved", "gh:evoila/meho#1", 0, `no approved approval requests for change ticket "gh:evoila/meho#1" (use --status all or remove --filter-work-ref to see more)`},
+		{"all", "gh:evoila/meho#1", 2, `no approval requests for change ticket "gh:evoila/meho#1" after skipping 2 (this page is empty; use a smaller --offset)`},
+	}
+	for _, tc := range cases {
+		var buf bytes.Buffer
+		printListTable(&buf, nil, tc.status, tc.workRef, tc.offset)
+		got := strings.TrimSpace(buf.String())
+		if got != tc.want {
+			t.Errorf("status %q work-ref %q offset %d: got %q, want %q", tc.status, tc.workRef, tc.offset, got, tc.want)
+		}
+		if (tc.offset > 0 || tc.workRef != "") && strings.Contains(got, "in this tenant") {
+			t.Errorf("status %q work-ref %q offset %d: a filtered empty list must not claim the tenant has no requests: %q",
+				tc.status, tc.workRef, tc.offset, got)
+		}
+	}
+}
+
+// TestListSendsWorkRef confirms --filter-work-ref reaches the wire as
+// work_ref, so the server does the exact-match filter the empty message
+// then names.
+func TestListSendsWorkRef(t *testing.T) {
+	var seen url.Values
+	srv := mockBackplane(t, map[string]mockHandler{
+		"GET /api/v1/approvals": func(w http.ResponseWriter, r *http.Request) {
+			seen = r.URL.Query()
+			writeJSON(t, w, http.StatusOK, []api.ApprovalRequestView{})
+		},
+	})
+	defer srv.Close()
+
+	stderr, err := runListWithMock(t, srv, listOpts{StatusFilter: "all", WorkRef: "gh:evoila/meho#1"})
+	if err != nil {
+		t.Fatalf("runList: %v (stderr: %s)", err, stderr.String())
+	}
+	if got := seen.Get("work_ref"); got != "gh:evoila/meho#1" {
+		t.Errorf("expected work_ref=gh:evoila/meho#1 on the wire, got %q", got)
+	}
+}
+
+// TestListOrderOnTheWire pins --order (#3596): unset with no --filter-work-ref
+// leaves `order` off the wire (server default, newest first); --filter-work-ref
+// alone sends order=oldest; an explicit --order always wins.
+func TestListOrderOnTheWire(t *testing.T) {
+	cases := []struct {
+		name string
+		opts listOpts
+		want string
+	}{
+		{"default", listOpts{}, ""},
+		{"work ref defaults to oldest", listOpts{WorkRef: "gh:evoila/meho#1"}, "oldest"},
+		{"explicit newest with work ref", listOpts{WorkRef: "gh:evoila/meho#1", Order: "newest"}, "newest"},
+		{"explicit oldest", listOpts{Order: "oldest"}, "oldest"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var seen url.Values
+			srv := mockBackplane(t, map[string]mockHandler{
+				"GET /api/v1/approvals": func(w http.ResponseWriter, r *http.Request) {
+					seen = r.URL.Query()
+					writeJSON(t, w, http.StatusOK, []api.ApprovalRequestView{})
+				},
+			})
+			defer srv.Close()
+
+			stderr, err := runListWithMock(t, srv, tc.opts)
+			if err != nil {
+				t.Fatalf("runList: %v (stderr: %s)", err, stderr.String())
+			}
+			if _, present := seen["order"]; tc.want == "" && present {
+				t.Errorf("order should stay off the wire; got %q", seen.Get("order"))
+			}
+			if got := seen.Get("order"); got != tc.want {
+				t.Errorf("expected order=%q on the wire, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestListRejectsUnknownOrder — a value other than oldest/newest fails
+// before any request.
+func TestListRejectsUnknownOrder(t *testing.T) {
+	cmd := &cobra.Command{Use: "list"}
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	cmd.SetContext(context.Background())
+	err := runList(cmd, listOpts{Order: "random", JSONOut: true})
+	if err == nil {
+		t.Fatal("expected an error for --order random")
+	}
+	if !strings.Contains(stderr.String(), "--order must be oldest or newest") {
+		t.Errorf("error should name the accepted values; got:\n%s", stderr.String())
 	}
 }
 
@@ -632,7 +828,7 @@ func TestPrintListTableEmpty(t *testing.T) {
 func TestPrintListTableHappyPath(t *testing.T) {
 	items := []api.ApprovalRequestView{newApprovalView(t, "pending", "")}
 	var buf bytes.Buffer
-	printListTable(&buf, items)
+	printListTable(&buf, items, "", "", 0)
 	out := buf.String()
 	for _, want := range []string{
 		"ID", "STATUS", "CONNECTOR", "OP", "PRINCIPAL", "CREATED",
@@ -702,14 +898,14 @@ func TestPrintListTableRendersDisplayName(t *testing.T) {
 	principalName := "Bob Requester"
 	named.PrincipalName = &principalName
 	var buf bytes.Buffer
-	printListTable(&buf, []api.ApprovalRequestView{named})
+	printListTable(&buf, []api.ApprovalRequestView{named}, "", "", 0)
 	if out := buf.String(); !strings.Contains(out, "Bob Requester") {
 		t.Errorf("printListTable missing resolved name in:\n%s", out)
 	}
 
 	anon := newApprovalView(t, "pending", "")
 	var buf2 bytes.Buffer
-	printListTable(&buf2, []api.ApprovalRequestView{anon})
+	printListTable(&buf2, []api.ApprovalRequestView{anon}, "", "", 0)
 	if out := buf2.String(); !strings.Contains(out, "user-abc") {
 		t.Errorf("printListTable fail-open to sub missing in:\n%s", out)
 	}
@@ -995,6 +1191,7 @@ func TestPrintDecisionRendersDelegation(t *testing.T) {
 func TestApproveSurfacesDecide422DelegatedReason(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"POST /api/v1/approvals/" + stubID + "/decide": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			_, _ = w.Write([]byte(`{"detail":"delegated_reason_invalid: missing or empty: Refs"}`))
 		},
@@ -1086,7 +1283,7 @@ func TestPrintListTableRendersRunState(t *testing.T) {
 	ok.ResultState = &executed
 	items := []api.ApprovalRequestView{ok, failedRunView(t), newApprovalView(t, "pending", "")}
 	var buf bytes.Buffer
-	printListTable(&buf, items)
+	printListTable(&buf, items, "", "", 0)
 	lines := strings.Split(buf.String(), "\n")
 	if !strings.Contains(lines[0], "RUN") {
 		t.Fatalf("header missing RUN column: %q", lines[0])
@@ -1096,5 +1293,63 @@ func TestPrintListTableRendersRunState(t *testing.T) {
 		if len(fields) < 3 || fields[2] != want {
 			t.Errorf("row %d: RUN = %v, want %q (line %q)", i, fields, want, lines[i+1])
 		}
+	}
+}
+
+// guidanceRunView is an approved request whose run ended result_unknown
+// while the VM waits on a question (#5377): the run summary carries the
+// next step MEHO names.
+func guidanceRunView(t *testing.T) api.ApprovalRequestView {
+	t.Helper()
+	d := failedRunView(t)
+	errorCode := "result_unknown"
+	guidance := "The change did not answer in time and may still run (vCenter tasks: task-7). " +
+		"Do not start it again yet. The VM waits on question _vmx1: show it to the user " +
+		"and answer it with vmware.vm.question.answer."
+	d.ResumeOutcome.ErrorCode = &errorCode
+	d.ResumeOutcome.Guidance = &guidance
+	return d
+}
+
+// TestPrintDetailAndDecisionRenderGuidance: show and approve print the
+// next step of a run that waits on a VM question (#5377).
+func TestPrintDetailAndDecisionRenderGuidance(t *testing.T) {
+	d := guidanceRunView(t)
+	want := []string{
+		"Run:          FAILED",
+		"Error code:   result_unknown",
+		"Next step:    The change did not answer in time",
+		"The VM waits on question _vmx1",
+	}
+
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	var buf bytes.Buffer
+	printDecision(&buf, stubID, &d)
+	for name, out := range map[string]string{"show": stdout.String(), "approve": buf.String()} {
+		for _, w := range want {
+			if !strings.Contains(out, w) {
+				t.Errorf("%s render missing %q in:\n%s", name, w, out)
+			}
+		}
+	}
+}
+
+// TestPrintDecisionOkRunHasNoGuidance: a run that ended ok prints as
+// before, with no "Next step:" line (#5377).
+func TestPrintDecisionOkRunHasNoGuidance(t *testing.T) {
+	d := newApprovalView(t, "approved", "T-test")
+	executed := api.ApprovalResultStateExecuted
+	resultStatus := "ok"
+	d.ResultState = &executed
+	d.ResumeOutcome = &api.ApprovalResumeOutcomeView{ResultStatus: &resultStatus}
+	var buf bytes.Buffer
+	printDecision(&buf, stubID, &d)
+	out := buf.String()
+	if !strings.Contains(out, "Run:          ok") || !strings.Contains(out, "Run result:   ok") {
+		t.Errorf("ok run render changed:\n%s", out)
+	}
+	if strings.Contains(out, "Next step:") {
+		t.Errorf("ok run printed a Next step line:\n%s", out)
 	}
 }

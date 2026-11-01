@@ -55,6 +55,7 @@ func TestRunTransitionDelete204(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"DELETE /api/v1/connectors/vrli-rest-9.0": func(w http.ResponseWriter, r *http.Request) {
 			method = r.Method
+			w.Header().Set("Meho-Audit-Id", "delete-audit-id")
 			w.WriteHeader(http.StatusNoContent)
 		},
 	})
@@ -84,7 +85,8 @@ func TestRunTransitionDelete204(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("decode --json envelope: %v\n%s", err, out.String())
 	}
-	if got.ConnectorID != "vrli-rest-9.0" || got.Action != "deleted" {
+	if got.ConnectorID != "vrli-rest-9.0" || got.Action != "deleted" ||
+		got.AuditID == nil || *got.AuditID != "delete-audit-id" {
 		t.Errorf("unexpected envelope: %+v", got)
 	}
 }
@@ -118,5 +120,57 @@ func TestRunTransitionDelete404RendersError(t *testing.T) {
 	}
 	if !strings.Contains(errBuf.String(), "404") || !strings.Contains(errBuf.String(), "not found") {
 		t.Fatalf("404 output missing status and detail: %q", errBuf.String())
+	}
+}
+
+// TestRunTransitionDelete409InUseListsUsers — the backplane refuses the
+// delete because a sensor and a hosted agent still use the connector
+// (#5027). The verb fails and prints each user.
+func TestRunTransitionDelete409InUseListsUsers(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"DELETE /api/v1/connectors/vrli-rest-9.0": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 409, map[string]any{
+				"detail": map[string]any{
+					"detail":       "connector_in_use",
+					"connector_id": "vrli-rest-9.0",
+					"users": []map[string]any{
+						{"kind": "sensor", "id": "s-1", "name": "disk-free", "op_id": "GET:/disks"},
+						{"kind": "hosted_agent", "id": "a-1", "name": "nightly-check", "op_id": nil},
+					},
+					"other_tenant_user_count": 2,
+					"message":                 "connector 'vrli-rest-9.0' is still used",
+				},
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	var errBuf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&errBuf)
+
+	p := transitionParams{Verb: verbDelete, Action: "deleted", ConfirmQuestion: "Delete %s?"}
+	err := runTransition(cmd, p, transitionOptions{
+		ConnectorID:       "vrli-rest-9.0",
+		Confirm:           true,
+		BackplaneOverride: srv.URL,
+	})
+	if err == nil {
+		t.Fatal("expected a non-nil error for HTTP 409 connector_in_use")
+	}
+	got := errBuf.String()
+	for _, want := range []string{
+		"connector_in_use",
+		"sensor disk-free (operation GET:/disks)",
+		"hosted_agent nightly-check",
+		"2 more in other tenants",
+		"Remove or change each one",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q:\n%s", want, got)
+		}
 	}
 }

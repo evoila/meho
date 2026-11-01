@@ -65,8 +65,10 @@ On an instance in sandbox mode (:mod:`meho_backplane.sandbox_mode`,
 grant**: a standing grant for an operation with a delete sign, or for a
 delete step of a multi-step operation. Such a grant is stored in its own
 table (:class:`~meho_backplane.db.models.SandboxDeleteGrant`), which an
-older build and an instance with the mode off never read. It is made only
-in the web console (``from_console``), and it expires within
+older build and an instance with the mode off never read. It is made in
+the web console (``from_console``), or, with the boot setting
+``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` on (#5251), through REST by a
+tenant admin. It expires within
 :data:`~meho_backplane.sandbox_mode.SANDBOX_DELETE_GRANT_MAX_DAYS` days.
 At dispatch, a ``destructive`` call under a delete grant still needs its
 preview hash and a valid blast radius; both are checked before the
@@ -89,6 +91,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
@@ -105,6 +108,7 @@ from meho_backplane.sandbox_mode import SANDBOX_DELETE_GRANT_MAX_DAYS, sandbox_m
 
 __all__ = [
     "DeleteGrantConsoleOnlyError",
+    "DeleteGrantNeedsTenantAdminError",
     "GrantModel",
     "GrantValidationError",
     "ServicePrincipalGrantService",
@@ -153,10 +157,24 @@ class DeleteGrantConsoleOnlyError(Exception):
     """A delete grant was requested from outside the web console (#4622).
 
     Raised by :meth:`ServicePrincipalGrantService.create` in sandbox mode
-    when the op has a delete sign and the call did not come from the
-    console route. The REST route maps this to HTTP 403
-    ``delete_grant_console_only``. The CLI refuses such an op before it
-    calls the server.
+    when the op has a delete sign, the call did not come from the console
+    route, and ``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` is off (#5251). The
+    REST route maps this to HTTP 403 ``delete_grant_console_only``.
+    """
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+        super().__init__(message)
+
+
+class DeleteGrantNeedsTenantAdminError(Exception):
+    """A delete grant was requested through REST by a caller who is no tenant admin (#5251).
+
+    Raised by :meth:`ServicePrincipalGrantService.create` in sandbox mode
+    with ``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` on, when the op has a
+    delete sign and the caller has only the ``operator`` role. The REST
+    route maps this to HTTP 403 ``grants_require_tenant_admin``, the
+    console's answer.
     """
 
     def __init__(self, message: str) -> None:
@@ -171,17 +189,14 @@ class DeleteGrantConsoleOnlyError(Exception):
 
 #: A well-formed HTTP-style ``op_id`` ending in a **literal** query string.
 #:
-#: Several governed vCenter operations carry a ``?action=<verb>`` (or a
-#: multi-param) query string as a literal part of their canonical op id — the
-#: ``vm.power`` / ``vm.deploy_from_library`` / host-software composite sub-ops
-#: (``POST:/vcenter/vm/{vm}/power?action=start``,
-#: ``POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy``,
-#: ``POST:/esx/settings/hosts/{host}/software?action=apply&vmw-task=true``) and
-#: every ``?action=`` endpoint the ingest parser emits. That ``?`` is part of
-#: the exact op id, not a glob — grant matching is exact string equality (see
+#: Some ingested operations carry a ``?action=<verb>`` (or a multi-param)
+#: query string as a literal part of their canonical op id. The ingest parser
+#: keeps the query of such a path, so the op id looks like
+#: ``POST:/items/{id}?action=start``. That ``?`` is part of the exact op id,
+#: not a glob — grant matching is exact string equality (see
 #: :func:`find_live_grant`), so the literal is safe. This matches exactly one
 #: ``?`` (no ``*``), followed by one or more ``key=value`` pairs joined by
-#: ``&`` (keys / values are ``[A-Za-z0-9_.-]``, covering ``vmw-task``).
+#: ``&`` (keys / values are ``[A-Za-z0-9_.-]``, so hyphenated keys fit).
 _LITERAL_QUERY_STRING_OP_ID: re.Pattern[str] = re.compile(
     r"^[A-Z]+:/[^?*]+\?[A-Za-z0-9_.-]+=[A-Za-z0-9_.-]+"
     r"(?:&[A-Za-z0-9_.-]+=[A-Za-z0-9_.-]+)*$"
@@ -198,8 +213,8 @@ def _reject_wildcards(payload: ServiceGrantCreate) -> None:
     permitted anywhere.
 
     The one exception is a **literal** query string on an HTTP-style
-    ``op_id`` (e.g. ``POST:/vcenter/vm/{vm}/power?action=start``): several
-    governed vCenter ops carry a ``?action=`` key as a literal part of their
+    ``op_id`` (for example an op id ending in ``?action=start``): some
+    ingested ops carry a ``?key=value`` suffix as a literal part of their
     exact op id, and grant matching is exact string equality, so such an op
     id is accepted verbatim (see :data:`_LITERAL_QUERY_STRING_OP_ID`). A
     ``?`` anywhere else — a malformed op id, or a ``connector_id`` /
@@ -533,6 +548,7 @@ class ServicePrincipalGrantService:
         payload: ServiceGrantCreate,
         *,
         from_console: bool = False,
+        by_tenant_admin: bool = False,
     ) -> ServiceGrantRead:
         """Create one standing grant row after the full create-time review.
 
@@ -548,9 +564,15 @@ class ServicePrincipalGrantService:
         route, in server code; no request field, header or token claim can
         set it; otherwise :exc:`DeleteGrantConsoleOnlyError`), and it must
         expire within :data:`~meho_backplane.sandbox_mode.SANDBOX_DELETE_GRANT_MAX_DAYS`
-        days. Ordinary grants keep today's rules in every mode.
+        days. With ``MEHO_SANDBOX_DELETE_GRANTS_FROM_API`` on (#5251) a
+        caller outside the console may create one too, but only when
+        ``by_tenant_admin`` is set (otherwise
+        :exc:`DeleteGrantNeedsTenantAdminError`). Ordinary grants keep
+        today's rules in every mode.
         """
-        model = await self._review(tenant_id, payload, from_console=from_console)
+        model = await self._review(
+            tenant_id, payload, from_console=from_console, by_tenant_admin=by_tenant_admin
+        )
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             entry = await self._insert(session, tenant_id, created_by_sub, payload, model)
@@ -579,6 +601,7 @@ class ServicePrincipalGrantService:
         payload: ServiceGrantCreate,
         *,
         from_console: bool,
+        by_tenant_admin: bool = False,
     ) -> GrantModel:
         """Run the full create-time review; return the table the grant goes in.
 
@@ -602,11 +625,18 @@ class ServicePrincipalGrantService:
         if not sandbox_mode_active():
             raise GrantValidationError(delete_reason)
         if not from_console:
-            raise DeleteGrantConsoleOnlyError(
-                f"op {payload.op_id!r} has a delete sign, so this is a delete grant. "
-                "A delete grant is made only in the web console, by a tenant admin, "
-                "and only on an instance in sandbox mode. REST and the CLI refuse it."
-            )
+            if not get_settings().sandbox_delete_grants_from_api:
+                raise DeleteGrantConsoleOnlyError(
+                    f"op {payload.op_id!r} has a delete sign, so this is a delete grant. "
+                    "A delete grant is made in the web console, by a tenant admin, "
+                    "and only on an instance in sandbox mode. REST and the CLI refuse it "
+                    "unless MEHO_SANDBOX_DELETE_GRANTS_FROM_API is on."
+                )
+            if not by_tenant_admin:
+                raise DeleteGrantNeedsTenantAdminError(
+                    f"op {payload.op_id!r} has a delete sign, so this is a delete grant. "
+                    "Only a tenant admin creates a delete grant."
+                )
         _validate_delete_grant_expires_at(payload.expires_at)
         return SandboxDeleteGrant
 
@@ -1499,6 +1529,7 @@ async def _record_grant_use(
     if isinstance(grant, SandboxDeleteGrant):
         payload["delete_grant"] = True
         payload.update(evidence or {})
+    payload.update(tenant_role_source_payload(operator))
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         row = AuditLog(

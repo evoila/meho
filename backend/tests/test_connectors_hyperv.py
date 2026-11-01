@@ -151,7 +151,7 @@ def test_connector_id_triple_round_trips() -> None:
 
 def test_op_surface_ids_and_safety_tiers() -> None:
     by_id = {op.op_id: op for op in HYPERV_OPS}
-    assert len(by_id) == 18
+    assert len(by_id) == 19
     safe = {k for k, v in by_id.items() if v.safety_level == "safe"}
     caution = {k for k, v in by_id.items() if v.safety_level == "caution"}
     dangerous = {k for k, v in by_id.items() if v.safety_level == "dangerous"}
@@ -237,7 +237,7 @@ async def test_vswitch_list_empty_host(rows_json: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# vms group (the migration-assessment surface)
+# vms group (the migration assessment surface)
 # ---------------------------------------------------------------------------
 
 

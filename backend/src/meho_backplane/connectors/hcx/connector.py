@@ -14,11 +14,13 @@ with HTTP Basic (HCX 4.5 removed cookie authentication):
    account registered with the HCX Manager, read from Vault through the
    :class:`~meho_backplane.connectors.hcx.session.HcxSessionLoader`.
 2. The response header ``x-hm-authorization`` carries the token. It is
-   cached per target and tenant (``target_cache_key``).
+   cached per credential (``credential_cache_key``: tenant, secret and
+   login host), so two targets that share one credential share one token.
 3. Every later call sends the token in the ``x-hm-authorization`` header.
 4. On ``401`` from a later call the dispatcher calls
-   :meth:`invalidate_session`, which drops the cached token, and
-   dispatches once more; the next call logs in again.
+   :meth:`invalidate_session` with the rejected request. The token is
+   dropped only when that request sent it, so a late ``401`` never drops
+   a newer token. The dispatcher then runs the call once more.
 
 Version
 -------
@@ -40,6 +42,10 @@ documentation that a running HCX Manager serves, so the vendor API files
 can be pinned. The other reads (``hcx.about``, site pairings, service
 meshes, appliances, the service mesh diagnostics, jobs, alerts and the
 inventory) live in :mod:`meho_backplane.connectors.hcx.typed_reads`.
+The service mesh changes and the task read ``hcx.task.get`` live in
+:mod:`meho_backplane.connectors.hcx.service_mesh_writes`. The network
+extension operations (list, extend, unextend, Mobility Optimized
+Networking) live in :mod:`meho_backplane.connectors.hcx.network_extension`.
 
 Traces
 ------
@@ -60,7 +66,8 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import credential_cache_key
+from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vcf_auth import session_establish_auth_error
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -159,7 +166,7 @@ class HcxConnector(HttpConnector):
 
     def __init__(self, *, session_loader: HcxSessionLoader | None = None) -> None:
         super().__init__()
-        self._session_tokens: dict[tuple[str, str], str] = {}
+        self._session_tokens: dict[tuple[str, ...], str] = {}
         self._session_lock = asyncio.Lock()
         self._session_loader: HcxSessionLoader = (
             session_loader if session_loader is not None else load_session_credentials_from_vault
@@ -183,7 +190,7 @@ class HcxConnector(HttpConnector):
 
     async def _session_token(self, target: HcxTargetLike, operator: Operator) -> str:
         """Return the cached session token for *target*, logging in on first use."""
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
@@ -224,15 +231,21 @@ class HcxConnector(HttpConnector):
             _log.info("hcx_session_established", target=target.name, host=target.host)
             return token
 
-    async def invalidate_session(self, target: HcxTargetLike) -> None:
+    async def invalidate_session(
+        self, target: HcxTargetLike, *, rejected: httpx.Request | None = None
+    ) -> None:
         """Drop the cached session token for *target* (the dispatcher's 401 hook).
 
-        The next :meth:`auth_headers` call logs in again. Credentials are
-        not cached: every login reads them through the loader.
+        With *rejected*, the token is dropped only when that request sent
+        it; a newer token stays. The next :meth:`auth_headers` call logs in
+        again when the token was dropped. Credentials are not cached: every
+        login reads them through the loader.
         """
-        cache_key = target_cache_key(target)
+        cache_key = credential_cache_key(target)
         async with self._session_lock:
-            self._session_tokens.pop(cache_key, None)
+            drop_rejected_token(
+                self._session_tokens, cache_key, rejected, lambda token: {_AUTH_HEADER: token}
+            )
 
     async def manager_version(self, target: HcxTargetLike, operator: Operator) -> HcxManagerVersion:
         """Read the HCX Manager version. Never raises: a failure is named in ``error``."""
@@ -426,6 +439,86 @@ class HcxConnector(HttpConnector):
         from meho_backplane.connectors.hcx.typed_reads import hcx_inventory_network_list_impl
 
         return await hcx_inventory_network_list_impl(self, operator, target, params)
+
+    async def service_mesh_create(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.service_mesh.create`` shim."""
+        from meho_backplane.connectors.hcx.service_mesh_writes import hcx_service_mesh_create_impl
+
+        return await hcx_service_mesh_create_impl(self, operator, target, params)
+
+    async def service_mesh_update(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.service_mesh.update`` shim."""
+        from meho_backplane.connectors.hcx.service_mesh_writes import hcx_service_mesh_update_impl
+
+        return await hcx_service_mesh_update_impl(self, operator, target, params)
+
+    async def service_mesh_resync(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.service_mesh.resync`` shim."""
+        from meho_backplane.connectors.hcx.service_mesh_writes import hcx_service_mesh_resync_impl
+
+        return await hcx_service_mesh_resync_impl(self, operator, target, params)
+
+    async def service_mesh_delete(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.service_mesh.delete`` shim."""
+        from meho_backplane.connectors.hcx.service_mesh_writes import hcx_service_mesh_delete_impl
+
+        return await hcx_service_mesh_delete_impl(self, operator, target, params)
+
+    async def task_get(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.task.get`` shim."""
+        from meho_backplane.connectors.hcx.service_mesh_writes import hcx_task_get_impl
+
+        return await hcx_task_get_impl(self, operator, target, params)
+
+    async def network_extension_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.network_extension.list`` shim."""
+        from meho_backplane.connectors.hcx.network_extension import (
+            hcx_network_extension_list_impl,
+        )
+
+        return await hcx_network_extension_list_impl(self, operator, target, params)
+
+    async def network_extension_extend(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.network_extension.extend`` shim."""
+        from meho_backplane.connectors.hcx.network_extension import (
+            hcx_network_extension_extend_impl,
+        )
+
+        return await hcx_network_extension_extend_impl(self, operator, target, params)
+
+    async def network_extension_unextend(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.network_extension.unextend`` shim."""
+        from meho_backplane.connectors.hcx.network_extension import (
+            hcx_network_extension_unextend_impl,
+        )
+
+        return await hcx_network_extension_unextend_impl(self, operator, target, params)
+
+    async def network_extension_mon_set(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.network_extension.mon.set`` shim."""
+        from meho_backplane.connectors.hcx.network_extension import (
+            hcx_network_extension_mon_set_impl,
+        )
+
+        return await hcx_network_extension_mon_set_impl(self, operator, target, params)
 
     def trace_response_body(self, response: httpx.Response) -> Any:
         """Mask the secret-named fields of a vendor answer before the trace records it.

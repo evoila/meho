@@ -10,7 +10,8 @@ it can serve the target. When it cannot, the call is normally rejected
 with ``unqualified_target_version``.
 
 One implementation can ship several versioned catalogs, for example
-``vmware-rest-9.0`` (9.x targets) and ``vmware-rest-8.0`` (8.0.x targets).
+an ``<impl_id>-9.0`` catalog (9.x targets) and an ``<impl_id>-8.0``
+catalog (8.0.x targets).
 A caller that names one catalog for a target the other catalog serves gets
 the other catalog's descriptor instead (#3600), but only when:
 
@@ -21,7 +22,12 @@ the other catalog's descriptor instead (#3600), but only when:
 * the same ``op_id`` exists there as an **enabled** ingested descriptor
   the caller can see.
 
-Otherwise the rejection stands, unchanged. The preview path uses the
+Otherwise the rejection stands. Its reason is the connector's own, with
+one exception (#5069): when the sibling serves the target but has no
+enabled op of that ``op_id``, the reason says the operation is not
+available for the target and points at ``search_operations`` on the
+sibling. It does not tell the caller to use the sibling, which would
+answer ``unknown_op``. The preview path uses the
 same choice (:func:`choose_catalog_for_target`, which writes no audit
 row), so a ``preview_hash`` taken with the named catalog matches the
 dispatch that runs on the sibling. Typed and composite
@@ -62,6 +68,7 @@ from meho_backplane.operations._lookup import lookup_descriptor
 __all__ = [
     "CatalogRefusal",
     "CatalogSelection",
+    "catalog_refuses_target",
     "choose_catalog_for_target",
     "select_catalog_for_target",
 ]
@@ -109,49 +116,78 @@ async def choose_catalog_for_target(
     this, so a preview binds the same catalog the dispatch runs on.
     ``allow_sibling=False`` pins the named catalog: a refusal is returned
     even when a sibling would fit (the approval-resume path).
+
+    When the sibling catalog serves the target but does not have the op
+    enabled, the refusal says so and points at ``search_operations`` on
+    that sibling (#5069). It does not repeat the connector's own hint to
+    use the sibling, because the sibling would answer ``unknown_op``.
     """
-    owner_class = get_connector_v2(descriptor.product, descriptor.version, descriptor.impl_id)
-    if (
-        descriptor.source_kind != "ingested"
-        or owner_class is None
-        or not owner_class.enforces_catalog_target_compatibility
-    ):
+    owner_class = _guarded_owner_class(
+        product=descriptor.product,
+        version=descriptor.version,
+        impl_id=descriptor.impl_id,
+        source_kind=descriptor.source_kind,
+    )
+    if owner_class is None:
         return CatalogSelection(descriptor, connector_id, None)
 
-    resolved_class, _label, _message = resolve_connector_or_label(target)
-    target_product = getattr(target, "product", None)
-    if not isinstance(target_product, str) or not target_product:
-        target_product = None
-    target_version = resolve_target_version(target)
-    incompatibility = owner_class.catalog_target_incompatibility(
-        descriptor_source_kind=descriptor.source_kind,
-        target_product=target_product,
-        target_version=target_version,
-        selected_target_connector=resolved_class,
-    )
-    if incompatibility is None:
-        return CatalogSelection(descriptor, connector_id, resolved_class)
+    check = _check_target(owner_class, descriptor.source_kind, target)
+    if check.incompatibility is None:
+        return CatalogSelection(descriptor, connector_id, check.resolved_class)
+    refusal = CatalogRefusal(check.incompatibility, check.target_product, check.target_version)
     if not allow_sibling:
-        return CatalogRefusal(incompatibility, target_product, target_version)
+        return refusal
 
-    sibling = await _qualified_sibling_descriptor(
-        operator=operator,
-        descriptor=descriptor,
-        resolved_class=resolved_class,
-        target_product=target_product,
-        target_version=target_version,
+    sibling_class = _qualified_sibling_class(descriptor=descriptor, check=check)
+    if sibling_class is None:
+        return refusal
+    sibling_connector_id = f"{descriptor.impl_id}-{sibling_class.version}"
+    sibling = await lookup_descriptor(
+        tenant_id=operator.tenant_id,
+        product=descriptor.product,
+        version=sibling_class.version,
+        impl_id=descriptor.impl_id,
+        op_id=descriptor.op_id,
     )
-    if sibling is not None:
-        sibling_connector_id = f"{sibling.impl_id}-{sibling.version}"
-        _log.info(
-            "catalog_sibling_fallback",
-            op_id=descriptor.op_id,
-            requested_connector_id=connector_id,
-            resolved_connector_id=sibling_connector_id,
-            target_version=target_version,
+    if sibling is None:
+        return CatalogRefusal(
+            _not_on_sibling_reason(sibling_connector_id, check),
+            check.target_product,
+            check.target_version,
         )
-        return CatalogSelection(sibling, sibling_connector_id, resolved_class)
-    return CatalogRefusal(incompatibility, target_product, target_version)
+    if sibling.source_kind != "ingested":
+        return refusal
+    _log.info(
+        "catalog_sibling_fallback",
+        op_id=descriptor.op_id,
+        requested_connector_id=connector_id,
+        resolved_connector_id=sibling_connector_id,
+        target_version=check.target_version,
+    )
+    return CatalogSelection(sibling, sibling_connector_id, check.resolved_class)
+
+
+def catalog_refuses_target(
+    *,
+    product: str,
+    version: str,
+    impl_id: str,
+    source_kind: str,
+    target: Any,
+) -> bool:
+    """True when the catalog of *(product, version, impl_id)* refuses *target*.
+
+    The same check :func:`choose_catalog_for_target` makes first, for an op
+    of *source_kind* in that catalog. It looks at no sibling catalog. The
+    ``unknown_op`` error uses it to leave out connectors that would refuse
+    the caller's target (#5069).
+    """
+    owner_class = _guarded_owner_class(
+        product=product, version=version, impl_id=impl_id, source_kind=source_kind
+    )
+    if owner_class is None:
+        return False
+    return _check_target(owner_class, source_kind, target).incompatibility is not None
 
 
 async def select_catalog_for_target(
@@ -202,20 +238,54 @@ async def select_catalog_for_target(
     )
 
 
-async def _qualified_sibling_descriptor(
-    *,
-    operator: Operator,
-    descriptor: EndpointDescriptor,
-    resolved_class: type[Connector] | None,
-    target_product: str | None,
-    target_version: str | None,
-) -> EndpointDescriptor | None:
-    """Return the sibling catalog's enabled descriptor for the same op, or ``None``.
+@dataclass(frozen=True)
+class _TargetCheck:
+    """What one catalog's guard said about a target."""
+
+    resolved_class: type[Connector] | None
+    target_product: str | None
+    target_version: str | None
+    incompatibility: str | None
+
+
+def _guarded_owner_class(
+    *, product: str, version: str, impl_id: str, source_kind: str
+) -> type[Connector] | None:
+    """Return the catalog's class when its guard applies to an op of *source_kind*."""
+    if source_kind != "ingested":
+        return None
+    owner_class = get_connector_v2(product, version, impl_id)
+    if owner_class is None or not owner_class.enforces_catalog_target_compatibility:
+        return None
+    return owner_class
+
+
+def _check_target(owner_class: type[Connector], source_kind: str, target: Any) -> _TargetCheck:
+    """Ask *owner_class* whether its catalog can serve *target*."""
+    resolved_class, _label, _message = resolve_connector_or_label(target)
+    target_product = getattr(target, "product", None)
+    if not isinstance(target_product, str) or not target_product:
+        target_product = None
+    target_version = resolve_target_version(target)
+    incompatibility = owner_class.catalog_target_incompatibility(
+        descriptor_source_kind=source_kind,
+        target_product=target_product,
+        target_version=target_version,
+        selected_target_connector=resolved_class,
+    )
+    return _TargetCheck(resolved_class, target_product, target_version, incompatibility)
+
+
+def _qualified_sibling_class(
+    *, descriptor: EndpointDescriptor, check: _TargetCheck
+) -> type[Connector] | None:
+    """Return the sibling catalog's class when it serves the target, or ``None``.
 
     The sibling is the catalog the resolver picked for the target. It must
     belong to the same ``(product, impl_id)`` family, be registered under
     its own version, opt into the same guard, and accept the target.
     """
+    resolved_class = check.resolved_class
     if resolved_class is None:
         return None
     sibling_version = resolved_class.version
@@ -232,20 +302,22 @@ async def _qualified_sibling_descriptor(
     if (
         resolved_class.catalog_target_incompatibility(
             descriptor_source_kind=descriptor.source_kind,
-            target_product=target_product,
-            target_version=target_version,
+            target_product=check.target_product,
+            target_version=check.target_version,
             selected_target_connector=resolved_class,
         )
         is not None
     ):
         return None
-    sibling = await lookup_descriptor(
-        tenant_id=operator.tenant_id,
-        product=descriptor.product,
-        version=sibling_version,
-        impl_id=descriptor.impl_id,
-        op_id=descriptor.op_id,
+    return resolved_class
+
+
+def _not_on_sibling_reason(sibling_connector_id: str, check: _TargetCheck) -> str:
+    """Reason for a refusal when the sibling serves the target but lacks the op."""
+    target = " ".join(part for part in (check.target_product, check.target_version) if part)
+    return (
+        f"this operation is not available for {target or 'this target'}: "
+        f"connector {sibling_connector_id} serves this target and does not have "
+        f"this operation; use search_operations on connector {sibling_connector_id} "
+        "to find a typed operation for this target"
     )
-    if sibling is None or sibling.source_kind != "ingested":
-        return None
-    return sibling

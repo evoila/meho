@@ -19,8 +19,31 @@ Widening one class both sides import keeps the two ends of the wire in
 lockstep by construction; forking a second copy would let the shapes
 drift silently. Do not fork.
 
-``SCHEMA_VERSION`` is an explicit protocol marker so a future
-incompatible change is a visible bump rather than an implicit break.
+``SCHEMA_VERSION`` is the wire version: the version of these models.
+The runner sends it on every call in the :data:`WIRE_VERSION_HEADER`
+header. The central MEHO compares it with its own ``SCHEMA_VERSION``
+(:func:`~meho_backplane.auth.runner_guard.runner_wire_version`, before it
+reads the request body) and, when they differ, refuses the call with HTTP
+409. The refusal text starts with :data:`WIRE_VERSION_MISMATCH` and names
+both versions (see :func:`wire_version_mismatch_message`). The runner logs
+that text, drops its cached work and runs nothing for that tick, whichever
+call was refused. A call without the header counts as version
+:data:`WIRE_VERSION_WHEN_MISSING`, so runners built before the header
+existed keep working.
+
+The check guards only the version number. The models still drop unknown
+fields without a message (the pydantic default), so a change a runner must
+not silently ignore -- a new field it has to act on, a changed meaning --
+needs a ``SCHEMA_VERSION`` bump.
+
+Next to its wire version the runner sends the digest of its connector
+packages (:mod:`meho_backplane.runner.package_set`, #5038). A work item for
+an operation that a connector package provides names the package set it
+needs in :attr:`RunnerWorkItem.package_set`. This field did not need a
+``SCHEMA_VERSION`` bump: a runner that sends no digest counts as a runner
+without connector packages, so the central MEHO never assigns it such an
+item, and an older runner never sees the field set.
+
 The per-assignment :attr:`RunnerAssignment.assignment_version` is a
 separate concern: an **opaque content digest** whose contract (a sha256
 over the canonical materialised payload) is owned by #2499. The runner
@@ -39,18 +62,55 @@ from meho_backplane.auth.operator import PrincipalKind, TenantRole
 
 __all__ = [
     "SCHEMA_VERSION",
+    "WIRE_VERSION_HEADER",
+    "WIRE_VERSION_MISMATCH",
+    "WIRE_VERSION_WHEN_MISSING",
     "ResolvedTargetDescriptor",
     "RunnerAssignment",
     "RunnerPrincipal",
     "RunnerResult",
     "RunnerResultBatch",
     "RunnerWorkItem",
+    "wire_version_mismatch_message",
 ]
 
 #: Wire protocol version. Bump on any incompatible change to the models
-#: below so a runner talking to a mismatched central fails loudly rather
-#: than misinterpreting fields.
+#: below. The runner sends it on every call and the central MEHO refuses a
+#: call with another version (HTTP 409 naming both versions), so a runner
+#: and a central MEHO on different versions stop with a clear message
+#: instead of misreading fields. Keep it a whole number: the two sides
+#: compare it as one to say which side to update.
 SCHEMA_VERSION = "1"
+
+#: Request header that carries the runner's wire version.
+WIRE_VERSION_HEADER = "X-MEHO-Runner-Wire-Version"
+
+#: The version a call without :data:`WIRE_VERSION_HEADER` counts as. Every
+#: runner built before the header existed spoke version ``"1"``.
+WIRE_VERSION_WHEN_MISSING = "1"
+
+#: First word of the central MEHO's refusal text on a version mismatch.
+#: The runner client looks for it to tell this refusal apart from other
+#: HTTP 409 answers.
+WIRE_VERSION_MISMATCH = "runner_wire_version_mismatch"
+
+
+def wire_version_mismatch_message(runner_version: str, central_version: str) -> str:
+    """Return the refusal text for a runner on another wire version.
+
+    Names both versions and says which side to update, for example
+    ``runner_wire_version_mismatch: runner wire version 1, central MEHO
+    needs 2: update the runner``.
+    """
+    if runner_version.isdigit() and central_version.isdigit():
+        older = int(runner_version) < int(central_version)
+        advice = "update the runner" if older else "update the central MEHO"
+    else:
+        advice = "run the same MEHO version on the runner and the central MEHO"
+    return (
+        f"{WIRE_VERSION_MISMATCH}: runner wire version {runner_version}, "
+        f"central MEHO needs {central_version}: {advice}"
+    )
 
 
 class ResolvedTargetDescriptor(BaseModel):
@@ -104,7 +164,15 @@ class ResolvedTargetDescriptor(BaseModel):
     verify_tls: bool = True
     tls_ca_pin: str | None = None
     tls_server_name: str | None = None
+    # #3711. Secret field names map the credential reader applies to the
+    # target's own secret. Field names only, never a value.
+    secret_field_map: dict[str, str] = Field(default_factory=dict)
     extras: dict[str, Any] = Field(default_factory=dict)
+    # When the target row last changed (#3879). The runner compares it with
+    # the value it saw last and drops the login it keeps for the target when
+    # the row changed. ``None`` from an older gateway: never treated as a
+    # change.
+    updated_at: datetime | None = None
 
 
 class RunnerPrincipal(BaseModel):
@@ -145,6 +213,13 @@ class RunnerWorkItem(BaseModel):
     path materialises only ``safe`` ops and never signs them) -- signing is
     a write-tier property, so their absence on a ``safe`` item is correct,
     not a missing field.
+
+    Connector packages (#5038): ``package_set`` is the digest of the
+    connector package set the item needs
+    (:func:`~meho_backplane.runner.package_set.package_set_digest`). The
+    central MEHO sets it only when a connector package provides the op, and
+    the runner refuses the item when its own digest differs. ``None`` for an
+    op built into MEHO.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -161,6 +236,7 @@ class RunnerWorkItem(BaseModel):
     target_descriptor: ResolvedTargetDescriptor | None = None
     signature: str | None = None
     expires_at: datetime | None = None
+    package_set: str | None = None
 
 
 class RunnerAssignment(BaseModel):

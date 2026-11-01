@@ -23,7 +23,7 @@ What is covered, with a respx-mocked appliance and no ingested catalog:
 * no password or session id in a result; registration shape; fingerprint.
 
 The login, session cache and API file read are shared with the SRM
-connector (``connectors/_shared/dr_rest.py``, ``dr_api_file.py``); their
+connector (``connectors/vmware_shared/dr_rest.py``, ``dr_api_file.py``); their
 edge cases are tested in ``test_connectors_srm.py``.
 
 Fixture values are made up; no real host, user or id appears here.
@@ -455,6 +455,9 @@ async def test_each_product_stores_a_handler_on_its_own_class(
                 select(EndpointDescriptor).where(
                     EndpointDescriptor.product.in_([VR_PRODUCT, SRM_PRODUCT]),
                     EndpointDescriptor.impl_id.in_([VR_IMPL_ID, SRM_IMPL_ID]),
+                    EndpointDescriptor.op_id.in_(
+                        ["vr.about", "vr.api_file.get", "srm.about", "srm.api_file.get"]
+                    ),
                 )
             )
         )
@@ -618,7 +621,15 @@ async def test_registered_ops_are_typed_safe_and_documented(
         .all()
     )
     assert {r.op_id for r in rows} == {op.op_id for op in VR_TYPED_OPS}
-    assert {r.op_id for r in rows} == {"vr.about", "vr.api_file.get"}
+    assert {r.op_id for r in rows} == {
+        "vr.about",
+        "vr.api_file.get",
+        "vr.pairing.list",
+        "vr.replication.list",
+        "vr.replication.issues",
+        "vr.vm.check",
+        "vr.task.get",
+    }
     for row in rows:
         assert row.source_kind == "typed"
         assert row.handler_ref is not None

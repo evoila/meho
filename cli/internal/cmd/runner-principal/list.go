@@ -110,9 +110,35 @@ func printListTable(w io.Writer, r *api.RunnerPrincipalListResponse) {
 		fmt.Fprintln(w, "no runner principals registered in this tenant")
 		return
 	}
-	fmt.Fprintf(w, "%-32s %-8s %-20s %s\n", "NAME", "REVOKED", "OWNER", "KEYCLOAK CLIENT ID")
+	fmt.Fprintf(w, "%-32s %-8s %-20s %-6s %-19s %s\n",
+		"NAME", "REVOKED", "OWNER", "WIRE", "PACKAGES", "KEYCLOAK CLIENT ID")
 	for _, e := range r.Principals {
-		fmt.Fprintf(w, "%-32s %-8v %-20s %s\n",
-			e.Name, e.Revoked, e.OwnerSub, e.KeycloakClientId)
+		fmt.Fprintf(w, "%-32s %-8v %-20s %-6s %-19s %s\n",
+			e.Name, e.Revoked, e.OwnerSub, wireVersionText(e.WireVersion),
+			packageSetText(e.PackageSetDigest), e.KeycloakClientId)
 	}
+}
+
+// packageSetText renders the start of the connector package set digest the
+// runner sent last ("sha256:" and 12 hex characters), or "-" when it has not
+// called since the server started to record it. `-o json` shows the full
+// digest.
+func packageSetText(v *string) string {
+	const shown = len("sha256:") + 12
+	if v == nil || *v == "" {
+		return "-"
+	}
+	if len(*v) > shown {
+		return (*v)[:shown]
+	}
+	return *v
+}
+
+// wireVersionText renders the wire version the runner sent last, or "-"
+// when it has not called since the server started to record it.
+func wireVersionText(v *string) string {
+	if v == nil || *v == "" {
+		return "-"
+	}
+	return *v
 }

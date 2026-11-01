@@ -3,13 +3,17 @@
 
 """Typed-op metadata + registrar for :class:`SrmConnector`.
 
-Two reads ship here, on SRM 8.8, Live Site Recovery 9.0 and VCF 9.1
-Protection and Recovery:
+Two reads are defined here, on SRM 8.8, Live Site Recovery 9.0 and VCF
+9.1 Protection and Recovery:
 
 * ``srm.about`` -- ``GET /api/rest/srm/v2/server/info``: the server's
   name, status, version, build and paired vCenter;
 * ``srm.api_file.get`` -- ``GET`` one of the two API files the appliance
-  serves; the body lives in :mod:`meho_backplane.connectors._shared.dr_api_file`.
+  serves; the body lives in :mod:`meho_backplane.connectors.vmware_shared.dr_api_file`.
+
+The pairing, recovery plan, protection group, issue and history reads are
+defined in :mod:`meho_backplane.connectors.srm.recovery_ops` and joined
+into :data:`SRM_TYPED_OPS` here.
 
 The dataclass + tuple + registrar shape mirrors
 :mod:`meho_backplane.connectors.hcx.typed_ops`.
@@ -17,10 +21,14 @@ The dataclass + tuple + registrar shape mirrors
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING
 
-from meho_backplane.connectors._shared.dr_rest_schemas import (
+from meho_backplane.connectors.srm._op import SrmTypedOp
+from meho_backplane.connectors.srm.recovery_ops import (
+    RECOVERY_TYPED_OPS,
+    RECOVERY_WHEN_TO_USE_BY_GROUP,
+)
+from meho_backplane.connectors.vmware_shared.dr_rest_schemas import (
     API_FILE_NEXT_STEP,
     API_FILE_OUTPUT_SHAPE,
     API_FILE_RESULT_SCALARS,
@@ -42,24 +50,6 @@ __all__ = [
 _GROUP_SERVER = "srm-server"
 _GROUP_API_DOCS = "srm-api-docs"
 
-
-@dataclass(frozen=True)
-class SrmTypedOp:
-    """Metadata for one SRM typed op registered at lifespan startup."""
-
-    op_id: str
-    handler_attr: str
-    summary: str
-    description: str
-    parameter_schema: dict[str, Any]
-    response_schema: dict[str, Any] | None
-    group_key: str | None
-    tags: tuple[str, ...]
-    safety_level: Literal["safe", "caution", "dangerous", "destructive"]
-    requires_approval: bool
-    llm_instructions: dict[str, Any] | None
-
-
 #: Curated ``when_to_use`` text per group. Says what the group holds; it
 #: makes no claim about the safety of the whole group.
 SRM_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
@@ -75,6 +65,7 @@ SRM_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "its size, SHA-256 and the SRM version, with the text in parts behind a "
         "result handle, so a vendor API file can be pinned and compared. One read."
     ),
+    **RECOVERY_WHEN_TO_USE_BY_GROUP,
 }
 
 _ABOUT = SrmTypedOp(
@@ -155,7 +146,7 @@ _API_FILE_GET = SrmTypedOp(
     },
 )
 
-SRM_TYPED_OPS: tuple[SrmTypedOp, ...] = (_ABOUT, _API_FILE_GET)
+SRM_TYPED_OPS: tuple[SrmTypedOp, ...] = (_ABOUT, _API_FILE_GET, *RECOVERY_TYPED_OPS)
 
 
 async def register_srm_typed_operations(

@@ -25,7 +25,7 @@ Route inventory
   :class:`EditGroupBody`. Returns 204. Role: ``tenant_admin``.
 * ``PATCH /api/v1/connectors/{connector_id}/operations/{op_id}`` —
   edit a per-op override (``safety_level``, ``requires_approval``,
-  ``custom_description``, ``is_enabled``). Body: :class:`EditOpBody`.
+  ``custom_description``, ``is_enabled``, ``reason``). Body: :class:`EditOpBody`.
   Returns 200 with :class:`EditOpResponse` (enable-time advisories
   in ``warnings``, G0.23-T4 #1630). Role: ``tenant_admin``.
 * ``POST /api/v1/connectors/{connector_id}/enable`` — transition all
@@ -197,6 +197,7 @@ from fastapi import status as http_status
 from fastapi.responses import JSONResponse, Response
 
 from meho_backplane.api.v1.operations import connector_not_ingested_404
+from meho_backplane.auth.fresh_sign_in import fresh_sign_in_challenge, has_fresh_sign_in
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.operations._lookup import (
@@ -208,6 +209,7 @@ from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
     BuiltinConnectorWriteForbiddenError,
     CatalogListResponse,
+    ConnectorInUseError,
     ConnectorListResponse,
     ConnectorNotFoundError,
     ConnectorReviewPayload,
@@ -270,8 +272,10 @@ from meho_backplane.operations.ingest.list_connectors import (
     next_step_for_registered_connector,
 )
 from meho_backplane.operations.meta_tools import ConnectorNotIngestedError
+from meho_backplane.operations.op_policy import OpPolicyEditError, OverrideNotFoundError
 
 __all__ = [
+    "apply_op_edit",
     "get_llm_client_factory",
     "router",
     "set_llm_client_factory",
@@ -444,8 +448,8 @@ async def ingest_endpoint(
     :class:`IngestJobHandle` at HTTP 202; the operator polls
     ``GET /api/v1/connectors/ingest/jobs/{job_id}`` for completion.
     This is the only mode that survives real-world vendor specs
-    without tripping the kubelet liveness probe -- the
-    ``vmware/9.0.0.0`` spec at 7.5 MB / 1275 ops blocks the event
+    without tripping the kubelet liveness probe -- a vendor
+    spec at 7.5 MB / 1275 ops blocks the event
     loop for ~30 s in the register + LLM-grouping phases, past
     the 25 s liveness deadline. The 202 + job-id shape is the
     "escape hatch must not crash the pod" answer G0.16-T1 closes.
@@ -1507,8 +1511,39 @@ async def edit_op_endpoint(
 
     The ``op_id`` path parameter uses the ``:path`` converter so
     operations whose natural key contains slashes
-    (``"GET:/api/vcenter/cluster"``) round-trip without
+    (``"GET:/repos/{owner}/{repo}/issues"``) round-trip without
     URL-encoding the colon-prefixed path segment.
+
+    ``safety_level`` / ``requires_approval`` are stored as an operator
+    override (#4711). Turning approval off needs a person with a fresh
+    sign-in (:func:`~meho_backplane.auth.fresh_sign_in.has_fresh_sign_in`):
+    an API token with an old sign-in, a service principal or an agent gets
+    ``401`` with ``WWW-Authenticate: Bearer
+    error="insufficient_user_authentication"``. A tenant admin asking for it
+    gets ``403``; a level below the classification, a missing reason or a
+    destructive operation gets ``400``.
+    """
+    return await apply_op_edit(
+        connector_id,
+        op_id,
+        body,
+        operator,
+        person_present=has_fresh_sign_in(operator),
+    )
+
+
+async def apply_op_edit(
+    connector_id: str,
+    op_id: str,
+    body: EditOpBody,
+    operator: Operator,
+    *,
+    person_present: bool,
+) -> EditOpResponse:
+    """Run one per-op edit and map service errors to HTTP errors.
+
+    Shared by the REST route and the console (which calls it in-process
+    with ``person_present=True``: the web session is the person, #4711).
     """
     service = ReviewService(operator)
     # Forward custom_description only when the operator supplied one. The
@@ -1521,6 +1556,8 @@ async def edit_op_endpoint(
         "safety_level": body.safety_level,
         "requires_approval": body.requires_approval,
         "is_enabled": body.is_enabled,
+        "reason": body.reason,
+        "person_present": person_present,
     }
     if body.custom_description is not None:
         edit_op_overrides["custom_description"] = body.custom_description
@@ -1547,12 +1584,89 @@ async def edit_op_endpoint(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         ) from exc
+    except OpPolicyEditError as exc:
+        raise _policy_edit_http_error(exc) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
     return EditOpResponse(warnings=warnings)
+
+
+def _policy_edit_http_error(exc: OpPolicyEditError) -> HTTPException:
+    """Map a refused risk level / approval edit to its HTTP error (#4711)."""
+    detail = f"{exc.code}: {exc}"
+    if exc.code == "approval_off_needs_fresh_sign_in":
+        return fresh_sign_in_challenge(detail)
+    if exc.code == "approval_off_needs_platform_admin":
+        return HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail=detail)
+    return HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail=detail)
+
+
+_override_tenant_query = Query(
+    default=None,
+    description=(
+        "The tenant whose override to remove. Leave it out for the install-wide "
+        "override. A tenant admin can name only their own tenant."
+    ),
+)
+_override_reason_query = Query(
+    default=None,
+    min_length=1,
+    max_length=1024,
+    description=(
+        "Why you remove it; written to the audit row. Required when the removal ends approval."
+    ),
+)
+
+
+@router.delete(
+    "/{connector_id}/operation-overrides/{op_id:path}",
+    status_code=http_status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def remove_op_override_endpoint(
+    connector_id: str,
+    op_id: str,
+    tenant_id: UUID | None = _override_tenant_query,
+    reason: str | None = _override_reason_query,
+    operator: Operator = _require_admin,
+) -> Response:
+    """Remove one operator override of a risk level or approval flag.
+
+    The override is the one ``GET /api/v1/connectors/operation-overrides``
+    lists for ``connector_id``, ``op_id`` and ``tenant_id`` (none for the
+    install-wide one). A platform admin can remove any tenant's override;
+    a tenant admin only their own tenant's (``403`` for the install-wide
+    one, ``404`` for another tenant's). When the removal ends approval in
+    that scope it needs ``platform_admin`` (``403``), a ``reason``
+    (``400``) and a fresh sign-in (``401``), like turning approval off.
+    ``404`` when there is no such override. Writes one
+    ``meho_connector_edit_op`` audit row. Returns 204 on success.
+    """
+    service = ReviewService(operator)
+    try:
+        await service.remove_op_override(
+            connector_id,
+            op_id,
+            override_tenant_id=tenant_id,
+            reason=reason,
+            person_present=has_fresh_sign_in(operator),
+        )
+    except BuiltinConnectorWriteForbiddenError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=exc.detail,
+        ) from exc
+    except (ConnectorNotFoundError, OverrideNotFoundError) as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except OpPolicyEditError as exc:
+        raise _policy_edit_http_error(exc) from exc
+    return Response(status_code=http_status.HTTP_204_NO_CONTENT)
 
 
 @router.post(
@@ -1759,6 +1873,11 @@ async def delete_endpoint(
     into the same 404 the other connector routes use; a repeat
     DELETE therefore returns 404 once the first one landed.
 
+    A connector that something still uses is not deleted (#5027): the
+    route answers ``409`` with the ``connector_in_use`` detail, which
+    lists each sensor, runbook template, hosted agent, schedule, waiting
+    approval or queued operation run (kind, id, name, operation).
+
     A connector that still has enabled operations is deleted anyway —
     the advisory is deliberate, not an error: it surfaces as the
     ``connector_delete_enabled_ops`` structured log event plus the
@@ -1775,6 +1894,11 @@ async def delete_endpoint(
             connector_id,
             tenant_id=operator.tenant_id,
         )
+    except ConnectorInUseError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=dict(exc.detail),
+        ) from exc
     except ConnectorNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,

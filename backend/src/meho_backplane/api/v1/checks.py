@@ -47,7 +47,12 @@ from fastapi.responses import Response
 from meho_backplane.api.v1._errors import http_for, register_error
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
-from meho_backplane.auth.runner_guard import assert_runner_scope, require_runner
+from meho_backplane.auth.runner_guard import (
+    assert_runner_scope,
+    require_runner,
+    runner_package_set,
+    runner_wire_version,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.gateway import assignment_service
 from meho_backplane.gateway.deadman import clear_runner_stale
@@ -76,6 +81,8 @@ router = APIRouter(prefix="/api/v1/checks", tags=["checks"])
 #: :mod:`meho_backplane.api.v1.scheduler`.
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
 _require_runner = Depends(require_runner())
+_runner_wire_version = Depends(runner_wire_version)
+_runner_package_set = Depends(runner_package_set)
 
 #: Canonical op ids bound into ``audit_op_id`` per route (greppable; a typo
 #: surfaces as a mis-classified broadcast rather than a silent 500).
@@ -144,12 +151,17 @@ async def put_assignment(
 async def get_assignment(
     operator: Annotated[Operator, _require_runner],
     runner: Annotated[str, Query(min_length=1)],
+    wire_version: Annotated[str, _runner_wire_version],
+    package_set: Annotated[str, _runner_package_set],
     known_version: Annotated[str | None, Query()] = None,
 ) -> wire.RunnerAssignment | Response:
     """Return runner *runner*'s versioned assignment (runner-authenticated).
 
     A runner may fetch only its own assignment
-    (:func:`assert_runner_scope`). ``known_version`` matching the current
+    (:func:`assert_runner_scope`). A runner on another wire version gets a
+    409 that names both versions. Work for a connector package is left out
+    when the runner's package set differs from central's (#5038).
+    ``known_version`` matching the current
     content digest yields ``304 Not Modified`` (empty body); the runner
     keeps its cache.
     """
@@ -159,12 +171,19 @@ async def get_assignment(
     )
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        await assert_runner_scope(operator, runner_name=runner, session=session)
+        await assert_runner_scope(
+            operator,
+            runner_name=runner,
+            session=session,
+            wire_version=wire_version,
+            package_set=package_set,
+        )
         assignment = await assignment_service.materialize_assignment(
             session,
             tenant_id=operator.tenant_id,
             runner_name=runner,
             principal=_principal_from_operator(operator),
+            runner_package_set=package_set,
         )
     if known_version is not None and known_version == assignment.assignment_version:
         return Response(status_code=http_status.HTTP_304_NOT_MODIFIED)
@@ -175,6 +194,8 @@ async def get_assignment(
 async def post_results(
     batch: wire.RunnerResultBatch,
     operator: Annotated[Operator, _require_runner],
+    wire_version: Annotated[str, _runner_wire_version],
+    package_set: Annotated[str, _runner_package_set],
 ) -> ResultIngestResponse:
     """Ingest a runner's result batch idempotently (runner-authenticated).
 
@@ -189,7 +210,13 @@ async def post_results(
     )
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        await assert_runner_scope(operator, runner_name=batch.runner_id, session=session)
+        await assert_runner_scope(
+            operator,
+            runner_name=batch.runner_id,
+            session=session,
+            wire_version=wire_version,
+            package_set=package_set,
+        )
         accepted, duplicates = await ingest_results(
             session,
             tenant_id=operator.tenant_id,

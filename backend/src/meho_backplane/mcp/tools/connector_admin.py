@@ -97,12 +97,17 @@ tenant-curated connectors.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    READ_ONLY,
+    ToolDefinition,
+    ToolSurface,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.tools._connector_shared import (
     _CONNECTOR_ID_DESCRIPTION,
     _OP_CLASS_READ,
@@ -114,6 +119,7 @@ from meho_backplane.mcp.tools._connector_shared import (
     _model_dump_json_safe,
     raise_invalid_params_for_ambiguous_scope,
     raise_invalid_params_for_builtin_write_forbidden,
+    raise_invalid_params_for_connector_in_use,
     raise_invalid_params_for_connector_not_found,
     raise_invalid_params_for_edit_value_error,
     raise_invalid_params_for_legacy_tenant_copy,
@@ -121,14 +127,23 @@ from meho_backplane.mcp.tools._connector_shared import (
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
     BuiltinConnectorWriteForbiddenError,
+    ConnectorInUseError,
+    ConnectorListItem,
     ConnectorNotFoundError,
     ConnectorStatusFilter,
     LegacyTenantConnectorCopyError,
     ReviewService,
     list_ingested_connectors,
 )
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 
-__all__: list[str] = []
+__all__ = [
+    "CONNECTOR_LIST_NAME",
+    "list_connector_rows",
+    "reduce_connector_list",
+]
+
+CONNECTOR_LIST_NAME: Final[str] = "meho_connector_list"
 
 _log = structlog.get_logger(__name__)
 
@@ -138,28 +153,120 @@ _log = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
+#: Same reducer class and default thresholds (more than 50 rows or 4 KB)
+#: ``call_operation`` and ``list_targets`` use (CLAUDE.md postulate 6).
+_CONNECTOR_LIST_REDUCER: Final[JsonFluxReducer] = JsonFluxReducer()
+
+#: ``fetch_more.native_pagination`` for a reduced list: how to ask again
+#: for a list short enough to come back inline.
+_CONNECTOR_LIST_PAGINATION_HINT: Final[dict[str, Any]] = {
+    "params": {
+        "product": (
+            "Exact product name from a row's `product` field. One product's "
+            "connectors usually come back inline as `connectors`."
+        ),
+    },
+    "example_next_call": {
+        "tool": CONNECTOR_LIST_NAME,
+        "args": {"product": "<product>"},
+    },
+}
+
+
+def connector_review_status(item: ConnectorListItem) -> str:
+    """Return the one-word review status of a connector row.
+
+    The words match the ``status`` filter, so a row with ``"staged"``
+    is one that ``status="staged"`` returns. Two more words: a connector
+    with no operations yet is ``"registered"``, and one whose groups are
+    partly enabled and partly disabled (none staged) is ``"mixed"``. No
+    filter except ``all`` returns a mixed row.
+    """
+    if item.state == "registered":
+        return "registered"
+    if item.staged_group_count > 0:
+        return "staged"
+    if item.group_count > 0 and item.enabled_group_count == item.group_count:
+        return "enabled"
+    if item.group_count > 0 and item.disabled_group_count == item.group_count:
+        return "disabled"
+    return "mixed"
+
+
+def _connector_row(item: ConnectorListItem, detail: str) -> dict[str, Any]:
+    """Project one row: six short fields, or every field for ``detail="full"``.
+
+    The short row keeps ``scope`` because one connector id can appear
+    twice, once built-in and once for the tenant.
+    """
+    if detail == "full":
+        return item.model_dump(mode="json")
+    return {
+        "connector_id": item.connector_id,
+        "product": item.product,
+        "version": item.version,
+        "status": connector_review_status(item),
+        "dispatchable": item.dispatchable,
+        "scope": item.scope,
+    }
+
+
+async def list_connector_rows(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Return ``{"connectors": [...]}`` for the operator, not yet reduced.
+
+    Delegates to :func:`list_ingested_connectors` — the same query
+    helper the REST route at ``GET /api/v1/connectors`` uses. ``status``
+    has already been checked against the tool's JSON Schema. ``product``
+    keeps only rows with exactly that product; empty text means no
+    filter. ``detail`` picks short rows (the default) or full rows.
+
+    Split from :func:`reduce_connector_list` so the hosted agent can
+    drop the rows outside its connector allow-list *before* the list is
+    stored behind a handle.
+    """
+    status: ConnectorStatusFilter = arguments.get("status", "all")
+    product = (arguments.get("product") or "").strip()
+    detail = arguments.get("detail", "short")
+    connectors = await list_ingested_connectors(operator=operator, status=status)
+    return {
+        "connectors": [
+            _connector_row(item, detail)
+            for item in connectors
+            if not product or item.product == product
+        ],
+    }
+
+
+async def reduce_connector_list(operator: Operator, result: dict[str, Any]) -> dict[str, Any]:
+    """Return *result* unchanged, or a JSONFlux summary + ``handle`` above the threshold.
+
+    Same pattern as ``list_targets``: the spill is keyed to the caller's
+    tenant and subject, which is the key ``result_query`` reads back with.
+    """
+    summary, handle = await _CONNECTOR_LIST_REDUCER.reduce(
+        result,
+        None,
+        {
+            "op_id": CONNECTOR_LIST_NAME,
+            "tenant_id": str(operator.tenant_id),
+            "operator_sub": operator.sub,
+            "pagination_hint": _CONNECTOR_LIST_PAGINATION_HINT,
+        },
+    )
+    if handle is None:
+        return result
+    return {**summary, "handle": handle.model_dump(mode="json")}
+
+
 async def _list_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Return connectors visible to the operator's tenant + built-in.
-
-    Delegates to :func:`list_ingested_connectors` — the same query
-    helper the REST route at ``GET /api/v1/connectors`` uses. The
-    ``status`` argument is the canonical
-    :data:`ConnectorStatusFilter` literal; the JSON-Schema validator
-    has already restricted it to one of the four legal values before
-    this handler runs.
-    """
-    raw_status = arguments.get("status", "all")
-    # Normalise the JSON-Schema-validated string into the canonical
-    # Literal type the query helper takes. ``"all"`` is the explicit
-    # no-filter sentinel; the function itself also accepts ``None``.
-    status: ConnectorStatusFilter = raw_status
-    connectors = await list_ingested_connectors(operator=operator, status=status)
-    return {
-        "connectors": [item.model_dump(mode="json") for item in connectors],
-    }
+    """List the connectors; a long list comes back as a handle (#4121)."""
+    return await reduce_connector_list(operator, await list_connector_rows(operator, arguments))
 
 
 async def _review_handler(
@@ -281,12 +388,18 @@ async def _edit_op_handler(
         patch["requires_approval"] = arguments["requires_approval"]
     if "is_enabled" in arguments:
         patch["is_enabled"] = arguments["is_enabled"]
+    if "reason" in arguments:
+        patch["reason"] = arguments["reason"]
     service = ReviewService(operator)
     try:
+        # #4711: an AI client may make an operation stricter, never looser.
+        # ``tighten_only`` refuses ``requires_approval: false`` and any lower
+        # risk level with a message that names the console / CLI path.
         warnings = await service.edit_op(
             connector_id,
             op_id,
             tenant_id=tenant_id,
+            tighten_only=True,
             **patch,
         )
     except BuiltinConnectorWriteForbiddenError as exc:
@@ -441,6 +554,9 @@ async def _delete_handler(
     service = ReviewService(operator)
     try:
         result = await service.delete_connector(connector_id, tenant_id=tenant_id)
+    except ConnectorInUseError as exc:
+        # #5027: something still uses the connector; nothing was deleted.
+        raise_invalid_params_for_connector_in_use(exc)
     except ConnectorNotFoundError as exc:
         # Unknown / cross-tenant label → -32602 connector_not_found
         # (#2481), not the dispatcher's bare -32603 class-name leak.
@@ -473,24 +589,29 @@ async def _delete_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        name="meho_connector_list",
+        name=CONNECTOR_LIST_NAME,
+        annotations=READ_ONLY,
         surface=ToolSurface.WORKING,
         feature="typed_connector_reads",
         description=(
             "List ingested connectors visible to the operator's tenant "
-            "(plus built-in / global). Returns per-connector counts — "
+            "(plus built-in / global). By default each row is short: "
+            "connector_id, product, version, status, dispatchable, scope. "
+            "Pass `product` to list one product only. A long list comes "
+            "back as a short preview plus a `handle`; read its rows with "
+            "`result_query`. With detail='full' each row also has counts — "
             "group counts split by review status, plus the operation "
             "rollup split enabled-vs-total (enabled_operation_count = "
             "ops whose per-op is_enabled flag is set, i.e. actually "
             "dispatchable; operation_count = every ingested/typed/"
-            "composite op) — and the aggregate review status (staged / "
-            "enabled / disabled). Use as the entry point when an "
-            "operator needs to find a connector to review or to see "
-            "what's already in place. Filter via status=staged to "
-            "surface only connectors that need review. Pair with "
-            "meho_connector_review to drill into an individual "
-            "connector. Read-only; visible to operator and "
-            "tenant_admin roles."
+            "composite op) — and the aggregate review status. The "
+            "review status says if a person has checked the connector's "
+            "operations yet: 'staged' = at least one group still waits "
+            "for review; 'enabled' = reviewed and ready to use; "
+            "'disabled' = every group is turned off. With no `status`, "
+            "it lists every connector. Do not pass `status` unless the "
+            "user asks for connectors in one review state. Read-only; "
+            "visible to operator and tenant_admin roles."
         ),
         inputSchema={
             "type": "object",
@@ -505,6 +626,25 @@ register_mcp_tool(
                         "one group enabled and none staged; "
                         "'disabled' = every group disabled; 'all' = "
                         "no filter."
+                    ),
+                },
+                "product": {
+                    "type": "string",
+                    "description": (
+                        "Keep only connectors of this product. Use the "
+                        "exact value of a row's `product` field. Leave "
+                        "it out to list every product."
+                    ),
+                },
+                "detail": {
+                    "type": "string",
+                    "enum": ["short", "full"],
+                    "default": "short",
+                    "description": (
+                        "'short' = six fields per row (connector_id, "
+                        "product, version, status, dispatchable, scope). "
+                        "'full' = every field, with group and operation "
+                        "counts."
                     ),
                 },
             },
@@ -611,14 +751,20 @@ register_mcp_tool(
             "Edit one operation's per-op overrides (tenant_admin only). "
             "Editable fields: custom_description (operator-authored "
             "agent-facing description), safety_level (safe / caution / "
-            "dangerous), requires_approval (gate the operation behind "
-            "out-of-band approval), is_enabled (per-op enable/disable "
-            "that survives connector-level enable/disable cycles). Pass "
-            "at least one field; passing none is rejected. Use during "
-            "review (after meho_connector_review surfaces the op) when "
-            "an LLM-generated description is misleading or when a "
-            "DELETE-shaped op needs the safety_level promoted from "
-            "'dangerous' to require approval. is_enabled=false here "
+            "dangerous / destructive), requires_approval (gate the "
+            "operation behind out-of-band approval), is_enabled (per-op "
+            "enable/disable that survives connector-level enable/disable "
+            "cycles), reason (written to the audit row). Pass at least one "
+            "field; passing none is rejected. This tool can only make an "
+            "operation stricter: it refuses requires_approval=false and "
+            "any risk level lower than the current one. Turning approval "
+            "off is for a platform admin in the console or the CLI; "
+            "lowering a risk level needs a pull request. A raised risk "
+            "level or required approval survives restarts and re-ingest. "
+            "Use during review (after meho_connector_review surfaces the "
+            "op) when an LLM-generated description is misleading or when "
+            "a DELETE-shaped op needs a higher safety_level or approval. "
+            "is_enabled=false here "
             "STICKS: a subsequent meho_connector_enable will NOT "
             "clobber the operator's per-op disable. Do not use this "
             "to flip whole-connector state — pair with "
@@ -635,7 +781,9 @@ register_mcp_tool(
                 "op_id": {
                     "type": "string",
                     "minLength": 1,
-                    "description": ("Connector-side op_id (e.g. 'GET:/api/vcenter/cluster')."),
+                    "description": (
+                        "Connector-side op_id (e.g. 'GET:/repos/{owner}/{repo}/issues')."
+                    ),
                 },
                 "custom_description": {"type": ["string", "null"]},
                 "safety_level": {
@@ -644,6 +792,7 @@ register_mcp_tool(
                 },
                 "requires_approval": {"type": ["boolean", "null"]},
                 "is_enabled": {"type": ["boolean", "null"]},
+                "reason": {"type": ["string", "null"], "minLength": 1, "maxLength": 1024},
                 "tenant_id": _TENANT_ID_PROPERTY,
             },
             "required": ["connector_id", "op_id"],
@@ -808,7 +957,11 @@ register_mcp_tool(
             "operator's tenant — for global rows use this tool. "
             "Deleting a connector that still has enabled operations "
             "completes and returns an enabled_operations_deleted "
-            "warning (advisory, never blocks). One "
+            "warning (advisory, never blocks). A connector that a "
+            "sensor, runbook template, hosted agent, schedule, waiting "
+            "approval or queued operation run still uses is NOT "
+            "deleted: the call fails with connector_in_use and lists "
+            "each user, so remove or change them first. One "
             "meho_connector_delete audit row is written. Do NOT use "
             "this for a temporary roll-back — pair with "
             "meho_connector_disable for reversible state instead; "

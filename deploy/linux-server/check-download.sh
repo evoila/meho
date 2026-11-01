@@ -40,6 +40,10 @@ Usage:
 Settings, from the environment:
   MEHO_DOWNLOAD_MAX_BYTES  The size limit of the tar. Default: 2040109465
                            (1.9 GiB).
+  MEHO_REGISTRY, MEHO_REGISTRY_USERNAME, MEHO_REGISTRY_PASSWORD
+                           A login for a private registry, for a download
+                           with an overlay image (all three or none). The
+                           password goes to regctl on stdin.
 
 Tools on PATH: tar, zstd, jq, sha256sum and regctl. The check runs bin/helm
 and bin/meho of the download, so it runs on Linux amd64.
@@ -118,6 +122,7 @@ main() {
     [[ $VERSION =~ $VERSION_PATTERN ]] ||
         usage_error "$base is not named like meho-linux-0.36.0-amd64.tar."
     top=$(download_name "$VERSION")
+    check_registry_login
     need_tools tar zstd jq sha256sum regctl
     trap 'on_error "$?" "$LINENO" "${BASH_SOURCE[0]##*/}"' ERR
 
@@ -133,6 +138,7 @@ main() {
     trap 'rm -rf "$WORK"' EXIT
     export HELM_CACHE_HOME=$WORK/helm-home/cache HELM_CONFIG_HOME=$WORK/helm-home/config \
         HELM_DATA_HOME=$WORK/helm-home/data
+    registry_login "$WORK/registry-login" regctl
     tar -xf "$file" -C "$WORK"
     STAGE=$WORK/$top
     check_version_file

@@ -23,7 +23,8 @@ actions and decisions. This file proves it across the fronts:
   row used to carry; a change whose own record was rolled back with it
   keeps one ``operation_execution`` row for the failed attempt; a bulk
   import's dry run is routine, while its apply keeps only the records it
-  wrote itself.
+  wrote itself; a record written under a role that came from platform
+  admin access says so (#5239), whichever writer built it.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from __future__ import annotations
 import ast
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -39,7 +41,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import structlog
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Response
 from fastapi.routing import iter_route_contexts
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -56,6 +58,7 @@ from meho_backplane.api.v1.runner_principals import router as runner_principals_
 from meho_backplane.api.v1.topology import router as topology_router
 from meho_backplane.audit import AuditMiddleware, _write_audit_row
 from meho_backplane.auth.agent_principals import AgentPrincipalService
+from meho_backplane.auth.current_tenant import bind_tenant_role_source
 from meho_backplane.auth.delegation import ACTOR_SUB_KEY
 from meho_backplane.auth.keycloak_admin import KeycloakAdminError
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -220,6 +223,7 @@ def _classified_row(
     *,
     operator_sub: str = "op-rest",
     path: str = "probe.edit",
+    payload: dict[str, Any] | None = None,
     **lineage: Any,
 ) -> AuditLog:
     """Build (not store) a row the way a domain writer does."""
@@ -233,9 +237,28 @@ def _classified_row(
         path=path,
         status_code=200,
         duration_ms=Decimal("0"),
-        payload={},
+        payload={} if payload is None else payload,
         **lineage,
     )
+
+
+def _platform_admin_operator() -> Operator:
+    """A platform admin acting as ``tenant_admin`` in a tenant without a role group."""
+    return build_operator(TenantRole.TENANT_ADMIN, platform_admin=True).model_copy(
+        update={"role_from_platform_admin": True}
+    )
+
+
+@contextmanager
+def _role_source_bound(operator: Operator) -> Iterator[None]:
+    """Bind the role-source marker as the bind steps do; unbind it afterwards."""
+    before = set(structlog.contextvars.get_contextvars())
+    bind_tenant_role_source(operator)
+    try:
+        yield
+    finally:
+        added = set(structlog.contextvars.get_contextvars()) - before
+        structlog.contextvars.unbind_contextvars(*added)
 
 
 async def _store(row: AuditLog, *, commit: bool) -> None:
@@ -346,6 +369,46 @@ def test_classified_rows_keep_their_lineage_with_the_cutover_off() -> None:
     finally:
         audit_cutover.close_classified_record_scope(scope)
     assert _lineage(row) == (None, None, None, None, None)
+
+
+@pytest.mark.parametrize("retired", [True, False])
+def test_classified_rows_carry_the_role_source_marker(
+    retired: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record built while the platform-admin marker is bound says so in its payload.
+
+    A value the writer set is kept. A ``legacy_request`` row (a wrapper
+    row, which reads the contextvar itself) and a row built outside a
+    scope are left alone. With or without the cutover: the marker says
+    where the caller's role came from, whichever row is the record.
+    """
+    if retired:
+        monkeypatch.setenv("REQUEST_USAGE_RETENTION_DAYS", "30")
+        monkeypatch.setenv("AUDIT_WRAPPER_ROWS_RETIRED", "true")
+    get_settings.cache_clear()
+    try:
+        with _role_source_bound(_platform_admin_operator()):
+            scope = audit_cutover.open_classified_record_scope()
+            try:
+                filled = _classified_row()
+                kept = _classified_row(payload={"tenant_role_source": "group", "k": 1})
+                legacy = _classified_row(event_class=AuditEventClass.LEGACY_REQUEST)
+            finally:
+                audit_cutover.close_classified_record_scope(scope)
+            outside = _classified_row()
+        scope = audit_cutover.open_classified_record_scope()
+        try:
+            unbound = _classified_row()
+        finally:
+            audit_cutover.close_classified_record_scope(scope)
+    finally:
+        get_settings.cache_clear()
+
+    assert filled.payload == {"tenant_role_source": "platform_admin"}
+    assert kept.payload == {"tenant_role_source": "group", "k": 1}
+    assert legacy.payload == {}
+    assert outside.payload == {}
+    assert unbound.payload == {}
 
 
 @pytest.mark.parametrize("writer", [_write_audit_row, write_mcp_audit_row])
@@ -538,23 +601,60 @@ async def _system_recorded(operator: Operator = Depends(verify_jwt_and_bind)) ->
     return {"recorded": "by-system"}
 
 
+@_probe.post("/recorded", status_code=204, response_class=Response)
+async def _recorded(operator: Operator = Depends(verify_jwt_and_bind)) -> Response:
+    """A MEHO change that writes its own record in the caller's name, answering 204."""
+    await _store(_classified_row(operator_sub=operator.sub, path="probe.recorded"), commit=True)
+    return Response(status_code=204)
+
+
+@_probe.post("/granted", status_code=204, response_class=Response)
+async def _granted(operator: Operator = Depends(verify_jwt_and_bind)) -> Response:
+    """A call a standing grant allows: the decision row commits first, then the execution row."""
+    await _store(
+        _classified_row(
+            AuditEventClass.APPROVAL_DECISION, operator_sub=operator.sub, path="probe.grant"
+        ),
+        commit=True,
+    )
+    await _store(_classified_row(operator_sub=operator.sub, path="probe.granted"), commit=True)
+    return Response(status_code=204)
+
+
+@_probe.post("/decided", status_code=204, response_class=Response)
+async def _decided(operator: Operator = Depends(verify_jwt_and_bind)) -> Response:
+    """A request that saves only a decision row in the caller's name."""
+    await _store(
+        _classified_row(
+            AuditEventClass.APPROVAL_DECISION, operator_sub=operator.sub, path="probe.decided"
+        ),
+        commit=True,
+    )
+    return Response(status_code=204)
+
+
 class _Caller:
-    """The REST caller; tests switch its role."""
+    """The REST caller; tests switch its role, or make it a platform admin."""
 
     def __init__(self) -> None:
         self.role = TenantRole.OPERATOR
         self.sub = "op-rest"
+        self.role_from_platform_admin = False
 
     async def __call__(self) -> Operator:
         structlog.contextvars.bind_contextvars(operator_sub=self.sub, tenant_id=str(_TENANT))
-        return Operator(
+        operator = Operator(
             sub=self.sub,
             name="Rest Caller",
             email=None,
             raw_jwt="<test-jwt>",
             tenant_id=_TENANT,
             tenant_role=self.role,
+            platform_admin=self.role_from_platform_admin,
+            role_from_platform_admin=self.role_from_platform_admin,
         )
+        bind_tenant_role_source(operator)
+        return operator
 
 
 def _rest_client() -> tuple[TestClient, _Caller]:
@@ -620,6 +720,30 @@ async def test_rest_dispatch_keeps_only_the_execution_record(
     assert rows[0].status_code == 200
     assert rows[1].status_code >= 400
     assert len(await read_usage_events()) == 2
+
+
+@pytest.mark.usefixtures("stub_ops")
+async def test_rest_records_of_a_platform_admin_name_the_role_source(
+    rest: tuple[TestClient, _Caller],
+) -> None:
+    """Every record of a platform admin working without a role group carries the marker.
+
+    The dispatcher's row and the wrapper row of a change without its own
+    record both say ``tenant_role_source: platform_admin``, so the record
+    shows where the role came from also with the wrapper rows retired.
+    """
+    client, caller = rest
+    caller.role = TenantRole.TENANT_ADMIN
+    caller.role_from_platform_admin = True
+    assert client.post("/api/v1/operations/call", json=_call_body(_OK_OP)).status_code == 200
+    assert client.post("/api/v1/cutover-probe/things").status_code == 201
+
+    rows = await _audit_rows()
+    assert _shape(rows) == [
+        ("operation_execution", "DISPATCH", _OK_OP),
+        ("operation_execution", "POST", "/api/v1/cutover-probe/things"),
+    ]
+    assert [row.payload["tenant_role_source"] for row in rows] == ["platform_admin"] * 2
 
 
 @pytest.mark.usefixtures("stub_ops")
@@ -911,14 +1035,24 @@ async def _rolled_back_tool_handler(
         raise McpExecutionFailedError(str(exc)) from exc
 
 
-def _register_tool(name: str, handler: Any, *, op_class: str = "write") -> None:
+def _register_tool(
+    name: str,
+    handler: Any,
+    *,
+    op_class: str = "write",
+    properties: dict[str, Any] | None = None,
+) -> None:
     register_mcp_tool(
         ToolDefinition(
             feature=None,
             surface=ToolSurface.WORKING,
             name=name,
             description="Test tool for the wrapper cutover.",
-            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+            inputSchema={
+                "type": "object",
+                "properties": properties or {},
+                "additionalProperties": False,
+            },
             required_role=TenantRole.OPERATOR,
             op_class=op_class,
         ),
@@ -931,9 +1065,17 @@ async def test_mcp_reads_and_validation_failures_write_no_audit_row(
 ) -> None:
     client, _holder = mcp
     _register_tool("test.cutover_read", _write_tool_handler, op_class="read")
+    # A read tool with no arguments ignores extra ones (#4137), so the
+    # schema failure uses a read tool that takes one argument.
+    _register_tool(
+        "test.cutover_read_with_args",
+        _write_tool_handler,
+        op_class="read",
+        properties={"limit": {"type": "integer"}},
+    )
     assert "result" in _tool_call(client, "test.cutover_read", {})
     assert "error" in _tool_call(client, "no_such_tool", {}, 2)
-    assert "error" in _tool_call(client, "test.cutover_read", {"unexpected": 1}, 3)
+    assert "error" in _tool_call(client, "test.cutover_read_with_args", {"limit": "x"}, 3)
     read = post_mcp(
         client,
         {
@@ -1049,17 +1191,8 @@ async def test_mcp_bulk_import_dry_run_is_routine_and_apply_keeps_its_own_record
     assert _shape(await _audit_rows())[-1] == ("policy_decision", "MCP", tool_path)
 
 
-@pytest.mark.usefixtures("cutover_on")
-async def test_mcp_connector_edit_keeps_the_session_and_actor_on_its_own_record() -> None:
-    """A connector edit over MCP stays in its session's replay after the cutover.
-
-    The edit's own record used to leave the agent session, the delegated
-    actor and the request id empty; the wrapper row carried them. After
-    the cutover the record is the only row, so it must carry them itself,
-    and the request's usage event must point at the same request.
-    """
-    op = build_operator(TenantRole.TENANT_ADMIN)
-    session_id = uuid.uuid4()
+async def _seed_inventory_group() -> None:
+    """A staged operation group the connector edit tool can change."""
     async with get_sessionmaker()() as session:
         session.add(
             OperationGroup(
@@ -1076,6 +1209,64 @@ async def test_mcp_connector_edit_keeps_the_session_and_actor_on_its_own_record(
         )
         await session.commit()
 
+
+def _edit_inventory_group(client: TestClient, session_id: uuid.UUID) -> Any:
+    return _tool_call(
+        client,
+        "meho_connector_edit_group",
+        {
+            "connector_id": "vmware-rest-9.0",
+            "group_key": "inventory",
+            "when_to_use": "Use for inventory reads and searches.",
+            "tenant_id": str(_TENANT),
+        },
+        headers={"Mcp-Session-Id": str(session_id)},
+    )
+
+
+@pytest.mark.usefixtures("cutover_on")
+async def test_mcp_connector_edit_by_a_platform_admin_names_the_role_source() -> None:
+    """A connector lifecycle record carries the role-source marker (#5239).
+
+    The connector service builds its own payload and knows only the
+    caller's ``sub``. After the cutover its row is the only record, so
+    the marker must reach it through the request context.
+    """
+    op = _platform_admin_operator()
+
+    async def _verify() -> Operator:
+        structlog.contextvars.bind_contextvars(operator_sub=op.sub, tenant_id=str(op.tenant_id))
+        bind_tenant_role_source(op)
+        return op
+
+    await _seed_inventory_group()
+    production_app.dependency_overrides[verify_mcp_jwt_and_bind] = _verify
+    try:
+        with TestClient(production_app) as client:
+            result = _edit_inventory_group(client, uuid.uuid4())
+            assert "error" not in result, result
+    finally:
+        production_app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+
+    rows = await _audit_rows()
+    assert _shape(rows) == [("operation_execution", "SERVICE", "meho_connector_edit_group")]
+    assert rows[0].operator_sub == op.sub
+    assert rows[0].payload["tenant_role_source"] == "platform_admin"
+
+
+@pytest.mark.usefixtures("cutover_on")
+async def test_mcp_connector_edit_keeps_the_session_and_actor_on_its_own_record() -> None:
+    """A connector edit over MCP stays in its session's replay after the cutover.
+
+    The edit's own record used to leave the agent session, the delegated
+    actor and the request id empty; the wrapper row carried them. After
+    the cutover the record is the only row, so it must carry them itself,
+    and the request's usage event must point at the same request.
+    """
+    op = build_operator(TenantRole.TENANT_ADMIN)
+    session_id = uuid.uuid4()
+    await _seed_inventory_group()
+
     async def _delegated_verify() -> Operator:
         structlog.contextvars.bind_contextvars(
             operator_sub=op.sub, tenant_id=str(op.tenant_id), **{ACTOR_SUB_KEY: "agent:planner"}
@@ -1085,17 +1276,7 @@ async def test_mcp_connector_edit_keeps_the_session_and_actor_on_its_own_record(
     production_app.dependency_overrides[verify_mcp_jwt_and_bind] = _delegated_verify
     try:
         with TestClient(production_app) as client:
-            result = _tool_call(
-                client,
-                "meho_connector_edit_group",
-                {
-                    "connector_id": "vmware-rest-9.0",
-                    "group_key": "inventory",
-                    "when_to_use": "Use for inventory reads and searches.",
-                    "tenant_id": str(_TENANT),
-                },
-                headers={"Mcp-Session-Id": str(session_id)},
-            )
+            result = _edit_inventory_group(client, session_id)
             assert "error" not in result, result
     finally:
         production_app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
@@ -1351,3 +1532,60 @@ async def test_mcp_failed_write_keeps_one_execution_row(
     row_class = "operation_execution" if retired else "legacy_request"
     assert _shape(rows) == [(row_class, "MCP", "/mcp/tools/call/meho_agent_principals_revoke")]
     assert rows[0].status_code == 502
+
+
+# ===========================================================================
+# Audit receipt header (#4976)
+# ===========================================================================
+
+
+def _receipt(response: Any) -> uuid.UUID | None:
+    raw = response.headers.get("meho-audit-id")
+    return None if raw is None else uuid.UUID(raw)
+
+
+async def test_rest_response_names_its_audit_record(retired: bool) -> None:
+    """``Meho-Audit-Id`` names the row ``meho audit query --audit-id`` returns.
+
+    A change with its own record names that record, with or without the
+    cutover (the legacy wrapper row is not the receipt). A change with no
+    record of its own names the wrapper row. A routine read names its
+    legacy row, or nothing after the cutover.
+    """
+    client, caller = _rest_client()
+    recorded = client.post("/api/v1/cutover-probe/recorded")
+    created = client.post("/api/v1/cutover-probe/things")
+    read = client.get(f"/api/v1/operations/groups?connector_id={_CONNECTOR}")
+    assert (recorded.status_code, created.status_code) == (204, 201)
+
+    rows = {row.id: row for row in await _audit_rows()}
+    recorded_row = rows[_receipt(recorded)]
+    assert recorded_row.path == "probe.recorded"
+    assert recorded_row.event_class == "operation_execution"
+    created_row = rows[_receipt(created)]
+    assert (created_row.method, created_row.path) == ("POST", "/api/v1/cutover-probe/things")
+    assert created_row.operator_sub == caller.sub
+    if retired:
+        assert _receipt(read) is None
+    else:
+        assert rows[_receipt(read)].path == "/api/v1/operations/groups"
+
+
+async def test_rest_receipt_prefers_the_execution_row(retired: bool) -> None:
+    """``Meho-Audit-Id`` names the execution row even when a decision row commits first.
+
+    A call a standing grant allows saves its approval decision row before
+    the operation runs. The receipt must name the execution row, the same
+    row as the ``audit_id`` in the response body. With no execution row,
+    the receipt falls back to the first row the request saved.
+    """
+    client, _caller = _rest_client()
+    granted = client.post("/api/v1/cutover-probe/granted")
+    decided = client.post("/api/v1/cutover-probe/decided")
+    assert (granted.status_code, decided.status_code) == (204, 204)
+
+    rows = {row.id: row for row in await _audit_rows()}
+    granted_row = rows[_receipt(granted)]
+    assert (granted_row.path, granted_row.event_class) == ("probe.granted", "operation_execution")
+    decided_row = rows[_receipt(decided)]
+    assert (decided_row.path, decided_row.event_class) == ("probe.decided", "approval_decision")

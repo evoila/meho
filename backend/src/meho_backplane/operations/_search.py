@@ -36,8 +36,15 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.connector_packages import installed_connector_package_names
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
-from meho_backplane.operations._lookup import visible_scope_clause
+from meho_backplane.operations._lookup import (
+    enabled_for_tenant_clause,
+    group_visible_for_tenant_clause,
+    installed_owner_clause,
+    visible_scope_clause,
+)
+from meho_backplane.operations.op_policy import OpKey, effective_policy_map
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RRF_K
 
@@ -61,11 +68,32 @@ _VISIBLE_SCOPE_SQL = """
                  AND owned.version = :version
                  AND owned.impl_id = :impl_id)))"""
 
-# The two candidate queries spell the visible-scope predicate out in full,
-# so each ``text()`` argument is a plain string literal (the
-# ``avoid-sqlalchemy-text`` rule rejects f-strings). ``_VISIBLE_SCOPE_SQL``
-# stays the one canonical copy; ``_assert_scope_inlined`` below fails at
-# import if either query drifts from it.
+# Raw-SQL twin of :func:`~meho_backplane.operations._lookup.installed_owner_clause`:
+# a row written by a connector package that is not installed is hidden (#5037).
+_INSTALLED_OWNER_SQL = """
+          AND (owner_package IS NULL
+               OR owner_package = ANY(CAST(:installed_packages AS text[])))"""
+
+# Raw-SQL twin of :func:`~meho_backplane.operations._lookup.enabled_for_tenant_clause`
+# for the same queries: on a built-in row the tenant's own on/off setting wins
+# over the install default ``is_enabled`` (#5029); a tenant's own row uses its
+# own flag. The queries are already pinned to one connector, so the setting is
+# matched on the bound triple plus the row's ``op_id``.
+_ENABLED_FOR_TENANT_SQL = """
+          AND (CASE WHEN tenant_id IS NULL THEN COALESCE((
+               SELECT setting.enabled FROM tenant_operation_setting setting
+               WHERE setting.tenant_id = :tenant_id
+                 AND setting.product = :product
+                 AND setting.version = :version
+                 AND setting.impl_id = :impl_id
+                 AND setting.op_id = endpoint_descriptor.op_id), is_enabled)
+               ELSE is_enabled END)"""
+
+# The two candidate queries spell the visible-scope, enabled and installed
+# predicates out in full, so each ``text()`` argument is a plain string literal (the
+# ``avoid-sqlalchemy-text`` rule rejects f-strings). ``_VISIBLE_SCOPE_SQL``,
+# ``_ENABLED_FOR_TENANT_SQL`` and ``_INSTALLED_OWNER_SQL`` stay the canonical
+# copies; ``_assert_scope_inlined`` below fails at import if either query drifts.
 _BM25_CANDIDATES_SQL = text(
     """
         SELECT id, ts_rank_cd(
@@ -84,7 +112,16 @@ _BM25_CANDIDATES_SQL = text(
           AND product = :product
           AND version = :version
           AND impl_id = :impl_id
-          AND is_enabled = TRUE
+          AND (CASE WHEN tenant_id IS NULL THEN COALESCE((
+               SELECT setting.enabled FROM tenant_operation_setting setting
+               WHERE setting.tenant_id = :tenant_id
+                 AND setting.product = :product
+                 AND setting.version = :version
+                 AND setting.impl_id = :impl_id
+                 AND setting.op_id = endpoint_descriptor.op_id), is_enabled)
+               ELSE is_enabled END)
+          AND (owner_package IS NULL
+               OR owner_package = ANY(CAST(:installed_packages AS text[])))
           AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
           AND to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(description, ''))
               @@ plainto_tsquery('english', :query)
@@ -108,7 +145,16 @@ _COSINE_CANDIDATES_SQL = text(
           AND product = :product
           AND version = :version
           AND impl_id = :impl_id
-          AND is_enabled = TRUE
+          AND (CASE WHEN tenant_id IS NULL THEN COALESCE((
+               SELECT setting.enabled FROM tenant_operation_setting setting
+               WHERE setting.tenant_id = :tenant_id
+                 AND setting.product = :product
+                 AND setting.version = :version
+                 AND setting.impl_id = :impl_id
+                 AND setting.op_id = endpoint_descriptor.op_id), is_enabled)
+               ELSE is_enabled END)
+          AND (owner_package IS NULL
+               OR owner_package = ANY(CAST(:installed_packages AS text[])))
           AND embedding IS NOT NULL
           AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
         ORDER BY embedding <=> CAST(:emb AS vector)
@@ -118,23 +164,29 @@ _COSINE_CANDIDATES_SQL = text(
 
 
 def _assert_scope_inlined() -> None:
-    """Fail at import if a candidate query no longer holds the scope predicate.
+    """Fail at import if a candidate query no longer holds the scope predicates.
 
     Whitespace is normalised, then each query must contain
-    :data:`_VISIBLE_SCOPE_SQL` word for word. An edit to one copy that is
+    :data:`_VISIBLE_SCOPE_SQL`, :data:`_ENABLED_FOR_TENANT_SQL` and
+    :data:`_INSTALLED_OWNER_SQL` word for word. An edit to one copy that is
     not made to the others is a loud ``AssertionError`` at import, not a
     silent change in which rows a tenant can see.
     """
-    scope = " ".join(_VISIBLE_SCOPE_SQL.split())
-    for name, statement in (
-        ("_BM25_CANDIDATES_SQL", _BM25_CANDIDATES_SQL),
-        ("_COSINE_CANDIDATES_SQL", _COSINE_CANDIDATES_SQL),
+    for canonical_name, canonical in (
+        ("_VISIBLE_SCOPE_SQL", _VISIBLE_SCOPE_SQL),
+        ("_ENABLED_FOR_TENANT_SQL", _ENABLED_FOR_TENANT_SQL),
+        ("_INSTALLED_OWNER_SQL", _INSTALLED_OWNER_SQL),
     ):
-        if scope not in " ".join(str(statement.text).split()):
-            raise AssertionError(
-                f"{name} no longer contains _VISIBLE_SCOPE_SQL word for word; "
-                "keep the inlined predicate identical to it."
-            )
+        predicate = " ".join(canonical.split())
+        for name, statement in (
+            ("_BM25_CANDIDATES_SQL", _BM25_CANDIDATES_SQL),
+            ("_COSINE_CANDIDATES_SQL", _COSINE_CANDIDATES_SQL),
+        ):
+            if predicate not in " ".join(str(statement.text).split()):
+                raise AssertionError(
+                    f"{name} no longer contains {canonical_name} word for word; "
+                    "keep the inlined predicate identical to it."
+                )
 
 
 _assert_scope_inlined()
@@ -167,15 +219,7 @@ async def resolve_group_id(
     hits — :func:`hybrid_search` already filters per-op ``is_enabled``,
     so the resolved staged-group id then yields exactly its enabled ops.
     """
-    has_enabled_op = (
-        select(EndpointDescriptor.id)
-        .where(
-            EndpointDescriptor.group_id == OperationGroup.id,
-            EndpointDescriptor.is_enabled.is_(True),
-        )
-        .exists()
-    )
-    visible = (OperationGroup.review_status == "enabled") | has_enabled_op
+    visible = group_visible_for_tenant_clause(tenant_id=tenant_id)
     result = await session.execute(
         select(OperationGroup.id).where(
             visible_scope_clause(
@@ -255,6 +299,7 @@ async def _hybrid_search_pg(
     ``coalesce(summary, '') || ' ' || coalesce(description, '')``
     expression the ``endpoint_descriptor_bm25_idx`` is built on.
     """
+    installed = sorted(installed_connector_package_names())
     query_embedding = await get_embedding_service().encode_one(query)
     embedding_literal = "[" + ", ".join(f"{x:.7f}" for x in query_embedding) + "]"
 
@@ -267,6 +312,7 @@ async def _hybrid_search_pg(
             "version": version,
             "impl_id": impl_id,
             "group_id": str(group_id) if group_id is not None else None,
+            "installed_packages": installed,
             "limit": CANDIDATE_LIMIT,
         },
     )
@@ -281,6 +327,7 @@ async def _hybrid_search_pg(
             "version": version,
             "impl_id": impl_id,
             "group_id": str(group_id) if group_id is not None else None,
+            "installed_packages": installed,
             "limit": CANDIDATE_LIMIT,
         },
     )
@@ -289,7 +336,7 @@ async def _hybrid_search_pg(
     fused = _rrf_fuse(bm25_rows, cosine_rows, limit=limit)
     if not fused:
         return []
-    return await _hydrate_hits(session, fused)
+    return await _hydrate_hits(session, fused, tenant_id=tenant_id)
 
 
 async def _hybrid_search_fallback(
@@ -323,7 +370,8 @@ async def _hybrid_search_fallback(
             EndpointDescriptor.product == product,
             EndpointDescriptor.version == version,
             EndpointDescriptor.impl_id == impl_id,
-            EndpointDescriptor.is_enabled.is_(True),
+            enabled_for_tenant_clause(tenant_id=tenant_id),
+            installed_owner_clause(),
         )
         .order_by(EndpointDescriptor.op_id)
         .limit(CANDIDATE_LIMIT)
@@ -360,7 +408,7 @@ async def _hybrid_search_fallback(
     fused = _rrf_fuse(bm25_rows, cosine_rows, limit=limit)
     if not fused:
         return []
-    return await _hydrate_hits(session, fused)
+    return await _hydrate_hits(session, fused, tenant_id=tenant_id)
 
 
 class _FallbackRow:
@@ -444,8 +492,14 @@ def _coerce_uuid(value: Any) -> uuid.UUID:
 async def _hydrate_hits(
     session: AsyncSession,
     fused: list[_FusedEntry],
+    *,
+    tenant_id: uuid.UUID,
 ) -> list[OperationSearchHit]:
-    """Bulk-fetch full descriptor rows + group_key for the fused top-N entries."""
+    """Bulk-fetch full descriptor rows + group_key for the fused top-N entries.
+
+    Each hit shows the risk level and approval that apply to *tenant_id*,
+    with the operator overrides (#4711) — the same values a call uses.
+    """
     from meho_backplane.operations.meta_tools import OperationSearchHit
 
     descriptor_ids = [e.descriptor_id for e in fused]
@@ -458,6 +512,9 @@ async def _hydrate_hits(
     by_id: dict[uuid.UUID, tuple[EndpointDescriptor, str | None]] = {
         descriptor.id: (descriptor, group_key) for descriptor, group_key in rows
     }
+    policies = await effective_policy_map(
+        session, tenant_id=tenant_id, rows=[descriptor for descriptor, _ in by_id.values()]
+    )
     hits: list[OperationSearchHit] = []
     for entry in fused:
         pair = by_id.get(entry.descriptor_id)
@@ -466,14 +523,15 @@ async def _hydrate_hits(
             # rather than fail; the caller's hit list shortens by one.
             continue
         descriptor, group_key = pair
+        policy = policies[OpKey.of(descriptor)]
         hits.append(
             OperationSearchHit(
                 op_id=descriptor.op_id,
                 summary=descriptor.summary,
                 description=descriptor.description,
                 group_key=group_key,
-                safety_level=descriptor.safety_level,
-                requires_approval=descriptor.requires_approval,
+                safety_level=policy.safety_level,
+                requires_approval=policy.requires_approval,
                 fused_score=entry.fused_score,
                 bm25_score=entry.bm25_score,
                 cosine_score=entry.cosine_score,

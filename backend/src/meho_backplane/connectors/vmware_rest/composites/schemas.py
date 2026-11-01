@@ -88,13 +88,20 @@ __all__ = [
     "DATASTORE_DIR_CREATE_RESPONSE_SCHEMA",
     "DATASTORE_FILE_DELETE_PARAMETER_SCHEMA",
     "DATASTORE_FILE_DELETE_RESPONSE_SCHEMA",
+    "DATASTORE_FILE_LIST_PARAMETER_SCHEMA",
+    "DATASTORE_FILE_LIST_RESPONSE_SCHEMA",
     "DATASTORE_MOID_PATTERN",
+    "DATASTORE_ORPHAN_DIRS_PARAMETER_SCHEMA",
+    "DATASTORE_ORPHAN_DIRS_RESPONSE_SCHEMA",
     "DATASTORE_PATH_PATTERN",
     "DATASTORE_REFRESH_PARAMETER_SCHEMA",
     "DATASTORE_REFRESH_RESPONSE_SCHEMA",
     "DATASTORE_USAGE_MAX_VM_NAMES",
     "DATASTORE_USAGE_PARAMETER_SCHEMA",
     "DATASTORE_USAGE_RESPONSE_SCHEMA",
+    "DATASTORE_VSAN_FOLDER_LIST_PARAMETER_SCHEMA",
+    "DATASTORE_VSAN_FOLDER_LIST_RESPONSE_SCHEMA",
+    "DVS_MOID_PATTERN",
     "EVENT_TAIL_PARAMETER_SCHEMA",
     "EVENT_TAIL_RESPONSE_SCHEMA",
     "FOLDER_CREATE_PARAMETER_SCHEMA",
@@ -183,7 +190,15 @@ __all__ = [
     "VM_SNAPSHOT_MOID_PATTERN",
     "VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA",
     "VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA",
+    "VSAN_FOLDER_PATTERN",
 ]
+
+
+#: vCenter content-library and item ids are UUIDs. Nothing else is accepted,
+#: so an id can never point a REST path at another object.
+CONTENT_LIBRARY_ID_PATTERN: str = (
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 
 #: The ``issues`` field a write composite adds when it did not complete (#3813).
@@ -561,6 +576,157 @@ DATASTORE_REFRESH_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["datastore", "refreshed", "storage_info_refreshed", "summary"],
+}
+
+
+#: ``vmware.composite.datastore.file.list`` parameter schema (#3432).
+#:
+#: One folder of one datastore, by datastore name. ``path`` is relative to
+#: the datastore root (empty = the root); the handler also refuses ``.`` /
+#: ``..`` segments and empty segments.
+DATASTORE_FILE_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "datastore": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "description": (
+                "Datastore name, e.g. 'datastore1'. On vCenter a moid such as "
+                "'datastore-17' also works (use it when two datastores share a name)."
+            ),
+        },
+        "path": {
+            "type": "string",
+            "maxLength": 1024,
+            "pattern": r"^[^\\\[\]*?\x00-\x1f\x7f]*$",
+            "default": "",
+            "description": (
+                "Folder relative to the datastore root, e.g. 'iso' or 'images/esxi'. "
+                "Empty (the default) lists the root."
+            ),
+        },
+        "pattern": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": r"^[^/\\\x00-\x1f\x7f]+$",
+            "description": (
+                "Optional file name pattern, e.g. '*.iso' or 'ks-host??.iso' "
+                "('*' and '?' are wildcards). Leave it out to list everything."
+            ),
+        },
+        "include_usage": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "When true, also sum each folder (size of all files below it, file "
+                "count, latest change) and name the registered VMs that use each "
+                "entry. Slower: it reads the whole folder tree and the VMs of the "
+                "datastore."
+            ),
+        },
+    },
+    "required": ["datastore"],
+    "additionalProperties": False,
+    "examples": [{"datastore": "datastore1", "path": "iso", "pattern": "*.iso"}],
+}
+
+
+#: ``vmware.composite.datastore.file.list`` response schema (#3432).
+DATASTORE_FILE_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "ok",
+                "not_found",
+                "ambiguous",
+                "invalid_request",
+                "unsupported_host_target",
+            ],
+            "description": (
+                "ok: entries holds the folder. not_found: no such datastore or folder. "
+                "ambiguous: two datastores share the name. invalid_request: a bad "
+                "path or pattern. unsupported_host_target: the target is not a "
+                "vCenter or an ESXi host. Each one but ok has guidance."
+            ),
+        },
+        "datastore": {"type": "string", "description": "Datastore name."},
+        "datastore_moid": {"type": ["string", "null"], "description": "Datastore moid."},
+        "datastore_type": {
+            "type": ["string", "null"],
+            "description": "Datastore type, e.g. VMFS, NFS, NFS41, vsan.",
+        },
+        "path": {"type": "string", "description": "The listed folder (relative)."},
+        "datastore_path": {
+            "type": ["string", "null"],
+            "description": "The listed folder as '[datastore] path'.",
+        },
+        "pattern": {"type": ["string", "null"], "description": "The file name pattern used."},
+        "count": {"type": "integer", "description": "Number of entries."},
+        "entries": {
+            "type": "array",
+            "description": "One row per file or folder directly in the listed folder.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "path": {
+                        "type": "string",
+                        "description": "Path relative to the datastore root.",
+                    },
+                    "kind": {"type": "string", "enum": ["file", "folder"]},
+                    "file_type": {
+                        "type": ["string", "null"],
+                        "description": "vSphere file type, e.g. IsoImageFileInfo, FolderFileInfo.",
+                    },
+                    "size_bytes": {
+                        "type": ["integer", "null"],
+                        "description": (
+                            "File size. For a folder: null, or with include_usage the "
+                            "size of all files below it."
+                        ),
+                    },
+                    "modified": {
+                        "type": ["string", "null"],
+                        "description": "Last change (ISO 8601).",
+                    },
+                    "file_count": {
+                        "type": "integer",
+                        "description": "include_usage, folders only: files below the folder.",
+                    },
+                    "latest_modified": {
+                        "type": ["string", "null"],
+                        "description": "include_usage, folders only: newest file change below.",
+                    },
+                    "vms": {
+                        "type": ["array", "null"],
+                        "items": {"type": "string"},
+                        "description": (
+                            "include_usage only: names of registered VMs that use a "
+                            "file at or below this path; null when not checked."
+                        ),
+                    },
+                },
+                "required": ["name", "path", "kind", "file_type", "size_bytes", "modified"],
+                "additionalProperties": False,
+            },
+        },
+        "vm_check": {
+            "type": ["string", "null"],
+            "enum": ["complete", "incomplete", "not_supported", None],
+            "description": (
+                "include_usage only. complete: vms is exact. incomplete: vSphere "
+                "answered only in part, so vms may miss a VM. not_supported: vSAN / "
+                "vVol datastore, vms not checked. null: include_usage was false."
+            ),
+        },
+        "guidance": {"type": ["string", "null"], "description": "Why the status is not ok."},
+    },
+    "required": ["status", "datastore", "path", "count", "entries"],
+    "additionalProperties": True,
 }
 
 
@@ -1390,9 +1556,9 @@ VM_CLONE_PARAMETER_SCHEMA: dict[str, Any] = {
         },
         "library_item": {
             "type": "string",
-            "minLength": 1,
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
             "description": (
-                "Content-library template item id. Rides the deploy path as "
+                "Content-library template item id (a UUID). Rides the deploy path as "
                 "``POST:/vcenter/vm-template/library-items/"
                 "{templateLibraryItem}?action=deploy``."
             ),
@@ -1404,7 +1570,7 @@ VM_CLONE_PARAMETER_SCHEMA: dict[str, Any] = {
         {
             "source_vm": "vm-42",
             "target_name": "<new-vm-name>",
-            "library_item": "<template-library-item-id>",
+            "library_item": "00000000-0000-0000-0000-000000000000",
         }
     ],
 }
@@ -1847,6 +2013,12 @@ HOST_MAINTENANCE_EXIT_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: Distributed switch moids, e.g. ``dvs-31``. A switch name does not match.
+DVS_MOID_PATTERN: str = r"^dvs-[0-9]+$"
+#: Distributed portgroup moids, e.g. ``dvportgroup-42``. A portgroup name does not match.
+PORTGROUP_MOID_PATTERN: str = r"^dvportgroup-[0-9]+$"
+
+
 #: ``vmware.composite.host.detach_from_vds`` parameter schema.
 #:
 #: Per-VM NIC migration off the DVS, then DVS host-detach. Refuses to
@@ -1862,8 +2034,10 @@ HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA: dict[str, Any] = {
         "dvs": {
             "type": "string",
             "minLength": 1,
+            "pattern": DVS_MOID_PATTERN,
             "description": (
-                "DVS moid the host is currently attached to. Required to scope the portgroup query."
+                "Distributed switch moid the host is attached to, like 'dvs-31'. "
+                "Not the name. Read the id with vmware.composite.network.portgroup.audit."
             ),
         },
         "fallback_network": {
@@ -2133,7 +2307,8 @@ CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "minLength": 1,
             "description": (
                 "Name of the ClusterVmGroup to create for the rule's VMs. Group names are "
-                "unique within a cluster — a clash returns ``status='group_exists'``."
+                "unique within a cluster — a clash returns ``status='group_exists'``. With "
+                "``use_existing_groups=true``: the name of a VM group that already exists."
             ),
         },
         "host_group_name": {
@@ -2141,7 +2316,18 @@ CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "minLength": 1,
             "description": (
                 "Name of the ClusterHostGroup to create for the rule's hosts. Group names are "
-                "unique within a cluster — a clash returns ``status='group_exists'``."
+                "unique within a cluster — a clash returns ``status='group_exists'``. With "
+                "``use_existing_groups=true``: the name of a host group that already exists."
+            ),
+        },
+        "use_existing_groups": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "``false`` (default): create both groups from ``vms`` and ``hosts``. ``true``: "
+                "create no group; put the rule on the VM group and host group that already "
+                "exist (leave out ``vms`` and ``hosts``). A missing group returns "
+                "``status='group_not_found'``."
             ),
         },
         "vms": {
@@ -2184,7 +2370,26 @@ CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": "Whether the rule is enabled on creation. Defaults to true.",
         },
     },
-    "required": ["cluster", "rule_name", "vm_group_name", "host_group_name", "vms", "hosts"],
+    "required": ["cluster", "rule_name", "vm_group_name", "host_group_name"],
+    # New groups need vms + hosts; existing groups take neither.
+    "oneOf": [
+        {
+            "required": ["vms", "hosts"],
+            "properties": {
+                "use_existing_groups": {
+                    "const": False,
+                    "description": "New groups: false or left out.",
+                }
+            },
+        },
+        {
+            "required": ["use_existing_groups"],
+            "properties": {
+                "use_existing_groups": {"const": True, "description": "Existing groups: true."}
+            },
+            "not": {"anyOf": [{"required": ["vms"]}, {"required": ["hosts"]}]},
+        },
+    ],
     "additionalProperties": False,
     "examples": [
         {
@@ -2196,7 +2401,14 @@ CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "hosts": ["<host-name>"],
             "affine": True,
             "mandatory": False,
-        }
+        },
+        {
+            "cluster": "domain-c7",
+            "rule_name": "<rule-name>",
+            "vm_group_name": "<existing-vm-group>",
+            "host_group_name": "<existing-host-group>",
+            "use_existing_groups": True,
+        },
     ],
 }
 
@@ -2428,11 +2640,10 @@ NETWORK_PORTGROUP_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
         "vds": {
             "type": "string",
             "minLength": 1,
+            "pattern": DVS_MOID_PATTERN,
             "description": (
-                "DistributedVirtualSwitch moid the portgroup is created on (e.g. "
-                "'dvs-16'). There is no portgroup/switch REST list to resolve a "
-                "display name against, so the moid is passed directly — obtain it "
-                "from the networking group's portgroup.audit read."
+                "Distributed switch moid the portgroup is created on, like 'dvs-31'. "
+                "Not the name. Read the id with vmware.composite.network.portgroup.audit."
             ),
         },
         "name": {
@@ -2526,10 +2737,10 @@ NETWORK_PORTGROUP_SECURITY_SET_PARAMETER_SCHEMA: dict[str, Any] = {
         "portgroup": {
             "type": "string",
             "minLength": 1,
+            "pattern": PORTGROUP_MOID_PATTERN,
             "description": (
-                "DistributedVirtualPortgroup moid whose security policy is set "
-                "(e.g. 'dvportgroup-42'). Obtain it from the networking group's "
-                "portgroup.audit read."
+                "Distributed portgroup moid whose security policy is set, like 'dvportgroup-42'. "
+                "Not the name. Read the id with vmware.composite.network.portgroup.audit."
             ),
         },
         "allow_promiscuous": {
@@ -2589,10 +2800,10 @@ NETWORK_PORTGROUP_VLAN_SET_PARAMETER_SCHEMA: dict[str, Any] = {
         "portgroup": {
             "type": "string",
             "minLength": 1,
+            "pattern": PORTGROUP_MOID_PATTERN,
             "description": (
-                "DistributedVirtualPortgroup moid whose VLAN config is set (e.g. "
-                "'dvportgroup-42'). Obtain it from the networking group's "
-                "portgroup.audit read."
+                "Distributed portgroup moid whose VLAN config is set, like 'dvportgroup-42'. "
+                "Not the name. Read the id with vmware.composite.network.portgroup.audit."
             ),
         },
         "vlan_trunk_ranges": {
@@ -3556,6 +3767,7 @@ CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "created",
                 "rule_exists",
                 "group_exists",
+                "group_not_found",
                 "insufficient_vms",
                 "insufficient_hosts",
                 "timeout",
@@ -3564,6 +3776,8 @@ CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "``'created'`` — the ReconfigureComputeResource_Task add reached terminal "
                 "success; ``'rule_exists'`` / ``'group_exists'`` — the rule or a group name is "
                 "already present (idempotence keys; refused before any write); "
+                "``'group_not_found'`` — with ``use_existing_groups=true``, the VM group or "
+                "host group does not exist (refused before any write); "
                 "``'insufficient_vms'`` / ``'insufficient_hosts'`` — none of the requested VM / "
                 "host names resolved in the cluster (refused before any write); ``'timeout'`` — "
                 "the reconfigure task did not reach a terminal state within the poll bound."
@@ -3571,8 +3785,14 @@ CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "cluster": {"type": "string", "description": "ClusterComputeResource moid."},
         "rule_name": {"type": "string", "description": "Name of the rule."},
-        "vm_group_name": {"type": "string", "description": "Name of the created VM group."},
-        "host_group_name": {"type": "string", "description": "Name of the created host group."},
+        "vm_group_name": {
+            "type": "string",
+            "description": "Name of the VM group (new, or existing).",
+        },
+        "host_group_name": {
+            "type": "string",
+            "description": "Name of the host group (new, or existing).",
+        },
         "affine": {
             "type": "boolean",
             "description": (
@@ -4868,9 +5088,9 @@ VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "library_item": {
             "type": "string",
-            "minLength": 1,
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
             "description": (
-                "Content-library OVF/OVA item id (passthrough). Rides the deploy "
+                "Content-library OVF/OVA item id (a UUID). Rides the deploy "
                 "path as ``POST:/vcenter/ovf/library-item/{ovfLibraryItemId}"
                 "?action=deploy``. Give exactly one of ``library_item`` and "
                 "``library_item_name``; both or neither is refused before the call."
@@ -5160,9 +5380,9 @@ VM_IMPORT_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "library_item": {
             "type": "string",
-            "minLength": 1,
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
             "description": (
-                "Content-library OVF/OVA item id (passthrough). Give exactly one of "
+                "Content-library OVF/OVA item id (a UUID). Give exactly one of "
                 "``library_item`` and ``library_item_name``; both or neither is "
                 "refused before the call."
             ),
@@ -5274,7 +5494,7 @@ VM_IMPORT_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "examples": [
         {
-            "library_item": "<ovf-library-item-id>",
+            "library_item": "00000000-0000-0000-0000-000000000000",
             "resource_pool": "resgroup-8",
             "datastore": "datastore-15",
             "name": "<vm-name>",
@@ -5365,11 +5585,15 @@ VM_IMPORT_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
                         "description": "Lease device id the file went to.",
                     },
                     "size_bytes": {"type": "integer", "description": "Bytes sent."},
+                    "sha256": {
+                        "type": "string",
+                        "description": "SHA-256 (hex) of the bytes sent.",
+                    },
                 },
             },
             "description": (
-                "Per-disk transfer manifest ``{path, device_id, size_bytes}`` for the "
-                "files streamed to the lease. Empty unless ``status='deployed'``."
+                "Per-disk transfer manifest ``{path, device_id, size_bytes, sha256}`` for "
+                "the files streamed to the lease. Empty unless ``status='deployed'``."
             ),
         },
         "candidates": {
@@ -6089,7 +6313,8 @@ GUEST_ENV_READ_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": (
                 "Guest environment as ``NAME=value`` strings (whole environment "
-                "when ``names`` was omitted, else the requested names). "
+                "when ``names`` was omitted, else the requested names). The "
+                "value part is hidden unless a person passed ``reveal_secret``. "
                 "Set-shaped -- JSONFlux-wrapped over threshold."
             ),
         },
@@ -7579,9 +7804,9 @@ CONTENT_LIBRARY_SUBSCRIBED_SYNC_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "library_id": {
             "type": "string",
-            "minLength": 1,
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
             "description": (
-                "Subscribed-library id to synchronise. Supply this **or** "
+                "Subscribed-library id (a UUID) to synchronise. Supply this **or** "
                 "``library_name``; ``library_id`` wins when both are present."
             ),
         },
@@ -7651,9 +7876,9 @@ CONTENT_LIBRARY_SUBSCRIBED_STATUS_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "library_id": {
             "type": "string",
-            "minLength": 1,
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
             "description": (
-                "Subscribed-library id to read. Supply this **or** "
+                "Subscribed-library id (a UUID) to read. Supply this **or** "
                 "``library_name``; ``library_id`` wins when both are present."
             ),
         },
@@ -7767,9 +7992,9 @@ CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "library_id": {
             "type": "string",
-            "minLength": 1,
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
             "description": (
-                "Subscribed-library id whose items to list. Supply this **or** "
+                "Subscribed-library id (a UUID) whose items to list. Supply this **or** "
                 "``library_name``; ``library_id`` wins when both are present."
             ),
         },
@@ -8063,7 +8288,6 @@ DATASTORE_PATH_PATTERN: str = (
 
 #: Moid / id shapes shared by the teardown schemas and their handlers.
 DATASTORE_MOID_PATTERN: str = r"^datastore-[0-9]+$"
-PORTGROUP_MOID_PATTERN: str = r"^dvportgroup-[0-9]+$"
 HOST_MOID_PATTERN: str = r"^host-[0-9]+$"
 #: Cluster (``ClusterComputeResource``) moids, e.g. ``domain-c7``.
 CLUSTER_MOID_PATTERN: str = r"^domain-c[0-9]+$"
@@ -8071,11 +8295,6 @@ CLUSTER_MOID_PATTERN: str = r"^domain-c[0-9]+$"
 #: ``group-n`` network, ``group-d`` datacenter folders). ``group-p`` is a
 #: datastore cluster and is not accepted.
 FOLDER_MOID_PATTERN: str = r"^group-[a-oq-z][0-9]+$"
-#: vCenter content-library and item ids are UUIDs. Nothing else is accepted,
-#: so an id can never point a REST path at another object.
-CONTENT_LIBRARY_ID_PATTERN: str = (
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-)
 
 _TEARDOWN_OBJECT_SCHEMA: dict[str, Any] = {
     "type": ["object", "null"],
@@ -8371,6 +8590,178 @@ CLUSTER_DRS_RULE_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_sch
     },
 )
 
+_DRS_GROUP_NAME_PARAM: dict[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "description": "Exact name of an existing DRS VM group or host group on the cluster.",
+}
+
+_DRS_MEMBER_NAMES_PARAM: dict[str, Any] = {
+    "type": "array",
+    "items": {"type": "string", "minLength": 1},
+    "minItems": 1,
+    "uniqueItems": True,
+}
+
+_DRS_MEMBER_ROWS: dict[str, Any] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "moid": {"type": "string", "description": "VM or host moid."},
+            "name": {"type": ["string", "null"], "description": "VM or host name."},
+        },
+    },
+}
+
+_DRS_GROUP_RULES: dict[str, Any] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "description": "Always ``drs_rule``."},
+            "name": {"type": ["string", "null"], "description": "Rule name."},
+            "key": {"type": ["integer", "null"], "description": "Rule key (vim ``key``)."},
+            "rule_type": {"type": ["string", "null"], "description": "Type of the rule."},
+        },
+    },
+}
+
+#: ``vmware.composite.cluster.drs_group.members.set`` parameter schema.
+CLUSTER_DRS_GROUP_MEMBERS_SET_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "string",
+            "pattern": CLUSTER_MOID_PATTERN,
+            "description": "Cluster moid, e.g. 'domain-c7' (the cluster the group is on).",
+        },
+        "group_name": _DRS_GROUP_NAME_PARAM,
+        "add": {
+            **_DRS_MEMBER_NAMES_PARAM,
+            "description": (
+                "Names to add: VM names for a VM group, host names for a host group. Each "
+                "must be in the cluster, or nothing changes (``names_not_found``)."
+            ),
+        },
+        "remove": {
+            **_DRS_MEMBER_NAMES_PARAM,
+            "description": (
+                "Names to remove. A name that is not in the group is skipped and listed "
+                "under ``not_members``."
+            ),
+        },
+    },
+    "required": ["cluster", "group_name"],
+    "anyOf": [{"required": ["add"]}, {"required": ["remove"]}],
+    "additionalProperties": False,
+    "examples": [
+        {"cluster": "domain-c7", "group_name": "<vm-group-name>", "add": ["<vm-name>"]},
+        {"cluster": "domain-c7", "group_name": "<host-group-name>", "remove": ["<host-name>"]},
+    ],
+}
+
+#: ``vmware.composite.cluster.drs_group.members.set`` response schema.
+CLUSTER_DRS_GROUP_MEMBERS_SET_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "updated",
+                "unchanged",
+                "invalid_request",
+                "group_not_found",
+                "names_not_found",
+                "mismatch",
+                "timeout",
+            ],
+            "description": (
+                "``'updated'`` -- the change ran and the group reads back with the new "
+                "members; ``'unchanged'`` -- nothing to change, nothing written; "
+                "``'invalid_request'`` -- a bad or unknown cluster, or a name in both lists; "
+                "``'group_not_found'`` -- no VM or host group has that name; "
+                "``'names_not_found'`` -- a name to add is not in the cluster (see "
+                "``not_found``); ``'mismatch'`` -- the task succeeded but the members read back "
+                "differently; ``'timeout'`` -- the task outran the poll bound. Only "
+                "``updated``, ``mismatch`` and ``timeout`` wrote anything. A vSphere fault is "
+                "not a status: the call fails."
+            ),
+        },
+        "cluster": {"type": "string", "description": "Cluster moid."},
+        "cluster_name": {"type": ["string", "null"], "description": "Cluster name."},
+        "group_name": {"type": "string", "description": "Group name."},
+        "group_kind": {"type": "string", "enum": ["vm", "host"], "description": "Group kind."},
+        "rules": {**_DRS_GROUP_RULES, "description": "The rules that use this group."},
+        "members_before": {**_DRS_MEMBER_ROWS, "description": "Every member before the change."},
+        "member_count_before": {"type": "integer", "description": "Number of members before."},
+        "added": {**_DRS_MEMBER_ROWS, "description": "Members that are added."},
+        "removed": {**_DRS_MEMBER_ROWS, "description": "Members that are removed."},
+        "already_members": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Names to add that were already in the group.",
+        },
+        "not_members": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Names to remove that were not in the group (skipped).",
+        },
+        "not_found": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Names to add that are not in the cluster.",
+        },
+        "member_count_after": {"type": "integer", "description": "Planned number of members."},
+        "members": {
+            **_DRS_MEMBER_ROWS,
+            "description": "Every member as read back after the change.",
+        },
+        "task": {"type": ["string", "null"], "description": "vim Task moid, when one ran."},
+        "task_state": {"type": ["string", "null"], "description": "Terminal task state."},
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["status", "cluster", "group_name"],
+}
+
+#: ``vmware.composite.cluster.drs_group.delete`` parameter schema.
+CLUSTER_DRS_GROUP_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "string",
+            "pattern": CLUSTER_MOID_PATTERN,
+            "description": "Cluster moid, e.g. 'domain-c7' (the cluster the group is on).",
+        },
+        "group_name": _DRS_GROUP_NAME_PARAM,
+    },
+    "required": ["cluster", "group_name"],
+    "additionalProperties": False,
+    "examples": [{"cluster": "domain-c7", "group_name": "<group-name>"}],
+}
+
+#: ``vmware.composite.cluster.drs_group.delete`` response schema.
+CLUSTER_DRS_GROUP_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
+    ["deleted", "unchanged", "invalid_request", "precondition_failed", "still_present", "timeout"],
+    _DELETE_STATUS_COMMON
+    + " Here ``'precondition_failed'`` means a rule still uses the group (see "
+    "``blockers``). ``'invalid_request'`` -- the cluster moid does not exist. ``'timeout'`` "
+    "-- ReconfigureComputeResource_Task outran the poll bound.",
+    object_properties={
+        "kind": {"type": "string", "description": "Always ``drs_group``."},
+        "cluster": {"type": "string", "description": "Cluster moid."},
+        "cluster_name": {"type": ["string", "null"], "description": "Cluster name."},
+        "name": {"type": "string", "description": "Group name."},
+        "group_kind": {
+            "type": ["string", "null"],
+            "description": "``vm`` or ``host``; another vim group type by its type name.",
+        },
+        "members": {**_DRS_MEMBER_ROWS, "description": "Every member; they stay."},
+        "member_count": {"type": "integer", "description": "Number of members."},
+    },
+    blocker_properties=_DRS_GROUP_RULES["items"]["properties"],
+)
+
 _DATASTORE_MOID_PARAM: dict[str, Any] = {
     "type": "string",
     "pattern": DATASTORE_MOID_PATTERN,
@@ -8449,6 +8840,266 @@ DATASTORE_FILE_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schem
         },
     },
 )
+
+#: A folder on a vSAN datastore, relative to the root (#4022): one or more
+#: non-empty segments split by ``/``; no segment is ``.`` or ``..`` or holds
+#: wildcards, brackets, a backslash or control characters. A read, so the
+#: system-folder rules of :data:`DATASTORE_PATH_PATTERN` do not apply.
+_VSAN_SEGMENT = r"(?!\.\.?(?:/|$))[^/\\\[\]*?\x00-\x1f\x7f]+"
+VSAN_FOLDER_PATTERN: str = "^" + _VSAN_SEGMENT + "(?:/" + _VSAN_SEGMENT + ")*$"
+
+#: ``vmware.composite.datastore.vsan.folder.list`` parameter schema (#4022).
+DATASTORE_VSAN_FOLDER_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "datastore": _DATASTORE_MOID_PARAM,
+        "folder": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "pattern": VSAN_FOLDER_PATTERN,
+            "description": (
+                "Leave it out to list the top-level folders. Give a folder (its friendly "
+                "name or its UUID path from that list, e.g. 'my-vm') to list the files in it."
+            ),
+        },
+    },
+    "required": ["datastore"],
+    "additionalProperties": False,
+    "examples": [
+        {"datastore": "datastore-17"},
+        {"datastore": "datastore-17", "folder": "<vm-folder-name>"},
+    ],
+}
+
+#: ``vmware.composite.datastore.vsan.folder.list`` response schema (#4022).
+DATASTORE_VSAN_FOLDER_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["ok", "absent", "not_found", "invalid_request"],
+            "description": (
+                "ok: entries holds the list. absent: the folder does not exist (the answer "
+                "after a delete). not_found: no such datastore. invalid_request: bad input, "
+                "or the datastore is not vSAN. Each one but ok has guidance."
+            ),
+        },
+        "datastore": {"type": ["string", "null"], "description": "Datastore moid from the call."},
+        "datastore_name": {"type": ["string", "null"], "description": "Datastore name."},
+        "datastore_type": {"type": ["string", "null"], "description": "Datastore type."},
+        "folder": {"type": ["string", "null"], "description": "The folder from the call."},
+        "datastore_path": {
+            "type": ["string", "null"],
+            "description": "The listed folder as '[datastore] folder'.",
+        },
+        "count": {"type": "integer", "description": "Number of entries."},
+        "entries": {
+            "type": "array",
+            "description": (
+                "Without folder: one row per top-level folder (name, uuid_path, "
+                "datastore_path, size_bytes, file_count, modified, vms). With folder: one row "
+                "per entry in it (name, kind, file_type, size_bytes, modified)."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Friendly name of a top-level folder, or the entry name.",
+                    },
+                    "uuid_path": {
+                        "type": "string",
+                        "description": "Top-level folder: the path vCenter uses (a UUID on vSAN).",
+                    },
+                    "datastore_path": {
+                        "type": "string",
+                        "description": "Top-level folder: '[datastore] <uuid_path>'.",
+                    },
+                    "kind": {"type": "string", "enum": ["file", "folder"]},
+                    "file_type": {
+                        "type": ["string", "null"],
+                        "description": "vSphere file type, e.g. VmDiskFileInfo, FolderFileInfo.",
+                    },
+                    "size_bytes": {
+                        "type": ["integer", "null"],
+                        "description": (
+                            "File size; for a top-level folder the size of all files below "
+                            "it; null for a folder inside a listed folder."
+                        ),
+                    },
+                    "file_count": {
+                        "type": "integer",
+                        "description": "Top-level folder: number of files below it.",
+                    },
+                    "modified": {
+                        "type": ["string", "null"],
+                        "description": "Last change (ISO 8601); for a top-level folder the latest.",
+                    },
+                    "vms": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Top-level folder: names of the registered VMs that use a file "
+                            "below it (empty when none)."
+                        ),
+                    },
+                },
+                "required": ["name", "size_bytes", "modified"],
+                "additionalProperties": False,
+            },
+        },
+        "vm_check": {
+            "type": ["string", "null"],
+            "enum": ["complete", "incomplete", None],
+            "description": (
+                "Top-level list only. complete: vms is exact. incomplete: vCenter answered "
+                "only in part, so vms may miss a VM. null: a folder was listed."
+            ),
+        },
+        "guidance": {"type": ["string", "null"], "description": "Why the status is not ok."},
+    },
+    "required": ["status", "datastore", "count", "entries"],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.datastore.orphan_dirs`` parameter schema (#3814).
+DATASTORE_ORPHAN_DIRS_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "datastores": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1, "maxLength": 255},
+            "minItems": 1,
+            "maxItems": 200,
+            "uniqueItems": True,
+            "description": (
+                "Optional datastore names (exact match). Leave it out to check every "
+                "datastore the vCenter sees. A name that does not exist is listed in skipped."
+            ),
+        },
+    },
+    "required": [],
+    "additionalProperties": False,
+    "examples": [{}, {"datastores": ["<datastore-name>"]}],
+}
+
+#: ``vmware.composite.datastore.orphan_dirs`` response schema (#3814).
+DATASTORE_ORPHAN_DIRS_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["ok", "unsupported_host_target"],
+            "description": (
+                "ok: directories holds the rows. unsupported_host_target: the target is not "
+                "a vCenter (see guidance)."
+            ),
+        },
+        "target_product": {
+            "type": ["string", "null"],
+            "description": "With unsupported_host_target: the product the target reports.",
+        },
+        "datastore_count": {
+            "type": "integer",
+            "description": "Number of datastores that were read (not counting skipped ones).",
+        },
+        "count": {"type": "integer", "description": "Number of rows in directories."},
+        "orphan_count": {"type": "integer", "description": "Rows with classification orphan."},
+        "system_count": {"type": "integer", "description": "Rows with classification system."},
+        "claimed_count": {"type": "integer", "description": "Rows with classification claimed."},
+        "vm_check": {
+            "type": ["string", "null"],
+            "enum": ["complete", "incomplete", None],
+            "description": (
+                "complete: claimed_by is exact. incomplete: vCenter answered only in part, or "
+                "the files of a VM could not be read, so an orphan row may still be in use. "
+                "null: nothing was read (refusal)."
+            ),
+        },
+        "directories": {
+            "type": "array",
+            "description": "One row per top-level datastore folder, newest change first.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "datastore": {"type": "string", "description": "Datastore name."},
+                    "datastore_moid": {"type": "string", "description": "Datastore moid."},
+                    "folder": {
+                        "type": "string",
+                        "description": "Folder name (on vSAN the friendly name).",
+                    },
+                    "datastore_path": {
+                        "type": "string",
+                        "description": (
+                            "'[datastore] folder' as vCenter names it (on vSAN with the UUID)."
+                        ),
+                    },
+                    "size_bytes": {
+                        "type": "integer",
+                        "description": (
+                            "Size of the files directly inside the folder; sub-folders not counted."
+                        ),
+                    },
+                    "file_count": {
+                        "type": "integer",
+                        "description": (
+                            "Number of files directly inside the folder; sub-folders not counted."
+                        ),
+                    },
+                    "newest_modified": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "Latest change of the folder or a file directly inside it (ISO 8601)."
+                        ),
+                    },
+                    "classification": {
+                        "type": "string",
+                        "enum": ["orphan", "system", "claimed"],
+                        "description": (
+                            "claimed: a registered VM or template uses a file in it. system: "
+                            "a folder vSphere keeps for itself. orphan: no VM registered in "
+                            "this vCenter uses it -- a candidate to review, not to delete."
+                        ),
+                    },
+                    "claimed_by": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Names of the registered VMs that use the folder.",
+                    },
+                },
+                "required": [
+                    "datastore",
+                    "datastore_moid",
+                    "folder",
+                    "datastore_path",
+                    "size_bytes",
+                    "file_count",
+                    "newest_modified",
+                    "classification",
+                    "claimed_by",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        "skipped": {
+            "type": "array",
+            "description": "Datastores that were not read, each with the reason.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "datastore": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["datastore", "reason"],
+                "additionalProperties": False,
+            },
+        },
+        "guidance": {"type": ["string", "null"], "description": "Why the status is not ok."},
+    },
+    "required": ["status", "count", "directories", "skipped"],
+    "additionalProperties": False,
+}
 
 #: ``vmware.composite.datastore.dir.create`` parameter schema.
 DATASTORE_DIR_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {

@@ -1,6 +1,6 @@
-# Spec-reconcile guards as standard — every hand-coded vendor path asserts against a pinned spec (decision)
+# Spec-reconcile guards as standard — hand-coded vendor paths are checked against a vendor spec when one is pinned (decision)
 
-**Status:** accepted
+**Status:** accepted; changed on 2026-10-30 (see "The standard")
 **Date:** 2026-08-17
 **Task:** [#2980](https://github.com/evoila/meho/issues/2980) (initiative
 [#2979](https://github.com/evoila/meho/issues/2979), wave 3 of the guard
@@ -10,9 +10,27 @@ rollout; mechanics precedent
 
 ## The standard
 
-**Every hand-coded vendor-API path literal in a typed connector or
-composite MUST be asserted against a pinned vendor spec in CI, wherever
-such a spec exists or can be pinned.**
+**Since 2026-10-30: a CI guard checks the hand-coded vendor-API paths of
+a typed connector or composite only against a vendor spec file that is
+already pinned (on the spec shelf, or as test data in this repo). A
+pinned file is not a step before coding.**
+
+- A build Task may add such a file as test data when it helps. No Task
+  waits for one.
+- The agent may use any source: vendor documents, published API files,
+  internet research, and live exploration in the sandbox or the lab.
+- A live test is the proof that a path works.
+- The guards that exist stay as they are. CI keeps its list of required
+  spec files for the files that exist.
+
+Why it changed: the old rule made a pinned file a step before coding, so
+build Tasks waited for separate file Tasks. Now one Task per capability
+reads the docs, explores the API, builds, tests live, and fixes what it
+finds. The old rule said: "Every hand-coded vendor-API path literal in a
+typed connector or composite MUST be asserted against a pinned vendor
+spec in CI, wherever such a spec exists or can be pinned." The rest of
+this file is the record of how the guards work. Where it says a Task
+must pin a file, that is now optional.
 
 The determination of record behind it (#2979, grounded 2026-08-17): *if
 we have the spec, we do not risk hallucinating an endpoint.* #2970
@@ -33,7 +51,7 @@ Scope boundaries:
 - **Generic (ingested) connectors are immune by construction** and need
   no lane: their op_ids are emitted *from* the spec by the ingest
   pipeline, so an unserved path cannot exist.
-- **Where no spec exists or can be pinned**, the lane still ships and
+- **Where no spec is pinned**, the lane still ships and
   skips uniformly; it arms itself the day the spec lands on the shelf.
   A task that proves a spec is unobtainable records the evidenced
   exclusion instead (#2993's contract; the entries live in the
@@ -160,7 +178,9 @@ starts from this pattern; per-test ingest is only acceptable while
 
 ## Extension mechanics (per new vendor lane)
 
-Each lane task (#2981-#2993) ships all of:
+Each lane task (#2981-#2993) ships all of the steps below. Since
+2026-10-30, steps 2 to 4 are optional: a build Task runs them only when
+it chooses to add a spec file.
 
 1. **The lane** — a `backend/tests/` module using the harness;
    declared set introspected from the connector's live constants.
@@ -357,7 +377,31 @@ split.
   instead of skipping. The other provider op_ids stay in the exclusion
   above; this change checks only the region path.
 
-### vcd — fully excluded, all-typed (no pinnable spec) (#3057)
+### vcd — CloudAPI paths ARMED 2026-10-31 (#4519); `/api` paths pinned only
+
+**Update 2026-10-31 (#4519).** A running Cloud Director cell serves its own
+`/cloudapi` file: `GET /api-explorer/provider/cloudapi.json`, Swagger 2.0, no
+session needed. The spec shelf pins it as
+`vmware-cloud-director-10.6/cloudapi-39.2.json` (API 39.2, from a 10.6.2
+cell, 646 paths, `basePath` `/cloudapi`; provenance in the shelf's
+`MANIFEST.md`). This replaces the `/cloudapi` half of the exclusion below.
+
+- **Armed (every `/cloudapi` op_id):** `GET` and `POST /cloudapi/1.0.0/orgs`,
+  `GET`, `PUT` and `DELETE /cloudapi/1.0.0/orgs/{orgUrn}`, and
+  `POST /cloudapi/1.0.0/sessions/provider`. The lane
+  (`backend/tests/test_connectors_vcd_spec_reconcile.py`) reads the Swagger
+  2.0 file itself (MEHO's spec ingest reads OpenAPI 3 only), adds the
+  `basePath`, and ignores path parameter names. CI checks the folder out and
+  requires the file, so the check fails instead of skipping when it is
+  missing.
+- **Still pinned only (2 op_ids: `GET:/api/query`, `GET:/api/versions`).** The
+  vendor publishes no API file for the older `/api` surface. Both paths are in
+  the vendor's API 39.0 reference
+  (<https://developer.broadcom.com/xapis/vmware-cloud-director-api/39.0/>,
+  operations `GET-ExecuteQuery` and `GET-SupportedVersions`); the lane names
+  that link and keeps them in the manifest pin.
+
+The original exclusion (#3057) is kept below as history.
 
 The `vcd` (VMware Cloud Director) connector is a **net-new typed**
 connector for the legacy standalone product (initiative
@@ -553,6 +597,145 @@ Path existence is version-stable across the 8.x↔9.x boundary, so the modern
   (an 8.x-only path or a forked op-set), that new hand-coded surface must
   ship its own served-set (or manifest-pin) lane at that point — the op-set
   drift guard is what surfaces the divergence.
+
+### azure-arm-2026.10 — the public Retail Prices API is excluded (no spec exists) (#5088)
+
+The Azure connector's lane (`backend/tests/test_connectors_azure_spec_reconcile.py`)
+compares every `*_PATH` constant of `connectors/azure/_paths.py` with the
+pinned Azure Resource Manager spec files. One call of the connector is not
+an Azure Resource Manager call: `azure.price.list` reads the public Azure
+Retail Prices API at `https://prices.azure.com/api/retail/prices`. It needs
+no login, and MEHO sends it no token.
+
+- **Excluded (1 URL: `GET https://prices.azure.com/api/retail/prices`).**
+  What was checked, on 2026-10-27: (1) a GitHub code search of
+  [`Azure/azure-rest-api-specs`](https://github.com/Azure/azure-rest-api-specs)
+  for `api/retail/prices` and for `prices.azure.com` found no file; (2)
+  Microsoft documents the API only on a conceptual page
+  (<https://learn.microsoft.com/en-us/rest/api/cost-management/retail-prices/azure-retail-prices>),
+  with no API description file; (3) the manifest of the pinned
+  `azure-arm-2026.10` shelf records it as an API with no spec. So no file
+  can serve as the reference for this URL.
+- **How the lane stays honest about it.** The address is a full-URL
+  constant (`RETAIL_PRICES_URL`), not a `*_PATH` constant, so the lane does
+  not sweep it and cannot fail on it. Its API version is
+  `RETAIL_PRICES_API_VERSION`. Unit tests in
+  `backend/tests/test_connectors_azure_cost.py` pin what the lane cannot:
+  the host and path, the query MEHO builds, the next-page rule (only the
+  `$skip` number is read from Azure's link), and that no request to the
+  host carries an `Authorization` header.
+- **Residual risk, named:** without a spec, a change to the API's answer
+  shape shows up only in a live call (the connector's lab proof).
+- **Activation:** Microsoft publishing an API description file for the
+  Retail Prices API. Then the file goes on the shelf, the constant becomes
+  a `*_PATH` on the lane, and this entry is withdrawn.
+
+### entra-graph-1.0 — spec exists but is too big for the shelf; check ships skipping (#5097)
+
+The `entra-graph-1.0` connector (product `entra`) calls Microsoft Graph
+v1.0 with eight hand-written `GET` paths. Microsoft publishes an OpenAPI
+3.0 file for all of Graph v1.0, so a spec exists. It is not on the shelf
+yet only because of its size. The check file ships now and skips until the
+file is there.
+
+- **Check file:** `backend/tests/test_connectors_entra_spec_reconcile.py`.
+  It reads the `*_PATH` constants of `connectors/entra/_paths.py` live,
+  gives each one its HTTP method (all `GET`), and fails when a constant has
+  no method. These tests run always. The compare test reads
+  `entra-graph-1.0/openapi.yaml` from the shelf and skips while it is
+  missing. It reads the file with a YAML loader itself (not with MEHO's
+  spec ingest, whose size limit is 20 MiB), puts the `servers[0].url`
+  prefix `/v1.0` in front of every spec path, and ignores parameter names
+  (`{group-id}` in the spec, `{group_id}` in the connector).
+- **What was checked (2026-10-28).** The file
+  `openapi/v1.0/openapi.yaml` in
+  [`microsoftgraph/msgraph-metadata`](https://github.com/microsoftgraph/msgraph-metadata)
+  (MIT license) at commit `29d027ab701b8d16c5fafc8cee31bb22d29eecad`
+  (the last commit that changed the file, 2026-10-20). Size 44,457,302
+  bytes, sha256
+  `69de68b2c895bc608a58229e662e2b3eeb23524385516afc250ff0b8f165ff29`,
+  OpenAPI 3.0.4, 11,582 paths, server `https://graph.microsoft.com/v1.0`.
+  All eight paths are in it with a `get` operation: `/organization`,
+  `/users`, `/groups`, `/groups/{group-id}/members/$count`,
+  `/roleManagement/directory/roleAssignments`,
+  `/roleManagement/directory/roleDefinitions`, `/applications`,
+  `/servicePrincipals`. The compare test passed against this file with
+  `MEHO_CONSUMER_DOCS_ROOT` pointed at a local folder that held it.
+- **Why it is not pinned.** About 44 MB for eight paths. That is far more
+  than any other shelf file, and every CI job would check it out. A trimmed
+  copy is possible but needs its own provenance note.
+- **Residual risk, named.** Until the file is on the shelf, CI does not
+  compare a new or renamed path with Graph. The always-on tests still make
+  sure every new `*_PATH` constant gets a method and shows up in the pinned
+  list, so a change cannot slip past the check without an edit here.
+- **Activation:** the file, or a trimmed copy of it with a provenance note
+  (source commit and sha256), lands on the shelf at
+  `entra-graph-1.0/openapi.yaml`. The activating task runs the extension
+  mechanics above (CI checkout widened, provenance recorded) and the
+  compare test then runs for real.
+
+### phpipam-rest-1.x — no API file exists; the check pins the list (#5070)
+
+The `phpipam-rest-1.x` connector (product `phpipam`) calls the phpIPAM REST
+API with eleven hand-written path constants (thirteen `METHOD:/path` pairs).
+
+- **Check file:** `backend/tests/test_connectors_phpipam_spec_reconcile.py`.
+  It reads the `*_PATH` constants of `connectors/phpipam/_paths.py` live,
+  gives each one its HTTP methods, and pins the full `METHOD:/path` list. It
+  also checks that every path is in the reference list in the docstring of
+  `_paths.py`. All tests run always; there is no compare test.
+- **What was checked (2026-10-29).** phpIPAM documents its API only as web
+  pages: the API reference (<https://phpipam.net/api/api_reference/>) and
+  the API documentation (<https://phpipam.net/api/api_documentation/>),
+  which describe phpIPAM 1.8.2. Neither links an OpenAPI, Swagger or other
+  API description file, and the phpIPAM source at tag `v1.8.2`
+  (<https://github.com/phpipam/phpipam>) has none either: the API is served
+  by the PHP controllers in `api/controllers/`. Every path the connector
+  uses was checked against the reference page and against the controller
+  that serves it (`Subnets.php`, `Addresses.php`, `User.php`), including
+  the answer codes the connector relies on (404 for "nothing found", 409 for
+  a taken address, 201 for a created address). One address is read with
+  `GET /subnets/{subnet_id}/addresses/{ip}/`, not with
+  `GET /addresses/{ip}/{subnet_id}/`: in 1.8.2 the second call finds only the
+  first address row of a subnet (`Addresses.php` filters on an `ip` field that
+  the cache in `class.Common.php` fills in only for that row). The
+  `DELETE /addresses/{ip}/{subnet_id}/` call looks the address up by its value
+  and works for every row.
+- **Residual risk, named.** Without an API file, a renamed path or a changed
+  answer in a later phpIPAM release shows up only in a live call (the
+  connector's lab proof). The pinned list makes sure every path change in
+  MEHO is made on purpose.
+- **Activation:** phpIPAM publishing an API description file. Then the file
+  goes on the shelf, the check gets a compare test, and this entry is
+  withdrawn.
+
+### installer-cb-5.0 — no API file for Cloud Builder 5.x; the check uses the reference lists (#4469)
+
+The `installer-cb-5.0` connector (Cloud Builder 5.0 to 5.2, product
+`installer`) sends ten `METHOD:/path` calls under `/v1/sddcs`.
+
+- **Check file:** `backend/tests/test_connectors_vcf_cloud_builder_spec_reconcile.py`.
+  It reads the call sets of `vcf_cloud_builder/typed_reads.py` and
+  `typed_writes.py` live and pins them (always runs). When the shelf is
+  there, it checks every call against the reference list of each version:
+  `cloud-builder-5.0` (5.0.0), `cloud-builder-5.1` (5.1.0, 5.1.1) and
+  `cloud-builder-5.2` (5.2.0 to 5.2.4). CI checks out the three folders and
+  fails when a list is missing.
+- **What was checked (2026-10-19, on the shelf).** Broadcom publishes no
+  OpenAPI or Swagger file for VCF 5.x: the "Related Resources" page of each
+  version of the VMware Cloud Foundation API reference
+  (<https://developer.broadcom.com/xapis/vmware-cloud-foundation-api/5.2.0/>)
+  offers no download, and `vmware/vcf-api-specs` has 9.x tags only. The
+  shelf lists are made from the vendor's operation index and operation
+  pages, section "Sddc" (the Cloud Builder calls). One finding changed the
+  connector: `GET /v1/system/appliance-info` (the Installer's version call)
+  is in no 5.x list, so the connector reads the version from
+  `GET /v1/sddcs/about`.
+- **Residual risk, named.** The lists hold paths, not schemas. A field that
+  differs by patch release shows up only in a live call (the separate lab
+  proof).
+- **Activation:** Broadcom publishing a 5.x API file. Then the file goes on
+  the shelf next to the lists and the check compares against it.
 
 ## Red lane = finding (the protocol)
 

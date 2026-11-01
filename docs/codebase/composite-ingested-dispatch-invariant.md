@@ -39,21 +39,27 @@ code-shipped op's declared sub-op may resolve to an `ingested` row.
   the sub-ops it routes through the dispatcher (`dispatch_child`). A
   composite that dispatches every sub-op directly on the connector session
   has no descriptor-routed surface and registers nothing — the shape every
-  shipped composite migrated to (Task #2249), so the registry is empty in
-  production.
+  shipped composite migrated to (Task #2249). One composite declares a
+  surface today: `vmware.migration.inventory` runs two VCF Operations reads
+  (`vrops.resource.query`, `vrops.resource.stats`) as child operations on
+  another target, and declares them when the vCenter composites register.
 - `assert_registered_composites_have_no_ingested_dispatch()` — the
   platform-wide sweep over that dispatch-surface registry. Connector-agnostic:
   a connector is covered the moment it registers a surface.
 
 ## Control flow
 
-The sweep runs at the tail of `run_typed_op_registrars`
-(`operations/typed_register.py`), invoked from the FastAPI lifespan after
-every connector has registered its typed/composite rows. It runs on both
+The sweep runs at the tail of `operation_catalog_write`
+(`operations/typed_register.py`; `run_typed_op_registrars` wraps it),
+invoked from the FastAPI lifespan after every connector has registered
+its typed/composite rows. It runs on both
 the real registrar pass and the amortized snapshot-replay test path,
 because the verdict is a function of live descriptor state. A violation
 propagates as a lifespan crash — the same crash-loud posture the registrar
-runner already takes for a registration bug.
+runner already takes for a registration bug. The sweep reads through the
+registration's own transaction, so it sees the rows written but not yet
+committed; a violation rolls that transaction back and no row changes
+(#5019).
 
 ## Why keyed on the resolved `source_kind`
 
@@ -67,8 +73,10 @@ is allowed; only `ingested` is a violation.
 
 github's `gh.composite.pr_status_summary` and the vmware composites were
 migrated to direct-session sub-calls (Initiative #2248, tasks #2249/#2253/
-#2255/#2256), so none declares a descriptor-routed dispatch surface and the
-registry is empty in production. The old failure-coping apparatus — vmware's
+#2255/#2256), so none of them declares a descriptor-routed dispatch surface.
+The one entry in the registry is `vmware.migration.inventory`'s two VCF
+Operations child reads, which are typed operations of that connector, never
+ingested rows. The old failure-coping apparatus — vmware's
 dispatch-time preflight + `composite_l2_missing`/`composite_l2_disabled`
 errors and github's import-time `UnbackedEnabledCompositeError` load guard —
 is deleted (Task #2259); this platform-wide sweep is the sole remaining

@@ -122,6 +122,14 @@ connector-level TLS handling.
   queued in `__init__.py`.
 - Registry v2 dual registration (versioned + wildcard) in `__init__.py`.
 
+## Migration inventory
+
+The multi-step read `proxmox.migration.inventory` (group `migration`, `safe`)
+collects the QEMU VMs in the common migration inventory shape. It only calls
+`proxmox.api.get` (nodes, each node's `qemu` list, each VM's `config` and
+`snapshot`, and the guest agent's `get-osinfo`). It lives in
+`connectors/inventory/source_proxmox.py`; see `connectors-inventory.md`.
+
 ## Known issues / limits
 
 - Registering `proxmox` auto-adds it to the `TargetCreate.product` enum

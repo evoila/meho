@@ -17,7 +17,10 @@
   No ``params`` / ``params_hash`` are projected onto these rows.
 
   Context variables:
-    requests          -- list[dict]: projected rows
+    requests          -- list[dict]: projected rows; ``chain`` is
+                         {work_ref, step, total} for a pending row that is one
+                         of two or more pending requests under one change
+                         ticket, else None (#3596)
     status_pill_class -- dict[str, str]: status -> DaisyUI badge modifier
     result_state_pill -- dict[str, tuple[str, str]]: run state of an
                          approved request -> (label, badge modifier) (#3543)
@@ -42,6 +45,11 @@
           >{{ run_label }}</span>
         {% endif %}
         <p class="truncate font-mono text-sm">{{ req.op_id }}</p>
+        {#- Chain step (#3596): this pending request is step k of N pending
+            requests under one change ticket. -#}
+        {% if req.chain %}
+          <span class="badge badge-sm badge-info shrink-0" data-approval-chain-step="{{ req.chain.step }}">Step {{ req.chain.step }} of {{ req.chain.total }}</span>
+        {% endif %}
       </div>
       <p class="truncate text-xs text-base-content/55">
         <span>{{ req.connector_id }}</span>
@@ -51,6 +59,18 @@
           {% if req.created_at %}
             <span aria-hidden="true">&middot;</span>
             <time datetime="{{ req.created_at }}">{{ req.created_at }}</time>
+          {% endif %}
+        {% elif req.status == "withdrawn" %}
+          {#- Withdrawn (#4987): the sender took it back; no reviewer. -#}
+          <span aria-hidden="true">&middot;</span>
+          <span>withdrawn by the sender</span>
+          {% if req.withdrawn_at %}
+            <span aria-hidden="true">&middot;</span>
+            <time datetime="{{ req.withdrawn_at }}">{{ req.withdrawn_at }}</time>
+          {% endif %}
+          {% if req.withdraw_reason %}
+            <span aria-hidden="true">&middot;</span>
+            <span>{{ req.withdraw_reason }}</span>
           {% endif %}
         {% else %}
           {% if req.reviewer %}

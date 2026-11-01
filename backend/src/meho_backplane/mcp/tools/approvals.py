@@ -52,7 +52,9 @@ from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mc
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.approval_outcome import resume_outcome
 from meho_backplane.operations.approval_queue import (
+    EXPIRED_REASON_MESSAGES,
     ApprovalNotFoundError,
+    approval_expired_reason,
     approval_result_state,
     get_request,
     list_pending,
@@ -88,8 +90,8 @@ _APPROVAL_REQUEST_ID_PROPERTY: Final[dict[str, Any]] = {
     "type": "string",
     "format": "uuid",
     "description": (
-        "Approval request UUID. Canonical name "
-        "(G0.18-T5 #1358); matches the `<noun>_id` convention used "
+        "Approval request UUID. Canonical name; "
+        "matches the `<noun>_id` convention used "
         "by every other MCP tool that names a resource UUID."
     ),
 }
@@ -127,6 +129,7 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
     """
     result_state = approval_result_state(row)
     outcome = resume_outcome(row)
+    expired_reason = approval_expired_reason(row)
     return {
         "id": str(row.id),
         "tenant_id": str(row.tenant_id),
@@ -145,10 +148,15 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
                 "result_status": outcome.result_status,
                 "error_code": outcome.error_code,
                 "audit_id": str(outcome.audit_id) if outcome.audit_id else None,
+                "guidance": outcome.guidance,
             }
             if outcome is not None
             else None
         ),
+        # #5030: why an expired request expired, and the advice to ask again.
+        "expired_reason": expired_reason.value if expired_reason else None,
+        "expired_message": EXPIRED_REASON_MESSAGES[expired_reason] if expired_reason else None,
+        "release_id": row.release_id,
         "reviewed_by": row.reviewed_by,
         "decided_at": row.decided_at.isoformat() if row.decided_at else None,
         "expires_at": row.expires_at.isoformat() if row.expires_at else None,
@@ -240,7 +248,7 @@ register_mcp_tool(
         name="meho_approvals_list",
         surface=ToolSurface.OPERATOR,
         description=(
-            "List approval requests for your tenant (G11.2-T5 / #818). "
+            "List approval requests for your tenant. "
             "Operator-level. Use status='pending' (default) for the "
             "common case — requests awaiting a decision. Pass status='all' "
             "for every state. Pagination via limit / offset."
@@ -256,8 +264,7 @@ register_mcp_tool(
                         "Filter by status. 'all' is the sentinel meaning "
                         "'no filter'. Vocabulary mirrors "
                         "`meho_scheduler_list.status` (both surface the "
-                        "allowed values as a JSON enum, not prose) — "
-                        "RDC #789 N4 / G0.18-T5."
+                        "allowed values as a JSON enum, not prose)."
                     ),
                 },
                 "limit": {
@@ -278,8 +285,8 @@ register_mcp_tool(
                     "description": (
                         "Filter by external change-ticket reference (exact "
                         "match), e.g. 'gh:evoila/meho#1' — the requests "
-                        "authorised by change ticket X (work_ref I2-T1 "
-                        "#1659). Omit for no work_ref filter."
+                        "authorised by change ticket X. Omit for no "
+                        "work_ref filter."
                     ),
                 },
             },
@@ -325,13 +332,13 @@ register_mcp_tool(
         name="meho_approvals_get",
         surface=ToolSurface.OPERATOR,
         description=(
-            "Inspect a single approval request by id (G11.2-T5 / #818). "
+            "Inspect a single approval request by id. "
             "Operator-level. Returns the full detail including "
             "proposed_effect (human-readable description of what the op "
             "would do) so an operator can decide before approving. "
             "Cross-tenant / absent ids return approval_request_not_found. "
-            "Pass either `approval_request_id` (canonical name; "
-            "G0.18-T5 #1358) or the deprecated `id` alias."
+            "Pass either `approval_request_id` (canonical name) "
+            "or the deprecated `id` alias."
         ),
         inputSchema={
             "type": "object",

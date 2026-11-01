@@ -56,6 +56,7 @@ nav:
       - The install trail: install/index.md
       - Credential backends: install/credential-backends.md
       - Keycloak realm setup: install/keycloak-realm.md
+      - Company login with authentik: install/company-login-authentik.md
       - "OpenBao unseal key: who keeps what": install/openbao-unseal-key.md
       - TLS and ingress: install/tls-ingress.md
       - Upgrades: install/upgrades.md
@@ -74,6 +75,7 @@ nav:
       - guides/first-operations.md
       - guides/sensors-quickstart.md
       - Approvals and break-glass: guides/approvals-and-break-glass.md
+      - Add a tenant: guides/tenant-bootstrap.md
       - Topology: guides/topology.md
       - Broadcast: guides/broadcast.md
       - Memory and knowledge: guides/memory-and-knowledge.md

@@ -45,12 +45,19 @@ const (
 	AggregateFuncSUM   AggregateFunc = "SUM"
 )
 
+// Defines values for ApprovalExpiredReason.
+const (
+	ApprovalExpiredReasonDeadlinePassed ApprovalExpiredReason = "deadline_passed"
+	ApprovalExpiredReasonReleaseChanged ApprovalExpiredReason = "release_changed"
+)
+
 // Defines values for ApprovalRequestStatus.
 const (
-	ApprovalRequestStatusApproved ApprovalRequestStatus = "approved"
-	ApprovalRequestStatusExpired  ApprovalRequestStatus = "expired"
-	ApprovalRequestStatusPending  ApprovalRequestStatus = "pending"
-	ApprovalRequestStatusRejected ApprovalRequestStatus = "rejected"
+	ApprovalRequestStatusApproved  ApprovalRequestStatus = "approved"
+	ApprovalRequestStatusExpired   ApprovalRequestStatus = "expired"
+	ApprovalRequestStatusPending   ApprovalRequestStatus = "pending"
+	ApprovalRequestStatusRejected  ApprovalRequestStatus = "rejected"
+	ApprovalRequestStatusWithdrawn ApprovalRequestStatus = "withdrawn"
 )
 
 // Defines values for ApprovalResultState.
@@ -440,6 +447,12 @@ const (
 	MemoryScopeUserTenant MemoryScope = "user-tenant"
 )
 
+// Defines values for OperationOverrideRowScope.
+const (
+	OperationOverrideRowScopeInstall OperationOverrideRowScope = "install"
+	OperationOverrideRowScopeTenant  OperationOverrideRowScope = "tenant"
+)
+
 // Defines values for OperationRunStatus.
 const (
 	OperationRunStatusCancelled OperationRunStatus = "cancelled"
@@ -669,6 +682,7 @@ const (
 	TargetCreateProductArgocd     TargetCreateProduct = "argocd"
 	TargetCreateProductAzure      TargetCreateProduct = "azure"
 	TargetCreateProductBind9      TargetCreateProduct = "bind9"
+	TargetCreateProductEntra      TargetCreateProduct = "entra"
 	TargetCreateProductFleet      TargetCreateProduct = "fleet"
 	TargetCreateProductGcloud     TargetCreateProduct = "gcloud"
 	TargetCreateProductGh         TargetCreateProduct = "gh"
@@ -687,6 +701,7 @@ const (
 	TargetCreateProductMssql      TargetCreateProduct = "mssql"
 	TargetCreateProductNsx        TargetCreateProduct = "nsx"
 	TargetCreateProductPfsense    TargetCreateProduct = "pfsense"
+	TargetCreateProductPhpipam    TargetCreateProduct = "phpipam"
 	TargetCreateProductPostgres   TargetCreateProduct = "postgres"
 	TargetCreateProductPrometheus TargetCreateProduct = "prometheus"
 	TargetCreateProductProxmox    TargetCreateProduct = "proxmox"
@@ -821,6 +836,12 @@ const (
 	MehoBackplaneUiRoutesTopologyTableSortColumnName      MehoBackplaneUiRoutesTopologyTableSortColumn = "name"
 )
 
+// Defines values for ListApprovalsApiV1ApprovalsGetParamsOrder.
+const (
+	ListApprovalsApiV1ApprovalsGetParamsOrderNewest ListApprovalsApiV1ApprovalsGetParamsOrder = "newest"
+	ListApprovalsApiV1ApprovalsGetParamsOrderOldest ListApprovalsApiV1ApprovalsGetParamsOrder = "oldest"
+)
+
 // Defines values for ListEndpointApiV1ConnectorsGetParamsStatus.
 const (
 	ListEndpointApiV1ConnectorsGetParamsStatusAll      ListEndpointApiV1ConnectorsGetParamsStatus = "all"
@@ -899,6 +920,12 @@ const (
 	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateOk       ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "ok"
 	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateSkip     ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "skip"
 	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateUnknown  ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "unknown"
+)
+
+// Defines values for UiConnectorsOverridesUiConnectorsOverridesGetParamsShow.
+const (
+	UiConnectorsOverridesUiConnectorsOverridesGetParamsShowAll     UiConnectorsOverridesUiConnectorsOverridesGetParamsShow = "all"
+	UiConnectorsOverridesUiConnectorsOverridesGetParamsShowReduced UiConnectorsOverridesUiConnectorsOverridesGetParamsShow = "reduced"
 )
 
 // Defines values for RunbooksIndexUiRunbooksGetParamsStatus.
@@ -1440,11 +1467,23 @@ type Aggregate struct {
 // AggregateFunc Aggregate function (fixed allow-list).
 type AggregateFunc string
 
+// ApprovalExpiredReason Why an “expired“ request expired (#5030).
+//
+// Read off the row, never stored, like :class:`ApprovalResultState`.
+//
+//   - :attr:`DEADLINE_PASSED` -- the request waited past “expires_at“
+//     without a decision.
+//   - :attr:`RELEASE_CHANGED` -- MEHO started with a different release
+//     while the request waited (:func:`expire_older_release_requests`).
+//     Only this path expires a request before its deadline, so an
+//     “expired“ row with “decided_at < expires_at“ is this case.
+type ApprovalExpiredReason string
+
 // ApprovalRequestStatus Closed lifecycle status of an :class:`ApprovalRequest`.
 //
 // Initiative #803 (G11.2 Agent permission model), Task #817 (T4). The
 // approval queue parks a “requires_approval“ dispatch durably; the
-// row walks a simple four-state lifecycle enforced by the service
+// row walks a simple five-state lifecycle enforced by the service
 // (:mod:`meho_backplane.operations.approval_queue`).
 //
 // Members:
@@ -1459,10 +1498,15 @@ type AggregateFunc string
 //   - :attr:`EXPIRED` -- the “expires_at“ deadline passed without a
 //     decision; the expiry sweep transitioned the row and wrote the
 //     decision audit row. Terminal.
+//   - :attr:`WITHDRAWN` -- the sender took its own pending request back
+//     (#4987). Not a decision: “reviewed_by“ stays NULL, and
+//     “withdrawn_at“ / “withdraw_reason“ say when and why. The
+//     original call was not executed. Terminal.
 //
 // The enum and the “CHECK (status IN (...))“ constraint on the DB
-// table move in lock-step (migration “0023“); the drift guard
-// :func:`tests.test_migration_0023_approval_request.test_status_check_matches_enum`
+// table move in lock-step (migration “0023“, widened by “0119“); the
+// drift guard
+// :func:`tests.migrations.test_migration_0119_approval_withdrawn.test_status_check_matches_enum`
 // asserts equality at unit-test time.
 type ApprovalRequestStatus string
 
@@ -1478,7 +1522,20 @@ type ApprovalRequestView struct {
 	// ``Instructed-by:`` / ``Instruction:`` / ``Refs:`` trailer block. The
 	// approver is still ``reviewed_by``; ``instructed_by`` is the other human
 	// whose written instruction they acted on.
-	Delegation     *DelegationView        `json:"delegation,omitempty"`
+	Delegation     *DelegationView `json:"delegation,omitempty"`
+	ExpiredMessage *string         `json:"expired_message"`
+
+	// ExpiredReason Why an ``expired`` request expired (#5030).
+	//
+	// Read off the row, never stored, like :class:`ApprovalResultState`.
+	//
+	// * :attr:`DEADLINE_PASSED` -- the request waited past ``expires_at``
+	//   without a decision.
+	// * :attr:`RELEASE_CHANGED` -- MEHO started with a different release
+	//   while the request waited (:func:`expire_older_release_requests`).
+	//   Only this path expires a request before its deadline, so an
+	//   ``expired`` row with ``decided_at < expires_at`` is this case.
+	ExpiredReason  *ApprovalExpiredReason `json:"expired_reason,omitempty"`
 	ExpiresAt      *string                `json:"expires_at"`
 	Id             openapi_types.UUID     `json:"id"`
 	OpId           string                 `json:"op_id"`
@@ -1488,6 +1545,7 @@ type ApprovalRequestView struct {
 	PrincipalName  *string                `json:"principal_name"`
 	PrincipalSub   string                 `json:"principal_sub"`
 	ProposedEffect map[string]interface{} `json:"proposed_effect"`
+	ReleaseId      *string                `json:"release_id"`
 
 	// ResultState Whether an approved request has run yet (#3486).
 	//
@@ -1534,7 +1592,7 @@ type ApprovalRequestView struct {
 	//
 	// Initiative #803 (G11.2 Agent permission model), Task #817 (T4). The
 	// approval queue parks a ``requires_approval`` dispatch durably; the
-	// row walks a simple four-state lifecycle enforced by the service
+	// row walks a simple five-state lifecycle enforced by the service
 	// (:mod:`meho_backplane.operations.approval_queue`).
 	//
 	// Members:
@@ -1549,15 +1607,22 @@ type ApprovalRequestView struct {
 	// * :attr:`EXPIRED` -- the ``expires_at`` deadline passed without a
 	//   decision; the expiry sweep transitioned the row and wrote the
 	//   decision audit row. Terminal.
+	// * :attr:`WITHDRAWN` -- the sender took its own pending request back
+	//   (#4987). Not a decision: ``reviewed_by`` stays NULL, and
+	//   ``withdrawn_at`` / ``withdraw_reason`` say when and why. The
+	//   original call was not executed. Terminal.
 	//
 	// The enum and the ``CHECK (status IN (...))`` constraint on the DB
-	// table move in lock-step (migration ``0023``); the drift guard
-	// :func:`tests.test_migration_0023_approval_request.test_status_check_matches_enum`
+	// table move in lock-step (migration ``0023``, widened by ``0119``); the
+	// drift guard
+	// :func:`tests.migrations.test_migration_0119_approval_withdrawn.test_status_check_matches_enum`
 	// asserts equality at unit-test time.
-	Status   ApprovalRequestStatus `json:"status"`
-	TargetId *openapi_types.UUID   `json:"target_id"`
-	TenantId openapi_types.UUID    `json:"tenant_id"`
-	WorkRef  *string               `json:"work_ref"`
+	Status         ApprovalRequestStatus `json:"status"`
+	TargetId       *openapi_types.UUID   `json:"target_id"`
+	TenantId       openapi_types.UUID    `json:"tenant_id"`
+	WithdrawReason *string               `json:"withdraw_reason"`
+	WithdrawnAt    *string               `json:"withdrawn_at"`
+	WorkRef        *string               `json:"work_ref"`
 }
 
 // ApprovalResultState Whether an approved request has run yet (#3486).
@@ -1602,7 +1667,7 @@ type ApprovalResultView struct {
 	//
 	// Initiative #803 (G11.2 Agent permission model), Task #817 (T4). The
 	// approval queue parks a ``requires_approval`` dispatch durably; the
-	// row walks a simple four-state lifecycle enforced by the service
+	// row walks a simple five-state lifecycle enforced by the service
 	// (:mod:`meho_backplane.operations.approval_queue`).
 	//
 	// Members:
@@ -1617,10 +1682,15 @@ type ApprovalResultView struct {
 	// * :attr:`EXPIRED` -- the ``expires_at`` deadline passed without a
 	//   decision; the expiry sweep transitioned the row and wrote the
 	//   decision audit row. Terminal.
+	// * :attr:`WITHDRAWN` -- the sender took its own pending request back
+	//   (#4987). Not a decision: ``reviewed_by`` stays NULL, and
+	//   ``withdrawn_at`` / ``withdraw_reason`` say when and why. The
+	//   original call was not executed. Terminal.
 	//
 	// The enum and the ``CHECK (status IN (...))`` constraint on the DB
-	// table move in lock-step (migration ``0023``); the drift guard
-	// :func:`tests.test_migration_0023_approval_request.test_status_check_matches_enum`
+	// table move in lock-step (migration ``0023``, widened by ``0119``); the
+	// drift guard
+	// :func:`tests.migrations.test_migration_0119_approval_withdrawn.test_status_check_matches_enum`
 	// asserts equality at unit-test time.
 	Status ApprovalRequestStatus `json:"status"`
 }
@@ -1632,6 +1702,7 @@ type ApprovalResultView struct {
 type ApprovalResumeOutcomeView struct {
 	AuditId      *openapi_types.UUID `json:"audit_id"`
 	ErrorCode    *string             `json:"error_code"`
+	Guidance     *string             `json:"guidance"`
 	ResultStatus *string             `json:"result_status"`
 	ResumedAt    *string             `json:"resumed_at"`
 }
@@ -1808,6 +1879,8 @@ type AuditClassCountsRequest struct {
 //   - “id“ ← “audit_log.id“
 //   - “ts“ ← “audit_log.occurred_at“
 //   - “tenant_id“ ← “audit_log.tenant_id“
+//   - “tenant_name“ ← LEFT JOIN “tenant.name“ ON “audit_log.tenant_id“
+//     (#5238). “None“ when the tenant row is gone; show “tenant_id“ then.
 //   - “principal_sub“ ← “audit_log.operator_sub“
 //   - “target_id“ ← “audit_log.target_id“
 //   - “target_name“ ← LEFT JOIN “targets.name“ ON “audit_log.target_id“
@@ -1824,6 +1897,7 @@ type AuditClassCountsRequest struct {
 //     “Operator.name“ since G0.15-T3 #1212; HTTP-chassis rows remain
 //     None pending a separate fix to bind “name“ to contextvars in
 //     “verify_jwt_and_bind“.
+//   - “sandbox_mode“ ← “audit_log.sandbox_mode“ (the sandbox mark; #4622)
 //   - “broadcast_event_id“ — v0.2 placeholder, always None (FK direction
 //     is reversed: “BroadcastEvent.audit_id“ points at the audit row).
 type AuditEntry struct {
@@ -1843,10 +1917,12 @@ type AuditEntry struct {
 	PrincipalSub     string                 `json:"principal_sub"`
 	RequestId        *openapi_types.UUID    `json:"request_id"`
 	ResultStatus     string                 `json:"result_status"`
+	SandboxMode      bool                   `json:"sandbox_mode"`
 	StatusCode       int                    `json:"status_code"`
 	TargetId         *openapi_types.UUID    `json:"target_id"`
 	TargetName       *string                `json:"target_name"`
 	TenantId         *openapi_types.UUID    `json:"tenant_id"`
+	TenantName       *string                `json:"tenant_name"`
 	Ts               time.Time              `json:"ts"`
 	WorkRef          *string                `json:"work_ref"`
 }
@@ -2063,7 +2139,7 @@ type AuthModel string
 // “target_name“ is resolved to a live target descriptor, “op“ to the
 // resolved connector's enabled descriptor (yielding “handler_ref“ +
 // “safety_level“ + the “(product, version, impl_id)“ key). “op“ is
-// the connector-side op id (e.g. “"vsphere.host.list"“); the connector
+// the connector-side op id (e.g. “"k8s.node.list"“); the connector
 // triple is derived from the resolved target, not authored here.
 type AuthoredCheckItem struct {
 	CadenceSeconds int                     `json:"cadence_seconds"`
@@ -2224,6 +2300,13 @@ type BodyApprovalRejectUiApprovalsRequestIdRejectPost struct {
 	Reason *string `json:"reason,omitempty"`
 }
 
+// BodyApprovalsInOrderRunUiApprovalsInOrderPost defines model for Body_approvals_in_order_run_ui_approvals_in_order_post.
+type BodyApprovalsInOrderRunUiApprovalsInOrderPost struct {
+	ConfirmId *string `json:"confirm_id,omitempty"`
+	Reason    *string `json:"reason,omitempty"`
+	WorkRef   string  `json:"work_ref"`
+}
+
 // BodyBulkImportUiTopologyEdgesBulkPost defines model for Body_bulk_import_ui_topology_edges_bulk_post.
 type BodyBulkImportUiTopologyEdgesBulkPost struct {
 	DryRun   *bool   `json:"dry_run,omitempty"`
@@ -2357,6 +2440,7 @@ type BodyOperationsCallUiOperationsCallPost struct {
 	ConnectorId string  `json:"connector_id"`
 	OpId        string  `json:"op_id"`
 	Params      *string `json:"params,omitempty"`
+	PreviewHash *string `json:"preview_hash,omitempty"`
 	Target      *string `json:"target,omitempty"`
 	WorkRef     *string `json:"work_ref,omitempty"`
 }
@@ -2841,6 +2925,7 @@ type BodyUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPost struct {
 type BodyUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatch struct {
 	CustomDescription *string `json:"custom_description"`
 	IsEnabled         *string `json:"is_enabled"`
+	Reason            *string `json:"reason"`
 	RequiresApproval  *string `json:"requires_approval"`
 	SafetyLevel       *string `json:"safety_level"`
 
@@ -3401,11 +3486,11 @@ type BudgetStatus struct {
 // and the MCP handler share validation. “target“ accepts either
 // shape and “None“:
 //
-//   - **Bare string** -- “target: "rdc-vcenter"“. The forward-preferred
+//   - **Bare string** -- “target: "prod-k8s"“. The forward-preferred
 //     shape; matches “query_topology“ / “query_audit“ so an agent
 //     can carry a target name across the read and the write surfaces
 //     without reshape. G0.13-T2 (#1132) widening of #780.
-//   - **Dict** -- “target: {"name": "rdc-vcenter"}“. The original
+//   - **Dict** -- “target: {"name": "prod-k8s"}“. The original
 //     shape; the handler resolves the “name“ field and (optionally)
 //     reads “fqdn“ for vhost routing. Still accepted unchanged.
 //   - **None** -- the operation does not need a target (typed handlers
@@ -3487,8 +3572,8 @@ type CallOperationBody_Target struct {
 // CandidateHint One candidate target a connector's :meth:`Connector.list_candidates` returns.
 //
 // Candidates are potentially-reachable targets the connector inferred
-// from an existing seed (e.g. a vCenter exposing its managed ESXi
-// hosts; a kubeconfig listing peer cluster contexts). The
+// from an existing seed (e.g. a kubeconfig listing peer cluster
+// contexts). The
 // G9.1-T6 “meho targets discover“ CLI verb surfaces these to the
 // operator; auto-registration is intentionally out of scope per
 // Initiative #363 (operator runs “meho targets import“ after review).
@@ -3497,12 +3582,20 @@ type CallOperationBody_Target struct {
 // think this candidate exists (e.g. “{"source": "kubeconfig",
 // "context_name": "cluster-2"}“); “confidence“ is the connector's
 // self-assessment of probe-vs-curation reliability.
+//
+// “secret_ref“ and “extras“ are set when the connector knows them:
+// the secret reference and the target extras a target for this candidate
+// needs (Azure: the seed's secret reference and “subscription_id“,
+// “tenant_id“ and “cloud“). “meho targets discover --import-yaml“
+// writes them into a file that “meho targets import“ reads.
 type CandidateHint struct {
 	Confidence CandidateHintConfidence `json:"confidence"`
 	Evidence   map[string]interface{}  `json:"evidence"`
+	Extras     *map[string]interface{} `json:"extras,omitempty"`
 	Host       string                  `json:"host"`
 	Name       string                  `json:"name"`
 	Port       *int                    `json:"port"`
+	SecretRef  *string                 `json:"secret_ref"`
 }
 
 // CandidateHintConfidence defines model for CandidateHint.Confidence.
@@ -3635,8 +3728,8 @@ type ConfirmVerifyResponseAnswer string
 // (the dispatchability flag that survives connector-level
 // enable/disable cycles via operator overrides). Useful for the
 // CLI's “meho connector list --status staged“ summary view and
-// for an LLM browsing the catalog: “vmware-rest-9.0“ ingests
-// ~2,211 ops of which only a fraction are enabled, and before the
+// for an LLM browsing the catalog: a big ingested connector
+// can carry thousands of ops of which only a fraction are enabled, and before the
 // split nothing on the row said which of the two numbers
 // “operation_count“ was.
 //
@@ -3661,7 +3754,7 @@ type ConfirmVerifyResponseAnswer string
 // object on “state="registered"“ rows and “None“ on
 // “state="ingested"“ rows (no operator action remains for an
 // ingested connector) — with one exception: a tenant row stored under
-// a former product name (“vcf-logs“ rows for “vrli-rest-9.0“,
+// a former product name (rows saved before a product rename,
 // #4889) can never be called, so it ships “dispatchable=False“ plus
 // a “next_step“ naming “meho connector delete <id>“ as the
 // clean-up. For registered rows the hint is computed against the curated
@@ -3778,6 +3871,14 @@ type ConnectorListResponse struct {
 	NextCursor *string             `json:"next_cursor"`
 }
 
+// ConnectorPackage One connector package named in the allowlist file.
+type ConnectorPackage struct {
+	Folders     []string `json:"folders"`
+	Name        string   `json:"name"`
+	Version     string   `json:"version"`
+	WheelDigest string   `json:"wheel_digest"`
+}
+
 // ConnectorReviewDeleteOp One stored ingested delete that sits below the “destructive“ risk level (#3827).
 //
 // The review report for stored deletes. Rows persisted by an earlier
@@ -3863,18 +3964,20 @@ type ConnectorReviewGroupAdvisory struct {
 // “parameter_schema“ / “response_schema“ / “embedding“ —
 // those are dispatch-time concerns, not review-time concerns, and
 // sending 4 KB of schema per op would balloon the review payload
-// for connectors with thousands of operations (vCenter has 961
-// paths in v0.2).
+// for connectors with thousands of operations.
 type ConnectorReviewOp struct {
-	CustomDescription *string  `json:"custom_description"`
-	Description       *string  `json:"description"`
-	IsEnabled         bool     `json:"is_enabled"`
-	NeedsReingest     *bool    `json:"needs_reingest,omitempty"`
-	OpId              string   `json:"op_id"`
-	RequiresApproval  bool     `json:"requires_approval"`
-	SafetyLevel       string   `json:"safety_level"`
-	Summary           *string  `json:"summary"`
-	Tags              []string `json:"tags"`
+	ClassifiedRequiresApproval *bool    `json:"classified_requires_approval"`
+	ClassifiedSafetyLevel      *string  `json:"classified_safety_level"`
+	CustomDescription          *string  `json:"custom_description"`
+	Description                *string  `json:"description"`
+	IsEnabled                  bool     `json:"is_enabled"`
+	NeedsReingest              *bool    `json:"needs_reingest,omitempty"`
+	OpId                       string   `json:"op_id"`
+	RequiresApproval           bool     `json:"requires_approval"`
+	SafetyLevel                string   `json:"safety_level"`
+	Summary                    *string  `json:"summary"`
+	Tags                       []string `json:"tags"`
+	TenantEnabled              *bool    `json:"tenant_enabled"`
 }
 
 // ConnectorReviewPayload Top-level review payload returned by :meth:`ReviewService.get_review_payload`.
@@ -5040,8 +5143,19 @@ type EditGroupBody struct {
 //
 // “safety_level“ is the bounded enum from
 // :class:`~meho_backplane.db.models.EndpointDescriptor.safety_level`
-// (“safe“ / “caution“ / “dangerous“); a value outside the set
-// is rejected by Pydantic before the service layer sees it.
+// (“safe“ / “caution“ / “dangerous“ / “destructive“); a value
+// outside the set is rejected by Pydantic before the service layer sees
+// it. It can only raise the level above the classification (#4711).
+//
+// “safety_level“ and “requires_approval“ are stored as an operator
+// override, apart from the value in code or in the API description, so
+// they survive a restart and a re-ingest (#4711). “requires_approval:
+// false“ where the classification requires approval needs
+// “platform_admin“, a “reason“ and a fresh sign-in; it is never
+// allowed for a destructive operation.
+//
+// “reason“ is written to the audit row. It is required to turn
+// approval off.
 //
 // “is_enabled“ is the per-op override that wins over the group
 // cascade (see :meth:`ReviewService.edit_op` for the full
@@ -5061,6 +5175,7 @@ type EditGroupBody struct {
 type EditOpBody struct {
 	CustomDescription *string                `json:"custom_description"`
 	IsEnabled         *bool                  `json:"is_enabled"`
+	Reason            *string                `json:"reason"`
 	RequiresApproval  *bool                  `json:"requires_approval"`
 	SafetyLevel       *EditOpBodySafetyLevel `json:"safety_level"`
 }
@@ -5704,6 +5819,8 @@ type GroupSummaryModel struct {
 //
 // Mirrors the dataclass; rendered alongside :class:`IngestionResultModel`
 // in the ingest response so the operator sees both counts.
+// “unassigned_op_ids“ names the operations still without a group
+// (sorted, capped); “operations_unassigned“ is the full count.
 type GroupingResultModel struct {
 	ConnectorId          string               `json:"connector_id"`
 	Groups               *[]GroupSummaryModel `json:"groups,omitempty"`
@@ -5712,6 +5829,7 @@ type GroupingResultModel struct {
 	LlmDurationMs        float32              `json:"llm_duration_ms"`
 	OperationsAssigned   int                  `json:"operations_assigned"`
 	OperationsUnassigned int                  `json:"operations_unassigned"`
+	UnassignedOpIds      *[]string            `json:"unassigned_op_ids,omitempty"`
 }
 
 // HTTPValidationError defines model for HTTPValidationError.
@@ -5791,6 +5909,15 @@ type HTTPValidationError struct {
 // OPERATOR-gated, so unlike “/ready“ no metrics token is needed.
 // “None“ / empty defaults keep older response decoders working; the
 // handler always fills them.
+//
+// “connector_packages“ (#5036) lists the connector packages this image
+// carries, the same list “GET /version“ shows. It is empty for the
+// plain public image.
+//
+// “operation_catalog“ (#5019) names the release that wrote the shared
+// operation rows and says whether it is this pod's release
+// (:class:`OperationCatalogStatus`). The “None“ default keeps older
+// response decoders working; the handler always fills it.
 type HealthResponse struct {
 	// Approvals The approval settings in force (#4830).
 	//
@@ -5802,7 +5929,8 @@ type HealthResponse struct {
 	// someone else's instruction is allowed. The three values come from
 	// :func:`meho_backplane.features.build_features_block`; they are state
 	// words only, never a key value.
-	Approvals *ApprovalsStatus `json:"approvals,omitempty"`
+	Approvals         *ApprovalsStatus    `json:"approvals,omitempty"`
+	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`
 
 	// Db Database migration status.
 	//
@@ -5834,6 +5962,26 @@ type HealthResponse struct {
 	McpProtocolVersion  *string          `json:"mcp_protocol_version,omitempty"`
 	McpSessionIdCapture string           `json:"mcp_session_id_capture"`
 
+	// OperationCatalog Which release wrote the shared operation rows (#5019).
+	//
+	// The operation rows hold, for each built-in operation, which code
+	// runs, the parameter rules, the risk level and the approval flag.
+	// Every start writes them, and all pods share them. ``state`` is:
+	//
+	// * ``same_release`` -- this pod's release wrote them.
+	// * ``other_release`` -- another release wrote them, so this pod
+	//   serves settings that were not made for its code. Usually a sign
+	//   that two releases run at the same time; see
+	//   ``docs/acceptance/rollback.md`` for what to do.
+	// * ``not_recorded`` -- no start since this check shipped has written
+	//   them yet.
+	// * ``unknown`` -- the database could not be read (the ``db`` field
+	//   says more).
+	//
+	// ``this_release`` and ``written_by_release`` are commit hashes, the
+	// ``git_sha`` value of ``GET /version``.
+	OperationCatalog *OperationCatalogStatus `json:"operation_catalog,omitempty"`
+
 	// Operator Operator identity surface exposed to the CLI and MCP ``meho_status``.
 	//
 	// Excludes ``raw_jwt`` deliberately — the bearer token must never
@@ -5850,6 +5998,12 @@ type HealthResponse struct {
 	// they serialise as a UUID string / role value under
 	// ``model_dump(mode="json")`` — the same wire shape the
 	// ``meho://tenant/<id>/info`` resource returns.
+	//
+	// ``tenants`` (#5239) lists every tenant of the person, with the role
+	// in each, when the token carries a tenant list (empty otherwise). A
+	// login with several tenants that chose none gets ``tenant_id`` and
+	// ``tenant_role`` as ``None``: the status answer then only lists the
+	// tenants.
 	Operator OperatorIdentity `json:"operator"`
 	Pairings *[]PairingHealth `json:"pairings,omitempty"`
 
@@ -6015,6 +6169,8 @@ type IngestJobStatusResponse struct {
 	//
 	// Mirrors the dataclass; rendered alongside :class:`IngestionResultModel`
 	// in the ingest response so the operator sees both counts.
+	// ``unassigned_op_ids`` names the operations still without a group
+	// (sorted, capped); ``operations_unassigned`` is the full count.
 	Grouping *GroupingResultModel `json:"grouping,omitempty"`
 	ImplId   *string              `json:"impl_id"`
 
@@ -6065,7 +6221,7 @@ type IngestKbRequest struct {
 // :func:`register_ingested_operations` once per spec under the same
 // “(product, version, impl_id)“ connector triple, then run
 // :func:`run_llm_grouping` once for the whole connector. Multi-spec
-// ingestion (vCenter's “vcenter.yaml“ + “vi-json.yaml“) lands as
+// ingestion (a product whose API is split across several spec files) lands as
 // multiple “SpecSource“ entries in one request.
 //
 // Two mutually-exclusive request shapes:
@@ -6167,6 +6323,8 @@ type IngestResponse struct {
 	//
 	// Mirrors the dataclass; rendered alongside :class:`IngestionResultModel`
 	// in the ingest response so the operator sees both counts.
+	// ``unassigned_op_ids`` names the operations still without a group
+	// (sorted, capped); ``operations_unassigned`` is the full count.
 	Grouping *GroupingResultModel `json:"grouping,omitempty"`
 
 	// Ingestion Pydantic projection of
@@ -6442,6 +6600,12 @@ type LivenessResponse struct {
 	// they serialise as a UUID string / role value under
 	// ``model_dump(mode="json")`` — the same wire shape the
 	// ``meho://tenant/<id>/info`` resource returns.
+	//
+	// ``tenants`` (#5239) lists every tenant of the person, with the role
+	// in each, when the token carries a tenant list (empty otherwise). A
+	// login with several tenants that chose none gets ``tenant_id`` and
+	// ``tenant_role`` as ``None``: the status answer then only lists the
+	// tenants.
 	Operator OperatorIdentity `json:"operator"`
 
 	// SensorRunner Liveness of this process's sensor evaluation loop (#2763).
@@ -6745,7 +6909,7 @@ type OpAllowlistEntry struct {
 // OperationCallStep A step the agent dispatches via the operation registry.
 //
 // :attr:`op_id` is the registry operation id (e.g.
-// “vmware.composite.vm.create“); :attr:`params` is the call payload,
+// “gh.composite.repo_create“); :attr:`params` is the call payload,
 // which may contain “${...}“ substitutions resolved at advance time.
 // :attr:`body` is operator-readable Markdown context (may also contain
 // substitutions). :attr:`verify` gates advance to the next step.
@@ -6794,6 +6958,31 @@ type OperationCallVerifyResponse struct {
 	Type    string                 `json:"type"`
 }
 
+// OperationCatalogStatus Which release wrote the shared operation rows (#5019).
+//
+// The operation rows hold, for each built-in operation, which code
+// runs, the parameter rules, the risk level and the approval flag.
+// Every start writes them, and all pods share them. “state“ is:
+//
+//   - “same_release“ -- this pod's release wrote them.
+//   - “other_release“ -- another release wrote them, so this pod
+//     serves settings that were not made for its code. Usually a sign
+//     that two releases run at the same time; see
+//     “docs/acceptance/rollback.md“ for what to do.
+//   - “not_recorded“ -- no start since this check shipped has written
+//     them yet.
+//   - “unknown“ -- the database could not be read (the “db“ field
+//     says more).
+//
+// “this_release“ and “written_by_release“ are commit hashes, the
+// “git_sha“ value of “GET /version“.
+type OperationCatalogStatus struct {
+	State            string     `json:"state"`
+	ThisRelease      string     `json:"this_release"`
+	WrittenAt        *time.Time `json:"written_at"`
+	WrittenByRelease *string    `json:"written_by_release"`
+}
+
 // OperationDescriptor Full :class:`~meho_backplane.db.models.EndpointDescriptor` read shape.
 //
 // Returned by :func:`describe_descriptor` (and the
@@ -6828,6 +7017,33 @@ type OperationDescriptor struct {
 	TenantId          *openapi_types.UUID     `json:"tenant_id"`
 	Version           string                  `json:"version"`
 }
+
+// OperationOverrideList Response body for “GET /api/v1/connectors/operation-overrides“ (#4711).
+type OperationOverrideList struct {
+	Overrides []OperationOverrideRow `json:"overrides"`
+}
+
+// OperationOverrideRow One operator override of a risk level or approval flag (#4711).
+//
+// “scope“ is “tenant“ (the change applies to “tenant_id“ only) or
+// “install“ (the whole install). “safety_level“ / “requires_approval“
+// are the values that apply in that scope: the classification with every
+// override there. “reason“ is the reason a platform admin gave for
+// turning approval off.
+type OperationOverrideRow struct {
+	ConnectorId      string                    `json:"connector_id"`
+	OpId             string                    `json:"op_id"`
+	Reason           *string                   `json:"reason"`
+	RequiresApproval *bool                     `json:"requires_approval"`
+	SafetyLevel      *string                   `json:"safety_level"`
+	Scope            OperationOverrideRowScope `json:"scope"`
+	SetAt            time.Time                 `json:"set_at"`
+	SetBySub         string                    `json:"set_by_sub"`
+	TenantId         *openapi_types.UUID       `json:"tenant_id"`
+}
+
+// OperationOverrideRowScope defines model for OperationOverrideRow.Scope.
+type OperationOverrideRowScope string
 
 // OperationRunStatus Closed lifecycle status of an :class:`OperationRun`.
 //
@@ -6873,7 +7089,9 @@ type OperationRunStatus string
 // “result“ carries the full persisted “OperationResult“ envelope once
 // the run reaches “succeeded“ (the dropped-response-class fix); “error“
 // carries the run-crash / reaper reason on a “failed“ run. Both are
-// “None“ while the run is still “pending“ / “running“.
+// “None“ while the run is still “pending“ / “running“. “result“ is
+// also “None“ for anyone but the person who started the run
+// (:func:`~meho_backplane.operations.operation_run_service.run_result_visible_to`).
 type OperationRunStatusResponse struct {
 	ApprovalRequestId *openapi_types.UUID     `json:"approval_request_id"`
 	ConnectorId       string                  `json:"connector_id"`
@@ -6999,11 +7217,17 @@ type OperationRunSummaryResponse struct {
 // they serialise as a UUID string / role value under
 // “model_dump(mode="json")“ — the same wire shape the
 // “meho://tenant/<id>/info“ resource returns.
+//
+// “tenants“ (#5239) lists every tenant of the person, with the role
+// in each, when the token carries a tenant list (empty otherwise). A
+// login with several tenants that chose none gets “tenant_id“ and
+// “tenant_role“ as “None“: the status answer then only lists the
+// tenants.
 type OperatorIdentity struct {
-	Email    *string            `json:"email"`
-	Name     *string            `json:"name"`
-	Sub      string             `json:"sub"`
-	TenantId openapi_types.UUID `json:"tenant_id"`
+	Email    *string             `json:"email"`
+	Name     *string             `json:"name"`
+	Sub      string              `json:"sub"`
+	TenantId *openapi_types.UUID `json:"tenant_id"`
 
 	// TenantRole Per-tenant role granted to the operator by the JWT issuer.
 	//
@@ -7021,7 +7245,8 @@ type OperatorIdentity struct {
 	// 3.11+) gives the members ``str`` semantics for free, so
 	// ``f"role={role}"`` renders as ``"role=tenant_admin"`` rather than
 	// ``"role=TenantRole.TENANT_ADMIN"``.
-	TenantRole TenantRole `json:"tenant_role"`
+	TenantRole TenantRole     `json:"tenant_role"`
+	Tenants    *[]TenantEntry `json:"tenants,omitempty"`
 }
 
 // OrderBy One “ORDER BY“ term: a known column plus a direction.
@@ -7615,12 +7840,41 @@ type ReplayNode struct {
 	PrincipalSub     string                 `json:"principal_sub"`
 	RequestId        *openapi_types.UUID    `json:"request_id"`
 	ResultStatus     string                 `json:"result_status"`
+	SandboxMode      bool                   `json:"sandbox_mode"`
 	StatusCode       int                    `json:"status_code"`
 	TargetId         *openapi_types.UUID    `json:"target_id"`
 	TargetName       *string                `json:"target_name"`
 	TenantId         *openapi_types.UUID    `json:"tenant_id"`
+	TenantName       *string                `json:"tenant_name"`
 	Ts               time.Time              `json:"ts"`
 	WorkRef          *string                `json:"work_ref"`
+}
+
+// RerunRequestBody POST body for “…/rerun“ (#5417).
+type RerunRequestBody struct {
+	// Params The original params, unchanged. Leave out to use the params MEHO stored with the request. Required for a credential write, whose params MEHO keeps only until the first run. Params that do not match the approved ones are refused (409).
+	Params *map[string]interface{} `json:"params"`
+}
+
+// RerunResponseBody Response for “…/rerun“ (#5417): the attempt number and the run result.
+type RerunResponseBody struct {
+	ApprovalRequestId openapi_types.UUID                `json:"approval_request_id"`
+	Attempt           int                               `json:"attempt"`
+	DispatchError     *string                           `json:"dispatch_error"`
+	DispatchOpId      string                            `json:"dispatch_op_id"`
+	DispatchResult    *RerunResponseBody_DispatchResult `json:"dispatch_result"`
+	DispatchStatus    string                            `json:"dispatch_status"`
+}
+
+// RerunResponseBodyDispatchResult0 defines model for .
+type RerunResponseBodyDispatchResult0 map[string]interface{}
+
+// RerunResponseBodyDispatchResult1 defines model for .
+type RerunResponseBodyDispatchResult1 = []interface{}
+
+// RerunResponseBody_DispatchResult defines model for RerunResponseBody.DispatchResult.
+type RerunResponseBody_DispatchResult struct {
+	union json.RawMessage
 }
 
 // ResolvedTargetDescriptor Centrally-resolved target attributes a connector handler reads.
@@ -7659,10 +7913,12 @@ type ResolvedTargetDescriptor struct {
 	Port            *int                    `json:"port"`
 	PreferredImplId *string                 `json:"preferred_impl_id"`
 	Product         string                  `json:"product"`
+	SecretFieldMap  *map[string]string      `json:"secret_field_map,omitempty"`
 	SecretRef       *string                 `json:"secret_ref"`
 	TenantId        openapi_types.UUID      `json:"tenant_id"`
 	TlsCaPin        *string                 `json:"tls_ca_pin"`
 	TlsServerName   *string                 `json:"tls_server_name"`
+	UpdatedAt       *time.Time              `json:"updated_at"`
 	VerifyTls       *bool                   `json:"verify_tls,omitempty"`
 	Version         *string                 `json:"version"`
 }
@@ -8145,9 +8401,11 @@ type RunnerPrincipalRead struct {
 	LastSeenAt         *time.Time         `json:"last_seen_at"`
 	Name               string             `json:"name"`
 	OwnerSub           string             `json:"owner_sub"`
+	PackageSetDigest   *string            `json:"package_set_digest"`
 	Revoked            bool               `json:"revoked"`
 	TenantId           openapi_types.UUID `json:"tenant_id"`
 	UpdatedAt          time.Time          `json:"updated_at"`
+	WireVersion        *string            `json:"wire_version"`
 }
 
 // RunnerResult The outcome of executing one :class:`RunnerWorkItem`.
@@ -8201,12 +8459,20 @@ type RunnerResultBatch struct {
 // path materialises only “safe“ ops and never signs them) -- signing is
 // a write-tier property, so their absence on a “safe“ item is correct,
 // not a missing field.
+//
+// Connector packages (#5038): “package_set“ is the digest of the
+// connector package set the item needs
+// (:func:`~meho_backplane.runner.package_set.package_set_digest`). The
+// central MEHO sets it only when a connector package provides the op, and
+// the runner refuses the item when its own digest differs. “None“ for an
+// op built into MEHO.
 type RunnerWorkItem struct {
 	CheckRef   string                  `json:"check_ref"`
 	ExpiresAt  *time.Time              `json:"expires_at"`
 	HandlerRef string                  `json:"handler_ref"`
 	ImplId     *string                 `json:"impl_id,omitempty"`
 	OpId       string                  `json:"op_id"`
+	PackageSet *string                 `json:"package_set"`
 	Params     *map[string]interface{} `json:"params,omitempty"`
 
 	// Principal Principal context an executed op runs under, carried on each item.
@@ -8999,13 +9265,13 @@ type SensorStatus string
 // floor of what runs unattended, not a bypass of a modeled destructive
 // gate).
 type ServiceGrantCreate struct {
-	// ConnectorId Exact '<impl_id>-<version>' connector id, e.g. 'vmware-rest-9.0'.
+	// ConnectorId Exact '<impl_id>-<version>' connector id, e.g. 'gh-rest-3'.
 	ConnectorId string `json:"connector_id"`
 
 	// ExpiresAt Optional UTC expiry; null = standing (permanent) grant; must be future.
 	ExpiresAt *time.Time `json:"expires_at"`
 
-	// OpId Exact operation id, no glob (e.g. 'POST:/vcenter/vm').
+	// OpId Exact operation id, no glob (e.g. 'POST:/repos/{owner}/{repo}/issues').
 	OpId string `json:"op_id"`
 
 	// PrincipalSub JWT sub of the service principal the grant authorises (no wildcard).
@@ -9020,7 +9286,7 @@ type ServiceGrantCreate struct {
 	// TargetNamePattern Target selector (#3349): match any dispatch whose target name matches this fnmatch glob (e.g. 'esx-dc*'). Requires target_id to be null. This glob is the explicit any-target request — it is never implied by a null target_id.
 	TargetNamePattern *string `json:"target_name_pattern"`
 
-	// TargetProduct Target selector (#3349): match any dispatch whose target product equals this exact value (e.g. 'vmware'). Requires target_id to be null.
+	// TargetProduct Target selector (#3349): match any dispatch whose target product equals this exact value (e.g. 'gh'). Requires target_id to be null.
 	TargetProduct *string `json:"target_product"`
 }
 
@@ -9455,6 +9721,7 @@ type Target struct {
 	Port                  *int                    `json:"port"`
 	PreferredImplId       *string                 `json:"preferred_impl_id"`
 	Product               string                  `json:"product"`
+	SecretFieldMap        *map[string]string      `json:"secret_field_map,omitempty"`
 	SecretRef             *string                 `json:"secret_ref"`
 	TenantId              openapi_types.UUID      `json:"tenant_id"`
 	TlsCaPin              *string                 `json:"tls_ca_pin"`
@@ -9480,7 +9747,7 @@ type Target struct {
 //
 // “version“ is accepted as an optional operator-asserted product
 // version (G0.15-T6 #1215). Operators who know the version up-front
-// (e.g. “"9.0"“ for a vCenter Hetzner-DC target the consumer just
+// (e.g. “"2.11.0"“ for a Harbor target the consumer just
 // deployed) can pass it at create time so the very first probe
 // dispatches against the versioned connector without round-tripping
 // through PATCH. Fresh targets still default to “None“ and resolve
@@ -9501,13 +9768,14 @@ type TargetCreate struct {
 	PreferredImplId       *string                 `json:"preferred_impl_id"`
 
 	// Product Connector product slug. Must match the ``product`` field of a registered connector class; see ``GET /api/v1/connectors`` for the live list and ``docs/codebase/error-message-shape.md`` for the 422 shape returned on miss.
-	Product       TargetCreateProduct `json:"product"`
-	SecretRef     *string             `json:"secret_ref"`
-	TlsCaPin      *string             `json:"tls_ca_pin"`
-	TlsServerName *string             `json:"tls_server_name"`
-	VerifyTls     *bool               `json:"verify_tls,omitempty"`
-	Version       *string             `json:"version"`
-	VpnRequired   *bool               `json:"vpn_required,omitempty"`
+	Product        TargetCreateProduct `json:"product"`
+	SecretFieldMap *map[string]string  `json:"secret_field_map,omitempty"`
+	SecretRef      *string             `json:"secret_ref"`
+	TlsCaPin       *string             `json:"tls_ca_pin"`
+	TlsServerName  *string             `json:"tls_server_name"`
+	VerifyTls      *bool               `json:"verify_tls,omitempty"`
+	Version        *string             `json:"version"`
+	VpnRequired    *bool               `json:"vpn_required,omitempty"`
 }
 
 // TargetCreateProduct Connector product slug. Must match the “product“ field of a registered connector class; see “GET /api/v1/connectors“ for the live list and “docs/codebase/error-message-shape.md“ for the 422 shape returned on miss.
@@ -9573,6 +9841,7 @@ type TargetSummary struct {
 	Port                  *int                    `json:"port"`
 	PreferredImplId       *string                 `json:"preferred_impl_id"`
 	Product               string                  `json:"product"`
+	SecretFieldMap        *map[string]string      `json:"secret_field_map,omitempty"`
 	SecretRef             *string                 `json:"secret_ref"`
 	TenantId              openapi_types.UUID      `json:"tenant_id"`
 	TlsCaPin              *string                 `json:"tls_ca_pin"`
@@ -9630,6 +9899,7 @@ type TargetUpdate struct {
 	Port                  *int                    `json:"port"`
 	PreferredImplId       *string                 `json:"preferred_impl_id"`
 	Product               *string                 `json:"product"`
+	SecretFieldMap        *map[string]*string     `json:"secret_field_map"`
 	SecretRef             *string                 `json:"secret_ref"`
 	TlsCaPin              *string                 `json:"tls_ca_pin"`
 	TlsServerName         *string                 `json:"tls_server_name"`
@@ -9667,6 +9937,33 @@ type TemplateSummary struct {
 
 // TemplateSummaryStatus defines model for TemplateSummary.Status.
 type TemplateSummaryStatus string
+
+// TenantEntry One tenant of the person, with the role there (#5239).
+//
+// “current“ is “True“ for the tenant this request works in.
+type TenantEntry struct {
+	Current  bool               `json:"current"`
+	Name     string             `json:"name"`
+	TenantId openapi_types.UUID `json:"tenant_id"`
+
+	// TenantRole Per-tenant role granted to the operator by the JWT issuer.
+	//
+	// The set is intentionally small in v0.2: a closed three-value enum
+	// lets the RBAC primitive (Task #234, ``require_role``) make
+	// exhaustive comparisons without leaking arbitrary string handling
+	// into route code. A richer policy engine — topology-aware
+	// permissions, ABAC, approval workflows — is a separate v0.2.next
+	// Goal; widening this enum is the only ratcheting mechanism in the
+	// interim.
+	//
+	// Values are the literal strings the Keycloak protocol-mapper recipe
+	// (Task #235) emits, so a JWT carrying ``"tenant_admin"`` materialises
+	// cleanly as :attr:`TENANT_ADMIN`. ``StrEnum`` (PEP 663, stdlib in
+	// 3.11+) gives the members ``str`` semantics for free, so
+	// ``f"role={role}"`` renders as ``"role=tenant_admin"`` rather than
+	// ``"role=TenantRole.TENANT_ADMIN"``.
+	TenantRole TenantRole `json:"tenant_role"`
+}
 
 // TenantFlightRecorderPolicy Resolved per-tenant flight-recorder policy -- the PATCH read-back shape.
 //
@@ -9722,6 +10019,14 @@ type TenantFlightRecorderPolicyUpdate struct {
 	FlightRecorderRetentionDays *int  `json:"flight_recorder_retention_days"`
 }
 
+// TenantGroupSettingResponse The group's operations after a group write.
+type TenantGroupSettingResponse struct {
+	ConnectorId string                       `json:"connector_id"`
+	GroupKey    string                       `json:"group_key"`
+	Items       []TenantOperationSettingItem `json:"items"`
+	TenantId    openapi_types.UUID           `json:"tenant_id"`
+}
+
 // TenantMailRecipientPolicy Resolved per-tenant mail-recipient policy -- the PATCH read-back shape (#3499).
 //
 // Frozen; maps 1:1 to the tenant's “mail_recipient_allowlist“ column plus the
@@ -9757,6 +10062,22 @@ type TenantMailRecipientPolicyUpdate struct {
 	MailRecipientAllowlist *string `json:"mail_recipient_allowlist"`
 }
 
+// TenantOperationSettingItem One built-in operation with its install default and the tenant's own setting.
+type TenantOperationSettingItem struct {
+	DefaultEnabled bool    `json:"default_enabled"`
+	Enabled        bool    `json:"enabled"`
+	GroupKey       *string `json:"group_key"`
+	OpId           string  `json:"op_id"`
+	TenantEnabled  *bool   `json:"tenant_enabled"`
+}
+
+// TenantOperationSettingsResponse The tenant settings of one connector, for one tenant.
+type TenantOperationSettingsResponse struct {
+	ConnectorId string                       `json:"connector_id"`
+	Items       []TenantOperationSettingItem `json:"items"`
+	TenantId    openapi_types.UUID           `json:"tenant_id"`
+}
+
 // TenantRole Per-tenant role granted to the operator by the JWT issuer.
 //
 // The set is intentionally small in v0.2: a closed three-value enum
@@ -9774,6 +10095,15 @@ type TenantMailRecipientPolicyUpdate struct {
 // “f"role={role}"“ renders as “"role=tenant_admin"“ rather than
 // “"role=TenantRole.TENANT_ADMIN"“.
 type TenantRole string
+
+// TenantSettingBody Body of the tenant-setting writes.
+//
+// “enabled“ is required: “true“ turns the operation on for the tenant,
+// “false“ turns it off, “null“ removes the setting so the tenant uses
+// the install default again.
+type TenantSettingBody struct {
+	Enabled *bool `json:"enabled"`
+}
 
 // ThresholdCompare Numeric-bound comparator: “ok“ / “degraded“ / “critical“.
 //
@@ -10311,6 +10641,20 @@ type VaultStatus struct {
 	ReadOk    bool    `json:"read_ok"`
 }
 
+// VersionResponse “GET /version“ response body.
+type VersionResponse struct {
+	BuildDate         string              `json:"build_date"`
+	ChartVersion      *string             `json:"chart_version"`
+	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`
+	GitSha            string              `json:"git_sha"`
+}
+
+// WithdrawRequestBody POST body for “…/withdraw“ (#4987).
+type WithdrawRequestBody struct {
+	// Reason Optional reason why the sender takes the request back.
+	Reason *string `json:"reason,omitempty"`
+}
+
 // UnderscoreAnnotateEdgeRequest Inbound body for “POST /api/v1/topology/edges“.
 //
 // “kind“ is typed against :data:`_EdgeKindSlug` so a malformed kind
@@ -10688,13 +11032,25 @@ type RunAgentEventsApiV1AgentsNameRunEventsPostParams struct {
 
 // ListApprovalsApiV1ApprovalsGetParams defines parameters for ListApprovalsApiV1ApprovalsGet.
 type ListApprovalsApiV1ApprovalsGetParams struct {
-	// Status Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'.
+	// Status Filter by status. One of: pending, approved, rejected, expired, withdrawn, all. 'all' returns requests in every state. Defaults to 'pending'.
 	Status *string `form:"status,omitempty" json:"status,omitempty"`
 
 	// WorkRef Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#1' — the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter.
-	WorkRef       *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
-	Authorization *string `json:"authorization,omitempty"`
+	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+
+	// Limit Return at most this many requests (1..500). Omit for no limit.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Offset Skip this many requests first, in the chosen order. Defaults to 0.
+	Offset *int `form:"offset,omitempty" json:"offset,omitempty"`
+
+	// Order Sort by creation time. 'newest' (default) lists the newest request first; 'oldest' lists the oldest first, which is the order a chain of requests under one change ticket was sent in.
+	Order         *ListApprovalsApiV1ApprovalsGetParamsOrder `form:"order,omitempty" json:"order,omitempty"`
+	Authorization *string                                    `json:"authorization,omitempty"`
 }
+
+// ListApprovalsApiV1ApprovalsGetParamsOrder defines parameters for ListApprovalsApiV1ApprovalsGet.
+type ListApprovalsApiV1ApprovalsGetParamsOrder string
 
 // GetApprovalRequestApiV1ApprovalsRequestIdGetParams defines parameters for GetApprovalRequestApiV1ApprovalsRequestIdGet.
 type GetApprovalRequestApiV1ApprovalsRequestIdGetParams struct {
@@ -10716,8 +11072,18 @@ type RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostParams defines parameters for RerunApprovalRequestApiV1ApprovalsRequestIdRerunPost.
+type RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // GetApprovalResultApiV1ApprovalsRequestIdResultGetParams defines parameters for GetApprovalResultApiV1ApprovalsRequestIdResultGet.
 type GetApprovalResultApiV1ApprovalsRequestIdResultGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams defines parameters for WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPost.
+type WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -10822,9 +11188,11 @@ type RecentBroadcastEventsApiV1BroadcastRecentGetParams struct {
 
 // GetAssignmentApiV1ChecksAssignmentGetParams defines parameters for GetAssignmentApiV1ChecksAssignmentGet.
 type GetAssignmentApiV1ChecksAssignmentGetParams struct {
-	Runner        string  `form:"runner" json:"runner"`
-	KnownVersion  *string `form:"known_version,omitempty" json:"known_version,omitempty"`
-	Authorization *string `json:"authorization,omitempty"`
+	Runner                 string  `form:"runner" json:"runner"`
+	KnownVersion           *string `form:"known_version,omitempty" json:"known_version,omitempty"`
+	Authorization          *string `json:"authorization,omitempty"`
+	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
+	XMEHORunnerPackageSet  *string `json:"X-MEHO-Runner-Package-Set,omitempty"`
 }
 
 // PutAssignmentApiV1ChecksAssignmentRunnerPutParams defines parameters for PutAssignmentApiV1ChecksAssignmentRunnerPut.
@@ -10859,7 +11227,9 @@ type GetDashboardApiV1ChecksDashboardsDashboardIdGetParams struct {
 
 // PostResultsApiV1ChecksResultsPostParams defines parameters for PostResultsApiV1ChecksResultsPost.
 type PostResultsApiV1ChecksResultsPostParams struct {
-	Authorization *string `json:"authorization,omitempty"`
+	Authorization          *string `json:"authorization,omitempty"`
+	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
+	XMEHORunnerPackageSet  *string `json:"X-MEHO-Runner-Package-Set,omitempty"`
 }
 
 // ListEndpointApiV1ConnectorsGetParams defines parameters for ListEndpointApiV1ConnectorsGet.
@@ -10884,6 +11254,13 @@ type IngestEndpointApiV1ConnectorsIngestPostParams struct {
 // GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams defines parameters for GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet.
 type GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams defines parameters for ListOperationOverridesApiV1ConnectorsOperationOverridesGet.
+type ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams struct {
+	// ReducedApproval Only the operations a platform admin turned approval off for.
+	ReducedApproval *bool   `form:"reduced_approval,omitempty" json:"reduced_approval,omitempty"`
+	Authorization   *string `json:"authorization,omitempty"`
 }
 
 // DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams defines parameters for DeleteEndpointApiV1ConnectorsConnectorIdDelete.
@@ -10916,6 +11293,16 @@ type EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams struct
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams defines parameters for RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDelete.
+type RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams struct {
+	// TenantId The tenant whose override to remove. Leave it out for the install-wide override. A tenant admin can name only their own tenant.
+	TenantId *openapi_types.UUID `form:"tenant_id,omitempty" json:"tenant_id,omitempty"`
+
+	// Reason Why you remove it; written to the audit row. Required when the removal ends approval.
+	Reason        *string `form:"reason,omitempty" json:"reason,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams defines parameters for EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatch.
 type EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -10930,6 +11317,27 @@ type GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams struct {
 
 // GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer defines parameters for GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet.
 type GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer string
+
+// ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetParams defines parameters for ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGet.
+type ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetParams struct {
+	// TenantId Act on this tenant instead of your own. Needs platform_admin when it is not your tenant.
+	TenantId      *openapi_types.UUID `form:"tenant_id,omitempty" json:"tenant_id,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
+// SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams defines parameters for SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPut.
+type SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams struct {
+	// TenantId Act on this tenant instead of your own. Needs platform_admin when it is not your tenant.
+	TenantId      *openapi_types.UUID `form:"tenant_id,omitempty" json:"tenant_id,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
+// SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams defines parameters for SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPut.
+type SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams struct {
+	// TenantId Act on this tenant instead of your own. Needs platform_admin when it is not your tenant.
+	TenantId      *openapi_types.UUID `form:"tenant_id,omitempty" json:"tenant_id,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
 
 // ListConventionsApiV1ConventionsGetParams defines parameters for ListConventionsApiV1ConventionsGet.
 type ListConventionsApiV1ConventionsGetParams struct {
@@ -11048,13 +11456,17 @@ type FeedEndpointApiV1FeedGetParams struct {
 // PollNextCommandApiV1GatewayRunnerNextGetParams defines parameters for PollNextCommandApiV1GatewayRunnerNextGet.
 type PollNextCommandApiV1GatewayRunnerNextGetParams struct {
 	// Wait Long-poll hold in seconds. 0 = a single immediate claim attempt (no hold). Values above the ceiling (30s) are clamped down, not rejected — the runner asking for a longer hold gets a bounded one.
-	Wait          *int    `form:"wait,omitempty" json:"wait,omitempty"`
-	Authorization *string `json:"authorization,omitempty"`
+	Wait                   *int    `form:"wait,omitempty" json:"wait,omitempty"`
+	Authorization          *string `json:"authorization,omitempty"`
+	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
+	XMEHORunnerPackageSet  *string `json:"X-MEHO-Runner-Package-Set,omitempty"`
 }
 
 // ReportCommandResultApiV1GatewayRunnerResultPostParams defines parameters for ReportCommandResultApiV1GatewayRunnerResultPost.
 type ReportCommandResultApiV1GatewayRunnerResultPostParams struct {
-	Authorization *string `json:"authorization,omitempty"`
+	Authorization          *string `json:"authorization,omitempty"`
+	XMEHORunnerWireVersion *string `json:"X-MEHO-Runner-Wire-Version,omitempty"`
+	XMEHORunnerPackageSet  *string `json:"X-MEHO-Runner-Package-Set,omitempty"`
 }
 
 // AuthenticatedHealthApiV1HealthGetParams defines parameters for AuthenticatedHealthApiV1HealthGet.
@@ -11148,7 +11560,7 @@ type PostCallApiV1OperationsCallPostParams struct {
 
 // GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams defines parameters for GetGovernedSubopsApiV1OperationsGovernedSubopsGet.
 type GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams struct {
-	// OpId A composite op id whose governed child ops to enumerate — e.g. `vmware.composite.vm.create`.
+	// OpId A composite op id whose governed child ops to enumerate — e.g. `gh.composite.repo_create`.
 	OpId string `form:"op_id" json:"op_id"`
 
 	// ConnectorId Optional connector-id override for resolving each child's best-effort safety_level; defaults to the connector the composite is registered against.
@@ -11158,7 +11570,7 @@ type GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams struct {
 
 // GetGroupsApiV1OperationsGroupsGetParams defines parameters for GetGroupsApiV1OperationsGroupsGet.
 type GetGroupsApiV1OperationsGroupsGetParams struct {
-	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
+	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `gh-rest-3`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `gh`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
 	ConnectorId string `form:"connector_id" json:"connector_id"`
 
 	// Limit Page size. Default 100; max 500. Matches `list_targets` paging — sibling list surfaces share one ceiling (G0.18-T5 #1358).
@@ -11194,6 +11606,8 @@ type ListOperationRunsApiV1OperationsRunsGetParams struct {
 
 // GetOperationRunStatusApiV1OperationsRunsHandleGetParams defines parameters for GetOperationRunStatusApiV1OperationsRunsHandleGet.
 type GetOperationRunStatusApiV1OperationsRunsHandleGetParams struct {
+	// WaitSeconds Wait up to this many seconds for the run to end, then answer. 0 (the default) answers at once. At most 50.
+	WaitSeconds   *int    `form:"wait_seconds,omitempty" json:"wait_seconds,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -11204,7 +11618,7 @@ type CancelOperationRunApiV1OperationsRunsHandleCancelPostParams struct {
 
 // GetSearchApiV1OperationsSearchGetParams defines parameters for GetSearchApiV1OperationsSearchGet.
 type GetSearchApiV1OperationsSearchGetParams struct {
-	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
+	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `gh-rest-3`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `gh`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
 	ConnectorId string `form:"connector_id" json:"connector_id"`
 
 	// Q Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated.
@@ -11681,6 +12095,12 @@ type ApprovalsIndexUiApprovalsGetParams struct {
 	Tab     *string `form:"tab,omitempty" json:"tab,omitempty"`
 	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	Offset  *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Order   *string `form:"order,omitempty" json:"order,omitempty"`
+}
+
+// ApprovalsInOrderPlanUiApprovalsInOrderGetParams defines parameters for ApprovalsInOrderPlanUiApprovalsInOrderGet.
+type ApprovalsInOrderPlanUiApprovalsInOrderGetParams struct {
+	WorkRef string `form:"work_ref" json:"work_ref"`
 }
 
 // ApprovalsHistoryUiApprovalsListGetParams defines parameters for ApprovalsHistoryUiApprovalsListGet.
@@ -11689,6 +12109,7 @@ type ApprovalsHistoryUiApprovalsListGetParams struct {
 	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	Offset  *int    `form:"offset,omitempty" json:"offset,omitempty"`
 	Partial *string `form:"partial,omitempty" json:"partial,omitempty"`
+	Order   *string `form:"order,omitempty" json:"order,omitempty"`
 }
 
 // UiAuditPageUiAuditGetParams defines parameters for UiAuditPageUiAuditGet.
@@ -11787,6 +12208,14 @@ type UiConnectorsListUiConnectorsGetParams struct {
 	Dir     *UnderscoreSortDirection                           `form:"dir,omitempty" json:"dir,omitempty"`
 	Product *string                                            `form:"product,omitempty" json:"product,omitempty"`
 }
+
+// UiConnectorsOverridesUiConnectorsOverridesGetParams defines parameters for UiConnectorsOverridesUiConnectorsOverridesGet.
+type UiConnectorsOverridesUiConnectorsOverridesGetParams struct {
+	Show *UiConnectorsOverridesUiConnectorsOverridesGetParamsShow `form:"show,omitempty" json:"show,omitempty"`
+}
+
+// UiConnectorsOverridesUiConnectorsOverridesGetParamsShow defines parameters for UiConnectorsOverridesUiConnectorsOverridesGet.
+type UiConnectorsOverridesUiConnectorsOverridesGetParamsShow string
 
 // UiConnectorsRegistryListUiConnectorsRegistryGetParams defines parameters for UiConnectorsRegistryListUiConnectorsRegistryGet.
 type UiConnectorsRegistryListUiConnectorsRegistryGetParams struct {
@@ -12049,6 +12478,12 @@ type DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostJSONRequestBody = Dec
 // RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostJSONRequestBody defines body for RejectApprovalRequestApiV1ApprovalsRequestIdRejectPost for application/json ContentType.
 type RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostJSONRequestBody = RejectRequestBody
 
+// RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostJSONRequestBody defines body for RerunApprovalRequestApiV1ApprovalsRequestIdRerunPost for application/json ContentType.
+type RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostJSONRequestBody = RerunRequestBody
+
+// WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostJSONRequestBody defines body for WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPost for application/json ContentType.
+type WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostJSONRequestBody = WithdrawRequestBody
+
 // AskDocsEndpointApiV1AskDocsPostJSONRequestBody defines body for AskDocsEndpointApiV1AskDocsPost for application/json ContentType.
 type AskDocsEndpointApiV1AskDocsPostJSONRequestBody = AskDocsRequest
 
@@ -12081,6 +12516,12 @@ type EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBo
 
 // EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchJSONRequestBody defines body for EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatch for application/json ContentType.
 type EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchJSONRequestBody = EditOpBody
+
+// SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutJSONRequestBody defines body for SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPut for application/json ContentType.
+type SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutJSONRequestBody = TenantSettingBody
+
+// SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutJSONRequestBody defines body for SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPut for application/json ContentType.
+type SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutJSONRequestBody = TenantSettingBody
 
 // CreateConventionApiV1ConventionsPostJSONRequestBody defines body for CreateConventionApiV1ConventionsPost for application/json ContentType.
 type CreateConventionApiV1ConventionsPostJSONRequestBody = ConventionCreate
@@ -12283,6 +12724,9 @@ type UiAgentsRunCancelUiAgentsNameRunHandleCancelPostJSONRequestBody = UISession
 // UiAgentsToggleUiAgentsNameTogglePostFormdataRequestBody defines body for UiAgentsToggleUiAgentsNameTogglePost for application/x-www-form-urlencoded ContentType.
 type UiAgentsToggleUiAgentsNameTogglePostFormdataRequestBody = BodyUiAgentsToggleUiAgentsNameTogglePost
 
+// ApprovalsInOrderRunUiApprovalsInOrderPostFormdataRequestBody defines body for ApprovalsInOrderRunUiApprovalsInOrderPost for application/x-www-form-urlencoded ContentType.
+type ApprovalsInOrderRunUiApprovalsInOrderPostFormdataRequestBody = BodyApprovalsInOrderRunUiApprovalsInOrderPost
+
 // ApprovalApproveUiApprovalsRequestIdApprovePostFormdataRequestBody defines body for ApprovalApproveUiApprovalsRequestIdApprovePost for application/x-www-form-urlencoded ContentType.
 type ApprovalApproveUiApprovalsRequestIdApprovePostFormdataRequestBody = BodyApprovalApproveUiApprovalsRequestIdApprovePost
 
@@ -12309,6 +12753,9 @@ type UiConnectorsImportPreviewUiConnectorsImportPostMultipartRequestBody = BodyU
 
 // UiConnectorsImportConfirmUiConnectorsImportConfirmPostMultipartRequestBody defines body for UiConnectorsImportConfirmUiConnectorsImportConfirmPost for multipart/form-data ContentType.
 type UiConnectorsImportConfirmUiConnectorsImportConfirmPostMultipartRequestBody = BodyUiConnectorsImportConfirmUiConnectorsImportConfirmPost
+
+// UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody defines body for UiConnectorsOverridesUiConnectorsOverridesGet for application/json ContentType.
+type UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody = UISessionContext
 
 // UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody defines body for UiConnectorsRegistryListUiConnectorsRegistryGet for application/json ContentType.
 type UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody = UISessionContext
@@ -13842,6 +14289,68 @@ func (t *PreviewOperationBody_Target) UnmarshalJSON(b []byte) error {
 	return err
 }
 
+// AsRerunResponseBodyDispatchResult0 returns the union data inside the RerunResponseBody_DispatchResult as a RerunResponseBodyDispatchResult0
+func (t RerunResponseBody_DispatchResult) AsRerunResponseBodyDispatchResult0() (RerunResponseBodyDispatchResult0, error) {
+	var body RerunResponseBodyDispatchResult0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromRerunResponseBodyDispatchResult0 overwrites any union data inside the RerunResponseBody_DispatchResult as the provided RerunResponseBodyDispatchResult0
+func (t *RerunResponseBody_DispatchResult) FromRerunResponseBodyDispatchResult0(v RerunResponseBodyDispatchResult0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeRerunResponseBodyDispatchResult0 performs a merge with any union data inside the RerunResponseBody_DispatchResult, using the provided RerunResponseBodyDispatchResult0
+func (t *RerunResponseBody_DispatchResult) MergeRerunResponseBodyDispatchResult0(v RerunResponseBodyDispatchResult0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsRerunResponseBodyDispatchResult1 returns the union data inside the RerunResponseBody_DispatchResult as a RerunResponseBodyDispatchResult1
+func (t RerunResponseBody_DispatchResult) AsRerunResponseBodyDispatchResult1() (RerunResponseBodyDispatchResult1, error) {
+	var body RerunResponseBodyDispatchResult1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromRerunResponseBodyDispatchResult1 overwrites any union data inside the RerunResponseBody_DispatchResult as the provided RerunResponseBodyDispatchResult1
+func (t *RerunResponseBody_DispatchResult) FromRerunResponseBodyDispatchResult1(v RerunResponseBodyDispatchResult1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeRerunResponseBodyDispatchResult1 performs a merge with any union data inside the RerunResponseBody_DispatchResult, using the provided RerunResponseBodyDispatchResult1
+func (t *RerunResponseBody_DispatchResult) MergeRerunResponseBodyDispatchResult1(v RerunResponseBodyDispatchResult1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t RerunResponseBody_DispatchResult) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *RerunResponseBody_DispatchResult) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
 // AsOperationCallStep returns the union data inside the RunbookTemplateBody_Steps_Item as a OperationCallStep
 func (t RunbookTemplateBody_Steps_Item) AsOperationCallStep() (OperationCallStep, error) {
 	var body OperationCallStep
@@ -14281,8 +14790,18 @@ type ClientInterface interface {
 
 	RejectApprovalRequestApiV1ApprovalsRequestIdRejectPost(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostParams, body RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostWithBody request with any body
+	RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostWithBody(ctx context.Context, requestId openapi_types.UUID, params *RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RerunApprovalRequestApiV1ApprovalsRequestIdRerunPost(ctx context.Context, requestId openapi_types.UUID, params *RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostParams, body RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetApprovalResultApiV1ApprovalsRequestIdResultGet request
 	GetApprovalResultApiV1ApprovalsRequestIdResultGet(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalResultApiV1ApprovalsRequestIdResultGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBody request with any body
+	WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBody(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPost(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, body WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AskDocsEndpointApiV1AskDocsPostWithBody request with any body
 	AskDocsEndpointApiV1AskDocsPostWithBody(ctx context.Context, params *AskDocsEndpointApiV1AskDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -14386,6 +14905,9 @@ type ClientInterface interface {
 	// GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet request
 	GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet(ctx context.Context, jobId openapi_types.UUID, params *GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListOperationOverridesApiV1ConnectorsOperationOverridesGet request
+	ListOperationOverridesApiV1ConnectorsOperationOverridesGet(ctx context.Context, params *ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DeleteEndpointApiV1ConnectorsConnectorIdDelete request
 	DeleteEndpointApiV1ConnectorsConnectorIdDelete(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -14403,6 +14925,9 @@ type ClientInterface interface {
 
 	EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatch(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, body EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDelete request
+	RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDelete(ctx context.Context, connectorId string, opId string, params *RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBody request with any body
 	EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBody(ctx context.Context, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -14410,6 +14935,19 @@ type ClientInterface interface {
 
 	// GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet request
 	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet(ctx context.Context, connectorId string, params *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGet request
+	ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGet(ctx context.Context, connectorId string, params *ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithBody request with any body
+	SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithBody(ctx context.Context, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPut(ctx context.Context, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, body SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithBody request with any body
+	SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithBody(ctx context.Context, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPut(ctx context.Context, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, body SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListConventionsApiV1ConventionsGet request
 	ListConventionsApiV1ConventionsGet(ctx context.Context, params *ListConventionsApiV1ConventionsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -14974,6 +15512,14 @@ type ClientInterface interface {
 	// ApprovalsBadgeUiApprovalsBadgeGet request
 	ApprovalsBadgeUiApprovalsBadgeGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ApprovalsInOrderPlanUiApprovalsInOrderGet request
+	ApprovalsInOrderPlanUiApprovalsInOrderGet(ctx context.Context, params *ApprovalsInOrderPlanUiApprovalsInOrderGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ApprovalsInOrderRunUiApprovalsInOrderPostWithBody request with any body
+	ApprovalsInOrderRunUiApprovalsInOrderPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ApprovalsInOrderRunUiApprovalsInOrderPostWithFormdataBody(ctx context.Context, body ApprovalsInOrderRunUiApprovalsInOrderPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ApprovalsHistoryUiApprovalsListGet request
 	ApprovalsHistoryUiApprovalsListGet(ctx context.Context, params *ApprovalsHistoryUiApprovalsListGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -15074,6 +15620,11 @@ type ClientInterface interface {
 
 	// UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody request with any body
 	UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsOverridesUiConnectorsOverridesGetWithBody request with any body
+	UiConnectorsOverridesUiConnectorsOverridesGetWithBody(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsOverridesUiConnectorsOverridesGet(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, body UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiConnectorsRegistryListUiConnectorsRegistryGetWithBody request with any body
 	UiConnectorsRegistryListUiConnectorsRegistryGetWithBody(ctx context.Context, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -16275,8 +16826,56 @@ func (c *Client) RejectApprovalRequestApiV1ApprovalsRequestIdRejectPost(ctx cont
 	return c.Client.Do(req)
 }
 
+func (c *Client) RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostWithBody(ctx context.Context, requestId openapi_types.UUID, params *RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRerunApprovalRequestApiV1ApprovalsRequestIdRerunPostRequestWithBody(c.Server, requestId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RerunApprovalRequestApiV1ApprovalsRequestIdRerunPost(ctx context.Context, requestId openapi_types.UUID, params *RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostParams, body RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRerunApprovalRequestApiV1ApprovalsRequestIdRerunPostRequest(c.Server, requestId, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) GetApprovalResultApiV1ApprovalsRequestIdResultGet(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalResultApiV1ApprovalsRequestIdResultGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetApprovalResultApiV1ApprovalsRequestIdResultGetRequest(c.Server, requestId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBody(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewWithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostRequestWithBody(c.Server, requestId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPost(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, body WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewWithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostRequest(c.Server, requestId, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -16731,6 +17330,18 @@ func (c *Client) GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet(ctx conte
 	return c.Client.Do(req)
 }
 
+func (c *Client) ListOperationOverridesApiV1ConnectorsOperationOverridesGet(ctx context.Context, params *ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListOperationOverridesApiV1ConnectorsOperationOverridesGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) DeleteEndpointApiV1ConnectorsConnectorIdDelete(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDeleteEndpointApiV1ConnectorsConnectorIdDeleteRequest(c.Server, connectorId, params)
 	if err != nil {
@@ -16803,6 +17414,18 @@ func (c *Client) EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatch(
 	return c.Client.Do(req)
 }
 
+func (c *Client) RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDelete(ctx context.Context, connectorId string, opId string, params *RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteRequest(c.Server, connectorId, opId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBody(ctx context.Context, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchRequestWithBody(c.Server, connectorId, opId, params, contentType, body)
 	if err != nil {
@@ -16829,6 +17452,66 @@ func (c *Client) EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatch(ctx
 
 func (c *Client) GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet(ctx context.Context, connectorId string, params *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetRequest(c.Server, connectorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGet(ctx context.Context, connectorId string, params *ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetRequest(c.Server, connectorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithBody(ctx context.Context, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutRequestWithBody(c.Server, connectorId, groupKey, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPut(ctx context.Context, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, body SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutRequest(c.Server, connectorId, groupKey, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithBody(ctx context.Context, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutRequestWithBody(c.Server, connectorId, opId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPut(ctx context.Context, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, body SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutRequest(c.Server, connectorId, opId, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -19359,6 +20042,42 @@ func (c *Client) ApprovalsBadgeUiApprovalsBadgeGet(ctx context.Context, reqEdito
 	return c.Client.Do(req)
 }
 
+func (c *Client) ApprovalsInOrderPlanUiApprovalsInOrderGet(ctx context.Context, params *ApprovalsInOrderPlanUiApprovalsInOrderGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalsInOrderPlanUiApprovalsInOrderGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApprovalsInOrderRunUiApprovalsInOrderPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalsInOrderRunUiApprovalsInOrderPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApprovalsInOrderRunUiApprovalsInOrderPostWithFormdataBody(ctx context.Context, body ApprovalsInOrderRunUiApprovalsInOrderPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalsInOrderRunUiApprovalsInOrderPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) ApprovalsHistoryUiApprovalsListGet(ctx context.Context, params *ApprovalsHistoryUiApprovalsListGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewApprovalsHistoryUiApprovalsListGetRequest(c.Server, params)
 	if err != nil {
@@ -19781,6 +20500,30 @@ func (c *Client) UiConnectorsImportPreviewUiConnectorsImportPostWithBody(ctx con
 
 func (c *Client) UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiConnectorsImportConfirmUiConnectorsImportConfirmPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsOverridesUiConnectorsOverridesGetWithBody(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsOverridesUiConnectorsOverridesGetRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsOverridesUiConnectorsOverridesGet(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, body UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsOverridesUiConnectorsOverridesGetRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -24541,6 +25284,54 @@ func NewListApprovalsApiV1ApprovalsGetRequest(server string, params *ListApprova
 
 		}
 
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Order != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "order", runtime.ParamLocationQuery, *params.Order); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -24802,6 +25593,68 @@ func NewRejectApprovalRequestApiV1ApprovalsRequestIdRejectPostRequestWithBody(se
 	return req, nil
 }
 
+// NewRerunApprovalRequestApiV1ApprovalsRequestIdRerunPostRequest calls the generic RerunApprovalRequestApiV1ApprovalsRequestIdRerunPost builder with application/json body
+func NewRerunApprovalRequestApiV1ApprovalsRequestIdRerunPostRequest(server string, requestId openapi_types.UUID, params *RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostParams, body RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRerunApprovalRequestApiV1ApprovalsRequestIdRerunPostRequestWithBody(server, requestId, params, "application/json", bodyReader)
+}
+
+// NewRerunApprovalRequestApiV1ApprovalsRequestIdRerunPostRequestWithBody generates requests for RerunApprovalRequestApiV1ApprovalsRequestIdRerunPost with any type of body
+func NewRerunApprovalRequestApiV1ApprovalsRequestIdRerunPostRequestWithBody(server string, requestId openapi_types.UUID, params *RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/approvals/%s/rerun", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewGetApprovalResultApiV1ApprovalsRequestIdResultGetRequest generates requests for GetApprovalResultApiV1ApprovalsRequestIdResultGet
 func NewGetApprovalResultApiV1ApprovalsRequestIdResultGetRequest(server string, requestId openapi_types.UUID, params *GetApprovalResultApiV1ApprovalsRequestIdResultGetParams) (*http.Request, error) {
 	var err error
@@ -24832,6 +25685,68 @@ func NewGetApprovalResultApiV1ApprovalsRequestIdResultGetRequest(server string, 
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewWithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostRequest calls the generic WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPost builder with application/json body
+func NewWithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostRequest(server string, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, body WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewWithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostRequestWithBody(server, requestId, params, "application/json", bodyReader)
+}
+
+// NewWithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostRequestWithBody generates requests for WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPost with any type of body
+func NewWithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostRequestWithBody(server string, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/approvals/%s/withdraw", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -26052,6 +26967,28 @@ func NewGetAssignmentApiV1ChecksAssignmentGetRequest(server string, params *GetA
 			req.Header.Set("authorization", headerParam0)
 		}
 
+		if params.XMEHORunnerWireVersion != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Wire-Version", runtime.ParamLocationHeader, *params.XMEHORunnerWireVersion)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
+		}
+
+		if params.XMEHORunnerPackageSet != nil {
+			var headerParam2 string
+
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam2)
+		}
+
 	}
 
 	return req, nil
@@ -26462,6 +27399,28 @@ func NewPostResultsApiV1ChecksResultsPostRequestWithBody(server string, params *
 			req.Header.Set("authorization", headerParam0)
 		}
 
+		if params.XMEHORunnerWireVersion != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Wire-Version", runtime.ParamLocationHeader, *params.XMEHORunnerWireVersion)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
+		}
+
+		if params.XMEHORunnerPackageSet != nil {
+			var headerParam2 string
+
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam2)
+		}
+
 	}
 
 	return req, nil
@@ -26652,6 +27611,70 @@ func NewGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetRequest(server stri
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListOperationOverridesApiV1ConnectorsOperationOverridesGetRequest generates requests for ListOperationOverridesApiV1ConnectorsOperationOverridesGet
+func NewListOperationOverridesApiV1ConnectorsOperationOverridesGetRequest(server string, params *ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/operation-overrides")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.ReducedApproval != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "reduced_approval", runtime.ParamLocationQuery, *params.ReducedApproval); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -26964,6 +27987,100 @@ func NewEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchRequestWit
 	return req, nil
 }
 
+// NewRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteRequest generates requests for RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDelete
+func NewRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteRequest(server string, connectorId string, opId string, params *RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "op_id", runtime.ParamLocationPath, opId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/%s/operation-overrides/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_id", runtime.ParamLocationQuery, *params.TenantId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Reason != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "reason", runtime.ParamLocationQuery, *params.Reason); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchRequest calls the generic EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatch builder with application/json body
 func NewEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchRequest(server string, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, body EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -27085,6 +28202,259 @@ func NewGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetRequest(server strin
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetRequest generates requests for ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGet
+func NewListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetRequest(server string, connectorId string, params *ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/%s/tenant-settings", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_id", runtime.ParamLocationQuery, *params.TenantId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutRequest calls the generic SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPut builder with application/json body
+func NewSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutRequest(server string, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, body SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutRequestWithBody(server, connectorId, groupKey, params, "application/json", bodyReader)
+}
+
+// NewSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutRequestWithBody generates requests for SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPut with any type of body
+func NewSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutRequestWithBody(server string, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "group_key", runtime.ParamLocationPath, groupKey)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/%s/tenant-settings/groups/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_id", runtime.ParamLocationQuery, *params.TenantId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("PUT", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutRequest calls the generic SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPut builder with application/json body
+func NewSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutRequest(server string, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, body SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutRequestWithBody(server, connectorId, opId, params, "application/json", bodyReader)
+}
+
+// NewSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutRequestWithBody generates requests for SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPut with any type of body
+func NewSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutRequestWithBody(server string, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "op_id", runtime.ParamLocationPath, opId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/%s/tenant-settings/operations/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_id", runtime.ParamLocationQuery, *params.TenantId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("PUT", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -28364,6 +29734,28 @@ func NewPollNextCommandApiV1GatewayRunnerNextGetRequest(server string, runner st
 			req.Header.Set("authorization", headerParam0)
 		}
 
+		if params.XMEHORunnerWireVersion != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Wire-Version", runtime.ParamLocationHeader, *params.XMEHORunnerWireVersion)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
+		}
+
+		if params.XMEHORunnerPackageSet != nil {
+			var headerParam2 string
+
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam2)
+		}
+
 	}
 
 	return req, nil
@@ -28424,6 +29816,28 @@ func NewReportCommandResultApiV1GatewayRunnerResultPostRequestWithBody(server st
 			}
 
 			req.Header.Set("authorization", headerParam0)
+		}
+
+		if params.XMEHORunnerWireVersion != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Wire-Version", runtime.ParamLocationHeader, *params.XMEHORunnerWireVersion)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Wire-Version", headerParam1)
+		}
+
+		if params.XMEHORunnerPackageSet != nil {
+			var headerParam2 string
+
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-MEHO-Runner-Package-Set", runtime.ParamLocationHeader, *params.XMEHORunnerPackageSet)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-MEHO-Runner-Package-Set", headerParam2)
 		}
 
 	}
@@ -29767,6 +31181,28 @@ func NewGetOperationRunStatusApiV1OperationsRunsHandleGetRequest(server string, 
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.WaitSeconds != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "wait_seconds", runtime.ParamLocationQuery, *params.WaitSeconds); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -36201,6 +37637,22 @@ func NewApprovalsIndexUiApprovalsGetRequest(server string, params *ApprovalsInde
 
 		}
 
+		if params.Order != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "order", runtime.ParamLocationQuery, *params.Order); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -36235,6 +37687,91 @@ func NewApprovalsBadgeUiApprovalsBadgeGetRequest(server string) (*http.Request, 
 	if err != nil {
 		return nil, err
 	}
+
+	return req, nil
+}
+
+// NewApprovalsInOrderPlanUiApprovalsInOrderGetRequest generates requests for ApprovalsInOrderPlanUiApprovalsInOrderGet
+func NewApprovalsInOrderPlanUiApprovalsInOrderGetRequest(server string, params *ApprovalsInOrderPlanUiApprovalsInOrderGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/approvals/in-order")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "work_ref", runtime.ParamLocationQuery, params.WorkRef); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewApprovalsInOrderRunUiApprovalsInOrderPostRequestWithFormdataBody calls the generic ApprovalsInOrderRunUiApprovalsInOrderPost builder with application/x-www-form-urlencoded body
+func NewApprovalsInOrderRunUiApprovalsInOrderPostRequestWithFormdataBody(server string, body ApprovalsInOrderRunUiApprovalsInOrderPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewApprovalsInOrderRunUiApprovalsInOrderPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewApprovalsInOrderRunUiApprovalsInOrderPostRequestWithBody generates requests for ApprovalsInOrderRunUiApprovalsInOrderPost with any type of body
+func NewApprovalsInOrderRunUiApprovalsInOrderPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/approvals/in-order")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -36312,6 +37849,22 @@ func NewApprovalsHistoryUiApprovalsListGetRequest(server string, params *Approva
 		if params.Partial != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "partial", runtime.ParamLocationQuery, *params.Partial); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Order != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "order", runtime.ParamLocationQuery, *params.Order); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -38052,6 +39605,68 @@ func NewUiConnectorsImportConfirmUiConnectorsImportConfirmPostRequestWithBody(se
 	}
 
 	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsOverridesUiConnectorsOverridesGetRequest calls the generic UiConnectorsOverridesUiConnectorsOverridesGet builder with application/json body
+func NewUiConnectorsOverridesUiConnectorsOverridesGetRequest(server string, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, body UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsOverridesUiConnectorsOverridesGetRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewUiConnectorsOverridesUiConnectorsOverridesGetRequestWithBody generates requests for UiConnectorsOverridesUiConnectorsOverridesGet with any type of body
+func NewUiConnectorsOverridesUiConnectorsOverridesGetRequestWithBody(server string, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/overrides")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Show != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "show", runtime.ParamLocationQuery, *params.Show); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
@@ -45610,8 +47225,18 @@ type ClientWithResponsesInterface interface {
 
 	RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostParams, body RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse, error)
 
+	// RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostWithBodyWithResponse request with any body
+	RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostResponse, error)
+
+	RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostParams, body RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostResponse, error)
+
 	// GetApprovalResultApiV1ApprovalsRequestIdResultGetWithResponse request
 	GetApprovalResultApiV1ApprovalsRequestIdResultGetWithResponse(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalResultApiV1ApprovalsRequestIdResultGetParams, reqEditors ...RequestEditorFn) (*GetApprovalResultApiV1ApprovalsRequestIdResultGetResponse, error)
+
+	// WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBodyWithResponse request with any body
+	WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse, error)
+
+	WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, body WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostJSONRequestBody, reqEditors ...RequestEditorFn) (*WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse, error)
 
 	// AskDocsEndpointApiV1AskDocsPostWithBodyWithResponse request with any body
 	AskDocsEndpointApiV1AskDocsPostWithBodyWithResponse(ctx context.Context, params *AskDocsEndpointApiV1AskDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AskDocsEndpointApiV1AskDocsPostResponse, error)
@@ -45715,6 +47340,9 @@ type ClientWithResponsesInterface interface {
 	// GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetWithResponse request
 	GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetWithResponse(ctx context.Context, jobId openapi_types.UUID, params *GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams, reqEditors ...RequestEditorFn) (*GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse, error)
 
+	// ListOperationOverridesApiV1ConnectorsOperationOverridesGetWithResponse request
+	ListOperationOverridesApiV1ConnectorsOperationOverridesGetWithResponse(ctx context.Context, params *ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams, reqEditors ...RequestEditorFn) (*ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse, error)
+
 	// DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse request
 	DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse, error)
 
@@ -45732,6 +47360,9 @@ type ClientWithResponsesInterface interface {
 
 	EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithResponse(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, body EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse, error)
 
+	// RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteWithResponse request
+	RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteWithResponse(ctx context.Context, connectorId string, opId string, params *RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams, reqEditors ...RequestEditorFn) (*RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse, error)
+
 	// EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBodyWithResponse request with any body
 	EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBodyWithResponse(ctx context.Context, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse, error)
 
@@ -45739,6 +47370,19 @@ type ClientWithResponsesInterface interface {
 
 	// GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetWithResponse request
 	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetWithResponse(ctx context.Context, connectorId string, params *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams, reqEditors ...RequestEditorFn) (*GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse, error)
+
+	// ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetWithResponse request
+	ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetWithResponse(ctx context.Context, connectorId string, params *ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetParams, reqEditors ...RequestEditorFn) (*ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse, error)
+
+	// SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithBodyWithResponse request with any body
+	SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithBodyWithResponse(ctx context.Context, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse, error)
+
+	SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithResponse(ctx context.Context, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, body SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutJSONRequestBody, reqEditors ...RequestEditorFn) (*SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse, error)
+
+	// SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithBodyWithResponse request with any body
+	SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithBodyWithResponse(ctx context.Context, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse, error)
+
+	SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithResponse(ctx context.Context, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, body SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutJSONRequestBody, reqEditors ...RequestEditorFn) (*SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse, error)
 
 	// ListConventionsApiV1ConventionsGetWithResponse request
 	ListConventionsApiV1ConventionsGetWithResponse(ctx context.Context, params *ListConventionsApiV1ConventionsGetParams, reqEditors ...RequestEditorFn) (*ListConventionsApiV1ConventionsGetResponse, error)
@@ -46303,6 +47947,14 @@ type ClientWithResponsesInterface interface {
 	// ApprovalsBadgeUiApprovalsBadgeGetWithResponse request
 	ApprovalsBadgeUiApprovalsBadgeGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ApprovalsBadgeUiApprovalsBadgeGetResponse, error)
 
+	// ApprovalsInOrderPlanUiApprovalsInOrderGetWithResponse request
+	ApprovalsInOrderPlanUiApprovalsInOrderGetWithResponse(ctx context.Context, params *ApprovalsInOrderPlanUiApprovalsInOrderGetParams, reqEditors ...RequestEditorFn) (*ApprovalsInOrderPlanUiApprovalsInOrderGetResponse, error)
+
+	// ApprovalsInOrderRunUiApprovalsInOrderPostWithBodyWithResponse request with any body
+	ApprovalsInOrderRunUiApprovalsInOrderPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ApprovalsInOrderRunUiApprovalsInOrderPostResponse, error)
+
+	ApprovalsInOrderRunUiApprovalsInOrderPostWithFormdataBodyWithResponse(ctx context.Context, body ApprovalsInOrderRunUiApprovalsInOrderPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*ApprovalsInOrderRunUiApprovalsInOrderPostResponse, error)
+
 	// ApprovalsHistoryUiApprovalsListGetWithResponse request
 	ApprovalsHistoryUiApprovalsListGetWithResponse(ctx context.Context, params *ApprovalsHistoryUiApprovalsListGetParams, reqEditors ...RequestEditorFn) (*ApprovalsHistoryUiApprovalsListGetResponse, error)
 
@@ -46403,6 +48055,11 @@ type ClientWithResponsesInterface interface {
 
 	// UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBodyWithResponse request with any body
 	UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse, error)
+
+	// UiConnectorsOverridesUiConnectorsOverridesGetWithBodyWithResponse request with any body
+	UiConnectorsOverridesUiConnectorsOverridesGetWithBodyWithResponse(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsOverridesUiConnectorsOverridesGetResponse, error)
+
+	UiConnectorsOverridesUiConnectorsOverridesGetWithResponse(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, body UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsOverridesUiConnectorsOverridesGetResponse, error)
 
 	// UiConnectorsRegistryListUiConnectorsRegistryGetWithBodyWithResponse request with any body
 	UiConnectorsRegistryListUiConnectorsRegistryGetWithBodyWithResponse(ctx context.Context, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryListUiConnectorsRegistryGetResponse, error)
@@ -47829,6 +49486,29 @@ func (r RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse) StatusCo
 	return 0
 }
 
+type RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RerunResponseBody
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type GetApprovalResultApiV1ApprovalsRequestIdResultGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -47846,6 +49526,29 @@ func (r GetApprovalResultApiV1ApprovalsRequestIdResultGetResponse) Status() stri
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetApprovalResultApiV1ApprovalsRequestIdResultGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ApprovalRequestView
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -48496,6 +50199,29 @@ func (r GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse) StatusCod
 	return 0
 }
 
+type ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *OperationOverrideList
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -48607,6 +50333,28 @@ func (r EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse) 
 	return 0
 }
 
+type RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -48647,6 +50395,75 @@ func (r GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse) Status() s
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *TenantOperationSettingsResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *TenantGroupSettingResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *TenantOperationSettingItem
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -51993,6 +53810,50 @@ func (r ApprovalsBadgeUiApprovalsBadgeGetResponse) StatusCode() int {
 	return 0
 }
 
+type ApprovalsInOrderPlanUiApprovalsInOrderGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ApprovalsInOrderPlanUiApprovalsInOrderGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ApprovalsInOrderPlanUiApprovalsInOrderGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ApprovalsInOrderRunUiApprovalsInOrderPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ApprovalsInOrderRunUiApprovalsInOrderPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ApprovalsInOrderRunUiApprovalsInOrderPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ApprovalsHistoryUiApprovalsListGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -52621,6 +54482,28 @@ func (r UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse) Status()
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsOverridesUiConnectorsOverridesGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsOverridesUiConnectorsOverridesGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsOverridesUiConnectorsOverridesGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -55959,7 +57842,7 @@ func (r VaultVersionsUiVaultVersionsGetResponse) StatusCode() int {
 type VersionVersionGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *map[string]*string
+	JSON200      *VersionResponse
 }
 
 // Status returns HTTPResponse.Status
@@ -56380,6 +58263,23 @@ func (c *ClientWithResponses) RejectApprovalRequestApiV1ApprovalsRequestIdReject
 	return ParseRejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse(rsp)
 }
 
+// RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostWithBodyWithResponse request with arbitrary body returning *RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostResponse
+func (c *ClientWithResponses) RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostResponse, error) {
+	rsp, err := c.RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostWithBody(ctx, requestId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRerunApprovalRequestApiV1ApprovalsRequestIdRerunPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostParams, body RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostResponse, error) {
+	rsp, err := c.RerunApprovalRequestApiV1ApprovalsRequestIdRerunPost(ctx, requestId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRerunApprovalRequestApiV1ApprovalsRequestIdRerunPostResponse(rsp)
+}
+
 // GetApprovalResultApiV1ApprovalsRequestIdResultGetWithResponse request returning *GetApprovalResultApiV1ApprovalsRequestIdResultGetResponse
 func (c *ClientWithResponses) GetApprovalResultApiV1ApprovalsRequestIdResultGetWithResponse(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalResultApiV1ApprovalsRequestIdResultGetParams, reqEditors ...RequestEditorFn) (*GetApprovalResultApiV1ApprovalsRequestIdResultGetResponse, error) {
 	rsp, err := c.GetApprovalResultApiV1ApprovalsRequestIdResultGet(ctx, requestId, params, reqEditors...)
@@ -56387,6 +58287,23 @@ func (c *ClientWithResponses) GetApprovalResultApiV1ApprovalsRequestIdResultGetW
 		return nil, err
 	}
 	return ParseGetApprovalResultApiV1ApprovalsRequestIdResultGetResponse(rsp)
+}
+
+// WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBodyWithResponse request with arbitrary body returning *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse
+func (c *ClientWithResponses) WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse, error) {
+	rsp, err := c.WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithBody(ctx, requestId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseWithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostParams, body WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostJSONRequestBody, reqEditors ...RequestEditorFn) (*WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse, error) {
+	rsp, err := c.WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPost(ctx, requestId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseWithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse(rsp)
 }
 
 // AskDocsEndpointApiV1AskDocsPostWithBodyWithResponse request with arbitrary body returning *AskDocsEndpointApiV1AskDocsPostResponse
@@ -56713,6 +58630,15 @@ func (c *ClientWithResponses) GetIngestJobEndpointApiV1ConnectorsIngestJobsJobId
 	return ParseGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse(rsp)
 }
 
+// ListOperationOverridesApiV1ConnectorsOperationOverridesGetWithResponse request returning *ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse
+func (c *ClientWithResponses) ListOperationOverridesApiV1ConnectorsOperationOverridesGetWithResponse(ctx context.Context, params *ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams, reqEditors ...RequestEditorFn) (*ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse, error) {
+	rsp, err := c.ListOperationOverridesApiV1ConnectorsOperationOverridesGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse(rsp)
+}
+
 // DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse request returning *DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse
 func (c *ClientWithResponses) DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse, error) {
 	rsp, err := c.DeleteEndpointApiV1ConnectorsConnectorIdDelete(ctx, connectorId, params, reqEditors...)
@@ -56766,6 +58692,15 @@ func (c *ClientWithResponses) EditGroupEndpointApiV1ConnectorsConnectorIdGroupsG
 	return ParseEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse(rsp)
 }
 
+// RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteWithResponse request returning *RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse
+func (c *ClientWithResponses) RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteWithResponse(ctx context.Context, connectorId string, opId string, params *RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams, reqEditors ...RequestEditorFn) (*RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse, error) {
+	rsp, err := c.RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDelete(ctx, connectorId, opId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse(rsp)
+}
+
 // EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBodyWithResponse request with arbitrary body returning *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse
 func (c *ClientWithResponses) EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBodyWithResponse(ctx context.Context, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse, error) {
 	rsp, err := c.EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBody(ctx, connectorId, opId, params, contentType, body, reqEditors...)
@@ -56790,6 +58725,49 @@ func (c *ClientWithResponses) GetReviewEndpointApiV1ConnectorsConnectorIdReviewG
 		return nil, err
 	}
 	return ParseGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse(rsp)
+}
+
+// ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetWithResponse request returning *ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse
+func (c *ClientWithResponses) ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetWithResponse(ctx context.Context, connectorId string, params *ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetParams, reqEditors ...RequestEditorFn) (*ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse, error) {
+	rsp, err := c.ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGet(ctx, connectorId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse(rsp)
+}
+
+// SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithBodyWithResponse request with arbitrary body returning *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse
+func (c *ClientWithResponses) SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithBodyWithResponse(ctx context.Context, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse, error) {
+	rsp, err := c.SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithBody(ctx, connectorId, groupKey, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse(rsp)
+}
+
+func (c *ClientWithResponses) SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithResponse(ctx context.Context, connectorId string, groupKey string, params *SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutParams, body SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutJSONRequestBody, reqEditors ...RequestEditorFn) (*SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse, error) {
+	rsp, err := c.SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPut(ctx, connectorId, groupKey, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse(rsp)
+}
+
+// SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithBodyWithResponse request with arbitrary body returning *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse
+func (c *ClientWithResponses) SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithBodyWithResponse(ctx context.Context, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse, error) {
+	rsp, err := c.SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithBody(ctx, connectorId, opId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse(rsp)
+}
+
+func (c *ClientWithResponses) SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithResponse(ctx context.Context, connectorId string, opId string, params *SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutParams, body SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutJSONRequestBody, reqEditors ...RequestEditorFn) (*SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse, error) {
+	rsp, err := c.SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPut(ctx, connectorId, opId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse(rsp)
 }
 
 // ListConventionsApiV1ConventionsGetWithResponse request returning *ListConventionsApiV1ConventionsGetResponse
@@ -58615,6 +60593,32 @@ func (c *ClientWithResponses) ApprovalsBadgeUiApprovalsBadgeGetWithResponse(ctx 
 	return ParseApprovalsBadgeUiApprovalsBadgeGetResponse(rsp)
 }
 
+// ApprovalsInOrderPlanUiApprovalsInOrderGetWithResponse request returning *ApprovalsInOrderPlanUiApprovalsInOrderGetResponse
+func (c *ClientWithResponses) ApprovalsInOrderPlanUiApprovalsInOrderGetWithResponse(ctx context.Context, params *ApprovalsInOrderPlanUiApprovalsInOrderGetParams, reqEditors ...RequestEditorFn) (*ApprovalsInOrderPlanUiApprovalsInOrderGetResponse, error) {
+	rsp, err := c.ApprovalsInOrderPlanUiApprovalsInOrderGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalsInOrderPlanUiApprovalsInOrderGetResponse(rsp)
+}
+
+// ApprovalsInOrderRunUiApprovalsInOrderPostWithBodyWithResponse request with arbitrary body returning *ApprovalsInOrderRunUiApprovalsInOrderPostResponse
+func (c *ClientWithResponses) ApprovalsInOrderRunUiApprovalsInOrderPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ApprovalsInOrderRunUiApprovalsInOrderPostResponse, error) {
+	rsp, err := c.ApprovalsInOrderRunUiApprovalsInOrderPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalsInOrderRunUiApprovalsInOrderPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ApprovalsInOrderRunUiApprovalsInOrderPostWithFormdataBodyWithResponse(ctx context.Context, body ApprovalsInOrderRunUiApprovalsInOrderPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*ApprovalsInOrderRunUiApprovalsInOrderPostResponse, error) {
+	rsp, err := c.ApprovalsInOrderRunUiApprovalsInOrderPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalsInOrderRunUiApprovalsInOrderPostResponse(rsp)
+}
+
 // ApprovalsHistoryUiApprovalsListGetWithResponse request returning *ApprovalsHistoryUiApprovalsListGetResponse
 func (c *ClientWithResponses) ApprovalsHistoryUiApprovalsListGetWithResponse(ctx context.Context, params *ApprovalsHistoryUiApprovalsListGetParams, reqEditors ...RequestEditorFn) (*ApprovalsHistoryUiApprovalsListGetResponse, error) {
 	rsp, err := c.ApprovalsHistoryUiApprovalsListGet(ctx, params, reqEditors...)
@@ -58930,6 +60934,23 @@ func (c *ClientWithResponses) UiConnectorsImportConfirmUiConnectorsImportConfirm
 		return nil, err
 	}
 	return ParseUiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse(rsp)
+}
+
+// UiConnectorsOverridesUiConnectorsOverridesGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsOverridesUiConnectorsOverridesGetResponse
+func (c *ClientWithResponses) UiConnectorsOverridesUiConnectorsOverridesGetWithBodyWithResponse(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsOverridesUiConnectorsOverridesGetResponse, error) {
+	rsp, err := c.UiConnectorsOverridesUiConnectorsOverridesGetWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsOverridesUiConnectorsOverridesGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsOverridesUiConnectorsOverridesGetWithResponse(ctx context.Context, params *UiConnectorsOverridesUiConnectorsOverridesGetParams, body UiConnectorsOverridesUiConnectorsOverridesGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsOverridesUiConnectorsOverridesGetResponse, error) {
+	rsp, err := c.UiConnectorsOverridesUiConnectorsOverridesGet(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsOverridesUiConnectorsOverridesGetResponse(rsp)
 }
 
 // UiConnectorsRegistryListUiConnectorsRegistryGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryListUiConnectorsRegistryGetResponse
@@ -62148,6 +64169,39 @@ func ParseRejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse(rsp *ht
 	return response, nil
 }
 
+// ParseRerunApprovalRequestApiV1ApprovalsRequestIdRerunPostResponse parses an HTTP response from a RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostWithResponse call
+func ParseRerunApprovalRequestApiV1ApprovalsRequestIdRerunPostResponse(rsp *http.Response) (*RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RerunApprovalRequestApiV1ApprovalsRequestIdRerunPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RerunResponseBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseGetApprovalResultApiV1ApprovalsRequestIdResultGetResponse parses an HTTP response from a GetApprovalResultApiV1ApprovalsRequestIdResultGetWithResponse call
 func ParseGetApprovalResultApiV1ApprovalsRequestIdResultGetResponse(rsp *http.Response) (*GetApprovalResultApiV1ApprovalsRequestIdResultGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -62164,6 +64218,39 @@ func ParseGetApprovalResultApiV1ApprovalsRequestIdResultGetResponse(rsp *http.Re
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest ApprovalResultView
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseWithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse parses an HTTP response from a WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostWithResponse call
+func ParseWithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse(rsp *http.Response) (*WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &WithdrawApprovalRequestApiV1ApprovalsRequestIdWithdrawPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ApprovalRequestView
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -63093,6 +65180,39 @@ func ParseGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse(rsp *htt
 	return response, nil
 }
 
+// ParseListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse parses an HTTP response from a ListOperationOverridesApiV1ConnectorsOperationOverridesGetWithResponse call
+func ParseListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse(rsp *http.Response) (*ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OperationOverrideList
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseDeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse parses an HTTP response from a DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse call
 func ParseDeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse(rsp *http.Response) (*DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -63230,6 +65350,32 @@ func ParseEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse
 	return response, nil
 }
 
+// ParseRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse parses an HTTP response from a RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteWithResponse call
+func ParseRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse(rsp *http.Response) (*RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse parses an HTTP response from a EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithResponse call
 func ParseEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse(rsp *http.Response) (*EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -63279,6 +65425,105 @@ func ParseGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse(rsp *http
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest ConnectorReviewPayload
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse parses an HTTP response from a ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetWithResponse call
+func ParseListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse(rsp *http.Response) (*ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListTenantSettingsEndpointApiV1ConnectorsConnectorIdTenantSettingsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TenantOperationSettingsResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse parses an HTTP response from a SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutWithResponse call
+func ParseSetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse(rsp *http.Response) (*SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetTenantGroupSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsGroupsGroupKeyPutResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TenantGroupSettingResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse parses an HTTP response from a SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutWithResponse call
+func ParseSetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse(rsp *http.Response) (*SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetTenantOperationSettingEndpointApiV1ConnectorsConnectorIdTenantSettingsOperationsOpIdPutResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TenantOperationSettingItem
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -67757,6 +70002,58 @@ func ParseApprovalsBadgeUiApprovalsBadgeGetResponse(rsp *http.Response) (*Approv
 	return response, nil
 }
 
+// ParseApprovalsInOrderPlanUiApprovalsInOrderGetResponse parses an HTTP response from a ApprovalsInOrderPlanUiApprovalsInOrderGetWithResponse call
+func ParseApprovalsInOrderPlanUiApprovalsInOrderGetResponse(rsp *http.Response) (*ApprovalsInOrderPlanUiApprovalsInOrderGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ApprovalsInOrderPlanUiApprovalsInOrderGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseApprovalsInOrderRunUiApprovalsInOrderPostResponse parses an HTTP response from a ApprovalsInOrderRunUiApprovalsInOrderPostWithResponse call
+func ParseApprovalsInOrderRunUiApprovalsInOrderPostResponse(rsp *http.Response) (*ApprovalsInOrderRunUiApprovalsInOrderPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ApprovalsInOrderRunUiApprovalsInOrderPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseApprovalsHistoryUiApprovalsListGetResponse parses an HTTP response from a ApprovalsHistoryUiApprovalsListGetWithResponse call
 func ParseApprovalsHistoryUiApprovalsListGetResponse(rsp *http.Response) (*ApprovalsHistoryUiApprovalsListGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -68454,6 +70751,32 @@ func ParseUiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse(rsp *ht
 	}
 
 	response := &UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsOverridesUiConnectorsOverridesGetResponse parses an HTTP response from a UiConnectorsOverridesUiConnectorsOverridesGetWithResponse call
+func ParseUiConnectorsOverridesUiConnectorsOverridesGetResponse(rsp *http.Response) (*UiConnectorsOverridesUiConnectorsOverridesGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsOverridesUiConnectorsOverridesGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
@@ -72279,7 +74602,7 @@ func ParseVersionVersionGetResponse(rsp *http.Response) (*VersionVersionGetRespo
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest map[string]*string
+		var dest VersionResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

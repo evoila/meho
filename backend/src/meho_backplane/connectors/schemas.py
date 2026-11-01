@@ -602,8 +602,8 @@ class CandidateHint(BaseModel):
     """One candidate target a connector's :meth:`Connector.list_candidates` returns.
 
     Candidates are potentially-reachable targets the connector inferred
-    from an existing seed (e.g. a vCenter exposing its managed ESXi
-    hosts; a kubeconfig listing peer cluster contexts). The
+    from an existing seed (e.g. a kubeconfig listing peer cluster
+    contexts). The
     G9.1-T6 ``meho targets discover`` CLI verb surfaces these to the
     operator; auto-registration is intentionally out of scope per
     Initiative #363 (operator runs ``meho targets import`` after review).
@@ -612,6 +612,12 @@ class CandidateHint(BaseModel):
     think this candidate exists (e.g. ``{"source": "kubeconfig",
     "context_name": "cluster-2"}``); ``confidence`` is the connector's
     self-assessment of probe-vs-curation reliability.
+
+    ``secret_ref`` and ``extras`` are set when the connector knows them:
+    the secret reference and the target extras a target for this candidate
+    needs (Azure: the seed's secret reference and ``subscription_id``,
+    ``tenant_id`` and ``cloud``). ``meho targets discover --import-yaml``
+    writes them into a file that ``meho targets import`` reads.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -621,13 +627,16 @@ class CandidateHint(BaseModel):
     port: int | None = None
     evidence: Mapping[str, Any]
     confidence: Literal["high", "medium", "low"]
+    secret_ref: str | None = None
+    extras: Mapping[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _freeze_evidence(self) -> "CandidateHint":
         object.__setattr__(self, "evidence", MappingProxyType(dict(self.evidence)))
+        object.__setattr__(self, "extras", MappingProxyType(dict(self.extras)))
         return self
 
-    @field_serializer("evidence")
+    @field_serializer("evidence", "extras")
     def _serialize_evidence(self, value: Mapping[str, Any]) -> dict[str, Any]:
         return dict(value)
 

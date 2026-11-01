@@ -47,7 +47,7 @@ violation.
   passes through as the bearer credential. Documented but not
   first-class.
 
-Per-target cache scoping mirrors vmware-rest: keyed on the tenant-unique
+Per-target cache scoping is keyed on the tenant-unique
 ``(tenant_id, target.id)`` tuple (#1642/#1672) so two same-named targets
 in different tenants never share a cached token,
 serialised under a single :class:`asyncio.Lock` so two concurrent
@@ -492,6 +492,19 @@ class GitHubRestConnector(HttpConnector):
         """
         return None
 
+    async def invalidate_credentials(self, target: GitHubTargetLike) -> None:
+        """Drop the kept installation token and PAT for *target* (#2396, #3879).
+
+        The next call reads the secret from Vault again. The dispatcher calls
+        this after a failed login, and the target update route calls it after
+        a target change, so a new or narrower credential is used at once
+        instead of after the kept token expires.
+        """
+        cache_key = target_cache_key(target)
+        async with self._token_lock:
+            self._installation_tokens.pop(cache_key, None)
+            self._pat_tokens.pop(cache_key, None)
+
     async def aclose(self) -> None:
         """Drop cached tokens + close the inherited httpx pool."""
         async with self._token_lock:
@@ -533,9 +546,8 @@ async def _default_loader(
 def _is_acceptable_auth_model(value: object) -> bool:
     """Return ``True`` iff *value* is the SHARED_SERVICE_ACCOUNT model or unset.
 
-    Mirrors the predicate :class:`VmwareRestConnector` uses at its
-    boundary (the vmware-rest precedent the G0.16-T2 reconciliation
-    aligned the gh-rest connector with). Accepts the enum member, the
+    The G0.16-T2 reconciliation set this predicate at the gh-rest
+    connector boundary. Accepts the enum member, the
     equivalent string, and ``None`` (the legacy-row sentinel for
     targets that predate the column-default backfill). Any other
     value (``"per_user"``, ``"impersonation"``, a typo, an int) is
@@ -632,7 +644,7 @@ def _fingerprint_from_repo(
     Returns the repo's identity (``full_name``, ``id``, ``private``)
     plus the owner's account type — sufficient for an operator to
     confirm "yes my App is installed on this repo" without a second
-    call. Inspired by vmware-rest's ``GET /api/about`` shape.
+    call.
     """
     if not isinstance(payload, dict):
         return FingerprintResult(

@@ -70,6 +70,16 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
   `ops_config.py` to fit under the 600-line code-quality cap; the
   separation also aligns with the operator mental model (events are
   observability, configmaps are configuration).
+- **Core-group object reads** (`ops_core_objects.py`, #3840) --
+  `list_core_objects` / `get_core_object` send the `k8s.cr.*` GET to
+  the core `/api/{version}` root when `group` is empty, and
+  `list_items` copies the list kind onto items that lack one.
+- **Access checks** (`ops_access.py`, #3840) -- `access_review_body`,
+  `access_review_result`, `rules_review_result` plus the `ACCESS_OPS`
+  rows for `k8s.auth.can_i` / `k8s.auth.rules`.
+- **Admission webhooks** (`ops_admission.py`, #3840) --
+  `admission_webhook_rows` plus the `ADMISSION_OPS` row for
+  `k8s.admission_webhook.list`.
 - **`KubernetesTargetLike`** (`kubeconfig.py`) -- runtime-checkable
   Protocol capturing the minimum target shape the connector reads:
   `name`, `host`, `port`, `secret_ref`. Replaced by the concrete
@@ -332,13 +342,14 @@ real operator through the same loader.
 | `k8s.about`            | safe   | Product / version / platform via `VersionApi.get_code`.           |
 | `k8s.ls`               | safe   | Synthetic walker: root / namespace / namespace+kind.              |
 | `k8s.namespace.list`   | safe   | `CoreV1Api.list_namespace()` -- name / status / age.              |
-| `k8s.node.list`        | safe   | `CoreV1Api.list_node()` -- status / roles / version.              |
+| `k8s.node.list`        | safe   | `CoreV1Api.list_node()` -- status / roles / version, plus `system_uuid` (the node's BIOS UUID), `os_image`, `architecture`, `cpu_capacity`, `memory_capacity` (`_node_identity.py`). |
 | `k8s.pod.list`         | safe   | Pods with selectors + server-side pagination.                     |
-| `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix.                     |
+| `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix. Includes init containers, their statuses, and `image_pull_secrets` (names only). |
 | `k8s.deployment.list`  | safe   | Deployments with live replica counts + image + strategy.          |
-| `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix.              |
+| `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix. Includes `image_pull_secrets` (names only). |
 | `k8s.job.list`         | safe   | `BatchV1Api.list_namespaced_job()` / `list_job_for_all_namespaces()` -- one row per Job with a one-word `state`, pod counts, `completions`, start / completion times. Same selectors + paging as `k8s.pod.list`. (`ops_job.py`) |
 | `k8s.job.info`         | safe   | One Job by exact name or unique prefix: the row fields plus conditions (reason + message), `backoff_limit`, `active_deadline_seconds`, template containers, `pod_selector` and up to 50 of its pods, newest first. (`ops_job.py`) |
+| `k8s.workload.list`    | safe   | `AppsV1Api` list for one `kind` (Deployment / StatefulSet / DaemonSet): desired `replicas` (DaemonSet: pods it should run), per-container `requests` / `limits` as API quantities, images, `volumes` with `claim_name`, StatefulSet `volume_claim_templates`, and `pod_selector`. `containers` holds the app containers and the sidecars (init containers with `restartPolicy: Always`); plain init containers are left out. Same selectors + paging as `k8s.deployment.list`. (`ops_workload_set.py`) |
 | `k8s.service.list`     | safe   | `CoreV1Api.list_namespaced_service()` / `list_service_for_all_namespaces()` -- type / cluster_ip / ports / selector / lb_ingress (LoadBalancer VIP from `status.loadBalancer.ingress`, `[]` otherwise) + `label_selector`. |
 | `k8s.ingress.list`     | safe   | `NetworkingV1Api.list_namespaced_ingress()` / `list_ingress_for_all_namespaces()` -- class / hosts / TLS / rules + `label_selector`. |
 | `k8s.configmap.list`   | safe   | `CoreV1Api.list_namespaced_config_map()` / `list_config_map_for_all_namespaces()` -- **keys only, NO values** + `label_selector`. |
@@ -348,11 +359,22 @@ real operator through the same loader.
 | `k8s.persistentvolume.list` | safe | `CoreV1Api.list_persistent_volume()` -- name / phase / capacity / storage_class / claim_ref (`namespace/name`) / access_modes / reclaim_policy. Cluster-scoped, no params. (`ops_storage.py`) |
 | `k8s.persistentvolumeclaim.list` | safe | `CoreV1Api.list_namespaced_persistent_volume_claim()` / `list_persistent_volume_claim_for_all_namespaces()` -- name / namespace / status / capacity (`status.capacity.storage`) / storage_class / volume_name / access_modes. `namespace` XOR `all_namespaces`. Backs `k8s.ls /<ns>/persistentvolumeclaims`. (`ops_storage.py`) |
 | `k8s.crd.list`         | safe   | `ApiextensionsV1Api.list_custom_resource_definition()` -- group / kind / plural / scope / versions (`{name, served, storage}`). Discovery op for the generic CR reads. (`ops_customresource.py`) |
-| `k8s.cr.list`          | safe   | Generic CR list over `CustomObjectsApi.list_namespaced_custom_object()` (with `namespace`) / `list_cluster_custom_object()` (without). Rows = metadata + bounded JSON `spec_excerpt` (cap `CR_SPEC_EXCERPT_MAX_BYTES` = 2048 B, `spec_truncated` flag). Requires `group`/`version`/`plural`. (`ops_customresource.py`) |
-| `k8s.cr.info`          | safe   | Generic single CR read over `CustomObjectsApi.get_namespaced_custom_object()` / `get_cluster_custom_object()`. Single-object projection (metadata + bounded `spec_excerpt`), not a rows envelope. Requires `group`/`version`/`plural`/`name`. (`ops_customresource.py`) |
-| `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. |
+| `k8s.cr.list`          | safe   | Generic CR list over `CustomObjectsApi.list_namespaced_custom_object()` (with `namespace`) / `list_cluster_custom_object()` (without). Rows = metadata + bounded JSON `spec_excerpt` (cap `CR_SPEC_EXCERPT_MAX_BYTES` = 2048 B, `spec_truncated` flag). Requires `group`/`version`/`plural`. `group: ""` reads the core group under `/api/{version}` instead (`ops_core_objects.py`, #3840). (`ops_customresource.py`) |
+| `k8s.cr.info`          | safe   | Generic single CR read over `CustomObjectsApi.get_namespaced_custom_object()` / `get_cluster_custom_object()`. Single-object projection (metadata + bounded `spec_excerpt`), not a rows envelope. Requires `group`/`version`/`plural`/`name`. `group: ""` reads one core-group object under `/api/{version}`. (`ops_customresource.py`) |
+| `k8s.auth.can_i`       | safe   | `AuthorizationV1Api.create_self_subject_access_review()` -- may the target's kubeconfig identity do one verb on one resource (or one non-resource path)? `{allowed, denied, reason, evaluation_error}`. Same as `kubectl auth can-i`. (`ops_access.py`, #3840) |
+| `k8s.auth.rules`       | safe   | `AuthorizationV1Api.create_self_subject_rules_review()` -- every rule that identity has in one namespace, one row per rule, plus `incomplete`. Same as `kubectl auth can-i --list`. (`ops_access.py`, #3840) |
+| `k8s.admission_webhook.list` | safe | `AdmissionregistrationV1Api.list_validating_webhook_configuration()` + `list_mutating_webhook_configuration()` -- one row per webhook: rules, selectors, `failure_policy`, `side_effects`, `timeout_seconds`, service or URL. `caBundle` is left out. Optional `type` filter. (`ops_admission.py`, #3840) |
+| `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap; since_time / until_time read an older time window, oldest line first. `container` also accepts an init container name. |
 | `k8s.exec`             | **dangerous** (`requires_approval=True`) | `CoreV1Api.connect_get_namespaced_pod_exec()` over the `WsApiClient` websocket transport -- bounded argv command-and-capture: stdout / stderr demuxed from the `v4.channel.k8s.io` channels + exit code parsed from the channel-3 status frame, per-stream 1 MiB cap, bounded timeout. Interactive `-it` deferred. |
+| `k8s.secret.list`     | safe   | `CoreV1Api.list_namespaced_secret()` / `list_secret_for_all_namespaces()` -- one row per Secret: name / namespace / type / `keys` (names only) / `key_count` / labels / `annotation_keys` (names only) / `owner_count` / created / resource_version. **Never a value.** Same `namespace` XOR `all_namespaces` + `label_selector` params as `k8s.configmap.list`. Needs `list` on `secrets`. (`ops_secret_list.py`) |
+| `k8s.secret.info`     | safe   | `CoreV1Api.read_namespaced_secret()` -- the list row fields plus `immutable`, `owners` (kind + name) and `key_sizes` (bytes per key). **Never a value.** Needs `get` on `secrets`. (`ops_secret_list.py`) |
 | `k8s.secret.read_to_ref` | **caution** (`requires_approval=True`) | `CoreV1Api.read_namespaced_secret()` -- reads one Secret's `data[data_key]` (default `value`), decodes it, and stages the value to a **tenant-scoped Vault `secret_ref`** via `vault.kv.put`; returns **only** the ref + provenance (SHA-256 / byte length), never the value. Classified `credential_read` (audit + broadcast aggregate-only). The governed VKS guest-kubeconfig read (`ops_secret_read.py`, #3496). |
+| `k8s.secret.compare_to_ref` | safe | `CoreV1Api.read_namespaced_secret()` -- checks that one Secret key holds the same value as its Vault copy `{path, key, mount?}`. Answers only `same` and, per copy, `found` / `matches_first` / version; never a value or a hash. Classified `credential_read`. (`ops_secret_compare.py`) |
+
+The multi-step read `k8s.migration.inventory` (group `migration`, `safe`)
+collects the cluster's nodes and workloads in the common migration inventory
+shape. It lives in `connectors/inventory/source_k8s.py`; see
+`connectors-inventory.md`.
 
 ### `k8s.exec` -- websocket command-and-capture (`ops_exec.py`)
 
@@ -438,7 +460,7 @@ the same pattern `ops_workload.py` / `ops_logs.py` use. Every op is
 | `k8s.cordon`           | caution   | `CoreV1Api.patch_node(spec.unschedulable)`; `uncordon=true` reverses. Eviction-free. |
 | `k8s.apply`            | dangerous | Server-side apply over `DynamicClient.server_side_apply` (`field_manager="meho"`), GVK resolved per manifest doc from discovery. `dry_run="server"` -> API `?dryRun=All` (mutates nothing, returns the would-be object). |
 | `k8s.delete`           | dangerous | Kind dispatch **scoped to pod/job/replicaset in v1** (namespace/PVC/PV rejected); explicit `propagation_policy` / `grace_period_seconds`. |
-| `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). Values may be inline (`string_data` / `data`) or ref-sourced (`string_data_secret_ref` / `data_secret_ref`, resolved server-side through the credential-backend seam). |
+| `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). Values may be inline (`string_data` / `data`) or ref-sourced (`string_data_secret_ref` / `data_secret_ref`, resolved server-side through the credential-backend seam). Optional `labels` / `annotations` maps go on the Secret's metadata. |
 | `k8s.job.create`       | dangerous | `BatchV1Api.create_namespaced_job` from a spec body; response is identity only. |
 | `k8s.cronjob.run`      | caution   | `BatchV1Api.read_namespaced_cron_job`, then `BatchV1Api.create_namespaced_job`: one Job from the CronJob's job template, now (`ops_cronjob.py`). |
 | `k8s.secret.update`    | dangerous | `CoreV1Api.patch_namespaced_secret` (mode `patch`, keeps other keys) or `read_namespaced_secret` + `replace_namespaced_secret` (mode `replace`, keeps only the given keys). Same value inputs as `k8s.secret.create`; response is key names only. `ops_secret_write.py`. |
@@ -507,12 +529,44 @@ aggregate-only. A resolved payload missing the requested field raises
 `KubernetesSecretRefError` (never a bare `KeyError`, never echoing a
 value).
 
+**`k8s.secret.create` labels and annotations (#3680).** Some tools find a
+Secret by its label. ArgoCD, for example, reads repository credentials
+from Secrets labelled `argocd.argoproj.io/secret-type: repository`. So
+`k8s.secret.create` takes two optional string maps:
+
+- `labels` -- set as the new Secret's `metadata.labels`.
+- `annotations` -- set as the new Secret's `metadata.annotations`.
+
+With them, one call (and one approval) creates such a Secret, also when
+its value comes from a `*_secret_ref`. Before, this took a create plus a
+`k8s.apply` to add the label. Labels and annotations are not secret: the
+approval preview shows them in full. Any other unknown key is still
+rejected (`additionalProperties: false`). `k8s.secret.update` keeps the
+labels and annotations of an existing Secret as they are.
+
 **`k8s.apply` dry-run preview.** The op supports `dry_run="server"` (maps
 to the API's `?dryRun=All`) so the would-be object is returned without
 mutating -- the diff-preview an agent or reviewer runs before the real
 apply. When the op waits for approval, the `k8s.apply` preview builder in
 `operations/_preview.py` runs this dry-run and stores the result on the
-approval row (see `approvals.md`).
+approval row (see `approvals.md`). Next to the dry-run summary it stores
+the manifest itself (`preview.manifest`, one dict per document) and a
+`preview.subject` line such as `Deployment/prod/web` (#3877). Before the
+manifest is stored, `apply_manifest_echo` in `ops_write_preview.py` hides
+Secret `data` / `stringData` values (key names stay), every `env` value
+(variable names stay), every `httpHeaders` value of a probe or lifecycle
+hook (header names stay), the text of every `command` / `args` list (only
+its size in bytes stays, as `{"hidden": true, "bytes": N}`) and the
+last-applied annotation. All of this is done at any depth: a Secret nested
+in a custom resource and a pod template's copy of the annotation are hidden
+too. Hiding a value in an `env` or `httpHeaders` entry does not stop the
+walk: the entry's other fields are checked as well. Then the shared
+params redaction of the generic echo runs over the documents. The size
+limit comes last, after all redaction, because a redaction marker can be
+longer than the value it replaces: the echo keeps at most 16 KB in total
+as stored, counting every entry. A document that does not fit in full
+keeps only its identity; when not even that fits, one closing entry
+counts the documents left out.
 
 **`k8s.apply` API-server rejections (#3876).** `DynamicClient.request`
 calls the API with `_preload_content=False`, and kubernetes_asyncio only
@@ -538,6 +592,18 @@ raises from aiohttp). The discovery reads that
 `DynamicClient` makes before the apply go through the same unchecked
 path, but a denied discovery read still ends in an error (usually
 `ResourceNotFoundError`), not a false success.
+
+**`k8s.apply` API-server warnings (#3842).** The API server can accept
+an apply and still send `Warning` response headers, for example when the
+manifest uses a deprecated `apiVersion`. Each entry in `applied` has a
+`warnings` list with the text of these headers for that document (an
+empty list when there are none). This works on the real apply and on the
+dry-run, so the approval preview shows the warnings too. The header form
+is `299 - "text"`; several warnings can come as several header lines or
+comma-separated in one line. A header in an unknown form is kept as it
+is. Each text is redacted with the default policy before it is returned,
+because an admission webhook can write any text into a warning. Other
+write ops do not return warnings yet.
 
 ### Change or delete an existing Secret -- `k8s.secret.update` / `k8s.secret.delete`
 
@@ -681,6 +747,15 @@ Vault role. If the identity lacks `create` + `update`, MEHO refuses the
 park with `write_capability_denied` (#3542) and nobody approves a write
 that would fail.
 
+**Vault grant it needs (#3843).** The write path is fixed. It must stay
+`tenants/<tenant_id>/<register_as>`: the tenant-scope guard refuses a
+write outside the tenant subtree, and `targets create` without a
+`secret_ref` reads this path. Of the per-tenant policies, only
+`meho-tenant-admin` grants `create` + `update` there. The caller and the
+approver both need it. The deploy steps are in
+[`connector-vault-policy.md`](../cross-repo/connector-vault-policy.md)
+§6.6.
+
 **Supervisor case: no server rewrite (corpus-verified).** A VKS guest
 kubeconfig's `clusters[].cluster.server` already points at the guest
 cluster's own LoadBalancer API-server VIP and is used as-is, so **no**
@@ -693,6 +768,38 @@ A missing `data_key`, or a value that is not valid base64 / UTF-8, raises
 `KubernetesSecretDataError` naming the Secret + key (never the value);
 the error surfaces through the dispatcher's `connector_error` envelope,
 and nothing is written to Vault on failure.
+
+### Check a Secret against its Vault copy -- `k8s.secret.compare_to_ref`
+
+A Helm chart often reads a password from a Secret while the same password
+is kept in Vault. After a change the operator must prove that both copies
+match. `ops_secret_compare.py` answers that without showing the value.
+
+- Params: `namespace`, `name`, `key` and the Vault copy
+  `ref: {path, key, mount?}`.
+- The Secret is read with the connector's normal Kubernetes access. Its
+  value is base64-decoded, so it is compared with the plain text in Vault.
+  A Vault value that is not a string (a number, `null`, a list) never
+  matches the Secret.
+- The Vault copy is read with the caller's own Vault login and tenant
+  guard. Like `k8s.secret.read_to_ref`, it uses no Vault target
+  (`target=None`), so the deployment's Vault and the default role apply.
+  The read and the compare are the shared `read_kv_copy` /
+  `compare_copies` of `vault.kv.compare` (`connectors/vault/kv_compare.py`).
+- The two values are compared with `hmac.compare_digest` (constant time)
+  and dropped.
+- Answer: `{same, copies: [k8s copy, vault copy]}`. Each copy has
+  `source`, its names, `key`, `found`, `matches_first`, `version` (the
+  Secret's `resourceVersion` or the Vault version) and `reason`. Never a
+  value or a hash.
+- A copy that cannot be read answers `found: false` with `reason`
+  `forbidden` (Kubernetes 403, Vault 403, or a Vault path outside the
+  caller's tenant), `not_found` or `key_not_found`; the call does not
+  fail. Other Kubernetes errors, a Vault login failure or an unreachable
+  Vault fail the call.
+- `safe`, no approval. The op id is on `_CREDENTIAL_READ_OPS`, so the
+  flight recorder never stores the Secret body and the broadcast shows
+  only the outcome.
 
 ### Shared list-op request shape (`ops_listparams.py`)
 
@@ -813,6 +920,28 @@ a container waiting with `CreateContainerConfigError`: the status row
 says the container cannot start, and `value_from` / `env_from` say
 which Secret and key it asks for.
 
+### Image pull secrets in `k8s.pod.info` and `k8s.deployment.info` (#3686)
+
+Both ops return `image_pull_secrets`: the names of the Secrets in the pod
+spec's `imagePullSecrets` (for a Deployment, from its pod template), in
+spec order. The list is empty when the spec names none. It answers "is
+the image pulled with the expected pull secret?" without `kubectl get -o
+yaml`. `_image_pull_secret_names()` in `ops_workload.py` copies the names
+only. MEHO does not read the Secrets, so no secret content can appear in
+the result.
+
+### Init container logs in `k8s.logs` (#3686)
+
+`k8s.logs` passes `include_init_containers=True` to
+`resolve_pod_and_container()` in `ops_logs.py`. So an init container
+name (for example a `migrate` step) is a valid `container` value, and
+the `MultiContainerAmbiguityError` candidate list shows the app
+containers first, then the init containers. Auto-pick still looks only
+at the app containers: a pod with one app container and some init
+containers still resolves to the app container. `k8s.exec` uses the same
+resolver with the default (`False`), so its valid set stays the app
+containers.
+
 ### Job reads (`ops_job.py`)
 
 `k8s.job.list` and `k8s.job.info` answer "did the Job finish, and did it
@@ -885,7 +1014,58 @@ consumer session that fell back to raw kubectl):
   keeps metadata identifiers + `labels` and a JSON `spec_excerpt` capped
   at `CR_SPEC_EXCERPT_MAX_BYTES` (2048 B); over the cap, `spec_truncated`
   is `true` and the excerpt is a preview (not parseable JSON). The
-  verbose `managedFields` / `annotations` metadata blocks are dropped.
+  verbose `managedFields` metadata block is dropped.
+- **Annotations, version and status on CR rows** (#3878): every
+  `k8s.cr.list` row and the `k8s.cr.info` result also carry
+  `resource_version`, `uid`, `annotations` and a `status_excerpt`. This
+  lets a governed read confirm that an annotation-only change landed
+  (for example a Cluster API pause annotation). `annotations` is an
+  object column, so `result_query` cannot filter or sort on it. Return
+  it with `select`, or read the raw rows by paging (`offset` /
+  `limit`).
+  - Each annotation value is cut at `CR_ANNOTATION_VALUE_MAX_BYTES`
+    (256 B). `annotations_truncated` is `true` when any value was cut.
+  - The `kubectl.kubernetes.io/last-applied-configuration` annotation
+    is always left out. It is a copy of the whole last manifest, so it
+    is large, and on a Secret it repeats every value.
+  - On a `Secret`, every annotation value is the redacted placeholder
+    (the same one `data` values get). The keys stay. Deploy tools can
+    copy the whole manifest into an annotation, so no value is shown.
+  - `status_excerpt` is the JSON `.status`, capped like `spec_excerpt`
+    (2048 B), with its own `status_truncated` flag. It is `null` when
+    the object has no `.status`.
+- **Built-in kinds** (#3840): the same two ops read any kind no
+  dedicated op covers. A built-in group with a name (for example
+  `apiregistration.k8s.io` / `v1` / `apiservices`, or
+  `admissionregistration.k8s.io` / `v1` /
+  `validatingadmissionpolicies`) goes through `CustomObjectsApi` like a
+  CRD. The core group has an empty name and a different root
+  (`/api/v1`, not `/apis/...`), so `group: ""` is sent by
+  `ops_core_objects.py` through the same `ApiClient.call_api` (same
+  auth, TLS and wire span). The API server does not repeat `kind` /
+  `apiVersion` on the items of a list of built-in objects, so
+  `list_items` copies them from the list kind (`SecretList` ->
+  `Secret`) before the row projection. That keeps the Secret
+  redaction below working for list reads too.
+
+### Access checks and admission webhooks (#3840, `ops_access.py` / `ops_admission.py`)
+
+Three safe reads in the `access` group answer "why did this apply not
+take effect?" without leaving MEHO:
+
+- `k8s.auth.can_i` -- a `SelfSubjectAccessReview`. Takes `verb` and
+  either a resource (`group`, `resource`, `subresource`, `name`,
+  `namespace`, `version`) or a `non_resource_path`; the schema's
+  `oneOf` allows exactly one of the two forms.
+- `k8s.auth.rules` -- a `SelfSubjectRulesReview` for one `namespace`.
+  `incomplete: true` means an authorizer could not list its rules, so
+  confirm a single action with `k8s.auth.can_i`.
+- `k8s.admission_webhook.list` -- one row per webhook of every
+  validating and mutating webhook configuration.
+
+Both reviews are HTTP `POST` calls, but the API server stores nothing,
+so they are `safe`. They always check the identity in the target's
+kubeconfig (the identity MEHO uses for that target), not the caller.
 
 This tier also retires the `cluster_kinds` **dead-end advertisements**:
 `k8s.ls /` had long listed `storageclasses` / `persistentvolumes` in its
@@ -916,13 +1096,17 @@ per-connector redactors (see [`redaction.md`](redaction.md)).
 The redactor is wired into `custom_resource_row`
 (`ops_customresource.py`), the projection both `k8s.cr.list` and
 `k8s.cr.info` share, so a dynamic read pointed at core Secrets
-(`group=""` / `version="v1"` / `plural="secrets"`) — the one shipped read
-path that can surface a raw Secret object — is scrubbed before JSONFlux /
-audit / broadcast.
+(`group=""` / `version="v1"` / `plural="secrets"`) is scrubbed before
+JSONFlux / audit / broadcast. For a list read, each item first gets
+`kind: Secret` from its `SecretList` (see "Built-in kinds" above),
+because the API server leaves `kind` off list items. The dedicated way
+to look at core Secrets is `k8s.secret.list` / `k8s.secret.info` (next
+section), which also run this redactor as a second net.
 
 **Projection note.** `custom_resource_row` otherwise keeps only
-`metadata` + a bounded `.spec` excerpt and drops every other top-level
-field; a `Secret` has no `.spec`, so before #3501 a CR read of a Secret
+`metadata` + bounded `.spec` / `.status` excerpts and drops every other
+top-level field (a Secret's annotation keys show, but every annotation
+value is replaced by the placeholder); a `Secret` has no `.spec`, so before #3501 a CR read of a Secret
 returned no `data` at all (safe, but uninformative). The redactor lets
 the projection surface a `data` / `string_data` **key inventory** (values
 redacted, digests attached) for a `kind: Secret` object instead — safe
@@ -935,6 +1119,40 @@ pass: it reads the value inside the backplane and stages it to a Vault
 `secret_ref`, returning only the ref + a SHA-256 + byte length — no
 `data` map and no `kind: Secret` object, so the structural walk finds
 nothing to redact and the op's no-transit contract is preserved.
+
+### List and describe Secrets by name only -- `k8s.secret.list` / `k8s.secret.info` (`ops_secret_list.py`)
+
+Before a Secret change an operator needs to know which keys the Secret
+has, and whether it carries labels, annotations or owners (a full
+replace would drop them). These two safe reads answer that through MEHO,
+so nobody needs `kubectl get secret` by hand.
+
+- `k8s.secret.list` -- same params as `k8s.configmap.list`
+  (`namespace` XOR `all_namespaces`, `label_selector`). One row per
+  Secret: `name`, `namespace`, `type`, `keys`, `key_count`, `labels`,
+  `annotation_keys`, `owner_count`, `created`, `resource_version`. A
+  long list comes back as a link to the stored result (JSONFlux).
+- `k8s.secret.info` -- params `name`, `namespace`. The row fields plus
+  `immutable`, `owners` (`kind` + `name` of each owner reference) and
+  `key_sizes` (bytes per key; the decoded size of a `data` value).
+
+**Never a value.** The answer is built from names only: key names from
+`data` / `stringData`, annotation names only (the
+`kubectl.kubernetes.io/last-applied-configuration` annotation can hold
+the whole Secret, values included), owner kind and name. No value is
+copied out of the `V1Secret`. The answer then passes through
+`redact_kubernetes_payload` as a second net. So no value reaches the
+result, the audit row, the stored result or the broadcast feed.
+
+**Kubernetes rights.** The target's service account needs `list` on
+`secrets` for `k8s.secret.list` (cluster-wide for `all_namespaces`) and
+`get` on `secrets` for `k8s.secret.info`. The API server sends the values
+to MEHO on both calls; MEHO drops them before the answer is built.
+
+Reading a value stays with `k8s.secret.read_to_ref` (copied to the
+credential store, never shown).
+
+Tests: `tests/test_connectors_k8s_secret_list.py`.
 
 ## Control flow
 
@@ -1042,9 +1260,9 @@ happened" apply could not be explained from the trace.
 - Secret payloads are masked before capture. Every JSON request and
   response body first goes through the connector's structural Secret
   redactor (`redaction.py`, the same walk `k8s.cr.*` reads use). Every
-  `data` / `stringData` value of a `kind: Secret` object, and its
-  `last-applied-configuration` annotation, is replaced by a placeholder
-  plus a digest; key names stay. This covers a `k8s.apply` of a Secret
+  `data` / `stringData` value of a `kind: Secret` object, and every
+  annotation value on it, is replaced by a placeholder plus a digest;
+  key names stay. This covers a `k8s.apply` of a Secret
   manifest, a `k8s.cr.info` read of one, and the items of a
   `SecretList` (which carry no `kind` of their own). The normal body
   redaction then runs over the masked body.

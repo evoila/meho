@@ -99,10 +99,13 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newReviewCmd())
 	cmd.AddCommand(newEditGroupCmd())
 	cmd.AddCommand(newEditOpCmd())
+	cmd.AddCommand(newOverridesCmd())
+	cmd.AddCommand(newRemoveOverrideCmd())
 	cmd.AddCommand(newEnableCmd())
 	cmd.AddCommand(newEnableReadsCmd())
 	cmd.AddCommand(newDisableCmd())
 	cmd.AddCommand(newDeleteCmd())
+	cmd.AddCommand(newTenantSettingCmd())
 	return cmd
 }
 
@@ -353,6 +356,16 @@ func renderHTTPStatus(
 			jsonOut,
 		)
 	case http.StatusConflict:
+		if detail, ok := connectorInUseDetail(body); ok {
+			return output.RenderError(cmd.ErrOrStderr(),
+				&output.StructuredError{
+					Code:   errCodeConnectorInUse,
+					Detail: detail,
+					Exit:   output.ExitUnexpected,
+				},
+				jsonOut,
+			)
+		}
 		if connectorID, ok := scopeAmbiguousConnectorID(body); ok {
 			return output.RenderError(cmd.ErrOrStderr(),
 				&output.StructuredError{
@@ -405,6 +418,54 @@ func scopeAmbiguousConnectorID(body []byte) (connectorID string, ok bool) {
 		return "", false
 	}
 	return envelope.Detail.ConnectorID, true
+}
+
+// errCodeConnectorInUse is the error code for a connector delete that
+// the backplane refused because something still uses the connector
+// (#5027). It is the same classifier the backplane sends in its 409 body.
+const errCodeConnectorInUse = "connector_in_use"
+
+// connectorInUseDetail reports whether a 409 body is the backplane's
+// connector_in_use refusal, and returns a text that lists each user
+// (one line per user) and what to do next. Any other 409 returns ok=false.
+func connectorInUseDetail(body []byte) (detail string, ok bool) {
+	var envelope struct {
+		Detail struct {
+			Detail      string `json:"detail"`
+			ConnectorID string `json:"connector_id"`
+			Users       []struct {
+				Kind string  `json:"kind"`
+				ID   string  `json:"id"`
+				Name *string `json:"name"`
+				OpID *string `json:"op_id"`
+			} `json:"users"`
+			OtherTenantUserCount int `json:"other_tenant_user_count"`
+		} `json:"detail"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return "", false
+	}
+	d := envelope.Detail
+	if d.Detail != errCodeConnectorInUse {
+		return "", false
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "connector %q was not deleted because it is still used by:", d.ConnectorID)
+	for _, u := range d.Users {
+		label := u.ID
+		if u.Name != nil && *u.Name != "" {
+			label = *u.Name
+		}
+		fmt.Fprintf(&b, "\n  - %s %s", u.Kind, label)
+		if u.OpID != nil && *u.OpID != "" {
+			fmt.Fprintf(&b, " (operation %s)", *u.OpID)
+		}
+	}
+	if d.OtherTenantUserCount > 0 {
+		fmt.Fprintf(&b, "\n  - %d more in other tenants", d.OtherTenantUserCount)
+	}
+	b.WriteString("\nRemove or change each one, then run the delete again.")
+	return b.String(), true
 }
 
 // preferFlagUsage is the shared help text for the --prefer flag on

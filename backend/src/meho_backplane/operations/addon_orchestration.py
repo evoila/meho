@@ -61,6 +61,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AddonOrchestrationRun, AuditEventClass, AuditLog
@@ -183,6 +184,7 @@ async def _open_run(
                     "keycloak_client_id": keycloak_client_id,
                     "work_ref": work_ref,
                     "result_status": "opened",
+                    **tenant_role_source_payload(operator),
                 },
                 work_ref=work_ref,
             )

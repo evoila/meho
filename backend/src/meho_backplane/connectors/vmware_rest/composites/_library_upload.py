@@ -63,6 +63,7 @@ from meho_backplane.connectors.vmware_rest.composites._library_local_schemas imp
     CONTENT_LIBRARY_ITEM_UPLOAD_RESPONSE_SCHEMA,
     DEFAULT_WAIT_SECONDS,
 )
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _OP_FIND_LIBRARY,
     _OP_FIND_LIBRARY_ITEM,
@@ -87,7 +88,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
-    "CONTENT_LIBRARY_ITEM_UPLOAD_COMPOSITE",
+    "COMPOSITES",
     "content_library_item_upload_composite",
 ]
 
@@ -648,26 +649,28 @@ async def _add_session_file_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     return effect
 
 
-register_preview_builder(OP_ID_CONTENT_LIBRARY_ITEM_UPLOAD, _content_library_item_upload_preview)
 register_preview_builder(_OP_ADD_SESSION_FILE, _add_session_file_preview)
 
 
-#: The registration row, as ``_CompositeSpec`` keyword arguments.
-CONTENT_LIBRARY_ITEM_UPLOAD_COMPOSITE: Final[dict[str, Any]] = {
-    "op_id": OP_ID_CONTENT_LIBRARY_ITEM_UPLOAD,
-    "handler": content_library_item_upload_composite,
-    "summary": "Add an ISO, OVA or OVF file to a local content library from a URL.",
-    "description": (
-        "vCenter downloads one file from an http(s) URL into a new item of a local "
-        "content library; MEHO sends no file bytes. Waits until the download is done or "
-        "wait_seconds runs out. An item of that name with content gives unchanged. "
-        "Waits until a second person approves."
+#: The registration row.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_CONTENT_LIBRARY_ITEM_UPLOAD,
+        handler=content_library_item_upload_composite,
+        summary="Add an ISO, OVA or OVF file to a local content library from a URL.",
+        description=(
+            "vCenter downloads one file from an http(s) URL into a new item of a local "
+            "content library; MEHO sends no file bytes. Waits until the download is done or "
+            "wait_seconds runs out. An item of that name with content gives unchanged. "
+            "Waits until a second person approves."
+        ),
+        parameter_schema=CONTENT_LIBRARY_ITEM_UPLOAD_PARAMETER_SCHEMA,
+        response_schema=CONTENT_LIBRARY_ITEM_UPLOAD_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=["composite", "write", "content-library", "local", "iso", "ovf"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=CONTENT_LIBRARY_ITEM_UPLOAD_LLM_INSTRUCTIONS,
+        preview=_content_library_item_upload_preview,
     ),
-    "parameter_schema": CONTENT_LIBRARY_ITEM_UPLOAD_PARAMETER_SCHEMA,
-    "response_schema": CONTENT_LIBRARY_ITEM_UPLOAD_RESPONSE_SCHEMA,
-    "group_key": "content_library",
-    "tags": ["composite", "write", "content-library", "local", "iso", "ovf"],
-    "safety_level": "caution",
-    "requires_approval": True,
-    "llm_instructions": CONTENT_LIBRARY_ITEM_UPLOAD_LLM_INSTRUCTIONS,
-}
+)

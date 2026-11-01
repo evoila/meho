@@ -80,7 +80,7 @@
           "auth"
         ],
         "summary": "Auth Config",
-        "description": "Return Keycloak issuer, audience, and CLI client_id for device-code flow.\n\nReads :func:`~meho_backplane.settings.get_settings` so the response\ncannot drift from the values :mod:`~meho_backplane.auth.jwt` uses\nwhen it validates inbound JWTs. The issuer URL is returned exactly\nas configured, trailing slash included. Keycloak publishes its\nissuer without one; providers such as authentik publish theirs\nwith one, and a client that compares the value against the\ndiscovery document (RFC 8414 \u00a73.3) needs the published form. The\nCLI strips the slash itself before it builds\n``<issuer>/.well-known/openid-configuration``.",
+        "description": "Return Keycloak issuer, audience, and the CLI's two public client ids.\n\nReads :func:`~meho_backplane.settings.get_settings` so the response\ncannot drift from the values :mod:`~meho_backplane.auth.jwt` uses\nwhen it validates inbound JWTs. The issuer URL is returned exactly\nas configured, trailing slash included. Keycloak publishes its\nissuer without one; providers such as authentik publish theirs\nwith one, and a client that compares the value against the\ndiscovery document (RFC 8414 \u00a73.3) needs the published form. The\nCLI strips the slash itself before it builds\n``<issuer>/.well-known/openid-configuration``.",
         "operationId": "auth_config_api_v1_auth_config_get",
         "responses": {
           "200": {
@@ -10693,7 +10693,7 @@
           "approvals"
         ],
         "summary": "Approve Approval Request",
-        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nAsync governed dispatch (#3079): with ``async: true`` the decision is\nstill recorded + audited synchronously, but the resumed op is dispatched\non a background task and the route returns HTTP 202 + a durable run\nhandle (``{\"run_id\", \"status\": \"pending\", \"async\": true}``) instead of\nblocking for the resumed op's full duration. The resume runs through the\nsame exactly-one-resumer claim + policy bypass + audit path the inline\nresume uses. Default (``async`` absent / false) is byte-identical to the\npre-#3079 inline resume below.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully (sync).\n* 202 \u2014 approved; resume launched in the background (``async: true``).\n* 401 \u2014 the token shows no fresh sign-in (#3979): its ``auth_time`` is\n  missing or older than ``FRESH_SIGN_IN_MAX_AGE_SECONDS``, or\n  this sign-in already gave an approval. The answer carries\n  ``WWW-Authenticate: Bearer error=\"insufficient_user_authentication\"``\n  with ``max_age`` (RFC 9470). Approve in the web interface, or sign in\n  again. The request stays pending.\n* 403 \u2014 caller lacks approvals-plane access (neither ``operator`` role\n  nor the ``approver`` capability, #3243), **or** the approver is the\n  requester and self-approval break-glass is disabled (G11.7-T1 #1401).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch, a reason over 2000 characters, or a\n  delegated reason (``Instructed-by:``) missing ``Instruction:`` /\n  ``Refs:`` (#3692).",
+        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nAsync governed dispatch (#3079): with ``async: true`` the decision is\nstill recorded + audited synchronously, but the resumed op is dispatched\non a background task and the route returns HTTP 202 + a durable run\nhandle (``{\"run_id\", \"status\": \"pending\", \"async\": true}``) instead of\nblocking for the resumed op's full duration. The resume runs through the\nsame exactly-one-resumer claim + policy bypass + audit path the inline\nresume uses. Default (``async`` absent / false) is byte-identical to the\npre-#3079 inline resume below.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully (sync).\n* 202 \u2014 approved; resume launched in the background (``async: true``).\n* 401 \u2014 the token is not a fresh approval sign-in (#3979, #5515): it\n  does not come from the approval client (``azp``), or its\n  ``auth_time`` is missing or older than\n  ``FRESH_SIGN_IN_MAX_AGE_SECONDS``. For a ``destructive`` request the\n  limit is ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`` instead, and the\n  sign-in must not have approved anything else. The answer carries\n  ``WWW-Authenticate: Bearer error=\"insufficient_user_authentication\"``\n  with ``max_age`` (RFC 9470). Approve in the web interface, or sign in\n  again. The request stays pending.\n* 403 \u2014 caller lacks approvals-plane access (neither ``operator`` role\n  nor the ``approver`` capability, #3243), **or** the approver is the\n  requester and self-approval break-glass is disabled (G11.7-T1 #1401).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch, a reason over 2000 characters, or a\n  delegated reason (``Instructed-by:``) missing ``Instruction:`` /\n  ``Refs:`` (#3692).",
         "operationId": "approve_approval_request_api_v1_approvals__request_id__approve_post",
         "parameters": [
           {
@@ -10949,7 +10949,7 @@
           "approvals"
         ],
         "summary": "Decide Approval Request",
-        "description": "Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and records the ``approval.{approved,rejected}``\nadd-on step event. Backs the CLI/MCP operator-decision flow where the\noperator approves by id alone.\n\nOn **every approval** the decision then drives a re-dispatch using the\nparams stored on the row at park time (#1503) \u2014 the direct operator op\n(``run_id IS NULL``) and, since #2293, the **agent-run** request\n(``run_id`` set) alike. The exactly-one-resumer claim\n(:func:`~meho_backplane.operations.approval_queue.claim_resume`, won\ninside ``resume_dispatch_after_approval``) makes this safe for\nrun-bound requests: when the in-process agent waiter is alive it wins\nthe claim and ``/decide``'s re-dispatch no-ops with\n``dispatch_status=\"already_resumed\"``; when the waiter is gone\n(wait-timeout, pod restart, run cancelled) ``/decide`` wins the claim\nand executes the approved op, closing the silent-non-execution seam\nwhere the approval committed but nothing ran. Two independent guards\ncoexist: the already-decided 409 prevents a second *decision*, and the\nclaim prevents a second *dispatch* of one decision.\n\nAn approval needs a fresh sign-in or a one-time code (#3979): otherwise\nthe route answers 401 with ``WWW-Authenticate: Bearer\nerror=\"insufficient_user_authentication\"`` and ``max_age`` (RFC 9470),\nand the request stays pending. A rejection needs no fresh sign-in.",
+        "description": "Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and records the ``approval.{approved,rejected}``\nadd-on step event. Backs the CLI/MCP operator-decision flow where the\noperator approves by id alone.\n\nOn **every approval** the decision then drives a re-dispatch using the\nparams stored on the row at park time (#1503) \u2014 the direct operator op\n(``run_id IS NULL``) and, since #2293, the **agent-run** request\n(``run_id`` set) alike. The exactly-one-resumer claim\n(:func:`~meho_backplane.operations.approval_queue.claim_resume`, won\ninside ``resume_dispatch_after_approval``) makes this safe for\nrun-bound requests: when the in-process agent waiter is alive it wins\nthe claim and ``/decide``'s re-dispatch no-ops with\n``dispatch_status=\"already_resumed\"``; when the waiter is gone\n(wait-timeout, pod restart, run cancelled) ``/decide`` wins the claim\nand executes the approved op, closing the silent-non-execution seam\nwhere the approval committed but nothing ran. Two independent guards\ncoexist: the already-decided 409 prevents a second *decision*, and the\nclaim prevents a second *dispatch* of one decision.\n\nAn approval needs a fresh approval sign-in (#3979, #5515), the same\ncheck as ``/approve``: otherwise the route answers 401 with\n``WWW-Authenticate: Bearer error=\"insufficient_user_authentication\"``\nand ``max_age`` (RFC 9470), and the request stays pending. A rejection\nneeds no fresh sign-in.",
         "operationId": "decide_approval_request_api_v1_approvals__request_id__decide_post",
         "parameters": [
           {
@@ -12252,7 +12252,7 @@
           "discovery"
         ],
         "summary": "Protected Resource Metadata",
-        "description": "Return the RFC 9728 protected-resource metadata document.\n\nFields per RFC 9728 \u00a73:\n\n* ``resource`` (REQUIRED) \u2014 the canonical MCP server URI clients\n  pass as the ``resource`` parameter in OAuth requests per RFC 8707.\n  Resolved via :func:`~meho_backplane.mcp.auth.mcp_resource_uri`,\n  which prefers an explicit ``MCP_RESOURCE_URI`` setting and falls\n  back to ``f\"{backplane_url}/mcp\"``.\n* ``authorization_servers`` \u2014 the issuer URL exactly as configured\n  in ``KEYCLOAK_ISSUER_URL``. MCP 2025-06-18 \u00a7Authorization Server\n  Discovery requires this to be non-empty. The value is not\n  trailing-slash-normalised: RFC 8414 \u00a73.3 makes clients compare\n  it byte-for-byte with the ``issuer`` in the discovery document,\n  and providers such as authentik publish theirs with a ``/``.\n* ``scopes_supported`` \u2014 v0.2 ships two scopes that downstream\n  Tasks (T3 RBAC filter, T4 reference tool, T5 audit) consume.\n  Conservative: clients that request only ``mcp:read`` can list /\n  inspect but not invoke side-effecting tools.\n* ``bearer_methods_supported`` \u2014 ``[\"header\"]`` only. MCP transport\n  forbids tokens in the URI query (see \u00a7\"Access Token Usage\").\n\nNo authentication is enforced on this endpoint by design: RFC 9728\ndiscovery is the bootstrap step that lets unauthenticated clients\nlearn how to obtain a token. The chassis middleware chain still\nruns \u2014 the request_id stays bound for log correlation, and\nAuditMiddleware skips the row because no ``operator_sub`` is bound\n(the standard unauthenticated-route path).",
+        "description": "Return the RFC 9728 protected-resource metadata document.\n\nFields per RFC 9728 \u00a73:\n\n* ``resource`` (REQUIRED) \u2014 the canonical MCP server URI clients\n  pass as the ``resource`` parameter in OAuth requests per RFC 8707.\n  Resolved via :func:`~meho_backplane.mcp.auth.mcp_resource_uri`,\n  which prefers an explicit ``MCP_RESOURCE_URI`` setting and falls\n  back to ``f\"{backplane_url}/mcp\"``.\n* ``authorization_servers`` \u2014 the issuer URL exactly as configured\n  in ``KEYCLOAK_ISSUER_URL``. MCP 2025-06-18 \u00a7Authorization Server\n  Discovery requires this to be non-empty. The value is not\n  trailing-slash-normalised: RFC 8414 \u00a73.3 makes clients compare\n  it byte-for-byte with the ``issuer`` in the discovery document,\n  and providers such as authentik publish theirs with a ``/``.\n* ``scopes_supported`` \u2014 :data:`~meho_backplane.mcp.auth.MCP_SCOPES_SUPPORTED`:\n  ``mcp:read`` and ``mcp:execute`` for the working surface, plus\n  ``offline_access`` so a client that asks for every listed scope\n  gets a login that renews itself. Clients that request only\n  ``mcp:read`` can list / inspect but not invoke side-effecting\n  tools. ``mcp:admin`` is not listed; a client asks for it on purpose.\n* ``bearer_methods_supported`` \u2014 ``[\"header\"]`` only. MCP transport\n  forbids tokens in the URI query (see \u00a7\"Access Token Usage\").\n\nNo authentication is enforced on this endpoint by design: RFC 9728\ndiscovery is the bootstrap step that lets unauthenticated clients\nlearn how to obtain a token. The chassis middleware chain still\nruns \u2014 the request_id stays bound for log correlation, and\nAuditMiddleware skips the row because no ``operator_sub`` is bound\n(the standard unauthenticated-route path).",
         "operationId": "protected_resource_metadata__well_known_oauth_protected_resource_get",
         "responses": {
           "200": {
@@ -12318,7 +12318,7 @@
           "ui-auth"
         ],
         "summary": "Ui Auth Login",
-        "description": "Mint a PKCE authorization URL and 302 the browser to Keycloak.\n\n``?return_to=<path>`` is the originally-requested path the\noperator was bounced from (the middleware writes it). Declared as\na typed FastAPI ``Query`` parameter so the OpenAPI document\nreflects the real query-string contract; the value is validated\nvia :func:`_safe_return_to` to block open-redirect abuse.",
+        "description": "Mint a PKCE authorization URL and 302 the browser to Keycloak.\n\n``?return_to=<path>`` is the originally-requested path the\noperator was bounced from (the middleware writes it). Declared as\na typed FastAPI ``Query`` parameter so the OpenAPI document\nreflects the real query-string contract; the value is validated\nvia :func:`_safe_return_to` to block open-redirect abuse.\n\n``?reason=session_ended`` is set when a session the browser still\nheld has ended. Then the route answers with a small page: one plain\nline (\"Your session ended. Please sign in again.\") and a \"Sign in\"\nbutton that starts the normal login with the same ``return_to``.\nAny other ``reason`` value is ignored.",
         "operationId": "ui_auth_login_ui_auth_login_get",
         "parameters": [
           {
@@ -12329,6 +12329,16 @@
               "type": "string",
               "nullable": true,
               "title": "Return To"
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Reason"
             }
           }
         ],
@@ -24983,6 +24993,11 @@
           "cli_client_id": {
             "type": "string",
             "title": "Cli Client Id"
+          },
+          "cli_approve_client_id": {
+            "type": "string",
+            "title": "Cli Approve Client Id",
+            "default": ""
           }
         },
         "type": "object",
@@ -32752,7 +32767,7 @@
           "ended_at"
         ],
         "title": "OperationRunStatusResponse",
-        "description": "Poll response for ``GET /operations/runs/{handle}``.\n\n``result`` carries the full persisted ``OperationResult`` envelope once\nthe run reaches ``succeeded`` (the dropped-response-class fix); ``error``\ncarries the run-crash / reaper reason on a ``failed`` run. Both are\n``None`` while the run is still ``pending`` / ``running``."
+        "description": "Poll response for ``GET /operations/runs/{handle}``.\n\n``result`` carries the full persisted ``OperationResult`` envelope once\nthe run reaches ``succeeded`` (the dropped-response-class fix); ``error``\ncarries the run-crash / reaper reason on a ``failed`` run. Both are\n``None`` while the run is still ``pending`` / ``running``. ``result`` is\nalso ``None`` for anyone but the person who started the run\n(:func:`~meho_backplane.operations.operation_run_service.run_result_visible_to`)."
       },
       "OperationRunSummaryResponse": {
         "properties": {

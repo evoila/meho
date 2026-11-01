@@ -814,6 +814,7 @@ def test_approve_through_bff_needs_no_fresh_sign_in_and_records_the_click() -> N
         "channel": "web",
         "method": "web_click",
         "auth_time": None,
+        "acr": None,
     }
 
 

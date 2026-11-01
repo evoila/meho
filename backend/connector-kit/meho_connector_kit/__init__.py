@@ -25,7 +25,8 @@ from typing import Any, Protocol
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import TenantScopedTargetLike
+from meho_backplane.connectors._shared.cache_key import target_cache_key as _target_cache_key
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
@@ -72,6 +73,10 @@ class Target(Protocol):
     (``meho_backplane.db.models.Target``) or the read model
     (``meho_backplane.targets.schemas.Target``). Both have these six fields.
     Any other field of a target is private to the core.
+
+    The fields are read-only. A ``Target`` fits every kit function that
+    takes a target: :func:`load_vault_secret_data`,
+    :func:`load_param_secret_data` and :func:`target_cache_key`.
     """
 
     @property
@@ -103,6 +108,25 @@ class Target(Protocol):
     def secret_ref(self) -> str | None:
         """Where the target's secret is in Vault, or ``None``."""
         ...
+
+
+def target_cache_key(target: Target) -> tuple[str, str]:
+    """Return the cache key of *target*: one entry per target, tenants apart.
+
+    Use it as the key of a cache that a connector keeps across calls, for
+    example a client pool or a login token. The key is made of the target's
+    tenant and its row id. Those fields are private to the core, so a
+    connector asks the kit for the key and never reads them itself.
+
+    Raises :class:`TypeError` for an object without them, for example a test
+    stub that only has the six fields of :class:`Target`.
+    """
+    if not isinstance(target, TenantScopedTargetLike):
+        raise TypeError(
+            f"target {getattr(target, 'name', '?')!r} has no tenant identity; "
+            "target_cache_key needs the target MEHO hands to the connector"
+        )
+    return _target_cache_key(target)
 
 
 __all__ = [

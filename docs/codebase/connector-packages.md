@@ -362,7 +362,10 @@ Where it lives and how it ships:
   `meho_connector_kit/__init__.py`. The module imports the names from the
   core modules and adds one of its own: `Target`, a typed class with the six
   target fields a connector may read (`name`, `host`, `extras`,
-  `auth_model`, `verify_tls`, `secret_ref`).
+  `auth_model`, `verify_tls`, `secret_ref`). The fields are read-only. A
+  `Target` fits every kit function that takes a target. The kit's
+  `target_cache_key` takes a `Target` and makes the key from the target's
+  tenant and row id inside the core, so those two fields stay private.
 - The image build makes the kit's wheel next to MEHO's own
   (`backend/Dockerfile`, stage `wheelbuilder`), installs both, and checks
   that every kit name imports.
@@ -400,7 +403,9 @@ For every other class the kit promises only the name.
    list file, the kit's `pyproject.toml` and `backend/uv.lock`, and that
    both kinds of target MEHO hands a connector (the database row in
    `db/models.py` and the read model in `targets/schemas.py`) still have
-   every field of `Target`.
+   every field of `Target`. It also runs mypy on a small connector written
+   only with the kit's types, so the kit's types keep fitting each other,
+   and checks that reading a private target field is a type error.
 3. **The command.** In `backend/`, run
    `uv run python -m scripts.write_connector_kit_names`, then `uv lock`.
    The command writes the list file again, raises the right number of the

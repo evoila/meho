@@ -13,6 +13,9 @@ A connector package imports MEHO only through the kit. These tests check:
 * the kit version is the same in the list file, the kit's ``pyproject.toml``
   and ``uv.lock``;
 * both kinds of target MEHO hands a connector have every field of ``Target``;
+* a connector written only with the kit's types passes mypy, and reading a
+  private target field fails it;
+* ``target_cache_key`` keys on the target's tenant, which stays private;
 * a connector without its own ``execute`` registers and runs a typed
   operation.
 
@@ -23,11 +26,15 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
+import subprocess
+import sys
+import textwrap
 import tomllib
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock
 
 import meho_connector_kit as kit
@@ -47,7 +54,8 @@ from scripts.write_connector_kit_names import (
 from meho_backplane.db import models
 from meho_backplane.targets import schemas
 
-_UV_LOCK = Path(__file__).resolve().parents[1] / "uv.lock"
+_BACKEND = Path(__file__).resolve().parents[1]
+_UV_LOCK = _BACKEND / "uv.lock"
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +218,141 @@ def test_a_target_kind_without_a_field_is_reported() -> None:
         verify_tls = True
 
     assert _missing_target_fields(_NoSecretRef) == ["secret_ref"]
+
+
+# ---------------------------------------------------------------------------
+# A connector typed with the kit passes mypy
+# ---------------------------------------------------------------------------
+
+
+#: A connector that names only kit types. Every kit function that takes a
+#: target gets a ``kit.Target``.
+_TYPED_CONNECTOR = """\
+from typing import Any
+
+import meho_connector_kit as kit
+
+
+class WidgetConnector(kit.HttpConnector):
+    product = "example"
+    version = "1.x"
+    impl_id = "example-widget"
+
+    async def fingerprint(
+        self, target: kit.Target, operator: kit.Operator | None = None
+    ) -> kit.FingerprintResult:
+        raise NotImplementedError
+
+    async def probe(self, target: kit.Target) -> kit.ProbeResult:
+        raise NotImplementedError
+
+    async def auth_headers(self, target: kit.Target, operator: kit.Operator) -> dict[str, str]:
+        if not kit.is_acceptable_auth_model(target.auth_model):
+            raise kit.ConnectorUpstreamError(
+                f"{target.name} must use the shared service account",
+                http_status=401,
+                upstream_message=None,
+            )
+        secret = await kit.load_vault_secret_data(target, operator)
+        token = kit.strip_credential_value(secret["token"])
+        return {"Authorization": f"Bearer {token}"}
+
+
+async def list_widgets(
+    operator: kit.Operator, target: kit.Target, params: dict[str, Any]
+) -> dict[str, Any]:
+    key = kit.target_cache_key(target)
+    extra = await kit.load_param_secret_data(target, operator, param="credential_ref")
+    return {
+        "key": list(key),
+        "fields": sorted(extra),
+        "name": target.name,
+        "host": target.host,
+        "region": target.extras.get("region"),
+        "verify_tls": target.verify_tls,
+        "secret_ref": target.secret_ref,
+        "limit": params.get("limit"),
+    }
+"""
+
+#: Reads a target field that is not one of the six the kit promises.
+_READS_PRIVATE_FIELD = """\
+import meho_connector_kit as kit
+
+
+def tenant_of(target: kit.Target) -> object:
+    return target.tenant_id
+"""
+
+
+def _mypy_errors(*files: Path) -> list[str]:
+    """Run mypy on *files* with the backend's config and return its error lines.
+
+    ``MYPYPATH`` points at ``src/`` so mypy reads the core modules as
+    source. Without it, mypy sees the installed ``meho_backplane`` as a
+    package without type information and every kit name becomes ``Any``,
+    which would make a check like this pass without checking anything.
+    """
+    env = {**os.environ, "MYPYPATH": str(_BACKEND / "src")}
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mypy",
+            "--config-file",
+            str(_BACKEND / "pyproject.toml"),
+            "--no-error-summary",
+            "--no-color-output",
+            *map(str, files),
+        ],
+        cwd=_BACKEND,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode in (0, 1), result.stderr
+    return [line for line in result.stdout.splitlines() if ": error: " in line]
+
+
+def test_a_connector_typed_with_the_kit_passes_mypy(tmp_path: Path) -> None:
+    typed = tmp_path / "typed_connector.py"
+    typed.write_text(textwrap.dedent(_TYPED_CONNECTOR), encoding="utf-8")
+    private = tmp_path / "reads_private_field.py"
+    private.write_text(textwrap.dedent(_READS_PRIVATE_FIELD), encoding="utf-8")
+
+    errors = _mypy_errors(typed, private)
+
+    assert [e for e in errors if typed.name in e] == [], errors
+    assert len(errors) == 1, errors
+    assert private.name in errors[0] and "tenant_id" in errors[0], errors
+
+
+# ---------------------------------------------------------------------------
+# ``target_cache_key`` keys on the tenant, which stays private
+# ---------------------------------------------------------------------------
+
+
+def test_target_cache_key_keeps_tenants_apart() -> None:
+    first, second = _FakeTarget(), _FakeTarget()
+    second.tenant_id = uuid.UUID("00000000-0000-0000-0000-00000000beef")
+    second.id = first.id
+
+    assert kit.target_cache_key(first) == (str(_TENANT), str(first.id))
+    assert kit.target_cache_key(first) != kit.target_cache_key(second)
+
+
+def test_target_cache_key_refuses_a_target_without_a_tenant() -> None:
+    class _SixFields:
+        name = "stub"
+        host = "stub.example.com"
+        extras: ClassVar[dict[str, Any]] = {}
+        auth_model = "shared_service_account"
+        verify_tls = True
+        secret_ref = None
+
+    with pytest.raises(TypeError, match="stub"):
+        kit.target_cache_key(_SixFields())
 
 
 # ---------------------------------------------------------------------------

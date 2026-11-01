@@ -165,6 +165,8 @@ __all__ = [
     "VM_DESTROY_RESPONSE_SCHEMA",
     "VM_DEVICE_CDROM_PARAMETER_SCHEMA",
     "VM_DEVICE_CDROM_RESPONSE_SCHEMA",
+    "VM_DISKS_CONSOLIDATE_PARAMETER_SCHEMA",
+    "VM_DISKS_CONSOLIDATE_RESPONSE_SCHEMA",
     "VM_DISK_GROW_PARAMETER_SCHEMA",
     "VM_DISK_GROW_RESPONSE_SCHEMA",
     "VM_FOLDER_MOID_PATTERN",
@@ -185,6 +187,8 @@ __all__ = [
     "VM_RESOURCE_ALLOCATION_SHOW_RESPONSE_SCHEMA",
     "VM_SNAPSHOT_CREATE_PARAMETER_SCHEMA",
     "VM_SNAPSHOT_CREATE_RESPONSE_SCHEMA",
+    "VM_SNAPSHOT_DELETE_ALL_PARAMETER_SCHEMA",
+    "VM_SNAPSHOT_DELETE_ALL_RESPONSE_SCHEMA",
     "VM_SNAPSHOT_DELETE_PARAMETER_SCHEMA",
     "VM_SNAPSHOT_DELETE_RESPONSE_SCHEMA",
     "VM_SNAPSHOT_MOID_PATTERN",
@@ -9452,3 +9456,117 @@ VM_SNAPSHOT_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
         },
     },
 )
+
+
+#: ``vmware.composite.vm.snapshot.delete_all`` parameter schema.
+VM_SNAPSHOT_DELETE_ALL_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Moid of the VM whose snapshots all go, in the shape 'vm-<number>' "
+                "(vmware.vm.info finds it from the name). The call checks the shape."
+            ),
+        },
+    },
+    "required": ["vm"],
+    "additionalProperties": False,
+    "examples": [{"vm": "<vm-id>"}],
+}
+
+#: ``vmware.composite.vm.snapshot.delete_all`` response schema.
+VM_SNAPSHOT_DELETE_ALL_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
+    ["deleted", "unchanged", "invalid_request", "still_present", "timeout"],
+    "``'deleted'`` -- the delete ran and the VM has no snapshots left; "
+    "``'unchanged'`` -- the VM had no snapshots, nothing was written; "
+    "``'invalid_request'`` -- no VM with this moid, or the moid has the wrong shape; "
+    "``'still_present'`` -- the task ended but snapshots still read back; "
+    "``'timeout'`` -- RemoveAllSnapshots_Task outran the poll bound, it may still finish. A "
+    "vSphere fault is not a status: it raises (``connector_error``, audited as failed).",
+    object_properties={
+        "kind": {"type": "string", "description": "Always ``vm_snapshots``."},
+        "vm": {"type": "string", "description": "VM moid."},
+        "vm_name": {"type": ["string", "null"], "description": "VM name."},
+        "snapshot_count": {
+            "type": "integer",
+            "description": "Number of snapshots the VM had before the delete.",
+        },
+        "snapshots_left": {
+            "type": "integer",
+            "description": "Number of snapshots read back after the task.",
+        },
+    },
+)
+
+#: ``vmware.composite.vm.disks.consolidate`` parameter schema.
+VM_DISKS_CONSOLIDATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Moid of the VM whose disks to consolidate, in the shape 'vm-<number>' "
+                "(vmware.vm.info finds it from the name). The call checks the shape."
+            ),
+        },
+    },
+    "required": ["vm"],
+    "additionalProperties": False,
+    "examples": [{"vm": "<vm-id>"}],
+}
+
+#: ``vmware.composite.vm.disks.consolidate`` response schema.
+VM_DISKS_CONSOLIDATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "consolidated",
+                "unchanged",
+                "unknown",
+                "still_needed",
+                "unverified",
+                "not_found",
+                "invalid_request",
+                "timeout",
+            ],
+            "description": (
+                "``'consolidated'`` -- the task ran and vCenter reports the flag as false; "
+                "``'unchanged'`` -- the VM did not need it, nothing was written; "
+                "``'unknown'`` -- vCenter did not report the flag, nothing was written; "
+                "``'still_needed'`` -- the task ended but vCenter still asks for it; "
+                "``'unverified'`` -- the task ended but vCenter did not report the flag; "
+                "``'not_found'`` -- no VM with this moid; ``'invalid_request'`` -- the moid "
+                "has the wrong shape; ``'timeout'`` -- the task outran the poll bound."
+            ),
+        },
+        "vm": {"type": "string", "description": "VM moid."},
+        "vm_name": {"type": ["string", "null"], "description": "VM name."},
+        "consolidation_needed": {
+            "type": ["boolean", "null"],
+            "description": (
+                "vCenter's runtime.consolidationNeeded from the last read; null when vCenter "
+                "did not report it."
+            ),
+        },
+        "task": {"type": ["string", "null"], "description": "vim Task moid, when one ran."},
+        "task_state": {
+            "type": ["string", "null"],
+            "description": "Terminal task state when a task ran.",
+        },
+        "guidance": {"type": ["string", "null"], "description": "What to do next, if anything."},
+        "issues": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": (
+                "Error details, e.g. a task that did not finish in time, or a warning when "
+                "the result could not be confirmed."
+            ),
+        },
+    },
+    "required": ["status", "vm"],
+}

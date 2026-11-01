@@ -240,7 +240,12 @@ async def test_item_get_reads_the_version_form_and_hides_secret_defaults(
     assert rows["adminPassword"]["default"] == SECRET_FIELD_MARKER
     assert rows["token"]["default"] == SECRET_FIELD_MARKER
     assert "<not-a-real" not in json.dumps(out)
-    assert out["schema"]["properties"]["adminPassword"]["type"] == "string"
+    assert rows["adminPassword"]["type"] == "string"
+    # The default view of every answer hides a secret-named field whole, so
+    # the raw schema shows the marker there; the input rows above still name
+    # the field with its type.
+    assert out["schema"]["properties"]["adminPassword"] == SECRET_FIELD_MARKER
+    assert out["schema"]["properties"]["size"]["type"] == "string"
 
 
 async def test_item_get_hides_secrets_inside_object_and_list_defaults(

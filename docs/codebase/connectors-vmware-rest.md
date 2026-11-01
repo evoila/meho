@@ -5328,6 +5328,23 @@ version check (`_version_gate.py`).
   `error`. A vendor fault (a VI-JSON fault body, a SOAP fault, or a task fault)
   answers `failed` with `error_type` and `error_message` and an `error` issue.
   A login problem or a lost connection is raised to the dispatcher as before.
+- **A refused join account.** The join sends the join account's user name and
+  password, so the host can answer the call with an `InvalidLogin` fault that
+  means that account, not the target's credentials. Both transports turn an
+  `InvalidLogin` fault into a `ConnectorAuthError`; the join reads it back
+  (`host_access.vendor_fault` with `request_login`) when the error is from a
+  call on a live session (`stage` is `call`; the SOAP path sets it in
+  `_post_soap`). Then the answer is `failed` with `error_type` `InvalidLogin`,
+  the fault text without the password, and guidance that names the join
+  account. A fault of the session login (`stage` `establish`), and a
+  `NotAuthenticated` fault (a lost session), still go to the dispatcher as
+  `connector_auth_failed`.
+- **Large user lists.** `host.local_user.list` answers with two lists,
+  `users` and `read_notes`. Its `result_digest` hint names `users` as the
+  collection, so a long list comes back as a result handle whose rows the
+  caller pages and filters with `result_query`, with `status_counts` per
+  `access_mode` inline (a `null` role counts as `UNKNOWN`). Without the hint
+  the reducer would keep the whole answer as one document.
 - **The delete.** `host.local_user.delete` is `destructive`. Its preview reads
   the user and its access role and fills the `blast_radius` (`object` is the
   user, `children` its access role, `irreversibility` is `permanent`). It

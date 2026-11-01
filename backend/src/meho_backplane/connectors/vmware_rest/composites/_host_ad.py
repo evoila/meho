@@ -11,7 +11,9 @@ target (the call names the host) and on an ESXi target.
 
 Each change reads the membership first (``unchanged`` sends nothing), sends
 one gated task, waits for it and reads the membership again. A task fault
-answers ``failed`` with the fault type and text.
+answers ``failed`` with the fault type and text. So does an ``InvalidLogin``
+fault of the join call itself: it means the domain refused the join
+account, not that the target's credentials are wrong.
 
 The join account's password comes from Vault (``password_secret_ref``) and
 goes only into the ``JoinDomain_Task`` call. The approval request, the
@@ -33,6 +35,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     _write_vmomi_sub_op,
 )
 from meho_backplane.connectors.vmware_rest.host_access import (
+    LOGIN_FAULT_TYPE,
     OP_JOIN_DOMAIN,
     OP_LEAVE_DOMAIN,
     AdState,
@@ -110,8 +113,13 @@ async def _run_task(
     body: dict[str, Any],
     plan: dict[str, Any],
     secrets: tuple[str, ...],
+    request_login: bool = False,
 ) -> tuple[OperationResult | None, str | None, tuple[str | None, str] | None, bool]:
-    """Gate, send and wait for one task: ``(gate, task id, fault, timed out)``."""
+    """Gate, send and wait for one task: ``(gate, task id, fault, timed out)``.
+
+    ``request_login``: the call carries a login of its own, so a refused
+    login is a fault of the call (:func:`vendor_fault`).
+    """
     try:
         gate, payload = await _write_vmomi_sub_op(
             connector,
@@ -123,7 +131,7 @@ async def _run_task(
             params=plan,
         )
     except (httpx.HTTPStatusError, RuntimeError) as exc:
-        fault = vendor_fault(exc, secrets)
+        fault = vendor_fault(exc, secrets, request_login=request_login)
         if fault is None:
             raise
         return None, None, fault, False
@@ -200,6 +208,16 @@ def _join_plan(params: dict[str, Any], host: str | None) -> dict[str, Any]:
     }
 
 
+def _join_failed_guidance(fault: tuple[str | None, str]) -> str:
+    if fault[0] == LOGIN_FAULT_TYPE:
+        return (
+            "The domain refused the join account's login; nothing changed. Check user_name "
+            "and the password in Vault at password_secret_ref, then call again. The target's "
+            "own credentials are fine."
+        )
+    return "The host did not join; nothing changed. Fix the cause the error names and call again."
+
+
 async def ad_join_composite(
     *,
     operator: Operator,
@@ -241,6 +259,7 @@ async def ad_join_composite(
         body={"domainName": domain, "userName": params["user_name"], "password": password},
         plan=_join_plan(params, state.host),
         secrets=(password,),
+        request_login=True,
     )
     if gate is not None:
         return gate
@@ -251,8 +270,7 @@ async def ad_join_composite(
             state.host,
             task=task,
             error=fault,
-            guidance="The host did not join; nothing changed. Fix the cause the error names "
-            "and call again.",
+            guidance=_join_failed_guidance(fault),
             requested_domain=domain,
         )
     if timed_out:

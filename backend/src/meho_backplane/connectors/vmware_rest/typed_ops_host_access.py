@@ -165,7 +165,8 @@ _LOCAL_USER_LIST_OP = VmwareTypedOp(
         "output_shape": (
             "{status, host, users: [{user, full_name, uid, shell_access, access_mode}], "
             "read_notes, guidance}. access_mode is null for a user with no role on the host. "
-            "A long list comes back as a result handle; read it with result_query."
+            "A long list comes back as a result handle with status_counts per access_mode "
+            "(a null access_mode counts as UNKNOWN); read the rows with result_query."
         ),
         "next_step": (
             "To add a user, call vmware.composite.host.local_user.create; to change a "
@@ -173,6 +174,14 @@ _LOCAL_USER_LIST_OP = VmwareTypedOp(
             "vmware.composite.host.local_user.delete. On needs_esxi_target, call again with "
             "the ESXi host's own target (list_targets)."
         ),
+        # ``users`` is the collection. Without this hint the reducer sees two
+        # lists (``users`` and ``read_notes``) and keeps a long answer whole
+        # as a document, so result_query cannot page or filter the rows.
+        "result_digest": {
+            "collection": "users",
+            "status_field": "access_mode",
+            "name_field": "user",
+        },
     },
 )
 

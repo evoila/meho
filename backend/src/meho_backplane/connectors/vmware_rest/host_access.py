@@ -138,6 +138,9 @@ OP_LEAVE_DOMAIN: Final = "POST:/HostActiveDirectoryAuthentication/{moId}/LeaveCu
 #: Local users MEHO never deletes: without root, nobody can log in to fix the host.
 PROTECTED_USERS: Final = frozenset({"root"})
 
+#: The vim fault for a refused user name and password.
+LOGIN_FAULT_TYPE: Final = "InvalidLogin"
+
 AD_STORE_TYPE: Final = "HostActiveDirectoryAuthentication"
 _AD_INFO_TYPE: Final = "HostActiveDirectoryInfo"
 _AUTH_MANAGER_TYPE: Final = "HostAuthenticationManager"
@@ -173,16 +176,50 @@ def needs_esxi_target(target: Any) -> dict[str, Any] | None:
     }
 
 
-def vendor_fault(exc: Exception, secrets: tuple[str, ...]) -> tuple[str | None, str] | None:
+def _request_login_fault(exc: ConnectorAuthError) -> BaseException | None:
+    """The fault to read when *exc* is an ``InvalidLogin`` of the call itself.
+
+    Both transports turn an ``InvalidLogin`` fault into a
+    :class:`ConnectorAuthError`. One from a session login (``stage``
+    ``establish`` or ``after_relogin``) is the target's credential, and
+    stays an auth error. One from a call on a live session (``stage``
+    ``call``) can only be a login the call itself carried, because a lost
+    session answers ``NotAuthenticated``, never ``InvalidLogin``. Returns
+    the error that carries the fault (the SOAP error itself, or the HTTP
+    error under a VI-JSON one), else ``None``.
+    """
+    if exc.stage != "call":
+        return None
+    soap = soap_fault_of(exc)
+    if soap is not None:
+        return exc if soap.fault_type == LOGIN_FAULT_TYPE else None
+    cause = exc.__cause__
+    if exc.cause == f"vim_fault_{LOGIN_FAULT_TYPE}" and isinstance(cause, httpx.HTTPStatusError):
+        return cause
+    return None
+
+
+def vendor_fault(
+    exc: Exception, secrets: tuple[str, ...], *, request_login: bool = False
+) -> tuple[str | None, str] | None:
     """``(fault type, text)`` of a vendor fault, without any text that holds a secret.
 
     A VI-JSON fault is an HTTP error with a fault body; a SOAP fault is a
     ``RuntimeError`` that carries the parsed fault. ``None`` for anything else
     (a login problem, a lost connection): the caller lets it go on to the
     dispatcher.
+
+    ``request_login``: the call carries a login of its own (the join account
+    of ``JoinDomain_Task``). Then an ``InvalidLogin`` fault of the call is a
+    vendor fault too: the vendor refused that login, not the target's
+    credential (:func:`_request_login_fault`). The dispatcher would
+    otherwise tell the caller to fix the target's credentials.
     """
     if isinstance(exc, ConnectorAuthError):
-        return None
+        carrier = _request_login_fault(exc) if request_login else None
+        if carrier is None:
+            return None
+        exc = carrier  # type: ignore[assignment]
     soap = soap_fault_of(exc)
     if soap is not None:
         text = hide_secrets(soap.faultstring, secrets) or soap.fault_type or "SOAP fault"

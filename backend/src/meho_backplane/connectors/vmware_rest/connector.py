@@ -92,7 +92,7 @@ import os
 import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import httpx
 import structlog
@@ -1857,7 +1857,7 @@ class VmwareRestConnector(HttpConnector):
             if promote_managed_object_not_found:
                 self._raise_managed_object_not_found_fault(fault, vmomi_path, json)
             message = f"vmware vim {method} failed on target {target.name!r} ({mo_type}:{moid})"
-            raise self._soap_fault_error(fault, target, message=message)
+            raise self._soap_fault_error(fault, target, message=message, stage="call")
         resp.raise_for_status()
         return self._parse_esxi_soap_response(method, resp.text)
 
@@ -2484,6 +2484,7 @@ class VmwareRestConnector(HttpConnector):
         target: VsphereTargetLike,
         *,
         message: str,
+        stage: Literal["establish", "call"] = "establish",
     ) -> Exception:
         """Map a parsed :class:`SoapFault` to the error the caller should raise.
 
@@ -2500,6 +2501,11 @@ class VmwareRestConnector(HttpConnector):
         Both arms also carry the parsed *fault* (:func:`.soap.attach_soap_fault`),
         so the error envelope can show ``extras.upstream_fault`` with the fault
         type and the full faultstring (#3567).
+
+        *stage* says which step faulted: the session login (``establish``,
+        the default) or a call on a live session (``call``). A caller that
+        sends a login of its own (the domain join) reads it to tell a
+        refused request login from a refused target credential.
         """
         err: Exception
         if fault.fault_type in _SOAP_AUTH_FAULT_TYPES:
@@ -2510,6 +2516,7 @@ class VmwareRestConnector(HttpConnector):
                 target_name=getattr(target, "name", None),
                 host=getattr(target, "host", None),
                 secret_ref=getattr(target, "secret_ref", None),
+                stage=stage,
             )
         else:
             fault_type = fault.fault_type or fault.faultcode or "SoapFault"

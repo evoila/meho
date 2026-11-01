@@ -26,6 +26,9 @@ from typing import Any
 import pytest
 from jsonschema import Draft202012Validator
 
+from meho_backplane.connectors._shared.soap_fault import SoapFault, attach_soap_fault
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
+from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.vmware_rest import typed_ops_host_access as typed
 from meho_backplane.connectors.vmware_rest.composites import _host_ad, _host_local_users, _write
 from meho_backplane.connectors.vmware_rest.composites._host_access_schemas import (
@@ -35,7 +38,13 @@ from meho_backplane.connectors.vmware_rest.composites._host_access_schemas impor
     LOCAL_USER_DELETE_RESPONSE_SCHEMA,
     LOCAL_USER_PASSWORD_SET_RESPONSE_SCHEMA,
 )
+from meho_backplane.operations import jsonflux_reducer as reducer_module
+from meho_backplane.operations import result_query as rq
 from meho_backplane.operations._preview import blast_radius_missing_reason
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.operations.result_query import ResultQuerySpec, run_result_query
+from meho_backplane.settings import get_settings
+from tests._result_store_helpers import MemoryResultStore
 from tests._vmware_host_access_fake import (
     AD_STORE,
     DOMAIN,
@@ -130,6 +139,75 @@ async def test_local_user_list_gives_the_users_with_their_role() -> None:
     [(path, body)] = conn.calls_to("RetrieveUserGroups")
     assert path == "/UserDirectory/ha-user-directory/RetrieveUserGroups"
     assert body == {"searchStr": "", "exactMatch": False, "findUsers": True, "findGroups": False}
+
+
+@pytest.fixture
+def result_store(monkeypatch: pytest.MonkeyPatch) -> ResultHandleStore:
+    """The real result store on an in-memory stand-in for Valkey."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    store = MemoryResultStore()
+    monkeypatch.setattr(rq, "get_result_handle_store", lambda: store)
+    monkeypatch.setattr(reducer_module, "get_result_handle_store", lambda: store)
+    return store
+
+
+@pytest.mark.usefixtures("result_store")
+async def test_local_user_list_of_many_users_is_a_handle_with_queryable_rows() -> None:
+    """A long user list reduces to rows (not a document): paging and filters work."""
+    conn = _esxi()
+    conn.role_fault = soap_fault_error("NoPermission", "no access")
+    for i in range(300):
+        conn.add_user(f"svc-{i:03}", uid=2000 + i, role="accessReadOnly" if i % 2 else None)
+    op = operator()
+    out = _check(
+        _LIST_SCHEMA,
+        await typed.host_local_user_list_impl(conn, op, EsxiTarget(), {}),  # type: ignore[arg-type]
+    )
+    assert len(out["users"]) == 302
+    descriptor = _TYPED["vmware.host.local_user.list"]
+    assert descriptor.llm_instructions is not None
+    context = {
+        "op_id": descriptor.op_id,
+        "tenant_id": str(op.tenant_id),
+        "operator_sub": op.sub,
+        "result_digest": descriptor.llm_instructions["result_digest"],
+    }
+
+    reduced, handle = await JsonFluxReducer().reduce(out, _LIST_SCHEMA, context)
+
+    assert handle is not None
+    assert handle.total_rows == 302
+    assert "users" not in reduced
+    assert reduced["status"] == "ok"
+    assert reduced["host"] == ESXI_HOST
+    assert reduced["status_counts"] == {"UNKNOWN": 302}
+    assert reduced["read_notes"] == out["read_notes"]
+
+    page = await run_result_query(op, handle.handle_id, ResultQuerySpec(limit=5))
+    assert [row["user"] for row in page["rows"]] == [
+        "root",
+        "svc-000",
+        "svc-001",
+        "svc-002",
+        "svc-003",
+    ]
+    one = await run_result_query(
+        op,
+        handle.handle_id,
+        ResultQuerySpec(filter=[{"field": "user", "op": "=", "value": "svc-299"}]),
+    )
+    assert one["rows"] == [
+        {
+            "user": "svc-299",
+            "full_name": None,
+            "uid": 2299,
+            "shell_access": True,
+            "access_mode": None,
+        }
+    ]
 
 
 async def test_local_user_list_keeps_the_users_when_the_role_read_fails() -> None:
@@ -567,6 +645,63 @@ async def test_join_start_fault_reaches_the_answer(gate: GateRecorder) -> None:
     out = _check(AD_JOIN_RESPONSE_SCHEMA, await _join(conn))
     assert out["status"] == "failed"
     assert out["error_type"] == "InvalidState"
+
+
+def _call_login_fault(transport: str, text: str) -> ConnectorAuthError:
+    """The error each transport raises for an ``InvalidLogin`` fault of a call."""
+    if transport == "soap":
+        err = ConnectorAuthError(
+            "rejected", status_code=401, cause="session_establish_InvalidLogin", stage="call"
+        )
+        attach_soap_fault(err, SoapFault("ServerFaultCode", text, "InvalidLogin"))
+        return err
+    err = ConnectorAuthError(
+        "rejected", status_code=500, cause="vim_fault_InvalidLogin", stage="call"
+    )
+    err.__cause__ = http_status_error(
+        500, json.dumps({"_typeName": "InvalidLogin", "faultMessage": [{"message": text}]})
+    )
+    return err
+
+
+@pytest.mark.parametrize("transport", ["vi-json", "soap"])
+async def test_join_refused_login_is_a_failed_join_not_a_target_login_problem(
+    gate: GateRecorder, transport: str
+) -> None:
+    """``InvalidLogin`` of the join call means the join account, not the target's credential."""
+    conn = AccessVim()
+    conn.seed()
+    conn.faults["JoinDomain_Task"] = _call_login_fault(transport, f"login with {PASSWORD} refused")
+    out = _check(AD_JOIN_RESPONSE_SCHEMA, await _join(conn))
+    assert out["status"] == "failed"
+    assert out["error_type"] == "InvalidLogin"
+    assert out["error_message"] and PASSWORD not in out["error_message"]
+    assert "join account" in out["guidance"]
+    assert out["issues"][0]["severity"] == "error"
+    _no_password(out, conn, gate)
+
+
+async def test_join_session_login_problem_still_goes_to_the_dispatcher(
+    gate: GateRecorder,
+) -> None:
+    """``InvalidLogin`` of the session login (the target's credential) is not a join fault."""
+    conn = AccessVim()
+    conn.seed()
+    err = ConnectorAuthError("rejected", status_code=401, cause="session_establish_InvalidLogin")
+    attach_soap_fault(err, SoapFault("ServerFaultCode", "login refused", "InvalidLogin"))
+    conn.faults["JoinDomain_Task"] = err
+    with pytest.raises(ConnectorAuthError):
+        await _join(conn)
+
+
+async def test_create_refused_login_still_goes_to_the_dispatcher(gate: GateRecorder) -> None:
+    """Only the join carries a login of its own; a user create has no such fault."""
+    conn = _esxi()
+    conn.faults["CreateUser"] = _call_login_fault("soap", "login refused")
+    with pytest.raises(ConnectorAuthError):
+        await _user_op(
+            _host_local_users.local_user_create_composite, conn, password_secret_ref=_VAULT
+        )
 
 
 async def test_join_timeout_is_an_error(gate: GateRecorder) -> None:

@@ -32,6 +32,7 @@ import respx
 from defusedxml.ElementTree import fromstring
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector, VsphereTargetLike
 from meho_backplane.connectors.vmware_rest import typed_ops_host_access as typed
@@ -227,6 +228,47 @@ async def test_join_runs_on_the_vcenter_path_of_each_version(
 
 
 @pytest.mark.parametrize("about", sorted(_RELEASES))
+async def test_join_refused_login_on_vcenter_is_a_failed_join(
+    gate: GateRecorder, about: str
+) -> None:
+    """A VI-JSON ``InvalidLogin`` fault of the join call names the join account."""
+    state = {"joined": False}
+    connector = _connector()
+    try:
+        async with respx.mock(base_url=_VC_BASE) as mock:
+            base = _mock_vcenter(mock, about, state)
+            join = mock.post(
+                f"{base}/HostActiveDirectoryAuthentication/adAuth-1/JoinDomain_Task"
+            ).respond(
+                500,
+                json={
+                    "_typeName": "InvalidLogin",
+                    "faultMessage": [{"message": f"Cannot complete login for {_PASSWORD}"}],
+                },
+            )
+            out = await _host_ad.ad_join_composite(
+                operator=_operator(),
+                target=_Target(),
+                params={
+                    "host": "<esxi-host-name>",
+                    "domain": "corp.example",
+                    "user_name": "<join-account>",
+                    "password_secret_ref": _VAULT,
+                },
+                connector=connector,
+            )
+        assert join.call_count == 1
+        assert out["status"] == "failed"
+        assert out["error_type"] == "InvalidLogin"
+        assert out["error_message"] and _PASSWORD not in out["error_message"]
+        assert "join account" in out["guidance"]
+        assert out["joined"] is False
+        assert _PASSWORD not in json.dumps(out)
+    finally:
+        await _close(connector)
+
+
+@pytest.mark.parametrize("about", sorted(_RELEASES))
 async def test_ad_status_reads_the_vcenter_path_of_each_version(about: str) -> None:
     connector = _connector()
     try:
@@ -339,14 +381,26 @@ _FAULT = _soap(
 )
 
 
+def _auth_fault(fault_type: str) -> str:
+    """A SOAP fault of the auth set (``InvalidLogin`` / ``NotAuthenticated``)."""
+    return _soap(
+        "<soapenv:Fault><faultcode>ServerFaultCode</faultcode>"
+        f"<faultstring>{fault_type} for {html.escape(_PASSWORD)}</faultstring>"
+        f'<detail><{fault_type}Fault xmlns="urn:vim25" xsi:type="{fault_type}"/></detail>'
+        "</soapenv:Fault>"
+    )
+
+
 class _EsxiRouter:
     """``POST /sdk``: answer each SOAP call by its method (and read type)."""
 
-    def __init__(self, *, create_fault: bool = False) -> None:
+    def __init__(self, *, create_fault: bool = False, join_fault: str | None = None) -> None:
         self.methods: list[str] = []
         self.bodies: dict[str, str] = {}
         self.actions: dict[str, str] = {}
         self.create_fault = create_fault
+        #: Fault type the ``JoinDomain_Task`` call answers with, if any.
+        self.join_fault = join_fault
         self.joined = False
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -371,6 +425,8 @@ class _EsxiRouter:
             return httpx.Response(500, text=_FAULT)
         if method in ("CreateUser", "RemoveUser"):
             return httpx.Response(200, text=_response(method))
+        if method == "JoinDomain_Task" and self.join_fault is not None:
+            return httpx.Response(500, text=_auth_fault(self.join_fault))
         if method == "JoinDomain_Task":
             return httpx.Response(
                 200, text=_response(method, '<returnval type="Task">haTask-7</returnval>')
@@ -532,3 +588,39 @@ async def test_esxi_join_domain_runs_over_soap(gate: GateRecorder) -> None:
     join = fromstring(router.bodies["JoinDomain_Task"])[0][0]
     assert [_local(child.tag) for child in join] == ["_this", "domainName", "userName", "password"]
     assert _PASSWORD not in json.dumps(out)
+
+
+def _esxi_join(connector: VmwareRestConnector) -> Any:
+    return _host_ad.ad_join_composite(
+        operator=_operator(),
+        target=_esxi_target(),
+        params={
+            "domain": "corp.example",
+            "user_name": "<join-account>",
+            "password_secret_ref": _VAULT,
+        },
+        connector=connector,
+    )
+
+
+async def test_esxi_join_refused_login_over_soap_is_a_failed_join(gate: GateRecorder) -> None:
+    """A SOAP ``InvalidLogin`` fault of the join call names the join account."""
+    router = _EsxiRouter(join_fault="InvalidLogin")
+    out = await _esxi_call(router, _esxi_join)
+    assert router.methods.count("JoinDomain_Task") == 1
+    assert router.methods.count("Login") == 1
+    assert out["status"] == "failed"
+    assert out["error_type"] == "InvalidLogin"
+    assert out["error_message"] and _PASSWORD not in out["error_message"]
+    assert "join account" in out["guidance"]
+    assert _PASSWORD not in json.dumps(out)
+
+
+async def test_esxi_join_lost_session_over_soap_still_goes_to_the_dispatcher(
+    gate: GateRecorder,
+) -> None:
+    """A ``NotAuthenticated`` fault is the target's session, so it stays an auth error."""
+    router = _EsxiRouter(join_fault="NotAuthenticated")
+    with pytest.raises(ConnectorAuthError) as info:
+        await _esxi_call(router, _esxi_join)
+    assert info.value.stage == "call"

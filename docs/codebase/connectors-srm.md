@@ -543,7 +543,9 @@ Rules:
   under the operator's identity, like `appliance_secret_ref`. The reason:
   the parameters of a call are shown in the public preview, the approval
   row and the broadcast feed, so a token there would be visible. An
-  `archive_url` with a query part is refused before anything runs.
+  `archive_url` with a query part, a fragment or a login fails the
+  parameter check (a pattern in the schema), so the public preview
+  refuses it before it builds an answer. The handler checks it again.
 - **Credentials and URLs.** MEHO sends no credential to the archive
   server and follows no redirect, so nothing crosses to another host. The
   archive address passes the same address screen as a target address.

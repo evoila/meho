@@ -22,7 +22,8 @@ server, and certificates made in the test:
   and old leftovers removed; a signed URL read from Vault
   (``archive_url_secret_ref``): its token goes to the archive server only
   and is in no answer, no public preview and no approval row; a plain
-  ``archive_url`` with a query part is refused; the preview with its blast
+  ``archive_url`` with a query part is refused by the handler and by the
+  parameter check of the public preview; the preview with its blast
   radius, the preview that refuses a missing archive, and the call refused
   without a matching preview hash.
 
@@ -600,6 +601,37 @@ async def test_public_preview_and_approval_carry_the_reference_not_the_token(
     assert archive["source"] == _PLAIN_ARCHIVE_URL
     _no_secret(row.params)
     _no_secret(row.proposed_effect)
+
+
+async def test_public_preview_refuses_a_signed_archive_url_without_echoing_it(
+    _stub_embedding: AsyncMock,
+) -> None:
+    """A signed URL given as ``archive_url`` fails the parameter check.
+
+    The check runs before the preview builds its answer: no status ``ok``,
+    no preview hash, no redacted body with the token, no call to the
+    archive server.
+    """
+    await _connector(_stub_embedding)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        routes = _mock_sra(mock)
+        head = mock.head(f"https://{_ARCHIVE_HOST}{_ARCHIVE_PATH}").respond(200)
+        preview = await preview_dispatch(
+            operator=_operator(),
+            connector_id=SRM_CONNECTOR_ID,
+            op_id=sra.OP_ID,
+            target=_Target(),
+            params=_plain_params() | {"archive_url": _SIGNED_ARCHIVE_URL},
+        )
+    assert preview["status"] == "error", preview
+    assert preview["extras"]["error_code"] == "invalid_params"
+    assert "preview_hash" not in preview
+    assert "redacted_body" not in preview
+    assert [e["path"] for e in preview["extras"]["validation_errors"]] == ["$.archive_url"]
+    _no_secret(preview)
+    assert head.call_count == 0
+    assert routes["list"].call_count == 0
+    assert routes["archive"].call_count == 0
 
 
 async def test_wrong_sha256_uploads_nothing(_stub_embedding: AsyncMock, tmp_path: Path) -> None:

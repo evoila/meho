@@ -249,6 +249,10 @@ _SRA_INSTALL = SrmTypedOp(
             "archive_url": {
                 "type": "string",
                 "minLength": 1,
+                # The parameter check refuses a query part, a fragment or a login before
+                # the public preview builds its answer, so a signed URL's token is echoed
+                # nowhere. The handler checks the URL again.
+                "pattern": r"^https?://[^?#@]+$",
                 "description": (
                     "http(s) URL of the adapter archive (.tar.gz) that MEHO can reach, with no "
                     "query part, user name or password. MEHO follows no redirect. For a signed "

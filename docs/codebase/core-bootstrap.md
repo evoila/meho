@@ -307,6 +307,16 @@ when nothing is missing. The Secrets it makes carry only the label
   not reach a running realm; an operator changes it in Keycloak.
 - The `users` entry of the realm file (the roles of `meho-admin`'s service
   account) is applied at the first start only.
+- Realm settings at the top of the realm file reach a new realm only.
+  Today these are the remember-me login (`rememberMe`, and
+  `ssoSessionIdleTimeoutRememberMe` and `ssoSessionMaxLifespanRememberMe`
+  at 30 days) and the passkey policy
+  (`webAuthnPolicyPasswordlessPasskeysEnabled`, user verification
+  `required`, discoverable credential `Yes`). The stage cannot set them:
+  `meho-admin` has no `manage-realm` right (unless the company login is on).
+  A running realm gets them once with `keycloak.realm.update` or by hand;
+  see `docs-site/install/keycloak-realm.md`, "Remember the browser, and
+  passkeys".
 - A person who exists is never touched: not their groups, not their
   password. To start over for one person, delete the person in Keycloak;
   the Job makes them again from the Secret.

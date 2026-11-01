@@ -174,6 +174,28 @@ async def test_old_sign_in_is_refused_and_the_request_stays_pending(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", ["approve", "decide"])
+async def test_login_from_a_remembered_browser_cannot_approve(
+    route: str, _client: tuple[httpx.AsyncClient, Any], _fake_resume: list[uuid.UUID]
+) -> None:
+    """A remembered browser gives new tokens without a new sign-in.
+
+    Keycloak keeps the ``auth_time`` of the sign-in from days ago in those
+    tokens. So a browser cookie alone cannot approve: the approval needs a
+    new password and code, or a passkey.
+    """
+    ac, key = _client
+    request_id = await _park()
+    token = _token(key, auth_time=int(time.time()) - 10 * 24 * 3600, sid="s-remembered")
+
+    response = await _approve(ac, route, request_id, token)
+
+    _assert_challenge(response)
+    assert await _status(request_id) == ApprovalRequestStatus.PENDING.value
+    assert _fake_resume == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["approve", "decide"])
 async def test_token_without_sign_in_time_is_refused(
     route: str, _client: tuple[httpx.AsyncClient, Any], _fake_resume: list[uuid.UUID]
 ) -> None:

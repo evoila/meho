@@ -791,12 +791,12 @@ The restart (`manager_restart.py`) is a vendor job with no job id:
    `POST /hybridity/api/migrations?action=query` with
    `{"filter": {"skipDrafts": true}}` on the main API. A row with
    `progress.isDone: false` (and not failed or cancelled) refuses the
-   restart. If the check cannot run, the restart is refused. One case has
-   a way out: when the main API refused MEHO's login (the state of a new
-   Manager whose single sign-on does not work before its first restart),
-   `skip_migration_check: true` lets the restart go on. The flag does
-   nothing else: a check that answers and shows a running migration refuses
-   the restart in every case, and so does any other failure of the check.
+   restart. If the check cannot run, the restart is refused, and a refused
+   login is no exception: MEHO cannot tell a new Manager whose login does
+   not work yet from an active Manager with a stale password, and only the
+   second one may move migrations. There is no parameter that skips the
+   check. On a new Manager, the operator makes the first restart from the
+   HCX appliance management page.
 3. `POST /components/appengine?action=stop` (skipped when the service is
    `STOPPED`), then `?action=start`. Each call waits until HCX is done, up
    to 300 seconds.

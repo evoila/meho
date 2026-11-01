@@ -148,25 +148,10 @@ _RESTART = HcxTypedOp(
     summary="Restart the HCX application service so a setup change takes effect.",
     description=(
         "Stops, then starts the HCX application service. HCX is not usable for several "
-        "minutes. Refuses while migrations run. Returns accepted; follow it with "
-        "hcx.manager.service.status."
+        "minutes. Refuses while migrations run, and when it cannot check them. Returns "
+        "accepted; follow it with hcx.manager.service.status."
     ),
-    parameter_schema={
-        "type": "object",
-        "properties": {
-            "skip_migration_check": {
-                "type": "boolean",
-                "description": (
-                    "Go on when the main API refuses the HCX login of the migration "
-                    "check: the state of a new HCX Manager whose SSO login does not work "
-                    "before its first restart. Default false. A check that answers and "
-                    "shows a running migration still refuses the restart."
-                ),
-            },
-        },
-        "additionalProperties": False,
-        "examples": [{}],
-    },
+    parameter_schema=NO_PARAMS_SCHEMA,
     response_schema={
         "type": "object",
         "properties": {

@@ -103,7 +103,7 @@ _OP_COMPLETE_SESSION: Final = (
 _OP_GET_SESSION: Final = "GET:/content/library/item/update-session/{updateSessionId}"
 
 #: Every REST call of the upload (reads and writes). The reconcile test checks
-#: them against the pinned vCenter 9.0 API file, and ``_governed_subops`` lists
+#: them against the pinned vCenter 9.0 API file, and the composite row lists
 #: them for the grant set.
 _SUB_OPS_CONTENT_LIBRARY_ITEM_UPLOAD: Final[tuple[str, ...]] = (
     _OP_FIND_LIBRARY,
@@ -672,5 +672,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=CONTENT_LIBRARY_ITEM_UPLOAD_LLM_INSTRUCTIONS,
         preview=_content_library_item_upload_preview,
+        governed_subops=_SUB_OPS_CONTENT_LIBRARY_ITEM_UPLOAD,
     ),
 )

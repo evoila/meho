@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _library
 from meho_backplane.connectors.vmware_rest.composites._library import (
     content_library_subscribed_create_composite,
     content_library_subscribed_items_list_composite,
@@ -61,6 +62,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
             "vmware.composite.content_library.subscribed.create"
         ],
         preview=_content_library_subscribed_create_preview,
+        governed_subops=_library._SUB_OPS_CONTENT_LIBRARY_SUBSCRIBED_CREATE,
     ),
     CompositeSpec(
         op_id="vmware.composite.content_library.subscribed.sync",
@@ -81,6 +83,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
             "vmware.composite.content_library.subscribed.sync"
         ],
         preview=_content_library_subscribed_sync_preview,
+        governed_subops=_library._SUB_OPS_CONTENT_LIBRARY_SUBSCRIBED_SYNC,
     ),
     CompositeSpec(
         op_id="vmware.composite.content_library.subscribed.status",

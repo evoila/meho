@@ -6,9 +6,9 @@
 A composite module exports its rows as ``COMPOSITES``, a tuple of
 :class:`CompositeSpec`. ``_register.py`` collects the rows of every module
 in the package at start-up, sorts them by op id, registers each row's
-preview builder and derives the list of composites that stay off the
-vmware-rest-8.0 catalog. So a new composite needs a new module, and no
-shared list changes.
+preview builder, publishes the child calls each composite may make, and
+derives the list of composites that stay off the vmware-rest-8.0 catalog.
+So a new composite needs a new module, and no shared list changes.
 """
 
 from __future__ import annotations
@@ -55,3 +55,8 @@ class CompositeSpec(NamedTuple):
     # Why the composite is not on the vmware-rest-8.0 catalog. ``None``: it
     # is on both catalogs.
     not_on_8_0: str | None = None
+    # The vendor calls (child op ids) this composite may make, REST and VI-JSON.
+    # ``_register.py`` publishes them, so an operator can see which grants a
+    # service principal needs to run the composite. Empty: the composite
+    # declares no child calls (reads, and the guest-ops composites).
+    governed_subops: tuple[str, ...] = ()

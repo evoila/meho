@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _drs_group
 from meho_backplane.connectors.vmware_rest.composites._drs_group import (
     cluster_drs_group_members_set_composite,
     cluster_drs_group_members_set_preview,
@@ -48,5 +49,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
             "vmware.composite.cluster.drs_group.members.set"
         ],
         preview=cluster_drs_group_members_set_preview,
+        governed_subops=_drs_group._VIM_SUB_OPS_CLUSTER_DRS_GROUP_MEMBERS_SET,
     ),
 )

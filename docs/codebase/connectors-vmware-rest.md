@@ -489,8 +489,13 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   rows of every module on disk are collected. Each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults; its preview builder
-  (`preview`, registered at import on the per-op hook); and, when the
-  composite is not on the vCenter 8.0 catalog, the reason (`not_on_8_0`).
+  (`preview`, registered at import on the per-op hook); the vendor calls
+  (child op ids) the composite may make (`governed_subops`; `_register.py`
+  reads them from the rows into `_GOVERNED_SUBOP_MANIFEST` and publishes
+  them for the grant set); and, when the composite is not on the vCenter
+  8.0 catalog, the reason (`not_on_8_0`). The test
+  `test_connectors_vmware_rest_composite_governed_subops.py` checks that each
+  composite kept the vendor calls it had before they moved onto the rows.
   The per-group "when to use" texts stay hand-written in `_register.py`.
   The AI guidance
   (`llm_instructions`) of the VM and folder writes and the VM allocation
@@ -2682,7 +2687,7 @@ Code: `composites/_teardown.py` (shared plan helpers + `folder.delete`),
 `_teardown_reads.py` (strict reads), `_teardown_network.py`,
 `_datastore_browse.py` + `_datastore_claims.py` + `_datastore_files.py`,
 `_library_checks.py` + `_library_delete.py`. Governed sub-op manifests are
-listed in `_governed_subops.py`; the vim paths are reconciled against the
+listed on the composite rows (`governed_subops`); the vim paths are reconciled against the
 pinned `vi-json.yaml` and the REST paths against `vcenter.yaml`.
 
 The older library ops use the same id rule (#3938):
@@ -2736,8 +2741,8 @@ hosts.
   `deleted` only when no rule has the key any more; otherwise `still_present`.
 
 Code: `composites/_drs_rule_delete.py`. The governed sub-op manifest
-(`RetrievePropertiesEx` + `ReconfigureComputeResource_Task`) is in
-`_governed_subops.py`.
+(`RetrievePropertiesEx` + `ReconfigureComputeResource_Task`) is on its
+composite row (`governed_subops`).
 
 ### Governed DRS group changes (`cluster.drs_group.members.set`, `cluster.drs_group.delete`)
 
@@ -2792,7 +2797,7 @@ group after that. Both use the same vim call as the DRS rule ops:
 Code: `composites/_drs_group.py` (shared group reads + `members.set`),
 `composites/_drs_group_delete.py`, `composites/_drs_vm_host_rule_existing.py`
 (called from the create handler in `_write.py`). The governed sub-op
-manifests are in `_governed_subops.py`. All of them are on `vmware-rest-8.0` and
+manifests are on the composite rows. All of them are on `vmware-rest-8.0` and
 `vmware-rest-9.0`.
 
 ### VM snapshot operations (`vmware.snapshot.list`, `vm.snapshot.create` / `.delete` / `.revert`)
@@ -2855,7 +2860,7 @@ Every vendor call is in the pinned 8.0 U1, 9.0 and 9.1.1 `vi-json.yaml`.
 
 Code: `typed_ops_snapshot_list.py`, `snapshot_tree.py`, `composites/_snapshot.py`
 (create and delete) and `composites/_write.py` (revert). The governed sub-op
-manifests are in `_governed_subops.py`.
+manifests are on the composite rows.
 
 ### AI guidance of the host and cluster operations
 
@@ -3692,7 +3697,7 @@ Both writes ride the standard governed REST sub-op seam
 top-level composite's own `dangerous` / `requires_approval=True` posture pops
 the human approval park at dispatch, and the governed child POST re-applies
 policy under the shared `dangerous` / `requires_approval=False` sub-op posture
-(`_governed_subops._GOVERNED_SUBOP_MANIFEST` publishes each write's grant set).
+(each composite row's `governed_subops` publishes the write's grant set).
 Both register echo-only park-time preview builders (`_write_preview`) — enable
 echoes cluster / name / size / count / network stack, disable echoes the
 cluster + an irreversibility marker.
@@ -3775,8 +3780,8 @@ The get-by-name path is `GET:/vcenter/namespaces/instances/v2/{namespace}`. It r
 Both writes ride the standard governed REST sub-op seam
 (`_write._write_sub_op` → `enforce_subop_policy` → `_post_json`/DELETE); the
 `namespace.status` read and the create/delete read-backs ride the un-gated
-`_read_sub_op` read seam. `_governed_subops._GOVERNED_SUBOP_MANIFEST` publishes
-each write's grant set. The **list** read
+`_read_sub_op` read seam. Each composite row's `governed_subops` publishes
+the write's grant set. The **list** read
 (`GET /vcenter/namespaces/instances` / `.../v2`) is left to the already-enabled
 ingested rows, JSONFlux-reduced by the dispatcher; the single-namespace **get**
 is wrapped as the boot-enabled `namespace.status` composite above. The
@@ -4749,7 +4754,7 @@ operation contract check requires the flag for every operation that is not
 (`APPROVAL_ALLOW_SELF_APPROVAL`); else a second person approves. An agent's
 call waits too. Inside the composite, the one change goes through the shared
 write seam (`_write_vmomi_sub_op`) like in the other composites, and the
-child-op list is in `composites/_governed_subops.py`. The approval request
+child-op list is on the composite row (`governed_subops`). The approval request
 shows the alarm (acknowledge) or the triggered alarms the filter matches at
 that time, at most 25 (reset): the preview builders read vCenter when the call
 waits for approval. `preview_operation` (the CLI `meho operation preview`)
@@ -4912,8 +4917,8 @@ Code: `composites/_host_add.py`, `composites/_host_membership.py` (move,
 connect, disconnect and the shared host read), `composites/_host_remove.py`,
 the schemas and AI guidance in `composites/_host_membership_schemas.py`, and
 the registry rows and vendor-call lists in `composites/_host_membership_ops.py`
-(`_register.py` collects the rows; `_governed_subops.py` reads the
-vendor-call lists). The
+(`_register.py` collects the rows, with the vendor calls each change may
+make). The
 status read is `typed_ops_task_info.py`.
 
 Vendor calls: all are VIM methods sent as VI-JSON (`/sdk/vim25/<release>/...`)

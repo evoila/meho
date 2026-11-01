@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _write
 from meho_backplane.connectors.vmware_rest.composites._spec import (
     CompositeSpec,
 )
@@ -64,6 +65,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.disk.grow"],
         preview=_vm_disk_grow_preview,
+        governed_subops=_write._VIM_SUB_OPS_VM_DISK_GROW,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.disk.attach",
@@ -83,6 +85,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.disk.attach"],
         preview=_vm_disk_attach_preview,
+        governed_subops=_write._VIM_SUB_OPS_VM_DISK_ATTACH,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.resize",
@@ -101,6 +104,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.resize"],
         preview=_vm_resize_preview,
+        governed_subops=_write._SUB_OPS_VM_RESIZE,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.nic.repoint",
@@ -119,6 +123,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.nic.repoint"],
         preview=_vm_nic_repoint_preview,
+        governed_subops=_write._SUB_OPS_VM_NIC_REPOINT,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.device.cdrom",
@@ -137,5 +142,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.device.cdrom"],
         preview=_vm_device_cdrom_preview,
+        governed_subops=_write._SUB_OPS_VM_DEVICE_CDROM,
     ),
 )

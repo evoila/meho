@@ -19,8 +19,9 @@ Each composite keeps its registration rows in its own module, as
 :func:`collect_composites` imports every module of this package at
 start-up, collects the rows and sorts them by op id. So a new composite
 is a new module; no shared list in this file changes. A row also carries
-its preview builder (registered here, at import) and, when the composite
-is not on the vmware-rest-8.0 catalog, the reason why
+its preview builder (registered here, at import), the child calls it may
+make (:data:`_GOVERNED_SUBOP_MANIFEST` is derived from the rows) and, when
+the composite is not on the vmware-rest-8.0 catalog, the reason why
 (:data:`COMPOSITES_NOT_ON_8_0` is derived from the rows).
 
 The per-group "when to use" texts stay hand-written here: they are text
@@ -55,9 +56,6 @@ from meho_backplane.connectors.vmware_rest.alarm_state import (
     ALARMS_GROUP_KEY,
     ALARMS_WHEN_TO_USE,
 )
-from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
-    register_vmware_governed_subops,
-)
 from meho_backplane.connectors.vmware_rest.composites._migration_inventory import (
     register_migration_inventory_dispatch_surface,
 )
@@ -74,6 +72,7 @@ from meho_backplane.connectors.vmware_rest.vcenter_deployment import (
     INSTALL_WHEN_TO_USE,
 )
 from meho_backplane.operations._preview import register_preview_builder
+from meho_backplane.operations.governed_subops import register_governed_subops
 from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -101,6 +100,13 @@ _IMPL_ID = "vmware-rest"
 #: path per vCenter release (VI-JSON for writes REST cannot do, the 8.0.x
 #: arms in ``_write.py``), so the same handler serves both catalogs.
 _VERSION_8_0 = "8.0"
+
+#: The connector the published child calls name when the caller names none.
+#: A write step is checked under the connector the target resolves to
+#: (#4991), so the caller asks with ``connector_id=vmware-rest-8.0`` for a
+#: vCenter 8.0.x target and the answer names that connector for the step
+#: grants.
+_VMWARE_REST_CONNECTOR_ID = "vmware-rest-9.0"
 
 
 #: Curated agent-actionable group selectors for the vmware-rest
@@ -321,6 +327,33 @@ COMPOSITES_NOT_ON_8_0: dict[str, str] = {
     spec.op_id: spec.not_on_8_0 for spec in _COMPOSITES if spec.not_on_8_0 is not None
 }
 
+#: Composite op id -> the child op ids it may call (REST and VI-JSON), read
+#: from the rows. Only the write composites have them: their child calls
+#: wait for approval for a service principal, so each needs a grant. Reads
+#: run for a service principal without a grant, and the guest-ops
+#: composites declare no child calls. The delete and rollback calls are in
+#: the list too; the discovery surface marks them as not grantable, so a
+#: person decides on them.
+_GOVERNED_SUBOP_MANIFEST: dict[str, tuple[str, ...]] = {
+    spec.op_id: spec.governed_subops for spec in _COMPOSITES if spec.governed_subops
+}
+
+
+def register_vmware_governed_subops() -> None:
+    """Publish each composite's child calls to the core discovery registry.
+
+    ``GET /api/v1/operations/governed-subops`` reads that registry, so an
+    operator can put together a composite's grants without reading source.
+    Safe to run twice: the core registry overwrites an entry, and logs a
+    changed one.
+    """
+    for composite_op_id, sub_op_ids in _GOVERNED_SUBOP_MANIFEST.items():
+        register_governed_subops(
+            composite_op_id=composite_op_id,
+            connector_id=_VMWARE_REST_CONNECTOR_ID,
+            sub_op_ids=sub_op_ids,
+        )
+
 
 async def register_vmware_composite_operations(
     *,
@@ -350,7 +383,7 @@ async def register_vmware_composite_operations(
     # #3349: publish each write composite's governed child-op set into the
     # discovery registry the GET /api/v1/operations/governed-subops surface
     # reads, so an operator assembles a composite's grant set without reading
-    # the ``_SUB_OPS_*`` / ``_VIM_SUB_OPS_*`` manifests in source.
+    # the rows in source.
     register_vmware_governed_subops()
 
 

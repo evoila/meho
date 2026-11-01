@@ -24,11 +24,9 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest.composites import _vm_cdrom_library_iso as iso
 from meho_backplane.connectors.vmware_rest.composites import _write
-from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
-    _GOVERNED_SUBOP_MANIFEST,
-)
 from meho_backplane.connectors.vmware_rest.composites._register import (
     _COMPOSITES,
+    _GOVERNED_SUBOP_MANIFEST,
     COMPOSITES_NOT_ON_8_0,
 )
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext

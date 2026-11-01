@@ -14,6 +14,7 @@ from typing import Final
 from meho_backplane.connectors.vmware_rest.alarm_state import (
     ALARMS_GROUP_KEY,
 )
+from meho_backplane.connectors.vmware_rest.composites import _alarm
 from meho_backplane.connectors.vmware_rest.composites._alarm import (
     alarm_acknowledge_composite,
     alarm_acknowledge_preview,
@@ -53,6 +54,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=ALARM_ACKNOWLEDGE_LLM_INSTRUCTIONS,
         preview=alarm_acknowledge_preview,
+        governed_subops=_alarm._VIM_SUB_OPS_ALARM_ACKNOWLEDGE,
     ),
     CompositeSpec(
         op_id="vmware.composite.alarm.reset",
@@ -72,5 +74,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=ALARM_RESET_LLM_INSTRUCTIONS,
         preview=alarm_reset_preview,
+        governed_subops=_alarm._VIM_SUB_OPS_ALARM_RESET,
     ),
 )

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _write
 from meho_backplane.connectors.vmware_rest.composites._spec import (
     CompositeSpec,
 )
@@ -55,6 +56,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
             "vmware.composite.guest.customization_spec.create"
         ],
         preview=_guest_customization_spec_create_preview,
+        governed_subops=_write._SUB_OPS_GUEST_CUSTOMIZATION_SPEC_CREATE,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.customize",
@@ -73,5 +75,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS["vmware.composite.vm.customize"],
         preview=_vm_customize_preview,
+        governed_subops=_write._SUB_OPS_VM_CUSTOMIZE,
     ),
 )

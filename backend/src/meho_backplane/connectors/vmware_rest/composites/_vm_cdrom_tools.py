@@ -71,7 +71,7 @@ _OP_DISCONNECT_TOOLS_INSTALLER: Final = "POST:/vcenter/vm/{vm}/tools/installer?a
 
 #: Every REST call of each change (reads and the one write). The reconcile
 #: test checks them against the pinned vCenter 8.0 and 9.0 API files, and
-#: ``_governed_subops`` lists them for the grant set.
+#: the composite rows list them for the grant set.
 SUB_OPS_VM_CDROM_ADD: Final[tuple[str, ...]] = (
     _OP_LIST_VM_CDROMS,
     _OP_GET_VM_CDROM,
@@ -458,6 +458,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_CDROM_ADD_LLM_INSTRUCTIONS,
         preview=_vm_cdrom_add_preview,
+        governed_subops=SUB_OPS_VM_CDROM_ADD,
     ),
     CompositeSpec(
         op_id=OP_ID_VM_TOOLS_INSTALLER_UNMOUNT,
@@ -476,5 +477,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_TOOLS_INSTALLER_UNMOUNT_LLM_INSTRUCTIONS,
         preview=_vm_tools_installer_unmount_preview,
+        governed_subops=SUB_OPS_VM_TOOLS_INSTALLER_UNMOUNT,
     ),
 )

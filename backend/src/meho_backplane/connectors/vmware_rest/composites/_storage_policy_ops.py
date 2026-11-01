@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _storage_policy
 from meho_backplane.connectors.vmware_rest.composites._spec import (
     CompositeSpec,
 )
@@ -74,6 +75,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS["vmware.composite.storage_policy.create"],
         preview=_storage_policy_create_preview,
+        governed_subops=_storage_policy._SUB_OPS_STORAGE_POLICY_CREATE,
     ),
     CompositeSpec(
         op_id="vmware.composite.storage_policy.delete",
@@ -92,5 +94,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=STORAGE_NETWORK_LLM_INSTRUCTIONS["vmware.composite.storage_policy.delete"],
         preview=_storage_policy_delete_preview,
+        governed_subops=_storage_policy._SUB_OPS_STORAGE_POLICY_DELETE,
     ),
 )

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _host
 from meho_backplane.connectors.vmware_rest.composites._host import (
     datastore_mount_nfs_composite,
     disk_mark_flash_composite,
@@ -56,6 +57,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.datastore_mount_nfs"],
         preview=_host_datastore_mount_nfs_preview,
+        governed_subops=_host._VIM_SUB_OPS_HOST_DATASTORE_MOUNT_NFS,
     ),
     CompositeSpec(
         op_id="vmware.composite.host.disk_mark_flash",
@@ -74,6 +76,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.disk_mark_flash"],
         preview=_host_disk_mark_flash_preview,
+        governed_subops=_host._VIM_SUB_OPS_HOST_DISK_MARK_FLASH,
     ),
     CompositeSpec(
         op_id="vmware.composite.host.service_control",
@@ -92,5 +95,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.service_control"],
         preview=_host_service_control_preview,
+        governed_subops=_host._VIM_SUB_OPS_HOST_SERVICE_CONTROL,
     ),
 )

@@ -126,7 +126,7 @@ _OP_DELETE_NAMESPACE: Final = "DELETE:/vcenter/namespaces/instances/{namespace}"
 _OP_GET_NAMESPACE: Final = "GET:/vcenter/namespaces/instances/v2/{namespace}"
 
 #: REST governed-child manifests (parallel to ``_write._SUB_OPS_*``).
-#: Referenced by :mod:`._governed_subops` so the discovery surface publishes
+#: Referenced by the composite rows so the discovery surface publishes
 #: each write composite's grant set, and asserted by the reconcile lane. The
 #: read-back ``GET`` is NOT a governed child (it rides the un-gated read seam),
 #: so it is deliberately absent here -- mirroring ``_supervisor``.

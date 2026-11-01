@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _vm_allocation
 from meho_backplane.connectors.vmware_rest.composites._spec import (
     CompositeSpec,
 )
@@ -68,5 +69,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.resource_allocation.set"],
         preview=_vm_resource_allocation_set_preview,
+        governed_subops=_vm_allocation._VIM_SUB_OPS_VM_RESOURCE_ALLOCATION_SET,
     ),
 )

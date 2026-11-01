@@ -210,7 +210,7 @@ def test_vmware_wiring_is_derived_from_manifests_with_the_mode_on(
 ) -> None:
     """Copy of ``test_vmware_wiring_is_derived_from_manifests``: delete legs become grantable."""
     from meho_backplane.connectors.vmware_rest.composites import _write
-    from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
+    from meho_backplane.connectors.vmware_rest.composites._register import (
         register_vmware_governed_subops,
     )
 
@@ -236,7 +236,7 @@ def test_vmware_wiring_is_derived_from_manifests_with_the_mode_on(
 async def test_step_list_response_follows_the_mode(
     monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
-    from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
+    from meho_backplane.connectors.vmware_rest.composites._register import (
         register_vmware_governed_subops,
     )
 

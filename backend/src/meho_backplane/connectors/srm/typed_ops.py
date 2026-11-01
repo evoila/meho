@@ -15,6 +15,12 @@ The pairing, recovery plan, protection group, issue and history reads are
 defined in :mod:`meho_backplane.connectors.srm.recovery_ops` and joined
 into :data:`SRM_TYPED_OPS` here.
 
+The appliance setup operations (``srm.appliance.*`` and
+``srm.storage_adapter.install``) are defined in
+:mod:`meho_backplane.connectors.srm.appliance_ops` and
+:mod:`meho_backplane.connectors.srm.appliance_ops_more` and joined into
+:data:`SRM_TYPED_OPS` here.
+
 The dataclass + tuple + registrar shape mirrors
 :mod:`meho_backplane.connectors.hcx.typed_ops`.
 """
@@ -24,6 +30,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from meho_backplane.connectors.srm._op import SrmTypedOp
+from meho_backplane.connectors.srm.appliance_ops import (
+    APPLIANCE_TYPED_OPS,
+    SETUP_WHEN_TO_USE_BY_GROUP,
+)
+from meho_backplane.connectors.srm.appliance_ops_more import APPLIANCE_MORE_TYPED_OPS
 from meho_backplane.connectors.srm.recovery_ops import (
     RECOVERY_TYPED_OPS,
     RECOVERY_WHEN_TO_USE_BY_GROUP,
@@ -66,6 +77,7 @@ SRM_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "result handle, so a vendor API file can be pinned and compared. One read."
     ),
     **RECOVERY_WHEN_TO_USE_BY_GROUP,
+    **SETUP_WHEN_TO_USE_BY_GROUP,
 }
 
 _ABOUT = SrmTypedOp(
@@ -146,7 +158,13 @@ _API_FILE_GET = SrmTypedOp(
     },
 )
 
-SRM_TYPED_OPS: tuple[SrmTypedOp, ...] = (_ABOUT, _API_FILE_GET, *RECOVERY_TYPED_OPS)
+SRM_TYPED_OPS: tuple[SrmTypedOp, ...] = (
+    _ABOUT,
+    _API_FILE_GET,
+    *RECOVERY_TYPED_OPS,
+    *APPLIANCE_TYPED_OPS,
+    *APPLIANCE_MORE_TYPED_OPS,
+)
 
 
 async def register_srm_typed_operations(

@@ -58,14 +58,25 @@ operation needs a version check yet.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.srm import appliance as _appliance
+from meho_backplane.connectors.srm import appliance_certificate as _certificate
+from meho_backplane.connectors.srm import appliance_register as _register
 from meho_backplane.connectors.srm import recovery_reads
+from meho_backplane.connectors.srm import storage_adapter as _storage_adapter
 from meho_backplane.connectors.srm.api_file import API_FILES
 from meho_backplane.connectors.srm.session import (
     SrmSessionLoader,
     load_session_credentials_from_vault,
+)
+from meho_backplane.connectors.srm.setup_api import (
+    SetupCredentialsLoader,
+    SetupSecretLoader,
+    load_param_basic_credentials,
+    load_param_secret,
 )
 from meho_backplane.connectors.vmware_shared.dr_api_file import dr_api_file_get
 from meho_backplane.connectors.vmware_shared.dr_rest import DrRestConnector, DrTargetLike
@@ -99,6 +110,14 @@ class SrmConnector(DrRestConnector):
                 else load_session_credentials_from_vault
             )
         )
+        #: Setup API sessions, by appliance address and admin Vault reference.
+        self.setup_sessions: dict[tuple[str, ...], str] = {}
+        self.setup_lock = asyncio.Lock()
+        #: Reads a username and password named by an op param (a Vault reference).
+        self.setup_credentials_loader: SetupCredentialsLoader = load_param_basic_credentials
+        # Reads a secret named in the op params, for example the signed archive
+        # URL of a storage replication adapter. A test swaps it.
+        self.setup_secret_loader: SetupSecretLoader = load_param_secret
 
     async def about(
         self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
@@ -112,6 +131,62 @@ class SrmConnector(DrRestConnector):
     ) -> dict[str, Any]:
         """``srm.api_file.get``; the body is ``vmware_shared.dr_api_file.dr_api_file_get``."""
         return await dr_api_file_get(self, operator, target, params)
+
+    # -- Appliance setup (the setup API, ``/api/rest/configure/v2``) -------------
+
+    async def appliance_show(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``srm.appliance.show``; the body is ``srm.appliance.appliance_show``."""
+        return await _appliance.appliance_show(self, operator, target, params)
+
+    async def appliance_task_get(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``srm.appliance.task.get``; the body is ``srm.appliance.appliance_task_get``."""
+        return await _appliance.appliance_task_get(self, operator, target, params)
+
+    async def appliance_register(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``srm.appliance.register``; the body is in ``srm.appliance_register``."""
+        return await _register.appliance_register(self, operator, target, params)
+
+    async def appliance_network_set(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``srm.appliance.network.set``; the body is ``srm.appliance.appliance_network_set``."""
+        return await _appliance.appliance_network_set(self, operator, target, params)
+
+    async def appliance_time_set(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``srm.appliance.time.set``; the body is ``srm.appliance.appliance_time_set``."""
+        return await _appliance.appliance_time_set(self, operator, target, params)
+
+    async def appliance_csr_create(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``srm.appliance.csr.create``; the body is in ``srm.appliance_certificate``."""
+        return await _certificate.appliance_csr_create(self, operator, target, params)
+
+    async def appliance_certificate_set(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``srm.appliance.certificate.set``; the body is in ``srm.appliance_certificate``."""
+        return await _certificate.appliance_certificate_set(self, operator, target, params)
+
+    async def storage_adapter_install(
+        self, operator: Operator, target: DrTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``srm.storage_adapter.install``; the body is in ``srm.storage_adapter``."""
+        return await _storage_adapter.storage_adapter_install(self, operator, target, params)
+
+    async def aclose(self) -> None:
+        """Clear the setup API sessions too, then the base clean-up."""
+        async with self.setup_lock:
+            self.setup_sessions.clear()
+        await super().aclose()
 
     async def pairing_list(
         self, operator: Operator, target: DrTargetLike, params: dict[str, Any]

@@ -464,11 +464,14 @@ async def test_each_product_stores_a_handler_on_its_own_class(
         .scalars()
         .all()
     )
-    assert len(rows) == 4
     class_by_product = {VR_PRODUCT: "VrConnector", SRM_PRODUCT: "SrmConnector"}
     for row in rows:
-        attr = "about" if row.op_id.endswith(".about") else "api_file_get"
         assert row.handler_ref is not None
+        assert f".{class_by_product[row.product]}." in row.handler_ref, row.handler_ref
+    shared = [row for row in rows if row.op_id.endswith((".about", ".api_file.get"))]
+    assert len(shared) == 4
+    for row in shared:
+        attr = "about" if row.op_id.endswith(".about") else "api_file_get"
         assert row.handler_ref.endswith(f".{class_by_product[row.product]}.{attr}"), row.handler_ref
 
 

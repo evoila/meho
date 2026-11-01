@@ -13,9 +13,13 @@ Today the connector ships:
 
 - the **login** to the SRM API,
 - **version detection** (MEHO reads the SRM version and build),
-- two **server reads**: `srm.about` and `srm.api_file.get`, and
+- two **server reads**: `srm.about` and `srm.api_file.get`,
 - seven **recovery reads**: pairings, the login to the remote site,
-  recovery plans, protection groups, health issues and run history.
+  recovery plans, protection groups, health issues and run history, and
+- the **appliance setup** operations: register the appliance with vCenter
+  and SSO, set its network, time and certificates, and install storage
+  replication adapters. They use the appliance's second API, the setup
+  API (`/api/rest/configure/v2`). See "Appliance setup" below.
 
 Broadcom does not offer the SRM 8.8 and 9.0 API files as downloads; a
 running appliance serves them. `srm.api_file.get` is how the lab pins
@@ -51,8 +55,24 @@ The recovery read paths are relative to `/api/rest/srm/v2`; `...` stands
 for `/pairings/{pairing_id}/recovery-management` (plans) or
 `/pairings/{pairing_id}/protection-management` (groups).
 
+The appliance setup operations (all on the setup API, all paths below
+start with `/api/rest/configure/v2`):
+
+| Operation | What it does | What it returns | Vendor call | Risk | Versions |
+|---|---|---|---|---|---|
+| `srm.appliance.show` | The appliance's setup. | Version and build; registration with vCenter (state, site name, SSO address, services); DNS and interfaces; time zone and NTP; server certificate (subject, issuer, valid to). | `GET /appliance`, `GET /appliance/configuration-manager/configuration`, `GET /appliance/settings/network`, `GET /appliance/settings/time`, `GET /appliance/certificates/server` | read (`safe`) | 8.8, 9.0, 9.1 |
+| `srm.appliance.task.get` | One setup task: the status read of `register` and `certificate.set`. | State (`queued`, `running`, `succeeded`, `failed`, `cancelled`, `not_reachable`), progress, the vendor's error text, the time of the read. | `GET /tasks/{task_id}` | read (`safe`) | 8.8, 9.0, 9.1 |
+| `srm.appliance.register` | Register the appliance with its vCenter and SSO. | `accepted` with the task id and the status read, or `already_running`, `refused` or `failed`, with the steps. | `POST .../probe-ssl-connection`, `POST .../validate-connection`, `POST .../check-existing-registrations`, up to 9.0 `POST .../list-vc-services`, then `PUT /appliance/configuration-manager/configuration` | change (`dangerous`, waits for approval) | 8.8, 9.0, 9.1 |
+| `srm.appliance.network.set` | Set DNS and host name, or the IPv4 setup of one interface. | `done`, `unconfirmed` or `failed` with the steps; `session_ended` and `target_must_change` when MEHO's address changed. | `PUT /appliance/settings/network/dns`, `POST /appliance/settings/network/interfaces/{interface_name}` | change (`dangerous`, waits for approval) | 8.8, 9.0, 9.1 |
+| `srm.appliance.time.set` | Set the time zone and the time sync (NTP servers, the host, or none). | The time settings read back. | `PUT /appliance/settings/time` | change (`dangerous`, waits for approval) | 8.8, 9.0, 9.1 |
+| `srm.appliance.csr.create` | Make a new key and a certificate signing request. The key stays on the appliance. | The request (PEM), its subject, names and a hash of its public key. | `POST /appliance/certificates/actions/generate-csr` | change (`caution`, waits for approval) | 8.8, 9.0, 9.1 |
+| `srm.appliance.certificate.set` | Install the signed certificate for the request, with its CA chain; or add or remove trusted CA certificates. | Server certificate: `accepted` with the task, or `already_running`, `refused`, `failed`. CA change: `done`. | `POST /appliance/certificates/server/actions/update`, `POST /appliance/certificates/ca`, `POST /appliance/certificates/ca/actions/remove` | change (`dangerous`, waits for approval) | 8.8, 9.0, 9.1 |
+| `srm.storage_adapter.install` | Fetch a storage replication adapter archive (a plain URL, or a signed URL read from Vault), check its SHA-256, upload it. | The new adapter, the archive (name, source, size, SHA-256), the adapter lists before and after, the steps, the clean-up. | `GET /storage-replication-adapters`, `POST /storage-replication-adapters` | change (`destructive`: only a person, after a preview) | 8.8, 9.0, 9.1 |
+
 Every operation exists on every covered version, so none needs a
 version check yet. The Tasks that add 9.x-only operations add that check.
+`srm.appliance.register` reads the appliance version to choose the
+registration form (see below).
 
 ## Registering targets
 
@@ -115,6 +135,16 @@ other modes raise `NotImplementedError`.
   entry methods (`pairing_list`, `remote_login`, `plan_list`, `plan_get`,
   `group_list`, `issue_list`, `history_list`) are on `SrmConnector`, for
   the same reason as `about`.
+- `SetupApi`, `SetupApiError`, `SetupApiUnreachableError`, `Steps`,
+  `task_view`, `find_running_task`, `wait_for_task`, `SETUP_API_CALLS`
+  (`setup_api.py`) -- the setup API client and the shared parts of the
+  setup operations.
+- `appliance.py` (show, task read, network, time), `appliance_register.py`,
+  `appliance_certificate.py`, `storage_adapter.py` -- the bodies of the
+  setup operations. The entry methods are on `SrmConnector`.
+- `appliance_ops.py`, `appliance_ops_more.py` -- the metadata of the setup
+  operations and the two group texts (`srm-appliance`,
+  `srm-storage-adapters`).
 - `SrmTypedOp` (`_op.py`) -- the metadata record of one operation.
 - `dr_api_file_get` (`connectors/vmware_shared/dr_api_file.py`) -- the read's
   body, shared with `vr.api_file.get`.
@@ -336,8 +366,204 @@ with its `errors` and `warnings` texts.
 
 ### Shutdown
 
-`aclose()` clears the session cache and closes the HTTP pool. No logout
+`aclose()` clears both session caches (the SRM API and the setup API) and closes the HTTP pool. No logout
 call is sent.
+
+## Appliance setup
+
+### Login to the setup API
+
+The setup API has its own login: `POST /api/rest/configure/v2/session`
+with HTTP Basic and the appliance's **own admin user**, not the vCenter
+SSO account of the target. Every setup operation takes it as a Vault
+reference, `appliance_secret_ref` (a KV v2 path with `username` and
+`password`). MEHO reads it under the operator's identity
+(`load_param_basic_credentials` in `setup_api.py`) and never returns it.
+A wrong password gives an error that names `appliance_secret_ref` and
+HTTP 401, never the value.
+
+The session id goes in `x-dr-session`. It is cached per appliance address,
+Vault reference and operator (`SrmConnector.setup_sessions`), so each
+operator reads the Vault reference under their own identity and holds their
+own login. A `401` on a later
+call drops the session, logs in again and sends the call once more
+(`SetupApi.send`). So a login that expired between a start and a status
+read does not fail the read. This retry is inside the setup client; the
+dispatcher's own `401` retry (which would run a whole multi-step change
+again) never sees a setup `401`.
+
+`srm.appliance.register` and `srm.appliance.certificate.set` also need
+the vCenter SSO admin user: `sso_secret_ref`, read the same way. It goes
+to the appliance in the request body. The flight recorder records no
+request body of a setup API call, only the method, path, status and
+answer.
+
+### Vendor jobs: `register` and the server certificate
+
+The vendor answers both with a task. MEHO's rules:
+
+- The start call returns once the vendor took the job: `outcome:
+  accepted`, `task_id`, and `status_read` (`srm.appliance.task.get` with
+  the task id). It never says the work is done.
+- `srm.appliance.task.get` gives the vendor's state, the progress and the
+  error text. Call it until the state is `succeeded`, `failed` or
+  `cancelled`.
+- Before a start, MEHO reads `GET /tasks` and looks for a queued or
+  running task of the same kind (its type or description holds
+  `configur` or `regist` for a registration, `certificat` for a
+  certificate). If one runs, the answer is `already_running` with its id,
+  and nothing starts. This is a help, not a lock: two callers can both
+  check before either starts, and a task that just ended is no longer
+  running.
+- After a lost reply, do not start again blindly. Read
+  `srm.appliance.show` (`registration.state`, `certificate`) or the task,
+  and decide from that.
+- Start with MEHO's async mode (`async: true`,
+  `docs/codebase/async-governed-dispatch.md`): MEHO stores the answer
+  (with the task id) under a run handle, so a lost reply does not lose
+  the task id.
+- When the appliance does not answer (no connection, or HTTP 502, 503 or
+  504 from a service that is down, for example during an upgrade),
+  `srm.appliance.task.get` says `state: not_reachable` with the task id and the time of the read. It
+  never says `failed` for that. MEHO keeps no job state between calls;
+  the caller keeps the task id.
+- A multi-step change that fails part-way returns `steps`: each step is
+  `done`, `failed` (with the vendor's error) or `not_run`. Nothing that
+  ran is undone.
+
+### `srm.appliance.register`
+
+Steps (`appliance_register.py`):
+
+1. `running_task` -- read the version (`GET /appliance`) and look for a
+   running registration task.
+2. `probe_certificate` -- `probe-ssl-connection` on `https://<vcenter>:443`.
+   MEHO computes the SHA-256 fingerprint of the certificate the appliance
+   saw and compares it with `vcenter_fingerprint`. A different
+   fingerprint stops the call (`refused`, with `seen_fingerprint`). The
+   fingerprint goes out as the vendor writes it: SHA-256, in capitals,
+   with colons. The input may be in any case, with or without colons.
+3. `validate_connection` -- the appliance checks the SSO login and the
+   address. A wrong SSO password fails here with the vendor's text.
+4. `check_existing_registrations` -- when the appliance or the extension
+   key (`com.vmware.vcDr` by default) is already registered, the call
+   stops (`refused`, with the registrations it found).
+5. `list_vc_services` -- only up to 9.0 (version below 9.1): the vCenter
+   id (`service_id`) of the vCenter at that address. The registration
+   then also sends `vc_instance_id` and `vc_thumbprint`. 9.1 finds the
+   vCenter from the SSO address itself and does not need them.
+6. `register` -- `PUT /appliance/configuration-manager/configuration` with
+   the site name, admin e-mail, extension key, connection and SSO user.
+
+The vCenter address always goes out as `https://<name>:443`. Without the
+scheme and the port the vendor uses `http` and port 80, and the 9.1 setup
+API answers `500` on the connection test. The input may be the name,
+`https://<name>`, `<name>:443` or `https://<name>:443`; another scheme or
+port is refused.
+
+### `srm.appliance.network.set`
+
+DNS first (`set_dns`), then the interface (`set_interface`). MEHO reads
+the network first and refuses an interface the appliance does not have.
+The interface MEHO uses is every interface unless the target's host is
+the address of another interface. A new address there (a new static
+address, or a change to DHCP) needs `allow_address_change: true`;
+without it nothing changes. IPv4 only.
+
+The vendor ends the connection when the address changes, so the answer
+to that call is often lost. MEHO tells the cases apart by how far the
+call got:
+
+- The request went out, but no answer came back: the step and the
+  outcome are `unconfirmed`. The answer has `session_ended: true` and
+  `target_must_change`: change the target's host to the new address and
+  read `srm.appliance.show`. If the appliance does not answer there, it
+  did not take the change; read it at the old address.
+- The login failed, or no connection could be made (refused, timeout,
+  TLS failure): nothing was sent. The step and the outcome are `failed`,
+  like any other error, and the session stays.
+
+### Certificates
+
+`srm.appliance.csr.create` returns the request (PEM). Each call makes a
+new key, so only the newest request fits. `srm.appliance.certificate.set`
+takes exactly one of:
+
+- `server_certificate` (`certificate_pem`, `csr_pem`, `ca_chain_pem`):
+  MEHO checks that the certificate holds the public key of the request,
+  names the appliance's host name (from `GET /appliance`; a wildcard
+  name counts) and has not expired. Else it is refused before any change.
+  Then it is a vendor job (see above).
+- `add_ca_certificates` / `remove_ca_certificates`: done when the call
+  returns.
+
+Answers name certificates by subject, issuer, end date and SHA-256
+fingerprint; no PEM text comes back except the request.
+
+### `srm.storage_adapter.install`
+
+A storage replication adapter is the storage vendor's plug-in for
+array-based replication. It runs as a container on the appliance. MEHO
+does all the work inside its own call (`storage_adapter.py`):
+
+1. `list_before` -- `GET /storage-replication-adapters`. The vendor
+   answers with a task; MEHO reads it until it ends.
+2. `download` -- MEHO fetches the archive into a temporary folder
+   (`meho-srm-sra-*` under the system temp folder, the file named
+   `<name>.meho-partial` until the check passed). Size limit 4 GiB.
+3. `check_sha256` -- the SHA-256 must equal `sha256`; else nothing is
+   uploaded.
+4. `upload` -- `POST /storage-replication-adapters`, the archive as
+   `multipart/form-data` in the field `file`.
+5. `list_after` -- the new adapter is the one not in the first list.
+
+Rules:
+
+- **Use async mode.** The download and upload take minutes. With
+  `async: true` MEHO answers `202` with a run handle at once; the stored
+  result has the final answer. The answer is only written after the last
+  step and the clean-up.
+- **Keep-alive.** While the call runs, MEHO reads `GET /session` once a
+  minute, so the vendor session does not expire during a long download.
+- **Clean-up.** The temporary folder is removed in a `finally` block:
+  after success, an error or a cancel. The answer says so in `cleanup`.
+- **When MEHO dies.** The clean-up cannot run. What is left: the
+  temporary folder (the next run removes `meho-srm-sra-*` folders older
+  than six hours, listed in `cleanup.leftovers_removed`) and the vendor
+  session (it ends by its own timeout). MEHO's async mode does not resume
+  work: the run ends as failed. Then read the adapter list on the
+  appliance and run again; a partial upload is not in the vendor's list.
+- **A broken upload.** MEHO reads the list again and sets `installed`:
+  `false` (nothing installed), `true`, or `null` when the list could not
+  be read.
+- **The archive URL.** Give exactly one of two inputs. `archive_url` is
+  a plain URL with no query part, user name or password. A signed URL
+  (its token is in the query part) goes into a Vault secret, in the field
+  `url`, and `archive_url_secret_ref` names that secret. MEHO reads it
+  under the operator's identity, like `appliance_secret_ref`. The reason:
+  the parameters of a call are shown in the public preview, the approval
+  row and the broadcast feed, so a token there would be visible. An
+  `archive_url` with a query part, a fragment or a login fails the
+  parameter check (a pattern in the schema), so the public preview
+  refuses it before it builds an answer. The handler checks it again.
+- **Credentials and URLs.** MEHO sends no credential to the archive
+  server and follows no redirect, so nothing crosses to another host. The
+  archive address passes the same address screen as a target address.
+  Answers, previews, errors and logs show the URL without its query part;
+  a connection error is named by its class only.
+- **Preview, in two steps.** The operation is `destructive`: agents
+  cannot run it, and a person calls `preview_operation` first. That public
+  preview shows the redacted parameters, the risk level and the
+  `preview_hash`; it does not show the adapter's impact, because it runs
+  with no connector and sends nothing. `call_operation` with the
+  `preview_hash` then parks the call for approval, and at that point the
+  preview builder runs with the connector: it reads the appliance and its
+  adapters and sends `HEAD` to the archive URL. Its `blast_radius` names
+  the appliance and the archive (`object`), the adapters already there
+  (`children`) and what cannot be undone; the approver reads it in the
+  approval row. The builder refuses when the setup API cannot be read or
+  the archive URL answers 404 or 410. `call_operation` without the
+  matching `preview_hash` is refused.
 
 ## Dependencies
 
@@ -349,6 +575,10 @@ call is sent.
   `is_acceptable_auth_model`, `session_establish_auth_error`.
 - `connectors/_shared/api_file_read.py`: the API file read steps.
 - `operations/typed_register.py`: the typed-op registrar.
+- `operations/_preview.py`: the preview builder of `srm.storage_adapter.install`.
+- `connectors/_shared/pinned_transport.py` and `targets/ssrf_guard.py`:
+  the address screen of the archive download.
+- `cryptography`: the certificate and request checks.
 
 ## Tests
 
@@ -374,7 +604,22 @@ call is sent.
   `server/info` and every recovery read path (`VENDOR_CALLS`) against the
   pinned 9.1 file
   (`vcf-protection-and-recovery-9.1/recovery-srm-v2.yaml` on the spec
-  shelf). The 8.8 and 9.0 files join this lane once the lab pins them.
+  shelf), and every setup API call (`SETUP_API_CALLS` in `setup_api.py`)
+  against the pinned 9.1 setup API file
+  (`vcf-protection-and-recovery-9.1/appliance-configure-v2.yaml`). The 8.8
+  and 9.0 files join these lanes once the lab pins them. CI requires both
+  files, so a missing file fails the job instead of skipping the lane.
+- `backend/tests/test_connectors_srm_appliance.py` -- risk and approval of
+  every setup operation, the setup login, `show`, `task.get` (failed,
+  expired login, not reachable), `register` (address form, fingerprint,
+  existing registration, running task, both registration forms, wrong SSO
+  password), `network.set` and `time.set`.
+- `backend/tests/test_connectors_srm_appliance_certs_sra.py` -- the
+  request, the certificate checks, CA changes, and the adapter install
+  (good run, unreachable archive, wrong SHA-256, redirect, broken upload,
+  keep-alive, clean-up, a signed URL from Vault in no public preview and
+  no approval row, a plain URL with a query part refused, preview,
+  refused without a preview hash).
 
 ## Known issues
 
@@ -401,11 +646,26 @@ call is sent.
 - The 8.8 and 9.0 calls follow the 9.1 file and the vendor documentation.
   Their first live use is the pinning of the 8.8 and 9.0 files. If a call
   differs there, fix the call and the table above.
+- **The adapter upload format is not in the vendor file.** The 9.1 setup
+  API file lists `POST /storage-replication-adapters` with no request
+  body, and the vendor's API pages show none. MEHO sends
+  `multipart/form-data` with the archive in the field `file`. The live
+  proof checks it; if the field differs, change `_upload` in
+  `storage_adapter.py`.
+- **Task kinds are matched by words.** The vendor does not list its task
+  types, so the "is one running already" check matches words in a task's
+  type and description (`REGISTER_TASK_WORDS`, `CERTIFICATE_TASK_WORDS`).
+  The live proof records the real type names.
+- **The 8.8 and 9.0 setup API** follows the 9.1 file. `vc_instance_id` and
+  `vc_thumbprint` are deprecated from 9.0.3 on; MEHO sends them only below
+  9.1.
 
 ## References
 
 - Task #4505 (this connector); Task #4552 (the recovery reads); #4506 (the vSphere Replication connector,
   the second target of a 9.1 appliance, `connectors-vr.md`).
+- Task #4559 (the appliance setup operations).
+- `docs/codebase/async-governed-dispatch.md` -- MEHO's async mode.
 - `docs/codebase/connectors-hcx.md`, `docs/codebase/connectors-vcf-fleet.md`
   -- the sibling API file reads.
 - `docs/decisions/spec-reconcile-guards-standard.md` -- the reconcile lane.

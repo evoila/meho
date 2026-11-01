@@ -633,10 +633,13 @@ identity providers. The vCenter rows `vmware` / `9.0` and `vmware` / `8.0`
 share one set (a YAML anchor): proxy settings, content libraries, report
 download tokens, deployment and migration specs, guest customization specs,
 identity providers and broker clients, Supervisor image registries, and the
-older-API host config and precheck remediation result. The list also holds
-the VCF Installer bring-up spec read `GET:/v1/sddcs/{id}/spec`; it has no
-catalog row, so a manual ingest of it gets the redaction guard only. Stored
-rows change at the next ingest (see "Applying corrected floors to existing
+older-API host config and precheck remediation result. Each REST path is on
+both guards twice: as the vendor file writes it and under the `/api` base,
+because the parser folds a relative `servers.url` into every path
+(`_server_base_path` in `ingest/openapi.py`). The list also holds the VCF
+Installer bring-up spec read `GET:/v1/sddcs/{id}/spec`; it has no catalog
+row, so a manual ingest of it gets the redaction guard only. Stored rows
+change at the next ingest (see "Applying corrected floors to existing
 rows" below).
 
 #### Applying corrected floors to existing rows

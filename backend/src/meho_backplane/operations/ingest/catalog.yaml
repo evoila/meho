@@ -92,7 +92,9 @@ entries:
     # hand-written credential reads: caution with approval here, and the same
     # op ids in broadcast/events.py _CREDENTIAL_READ_OPS scrub the answer.
     # Keep both in step. Paths are from the vendor vcenter.yaml and
-    # vi-json.yaml; the 8.0 row below reuses this list.
+    # vi-json.yaml; the 8.0 row below reuses this list. Each REST path is
+    # listed as the vendor file writes it and under the /api base, because
+    # the parser folds a relative servers.url into every path.
     safety_overlay: &vcenter_credential_reads
       # Proxy settings carry the proxy password.
       - method: GET
@@ -100,7 +102,15 @@ entries:
         safety_level: caution
         requires_approval: true
       - method: GET
+        path: /api/appliance/networking/proxy
+        safety_level: caution
+        requires_approval: true
+      - method: GET
         path: /appliance/networking/proxy/{protocol}
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /api/appliance/networking/proxy/{protocol}
         safety_level: caution
         requires_approval: true
       # Content libraries carry the publish and subscription passwords.
@@ -109,11 +119,23 @@ entries:
         safety_level: caution
         requires_approval: true
       - method: GET
+        path: /api/content/library/{libraryId}
+        safety_level: caution
+        requires_approval: true
+      - method: GET
         path: /content/local-library/{libraryId}
         safety_level: caution
         requires_approval: true
       - method: GET
+        path: /api/content/local-library/{libraryId}
+        safety_level: caution
+        requires_approval: true
+      - method: GET
         path: /content/subscribed-library/{libraryId}
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /api/content/subscribed-library/{libraryId}
         safety_level: caution
         requires_approval: true
       # Compatibility and update reports carry a download token.
@@ -122,7 +144,15 @@ entries:
         safety_level: caution
         requires_approval: true
       - method: GET
+        path: /api/esx/hcl/reports/{report}
+        safety_level: caution
+        requires_approval: true
+      - method: GET
         path: /vcenter/lcm/reports/{report}
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /api/vcenter/lcm/reports/{report}
         safety_level: caution
         requires_approval: true
       # Deployment, upgrade and migration specs carry the SSO admin, root and
@@ -132,7 +162,15 @@ entries:
         safety_level: caution
         requires_approval: true
       - method: GET
+        path: /api/vcenter/deployment/install
+        safety_level: caution
+        requires_approval: true
+      - method: GET
         path: /vcenter/deployment/upgrade
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /api/vcenter/deployment/upgrade
         safety_level: caution
         requires_approval: true
       - method: GET
@@ -140,13 +178,25 @@ entries:
         safety_level: caution
         requires_approval: true
       - method: GET
+        path: /api/vcenter/deployment/migrate
+        safety_level: caution
+        requires_approval: true
+      - method: GET
         path: /vcenter/lcm/deployment/migration-upgrade
         safety_level: caution
         requires_approval: true
+      - method: GET
+        path: /api/vcenter/lcm/deployment/migration-upgrade
+        safety_level: caution
+        requires_approval: true
       # A guest customization spec carries the Windows admin and domain
-      # passwords.
+      # passwords and the Windows product key.
       - method: GET
         path: /vcenter/guest/customization-specs/{name}
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /api/vcenter/guest/customization-specs/{name}
         safety_level: caution
         requires_approval: true
       # Identity providers carry the LDAP password and the client secret; the
@@ -156,11 +206,23 @@ entries:
         safety_level: caution
         requires_approval: true
       - method: GET
+        path: /api/vcenter/identity/providers/{provider}
+        safety_level: caution
+        requires_approval: true
+      - method: GET
         path: /vcenter/identity/broker/tenants/{tenant}/admin-client
         safety_level: caution
         requires_approval: true
       - method: GET
+        path: /api/vcenter/identity/broker/tenants/{tenant}/admin-client
+        safety_level: caution
+        requires_approval: true
+      - method: GET
         path: /vcenter/identity/broker/tenants/operator-client
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /api/vcenter/identity/broker/tenants/operator-client
         safety_level: caution
         requires_approval: true
       # Supervisor container image registries carry the registry password.
@@ -169,7 +231,15 @@ entries:
         safety_level: caution
         requires_approval: true
       - method: GET
+        path: /api/vcenter/namespace-management/supervisors/{supervisor}/container-image-registries
+        safety_level: caution
+        requires_approval: true
+      - method: GET
         path: /vcenter/namespace-management/supervisors/{supervisor}/container-image-registries/{containerImageRegistry}
+        safety_level: caution
+        requires_approval: true
+      - method: GET
+        path: /api/vcenter/namespace-management/supervisors/{supervisor}/container-image-registries/{containerImageRegistry}
         safety_level: caution
         requires_approval: true
       # Older-API (VI-JSON) host reads: the host config carries the IPMI

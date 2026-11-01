@@ -45,15 +45,17 @@ _REDACTED = "[REDACTED:param_name]"
 _CLIENT_SECRET = "example-client" + "-secret-value"
 _LDAP_PASSWORD = "example-ldap" + "-pw-value"
 _IPMI_PASSWORD = "example-ipmi" + "-pw-value"
+_ADMIN_PASSWORD = "example-admin" + "-pw-value"
+_DOMAIN_PASSWORD = "example-domain" + "-pw-value"
+_PRODUCT_KEY = "XXXXX-XXXXX-XXXXX-XXXXX-EXMPL"
 
 _PRODUCT = "vmware"
 _IMPL_ID = "vmware-rest"
 _VERSIONS = ("9.0", "8.0")
 
-#: Every generic vCenter read the catalog overlay and the credential-read
-#: list cover. Spellings match the vendor files ``vcenter.yaml`` and
-#: ``vi-json.yaml`` (``vmware/vcf-api-specs``, 9.0).
-_VCENTER_CREDENTIAL_PATHS: tuple[str, ...] = (
+#: The REST reads, spelled as the vendor file ``vcenter.yaml``
+#: (``vmware/vcf-api-specs``, 9.0) writes them.
+_VCENTER_REST_CREDENTIAL_PATHS: tuple[str, ...] = (
     "/appliance/networking/proxy",
     "/appliance/networking/proxy/{protocol}",
     "/content/library/{libraryId}",
@@ -72,8 +74,22 @@ _VCENTER_CREDENTIAL_PATHS: tuple[str, ...] = (
     "/vcenter/namespace-management/supervisors/{supervisor}/container-image-registries",
     "/vcenter/namespace-management/supervisors/{supervisor}"
     "/container-image-registries/{containerImageRegistry}",
+)
+
+#: The older-API (VI-JSON) reads, spelled as ``vi-json.yaml`` writes them.
+_VCENTER_VI_JSON_CREDENTIAL_PATHS: tuple[str, ...] = (
     "/HostSystem/{moId}/config",
     "/HostSystem/{moId}/precheckRemediationResult",
+)
+
+#: Every path form the catalog overlay and the credential-read list cover.
+#: A REST path appears as the vendor file writes it and under the ``/api``
+#: base, the form the parser stores when a spec declares the relative
+#: server url ``/api``.
+_VCENTER_CREDENTIAL_PATHS: tuple[str, ...] = (
+    *_VCENTER_REST_CREDENTIAL_PATHS,
+    *(f"/api{path}" for path in _VCENTER_REST_CREDENTIAL_PATHS),
+    *_VCENTER_VI_JSON_CREDENTIAL_PATHS,
 )
 
 #: Reads with no credentials in their answer; they must stay ``safe``.
@@ -81,17 +97,21 @@ _VCENTER_PLAIN_PATHS: tuple[str, ...] = (
     "/vcenter/vm",
     "/vcenter/identity/providers",
     "/content/library",
+    "/api/vcenter/vm",
+    "/api/content/library",
     "/HostSystem/{moId}/hardware",
 )
 
 
-def _fixture_spec() -> str:
+def _spec_text(paths: tuple[str, ...], *, server_url: str | None = None) -> str:
     lines = [
         "openapi: 3.0.3",
         "info: {title: vCenter credential reads fixture, version: '9.0.0.0'}",
-        "paths:",
     ]
-    for index, path in enumerate((*_VCENTER_CREDENTIAL_PATHS, *_VCENTER_PLAIN_PATHS)):
+    if server_url is not None:
+        lines += ["servers:", f"  - url: {server_url}"]
+    lines.append("paths:")
+    for index, path in enumerate(paths):
         lines += [
             f"  {path}:",
             "    get:",
@@ -99,6 +119,10 @@ def _fixture_spec() -> str:
             "      responses: {'200': {description: ok}}",
         ]
     return "\n".join(lines) + "\n"
+
+
+def _fixture_spec() -> str:
+    return _spec_text((*_VCENTER_CREDENTIAL_PATHS, *_VCENTER_PLAIN_PATHS))
 
 
 @pytest.fixture(autouse=True)
@@ -178,6 +202,40 @@ def test_vcenter_rows_share_one_overlay() -> None:
     assert safety_overlay_for(_PRODUCT, "8.0") == safety_overlay_for(_PRODUCT, "9.0")
 
 
+@pytest.mark.parametrize("version", _VERSIONS)
+def test_vcenter_reads_under_api_server_base_get_both_guards(version: str) -> None:
+    """A spec with ``servers.url: /api`` stores ``/api/...`` paths; both guards still hold.
+
+    The parser folds the relative server url into every path, so the
+    stored op id is ``GET:/api/vcenter/...``. Each credential read must
+    still come out ``caution`` + approval and classify ``credential_read``;
+    a plain read under the same base stays ``safe`` and ``read``.
+    """
+    plain = ("/vcenter/vm", "/content/library")
+    rows = parse_openapi(
+        "file:///vcenter-api-base.yaml",
+        content=_spec_text((*_VCENTER_REST_CREDENTIAL_PATHS, *plain), server_url="/api"),
+    )
+    by_path = {row.path: row for row in rows}
+    assert set(by_path) == {f"/api{path}" for path in (*_VCENTER_REST_CREDENTIAL_PATHS, *plain)}
+    for path in _VCENTER_REST_CREDENTIAL_PATHS:
+        proto = by_path[f"/api{path}"]
+        floored = apply_safety_floor(
+            product=_PRODUCT, version=version, impl_id=_IMPL_ID, proto=proto
+        )
+        assert floored.safety_level == "caution", path
+        assert floored.requires_approval is True, path
+        assert classify_op(proto.op_id) == "credential_read", path
+    for path in plain:
+        proto = by_path[f"/api{path}"]
+        floored = apply_safety_floor(
+            product=_PRODUCT, version=version, impl_id=_IMPL_ID, proto=proto
+        )
+        assert floored.safety_level == "safe", path
+        assert floored.requires_approval is False, path
+        assert classify_op(proto.op_id) == "read", path
+
+
 # ---------------------------------------------------------------------------
 # Guard 2: the op id is on the shared credential-read list
 # ---------------------------------------------------------------------------
@@ -239,6 +297,49 @@ async def _host_config_handler(
 ) -> dict[str, Any]:
     """Stand-in for the generic ``GET:/HostSystem/{moId}/config`` answer."""
     return {"name": "host-01", "ipmi": {"login": "admin", "password": _IPMI_PASSWORD}}
+
+
+async def _guest_customization_spec_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Stand-in for the generic ``GET:/vcenter/guest/customization-specs/{name}`` answer.
+
+    The Windows shape of a vSphere customization spec: the sysprep user data
+    carries the product key, the GUI unattended block the admin password,
+    and the domain block the domain-join password.
+    """
+    return {
+        "name": "gosc-win",
+        "spec": {
+            "configuration_spec": {
+                "windows_config": {
+                    "reboot": "REBOOT",
+                    "sysprep": {
+                        "user_data": {
+                            "computer_name": {"type": "FIXED", "fixed_name": "win-01"},
+                            "full_name": "Operator",
+                            "organization": "Example",
+                            "product_key": _PRODUCT_KEY,
+                        },
+                        "gui_unattended": {
+                            "auto_logon": True,
+                            "auto_logon_count": 1,
+                            "password": _ADMIN_PASSWORD,
+                            "time_zone": 110,
+                        },
+                        "domain": {
+                            "type": "DOMAIN",
+                            "domain": "corp.example.test",
+                            "domain_username": "joiner",
+                            "domain_password": _DOMAIN_PASSWORD,
+                        },
+                    },
+                }
+            }
+        },
+    }
 
 
 async def _register_read(embedding_service: AsyncMock, op_id: str, handler: Any) -> None:
@@ -305,3 +406,34 @@ async def test_vcenter_host_config_read_response_is_scrubbed(
     assert result.result["ipmi"]["login"] == "admin"
     assert result.result["name"] == "host-01"
     assert _IPMI_PASSWORD not in result.model_dump_json()
+
+
+async def test_vcenter_guest_customization_spec_read_response_is_scrubbed(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The Windows product key and both passwords come back as the placeholder."""
+    register_connector_v2(product=_PRODUCT, version="", impl_id="", cls=_NoOpVmwareConnector)
+    op_id = "GET:/vcenter/guest/customization-specs/{name}"
+    await _register_read(stub_embedding_service, op_id, _guest_customization_spec_handler)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id=op_id,
+        target=None,
+        params={},
+    )
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    sysprep = result.result["spec"]["configuration_spec"]["windows_config"]["sysprep"]
+    assert sysprep["user_data"]["product_key"] == _REDACTED
+    assert sysprep["user_data"]["full_name"] == "Operator"
+    assert sysprep["user_data"]["computer_name"] == {"type": "FIXED", "fixed_name": "win-01"}
+    assert sysprep["gui_unattended"]["password"] == _REDACTED
+    assert sysprep["gui_unattended"]["auto_logon"] is True
+    assert sysprep["domain"]["domain_password"] == _REDACTED
+    assert sysprep["domain"]["domain_username"] == "joiner"
+    dumped = result.model_dump_json()
+    assert _PRODUCT_KEY not in dumped
+    assert _ADMIN_PASSWORD not in dumped
+    assert _DOMAIN_PASSWORD not in dumped

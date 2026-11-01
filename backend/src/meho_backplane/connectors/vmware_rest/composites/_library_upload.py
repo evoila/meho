@@ -673,5 +673,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=CONTENT_LIBRARY_ITEM_UPLOAD_LLM_INSTRUCTIONS,
         preview=_content_library_item_upload_preview,
         governed_subops=_SUB_OPS_CONTENT_LIBRARY_ITEM_UPLOAD,
+        classifier_other=True,
     ),
 )

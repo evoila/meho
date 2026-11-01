@@ -84,6 +84,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         ],
         preview=_content_library_subscribed_sync_preview,
         governed_subops=_library._SUB_OPS_CONTENT_LIBRARY_SUBSCRIBED_SYNC,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.content_library.subscribed.status",
@@ -103,6 +104,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS[
             "vmware.composite.content_library.subscribed.status"
         ],
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.content_library.subscribed.items.list",

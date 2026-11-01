@@ -103,6 +103,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=HOST_MOVE_LLM_INSTRUCTIONS,
         preview=_host_membership._host_preview,
         governed_subops=_VIM_SUB_OPS_HOST_MOVE,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id=_host_membership.OP_ID_HOST_CONNECT,
@@ -121,6 +122,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=HOST_CONNECT_LLM_INSTRUCTIONS,
         preview=_host_membership._host_preview,
         governed_subops=_VIM_SUB_OPS_HOST_CONNECT,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id=_host_membership.OP_ID_HOST_DISCONNECT,
@@ -140,6 +142,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=HOST_DISCONNECT_LLM_INSTRUCTIONS,
         preview=_host_membership._host_preview,
         governed_subops=_VIM_SUB_OPS_HOST_DISCONNECT,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id=_host_remove.OP_ID_HOST_REMOVE,

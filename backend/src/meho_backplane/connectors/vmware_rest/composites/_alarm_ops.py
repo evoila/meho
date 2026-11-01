@@ -55,6 +55,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=ALARM_ACKNOWLEDGE_LLM_INSTRUCTIONS,
         preview=alarm_acknowledge_preview,
         governed_subops=_alarm._VIM_SUB_OPS_ALARM_ACKNOWLEDGE,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.alarm.reset",
@@ -75,5 +76,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=ALARM_RESET_LLM_INSTRUCTIONS,
         preview=alarm_reset_preview,
         governed_subops=_alarm._VIM_SUB_OPS_ALARM_RESET,
+        classifier_other=True,
     ),
 )

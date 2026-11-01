@@ -51,6 +51,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         safety_level="safe",
         requires_approval=False,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.resource_allocation.show"],
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.resource_allocation.set",
@@ -70,5 +71,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.resource_allocation.set"],
         preview=_vm_resource_allocation_set_preview,
         governed_subops=_vm_allocation._VIM_SUB_OPS_VM_RESOURCE_ALLOCATION_SET,
+        classifier_other=True,
     ),
 )

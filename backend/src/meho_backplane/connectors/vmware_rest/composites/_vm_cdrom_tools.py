@@ -478,5 +478,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=VM_TOOLS_INSTALLER_UNMOUNT_LLM_INSTRUCTIONS,
         preview=_vm_tools_installer_unmount_preview,
         governed_subops=SUB_OPS_VM_TOOLS_INSTALLER_UNMOUNT,
+        classifier_other=True,
     ),
 )

@@ -66,6 +66,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.disk.grow"],
         preview=_vm_disk_grow_preview,
         governed_subops=_write._VIM_SUB_OPS_VM_DISK_GROW,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.disk.attach",
@@ -86,6 +87,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.disk.attach"],
         preview=_vm_disk_attach_preview,
         governed_subops=_write._VIM_SUB_OPS_VM_DISK_ATTACH,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.resize",
@@ -105,6 +107,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.resize"],
         preview=_vm_resize_preview,
         governed_subops=_write._SUB_OPS_VM_RESIZE,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.nic.repoint",
@@ -124,6 +127,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.nic.repoint"],
         preview=_vm_nic_repoint_preview,
         governed_subops=_write._SUB_OPS_VM_NIC_REPOINT,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.device.cdrom",
@@ -143,5 +147,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.device.cdrom"],
         preview=_vm_device_cdrom_preview,
         governed_subops=_write._SUB_OPS_VM_DEVICE_CDROM,
+        classifier_other=True,
     ),
 )

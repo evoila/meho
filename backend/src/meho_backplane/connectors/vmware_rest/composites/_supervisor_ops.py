@@ -68,6 +68,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         preview=_supervisor_enable_preview,
         not_on_8_0=SUPERVISOR_9X_REASON,
         governed_subops=_supervisor._SUB_OPS_SUPERVISOR_ENABLE,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.supervisor.disable",
@@ -88,6 +89,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         preview=_supervisor_disable_preview,
         not_on_8_0=SUPERVISOR_9X_REASON,
         governed_subops=_supervisor._SUB_OPS_SUPERVISOR_DISABLE,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.supervisor.status",
@@ -106,5 +108,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=False,
         llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS["vmware.composite.supervisor.status"],
         not_on_8_0=SUPERVISOR_9X_REASON,
+        classifier_other=True,
     ),
 )

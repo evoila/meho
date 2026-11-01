@@ -76,5 +76,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS["vmware.composite.vm.customize"],
         preview=_vm_customize_preview,
         governed_subops=_write._SUB_OPS_VM_CUSTOMIZE,
+        classifier_other=True,
     ),
 )

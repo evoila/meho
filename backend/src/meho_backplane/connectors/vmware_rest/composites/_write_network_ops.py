@@ -54,6 +54,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
             "vmware.composite.network.portgroup.create"
         ],
         governed_subops=_write._VIM_SUB_OPS_NETWORK_PORTGROUP_CREATE,
+        no_preview=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.network.portgroup.security.set",
@@ -74,6 +75,8 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
             "vmware.composite.network.portgroup.security.set"
         ],
         governed_subops=_write._VIM_SUB_OPS_NETWORK_PORTGROUP_SECURITY_SET,
+        no_preview=True,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.network.portgroup.vlan.set",
@@ -95,5 +98,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
             "vmware.composite.network.portgroup.vlan.set"
         ],
         governed_subops=_write._VIM_SUB_OPS_NETWORK_PORTGROUP_VLAN_SET,
+        no_preview=True,
+        classifier_other=True,
     ),
 )

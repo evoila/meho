@@ -60,3 +60,11 @@ class CompositeSpec(NamedTuple):
     # service principal needs to run the composite. Empty: the composite
     # declares no child calls (reads, and the guest-ops composites).
     governed_subops: tuple[str, ...] = ()
+    # True: a write that waits for approval with no preview of its effect, on
+    # purpose; the approver sees only the parameters. The coverage test
+    # checks that every other approval write has a preview builder.
+    no_preview: bool = False
+    # True: the broadcast classifier (``classify_op``) puts this op id in its
+    # generic ``other`` class, on purpose. The coverage test checks that this
+    # flag matches the classifier, so a new op id gets a conscious decision.
+    classifier_other: bool = False

@@ -59,6 +59,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.evacuate"],
         preview=_host_evacuate_preview,
         governed_subops=_write._SUB_OPS_HOST_EVACUATE + _write._VIM_SUB_OPS_HOST_EVACUATE,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.host.maintenance.exit",
@@ -79,6 +80,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.host.maintenance.exit"],
         preview=_host_maintenance_exit_preview,
         governed_subops=_write._VIM_SUB_OPS_HOST_MAINTENANCE_EXIT,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.host.detach_from_vds",
@@ -99,5 +101,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         preview=_host_detach_from_vds_preview,
         governed_subops=_write._SUB_OPS_HOST_DETACH_FROM_VDS
         + _write._VIM_SUB_OPS_HOST_DETACH_FROM_VDS,
+        classifier_other=True,
     ),
 )

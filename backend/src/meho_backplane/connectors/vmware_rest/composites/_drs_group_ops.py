@@ -50,5 +50,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         ],
         preview=cluster_drs_group_members_set_preview,
         governed_subops=_drs_group._VIM_SUB_OPS_CLUSTER_DRS_GROUP_MEMBERS_SET,
+        classifier_other=True,
     ),
 )

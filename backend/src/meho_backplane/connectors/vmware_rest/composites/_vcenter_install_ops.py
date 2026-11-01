@@ -98,6 +98,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         llm_instructions=DEPLOYMENT_ANSWER_LLM_INSTRUCTIONS,
         preview=_vcenter_answer.vcenter_deployment_answer_preview,
         governed_subops=_vcenter_answer._SUB_OPS_VCENTER_DEPLOYMENT_ANSWER,
+        classifier_other=True,
     ),
 )
 

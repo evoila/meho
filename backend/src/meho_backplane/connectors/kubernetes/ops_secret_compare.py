@@ -26,8 +26,8 @@ How it works
 
 A copy the caller may not read answers ``found: false, reason:
 "forbidden"`` (Kubernetes 403, Vault 403, or a Vault path outside the
-caller's tenant); the call does not fail. The op id is on
-``broadcast.events._CREDENTIAL_READ_OPS``, so the flight recorder never
+caller's tenant); the call does not fail. The op id is declared
+``credential_read`` in ``kubernetes/op_classes.py``, so the flight recorder never
 stores the Secret body and the broadcast feed shows only the outcome.
 """
 

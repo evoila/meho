@@ -623,8 +623,8 @@ catalog `(product, version)`, like `op_allowlist`. Operator guide:
 
 An ingested read whose answer holds credentials gets two guards, the same
 as its hand-written twin (#4617): a `safety_overlay` rule on its catalog
-row (`caution`, with approval) and an entry in `_CREDENTIAL_READ_OPS` in
-`broadcast/events.py`, so the dispatcher replaces every secret field in
+row (`caution`, with approval) and a `credential_read` declaration in the
+connector's `op_classes.py` (`sddc_manager/op_classes.py`), so the dispatcher replaces every secret field in
 the answer with `[REDACTED:param_name]`. That list stays the only list of
 secret reads. The SDDC Manager row `sddc` / `9.0` carries the first set:
 the `/v1/credentials` reads, the depot, backup and proxy settings, host

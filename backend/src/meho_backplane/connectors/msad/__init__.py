@@ -33,6 +33,7 @@ product token would break that round-trip and the registry's
 chassis history, so the v1 ``register_connector`` write is intentionally omitted.
 """
 
+from meho_backplane.connectors.msad import op_classes  # noqa: F401 -- declares the op classes
 from meho_backplane.connectors.msad.connector import MsadConnector
 from meho_backplane.connectors.msad.ops import MSAD_OPS, MsadOp
 from meho_backplane.connectors.registry import register_connector_v2

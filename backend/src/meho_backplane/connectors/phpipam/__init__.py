@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.phpipam import op_classes  # noqa: F401 -- declares the op classes
 from meho_backplane.connectors.phpipam import writes as _writes  # noqa: F401 -- wires previews
 from meho_backplane.connectors.phpipam.connector import PhpipamConnector
 from meho_backplane.connectors.phpipam.session import (

@@ -52,8 +52,8 @@ mapped to the **existing** safety_level/policy mechanism:
   ``requires_approval`` op to the approval queue (G11.7-T1 #1401), so it
   is **not dispatchable without the elevated policy path** (operator
   approval).
-* op-id ``sddc.credential.list`` on
-  :data:`~meho_backplane.broadcast.events._CREDENTIAL_READ_OPS` (decision
+* op-id ``sddc.credential.list`` declared ``credential_read`` in
+  ``sddc_manager/op_classes.py`` (decision
   #3's op-id classifier) -- ``classify_op`` returns ``credential_read`` so
   audit + broadcast rows collapse to aggregate-only (redacted).
 * the handler additionally scrubs secret-keyed values at the connector

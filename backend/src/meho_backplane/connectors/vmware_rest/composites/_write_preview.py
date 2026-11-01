@@ -1695,7 +1695,7 @@ async def _content_library_subscribed_create_preview(
     auth method, sync mode, whether an SSL thumbprint was pinned) but **never**
     the ``password`` / ``username`` — so no credential can reach the durable
     ``proposed_effect`` row through this path by construction. The broadcast
-    ``_CREDENTIAL_WRITE_OPS`` pin and the ``params_hash``-only audit are the
+    ``credential_write`` declaration (``op_classes.py``) and the ``params_hash``-only audit are the
     other two surfaces; this builder is the park-time one.
     """
     name = ctx.params.get("name")

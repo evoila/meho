@@ -48,8 +48,8 @@ Governance posture (same as the other credential reads, #2306)
 * ``safety_level="caution"`` + ``requires_approval=True`` — the policy
   gate parks an ordinary dispatch for operator approval; the read never
   runs unapproved.
-* ``op_id`` is pinned in
-  :data:`meho_backplane.broadcast.events._CREDENTIAL_READ_OPS`, so
+* ``op_id`` is declared ``credential_read`` in
+  ``kubernetes/op_classes.py``, so
   ``classify_op`` returns ``credential_read`` and the audit + broadcast
   rows collapse to aggregate-only.
 * the result is value-free **by construction** (only the ref + a

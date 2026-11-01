@@ -39,6 +39,7 @@ session.
 # k8s.secret.create and k8s.job.create (#4850), and of k8s.secret.update
 # and k8s.secret.delete.
 from meho_backplane.connectors.kubernetes import (  # noqa: F401
+    op_classes,
     ops_secret_write_preview,
     ops_write_preview,
 )

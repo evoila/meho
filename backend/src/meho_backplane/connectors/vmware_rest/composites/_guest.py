@@ -39,7 +39,8 @@ Design (see ``docs/codebase/connectors-vmware-rest-guest-ops.md``):
   ``run(cmd)`` shell endpoint. Its ``arguments`` / ``env`` values may
   carry secrets and are kept off the governed decision surfaces (sub-op
   gate params, park preview, result, audit-row hash, logs) and clamped to
-  aggregate-only on broadcast via the ``_CREDENTIAL_WRITE_OPS`` pin; the
+  aggregate-only on broadcast via the ``credential_write`` declaration in
+  ``vmware_rest/op_classes.py``; the
   resume-bound ``ApprovalRequest.params`` and flight-recorder spans still
   carry them, so operators must not pass bare secrets there -- the same
   characteristic as ``file.write``'s ``content`` (see the guest-ops doc's

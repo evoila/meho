@@ -521,7 +521,7 @@ broadcast surfaces.
   (patches fixed upstream) — it greps but never `sed`s. The patch strings are
   fixed code constants (C2 references `$env:brcm_build_token` by name), and the
   result reports only patch id / label / state — no file content. It **is**
-  pinned into `_CREDENTIAL_WRITE_OPS` (broadcast defence-in-depth) per the
+  declared `credential_write` in `holodeck/op_classes.py` (broadcast defence-in-depth) per the
   `rke2.node.config.update` precedent.
 
 ### DNS name ops (#4066 surface, Initiative #2907)

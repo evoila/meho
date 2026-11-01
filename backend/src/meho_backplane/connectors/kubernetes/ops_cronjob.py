@@ -28,8 +28,8 @@ A missing CronJob raises
 before anything is created.
 
 The params and the result hold only names, so the op is not a credential
-op and is not pinned in
-:data:`~meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS`. The
+op and is not declared ``credential_write`` in
+``kubernetes/op_classes.py``. The
 approval preview (``ops_write_preview.py``) reads the CronJob and shows its
 schedule, flags, running Jobs and containers; env var names, never values.
 

@@ -52,7 +52,8 @@ def expected_classes() -> dict[str, str]:
     """
     _eager_import_connectors()
     with _FIXTURE.open(encoding="utf-8") as handle:
-        return json.load(handle)
+        loaded: dict[str, str] = json.load(handle)
+    return loaded
 
 
 def test_fixture_is_not_empty(expected_classes: dict[str, str]) -> None:

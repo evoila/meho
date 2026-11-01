@@ -45,7 +45,10 @@ class — the same decision Harbor, bind9, NSX, and SDDC Manager made.
 # ``app.delete`` / ``appproject.update`` onto the #1437 dispatcher hook
 # (G11.7 follow-up #1452) so the reviewer sees the diff / cascade in the
 # approval queue before approving.
-from meho_backplane.connectors.argocd import ops_write_preview  # noqa: F401
+from meho_backplane.connectors.argocd import (
+    op_classes,  # noqa: F401 -- declares the op classes
+    ops_write_preview,  # noqa: F401
+)
 from meho_backplane.connectors.argocd.connector import ArgoCdConnector
 from meho_backplane.connectors.argocd.ops import (
     ARGOCD_OPS,

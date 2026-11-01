@@ -107,6 +107,24 @@ The folder's `__init__.py` does three things when MEHO imports it:
 3. **Register the approval previews**, if a change shows a person what it
    will do while it waits for approval. phpIPAM does this by importing its
    `writes` module.
+4. **Declare the op classes**, if an operation needs an exact class for
+   the broadcast feed, the approval queue and the flight recorder: a read
+   whose answer holds a secret (`credential_read`), a change that returns
+   a new secret (`credential_mint`), a change whose request carries or
+   sends a secret (`credential_write`), or a change whose op id does not
+   end in a write word (`write`). The package does this in its own
+   `op_classes.py`, imported from `__init__.py`:
+
+   ```python
+   # meho_backplane/connectors/example_widget/op_classes.py
+   from meho_backplane.op_classes import declare_op_classes
+
+   declare_op_classes(credential_write=("example.widget.set_password",))
+   ```
+
+   `classify_op` in `broadcast/events.py` reads these declarations
+   first. Core code lists no operation of a connector package. See
+   [broadcast.md](broadcast.md), "Where an exact class comes from".
 
 Nothing else runs at import. Other code that runs at import is a reason to
 refuse the package in the review (see "The review checklist").
@@ -384,7 +402,7 @@ brackets is the name of the point in the record.
   (`licences`)
 - The package has no start-up hooks: no `.pth` file, no `sitecustomize`
   or `usercustomize`, and no code that runs at import beyond registering
-  its operations. (`no_startup_hooks`)
+  its operations, its previews and its op classes. (`no_startup_hooks`)
 
 #### The review record
 

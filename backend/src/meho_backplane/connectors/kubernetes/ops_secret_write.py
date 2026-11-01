@@ -24,8 +24,8 @@ neither shows a Secret value anywhere.
     inputs are resolved through the credential-backend seam
     (:func:`~meho_backplane.connectors.kubernetes.ops_write_dangerous._resolve_secret_refs`),
     so a Vault-resident value never passes through the caller. The op is
-    pinned ``credential_write``
-    (:data:`~meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS`): while
+    declared ``credential_write``
+    (``kubernetes/op_classes.py``): while
     it waits for approval its params live in the approval hand-off store,
     not on the approval row, and the broadcast collapses to aggregate-only.
 

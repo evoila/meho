@@ -397,7 +397,8 @@ second layer, `operations/_secret_values.py`, right after the
 connector-boundary redaction (`dispatcher._protect_secret_values`):
 
 - **Which ops.** A secret read is a `credential_read` op
-  (`broadcast/events.py:_CREDENTIAL_READ_OPS`) or an op of
+  (`classify_op` in `broadcast/events.py`; a connector declares it in its
+  own `op_classes.py`) or an op of
   `_secret_values._VALUE_HIDING_OPS`.
 - **Default view** (`hide_secret_values`):
   - `vault.kv.read` keeps the key names under `data` and hides every value
@@ -986,7 +987,7 @@ values have no in-leaf label the shape net could catch, so this
 delegation — not the pattern net — is what protects them, and the two
 planes cannot drift. The vSphere guest-ops composites that log into the
 guest (`vmware.composite.vm.guest.{process.list,env.read,file.read,file.write,program.run}`)
-are pinned in `_CREDENTIAL_WRITE_OPS` for the same reason: their guest OS
+are declared `credential_write` in `vmware_rest/op_classes.py` for the same reason: their guest OS
 password rides the downstream vim `NamePasswordAuthentication` block in the
 *request* body, not an op param or a declared property, so this `classify_op`
 delegation — not the shape/pattern net — is what keeps their vendor-call

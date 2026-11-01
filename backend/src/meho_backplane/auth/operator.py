@@ -95,9 +95,12 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
   only fetch its own assignment and submit its own results.
 * ``check_runner_dispatch`` — internal-only marker that this operator is the
   in-process check-runner's synthetic *background-dispatch* identity
-  (#2757). Set to ``True`` **solely** by
-  :func:`~meho_backplane.checks.runner._sensor_operator`; defaults ``False``
-  for every other construction site (fail-closed). It selects the dedicated
+  (#2757). Set to ``True`` by
+  :func:`~meho_backplane.checks.runner._sensor_operator` and by the inbound
+  event intake's :func:`~meho_backplane.events.ingest.service._build_ingest_operator`
+  (both present the check runner's token, so both log in under its role);
+  defaults ``False`` for every other construction site (fail-closed). It
+  selects the dedicated
   :attr:`~meho_backplane.settings.Settings.vault_check_runner_role`, when one
   is configured, at the single Vault JWT-login site
   (:func:`~meho_backplane.auth.vault.vault_client_for_operator`) so an
@@ -115,10 +118,22 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
   :func:`~meho_backplane.auth.jwt._extract_tenants`. One login can list
   several tenants (``docs/decisions/2026-10-28-several-tenants-per-person.md``).
   Empty for a token without the claim and always empty for a machine
-  login (agent, service, runner). **Nothing reads it yet:** the current
-  tenant still comes from ``tenant_id`` / ``tenant_role``. The role and
-  flags of an entry come from :func:`group_grant`, the one table in code
-  that matches ``docs/decisions/login-role-groups.md``.
+  login (agent, service, runner). The role and flags of an entry come
+  from :func:`group_grant`, the one table in code that matches
+  ``docs/decisions/login-role-groups.md``. When the list is not empty,
+  ``tenant_id`` / ``tenant_role`` / ``approver`` hold the values of the
+  **current** tenant's entry, picked per request by
+  :func:`~meho_backplane.auth.current_tenant.select_current_tenant`
+  (#5239); the flat ``tenant_id`` / ``tenant_role`` / ``approver`` claims
+  are not used.
+* ``tenant_chosen`` — ``False`` only for a status answer (``meho status``,
+  ``meho_status``) of a login with several tenants that named no tenant.
+  The tenant fields then hold the first entry and must not be used for
+  any tenant work. ``True`` everywhere else.
+* ``role_from_platform_admin`` — ``True`` when a platform admin works in a
+  tenant where they have no role group, so the role (``tenant_admin``)
+  comes from the platform admin group (#5239). The audit rows of the
+  request record it as ``tenant_role_source: platform_admin``.
 
 Email validation uses pydantic's ``EmailStr`` (powered by
 ``email-validator``); a malformed ``email`` claim from Keycloak is a
@@ -327,9 +342,20 @@ class Operator(BaseModel):
     auth_time: int | None = None
     #: Every tenant the person is in, with the login group in each, in
     #: token order (#5236). Empty when the token has no ``meho_tenants``
-    #: claim, and always empty for a machine login. Not used yet: the
-    #: current tenant still comes from ``tenant_id`` / ``tenant_role``.
+    #: claim, and always empty for a machine login. The current tenant is
+    #: picked from it per request (#5239).
     tenants: tuple[TenantMembership, ...] = ()
+    #: How the person signed in, from the ``acr`` claim. ``None`` when absent.
+    acr: str | None = None
+    #: The Keycloak sign-in session id, from the ``sid`` claim. ``None`` when
+    #: absent. With ``auth_time`` it names one sign-in, so one sign-in allows
+    #: one approval (#3979).
+    sid: str | None = None
+    #: ``False`` only for a status answer of a login with several tenants
+    #: and no chosen tenant (#5239). Never use the tenant fields then.
+    tenant_chosen: bool = True
+    #: The role comes from the platform admin group, not a role group (#5239).
+    role_from_platform_admin: bool = False
 
 
 #: Machine (non-human) principal kinds. A human operator authenticates as

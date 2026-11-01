@@ -1,7 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""msad password-age read — ``msad.user.password-expiry`` (safe).
+"""msad password ops — the password-age read and the password set.
+
+* ``msad.user.password-expiry`` (safe) — when one account's password was last
+  set and when it expires.
+* ``msad.user.set-password`` (caution, waits for approval) — set a new
+  password on one account from the secret store, and enable the account.
+
+The password-expiry read
+------------------------
 
 Reads when one account's password was last set and when it expires. The
 script asks ``Get-ADUser`` for the raw attributes (``pwdLastSet``,
@@ -23,16 +31,50 @@ and https://learn.microsoft.com/en-us/windows/win32/adschema/a-pwdlastset.
 The op returns no password and no hash, and takes no secret parameter. The
 identity is interpolated only inside a single-quoted literal via
 ``ps_single_quote`` (the module-wide injection rule).
+
+The password set
+----------------
+
+The op never takes a password as an input. It takes ``password_ref``, a
+``"<vault-path>#<field>"`` reference into the secret store (the same form as
+``secret_env`` of ``linux.script.run``). The handler reads the value only
+when the approved call runs, under the identity of the operator, through the
+connector's one Vault seam (``SshConnector._resolve_secret``). So the
+approval row, the audit row and the broadcast carry the reference, never the
+value.
+
+The value then travels to PowerShell on standard input
+(``pwsh_run(stdin=...)``), not in the script. The script text rides on the
+remote command line (``-EncodedCommand``); standard input does not. The value
+is base64-encoded first, so the console code page of the server cannot change
+non-ASCII characters, and a line break in the value cannot split it. The
+script reads it with ``$input``, turns it into a ``SecureString`` and calls
+``Set-ADAccountPassword -Reset``. An admin reset does not check password
+history or minimum age, so the same call can run twice with the same result.
+
+References:
+https://learn.microsoft.com/en-us/powershell/module/activedirectory/set-adaccountpassword
+and ``$input`` with ``powershell.exe -Command`` in
+https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_automatic_variables
 """
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.pwsh import ps_single_quote, pwsh_run
+from meho_backplane.connectors._shared.vault_creds import (
+    CredentialsReadError,
+    check_param_secret_ref,
+    strip_credential_value,
+)
 from meho_backplane.connectors.msad.ops import SSH_TRANSPORT_NOTE, MsadOp
+from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -41,9 +83,16 @@ if TYPE_CHECKING:
 __all__ = [
     "NEVER_EXPIRES_FILETIME",
     "PASSWORD_OPS",
+    "SET_PASSWORD_OP_ID",
     "msad_user_password_expiry",
+    "msad_user_set_password",
+    "parse_password_ref",
     "password_expiry_fields",
+    "set_password_script",
 ]
+
+#: The op id of the password set.
+SET_PASSWORD_OP_ID: str = "msad.user.set-password"
 
 #: ``msDS-UserPasswordExpiryTimeComputed`` when the password never expires.
 NEVER_EXPIRES_FILETIME: int = 0x7FFFFFFFFFFFFFFF
@@ -133,6 +182,162 @@ def _filetime_to_datetime(value: int | None) -> datetime | None:
 
 def _iso(value: datetime | None) -> str | None:
     return value.strftime("%Y-%m-%dT%H:%M:%SZ") if value else None
+
+
+@dataclass(frozen=True)
+class _VaultRefTarget:
+    """The target shape ``SshConnector._resolve_secret`` needs for one read.
+
+    It carries the operator's vault path as ``secret_ref`` and borrows the
+    real target's ``name`` / ``host`` for the log line, like
+    ``linux.script.run`` does for ``secret_env``.
+    """
+
+    name: str
+    host: str
+    secret_ref: str
+
+
+def parse_password_ref(raw: Any) -> tuple[str, str]:
+    """Check ``password_ref`` and return ``(vault_path, field)``.
+
+    The form is ``"<vault-path>#<field>"``: exactly one ``#``, a non-empty
+    path and field, no control characters. Raises :class:`ValueError` before
+    any SSH or Vault call. The message names the reference, never a value.
+    """
+    if not isinstance(raw, str) or raw.count("#") != 1:
+        raise ValueError("password_ref must be one '<vault-path>#<field>' reference")
+    if any(ch < " " or ch == "\x7f" for ch in raw):
+        raise ValueError("password_ref contains a control character")
+    path, _, field = raw.partition("#")
+    path, field = path.strip(), field.strip()
+    if not path or not field:
+        raise ValueError("password_ref must give a vault path and a field: '<vault-path>#<field>'")
+    return path, field
+
+
+async def _read_password(
+    connector: MsadConnector,
+    target: Any,
+    operator: Operator | None,
+    ref: tuple[str, str],
+) -> str:
+    """Read the password at *ref* from the secret store, under *operator*.
+
+    Errors name the reference, never a value, and stop the op before anything
+    runs on the server. The field must hold a non-empty string: the type is
+    checked on the raw value, because ``strip_credential_value`` turns any
+    value into text (``None`` would become ``"None"``).
+    """
+    path, field = ref
+    host = getattr(target, "host", None)
+    stub = _VaultRefTarget(
+        name=str(getattr(target, "name", None) or "unknown"),
+        host=host if isinstance(host, str) and host else "unknown",
+        secret_ref=path,
+    )
+    # The path comes from the params: check it before the read. A refused
+    # path raises SecretRefScopeError unchanged, so the dispatcher answers
+    # vault_credentials_read_error with only the path's first segment.
+    check_param_secret_ref(operator, path, param="password_ref")
+    try:
+        data = await connector._resolve_secret(stub, operator)
+    except (VaultClientError, CredentialsReadError) as exc:
+        raise ValueError(f"could not read password_ref {path}#{field}: {exc}") from exc
+    if not isinstance(data, dict) or field not in data:
+        raise ValueError(f"password_ref: the secret at {path!r} has no field {field!r}")
+    raw = data[field]
+    if not isinstance(raw, str):
+        raise ValueError(f"password_ref: the field {field!r} at {path!r} is not a string")
+    value = strip_credential_value(raw)
+    if not value:
+        raise ValueError(f"password_ref: the field {field!r} at {path!r} is empty")
+    return value
+
+
+def set_password_script(identity: str, *, enable: bool) -> str:
+    """Return the fixed ``msad.user.set-password`` script for *identity*.
+
+    The password is not in the script: the script reads it, base64-encoded,
+    from standard input. *identity* is a single-quoted literal.
+    """
+    quoted = ps_single_quote(identity)
+    enable_step = f"Enable-ADAccount -Identity {quoted}; " if enable else ""
+    return (
+        "$ErrorActionPreference = 'Stop'; "
+        "$b = @($input)[0]; "
+        "if (-not $b) { throw 'No password arrived on standard input.' }; "
+        "$p = ConvertTo-SecureString -AsPlainText -Force -String "
+        "([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($b))); "
+        "Remove-Variable -Name b; "
+        f"Set-ADAccountPassword -Identity {quoted} -Reset -NewPassword $p; "
+        + enable_step
+        + f"$u = Get-ADUser -Identity {quoted} -Properties 'pwdLastSet'; "
+        "ConvertTo-Json -Compress -InputObject @{ "
+        "SamAccountName = $u.SamAccountName; "
+        "Enabled = $u.Enabled; "
+        "PwdLastSet = $u.pwdLastSet }"
+    )
+
+
+async def msad_user_set_password(
+    connector: MsadConnector,
+    target: Any,
+    params: dict[str, Any],
+    operator: Operator | None = None,
+) -> dict[str, Any]:
+    """Handler for ``msad.user.set-password`` (caution, waits for approval).
+
+    Runs only on the approved path. Reads the password from the secret store
+    now, sends it on standard input, and returns the account state. The
+    result holds no password.
+    """
+    identity = params.get("identity")
+    if not isinstance(identity, str) or not identity.strip():
+        raise ValueError("identity must be a non-empty string")
+    enable = params.get("enable", True)
+    if not isinstance(enable, bool):
+        raise ValueError("enable must be true or false")
+    ref = parse_password_ref(params.get("password_ref"))
+    password = await _read_password(connector, target, operator, ref)
+    stdin = base64.b64encode(password.encode("utf-8")).decode("ascii") + "\n"
+    script = set_password_script(identity, enable=enable)
+    payload = await pwsh_run(connector, target, script, operator=operator, stdin=stdin)
+    data = payload if isinstance(payload, dict) else {}
+    last_set = _filetime_to_datetime(_filetime(data.get("PwdLastSet")))
+    return {
+        "identity": identity,
+        "sam_account_name": data.get("SamAccountName"),
+        "enabled": bool(data.get("Enabled")),
+        "password_last_set": _iso(last_set),
+        "op_class": "write",
+    }
+
+
+async def _set_password_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview for ``msad.user.set-password``: the account and the reference.
+
+    The op is a credential write, so the default preview is suppressed. The
+    reference is a pointer into the secret store, not the value, and no value
+    exists before the approved call runs, so the approver can see which
+    secret will be used. Declines (``None``) on malformed input.
+    """
+    identity = ctx.params.get("identity")
+    try:
+        path, field = parse_password_ref(ctx.params.get("password_ref"))
+    except ValueError:
+        return None
+    if not isinstance(identity, str) or not identity.strip():
+        return None
+    return {
+        "target": getattr(ctx.target, "name", None),
+        "identity": identity,
+        "password_ref": f"{path}#{field}",
+        "enable": ctx.params.get("enable", True) is not False,
+    }
+
+
+register_preview_builder(SET_PASSWORD_OP_ID, _set_password_preview)
 
 
 _IDENTITY_PROP: dict[str, Any] = {
@@ -228,6 +433,99 @@ PASSWORD_OPS: tuple[MsadOp, ...] = (
                 "'password_age_days', 'password_never_expires', 'password_expired', "
                 "'password_expires_at', 'days_to_expiry'} — flat; days_to_expiry is "
                 "null when the password never expires."
+            ),
+        },
+    ),
+    MsadOp(
+        op_id=SET_PASSWORD_OP_ID,
+        handler_attr="msad_user_set_password",
+        summary="Set a new password on one AD account from the secret store, then enable it.",
+        description=(
+            "Reads the password from the secret store when the approved call runs, "
+            "sends it to Set-ADAccountPassword -Reset on standard input, then runs "
+            "Enable-ADAccount. Never takes or returns a password. Safe to run twice. "
+            "A person must approve it."
+        ),
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "identity": _IDENTITY_PROP,
+                "password_ref": {
+                    "type": "string",
+                    "minLength": 3,
+                    "pattern": "^[^#]+#[^#]+$",
+                    "description": (
+                        "Where the new password is in the secret store: "
+                        "'<vault-path>#<field>'. Never the password itself."
+                    ),
+                },
+                "enable": {
+                    "type": "boolean",
+                    "description": "Enable the account after the password is set. Default true.",
+                },
+            },
+            "required": ["identity", "password_ref"],
+            "additionalProperties": False,
+            "examples": [
+                {"identity": "svc-backup", "password_ref": "lab/ad/svc-backup#password"},
+                {
+                    "identity": "jdoe",
+                    "password_ref": "lab/ad/jdoe#password",
+                    "enable": False,
+                },
+            ],
+        },
+        response_schema={
+            "type": "object",
+            "properties": {
+                "identity": {"type": "string", "description": "The identity you asked for."},
+                "sam_account_name": {"type": ["string", "null"]},
+                "enabled": {"type": "boolean"},
+                "password_last_set": {
+                    "type": ["string", "null"],
+                    "description": "ISO 8601 UTC time the password was set.",
+                },
+                "op_class": {"type": "string", "enum": ["write"]},
+            },
+            "required": [
+                "identity",
+                "sam_account_name",
+                "enabled",
+                "password_last_set",
+                "op_class",
+            ],
+            "additionalProperties": False,
+        },
+        group_key="users",
+        tags=("write", "user", "password", "credential"),
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions={
+            "when_to_call": (
+                "Call after msad.user.create, which makes a disabled account without a "
+                "password, to give the account its password and enable it. Also call to "
+                "reset a password. " + SSH_TRANSPORT_NOTE
+            ),
+            "preconditions": (
+                "A person must approve the call. Put the password into the secret store "
+                "first and pass its place as password_ref. Never pass a password in any "
+                "parameter. The password must meet the domain's password rules "
+                "(see msad.domain.settings)."
+            ),
+            "parameter_hints": {
+                "identity": "Required. sAMAccountName / DN / GUID / SID.",
+                "password_ref": (
+                    "Required. '<vault-path>#<field>', for example 'lab/ad/jdoe#password'."
+                ),
+                "enable": "Optional. Default true. Set false to keep the account disabled.",
+            },
+            "output_shape": (
+                "{'identity', 'sam_account_name', 'enabled', 'password_last_set', "
+                "'op_class': 'write'} — no password."
+            ),
+            "next_step": (
+                "Check that enabled is true and password_last_set is now. "
+                "msad.user.password-expiry shows when the password expires."
             ),
         },
     ),

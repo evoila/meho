@@ -11,6 +11,8 @@ They cover:
 - the host steps: the etcd user and group, and RKE2's kernel settings file,
   copied to /etc/sysctl.d and loaded, after RKE2's installer and before RKE2
   starts, wherever the installer put the file;
+- the record of the parts of the etcd account that the install created,
+  which meho-host uninstall reads (#5133);
 - a second run, which is the update and changes nothing;
 - cis_state, which meho-host check (#4638) can call.
 
@@ -43,6 +45,7 @@ from harness import (
 CONFIG = "/etc/rancher/rke2/config.yaml"
 POD_SECURITY = "/etc/rancher/rke2/meho-pss.yaml"
 SYSCTL_FILE = "/etc/sysctl.d/60-rke2-cis.conf"
+ETCD_RECORD = "/etc/meho/etcd-account"
 
 RKE2_POD_SECURITY = (FIXTURES / "rke2-pod-security-cis.yaml").read_text()
 FIXTURE_SHA256 = {
@@ -111,6 +114,12 @@ def run_lib(machine: FakeMachine, snippet: str) -> subprocess.CompletedProcess[s
 class CisTestCase(InstallTestCase):
     def host_text(self, path: str) -> str:
         return self.machine.host_path(path).read_text()
+
+    def recorded(self) -> list[str]:
+        """The parts of the etcd account that the record names, in order."""
+        return [
+            line for line in self.host_text(ETCD_RECORD).splitlines() if not line.startswith("#")
+        ]
 
     def kernel(self, key: str) -> str:
         return self.host_text(kernel_path(key)).strip()
@@ -202,6 +211,42 @@ class HostStepTests(CisTestCase):
         self.assertIn(USERADD, self.machine.calls().splitlines())
         self.assertRegex(self.host_text("/etc/passwd"), r"(?m)^etcd:")
         self.assertRegex(self.host_text("/etc/group"), r"(?m)^etcd:")
+
+    def test_the_record_names_the_user_and_the_group_that_the_install_created(self) -> None:
+        result = self.machine.run()
+
+        self.assert_succeeds(result)
+        self.assertEqual(["user", "group"], self.recorded())
+        self.assertTrue(
+            self.host_text(ETCD_RECORD).startswith("# Written by MEHO install.sh: the parts")
+        )
+        self.assertEqual(0o600, mode(self.machine.host_path(ETCD_RECORD)))
+        self.assertIn("[ok]   created the etcd user and group for RKE2's etcd\n", result.stdout)
+
+    def test_the_record_is_written_before_rke2_starts(self) -> None:
+        self.machine.answer("systemctl_enable_rc", "1")
+
+        self.assertEqual(1, self.machine.run().returncode)
+
+        self.assertEqual(["user", "group"], self.recorded())
+
+    def test_an_existing_user_and_group_get_no_record(self) -> None:
+        self.machine.host_file(
+            "/etc/passwd",
+            "root:x:0:0:root:/root:/bin/bash\netcd:x:991:991::/nonexistent:/sbin/nologin\n",
+        )
+        self.machine.host_file("/etc/group", "root:x:0:\netcd:x:991:\n")
+
+        self.assert_succeeds(self.machine.run())
+
+        self.assertFalse(self.machine.host_path(ETCD_RECORD).exists())
+
+    def test_a_failed_useradd_writes_no_record(self) -> None:
+        self.machine.answer("useradd_rc", "1")
+
+        self.assertEqual(1, self.machine.run().returncode)
+
+        self.assertFalse(self.machine.host_path(ETCD_RECORD).exists())
 
     def test_rke2s_kernel_settings_are_copied_and_loaded(self) -> None:
         result = self.machine.run()
@@ -304,6 +349,7 @@ class HostStepTests(CisTestCase):
         self.assertIn("useradd -r -c etcd user -s /sbin/nologin -M -g etcd etcd\n", calls)
         self.assertNotIn("groupadd", calls)
         self.assertEqual(1, self.host_text("/etc/group").count("etcd:"))
+        self.assertEqual(["user"], self.recorded())
 
     def test_an_existing_etcd_user_gets_only_the_group(self) -> None:
         self.machine.host_file(
@@ -316,6 +362,7 @@ class HostStepTests(CisTestCase):
         calls = self.machine.calls()
         self.assertIn("groupadd -r etcd\n", calls)
         self.assertNotIn("useradd", calls)
+        self.assertEqual(["group"], self.recorded())
 
     def test_settings_that_the_kernel_has_already_are_not_loaded_again(self) -> None:
         for key, value in settings(RKE2_CIS_SYSCTL).items():
@@ -330,7 +377,7 @@ class HostStepTests(CisTestCase):
 
 
 class SecondRunTests(CisTestCase):
-    WATCHED = ("/etc/passwd", "/etc/group", SYSCTL_FILE, POD_SECURITY, CONFIG)
+    WATCHED = ("/etc/passwd", "/etc/group", ETCD_RECORD, SYSCTL_FILE, POD_SECURITY, CONFIG)
 
     def snapshot(self) -> dict[str, tuple[str, int]]:
         found = {}
@@ -357,6 +404,56 @@ class SecondRunTests(CisTestCase):
                 self.assertNotIn(command, calls)
         self.assertIn("[ok]   the etcd user and group for RKE2's etcd exist", result.stdout)
         self.assertNotIn("copied RKE2's kernel settings", result.stdout)
+
+    def test_the_update_keeps_the_record_of_the_first_install(self) -> None:
+        # The update finds the user and group that the first install created.
+        # It creates nothing, so the record stays as the first install wrote it.
+        self.assert_succeeds(self.machine.run())
+        self.machine.mark_installed()
+        record = self.host_text(ETCD_RECORD)
+
+        result = self.machine.run("--confirm-backup")
+
+        self.assert_succeeds(result)
+        self.assertIn("This run installs the same version again.", result.stdout)
+        self.assertEqual(record, self.host_text(ETCD_RECORD))
+        self.assertEqual(["user", "group"], self.recorded())
+
+    def test_an_update_of_an_install_without_a_record_writes_none(self) -> None:
+        # An install.sh from before #5133 wrote no record. The update cannot
+        # know who created the user and group, so it does not guess.
+        self.assert_succeeds(self.machine.run())
+        self.machine.host_path(ETCD_RECORD).unlink()
+        self.machine.mark_installed()
+
+        self.assert_succeeds(self.machine.run("--confirm-backup"))
+
+        self.assertFalse(self.machine.host_path(ETCD_RECORD).exists())
+
+    def test_a_run_after_a_failed_first_run_keeps_the_record(self) -> None:
+        # The first run creates the user and group, then stops at the kernel
+        # settings. install.json does not exist yet, so the second run is a
+        # first install again. It finds the user and group and keeps the
+        # record of the first run.
+        later_file = "/etc/sysctl.d/99-local.conf"
+        self.machine.host_file(later_file, "vm.overcommit_memory = 0\n")
+        self.assert_fails_once(self.machine.run(), "vm.overcommit_memory is 0")
+        self.assertEqual(["user", "group"], self.recorded())
+        self.machine.host_path(later_file).unlink()
+
+        result = self.machine.run()
+
+        self.assert_succeeds(result)
+        self.assertIn("[ok]   the etcd user and group for RKE2's etcd exist", result.stdout)
+        self.assertEqual(["user", "group"], self.recorded())
+
+    def test_a_part_created_later_is_added_to_the_record(self) -> None:
+        self.machine.host_file(ETCD_RECORD, "# comment\ngroup\n")
+
+        result = run_lib(self.machine, "record_etcd_account user")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(["user", "group"], self.recorded())
 
     def test_a_changed_settings_file_is_replaced_by_rke2s_file(self) -> None:
         self.assert_succeeds(self.machine.run())

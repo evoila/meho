@@ -19,6 +19,7 @@ the test path, so the pinned ``DEFAULT_TENANT_ID`` needs no tenant row).
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -37,6 +38,10 @@ from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import OperationRun, OperationRunOrigin, OperationRunStatus
 from meho_backplane.middleware import RequestContextMiddleware
+from meho_backplane.operations.operation_run_service import (
+    MAX_RUN_WAIT_SECONDS,
+    OperationRunService,
+)
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -95,13 +100,14 @@ async def _insert_run(
     result: dict[str, Any] | None = None,
     tenant_id: str = DEFAULT_TENANT_ID,
     op_id: str = "vm.list",
+    identity_sub: str = "op-1",
 ) -> uuid.UUID:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         run = OperationRun(
             id=uuid.uuid4(),
             tenant_id=uuid.UUID(tenant_id),
-            identity_sub="op-1",
+            identity_sub=identity_sub,
             origin=OperationRunOrigin.DIRECT.value,
             connector_id="vmware-rest-9.0",
             op_id=op_id,
@@ -215,6 +221,29 @@ async def test_poll_returns_persisted_result_envelope() -> None:
     assert body["connector_id"] == "vmware-rest-9.0"
 
 
+@pytest.mark.asyncio
+async def test_poll_shows_the_result_only_to_the_person_who_started_the_run() -> None:
+    """Another operator in the tenant sees the run's state, not its result."""
+    envelope = {"status": "ok", "op_id": "vm.list", "result": {"secret": "fake"}}
+    run_id = await _insert_run(
+        status=OperationRunStatus.SUCCEEDED, result=envelope, identity_sub="someone-else"
+    )
+
+    key = make_rsa_keypair("kid-A")
+    client = TestClient(_build_app())
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            f"/api/v1/operations/runs/{run_id}",
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "succeeded"
+    assert body["result"] is None
+    assert "fake" not in response.text
+
+
 def test_poll_unknown_handle_is_404(client: TestClient) -> None:
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
@@ -225,6 +254,59 @@ def test_poll_unknown_handle_is_404(client: TestClient) -> None:
         )
     assert response.status_code == 404
     assert response.json()["detail"] == "operation_run_not_found"
+
+
+@pytest.mark.asyncio
+async def test_poll_with_wait_answers_running_when_the_time_is_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``?wait_seconds=N`` waits, then answers ``running`` as before (#5264)."""
+    monkeypatch.setattr(OperationRunService, "wait_recheck_seconds", 0.2)
+    run_id = await _insert_run(status=OperationRunStatus.RUNNING)
+
+    key = make_rsa_keypair("kid-A")
+    client = TestClient(_build_app())
+    before = time.monotonic()
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            f"/api/v1/operations/runs/{run_id}?wait_seconds=1",
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+    assert response.status_code == 200
+    assert response.json()["status"] == "running"
+    assert time.monotonic() - before >= 1
+
+
+@pytest.mark.asyncio
+async def test_poll_with_wait_on_an_ended_run_answers_at_once() -> None:
+    envelope = {"status": "ok", "op_id": "vm.list", "result": {"vms": []}, "duration_ms": 1.0}
+    run_id = await _insert_run(status=OperationRunStatus.SUCCEEDED, result=envelope)
+
+    key = make_rsa_keypair("kid-A")
+    client = TestClient(_build_app())
+    before = time.monotonic()
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            f"/api/v1/operations/runs/{run_id}?wait_seconds={MAX_RUN_WAIT_SECONDS}",
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+    assert response.status_code == 200
+    assert response.json()["result"] == envelope
+    assert time.monotonic() - before < 10
+
+
+@pytest.mark.parametrize("wait", [MAX_RUN_WAIT_SECONDS + 1, -1])
+def test_poll_with_wait_out_of_range_is_422(client: TestClient, wait: int) -> None:
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            f"/api/v1/operations/runs/{uuid.uuid4()}?wait_seconds={wait}",
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+    assert response.status_code == 422
 
 
 # ---------------------------------------------------------------------------

@@ -90,7 +90,9 @@ def client() -> Iterator[TestClient]:
 
 
 def _token(key: Any, *, role: TenantRole, sub: str = "op-test") -> str:
-    return mint_token(key, sub=sub, tenant_role=role.value, tenant_id=str(_TENANT_A))
+    return mint_token(
+        key, sub=sub, tenant_role=role.value, tenant_id=str(_TENANT_A), fresh_sign_in=True
+    )
 
 
 # Every approval route+method gated by ``_require_operator``.
@@ -473,6 +475,7 @@ def _approve_only_token(key: Any, *, sub: str = "approve-only") -> str:
         tenant_role=TenantRole.READ_ONLY.value,
         tenant_id=str(_TENANT_A),
         approver=True,
+        fresh_sign_in=True,
     )
 
 
@@ -1069,7 +1072,32 @@ def test_list_limit_and_offset_page_the_result(client: TestClient) -> None:
     assert _list_ids(client, tenant_id, "?status=all&limit=2&offset=1") == newest_first[1:3]
 
 
-@pytest.mark.parametrize("query", ["?status=bogus", "?limit=0", "?limit=501", "?offset=-1"])
+def test_list_order_oldest_returns_oldest_first(client: TestClient) -> None:
+    """``order=oldest`` lists ``created_at ASC`` (#3596); paging follows it."""
+    tenant_id = uuid.uuid4()
+    ids = _seed_requests_in_every_state(tenant_id)
+
+    oldest_first = [str(i) for i in ids.values()]
+    assert _list_ids(client, tenant_id, "?status=all&order=oldest") == oldest_first
+    clear_jwks_cache()  # ``_list_ids`` mints a fresh key per call.
+    page = _list_ids(client, tenant_id, "?status=all&order=oldest&limit=2&offset=1")
+    assert page == oldest_first[1:3]
+
+
+def test_list_without_order_is_newest_first_like_order_newest(client: TestClient) -> None:
+    """Omitting ``order`` keeps the newest-first default (back-compat, #3596)."""
+    tenant_id = uuid.uuid4()
+    ids = _seed_requests_in_every_state(tenant_id)
+
+    newest_first = [str(i) for i in reversed(list(ids.values()))]
+    assert _list_ids(client, tenant_id, "?status=all") == newest_first
+    clear_jwks_cache()  # ``_list_ids`` mints a fresh key per call.
+    assert _list_ids(client, tenant_id, "?status=all&order=newest") == newest_first
+
+
+@pytest.mark.parametrize(
+    "query", ["?status=bogus", "?limit=0", "?limit=501", "?offset=-1", "?order=random"]
+)
 def test_list_rejects_bad_query_values(client: TestClient, query: str) -> None:
     """Unknown states and out-of-range paging values are a 422."""
     key = make_rsa_keypair("kid-op-list-bad")

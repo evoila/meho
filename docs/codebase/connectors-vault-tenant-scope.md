@@ -61,6 +61,64 @@ the dispatcher passes the real `Operator` to typed handlers
 (`operations/_branches.py` `dispatch_typed`). **No operator-threading
 refactor was needed.**
 
+**Paths that could move are refused.** A path that starts with the
+tenant prefix is still refused when it has a `.` or `..` segment, a `%`
+(a URL-encoded character such as `%2e%2e` or `%2f`) or a backslash
+(`is_plain_kv_path`). The HTTP client or Vault could resolve such a path
+to a place outside the prefix. A KV path never needs any of them.
+
+## Secret refs in operation parameters
+
+Some operations take a secret ref as a parameter, not only the target's
+own `secret_ref`. Examples: `secret_env` of `linux.script.run`,
+`password_ref` of `msad.user.set-password`, `password_secret_ref` (and
+`password_secret_mount`) of the Keycloak, VCF Automation, VCF Installer
+and vCenter appliance operations, `data_secret_ref` /
+`string_data_secret_ref` of `k8s.secret.create` / `k8s.secret.update`,
+`guest_secret_ref`, `destination_token_ref`, and `secret_ref` of
+`srm.remote_login`.
+
+Every one of these refs passes `check_param_secret_ref`
+(`connectors/_shared/vault_creds.py`) before any read:
+
+- **Vault ref** (`vault:` or schemeless on a Vault install): the same
+  `enforce_tenant_scope` check as above, on `<mount>/<path>`. So a free
+  mount parameter cannot leave the tenant subtree either.
+- **Google Secret Manager ref** (`gsm:` or schemeless on a
+  `CREDENTIAL_BACKEND=gsm` install): the project must be listed in
+  `GSM_PARAM_ALLOWED_PROJECTS` (comma-separated project ids). The list is
+  empty by default, so every such ref is refused until an operator lists
+  the projects. MEHO reads these secrets with its own Google identity, so
+  there is no tenant boundary on the Google side.
+- **Any other store kind** (for example `wrapped:`) is refused.
+
+A refused ref raises `SecretRefScopeError`, a `SecretRefReadError`. The
+dispatcher turns it into the `vault_credentials_read_error` result, which
+names the param and the first path segment only. The operation does not
+run. `load_param_secret_data` calls the check itself; the operations that
+read through another seam (`linux.script.run`, `msad.user.set-password`,
+the Kubernetes secret writes, the VCF Automation user writes) call it
+right before their read.
+
+## Check-runner reads
+
+The sensor check runner reads target secrets for every tenant. Two rules
+keep that inside each sensor's tenant:
+
+- **Each read is checked.** `VaultCredentialBackend.load_secret_data` runs
+  `enforce_tenant_scope` for an operator with `check_runner_dispatch`
+  set. The runner's operator carries the sensor's `tenant_id`, so a read
+  outside that tenant's subtree raises `VaultTenantScopeError` and the
+  sensor reads `unknown`.
+- **The runner needs its own Vault role.** With a service principal
+  (`CHECK_RUNNER_CLIENT_ID` / `CHECK_RUNNER_CLIENT_SECRET`) on an install
+  that uses Vault (`VAULT_ADDR` set), the runner does not start unless
+  `VAULT_CHECK_RUNNER_ROLE` names a role of its own (not the shared
+  `VAULT_OIDC_ROLE`). It logs `sensor_runner_refused` with the fix, and the
+  watchdog reports the runner as stalled. See
+  `docs/cross-repo/vault-provisioning.md`, "Bounding the check-runner
+  principal".
+
 ## The namespace convention
 
 The rule is configured by one setting,
@@ -296,7 +354,8 @@ importing clean and failing every dispatch with an opaque Vault
 `enforce_tenant_scope`: the match candidate is the normalised
 mount-pinned `<mount>/<secret_ref>` (the dispatch-time credential read
 addresses the default `secret` mount), matching is on a path-segment
-boundary, and the empty-prefix opt-out makes the gate a no-op. Only an
+boundary, a ref with a `.` / `..` segment, a `%` or a backslash is
+refused, and the empty-prefix opt-out makes the gate a no-op. Only an
 *explicit* ref is checked — the derived per-tenant default (#1723) and
 an explicit-null clear pass untouched.
 
@@ -340,6 +399,13 @@ out-of-namespace deny, look-alike sibling prefix, cross-mount, disabled
 default, system-tenant exemption) plus dispatch-level coverage that **every**
 KV-v2 handler denies a cross-tenant path (`exception_class=VaultTenantScopeError`,
 no Vault login) and allows an in-namespace path unchanged.
+
+[`backend/tests/test_param_secret_ref_scope.py`](../../backend/tests/test_param_secret_ref_scope.py):
+secret refs in operation parameters (own tenant passes; another tenant,
+`..`, `.`, URL-encoded and backslash variants and a free mount are
+refused before any Vault call; the `gsm:` allowlist and its empty
+default; one test per operation family), the check-runner start rule and
+per-read check, and the target write gate's `..` refusal.
 
 The #2091 write-time gate is covered in
 [`backend/tests/test_api_v1_targets.py`](../../backend/tests/test_api_v1_targets.py)

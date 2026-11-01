@@ -273,6 +273,11 @@ async def device_change_result_unknown(
     and ``tasks_error`` says what could not be read. When only the task read
     failed, the question is kept. The ``error`` issue makes the dispatcher
     record the call as failed.
+
+    ``guidance`` is MEHO's own text: it names the task ids and the question
+    id, never the question text or a read error. An approval shows it to the
+    approver in the run summary (#5377); the details stay in ``vm_question``
+    and ``tasks_error``.
     """
     try:
         state = await read_vm_wait_state(connector, operator, target, vm_moid)
@@ -284,7 +289,7 @@ async def device_change_result_unknown(
             "tasks_error": f"the VM read failed: {preview_failure_reason(exc)}",
         }
     if state["tasks_error"] is not None:
-        tasks = f"unknown, {state['tasks_error']}"
+        tasks = "unknown, see tasks_error"
     else:
         tasks = ", ".join(t["task"] for t in state["running_tasks"]) or "none found"
     guidance = (
@@ -293,8 +298,8 @@ async def device_change_result_unknown(
     )
     if state["question"] is not None:
         guidance += (
-            " The VM waits on a question: show it to the user and answer it with "
-            "vmware.vm.question.answer."
+            f" The VM waits on question {state['question']['id']}: show it to the user "
+            "and answer it with vmware.vm.question.answer."
         )
     else:
         guidance += " Check the VM again with vmware.vm.question.get."

@@ -146,7 +146,7 @@
           "health"
         ],
         "summary": "Authenticated Health",
-        "description": "Federation-proof authenticated health check (OPERATOR-gated).\n\nSee module docstring for the four-step chain this exercises. The\n``Depends(require_role(TenantRole.OPERATOR))`` dependency wraps\n``verify_jwt_and_bind`` \u2014 the JWT is validated *and*\n``operator_sub`` is bound into structlog contextvars before the\nrole check runs \u2014 and then enforces least privilege: every call\nhere federates a live per-operator Vault credential and reads a\nKV secret, which is not a ``read_only``-rank capability. Callers\nbelow OPERATOR receive 403 ``insufficient_role`` before any Vault\ninteraction; monitoring principals poll ``/health/live`` instead.",
+        "description": "Federation-proof authenticated health check (OPERATOR-gated).\n\nSee module docstring for the four-step chain this exercises. The\n:func:`_status_operator` dependency runs ``verify_jwt_and_bind`` and\nthe ``require_role(TenantRole.OPERATOR)`` check \u2014 the JWT is validated *and*\n``operator_sub`` is bound into structlog contextvars before the\nrole check runs \u2014 and then enforces least privilege: every call\nhere federates a live per-operator Vault credential and reads a\nKV secret, which is not a ``read_only``-rank capability. Callers\nbelow OPERATOR receive 403 ``insufficient_role`` before any Vault\ninteraction; monitoring principals poll ``/health/live`` instead.\n\nA login with several tenants and no chosen tenant (#5239) skips the\nrole check and gets only its tenants and roles (no Vault call).",
         "operationId": "authenticated_health_api_v1_health_get",
         "parameters": [
           {
@@ -1228,7 +1228,7 @@
           "targets"
         ],
         "summary": "Describe Target",
-        "description": "Describe a target by name or alias.\n\nUses :func:`~meho_backplane.targets.resolver.resolve_target` so\ncallers can pass any alias instead of the canonical name. Returns\n404 with near-misses when nothing matches.",
+        "description": "Describe a target by name, alias or id.\n\nUses :func:`_resolve_route_target`: exact name, then alias, then\nid (only when the value is a UUID). Returns 404 with near-misses\nwhen nothing matches.",
         "operationId": "describe_target_api_v1_targets__name__get",
         "parameters": [
           {
@@ -1279,7 +1279,7 @@
           "targets"
         ],
         "summary": "Update Target",
-        "description": "Partially update a target.\n\nOnly fields present in the request body are modified (Pydantic\n``exclude_unset``). ``name`` is not patchable \u2014 rename a target by\ndeleting and re-creating it (v0.2 decision). ``product`` is patchable\nas of G0.14-T4 (#1145); the new value is validated against the\nregistered connector products and an unknown product yields a\nstructured 422 listing the ``valid_products`` so an operator\ntypo-correcting a misregistered target sees the same actionable\ndiagnostic at PATCH time that they would see at probe time.\n``updated_at`` is always refreshed on a successful write.\n\n#2091. An explicit non-null ``secret_ref`` outside the operator's\ntenant subtree is rejected with a structured 422\n(``kind=\"secret_ref_outside_tenant_scope\"``) \u2014 the same write-time\ngate as POST. An explicit ``{\"secret_ref\": null}`` (clear) and a\nPATCH not sending the field are untouched; no-op when the guard is\ndisabled. See :func:`_enforce_secret_ref_tenant_scope`.",
+        "description": "Partially update a target.\n\nOnly fields present in the request body are modified (Pydantic\n``exclude_unset``). ``name`` is not patchable \u2014 rename a target by\ndeleting and re-creating it (v0.2 decision). ``product`` is patchable\nas of G0.14-T4 (#1145); the new value is validated against the\nregistered connector products and an unknown product yields a\nstructured 422 listing the ``valid_products`` so an operator\ntypo-correcting a misregistered target sees the same actionable\ndiagnostic at PATCH time that they would see at probe time.\n``updated_at`` is always refreshed on a successful write.\n\n#2091. An explicit non-null ``secret_ref`` outside the operator's\ntenant subtree is rejected with a structured 422\n(``kind=\"secret_ref_outside_tenant_scope\"``) \u2014 the same write-time\ngate as POST. An explicit ``{\"secret_ref\": null}`` (clear) and a\nPATCH not sending the field are untouched; no-op when the guard is\ndisabled. See :func:`_enforce_secret_ref_tenant_scope`. The path\nvalue is a name, an alias or an id (:func:`_resolve_route_target`).",
         "operationId": "update_target_api_v1_targets__name__patch",
         "parameters": [
           {
@@ -1340,7 +1340,7 @@
           "targets"
         ],
         "summary": "Delete Target",
-        "description": "Soft-delete a target.\n\nG0.14-T4 (#1145) \u2014 recovery path for misregistered targets\n(signal 6 in ``claude-rdc-hetzner-dc#697``). Stamps\n``deleted_at`` on the row instead of removing it so the\nappend-only :attr:`AuditLog.target_id` soft-FK keeps pointing\nat *something* (audit is append-only per v0.1-spec \u00a76); every\nread path filters ``deleted_at IS NULL`` so the row is\ninvisible to dispatch / probe / list / discover after the\nDELETE returns.\n\nCascade-check: counts ``graph_node.target_id`` references\n(G9.1-T1 #448 substrate) and defaults to **409 with the\ncount + a ``?force=true`` hint** when the target is wired\ninto the topology graph. ``?force=true`` proceeds with the\nsoft-delete anyway \u2014 the FK is\n``ON DELETE SET NULL`` so the graph rows survive the delete\nsafely; the operator confirms by passing ``force=true``.\nAudit references are not counted because the audit table\naccumulates a row per authenticated request against the\ntarget and would always block the delete.\n\nReturns 204 on success. The audit row is written by the\n:class:`~meho_backplane.audit.AuditMiddleware` with\n``audit_op_id='targets.delete'`` (mirrors the\n``meho_connector_edit_*`` precedent so cross-tenant audit\nqueries can filter by op id prefix).\n\nRe-deletes collapse to 404 \u2014 the second DELETE goes through\n:func:`~meho_backplane.targets.resolver.resolve_target`\nwhich filters ``deleted_at IS NULL``, so the row no longer\nresolves once the first DELETE flushes.\n\n``tenant_admin`` role required (cross-tenant DELETE returns\nthe standard 404 conflation that :func:`resolve_target`\nenforces).",
+        "description": "Soft-delete a target.\n\nG0.14-T4 (#1145) \u2014 recovery path for misregistered targets\n(signal 6 in ``claude-rdc-hetzner-dc#697``). Stamps\n``deleted_at`` on the row instead of removing it so the\nappend-only :attr:`AuditLog.target_id` soft-FK keeps pointing\nat *something* (audit is append-only per v0.1-spec \u00a76); every\nread path filters ``deleted_at IS NULL`` so the row is\ninvisible to dispatch / probe / list / discover after the\nDELETE returns.\n\nCascade-check: counts ``graph_node.target_id`` references\n(G9.1-T1 #448 substrate) and defaults to **409 with the\ncount + a ``?force=true`` hint** when the target is wired\ninto the topology graph. ``?force=true`` proceeds with the\nsoft-delete anyway \u2014 the FK is\n``ON DELETE SET NULL`` so the graph rows survive the delete\nsafely; the operator confirms by passing ``force=true``.\nAudit references are not counted because the audit table\naccumulates a row per authenticated request against the\ntarget and would always block the delete.\n\nReturns 204 on success. The audit row is written by the\n:class:`~meho_backplane.audit.AuditMiddleware` with\n``audit_op_id='targets.delete'`` (mirrors the\n``meho_connector_edit_*`` precedent so cross-tenant audit\nqueries can filter by op id prefix).\n\nThe path value is a name, an alias or an id (see\n:func:`_resolve_route_target`). Re-deletes collapse to 404 \u2014\nevery lookup step filters ``deleted_at IS NULL``, so the row no\nlonger resolves once the first DELETE flushes.\n\n``tenant_admin`` role required (cross-tenant DELETE, by name or\nby id, returns the standard 404).",
         "operationId": "delete_target_api_v1_targets__name__delete",
         "parameters": [
           {
@@ -1434,7 +1434,7 @@
           "targets"
         ],
         "summary": "Probe Target",
-        "description": "Invoke the registered connector's ``fingerprint`` method for a target.\n\nThe probe verb returns the connector's\n:class:`~meho_backplane.connectors.schemas.FingerprintResult` and\npersists it to ``targets.fingerprint`` so the G0.6 resolver (#388)\ncan pick an implementation without re-probing the live target.\nConnector selection uses\n:func:`~meho_backplane.connectors.resolver.resolve_connector_or_label`\nso this route and the dispatcher consult the same v2 registry\nthrough the same tie-break ladder (G0.14-T1 #1142). Returns:\n\n* **501** when the resolver reports ``no_connector``. ``detail``\n  carries the resolver's exception message naming the target's\n  product slug + the absence of a matching candidate.\n* **409** when the resolver reports ``ambiguous_connector``.\n  ``detail`` carries the resolver's exception message naming the\n  candidate set and the remediation step (set\n  ``target.preferred_impl_id`` to one of them).\n* **500** with the structured ``fingerprint_failed`` envelope from\n  :func:`_build_fingerprint_failed_detail` when the resolved\n  connector's :meth:`fingerprint` raises (G0.15-T1 #1210; mirrors\n  the dispatcher's ``connector_error`` envelope at the route\n  boundary so probe + dispatch agree on the shape of a connector\n  failure \u2014 sub-signal A of ``claude-rdc-hetzner-dc#753``).\n\nNo error branch writes to the DB row; the previously-cached\nfingerprint survives. The outer ``async with session.begin()``\nrolls back on every structured raise (nothing has been flushed by\nthat point), so the column always reflects the *last successful*\nprobe. The target must exist for the probe to fire \u2014 a\nnon-existent target returns 404 via ``resolve_target``.",
+        "description": "Invoke the registered connector's ``fingerprint`` method for a target.\n\nThe probe verb returns the connector's\n:class:`~meho_backplane.connectors.schemas.FingerprintResult` and\npersists it to ``targets.fingerprint`` so the G0.6 resolver (#388)\ncan pick an implementation without re-probing the live target.\nConnector selection uses\n:func:`~meho_backplane.connectors.resolver.resolve_connector_or_label`\nso this route and the dispatcher consult the same v2 registry\nthrough the same tie-break ladder (G0.14-T1 #1142). Returns:\n\n* **501** when the resolver reports ``no_connector``. ``detail``\n  carries the resolver's exception message naming the target's\n  product slug + the absence of a matching candidate.\n* **409** when the resolver reports ``ambiguous_connector``.\n  ``detail`` carries the resolver's exception message naming the\n  candidate set and the remediation step (set\n  ``target.preferred_impl_id`` to one of them).\n* **500** with the structured ``fingerprint_failed`` envelope from\n  :func:`_build_fingerprint_failed_detail` when the resolved\n  connector's :meth:`fingerprint` raises (G0.15-T1 #1210; mirrors\n  the dispatcher's ``connector_error`` envelope at the route\n  boundary so probe + dispatch agree on the shape of a connector\n  failure \u2014 sub-signal A of ``claude-rdc-hetzner-dc#753``).\n\nNo error branch writes to the DB row, so the column always\nreflects the *last successful* probe. The path value is a name,\nan alias or an id (:func:`_resolve_route_target`); no match is 404.",
         "operationId": "probe_target_api_v1_targets__name__probe_post",
         "parameters": [
           {
@@ -3706,7 +3706,7 @@
           "operations"
         ],
         "summary": "Get Operation Run Status",
-        "description": "Poll an async operation run's durable state by handle (the run id).\n\nReads the durable ``operation_run`` row, so it works after the request\nthat submitted the run has returned \u2014 the dropped-response-class fix: the\nfull result envelope is retrievable here even if the submit response was\nlost in transit. An unknown / cross-tenant handle is 404.",
+        "description": "Poll an async operation run's durable state by handle (the run id).\n\nReads the durable ``operation_run`` row, so it works after the request\nthat submitted the run has returned \u2014 the dropped-response-class fix: the\nfull result envelope is retrievable here even if the submit response was\nlost in transit. An unknown / cross-tenant handle is 404.\n\nWith ``wait_seconds`` the answer comes as soon as the run ends, or when\nthe time is up with the run still ``pending`` or ``running``. The wait\nholds no database connection.",
         "operationId": "get_operation_run_status_api_v1_operations_runs__handle__get",
         "parameters": [
           {
@@ -3718,6 +3718,20 @@
               "format": "uuid",
               "title": "Handle"
             }
+          },
+          {
+            "name": "wait_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 50,
+              "minimum": 0,
+              "description": "Wait up to this many seconds for the run to end, then answer. 0 (the default) answers at once. At most 50.",
+              "default": 0,
+              "title": "Wait Seconds"
+            },
+            "description": "Wait up to this many seconds for the run to end, then answer. 0 (the default) answers at once. At most 50."
           },
           {
             "name": "authorization",
@@ -10456,7 +10470,7 @@
           "approvals"
         ],
         "summary": "List Approvals",
-        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired`` / ``?status=withdrawn``, ``?status=all`` for every\nstate (the same sentinel ``meho_approvals_list`` accepts), and by\nchange ticket via\n``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first\n(``created_at DESC``). ``limit`` / ``offset`` page through the\nresult; no ``limit`` returns every match.",
+        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired`` / ``?status=withdrawn``, ``?status=all`` for every\nstate (the same sentinel ``meho_approvals_list`` accepts), and by\nchange ticket via\n``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first\n(``created_at DESC``) by default; ``?order=oldest`` returns\noldest-first (``created_at ASC``, ties broken on ``id``) so a chain of\nrequests under one change ticket reads in the order it was sent\n(#3596). ``limit`` / ``offset`` page through the result; no ``limit``\nreturns every match.",
         "operationId": "list_approvals_api_v1_approvals_get",
         "parameters": [
           {
@@ -10504,11 +10518,27 @@
             "schema": {
               "type": "integer",
               "minimum": 0,
-              "description": "Skip this many requests first (newest first). Defaults to 0.",
+              "description": "Skip this many requests first, in the chosen order. Defaults to 0.",
               "default": 0,
               "title": "Offset"
             },
-            "description": "Skip this many requests first (newest first). Defaults to 0."
+            "description": "Skip this many requests first, in the chosen order. Defaults to 0."
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "oldest",
+                "newest"
+              ],
+              "type": "string",
+              "description": "Sort by creation time. 'newest' (default) lists the newest request first; 'oldest' lists the oldest first, which is the order a chain of requests under one change ticket was sent in.",
+              "default": "newest",
+              "title": "Order"
+            },
+            "description": "Sort by creation time. 'newest' (default) lists the newest request first; 'oldest' lists the oldest first, which is the order a chain of requests under one change ticket was sent in."
           },
           {
             "name": "authorization",
@@ -10663,7 +10693,7 @@
           "approvals"
         ],
         "summary": "Approve Approval Request",
-        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nAsync governed dispatch (#3079): with ``async: true`` the decision is\nstill recorded + audited synchronously, but the resumed op is dispatched\non a background task and the route returns HTTP 202 + a durable run\nhandle (``{\"run_id\", \"status\": \"pending\", \"async\": true}``) instead of\nblocking for the resumed op's full duration. The resume runs through the\nsame exactly-one-resumer claim + policy bypass + audit path the inline\nresume uses. Default (``async`` absent / false) is byte-identical to the\npre-#3079 inline resume below.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully (sync).\n* 202 \u2014 approved; resume launched in the background (``async: true``).\n* 403 \u2014 caller lacks approvals-plane access (neither ``operator`` role\n  nor the ``approver`` capability, #3243), **or** the approver is the\n  requester and self-approval break-glass is disabled (G11.7-T1 #1401).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch, a reason over 2000 characters, or a\n  delegated reason (``Instructed-by:``) missing ``Instruction:`` /\n  ``Refs:`` (#3692).",
+        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nAsync governed dispatch (#3079): with ``async: true`` the decision is\nstill recorded + audited synchronously, but the resumed op is dispatched\non a background task and the route returns HTTP 202 + a durable run\nhandle (``{\"run_id\", \"status\": \"pending\", \"async\": true}``) instead of\nblocking for the resumed op's full duration. The resume runs through the\nsame exactly-one-resumer claim + policy bypass + audit path the inline\nresume uses. Default (``async`` absent / false) is byte-identical to the\npre-#3079 inline resume below.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully (sync).\n* 202 \u2014 approved; resume launched in the background (``async: true``).\n* 401 \u2014 the token shows no fresh sign-in (#3979): its ``auth_time`` is\n  missing or older than ``FRESH_SIGN_IN_MAX_AGE_SECONDS``, or\n  this sign-in already gave an approval. The answer carries\n  ``WWW-Authenticate: Bearer error=\"insufficient_user_authentication\"``\n  with ``max_age`` (RFC 9470). Approve in the web interface, or sign in\n  again. The request stays pending.\n* 403 \u2014 caller lacks approvals-plane access (neither ``operator`` role\n  nor the ``approver`` capability, #3243), **or** the approver is the\n  requester and self-approval break-glass is disabled (G11.7-T1 #1401).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch, a reason over 2000 characters, or a\n  delegated reason (``Instructed-by:``) missing ``Instruction:`` /\n  ``Refs:`` (#3692).",
         "operationId": "approve_approval_request_api_v1_approvals__request_id__approve_post",
         "parameters": [
           {
@@ -10849,13 +10879,77 @@
         }
       }
     },
+    "/api/v1/approvals/{request_id}/rerun": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Rerun Approval Request",
+        "description": "Run an approved request again after its run failed (#5417).\n\nNot a decision, so this route is not on the approvals-plane gate and not\nhuman-only: the requester (a person, an agent or a service principal)\nmay re-run **its own** request. No new approval is needed when nothing\nchanged: same params, same target, same preview, same work reference\n(the ``Meho-Work-Ref`` header), the ``expires_at`` deadline has not\npassed, and MEHO was not updated since the request was made. Otherwise\nthe re-run is refused and the requester asks again. Each re-run, and each\nrefused re-run, writes an ``approval.rerun`` audit row.\n\nHTTP status codes:\n\n* 200 \u2014 the request ran again. ``dispatch_status`` is the run's status.\n* 403 \u2014 the caller did not make the request.\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 the last run did not fail, another re-run is running, or\n  something changed and a new approval is needed.\n* 422 \u2014 MEHO does not keep this request's params; send them again.",
+        "operationId": "rerun_approval_request_api_v1_approvals__request_id__rerun_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RerunRequestBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerunResponseBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/approvals/{request_id}/decide": {
       "post": {
         "tags": [
           "approvals"
         ],
         "summary": "Decide Approval Request",
-        "description": "Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and records the ``approval.{approved,rejected}``\nadd-on step event. Backs the CLI/MCP operator-decision flow where the\noperator approves by id alone.\n\nOn **every approval** the decision then drives a re-dispatch using the\nparams stored on the row at park time (#1503) \u2014 the direct operator op\n(``run_id IS NULL``) and, since #2293, the **agent-run** request\n(``run_id`` set) alike. The exactly-one-resumer claim\n(:func:`~meho_backplane.operations.approval_queue.claim_resume`, won\ninside ``resume_dispatch_after_approval``) makes this safe for\nrun-bound requests: when the in-process agent waiter is alive it wins\nthe claim and ``/decide``'s re-dispatch no-ops with\n``dispatch_status=\"already_resumed\"``; when the waiter is gone\n(wait-timeout, pod restart, run cancelled) ``/decide`` wins the claim\nand executes the approved op, closing the silent-non-execution seam\nwhere the approval committed but nothing ran. Two independent guards\ncoexist: the already-decided 409 prevents a second *decision*, and the\nclaim prevents a second *dispatch* of one decision.",
+        "description": "Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and records the ``approval.{approved,rejected}``\nadd-on step event. Backs the CLI/MCP operator-decision flow where the\noperator approves by id alone.\n\nOn **every approval** the decision then drives a re-dispatch using the\nparams stored on the row at park time (#1503) \u2014 the direct operator op\n(``run_id IS NULL``) and, since #2293, the **agent-run** request\n(``run_id`` set) alike. The exactly-one-resumer claim\n(:func:`~meho_backplane.operations.approval_queue.claim_resume`, won\ninside ``resume_dispatch_after_approval``) makes this safe for\nrun-bound requests: when the in-process agent waiter is alive it wins\nthe claim and ``/decide``'s re-dispatch no-ops with\n``dispatch_status=\"already_resumed\"``; when the waiter is gone\n(wait-timeout, pod restart, run cancelled) ``/decide`` wins the claim\nand executes the approved op, closing the silent-non-execution seam\nwhere the approval committed but nothing ran. Two independent guards\ncoexist: the already-decided 409 prevents a second *decision*, and the\nclaim prevents a second *dispatch* of one decision.\n\nAn approval needs a fresh sign-in or a one-time code (#3979): otherwise\nthe route answers 401 with ``WWW-Authenticate: Bearer\nerror=\"insufficient_user_authentication\"`` and ``max_age`` (RFC 9470),\nand the request stays pending. A rejection needs no fresh sign-in.",
         "operationId": "decide_approval_request_api_v1_approvals__request_id__decide_post",
         "parameters": [
           {
@@ -20010,6 +20104,91 @@
         }
       }
     },
+    "/ui/approvals/in-order": {
+      "get": {
+        "tags": [
+          "ui-approvals"
+        ],
+        "summary": "Approvals In Order Plan",
+        "description": "Render the in-order modal with the steps and a Start button.",
+        "operationId": "approvals_in_order_plan_ui_approvals_in_order_get",
+        "parameters": [
+          {
+            "name": "work_ref",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "title": "Work Ref"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-approvals"
+        ],
+        "summary": "Approvals In Order Run",
+        "description": "Run the steps in order; render what happened to each.",
+        "operationId": "approvals_in_order_run_ui_approvals_in_order_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_approvals_in_order_run_ui_approvals_in_order_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/approvals/badge": {
       "get": {
         "tags": [
@@ -20082,6 +20261,16 @@
               "default": "",
               "title": "Partial"
             }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Order"
+            }
           }
         ],
         "responses": {
@@ -20147,6 +20336,16 @@
               "minimum": 0,
               "default": 0,
               "title": "Offset"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Order"
             }
           }
         ],
@@ -24043,6 +24242,11 @@
             "format": "uuid",
             "nullable": true,
             "title": "Audit Id"
+          },
+          "guidance": {
+            "type": "string",
+            "nullable": true,
+            "title": "Guidance"
           }
         },
         "type": "object",
@@ -24050,7 +24254,8 @@
           "resumed_at",
           "result_status",
           "error_code",
-          "audit_id"
+          "audit_id",
+          "guidance"
         ],
         "title": "ApprovalResumeOutcomeView",
         "description": "What happened when an approved request ran (#3543).\n\nA summary read off the stored result envelope. The result body and the\nfree-text error stay on the owner-only ``/result`` read."
@@ -24521,6 +24726,10 @@
             "type": "string",
             "title": "Event Class"
           },
+          "sandbox_mode": {
+            "type": "boolean",
+            "title": "Sandbox Mode"
+          },
           "broadcast_event_id": {
             "type": "string",
             "format": "uuid",
@@ -24551,10 +24760,11 @@
           "work_ref",
           "policy_decision",
           "event_class",
+          "sandbox_mode",
           "broadcast_event_id"
         ],
         "title": "AuditEntry",
-        "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``tenant_name`` \u2190 LEFT JOIN ``tenant.name`` ON ``audit_log.tenant_id``\n  (#5238). ``None`` when the tenant row is gone; show ``tenant_id`` then.\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``work_ref`` \u2190 ``audit_log.work_ref`` (external change-ticket reference;\n  work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat\n  ``work_ref`` filter on :class:`AuditQueryFilters` is exact-match.\n* ``principal_name`` \u2190 ``payload['principal_name']`` when set. The MCP\n  audit-write helper (``write_mcp_audit_row``) populates it from\n  ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain\n  None pending a separate fix to bind ``name`` to contextvars in\n  ``verify_jwt_and_bind``.\n* ``broadcast_event_id`` \u2014 v0.2 placeholder, always None (FK direction\n  is reversed: ``BroadcastEvent.audit_id`` points at the audit row)."
+        "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``tenant_name`` \u2190 LEFT JOIN ``tenant.name`` ON ``audit_log.tenant_id``\n  (#5238). ``None`` when the tenant row is gone; show ``tenant_id`` then.\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``work_ref`` \u2190 ``audit_log.work_ref`` (external change-ticket reference;\n  work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat\n  ``work_ref`` filter on :class:`AuditQueryFilters` is exact-match.\n* ``principal_name`` \u2190 ``payload['principal_name']`` when set. The MCP\n  audit-write helper (``write_mcp_audit_row``) populates it from\n  ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain\n  None pending a separate fix to bind ``name`` to contextvars in\n  ``verify_jwt_and_bind``.\n* ``sandbox_mode`` \u2190 ``audit_log.sandbox_mode`` (the sandbox mark; #4622)\n* ``broadcast_event_id`` \u2014 v0.2 placeholder, always None (FK direction\n  is reversed: ``BroadcastEvent.audit_id`` points at the audit row)."
       },
       "AuditEventClass": {
         "type": "string",
@@ -25220,6 +25430,32 @@
         },
         "type": "object",
         "title": "Body_approval_reject_ui_approvals__request_id__reject_post"
+      },
+      "Body_approvals_in_order_run_ui_approvals_in_order_post": {
+        "properties": {
+          "work_ref": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Work Ref"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Reason",
+            "default": ""
+          },
+          "confirm_id": {
+            "type": "string",
+            "title": "Confirm Id",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "work_ref"
+        ],
+        "title": "Body_approvals_in_order_run_ui_approvals_in_order_post"
       },
       "Body_bulk_import_ui_topology_edges_bulk_post": {
         "properties": {
@@ -32516,7 +32752,7 @@
           "ended_at"
         ],
         "title": "OperationRunStatusResponse",
-        "description": "Poll response for ``GET /operations/runs/{handle}``.\n\n``result`` carries the full persisted ``OperationResult`` envelope once\nthe run reaches ``succeeded`` (the dropped-response-class fix); ``error``\ncarries the run-crash / reaper reason on a ``failed`` run. Both are\n``None`` while the run is still ``pending`` / ``running``."
+        "description": "Poll response for ``GET /operations/runs/{handle}``.\n\n``result`` carries the full persisted ``OperationResult`` envelope once\nthe run reaches ``succeeded`` (the dropped-response-class fix); ``error``\ncarries the run-crash / reaper reason on a ``failed`` run. Both are\n``None`` while the run is still ``pending`` / ``running``. ``result`` is\nalso ``None`` for anyone but the person who started the run\n(:func:`~meho_backplane.operations.operation_run_service.run_result_visible_to`)."
       },
       "OperationRunSummaryResponse": {
         "properties": {
@@ -32604,10 +32840,20 @@
           "tenant_id": {
             "type": "string",
             "format": "uuid",
+            "nullable": true,
             "title": "Tenant Id"
           },
           "tenant_role": {
-            "$ref": "#/components/schemas/TenantRole"
+            "$ref": "#/components/schemas/TenantRole",
+            "nullable": true
+          },
+          "tenants": {
+            "items": {
+              "$ref": "#/components/schemas/TenantEntry"
+            },
+            "type": "array",
+            "title": "Tenants",
+            "default": []
           }
         },
         "type": "object",
@@ -32619,7 +32865,7 @@
           "tenant_role"
         ],
         "title": "OperatorIdentity",
-        "description": "Operator identity surface exposed to the CLI and MCP ``meho_status``.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only.\n\n``tenant_id`` + ``tenant_role`` (#2746) let a connected MCP session\nconfirm *which tenant and role it runs as* from inside the session \u2014\nthe check the clean-room program's \"logged in as operator, not\ntenant_admin\" discipline needs, and the identity the ``meho_status``\ntool's own doc (``docs/cross-repo/mcp-client-setup.md`` Step 4)\nalready promises. Both are always present on the validated\n:class:`Operator` (JWT claims), so the surface can never omit them;\nthey serialise as a UUID string / role value under\n``model_dump(mode=\"json\")`` \u2014 the same wire shape the\n``meho://tenant/<id>/info`` resource returns."
+        "description": "Operator identity surface exposed to the CLI and MCP ``meho_status``.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only.\n\n``tenant_id`` + ``tenant_role`` (#2746) let a connected MCP session\nconfirm *which tenant and role it runs as* from inside the session \u2014\nthe check the clean-room program's \"logged in as operator, not\ntenant_admin\" discipline needs, and the identity the ``meho_status``\ntool's own doc (``docs/cross-repo/mcp-client-setup.md`` Step 4)\nalready promises. Both are always present on the validated\n:class:`Operator` (JWT claims), so the surface can never omit them;\nthey serialise as a UUID string / role value under\n``model_dump(mode=\"json\")`` \u2014 the same wire shape the\n``meho://tenant/<id>/info`` resource returns.\n\n``tenants`` (#5239) lists every tenant of the person, with the role\nin each, when the token carries a tenant list (empty otherwise). A\nlogin with several tenants that chose none gets ``tenant_id`` and\n``tenant_role`` as ``None``: the status answer then only lists the\ntenants."
       },
       "OrderBy": {
         "properties": {
@@ -33697,6 +33943,10 @@
             "type": "string",
             "title": "Event Class"
           },
+          "sandbox_mode": {
+            "type": "boolean",
+            "title": "Sandbox Mode"
+          },
           "broadcast_event_id": {
             "type": "string",
             "format": "uuid",
@@ -33738,11 +33988,78 @@
           "work_ref",
           "policy_decision",
           "event_class",
+          "sandbox_mode",
           "broadcast_event_id",
           "depth"
         ],
         "title": "ReplayNode",
         "description": "One node of a per-session audit-replay tree (G8.2-T3).\n\nSubclasses :class:`AuditEntry` so it carries every audit field verbatim \u2014\nforward-compatible with the v0.2.next compliance-export contract, which\ntreats a replay node as an audit row plus its position in the session\ngraph. Two structural fields are added:\n\n* ``depth`` \u2014 distance from the session root. ``0`` for roots; assigned\n  during tree assembly in :func:`~meho_backplane.audit_query.replay.replay_session`.\n* ``children`` \u2014 the node's direct children, ordered by ``(occurred_at,\n  id)``. Self-referential \u2014 the forward reference is resolved by the\n  module-level :func:`ReplayNode.model_rebuild` call below.\n\nFrozen like its parent: a node handed to a caller cannot mutate after the\ntree is built."
+      },
+      "RerunRequestBody": {
+        "properties": {
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Params",
+            "description": "The original params, unchanged. Leave out to use the params MEHO stored with the request. Required for a credential write, whose params MEHO keeps only until the first run. Params that do not match the approved ones are refused (409)."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "RerunRequestBody",
+        "description": "POST body for ``\u2026/rerun`` (#5417)."
+      },
+      "RerunResponseBody": {
+        "properties": {
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Approval Request Id"
+          },
+          "attempt": {
+            "type": "integer",
+            "title": "Attempt"
+          },
+          "dispatch_status": {
+            "type": "string",
+            "title": "Dispatch Status"
+          },
+          "dispatch_op_id": {
+            "type": "string",
+            "title": "Dispatch Op Id"
+          },
+          "dispatch_result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              }
+            ],
+            "nullable": true,
+            "title": "Dispatch Result"
+          },
+          "dispatch_error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Dispatch Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_request_id",
+          "attempt",
+          "dispatch_status",
+          "dispatch_op_id",
+          "dispatch_result",
+          "dispatch_error"
+        ],
+        "title": "RerunResponseBody",
+        "description": "Response for ``\u2026/rerun`` (#5417): the attempt number and the run result."
       },
       "ResolvedTargetDescriptor": {
         "properties": {
@@ -33827,10 +34144,23 @@
             "nullable": true,
             "title": "Tls Server Name"
           },
+          "secret_field_map": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Secret Field Map"
+          },
           "extras": {
             "additionalProperties": true,
             "type": "object",
             "title": "Extras"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Updated At"
           }
         },
         "type": "object",
@@ -36643,6 +36973,13 @@
             "nullable": true,
             "title": "Tls Server Name"
           },
+          "secret_field_map": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Secret Field Map"
+          },
           "extras": {
             "additionalProperties": true,
             "type": "object",
@@ -36830,6 +37167,20 @@
             "nullable": true,
             "title": "Tls Server Name"
           },
+          "secret_field_map": {
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "propertyNames": {
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "type": "object",
+            "maxProperties": 50,
+            "title": "Secret Field Map"
+          },
           "extras": {
             "additionalProperties": true,
             "type": "object",
@@ -36957,6 +37308,13 @@
             "nullable": true,
             "title": "Tls Server Name"
           },
+          "secret_field_map": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Secret Field Map"
+          },
           "fingerprint": {
             "additionalProperties": true,
             "type": "object",
@@ -37082,6 +37440,22 @@
             "nullable": true,
             "title": "Tls Server Name"
           },
+          "secret_field_map": {
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1,
+              "nullable": true
+            },
+            "propertyNames": {
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "type": "object",
+            "maxProperties": 50,
+            "nullable": true,
+            "title": "Secret Field Map"
+          },
           "extras": {
             "additionalProperties": true,
             "type": "object",
@@ -37180,6 +37554,35 @@
         ],
         "title": "TemplateSummary",
         "description": "Operator-readable summary row surfaced by ``meho_runbook_list_templates``.\n\nThe list-view projection -- enough to identify a template and its\nlifecycle state without loading the full step list (which\n:class:`ShowTemplateResponse` carries)."
+      },
+      "TenantEntry": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "tenant_role": {
+            "$ref": "#/components/schemas/TenantRole"
+          },
+          "current": {
+            "type": "boolean",
+            "title": "Current"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "name",
+          "tenant_role",
+          "current"
+        ],
+        "title": "TenantEntry",
+        "description": "One tenant of the person, with the role there (#5239).\n\n``current`` is ``True`` for the tenant this request works in."
       },
       "TenantFlightRecorderPolicy": {
         "properties": {

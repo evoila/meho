@@ -417,6 +417,7 @@ def test_happy_path_returns_full_federation_response(
             "email": "alice@example.com",
             "tenant_id": _DEFAULT_TENANT_ID,
             "tenant_role": "operator",
+            "tenants": [],
         },
         "vault": {"reachable": True, "read_ok": True, "detail": "version=11"},
         # #4830: the probe's revisions ride along so an upgrade can be

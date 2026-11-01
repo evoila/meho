@@ -36,6 +36,7 @@ path against a registered typed op.
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
@@ -196,6 +197,10 @@ def _make_operator(
         tenant_role=role,
         principal_kind=principal_kind,
         approver=approver,
+        # A person who just signed in, so the REST approve routes accept the
+        # reviewer (#3979). Each call is a new sign-in.
+        auth_time=int(time.time()),
+        sid=str(uuid.uuid4()),
     )
 
 
@@ -714,6 +719,42 @@ async def test_approve_request_writes_decision_audit_row(session: AsyncSession) 
     # #3733: the park is a gate decision; the approve is an approval decision.
     assert request_rows[0].event_class == "policy_decision"
     assert decision_rows[0].event_class == "approval_decision"
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_decision_row_names_the_role_source(session: AsyncSession) -> None:
+    """A platform admin deciding in a tenant without a role group there (#5239).
+
+    The decision row builds its own payload, so the marker must be on it
+    even when no wrapper row records the request.
+    """
+    requester = _make_operator(sub="requester-sub")
+    reviewer = _make_operator(sub="reviewer-sub", role=TenantRole.TENANT_ADMIN).model_copy(
+        update={"platform_admin": True, "role_from_platform_admin": True}
+    )
+    params: dict[str, Any] = {}
+    pending = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.write",
+        target=None,
+        params=params,
+        params_hash=compute_params_hash(params),
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as s2:
+        await approve_request(s2, pending.id, operator=reviewer, params=params)
+        await s2.commit()
+
+    async with get_sessionmaker()() as fresh:
+        rows = (
+            await fresh.execute(select(AuditLog).where(AuditLog.method == "APPROVAL"))
+        ).scalars()
+        by_path = {row.path: row.payload for row in rows}
+    assert by_path["approval.decision"]["tenant_role_source"] == "platform_admin"
+    assert "tenant_role_source" not in by_path["approval.request"]
 
 
 @pytest.mark.asyncio

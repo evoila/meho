@@ -179,6 +179,7 @@ async def _resolve_value_inputs(
                     target,
                     dict(refs),
                     mount=str(params.get(mount_field) or DEFAULT_KV_MOUNT).strip(),
+                    param=ref_field,
                     op_id=_OP_UPDATE,
                 )
             )
@@ -460,8 +461,8 @@ _SECRET_DELETE_LLM: dict[str, Any] = {
     "output_shape": "{name, namespace, deleted}.",
     "next_step": (
         "If the preview lists workloads that use the Secret, change them first "
-        "(k8s.apply) or keep the Secret. After the delete, k8s.cr.list of secrets "
-        "in the namespace no longer shows it."
+        "(k8s.apply) or keep the Secret. After the delete, k8s.secret.list in the "
+        "namespace no longer shows it."
     ),
 }
 

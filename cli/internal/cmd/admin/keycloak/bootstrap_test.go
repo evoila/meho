@@ -1025,8 +1025,19 @@ func TestBootstrap_CLIClientHasDeviceGrantAttribute(t *testing.T) {
 	if cliClient.PublicClient == nil || !*cliClient.PublicClient {
 		t.Errorf("CLI client publicClient = false, want true")
 	}
-	if cliClient.StandardFlowEnabled == nil || *cliClient.StandardFlowEnabled {
-		t.Errorf("CLI client standardFlow should be off")
+	// The browser flow is on for the fresh sign-in of an approval
+	// (#3979): PKCE S256 and loopback redirects only.
+	if cliClient.StandardFlowEnabled == nil || !*cliClient.StandardFlowEnabled {
+		t.Errorf("CLI client standardFlow should be on")
+	}
+	if got := cliClient.Attributes["pkce.code.challenge.method"]; got != "S256" {
+		t.Errorf("CLI client PKCE method = %q, want S256", got)
+	}
+	if !slices.Equal(cliClient.RedirectURIs, []string{"http://127.0.0.1:*"}) {
+		t.Errorf("CLI client redirect URIs = %v, want the 127.0.0.1 loopback only", cliClient.RedirectURIs)
+	}
+	if len(cliClient.WebOrigins) != 0 {
+		t.Errorf("CLI client web origins = %v, want none", cliClient.WebOrigins)
 	}
 }
 
@@ -1554,5 +1565,17 @@ func TestBootstrapClientsCmd_RemovedFlagsStop(t *testing.T) {
 				t.Errorf("err = %v, want unknown flag: %s", err, flag)
 			}
 		})
+	}
+}
+
+// TestBootstrap_ClientDescriptionsFitKeycloak pins the 255-character
+// limit of Keycloak's client description column: a longer description
+// makes the client create fail with HTTP 500.
+func TestBootstrap_ClientDescriptionsFitKeycloak(t *testing.T) {
+	opts := fullOpts().withDefaults()
+	for _, c := range []*clientRep{opts.desiredCLIClient(), opts.desiredMCPClient()} {
+		if n := len(c.Description); n > 255 {
+			t.Errorf("%s description is %d characters, want at most 255", c.ClientID, n)
+		}
 	}
 }

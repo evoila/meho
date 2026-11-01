@@ -30,11 +30,11 @@ from fastapi import HTTPException, status
 from meho_backplane.auth.operator import Operator, is_human_principal
 from meho_backplane.settings import get_settings
 
-__all__ = ["fresh_sign_in_challenge", "has_fresh_sign_in"]
+__all__ = ["CLOCK_SKEW_SECONDS", "fresh_sign_in_challenge", "has_fresh_sign_in"]
 
 #: How far in the future an ``auth_time`` may be, for clock drift between
 #: Keycloak and MEHO.
-_CLOCK_SKEW_SECONDS: Final[int] = 60
+CLOCK_SKEW_SECONDS: Final[int] = 60
 
 
 def has_fresh_sign_in(operator: Operator, *, now: float | None = None) -> bool:
@@ -42,7 +42,7 @@ def has_fresh_sign_in(operator: Operator, *, now: float | None = None) -> bool:
     if not is_human_principal(operator) or operator.auth_time is None:
         return False
     age = (time.time() if now is None else now) - operator.auth_time
-    return -_CLOCK_SKEW_SECONDS <= age <= get_settings().fresh_sign_in_max_age_seconds
+    return -CLOCK_SKEW_SECONDS <= age <= get_settings().fresh_sign_in_max_age_seconds
 
 
 def fresh_sign_in_challenge(detail: str) -> HTTPException:

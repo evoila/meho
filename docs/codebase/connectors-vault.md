@@ -321,9 +321,11 @@ target registration) is documented in
   handlers also return a value-free confirmation (username/mount/policies,
   never the password). `generate_secret_id` mints a SecretID in its
   **response** → `credential_mint`; it is **non-idempotent** (a fresh
-  SecretID per call), flagged as such in its `llm_instructions`, and the
-  minted value reaches only the caller's `OperationResult` (never the
-  audit row or broadcast). `delete` / `approle.write` carry no secret and
+  SecretID per call), flagged as such in its `llm_instructions`. The
+  caller's `OperationResult` carries the SecretID; the audit row's raw
+  copy has it replaced (`[REDACTED:param_name]`, the `credential_mint`
+  rule in `dispatcher._apply_redaction_middleware`), and the broadcast is
+  aggregate-only. `delete` / `approle.write` carry no secret and
   classify plain `write` off their suffix. Registered from its own
   module via the `register_vault_auth_write_operations()` call at the end
   of `register_vault_typed_operations()`. `_reclassify_not_found` /
@@ -451,11 +453,17 @@ target registration) is documented in
   | `vault.token.role.write` | `adapter.post` on `/v1/auth/token/roles/<role_name>` | dangerous | True | `write` |
   | `vault.token.role.read` | `auth.token.read_role` | safe | False | `other` |
   | `vault.token.role.list` | `auth.token.list_roles` | safe | False | `read` |
+  | `vault.token.create_and_store` | `auth.token.create(role_name=...)` / `auth.token.create_orphan`, then the `vault.kv.patch` / `vault.kv.put` or `k8s.secret.update` handler | dangerous | True | `credential_mint` |
 
-  `token.create` mints a client token in its **response** →
-  `credential_mint` (aggregate-only broadcast; the token reaches only the
-  caller's `OperationResult`, never the audit row or feed). It is
-  **non-idempotent** (a fresh token per call). `revoke_accessor` is
+  `token.create` makes a client token but **never returns it**: the
+  handler keeps only the `accessor` and the `policies` from Vault's
+  answer, so the token is in no result, audit row, approval result or run
+  record. MEHO makes the token under its own Vault login for the call, and
+  Vault revokes a child token when that login is revoked at the end of the
+  call. To get a token you can use, call `vault.token.create_and_store`
+  (an orphan token, written to a Vault KV path or a Kubernetes Secret).
+  The op classifies `credential_mint` (aggregate-only broadcast). It is
+  **non-idempotent** (a new token per call). `revoke_accessor` is
   **surgical** — it revokes exactly one token by accessor; there is
   intentionally **no bulk-revoke op** (the vault skill's loudest
   Don't-rule). Token accessors are non-secret reference handles, so they
@@ -506,8 +514,69 @@ target registration) is documented in
   target's `extras["vault_role"]` decides which Vault role makes the
   change.
 
+  **Make a token and store it** (`ops_token_store.py`, with
+  `ops_token_store_schemas.py` and `ops_token_store_preview.py`).
+  `vault.token.create_and_store` makes a token and writes it straight to
+  the place the caller names, so nobody sees it: a KV v2 path on the same
+  Vault target (`store.vault_kv`: `path`, `field` default `token`, `mount`
+  default `secret`), or one key of an existing Kubernetes Secret
+  (`store.k8s_secret`: `target`, `namespace`, `name`, `key`). The steps:
+
+  1. Check the destination before the token exists. `vault_kv`: the path
+     shape and the tenant check. `k8s_secret`: the target exists in the
+     caller's tenant and resolves to the Kubernetes connector, MEHO policy
+     allows `k8s.secret.update` on it (the shared second-target check,
+     `operations/secondary_target_policy.py`: the caller's `deny` refuses,
+     a `needs-approval` verdict counts only on this op's own approved
+     run, and when a reviewer runs the approved request the requester's
+     policy on that target is checked again), and the Secret exists and
+     is not immutable (key names only).
+  2. Make the token under the target's Vault role
+     (`vault_client_for_target`): `POST auth/token/create/<role_name>`,
+     or `auth/token/create-orphan` when no role is given.
+  3. Check `auth.orphan`. **Why the token must be an orphan:** MEHO's own
+     Vault login token is revoked when the login block ends
+     (`vault_client_for_operator` calls `revoke-self`), and Vault revokes
+     every child token with its parent. A token with a parent would die
+     right after the call. So when Vault answers `orphan: false`, MEHO
+     revokes the token at once (still inside the login) and stops; the
+     error says the token role must set `orphan=true`.
+  4. Write the token by calling the handlers directly: `vault_kv_patch`
+     (`vault_kv_put` with `cas=0` when the path is new, so Vault creates
+     it only when it is still missing; a path another writer made in the
+     meantime is kept and the call fails), or `k8s_secret_update` in
+     `patch` mode. No second operation is started, so the token is never
+     in any operation's parameters or audit row.
+  5. On any failure after step 2, also a cancellation, revoke the new token
+     with the token itself (`auth/token/revoke-self`, in Vault's `default`
+     policy), shielded from cancellation. A cancellation that arrives
+     while Vault is still making the token waits for Vault's answer
+     (`_create_token`), so the token Vault may have made is revoked too.
+     When that revoke also fails, the error names the accessor and
+     `vault.token.revoke_accessor`.
+  6. Return `{accessor, expire_time, ttl_seconds, policies, stored_to}`;
+     `expire_time` is the creation time plus `auth.lease_duration`. A
+     `credential_mint` op keeps a part of its answer only through its own
+     hint, so a `result_scalars` hint keeps the three scalars inline and a
+     `result_objects` hint keeps `stored_to` when a long policy list is
+     moved behind a result handle.
+
+  The op is pinned `credential_mint` (aggregate-only broadcast, no
+  flight-recorder bodies) and its tags mark it secret-bearing, so the
+  dispatcher withholds error message text; every error carries MEHO's own
+  text as `remediation`. A preview builder shows the token settings and
+  the destination. A permission preflight probes, under the target's role,
+  `update` on the create path and, for a `vault_kv` store, `create` +
+  `read` + `update` on `<mount>/data/<path>` (what `vault.kv.put` and
+  `vault.kv.patch` need). For a `k8s_secret` store it also records the
+  requester's policy for `k8s.secret.update` on that target on the
+  approval card (`requester_denied`). The token role and policy setup is in
+  [`docs/cross-repo/connector-vault-policy.md`](../cross-repo/connector-vault-policy.md)
+  §6.8. Coverage in `test_connectors_vault_token_store.py` and the
+  dev-mode lane of `tests/integration/test_connectors_vault_dev_e2e.py`.
+
   Both groups register from `ops_identity.py` / `ops_identity_oidc.py` / `ops_token.py` /
-  `ops_token_role.py` spec tables, composed by the thin
+  `ops_token_role.py` / `ops_token_store.py` spec tables, composed by the thin
   `register_vault_identity_token_operations()` registrar
   (`ops_identity_token.py`), which is queued from the package `__init__`
   as its own lifespan registrar entry (independent of the KV / sys / auth
@@ -528,8 +597,9 @@ target registration) is documented in
 | `vault.kv.delete` | `delete_secret_versions` | dangerous | `write` |
 | `vault.kv.metadata.delete` | `delete_metadata_and_all_versions` | destructive | `write` |
 | `vault.kv.folder.delete` | `list_secrets` + `read_secret_metadata` + `delete_secret_versions` | dangerous | `write` |
+| `vault.kv.compare` | `read_secret_version` (per copy) | safe | `credential_read` |
 
-All eight register into operation group `kv`.
+All nine register into operation group `kv`.
 
 **Folder delete (`vault.kv.folder.delete`, `ops_kv_folder.py`).** Soft-deletes
 many secrets under one folder with one approval. Before it, each secret
@@ -582,6 +652,41 @@ needed its own `vault.kv.delete` call and its own approval.
   (`vault_capabilities_preflight`). When one is missing the call is refused
   with `write_capability_denied` naming that path, and no approval is
   requested.
+**Compare copies (`vault.kv.compare`, `kv_compare.py`).** Checks that 2 to
+10 copies of one secret hold the same value, without showing it. Params:
+`paths`, a list of `{path, key, mount?}`. The first item is the reference.
+
+- Each copy is read with the caller's own Vault login (same role and same
+  tenant guard as `vault.kv.read`).
+- The value under `key` becomes a `StoredValue`: its kind (`text` for a
+  string, `json` for any other JSON value) and its bytes (UTF-8 text, or
+  canonical JSON). Two copies match only when the kind and the bytes
+  match, compared by `hmac.compare_digest` (constant time); then the value
+  is dropped. So the string `"123"` never matches the number `123`, and
+  `"null"` never matches `null`.
+- Answer: `{same, copies: [{mount, path, key, found, matches_first,
+  version, reason}]}`. `same` is true only when every copy was found and
+  matches. Never a value, never a hash: a hash of a short password can be
+  guessed offline.
+- A copy that cannot be read does not fail the call. It answers
+  `found: false` with `reason` `forbidden` (Vault 403, or a path outside
+  the caller's tenant), `not_found` (no secret, or the latest version is
+  deleted) or `key_not_found`. A login failure, an unreachable Vault or a
+  path that repeats the mount segment still fails the whole call.
+- The op id is on `_CREDENTIAL_READ_OPS`. The backplane reads secret
+  values to answer it, so the flight recorder never stores a vendor body
+  for it and the broadcast feed shows only the outcome.
+- `read_kv_copy`, `compare_copies` and `text_value` are shared with
+  `k8s.secret.compare_to_ref` (a Kubernetes Secret key against one Vault
+  copy; see `connectors-kubernetes.md`).
+
+**Empty folder (`vault.kv.list`, #5231).** Vault answers a LIST on an
+empty or missing folder with a `404`, which hvac raises as
+`InvalidPath`. Like `vault.identity.list`, `vault.token.list_accessors`
+and `vault.token.role.list`, `vault.kv.list` turns that `404` into
+`{"keys": []}` with `status: ok`, so an agent can tell "the folder is
+empty" from "something broke". A permission denial (`Forbidden`) is
+still an error.
 
 **Permanent delete (`vault.kv.metadata.delete`, #3424).** `kv.delete` is a
 soft delete: Vault keeps the data and an undelete brings it back.
@@ -693,7 +798,8 @@ The G6 broadcast publisher emits an aggregate-only payload for
 `credential_read` and `audit_query` ops. The sensitivity class is
 derived **from the op-id**, not a per-descriptor field:
 `broadcast.events.classify_op` consults the `_CREDENTIAL_READ_OPS`
-allowlist (currently `{vault.kv.read, vault.kv.list}`), the
+allowlist (for this connector `{vault.kv.read, vault.kv.list,
+vault.kv.compare}`), the
 `_CREDENTIAL_WRITE_OPS` allowlist (G11.7-T1 #1401 / G3.15-T1 #1409 —
 `{vault.kv.put, vault.kv.patch, vault.auth.userpass.write,
 vault.auth.userpass.update_password, k8s.secret.create, k8s.job.create}`),
@@ -717,11 +823,14 @@ secret in full. The auth-write ops (G3.15-T3 #1411)
 `vault.auth.userpass.write` / `vault.auth.userpass.update_password` are
 also `credential_write` — the password is in their request params.
 Response-side secret-mint ops (`vault.token.create`,
-`vault.auth.approle.generate_secret_id`) classify `credential_mint`
-alongside `harbor.robot.create`: the minted value is in the response, so
-the broadcast collapses to aggregate-only and the audit row keeps only a
-`params_hash`, while the caller's `OperationResult` still carries the
-secret. See `docs/codebase/broadcast.md` for the full sensitivity
+`vault.auth.approle.generate_secret_id`, and
+`vault.token.create_and_store`, which never returns its token) classify
+`credential_mint`
+alongside `harbor.robot.create`: the broadcast collapses to aggregate-only,
+and the audit row's raw copy has every secret-named value replaced.
+`vault.auth.approle.generate_secret_id` and `harbor.robot.create` still
+return the secret in the caller's `OperationResult`; `vault.token.create`
+and `vault.token.create_and_store` return no token at all. See `docs/codebase/broadcast.md` for the full sensitivity
 taxonomy.
 
 `vault.sys.policy.write` (G3.15-T2 #1410) classifies `write` via the

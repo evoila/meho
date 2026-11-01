@@ -114,6 +114,12 @@ Design: `docs/decisions/2026-10-28-several-tenants-per-person.md`.
 
 Turn it on only on a test install: it is a login with fixed admin claims.
 
+It is a machine login (a service account), not a person. So it cannot do
+what only a person may do: registering an agent and creating a grant both
+answer 403 `human_principal_required` (`auth/rbac.py`,
+`ensure_human_principal`). A proof that uses an agent also needs a
+person's login, for example the first admin.
+
 ## The company login (off by default)
 
 A site connects its company login system (an OpenID Connect server such as

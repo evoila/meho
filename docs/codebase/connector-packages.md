@@ -86,6 +86,117 @@ checkout counts as built in. The start log line then says
 `source_checkout=True`. The MEHO image installs MEHO from a wheel, not as an
 editable install, so the full check applies there.
 
+## Writing the connector
+
+A connector package is normal MEHO connector code in its own folder. It
+works the same way as a built-in typed connector (one with hand-written
+operations). The phpIPAM connector is a small, complete example:
+`backend/src/meho_backplane/connectors/phpipam/`.
+
+The folder's `__init__.py` does three things when MEHO imports it:
+
+1. **Register the connector class** with `register_connector_v2` from
+   `meho_backplane/connectors/registry.py`. The class is a subclass of
+   `Connector` (`connectors/base.py`), or of `HttpConnector`
+   (`connectors/adapters/http.py`) for an HTTP API. It sets `product`,
+   `version` and `impl_id`, and has `fingerprint`, `probe` and `execute`.
+2. **Queue the registering function** with `register_typed_op_registrar`
+   from `meho_backplane/operations/typed_register.py`. Do not register the
+   operations at import: the import must stay quick and must not touch the
+   database.
+3. **Register the approval previews**, if a change shows a person what it
+   will do while it waits for approval. phpIPAM does this by importing its
+   `writes` module.
+
+Nothing else runs at import. Other code that runs at import is a reason to
+refuse the package in the review (see "The review checklist").
+
+At start, after every folder is imported, MEHO runs each queued function.
+It calls `register_typed_operation` (same module) once per operation. That
+call stores the operation as a row, with its input and answer schemas, its
+risk level (`safety_level`), whether it waits for approval
+(`requires_approval`), its group and its texts for agents. It is safe to
+run twice: MEHO runs it at every start.
+
+```python
+# meho_backplane/connectors/example_widget/__init__.py
+from meho_backplane.connectors.example_widget.connector import ExampleWidgetConnector
+from meho_backplane.connectors.example_widget.operations import register_widget_operations
+from meho_backplane.connectors.registry import register_connector_v2
+from meho_backplane.operations.typed_register import register_typed_op_registrar
+
+register_connector_v2(
+    product="example",
+    version="1.x",
+    impl_id="example-widget",
+    cls=ExampleWidgetConnector,
+)
+register_typed_op_registrar(register_widget_operations)
+```
+
+```python
+# meho_backplane/connectors/example_widget/operations.py
+async def register_widget_operations(*, embedding_service=None) -> None:
+    from meho_backplane.connectors.example_widget.connector import ExampleWidgetConnector
+    from meho_backplane.operations.typed_register import register_typed_operation
+
+    await register_typed_operation(
+        product=ExampleWidgetConnector.product,
+        version=ExampleWidgetConnector.version,
+        impl_id=ExampleWidgetConnector.impl_id,
+        op_id="example.widget.list",
+        handler=ExampleWidgetConnector.widget_list,
+        summary="List the widgets.",
+        description="...",
+        parameter_schema={"type": "object", "properties": {}},
+        response_schema={"type": "object"},
+        group_key="widgets",
+        when_to_use="...",
+        safety_level="safe",
+        embedding_service=embedding_service,
+    )
+```
+
+Rules the code checks at start:
+
+- `product` must be the first part of `impl_id` (`example` in
+  `example-widget`). Otherwise the start stops. The connector id is
+  `<impl_id>-<version>`, here `example-widget-1.x`.
+- A handler is an async method of the connector class (passed as
+  `ExampleWidgetConnector.widget_list`) or a module-level async function.
+  It takes `operator`, `target` and `params` and returns a dict. A lambda
+  or a nested function is refused.
+- Keep every handler inside the package's own folder. MEHO records the
+  package of an operation from the place of its handler (see "When a
+  package is removed").
+
+MEHO does the rest for every operation: policy, approvals, audit, removal
+of secrets from results, and a result handle (a link to the stored result)
+for a long list. The handler returns plain data.
+
+Before you build, run MEHO's operation contract check
+(`backend/tests/test_operation_contracts.py`) with the package's folder in
+a MEHO checkout. The review for tier 2 asks for it too.
+
+**Which MEHO modules a package may import.** Today no MEHO module is a
+promise to a package: any of them can change in any release. Modules whose
+path has a part that starts with an underscore, such as
+`connectors/_shared/vault_creds.py`, are private by name. The connector
+kit (one module with the names a package may use, #5278) will be the
+promise. Its design is in
+[`docs/decisions/2026-11-01-connector-kit.md`](../decisions/2026-11-01-connector-kit.md).
+Until it ships, test your package against the exact MEHO release you build
+for.
+
+More to read:
+
+- [`docs/architecture/operations-substrate.md`](../architecture/operations-substrate.md):
+  the operation table, the registry and how a call runs.
+- [`docs/architecture/connectors.md`](../architecture/connectors.md): the
+  `Connector` base class, fingerprint and probe.
+- [`connectors-shared-vault-creds.md`](connectors-shared-vault-creds.md):
+  how a connector reads the target's secret.
+
 ## Building an overlay image
 
 An overlay image is the public MEHO image plus one or more connector
@@ -188,6 +299,45 @@ sign it, and the appliance does not accept it.
    platform only).
 4. Deploy it with the chart: set `image.repository`, `image.tag` and
    `image.digest` to your image.
+
+### Try your image on a local kind cluster
+
+To test before you push anywhere, load the image into a
+[kind](https://kind.sigs.k8s.io/) cluster:
+
+1. Build without `--push`, with a tag that is not `latest`. The image goes
+   into the local Docker.
+2. Copy it into the cluster's nodes:
+
+   ```bash
+   kind load docker-image meho-overlay:dev-1 --name <cluster>
+   ```
+
+3. Put these chart values into your values file, in place of the release
+   tag. Do not pass a tag on the `helm` command line: it would win over
+   the file.
+
+   ```yaml
+   image:
+     repository: meho-overlay
+     tag: dev-1
+     digest: ""         # the image is in no registry, so it has no digest
+     pullPolicy: Never  # use the loaded image; never try to pull it
+   ```
+
+4. Install MEHO with real login, policy and Vault. The kind example file
+   (`deploy/values-examples/values-kind.yaml`) uses mocks only. Use the
+   recipe with MEHO's built-in parts in
+   [`docs/deploying.md`, "A throwaway install with the built-in parts"](../deploying.md#a-throwaway-install-with-the-built-in-parts).
+5. Check that `GET /version` lists your package under `connector_packages`.
+
+A test vendor often has no TLS and sits on a private address:
+
+- A vendor that answers on plain HTTP needs `extras.scheme: http` on its
+  target. The default is `https`.
+- A vendor on a private address needs that address or range in
+  `config.targetSsrfAllowlist`. MEHO refuses private addresses by default
+  ([`target-ssrf-guard.md`](target-ssrf-guard.md)).
 
 ### Tier 2: an image evoila signs
 
@@ -331,10 +481,15 @@ MEHO (ingested ops are `NULL` too).
   lookup do not see it. A group that holds only such rows is hidden too.
 - A call or a preview of such an op answers
   `connector_package_not_installed`, with the package name in
-  `extras.package`.
+  `extras.package`. This holds only for an op that is on for the
+  caller's tenant. An op that an operator turned off answers
+  `unknown_op`, as it does with the package installed.
 - Nothing is deleted or changed. When the package is installed again,
-  the rows are visible again with the operator's settings on them, for
-  example an op the operator turned off stays off.
+  the rows are visible again. An op the operator turned off stays off.
+  But the start writes the texts from code again: an operator's own
+  description (`custom_description`) and agent instructions
+  (`llm_instructions`) do not come back (#5321). The same happens to
+  every typed op at every start.
 - When the package registers its ops again, it can raise an op's risk
   level or turn on its approval requirement, but never lower them. A
   stricter value saved on the row, for example one an operator set,
@@ -385,6 +540,8 @@ in.
 
 - `backend/src/meho_backplane/connector_packages.py`
 - `backend/src/meho_backplane/connectors/registry.py`
+- `backend/src/meho_backplane/operations/typed_register.py`
+- `backend/src/meho_backplane/connectors/phpipam/` — a small typed connector to copy from
 - `backend/tests/test_connector_packages.py`
 - `backend/tests/test_connector_package_owner.py`
 - `deploy/connector-overlay/` and `backend/tests/test_connector_overlay_build.py`

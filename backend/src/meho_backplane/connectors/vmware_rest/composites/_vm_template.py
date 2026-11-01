@@ -31,6 +31,8 @@ from meho_backplane.connectors.vmware_rest.composites._teardown import (
 )
 from meho_backplane.connectors.vmware_rest.composites._teardown_reads import moid_problem
 from meho_backplane.connectors.vmware_rest.composites._vm_lifecycle import (
+    _VIM_SUB_OPS_VM_TEMPLATE_MARK,
+    _VIM_SUB_OPS_VM_TEMPLATE_UNMARK,
     OP_MARK_AS_TEMPLATE,
     OP_MARK_AS_VIRTUAL_MACHINE,
     POWERED_OFF,
@@ -274,6 +276,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_TEMPLATE_MARK_LLM_INSTRUCTIONS,
         preview=_mark_preview,
+        governed_subops=_VIM_SUB_OPS_VM_TEMPLATE_MARK,
         classifier_other=True,
     ),
     CompositeSpec(
@@ -293,6 +296,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_TEMPLATE_UNMARK_LLM_INSTRUCTIONS,
         preview=_unmark_preview,
+        governed_subops=_VIM_SUB_OPS_VM_TEMPLATE_UNMARK,
         classifier_other=True,
     ),
 )

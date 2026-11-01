@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from meho_backplane.connectors.vmware_rest.composites import _write
 from meho_backplane.connectors.vmware_rest.composites._host_cluster_llm_instructions import (
     HOST_CLUSTER_LLM_INSTRUCTIONS,
 )
@@ -71,6 +72,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.cluster.patch"],
         preview=_cluster_patch_preview,
+        governed_subops=_write._SUB_OPS_CLUSTER_PATCH + _write._VIM_SUB_OPS_CLUSTER_PATCH,
     ),
     CompositeSpec(
         op_id="vmware.composite.cluster.drs_rule.create",
@@ -89,6 +91,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.cluster.drs_rule.create"],
         preview=_cluster_drs_rule_create_preview,
+        governed_subops=_write._VIM_SUB_OPS_CLUSTER_DRS_RULE_CREATE,
     ),
     CompositeSpec(
         op_id="vmware.composite.cluster.drs_vm_host_rule.create",
@@ -109,6 +112,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
             "vmware.composite.cluster.drs_vm_host_rule.create"
         ],
         preview=_cluster_drs_vm_host_rule_create_preview,
+        governed_subops=_write._VIM_SUB_OPS_CLUSTER_DRS_VM_HOST_RULE_CREATE,
     ),
     CompositeSpec(
         op_id="vmware.composite.resource_pool.create",
@@ -127,6 +131,8 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.resource_pool.create"],
         preview=_resource_pool_create_preview,
+        governed_subops=_write._SUB_OPS_RESOURCE_POOL_CREATE
+        + _write._VIM_SUB_OPS_RESOURCE_POOL_CREATE,
     ),
     CompositeSpec(
         op_id="vmware.composite.resource_pool.delete",
@@ -145,6 +151,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=HOST_CLUSTER_LLM_INSTRUCTIONS["vmware.composite.resource_pool.delete"],
         preview=_resource_pool_delete_preview,
+        governed_subops=_write._SUB_OPS_RESOURCE_POOL_DELETE,
     ),
     CompositeSpec(
         op_id="vmware.composite.folder.create",
@@ -163,5 +170,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.folder.create"],
         preview=_folder_create_preview,
+        governed_subops=_write._VIM_SUB_OPS_FOLDER_CREATE,
     ),
 )

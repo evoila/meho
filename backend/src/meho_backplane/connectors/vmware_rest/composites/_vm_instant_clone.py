@@ -26,6 +26,7 @@ from meho_backplane.connectors.vmware_rest.composites._teardown import (
 )
 from meho_backplane.connectors.vmware_rest.composites._teardown_reads import moid_problem
 from meho_backplane.connectors.vmware_rest.composites._vm_lifecycle import (
+    _VIM_SUB_OPS_VM_INSTANT_CLONE,
     POWERED_ON,
     STATUS_NOT_CONFIRMED,
     STATUS_NOT_FOUND,
@@ -235,6 +236,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_INSTANT_CLONE_LLM_INSTRUCTIONS,
         preview=_instant_clone_preview,
+        governed_subops=_SUB_OPS_VM_INSTANT_CLONE + _VIM_SUB_OPS_VM_INSTANT_CLONE,
         classifier_other=True,
     ),
 )

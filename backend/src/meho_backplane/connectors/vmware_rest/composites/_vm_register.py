@@ -36,6 +36,8 @@ from meho_backplane.connectors.vmware_rest.composites._teardown_reads import (
     moref_values,
 )
 from meho_backplane.connectors.vmware_rest.composites._vm_lifecycle import (
+    _VIM_SUB_OPS_VM_REGISTER,
+    _VIM_SUB_OPS_VM_UNREGISTER,
     OP_REGISTER_VM_TASK,
     OP_UNREGISTER_VM,
     POWERED_ON,
@@ -360,6 +362,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_REGISTER_LLM_INSTRUCTIONS,
         preview=_register_preview,
+        governed_subops=_VIM_SUB_OPS_VM_REGISTER,
         classifier_other=True,
     ),
     CompositeSpec(
@@ -379,6 +382,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_UNREGISTER_LLM_INSTRUCTIONS,
         preview=_unregister_preview,
+        governed_subops=_VIM_SUB_OPS_VM_UNREGISTER,
         classifier_other=True,
     ),
 )

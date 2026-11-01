@@ -26,10 +26,6 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors.vmware_rest.composites.schemas import (
-    CLUSTER_MOID_PATTERN,
-    HOST_MOID_PATTERN,
-)
 from meho_backplane.connectors.vmware_rest.host_certificate import (
     CERTIFICATE_SCHEMA,
     HOST_CERTIFICATES_GROUP_KEY,
@@ -307,8 +303,8 @@ _NULL_TEXT: Final = ["string", "null"]
 
 _HOST_FIELD: Final[dict[str, Any]] = {
     "type": "string",
-    "pattern": HOST_MOID_PATTERN,
-    "description": "Host id (moid), e.g. host-1001. Find it with GET:/api/vcenter/host.",
+    "minLength": 1,
+    "description": "Managed object id of the host. Find it with GET:/api/vcenter/host.",
 }
 
 _SHOW_PARAMETER_SCHEMA: dict[str, Any] = {
@@ -316,7 +312,7 @@ _SHOW_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {"host": _HOST_FIELD},
     "required": ["host"],
     "additionalProperties": False,
-    "examples": [{"host": "host-1001"}],
+    "examples": [{"host": "<host-id>"}],
 }
 
 _REFUSAL_TEXT: Final = (
@@ -367,7 +363,7 @@ VMWARE_HOST_CERTIFICATE_SHOW_OP = VmwareTypedOp(
             "are left, and whether vCenter marks it as expiring. Call it before and after "
             "a renew or an install."
         ),
-        "parameter_hints": {"host": "Host id (moid), e.g. 'host-21'."},
+        "parameter_hints": {"host": "Managed object id of the host, from GET:/api/vcenter/host."},
         "output_shape": (
             "{status: ok|not_found|needs_vcenter|unreadable, host, host_name, "
             "connection_state, certificate: {kind, subject, issuer, valid_from, valid_to, "
@@ -387,10 +383,13 @@ _TPM_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "cluster": {
             "type": "string",
-            "pattern": CLUSTER_MOID_PATTERN,
-            "description": "Read every host of this cluster (moid, e.g. domain-c7). Or give host.",
+            "minLength": 1,
+            "description": "Managed object id of a cluster: read every host of it. Or give host.",
         },
-        "host": {**_HOST_FIELD, "description": "Read only this host (moid). Or give cluster."},
+        "host": {
+            **_HOST_FIELD,
+            "description": "Managed object id of one host: read only it. Or give cluster.",
+        },
         "include_report": {
             "type": "boolean",
             "default": False,
@@ -402,7 +401,7 @@ _TPM_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "oneOf": [{"required": ["cluster"]}, {"required": ["host"]}],
     "additionalProperties": False,
-    "examples": [{"cluster": "domain-c7"}],
+    "examples": [{"cluster": "<cluster-id>"}, {"host": "<host-id>", "include_report": True}],
 }
 
 _TPM_ROW_SCHEMA: dict[str, Any] = {

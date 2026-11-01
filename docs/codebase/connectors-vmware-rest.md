@@ -5405,15 +5405,15 @@ single ESXi host target answers `needs_vcenter` and nothing is sent.
 | `vmware.host.tpm.attestation` | For the hosts of a cluster, or one host: `capability.tpmSupported`, `tpmVersion`, `txtEnabled` and `summary.tpmAttestation`. With `include_report`, also `HostSystem.QueryTpmAttestationReport` per connected host. | `hosts`: one flat row per host (`tpm_supported`, `tpm_version`, `attestation_status`, `attestation_time`, `attestation_message`, `report_log_reliable`, `report_pcr_count`, `report_event_count`, `read_note`) | `safe` | 8.0, 9.x |
 | `vmware.composite.host.certificate.renew` | Renews the host certificate from the vCenter certificate authority (VMCA): `CertificateManager.CertMgrRefreshCertificates_Task` on vCenter's certificate manager (from `ServiceContent`). The task is polled (600 s). | `status` (`renewed`, `not_verified`, `timeout`, `not_found`, `not_connected`, `needs_vcenter`), `certificate_before`, `certificate_after`, `task` | `dangerous`, waits for approval | 8.0, 9.x |
 | `vmware.composite.host.certificate.csr` | The host makes a new key and a CSR: `HostCertificateManager.GenerateCertificateSigningRequest`. The key stays on the host. | `status` (`generated`, ...), `csr_pem`, `common_name`, the certificate still in use | `caution`, waits for approval | 8.0, 9.x |
-| `vmware.composite.host.certificate.install` | Adds the CA chain to the host's trusted CAs (`ListCACertificates`, `ListCACertificateRevocationLists`, then `ReplaceCACertificatesAndCRLs` with the old list plus the new CAs), then `InstallServerCertificate` and `NotifyAffectedServices`. | `status` (`installed`, `unchanged`, `not_verified`, `invalid_certificate`, ...), `certificate_wanted`, `ca_certificates_added`, `services_notified`, `certificate_before`, `certificate_after` | `dangerous`, waits for approval | 8.0, 9.x (on 8.0 U1 and U2 without `NotifyAffectedServices`) |
+| `vmware.composite.host.certificate.install` | Adds the CA chain to the host's trusted CAs (`ListCACertificates`, `ListCACertificateRevocationLists`, then `ReplaceCACertificatesAndCRLs` with the old list plus the new CAs), then `InstallServerCertificate` and `NotifyAffectedServices`. | `status` (`installed`, `not_verified`, `invalid_certificate`, ...), `certificate_wanted`, `ca_certificates_added`, `services_notified`, `certificate_before`, `certificate_after` | `dangerous`, waits for approval | 8.0, 9.x (on 8.0 U1 and U2 without `NotifyAffectedServices`) |
 
 Code: the shared reads and the group text in `host_certificate.py`; the two
 reads in `typed_ops_host_certificate.py`; the renew, the CSR and the approval
 previews in `composites/_host_certificate.py`; the install in
 `composites/_host_certificate_install.py`; the schemas and AI guidance in
-`composites/_host_certificate_schemas.py`; the registry rows and vendor-call
-lists in `composites/_host_certificate_ops.py` (`_register.py` and
-`_governed_subops.py` read them in one place each).
+`composites/_host_certificate_schemas.py`; the registry rows (`COMPOSITES`,
+collected by `_register.py`) and the vendor-call lists (read by
+`_governed_subops.py`) in `composites/_host_certificate_ops.py`.
 
 - **How it calls vCenter.** Every call is a VIM method or a property read,
   sent as VI-JSON (`/sdk/vim25/<release>/...`). The changes go through the
@@ -5425,9 +5425,10 @@ lists in `composites/_host_certificate_ops.py` (`_register.py` and
   certificate before and after, and returns both. The renew answers `renewed`
   only when the dates or the issuer changed, else `not_verified`. The install
   compares the start and end dates the host reads back with the certificate
-  it sent: `installed`, or `not_verified`. When the host already has a
-  certificate with these dates, the install answers `unchanged` and sends
-  nothing.
+  it sent: `installed`, or `not_verified`. The dates alone do not prove that
+  the host has this exact certificate (`certificateInfo` has no fingerprint),
+  so the install always sends: a certificate the host already shows the dates
+  of is installed again, and its CA chain is still added.
 - **Vendor faults.** A task fault or a refused method fails the call with the
   vendor's fault type and text (for example `HostConfigFault` when the
   certificate does not match the key of the last CSR). A poll timeout of the

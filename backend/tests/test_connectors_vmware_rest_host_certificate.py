@@ -13,7 +13,9 @@ sub-op gate. Every answer is checked against the operation's response schema.
   fault (the fault type and text reach the error), a parked gate, and the
   refusals that send nothing;
 * the install: the CA chain is added to the CA certificates the host has,
-  nothing is removed, and the inputs refuse a private key.
+  nothing is removed, a certificate with the dates the host already shows is
+  still installed (the dates do not prove the identity), and the inputs
+  refuse a private key.
 """
 
 from __future__ import annotations
@@ -476,15 +478,39 @@ async def test_install_does_not_add_a_ca_the_host_already_has(gate: GateRecorder
     assert conn.calls_to("ReplaceCACertificatesAndCRLs") == []
 
 
-async def test_install_sends_nothing_when_the_host_has_the_certificate(
+async def test_install_sends_a_certificate_with_the_dates_the_host_already_shows(
+    gate: GateRecorder,
+) -> None:
+    """Matching dates do not prove the host has this certificate (another key or subject)."""
+    conn = CertVim()
+    pem, start, end = make_certificate("other.example.invalid")
+    seed_host(conn, info=info_for(start, end))
+    conn.installed_info = info_for(start, end)
+    out = _check(CERTIFICATE_INSTALL_RESPONSE_SCHEMA, await _install(conn, certificate_pem=pem))
+    assert out["status"] == "installed"
+    [(_path, install)] = conn.calls_to("InstallServerCertificate")
+    assert install == {"cert": pem}
+    assert conn.calls_to("NotifyAffectedServices")
+
+
+async def test_install_adds_the_ca_chain_when_the_dates_already_match(
     gate: GateRecorder,
 ) -> None:
     conn = CertVim()
     pem, start, end = make_certificate()
+    ca_pem, _start, _end = make_certificate("Example CA")
     seed_host(conn, info=info_for(start, end))
-    out = _check(CERTIFICATE_INSTALL_RESPONSE_SCHEMA, await _install(conn, certificate_pem=pem))
-    assert out["status"] == "unchanged"
-    assert gate.calls == []
+    conn.installed_info = info_for(start, end)
+    old_cas, old_crls = list(conn.ca_certs), list(conn.ca_crls)
+    out = _check(
+        CERTIFICATE_INSTALL_RESPONSE_SCHEMA,
+        await _install(conn, certificate_pem=pem, ca_certificates_pem=[ca_pem]),
+    )
+    assert out["status"] == "installed"
+    assert out["ca_certificates_added"] == 1
+    [(_path, replace)] = conn.calls_to("ReplaceCACertificatesAndCRLs")
+    assert replace == {"caCert": [*old_cas, ca_pem], "caCrl": old_crls}
+    assert conn.calls_to("InstallServerCertificate")
 
 
 async def test_install_fault_reaches_the_error(gate: GateRecorder) -> None:

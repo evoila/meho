@@ -20,7 +20,10 @@ The steps, each through the governed write seam:
    certificate.
 
 Then the certificate is read back. MEHO compares its start and end dates with
-the certificate it sent. The certificate and the CA chain are public data; the
+the certificate it sent. The dates alone do not prove that the host has this
+exact certificate (``certificateInfo`` has no fingerprint), so the install
+always sends: a certificate the host already has is installed again, and the
+CA chain is still added. The certificate and the CA chain are public data; the
 input schema refuses any text with ``PRIVATE KEY``.
 """
 
@@ -223,17 +226,6 @@ async def host_certificate_install_composite(
     assert info is not None and info.certificate_manager is not None  # narrowed by refusal
     manager = info.certificate_manager
     before = await read_certificate(connector, target, operator, manager)
-    if _same_dates(before, server):
-        return _answer(
-            "unchanged",
-            host,
-            info,
-            before=before,
-            after=before,
-            certificate_wanted=wanted,
-            ca_certificates_added=0,
-            guidance="The host already has a certificate with these dates. Nothing was sent.",
-        )
     gate, added = await _add_ca_chain(
         connector,
         target,

@@ -1264,7 +1264,6 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
         },
         "vmware.composite.host.certificate.install": {
             "installed",
-            "unchanged",
             "not_verified",
             "invalid_certificate",
             "not_found",

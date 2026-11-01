@@ -18,7 +18,6 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _host_certificate,
     _host_certificate_install,
 )
-from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._host_certificate_schemas import (
     CERTIFICATE_CSR_LLM_INSTRUCTIONS,
     CERTIFICATE_CSR_PARAMETER_SCHEMA,
@@ -30,6 +29,7 @@ from meho_backplane.connectors.vmware_rest.composites._host_certificate_schemas 
     CERTIFICATE_RENEW_PARAMETER_SCHEMA,
     CERTIFICATE_RENEW_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._write import _OP_RETRIEVE_PROPERTIES
 from meho_backplane.connectors.vmware_rest.host_certificate import HOST_CERTIFICATES_GROUP_KEY
 

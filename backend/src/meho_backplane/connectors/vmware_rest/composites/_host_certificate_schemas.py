@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from typing import Any, Final
 
-from meho_backplane.connectors.vmware_rest.composites.schemas import HOST_MOID_PATTERN
 from meho_backplane.connectors.vmware_rest.host_certificate import CERTIFICATE_SCHEMA
 
 __all__ = [
@@ -30,8 +29,8 @@ _NULL_TEXT: Final = ["string", "null"]
 
 _HOST_FIELD: Final[dict[str, Any]] = {
     "type": "string",
-    "pattern": HOST_MOID_PATTERN,
-    "description": "Host id (moid), e.g. host-1001. Find it with GET:/api/vcenter/host.",
+    "minLength": 1,
+    "description": "Managed object id of the host. Find it with GET:/api/vcenter/host.",
 }
 
 #: A public PEM certificate. Text with ``PRIVATE KEY`` is refused before the
@@ -111,7 +110,7 @@ CERTIFICATE_RENEW_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {"host": _HOST_FIELD},
     "required": ["host"],
     "additionalProperties": False,
-    "examples": [{"host": "host-1001"}],
+    "examples": [{"host": "<host-id>"}],
 }
 
 CERTIFICATE_RENEW_RESPONSE_SCHEMA: dict[str, Any] = _response(
@@ -133,7 +132,7 @@ CERTIFICATE_RENEW_LLM_INSTRUCTIONS: dict[str, Any] = {
         "for a certificate from your own certificate authority, use host.certificate.csr and "
         "host.certificate.install instead. Works only on a vCenter target."
     ),
-    "parameter_hints": {"host": "Host id (moid), e.g. 'host-21'."},
+    "parameter_hints": {"host": "Managed object id of the host, from GET:/api/vcenter/host."},
     "output_shape": (
         "{status: renewed|not_verified|timeout|not_found|not_connected|needs_vcenter, host, "
         "host_name, connection_state, certificate_before, certificate_after: {kind, subject, "
@@ -165,7 +164,7 @@ CERTIFICATE_CSR_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["host"],
     "additionalProperties": False,
-    "examples": [{"host": "host-1001"}],
+    "examples": [{"host": "<host-id>"}],
 }
 
 CERTIFICATE_CSR_RESPONSE_SCHEMA: dict[str, Any] = _response(
@@ -240,7 +239,7 @@ CERTIFICATE_INSTALL_PARAMETER_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "examples": [
         {
-            "host": "host-1001",
+            "host": "<host-id>",
             "certificate_pem": _EXAMPLE_PEM,
             "ca_certificates_pem": [_EXAMPLE_CA_PEM],
         }
@@ -261,17 +260,15 @@ _WANTED_SCHEMA: Final[dict[str, Any]] = {
 CERTIFICATE_INSTALL_RESPONSE_SCHEMA: dict[str, Any] = _response(
     [
         "installed",
-        "unchanged",
         "not_verified",
         "invalid_certificate",
         "not_found",
         "not_connected",
         "needs_vcenter",
     ],
-    "installed: the host uses the new certificate. unchanged: it already had a certificate "
-    "with these dates; nothing sent. not_verified: the host took it, but it does not read "
-    "back yet. invalid_certificate: an input is not a PEM certificate; nothing sent."
-    + _COMMON_STATUS_TEXT,
+    "installed: the host uses the new certificate. not_verified: the host took it, but it "
+    "does not read back yet. invalid_certificate: an input is not a PEM certificate; nothing "
+    "sent." + _COMMON_STATUS_TEXT,
     certificate_wanted=_WANTED_SCHEMA,
     ca_certificates_added={
         "type": "integer",
@@ -296,15 +293,16 @@ CERTIFICATE_INSTALL_LLM_INSTRUCTIONS: dict[str, Any] = {
         "The certificate was signed for the host's last signing request "
         "(host.certificate.csr); else the host refuses it. vCenter trusts the same CA and "
         "is set to custom certificate mode, or vCenter can lose the connection to the host. "
-        "The host is connected. Never pass a private key."
+        "The host is connected. Never pass a private key. The install always sends: a "
+        "certificate the host already has is installed again."
     ),
     "parameter_hints": {
         "certificate_pem": "The signed certificate only, not the chain and not a key.",
         "ca_certificates_pem": "The issuing CA, then the root CA. Omit when the host has them.",
     },
     "output_shape": (
-        "{status: installed|unchanged|not_verified|invalid_certificate|not_found|"
-        "not_connected|needs_vcenter, host, host_name, connection_state, certificate_wanted, "
+        "{status: installed|not_verified|invalid_certificate|not_found|not_connected|"
+        "needs_vcenter, host, host_name, connection_state, certificate_wanted, "
         "ca_certificates_added, services_notified, certificate_before, certificate_after, "
         "guidance}."
     ),

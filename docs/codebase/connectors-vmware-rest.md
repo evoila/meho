@@ -4896,6 +4896,103 @@ splits an answer only between objects, so those reads do not use the helper.
 `_retrieve_props_by_moid` and `read_many` read in groups of 50 and refuse an
 answer that still carries a token, so they never return a short list either.
 
+### vSAN changes: turn on and configure vSAN, claim and wipe disks, encryption
+
+What an operator or agent can do now, through MEHO. Every change waits for
+approval.
+
+- Turn vSAN on or off for a cluster, pick ESA when it is turned on, set space
+  efficiency (deduplication and compression) and turn the vSAN performance
+  service on or off.
+- Claim disks of one host for vSAN: an ESA storage pool or an OSA disk group.
+- Wipe disks of one host, so vSAN can claim them. All data on them is lost.
+- Turn data-at-rest or data-in-transit encryption on or off, and rekey it.
+
+| Operation | Risk | Vendor call | What it returns | Versions |
+|---|---|---|---|---|
+| `vmware.composite.vsan.cluster.configure` | `dangerous`, waits for approval | vSAN `VsanVcClusterConfigSystem.VsanClusterReconfig` (`vsanClusterConfig`, `dataEfficiencyConfig`, `perfsvcConfig`) | `accepted` with the vCenter task id and the status read (`vmware.task.info`); `already_running` with the running vSAN job | 8.0, 9.x |
+| `vmware.composite.vsan.disk.claim` | `dangerous`, waits for approval | vSAN `VimClusterVsanVcDiskManagementSystem.VsanAddStoragePoolDisk` (ESA) or `.InitializeDiskMappings` (OSA); VIM `HostVsanSystem.QueryDisksForVsan` | `claimed` with one row per disk, read again after the task | 8.0, 9.x |
+| `vmware.composite.vsan.disk.wipe` | `destructive`, a person only, after a preview | VIM `HostStorageSystem.UpdateDiskPartitions` (empty partition spec); vSAN `VsanSystemEx.VsanHostWipeDisk` and `.VsanHostQueryWipeDisk` (secure wipe) | `wiped` with one step per disk and the disks read again | 8.0, 9.x |
+| `vmware.composite.vsan.encryption.set` | `dangerous`, waits for approval | vSAN `VsanVcClusterConfigSystem.VsanClusterReconfig` (`dataEncryptionConfig`, `dataInTransitEncryptionConfig`) | like `vsan.cluster.configure` | 8.0, 9.x |
+| `vmware.composite.vsan.encryption.rekey` | `dangerous`, waits for approval | vSAN `VsanVcClusterConfigSystem.VsanEncryptedClusterRekey_Task` (`deepRekey`) | `rekeyed` when the task ended well; `timeout` with the task id | 8.0, 9.x |
+
+"8.0, 9.x" means vCenter 8.0 U1, U2 and U3, and 9.0, 9.1 and 9.1.1. Every
+call is in the vendor files of these versions, so no version check is
+needed. All five are registered on `vmware-rest-8.0` and `vmware-rest-9.0`,
+in the group `vsan`.
+
+**How the vSAN calls are sent.** Each vSAN method is a `VsanMethod` constant
+in `composites/_vsan_common.py` and goes through
+`VmwareRestConnector._post_vsan`: VI-JSON `/vsan/<Type>/<moId>/<Method>` on
+vCenter 9.x, SOAP to `/vsanHealth` on vCenter 8.0. For the SOAP call,
+`soap_vsan.py` writes the data objects of the request as nested XML: one
+element per field, in the order of the dict, without `_typeName`. The
+handlers build each dict in the field order of the vendor type (vSAN
+Management SDK 8.0, `vsanmgmtObjects.py`), because SOAP checks that order.
+The object ids are fixed: `vsan-cluster-config-system`,
+`vsan-disk-management-system`, and `vsanSystemEx-<N>` for the host
+`host-<N>` (the vendor reference page of `VsanSystemEx`).
+`HostVsanSystem.QueryDisksForVsan` has another VI-JSON path per release:
+`/HostVsanSystem/...` in the 8.0 files and `/vsan/HostVsanSystem/...` from
+9.0 on. `_vsan_common.query_disks_for_vsan` picks the one of the target.
+
+**Vendor jobs** (`vsan.cluster.configure`, `vsan.encryption.set`). vSAN can
+take a long time: a space-efficiency or encryption change writes all data
+again. So these two answer as soon as vSAN accepted the job:
+
+- The answer says `accepted`, gives the vCenter task id, and names the status
+  read `vmware.task.info` with that id. It never says the work is done.
+- Before a start, the operation reads the cluster's recent tasks. When a
+  vSAN job (a task whose `descriptionId` or `name` has "vsan" in it) is
+  queued or running, it returns that task as `already_running` and starts
+  nothing. This is a help, not a lock: two callers can both look before
+  either starts, and a job that just ended is no longer in the list.
+- After a lost reply the caller does not start again blindly. It reads the
+  async run handle (when it used `async: true`, see
+  `async-governed-dispatch.md`), or `vmware.tasks.recent`. Calling again is
+  safe too: a running job comes back as `already_running`.
+- The status read `vmware.task.info` comes with the host power changes
+  (#4350). It gives the task state, the progress and the vendor's error
+  text. It logs in again when the login expired, and says
+  `not_reachable` (not `failed`) when vCenter does not answer. MEHO keeps no
+  job state between calls.
+
+**Claim.** The handler reads the host and asks vSAN about the named disks
+(`QueryDisksForVsan`). It sends nothing unless every disk is `eligible`:
+an unknown disk or one that is not eligible gives `precondition_failed`
+(the guidance names `vsan.disk.wipe` for disks with old partitions), and
+disks vSAN already uses give `unchanged`. ESA sends one
+`VsanAddStoragePoolDiskSpec` with `diskType: singleTier` per disk. OSA sends
+a `VimVsanHostDiskMappingCreationSpec` with the `HostScsiDisk` objects that
+`QueryDisksForVsan` returned, as the vendor sample does. The task is
+followed to its end; then the disks are read again.
+
+**Wipe.** One read-only plan (`plan_disk_wipe`) feeds the approval preview
+and the handler. The plan reads the host, the disks (`QueryDisksForVsan`),
+the VMFS volumes of the host (`HostStorageSystem.fileSystemVolumeInfo`) and
+the partitions of each disk (`RetrieveDiskPartitionInfo`); for a secure wipe
+also `VsanHostQueryWipeDisk`. The preview's `blast_radius` lists each disk
+with its size and partitions, says `irreversibility: permanent`, and adds an
+`effect` text. The plan refuses a host or a disk that does not exist, a disk
+vSAN uses, a disk that holds a VMFS datastore, and (secure wipe) a disk vSAN
+cannot wipe. Disks with no partitions give `unchanged`.
+
+- `method: partitions` (the default) writes an empty partition table on
+  each disk, one disk after the other. When a disk fails, the run stops. The
+  answer is `failed_part_way` with one step per disk: `done`, `failed` (with
+  vCenter's error) or `not_run`. Nothing is undone.
+- `method: secure` runs one `VsanHostWipeDisk` task for all disks and then
+  reads the wipe state of each disk.
+
+**Tests.** `test_connectors_vmware_rest_vsan_changes.py` (the handlers and
+the preview, against a recording fake), `..._vsan_changes_wire.py` (the real
+connector on the vCenter 9.1 VI-JSON and the vCenter 8.0 SOAP wire),
+`..._vsan_changes_approval.py` (the risk levels, the approval flow and the
+preview binding of the wipe), `..._vsan_changes_reconcile.py` (the vendor
+paths, types, fields and enum values in the pinned 9.0 VI-JSON file, and
+the field order in the vSAN SDK 8.0 U1 and U2). Not proved on a live system
+yet: a separate lab proof runs them on each version.
+
 ### Version check for typed operations (`_version_gate.py`, #4316)
 
 Some vCenter calls exist only from a given version on. Examples: the

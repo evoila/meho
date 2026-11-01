@@ -858,16 +858,19 @@ def test_build_vsan_envelope_sends_true_false_values() -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "value"),
+    ("name", "value", "refused_field"),
     [
-        ("vmCreateTimeout", 120),
-        ("perspective", "defaultView"),
-        ("fields", ["objectHealth"]),
-        ("spec", {"_typeName": "VsanClusterHealthQuerySpec"}),
+        # Numbers, texts, lists and data objects are written since the vSAN
+        # changes; a decimal number or another type is still refused, also
+        # inside a data object (the error names the inner field).
+        ("ratio", 1.5, "ratio"),
+        ("spec", {"_typeName": "VsanClusterHealthQuerySpec", "when": object()}, "when"),
     ],
 )
-def test_build_vsan_envelope_refuses_argument_types_it_cannot_send(name: str, value: Any) -> None:
-    with pytest.raises(TypeError, match=name):
+def test_build_vsan_envelope_refuses_argument_types_it_cannot_send(
+    name: str, value: Any, refused_field: str
+) -> None:
+    with pytest.raises(TypeError, match=refused_field):
         build_vsan_envelope(
             "VsanVcClusterHealthSystem",
             "vsan-cluster-health-system",

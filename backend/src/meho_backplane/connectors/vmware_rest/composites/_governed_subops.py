@@ -51,6 +51,9 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _vm_allocation,
     _vm_cdrom_library_iso,
     _vm_cdrom_tools,
+    _vsan_cluster,
+    _vsan_disk_claim,
+    _vsan_disk_wipe,
     _write,
 )
 from meho_backplane.connectors.vmware_rest.composites._vcenter_install_ops import (
@@ -195,6 +198,13 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.alarm.reset": _alarm._VIM_SUB_OPS_ALARM_RESET,
     # #4394 vCenter install: the deploy, the setup start and the answer.
     **VCENTER_INSTALL_GOVERNED_SUBOPS,
+    # vSAN changes: the reads, then the vSAN method(s). The disk wipe is
+    # destructive, so a human always decides.
+    "vmware.composite.vsan.cluster.configure": _vsan_cluster._VSAN_SUB_OPS_CLUSTER_CONFIGURE,
+    "vmware.composite.vsan.encryption.set": _vsan_cluster._VSAN_SUB_OPS_ENCRYPTION_SET,
+    "vmware.composite.vsan.encryption.rekey": _vsan_cluster._VSAN_SUB_OPS_ENCRYPTION_REKEY,
+    "vmware.composite.vsan.disk.claim": _vsan_disk_claim._VSAN_SUB_OPS_DISK_CLAIM,
+    "vmware.composite.vsan.disk.wipe": _vsan_disk_wipe._VSAN_SUB_OPS_DISK_WIPE,
 }
 
 

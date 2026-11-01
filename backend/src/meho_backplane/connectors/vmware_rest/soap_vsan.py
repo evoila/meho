@@ -61,21 +61,53 @@ def vsan_soap_action(api_version: str | None) -> str:
     return f"{VSAN_NAMESPACE}/{api_version}" if api_version else ""
 
 
-def _argument_xml(name: str, value: Any) -> str:
-    """One method argument as XML.
+def _is_moref(value: Mapping[str, Any]) -> bool:
+    """``True`` for a managed object reference in the VI-JSON form."""
+    if value.get(VIM_TYPE_NAME_KEY) == MOREF_TYPE_NAME:
+        return True
+    return VIM_TYPE_NAME_KEY not in value and set(value) == {"type", "value"}
 
-    Two value types are supported, because that is all the vSAN operations
-    send today: a managed object reference (``cluster``) and a true/false
-    value (``fetchFromCache``, #4922), which becomes ``<name>true</name>`` as
-    ``xsd:boolean`` writes it. A later operation that sends another type adds
-    it here, with a test.
+
+def _argument_xml(name: str, value: Any) -> str:
+    """One method argument (or one field of a data object) as XML.
+
+    The value comes in the VI-JSON body form, and these types are written:
+
+    * a managed object reference (``cluster``) becomes
+      ``<name type="ClusterComputeResource">domain-c7</name>``;
+    * a true/false value (``fetchFromCache``, #4922) becomes
+      ``<name>true</name>``, as ``xsd:boolean`` writes it;
+    * a whole number and a text become their text, escaped;
+    * a list becomes one element per entry, as SOAP writes an array;
+    * a data object (a dict) becomes ``<name>`` with one child per field, in
+      the order of the dict. The caller builds the dict in the field order of
+      the vendor type, because SOAP checks that order. ``_typeName`` is left
+      out: SOAP names the type by the position of the element, the same rule
+      as the other SOAP builders of this connector (:mod:`.soap`). A field
+      that is ``None`` is left out.
+
+    Any other type (for example a decimal number) raises ``TypeError``. A
+    later operation that sends it adds it here, with a test.
     """
     if isinstance(value, bool):
         return f"<{name}>{'true' if value else 'false'}</{name}>"
-    if isinstance(value, Mapping) and value.get(VIM_TYPE_NAME_KEY) == MOREF_TYPE_NAME:
-        mo_type = _xml_escape(str(value.get("type", "")))
-        moid = _xml_escape(str(value.get("value", "")))
-        return f'<{name} type="{mo_type}">{moid}</{name}>'
+    if isinstance(value, int):
+        return f"<{name}>{value}</{name}>"
+    if isinstance(value, str):
+        return f"<{name}>{_xml_escape(value)}</{name}>"
+    if isinstance(value, (list, tuple)):
+        return "".join(_argument_xml(name, item) for item in value)
+    if isinstance(value, Mapping):
+        if _is_moref(value):
+            mo_type = _xml_escape(str(value.get("type", "")))
+            moid = _xml_escape(str(value.get("value", "")))
+            return f'<{name} type="{mo_type}">{moid}</{name}>'
+        fields = "".join(
+            _argument_xml(str(key), item)
+            for key, item in value.items()
+            if key != VIM_TYPE_NAME_KEY and item is not None
+        )
+        return f"<{name}>{fields}</{name}>"
     raise TypeError(
         f"vSAN SOAP argument {name!r}: {type(value).__name__} values are not supported yet"
     )

@@ -41,6 +41,9 @@ with warnings.catch_warnings():
 
 ISSUER: str = "https://keycloak.test/realms/meho"
 AUDIENCE: str = "meho-backplane"
+#: The client of the approval sign-in (#5515), the default of
+#: ``KEYCLOAK_CLI_APPROVE_CLIENT_ID``.
+APPROVAL_CLIENT_ID: str = "meho-cli-approve"
 DISCOVERY_URL: str = f"{ISSUER}/.well-known/openid-configuration"
 JWKS_URL: str = f"{ISSUER}/protocol/openid-connect/certs"
 
@@ -121,9 +124,11 @@ def mint_token(
     ``tenant_role="read_only"`` to mint a dedicated approver principal that
     can decide approvals but cannot dispatch.
 
-    ``fresh_sign_in`` adds ``auth_time`` (now) and a new random ``sid``: a
-    person who just signed in. An approve over REST needs it (#3979). Each
-    call gives a new ``sid``, so each token is a new sign-in.
+    ``fresh_sign_in`` adds ``auth_time`` (now), a new random ``sid`` and
+    ``azp`` = the approval client (``meho-cli-approve``): a person who just
+    signed in with the approval sign-in. An approve over REST needs it
+    (#3979, #5515). Each call gives a new ``sid``, so each token is a new
+    sign-in.
 
     ``extra_claims`` merges arbitrary claims into the payload last (so a
     caller can add ``azp`` / ``client_id`` to mint a client-credentials
@@ -162,6 +167,7 @@ def mint_token(
         if fresh_sign_in:
             payload["auth_time"] = now
             payload["sid"] = str(uuid.uuid4())
+            payload["azp"] = APPROVAL_CLIENT_ID
         if extra_claims is not None:
             payload.update(extra_claims)
         header = {"alg": "RS256", "kid": private_key.as_dict()["kid"], "typ": "JWT"}

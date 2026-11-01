@@ -37,6 +37,8 @@ _REALM_FILE = (
 )
 
 _HUMAN_CLIENTS = ("meho-cli", "meho-mcp", "meho-web")
+#: Every client a person signs in with, including the approval sign-in (#5515).
+_PERSON_CLIENTS = (*_HUMAN_CLIENTS, "meho-cli-approve")
 _PLACEHOLDERS = {
     "MEHO_REALM_PUBLIC_URL",
     "MEHO_REALM_TENANT_ID",
@@ -117,6 +119,7 @@ def test_clients(realm: dict[str, Any]) -> None:
     assert {c["clientId"] for c in realm["clients"]} == {
         "meho-backplane",
         "meho-cli",
+        "meho-cli-approve",
         "meho-mcp",
         "meho-web",
         "meho-admin",
@@ -186,7 +189,7 @@ def test_no_fixed_tenant_or_role_on_any_client(realm: dict[str, Any]) -> None:
             assert mapper["protocolMapper"] != "oidc-hardcoded-claim-mapper", client["clientId"]
 
 
-@pytest.mark.parametrize("client_id", _HUMAN_CLIENTS)
+@pytest.mark.parametrize("client_id", _PERSON_CLIENTS)
 def test_human_clients_default_scopes(realm: dict[str, Any], client_id: str) -> None:
     client = _client(realm, client_id)
     assert set(client["defaultClientScopes"]) == {
@@ -301,3 +304,32 @@ def test_cli_client_allows_the_fresh_sign_in_for_an_approval(realm: dict[str, An
     assert client["attributes"]["oauth2.device.authorization.grant.enabled"] == "true"
     assert client["redirectUris"] == ["http://127.0.0.1:*"]
     assert client["webOrigins"] == []
+
+
+def test_approval_sign_in_client(realm: dict[str, Any]) -> None:
+    """The fresh sign-in of ``meho approvals approve`` has its own client (#5515).
+
+    Browser sign-in with PKCE on a 127.0.0.1 loopback redirect only, no
+    device login, no ``offline_access``. It has the claim mappers of
+    ``meho-cli`` (so the token names the person, tenant and role) and the
+    backplane audience, but not the MCP audience: the token is only for
+    the approve call.
+    """
+    client = _client(realm, "meho-cli-approve")
+    assert client["publicClient"] is True
+    assert client["standardFlowEnabled"] is True
+    assert client["implicitFlowEnabled"] is False
+    assert client["directAccessGrantsEnabled"] is False
+    assert client["serviceAccountsEnabled"] is False
+    assert client["attributes"]["pkce.code.challenge.method"] == "S256"
+    assert client["attributes"]["oauth2.device.authorization.grant.enabled"] == "false"
+    assert client["redirectUris"] == ["http://127.0.0.1:*"]
+    assert client["webOrigins"] == []
+    assert client["optionalClientScopes"] == []
+    assert "offline_access" not in client["defaultClientScopes"]
+    cli_mappers = {
+        m["name"]: m
+        for m in _client(realm, "meho-cli")["protocolMappers"]
+        if m["name"] != "meho-mcp-audience"
+    }
+    assert {m["name"]: m for m in client["protocolMappers"]} == cli_mappers

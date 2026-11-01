@@ -16,10 +16,11 @@ the end, then return to the trail.
 | Object | Kind | Used by |
 |---|---|---|
 | `meho-backplane` | Confidential client | The backplane itself — the audience it validates tokens for. If your realm does not have it yet, create it first: a confidential client with ID `meho-backplane` and no login flows enabled — it exists as the resource-server identity whose client ID is the token audience (`keycloak.audience` in the chart values). |
-| `meho-cli` | **Public** client, device-code grant, plus authorization-code + PKCE on a loopback address | `meho login`, and the fresh sign-in of `meho approvals approve` |
+| `meho-cli` | **Public** client, device-code grant | `meho login` |
+| `meho-cli-approve` | **Public** client, authorization-code + PKCE on a loopback address only | The fresh sign-in of `meho approvals approve`. Only its tokens can approve on the command line. |
 | `meho-mcp` | **Public** client, authorization-code + PKCE | Browser-capable MCP clients (Claude Desktop, MCP Inspector, …) |
-| 8 protocol mappers | On both public clients | Make issued tokens carry the claims the backplane validates |
-| 4 default client scopes | On both public clients | Including the `basic` scope that carries the mandatory `sub` claim |
+| 8 protocol mappers | On the public clients (`meho-cli-approve` without `meho-mcp-audience`) | Make issued tokens carry the claims the backplane validates |
+| 4 default client scopes | On the public clients | Including the `basic` scope that carries the mandatory `sub` claim |
 | `mcp:read`, `mcp:execute`, `mcp:admin` | Client scopes, optional on `meho-mcp` | The scopes MEHO's MCP clients ask for at login |
 | `MEHO-Readers`, `MEHO-Operators`, `MEHO-SA-Operators`, `MEHO-Admins`, `MEHO-Approvers` | Top-level groups with attributes | Give each person their tenant and their role |
 | `MEHO-Platform-Admins` | Top-level group with one attribute | Rights across all tenants, for the people who run MEHO |
@@ -28,7 +29,7 @@ the end, then return to the trail.
 !!! tip "There is an automation for this"
 
     The CLI ships an idempotent helper — `meho admin keycloak
-    bootstrap-clients` — that creates the two public clients, the eight
+    bootstrap-clients` — that creates the three public clients, the eight
     mappers, the four default scopes, the three `mcp:*` scopes, the
     five groups and `MEHO-Platform-Admins`, and puts the first admin
     user in `MEHO-Admins` and `MEHO-Platform-Admins`, in one
@@ -66,41 +67,67 @@ In the realm that hosts `meho-backplane`, create a client with:
 |---|---|---|
 | Client ID | `meho-cli` (suggested — any identifier works) | Must match `config.keycloakCliClientId` in your chart values. |
 | Client authentication | **Off** (public client) | The CLI has nowhere to store a secret; the device grant against a confidential client fails with `unauthorized_client`. |
-| Standard flow | **On** | `meho approvals approve` uses it for a fresh sign-in: an approval on the command line needs a sign-in from the last few minutes. `meho login` still uses the device flow. |
+| Standard flow | **On** | Older `meho` CLI versions open the approval sign-in on this client. The current CLI uses `meho-cli-approve` (below). `meho login` uses the device flow. |
 | PKCE method (Advanced → Proof Key for Code Exchange) | `S256` | The CLI sends a PKCE challenge with the browser sign-in. |
 | Direct access grants | Off | Password grant is out of scope by design. |
 | Implicit flow | Off | Deprecated by OAuth 2.1. |
 | Service accounts roles | Off | Public clients cannot hold credentials. |
 | **OAuth 2.0 Device Authorization Grant** | **On** | This *is* `meho login` ([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)). |
-| Valid redirect URIs | `http://127.0.0.1:*` | Only for the fresh sign-in. The CLI listens on 127.0.0.1 with a random port ([RFC 8252](https://www.rfc-editor.org/rfc/rfc8252#section-7.3)). Do not add other addresses. |
+| Valid redirect URIs | `http://127.0.0.1:*` | Only for the browser sign-in of older CLI versions. The CLI listens on 127.0.0.1 with a random port ([RFC 8252](https://www.rfc-editor.org/rfc/rfc8252#section-7.3)). Do not add other addresses. |
 | Web origins | (none) | The CLI is not a web page. |
 
-### Why approve needs a fresh sign-in
+### The approval client `meho-cli-approve`
 
 An approval is a person's decision. On the command line and REST, MEHO
-accepts an approve only when the token shows a sign-in from the last 5
-minutes (the `auth_time` claim). One sign-in allows one approval. A
-`meho login` token is older, so `meho approvals approve` opens the browser
-and asks for the password again (it sends `prompt=login` and `max_age=0`).
-It uses the new token for this one approval and does not store it. Reject
-needs no new sign-in. The web interface needs none either: the click is
-the proof.
+accepts an approve only with a token from the person's own approval
+sign-in:
 
-The `basic` scope (Step 4) puts `auth_time` into the access token. Without
-it every approve on the command line is refused.
+- the token was made for the approval client (its `azp` claim is
+  `meho-cli-approve`). A `meho login` token or an MCP token never
+  approves, even right after a login;
+- the sign-in is at most 15 minutes old (the `auth_time` claim). Inside
+  these 15 minutes one sign-in may approve several waiting changes. Each
+  approval is still a separate decision about one request;
+- an operation marked `destructive` needs a sign-in of its own, at most
+  5 minutes old. After it, that sign-in approves nothing more.
 
-**On an existing realm, change the client once.** `meho admin keycloak
-bootstrap-clients` turns these settings on when you run it again. The
-Keycloak that ships with the MEHO chart has them in new installs only: it
-does not change a client that already exists. On such an install, set the
-three settings above on `meho-cli` by hand. Until then, approve in the web
+`meho approvals approve` opens the browser and asks for the password
+again (it sends `prompt=login` and `max_age=0`). It keeps the token in
+memory for this one run and never stores it. Reject needs no new
+sign-in. The web interface needs none either: the click is the proof.
+
+Create a second public client with these settings:
+
+| Setting | Value | Why |
+|---|---|---|
+| Client ID | `meho-cli-approve` (suggested) | Must match `config.keycloakCliApproveClientId` in your chart values (default `meho-cli-approve`). |
+| Client authentication | **Off** (public client) | The CLI has nowhere to store a secret. |
+| Standard flow | **On** | The browser sign-in of an approval. |
+| PKCE method | `S256` | The CLI sends a PKCE challenge. |
+| OAuth 2.0 Device Authorization Grant | Off | Not used. |
+| Direct access grants, implicit flow, service accounts | Off | Not used. |
+| Valid redirect URIs | `http://127.0.0.1:*` | The CLI listens on 127.0.0.1 with a random port. Do not add other addresses. |
+| Web origins | (none) | The CLI is not a web page. |
+| `offline_access` | Not assigned | The approval sign-in never gives a long login. |
+
+Give it the default scopes of Step 4 and the mappers of Step 3, except
+`meho-mcp-audience`: its token is only for the approve call. The `basic`
+scope puts `auth_time` into the access token. Without it every approve
+on the command line is refused.
+
+**On an existing realm.** `meho admin keycloak bootstrap-clients` creates
+`meho-cli-approve` when you run it again. The Keycloak that ships with
+the MEHO chart creates it on the next upgrade (the realm finishing job
+adds a client that is missing). Until it exists, approve in the web
 interface.
 
 Two backplane settings control the check:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `FRESH_SIGN_IN_MAX_AGE_SECONDS` (chart `config.freshSignInMaxAgeSeconds`) | `300` | How old the sign-in may be, in seconds (30 to 3600). The same window applies when someone turns approval off for an operation. |
+| `FRESH_SIGN_IN_MAX_AGE_SECONDS` (chart `config.freshSignInMaxAgeSeconds`) | `900` | The approval window: how old the sign-in may be, in seconds (30 to 3600). One sign-in may approve several requests inside it. |
+| `PER_ACTION_SIGN_IN_MAX_AGE_SECONDS` (chart `config.perActionSignInMaxAgeSeconds`) | `300` | How old the sign-in may be for an action that needs a fresh sign-in each time: approving a `destructive` operation, and turning approval off or lowering a risk level for an operation. |
+| `KEYCLOAK_CLI_APPROVE_CLIENT_ID` (chart `config.keycloakCliApproveClientId`) | `meho-cli-approve` | The only client whose tokens can approve on the command line or REST. Empty: only the web interface can approve. |
 | `APPROVAL_ONE_TIME_CODE_ACR_VALUES` (chart `config.approvalOneTimeCodeAcrValues`) | empty (off) | Comma-separated `acr` values that mean "the person entered a one-time code". |
 
 **Optional one-time code step.** You can ask for a code from an
@@ -332,10 +359,12 @@ Tell the chart which client the CLI should use (already shown in
 ```yaml
 config:
   keycloakCliClientId: meho-cli
+  # The default; set it only when your approval client has another ID.
+  keycloakCliApproveClientId: meho-cli-approve
 ```
 
-The backplane serves this at `/api/v1/auth-config`, which is how
-`meho login` discovers it. `meho login --client-id <id>` overrides it
+The backplane serves both at `/api/v1/auth-config`, which is how
+`meho login` and `meho approvals approve` discover them. `meho login --client-id <id>` overrides it
 per invocation.
 
 ## Verify
@@ -346,7 +375,8 @@ curl -fsS "https://keycloak.example.com/realms/<realm>/.well-known/openid-config
 
 # 2. The backplane advertises the CLI client.
 curl -fsS https://meho.example.com/api/v1/auth-config | jq .
-# → {"keycloak_issuer": "…", "audience": "meho-backplane", "cli_client_id": "meho-cli"}
+# → {"keycloak_issuer": "…", "audience": "meho-backplane", "cli_client_id": "meho-cli",
+#    "cli_approve_client_id": "meho-cli-approve"}
 
 # 3. Device-code login completes end to end.
 meho login https://meho.example.com
@@ -391,8 +421,8 @@ usually appear:
 | Token issued, every call 401s with `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` | Missing protocol mappers, or the person is in none of the five groups | Step 3 — add all the mappers; Step 5 — put the person in one group. Then log out and back in. |
 | Everyone gets the same role, whatever their group | A fixed-value (Hardcoded claim) `tenant_role` mapper is still on the client | Delete it, or re-run `meho admin keycloak bootstrap-clients`, which replaces it. |
 | Token issued, every call 401s with `invalid_token` or `missing_sub`; the decoded token has no `sub` | The `basic` scope is not a default scope on the client | Step 4 — assign it, re-login (existing tokens stay broken). |
-| `meho approvals approve` fails with `fresh_sign_in_required` right after you signed in again | The access token has no `auth_time`: the `basic` scope is missing; or the client is not set up for the browser flow | Step 4 — assign `basic`; Step 2 — standard flow **On**, PKCE `S256`, redirect URI `http://127.0.0.1:*`. Or approve in the web interface. |
-| The browser shows "Invalid parameter: redirect_uri" during `meho approvals approve` | `http://127.0.0.1:*` is not a valid redirect URI of `meho-cli` | Step 2 — add it, or re-run `meho admin keycloak bootstrap-clients`. |
+| `meho approvals approve` fails with `fresh_sign_in_required` right after you signed in again | The access token has no `auth_time` (the `basic` scope is missing), or it was not made for the approval client (the chart's `config.keycloakCliApproveClientId` does not name the client) | Step 4 — assign `basic` to `meho-cli-approve`; check the client ID in Step 2. Or approve in the web interface. |
+| The browser shows "Client not found" or "Invalid parameter: redirect_uri" during `meho approvals approve` | `meho-cli-approve` is missing, or `http://127.0.0.1:*` is not one of its redirect URIs | Step 2 — create it, or re-run `meho admin keycloak bootstrap-clients`. |
 | `meho login` times out before you can approve | An ambient wrapper timeout (CI step, IDE task) shorter than the approval wait | Run `meho login` in a real terminal, or raise the wrapper timeout. |
 | MCP login fails with `invalid_scope` ("Invalid scopes: …") and the Keycloak login page never appears | The client asked for a scope that `meho-mcp` does not offer: `offline_access`, `mcp:read`, `mcp:execute` or `mcp:admin` | Create the scope if it is missing, then assign it as an **optional** scope on `meho-mcp` (see the MCP client table above). Or re-run `meho admin keycloak bootstrap-clients`. |
 | `x509: certificate signed by unknown authority` | Workstation OS trust store missing your CA | Step 1 / [TLS and ingress](tls-ingress.md#your-workstation-os-trust-store). |

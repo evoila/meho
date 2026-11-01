@@ -49,6 +49,22 @@ type FreshSignInOptions struct {
 	Timeout time.Duration
 }
 
+// freshSignInConfig is the OAuth client of the fresh sign-in. The scope
+// is openid only: no offline_access, so the sign-in never gives a
+// long-lived login (#5515).
+func freshSignInConfig(doc *DiscoveryDocument, clientID, redirectURL string) *oauth2.Config {
+	return &oauth2.Config{
+		ClientID: clientID,
+		Endpoint: oauth2.Endpoint{
+			AuthURL:   doc.AuthorizationEndpoint,
+			TokenURL:  doc.TokenEndpoint,
+			AuthStyle: oauth2.AuthStyleInParams,
+		},
+		RedirectURL: redirectURL,
+		Scopes:      []string{"openid"},
+	}
+}
+
 // RunFreshSignIn asks the person to sign in again in the browser and
 // returns the new token. It uses the OIDC authorization code flow with
 // PKCE and a loopback redirect (RFC 8252 §7.3) on 127.0.0.1 with a
@@ -56,9 +72,8 @@ type FreshSignInOptions struct {
 // Core §3.1.2.1), so the identity provider asks for the credentials
 // again even when the browser already has a session.
 //
-// The caller uses the token for one request and must not store it:
-// the token proves a fresh sign-in, and that proof is meant for one
-// approval (#3979).
+// The caller keeps the token in memory only and must not store it: the
+// token proves a fresh sign-in for approvals (#3979, #5515).
 func RunFreshSignIn(ctx context.Context, doc *DiscoveryDocument, clientID string, opts FreshSignInOptions) (*oauth2.Token, error) {
 	if doc.AuthorizationEndpoint == "" {
 		return nil, errors.New("meho: the identity provider has no authorization_endpoint")
@@ -81,16 +96,7 @@ func RunFreshSignIn(ctx context.Context, doc *DiscoveryDocument, clientID string
 		return nil, fmt.Errorf("meho: listen for the sign-in redirect: %w", err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
-	cfg := &oauth2.Config{
-		ClientID: clientID,
-		Endpoint: oauth2.Endpoint{
-			AuthURL:   doc.AuthorizationEndpoint,
-			TokenURL:  doc.TokenEndpoint,
-			AuthStyle: oauth2.AuthStyleInParams,
-		},
-		RedirectURL: fmt.Sprintf("http://127.0.0.1:%d/callback", port),
-		Scopes:      []string{"openid"},
-	}
+	cfg := freshSignInConfig(doc, clientID, fmt.Sprintf("http://127.0.0.1:%d/callback", port))
 	state, err := randomState()
 	if err != nil {
 		_ = ln.Close()
@@ -132,6 +138,19 @@ func RunFreshSignIn(ctx context.Context, doc *DiscoveryDocument, clientID string
 		return nil, fmt.Errorf("meho: exchange the sign-in code: %w", err)
 	}
 	return tok, nil
+}
+
+// FreshSignInTokenSource returns a token source that starts with tok, a
+// token from RunFreshSignIn, and renews it in memory with its refresh
+// token when it expires (#5515). The renewed token is never stored. The
+// identity provider keeps the auth_time of the sign-in on a renewal, so
+// renewing does not make the sign-in any newer.
+func FreshSignInTokenSource(ctx context.Context, doc *DiscoveryDocument, clientID string, tok *oauth2.Token, httpClient *http.Client) oauth2.TokenSource {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
+	return freshSignInConfig(doc, clientID, "").TokenSource(ctx, tok)
 }
 
 type callbackResult struct {

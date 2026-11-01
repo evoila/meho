@@ -6,7 +6,6 @@ package approvals
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -38,18 +37,16 @@ const inOrderHelp = "With --filter-work-ref REF --in-order, approve takes every 
 	"and at any refusal (for example you sent the request yourself). " +
 	"Then it exits non-zero and names the step that stopped it and the " +
 	"steps it did not run.\n\n" +
-	"At a dangerous or destructive step it stops and shows what the " +
-	"step changes. Type yes to approve that one step and go on; " +
-	"anything else stops the run. Steps at a lower risk level go on " +
-	"without a question.\n\n" +
+	"At each pending step it shows what the step does (the operation, " +
+	"the connector and its version, the target, the risk level and the " +
+	"parameters) and asks you about it. Type yes to approve that one " +
+	"step and go on; anything else stops the run. One sign-in covers " +
+	"the steps; a destructive step gets a sign-in of its own.\n\n" +
 	"Run it again after a stop: steps that were approved and ran OK " +
 	"are skipped. A step that was approved but whose run failed " +
 	"cannot run again from here; ask the requester to send it again. " +
 	"The run is not one transaction: if you stop the command, the " +
 	"steps it already approved stay approved."
-
-// Risk levels at which the in-order run waits for a per-step yes.
-var inOrderConfirmLevels = map[string]bool{"dangerous": true, "destructive": true}
 
 // How long the in-order run waits for the stored result of a step the
 // waiting requester runs (dispatch_status "already_resumed"), and how
@@ -107,7 +104,7 @@ type stepStop struct {
 }
 
 // approveArgs checks the positional args against --filter-work-ref/--in-order:
-// one id for a single approve, none for an in-order run.
+// one or more ids for an approve, none for an in-order run.
 func approveArgs(workRef *string, inOrder *bool) cobra.PositionalArgs {
 	return func(_ *cobra.Command, args []string) error {
 		if *inOrder {
@@ -120,10 +117,10 @@ func approveArgs(workRef *string, inOrder *bool) cobra.PositionalArgs {
 			return nil
 		}
 		if *workRef != "" {
-			return errors.New("--filter-work-ref needs --in-order; to approve one request, pass its id")
+			return errors.New("--filter-work-ref needs --in-order; to approve requests, pass their ids")
 		}
-		if len(args) != 1 {
-			return fmt.Errorf("approve takes one request id, got %d", len(args))
+		if len(args) == 0 {
+			return errors.New("approve takes one or more request ids")
 		}
 		return nil
 	}
@@ -159,7 +156,10 @@ func runInOrder(cmd *cobra.Command, opts inOrderOpts) error {
 	for _, w := range res.Warnings {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", w)
 	}
-	r := &inOrderRunner{cmd: cmd, client: client, opts: opts, in: bufio.NewReader(cmd.InOrStdin()), total: len(items)}
+	r := &inOrderRunner{
+		cmd: cmd, client: client, opts: opts, in: bufio.NewReader(cmd.InOrStdin()),
+		total: len(items), signIn: newApprovalSignIn(client),
+	}
 	var stop *stepStop
 	for i := range items {
 		step := newInOrderStep(i+1, &items[i])
@@ -203,6 +203,8 @@ type inOrderRunner struct {
 	opts   inOrderOpts
 	in     *bufio.Reader
 	total  int
+	// signIn is the one approval sign-in of the run (#5515).
+	signIn *approvalSignIn
 }
 
 // runStep handles one request. It returns nil when the run may go on to
@@ -228,14 +230,12 @@ func (r *inOrderRunner) runStep(ctx context.Context, item *api.ApprovalRequestVi
 			"this step is %s. The steps after it may need it, so the run stops here", item.Status)}
 	}
 
-	if inOrderConfirmLevels[step.SafetyLevel] {
-		ok, err := r.confirm(ctx, item, step)
-		if err != nil {
-			return &stepStop{detail: "could not read the step before asking for a yes", err: err}
-		}
-		if !ok {
-			return &stepStop{detail: "you did not type yes for this " + step.SafetyLevel + " step"}
-		}
+	ok, err := r.confirm(ctx, item, step)
+	if err != nil {
+		return &stepStop{detail: "could not read the step before asking for a yes", err: err}
+	}
+	if !ok {
+		return &stepStop{detail: "you did not type yes for this step"}
 	}
 
 	body := api.DecideRequestBody{Decision: "approved"}
@@ -243,7 +243,7 @@ func (r *inOrderRunner) runStep(ctx context.Context, item *api.ApprovalRequestVi
 		reason := r.opts.Reason
 		body.Reason = &reason
 	}
-	resp, err := sendDecide(ctx, r.client, item.Id, body)
+	resp, err := sendDecide(ctx, r.client, item.Id, body, r.signIn, step.SafetyLevel == "destructive")
 	if err != nil {
 		return &stepStop{detail: "the approval was refused: " + err.Error(), err: err}
 	}
@@ -323,8 +323,8 @@ func (r *inOrderRunner) waitForStoredResult(ctx context.Context, id uuid.UUID, s
 	}
 }
 
-// confirm shows a dangerous or destructive step and asks for a yes on
-// stdin. The text goes to stderr so --json output on stdout stays clean.
+// confirm shows a pending step and asks for a yes on stdin. The text
+// goes to stderr so --json output on stdout stays clean.
 func (r *inOrderRunner) confirm(ctx context.Context, item *api.ApprovalRequestView, step *inOrderStep) (bool, error) {
 	detail, err := fetchDetail(ctx, r.client, item.Id)
 	if err != nil {
@@ -334,26 +334,12 @@ func (r *inOrderRunner) confirm(ctx context.Context, item *api.ApprovalRequestVi
 		detail = item
 	}
 	w := r.cmd.ErrOrStderr()
-	fmt.Fprintf(w, "\nStep %d of %d is %s. Approving it runs it at once.\n", step.Step, r.total, step.SafetyLevel)
-	rc := detail.ReviewerContext
-	if rc != nil && rc.Summary != nil && *rc.Summary != "" {
-		fmt.Fprintf(w, "  What it does: %s\n", *rc.Summary)
+	level := step.SafetyLevel
+	if level == "" {
+		level = "of unknown risk level"
 	}
-	fmt.Fprintf(w, "  Operation:    %s (%s)\n", detail.OpId, detail.ConnectorId)
-	if rc != nil && rc.Subject != nil && *rc.Subject != "" {
-		fmt.Fprintf(w, "  Subject:      %s\n", *rc.Subject)
-	}
-	if detail.TargetId != nil {
-		fmt.Fprintf(w, "  Target:       %s\n", targetLabel(detail.TargetId.String(), rc))
-	}
-	fmt.Fprintf(w, "  Requested by: %s\n", principalLabel(detail.PrincipalSub, detail.PrincipalName))
-	if rc != nil && rc.BlastRadius != nil {
-		b, _ := json.MarshalIndent(*rc.BlastRadius, "    ", "  ")
-		fmt.Fprintf(w, "  What else is affected:\n    %s\n", string(b))
-	}
-	fmt.Fprintf(w, "Type yes to approve step %d and go on. Anything else stops here: ", step.Step)
-	line, _ := r.in.ReadString('\n')
-	return strings.EqualFold(strings.TrimSpace(line), "yes"), nil
+	showRequest(w, fmt.Sprintf("Step %d of %d is %s. Approving it runs it at once.", step.Step, r.total, level), detail)
+	return askYes(r.in, w, fmt.Sprintf("Type yes to approve step %d and go on. Anything else stops here: ", step.Step)), nil
 }
 
 func newInOrderStep(n int, item *api.ApprovalRequestView) inOrderStep {

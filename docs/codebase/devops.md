@@ -898,6 +898,7 @@ realm file, not from `config.*` or `keycloakAdmin.*`:
 | `KEYCLOAK_DISCOVERY_URL` | `http://<release>-keycloak:8080/auth/realms/meho`, the Service |
 | `KEYCLOAK_AUDIENCE` | `meho-backplane` |
 | `KEYCLOAK_CLI_CLIENT_ID` | `meho-cli` |
+| `KEYCLOAK_CLI_APPROVE_CLIENT_ID` | `meho-cli-approve` |
 | `UI_KEYCLOAK_CLIENT_ID` | `meho-web` |
 | `KEYCLOAK_ADMIN_URL` | `http://<release>-keycloak:8080/auth/admin/realms/meho` |
 | `KEYCLOAK_ADMIN_CLIENT_ID` | `meho-admin` |

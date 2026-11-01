@@ -108,6 +108,7 @@ meho admin keycloak bootstrap-clients [flags]
 - `--admin-user-username` — username of the admin user to provision in MEHO-Admins and MEHO-Platform-Admins (required unless --skip-user-provisioning)
 - `--admin-username` — master-realm admin username (or set KEYCLOAK_ADMIN_USER)
 - `--backplane-audience` — audience claim the `audience-meho-backplane` mapper emits (matches chart's `config.keycloakAudience`)
+- `--cli-approve-client-id` — public client_id for the fresh browser sign-in of `meho approvals approve` (matches chart's `config.keycloakCliApproveClientId`)
 - `--cli-client-id` — public client_id for the device-code flow (matches chart's `config.keycloakCliClientId`)
 - `--cli-offline-access` — opt the device-code CLI client into the long-lived offline-token path: assign `offline_access` as an optional client scope and bound its per-client offline-session idle timeout to the given number of seconds. Off by default. A bare `--cli-offline-access` uses 172800 seconds (48h); to pass a custom value use the equals form, e.g. `--cli-offline-access=86400`. Pairs with `meho login --offline`. Security: this enables a long-lived refresh token on the operator's disk — keep the bound tight and prefer the OS keyring for storage
 - `--dry-run` — print what would be provisioned without making any API calls
@@ -401,10 +402,10 @@ meho approvals
 
 ### `meho approvals approve`
 
-Approve a pending approval request
+Approve pending approval requests
 
 ```
-meho approvals approve <id> | --filter-work-ref REF --in-order [flags]
+meho approvals approve <id> [<id>...] | --filter-work-ref REF --in-order [flags]
 ```
 
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)

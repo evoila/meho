@@ -488,9 +488,12 @@ func TestBootstrap_FreshRealmCreatesEverything(t *testing.T) {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 
-	// Two clients created (CLI + MCP).
-	if len(fake.clients) != 2 {
-		t.Errorf("expected 2 clients, got %d", len(fake.clients))
+	// Three clients created (CLI, approval sign-in, MCP).
+	if len(fake.clients) != 3 {
+		t.Errorf("expected 3 clients, got %d", len(fake.clients))
+	}
+	if res.ApproveClientID != "meho-cli-approve" {
+		t.Errorf("ApproveClientID = %q, want meho-cli-approve", res.ApproveClientID)
 	}
 	if res.CLIClientID != "meho-cli" {
 		t.Errorf("CLIClientID = %q, want meho-cli", res.CLIClientID)
@@ -499,15 +502,22 @@ func TestBootstrap_FreshRealmCreatesEverything(t *testing.T) {
 		t.Errorf("MCPClientID = %q, want meho-mcp", res.MCPClientID)
 	}
 
-	// Each client has 8 mappers.
+	// The CLI and MCP clients have 8 mappers each; the approval client
+	// has the same without meho-mcp-audience.
 	for uuid, mappers := range fake.mappers {
-		if len(mappers) != 8 {
-			t.Errorf("client %s has %d mappers, want 8",
-				uuid, len(mappers))
-		}
 		names := make(map[string]bool)
 		for _, m := range mappers {
 			names[m.Name] = true
+		}
+		if fake.clients[uuid].ClientID == "meho-cli-approve" {
+			if len(mappers) != 7 || names["meho-mcp-audience"] {
+				t.Errorf("approval client has mappers %v, want 7 without meho-mcp-audience", names)
+			}
+			continue
+		}
+		if len(mappers) != 8 {
+			t.Errorf("client %s has %d mappers, want 8",
+				uuid, len(mappers))
 		}
 		for _, want := range []string{
 			"audience-meho-backplane",
@@ -696,9 +706,9 @@ func TestBootstrap_SkipUserProvisioningKeepsGroupsOmitsUser(t *testing.T) {
 		t.Errorf("expected 0 users when skipped, got %d",
 			len(fake.users))
 	}
-	// Both clients still landed.
-	if len(fake.clients) != 2 {
-		t.Errorf("expected 2 clients, got %d", len(fake.clients))
+	// All three clients still landed.
+	if len(fake.clients) != 3 {
+		t.Errorf("expected 3 clients, got %d", len(fake.clients))
 	}
 }
 
@@ -1573,9 +1583,49 @@ func TestBootstrapClientsCmd_RemovedFlagsStop(t *testing.T) {
 // makes the client create fail with HTTP 500.
 func TestBootstrap_ClientDescriptionsFitKeycloak(t *testing.T) {
 	opts := fullOpts().withDefaults()
-	for _, c := range []*clientRep{opts.desiredCLIClient(), opts.desiredMCPClient()} {
+	for _, c := range []*clientRep{opts.desiredCLIClient(), opts.desiredCLIApproveClient(), opts.desiredMCPClient()} {
 		if n := len(c.Description); n > 255 {
 			t.Errorf("%s description is %d characters, want at most 255", c.ClientID, n)
 		}
+	}
+}
+
+// TestBootstrap_ApproveClientShape checks the client of the approval
+// sign-in (#5515): browser sign-in with PKCE on a 127.0.0.1 loopback
+// only, no device flow, no offline_access, the four default scopes.
+func TestBootstrap_ApproveClientShape(t *testing.T) {
+	fake := newFakeKeycloak()
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	var c *clientRep
+	for _, rep := range fake.clients {
+		if rep.ClientID == "meho-cli-approve" {
+			c = rep
+		}
+	}
+	if c == nil {
+		t.Fatal("meho-cli-approve client not created")
+	}
+	if c.PublicClient == nil || !*c.PublicClient || c.StandardFlowEnabled == nil || !*c.StandardFlowEnabled {
+		t.Errorf("want a public client with the browser flow: %+v", c)
+	}
+	if c.DirectAccessGrantsEnabled == nil || *c.DirectAccessGrantsEnabled {
+		t.Errorf("direct access grants must be off")
+	}
+	if got := c.Attributes["oauth2.device.authorization.grant.enabled"]; got != "false" {
+		t.Errorf("device flow = %q, want false", got)
+	}
+	if got := c.Attributes["pkce.code.challenge.method"]; got != "S256" {
+		t.Errorf("PKCE = %q, want S256", got)
+	}
+	if !slices.Equal(c.RedirectURIs, []string{"http://127.0.0.1:*"}) {
+		t.Errorf("redirect URIs = %v", c.RedirectURIs)
+	}
+	if len(c.OptionalClientScopes) != 0 {
+		t.Errorf("optional scopes = %v, want none (no offline_access)", c.OptionalClientScopes)
+	}
+	if got := fake.defaultScopes[c.ID]; len(got) != 4 {
+		t.Errorf("default scopes = %v, want the four", got)
 	}
 }

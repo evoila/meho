@@ -44,17 +44,39 @@ func delegatedReasonHelp(verb string) string {
 		"  Refs: #12\""
 }
 
+// approveSignInHelp is the part of `meho approvals approve --help` that
+// explains the approval sign-in (#3979, #5515).
+const approveSignInHelp = "An approval needs proof that you are present: a fresh " +
+	"sign-in in the browser, made only for approvals. Your `meho login` " +
+	"token never approves. So approve opens your browser and asks you to " +
+	"sign in again. One sign-in covers approvals for 15 minutes (the " +
+	"server can set another time), so one run can approve several " +
+	"requests with one sign-in. A destructive operation needs a sign-in " +
+	"of its own: approve opens the browser again for it. The CLI keeps " +
+	"the sign-in in memory for this one run only. It never stores it. " +
+	"Without a browser it prints the sign-in link and stops; approve in " +
+	"the web interface instead. Reject needs no new sign-in."
+
+// severalIDsHelp explains `meho approvals approve <id> <id> ...`.
+const severalIDsHelp = "With several ids, approve shows each request (what it " +
+	"does, the operation, the connector and its version, the target, the " +
+	"risk level and the parameters) and asks you about each one on its " +
+	"own. Type yes to approve that request; anything else skips it. Each " +
+	"approval is a separate decision about one request."
+
 // newApproveCmd returns the `meho approvals approve` command.
 //
-//	meho approvals approve <id> [--reason TEXT] [--json] [--backplane <url>]
+//	meho approvals approve <id> [<id>...] [--reason TEXT] [--json] [--backplane <url>]
 //	meho approvals approve --filter-work-ref REF --in-order [--reason TEXT] [--json] [--backplane <url>]
 //
 // Role: operator. Approves a pending approval request via
 // POST /api/v1/approvals/{id}/decide. The backplane records the
 // decision durably and broadcasts approval_decided; the paused agent
-// run resumes off the broadcast (#1117 path). With --filter-work-ref and
-// --in-order it approves every pending request of one change ticket,
-// oldest first, and stops at the first step that fails (#3597).
+// run resumes off the broadcast (#1117 path). With several ids it shows
+// each request and asks for a yes for each one (#5515). With
+// --filter-work-ref and --in-order it approves every pending request of
+// one change ticket, oldest first, and stops at the first step that
+// fails (#3597).
 func newApproveCmd() *cobra.Command {
 	var (
 		reason            string
@@ -64,22 +86,17 @@ func newApproveCmd() *cobra.Command {
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
-		Use:   "approve <id> | --filter-work-ref REF --in-order",
-		Short: "Approve a pending approval request",
+		Use:   "approve <id> [<id>...] | --filter-work-ref REF --in-order",
+		Short: "Approve pending approval requests",
 		Long: "approve calls POST /api/v1/approvals/{id}/decide with " +
 			"decision=approved to flip the request status, write the " +
 			"decision audit row, and broadcast approval_decided. The " +
 			"paused agent run resumes off the broadcast (T9 #1117). " +
 			"Only pending requests can be approved; any other status " +
 			"returns 409. --reason attaches a human-readable " +
-			"rationale to the decision row.\n\n" + inOrderHelp +
-			"\n\nAn approval needs proof that you are present: a sign-in " +
-			"from the last few minutes. Your `meho login` token is " +
-			"older, so approve opens your browser and asks you to sign " +
-			"in again. It uses the new token for this one approval and " +
-			"does not store it. Without a browser it prints the sign-in " +
-			"link and stops; approve in the web interface instead. " +
-			"Reject needs no new sign-in.\n\n" + delegatedReasonHelp("approve"),
+			"rationale to the decision row.\n\n" + severalIDsHelp +
+			"\n\n" + inOrderHelp + "\n\n" + approveSignInHelp +
+			"\n\n" + delegatedReasonHelp("approve"),
 		Args:          approveArgs(&workRef, &inOrder),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -91,6 +108,9 @@ func newApproveCmd() *cobra.Command {
 					JSONOut:           jsonOut,
 					BackplaneOverride: backplaneOverride,
 				})
+			}
+			if len(args) > 1 {
+				return runApproveMany(cmd, args, reason, jsonOut, backplaneOverride)
 			}
 			return runDecision(cmd, args[0], "approve", reason, jsonOut, backplaneOverride)
 		},
@@ -236,7 +256,11 @@ func postDecision(
 		r := reason
 		body.Reason = &r
 	}
-	if _, err := sendDecide(ctx, client, requestID, body); err != nil {
+	var signIn *approvalSignIn
+	if decision == "approved" {
+		signIn = newApprovalSignIn(client)
+	}
+	if _, err := sendDecide(ctx, client, requestID, body, signIn, false); err != nil {
 		return nil, err
 	}
 	// Decision committed; fetch the full ApprovalRequestView for
@@ -246,17 +270,27 @@ func postDecision(
 	return fetchDetail(ctx, client, requestID)
 }
 
-// sendDecide posts one decision to POST /api/v1/approvals/{id}/decide,
-// with a one-shot refresh on 401. A non-2xx answer comes back as an
-// `*httpResponseError`. Shared by the single-id path (postDecision) and
-// the in-order path (runInOrder), which reads the response body for
+// sendDecide posts one decision to POST /api/v1/approvals/{id}/decide.
+// A non-2xx answer comes back as an `*httpResponseError`. Shared by the
+// single-id path (postDecision), the several-ids path (runApproveMany)
+// and the in-order path (runInOrder), which reads the response body for
 // dispatch_status.
+//
+// A reject uses the stored login, with a one-shot refresh on 401. An
+// approve uses the run's approval sign-in instead (#5515): the stored
+// login never approves. destructive says whether the request's
+// operation is destructive; such a request gets a sign-in of its own.
 func sendDecide(
 	ctx context.Context,
 	client *api.AuthedClient,
 	requestID uuid.UUID,
 	body api.DecideRequestBody,
+	signIn *approvalSignIn,
+	destructive bool,
 ) (*api.DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse, error) {
+	if body.Decision == "approved" && signIn != nil {
+		return sendApprove(ctx, client, requestID, body, signIn, destructive)
+	}
 	resp, err := client.DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostWithResponse(ctx, requestID, nil, body)
 	if err != nil {
 		return nil, err
@@ -270,26 +304,49 @@ func sendDecide(
 			return nil, err
 		}
 	}
-	if body.Decision == "approved" && resp.StatusCode() == 401 && needsFreshSignIn(resp.HTTPResponse) {
-		// The server wants a fresh sign-in (#3979). Sign in again in the
-		// browser and retry once with that token. The token stays in
-		// memory: it is never written to the token store.
-		token, serr := freshSignIn(ctx, client)
-		if serr != nil {
-			return nil, serr
+	if resp.StatusCode() < 200 || resp.StatusCode() >= 300 {
+		return nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+	}
+	return resp, nil
+}
+
+// sendApprove posts one approve with the token of the approval sign-in.
+// When MEHO refuses that sign-in (the RFC 9470 challenge: too old, or
+// used up by a destructive request), it opens one new sign-in and tries
+// once more.
+func sendApprove(
+	ctx context.Context,
+	client *api.AuthedClient,
+	requestID uuid.UUID,
+	body api.DecideRequestBody,
+	signIn *approvalSignIn,
+	destructive bool,
+) (*api.DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse, error) {
+	post := func() (*api.DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse, error) {
+		token, err := signIn.bearer(ctx, destructive)
+		if err != nil {
+			return nil, err
 		}
-		withFresh := func(_ context.Context, req *http.Request) error {
+		withSignIn := func(_ context.Context, req *http.Request) error {
 			req.Header.Set("Authorization", "Bearer "+token)
 			return nil
 		}
-		resp, err = client.DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostWithResponse(ctx, requestID, nil, body, withFresh)
-		if err != nil {
+		return client.DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostWithResponse(ctx, requestID, nil, body, withSignIn)
+	}
+	resp, err := post()
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode() == 401 && needsFreshSignIn(resp.HTTPResponse) {
+		signIn.forget()
+		if resp, err = post(); err != nil {
 			return nil, err
 		}
 	}
 	if resp.StatusCode() < 200 || resp.StatusCode() >= 300 {
 		return nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
 	}
+	signIn.approved(destructive)
 	return resp, nil
 }
 
@@ -306,35 +363,6 @@ func needsFreshSignIn(resp *http.Response) bool {
 		}
 	}
 	return false
-}
-
-// openSignInBrowser opens the fresh sign-in link. A package variable
-// so tests can play the browser against a fake identity provider.
-var openSignInBrowser = auth.OpenSystemBrowser
-
-// freshSignIn finds the identity provider of the stored login and runs
-// the browser sign-in against the same command-line client.
-func freshSignIn(ctx context.Context, client *api.AuthedClient) (string, error) {
-	issuer, clientID := client.SignInClient()
-	if issuer == "" || clientID == "" {
-		return "", errors.New("meho: the stored login names no identity provider; " +
-			"run `meho login` again, or approve in the web interface")
-	}
-	doc, err := auth.FetchDiscoveryFromRealm(ctx, client.HTTPClient(), issuer)
-	if err != nil {
-		return "", err
-	}
-	tok, err := auth.RunFreshSignIn(ctx, doc, clientID, auth.FreshSignInOptions{
-		HTTPClient:  client.HTTPClient(),
-		OpenBrowser: openSignInBrowser,
-	})
-	if err != nil {
-		return "", err
-	}
-	if tok.AccessToken == "" {
-		return "", errors.New("meho: the browser sign-in returned no access token")
-	}
-	return tok.AccessToken, nil
 }
 
 // noBrowserError is the message when no browser could be opened for

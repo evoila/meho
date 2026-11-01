@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/oauth2"
 )
 
 // fakeIdP is an authorization server for the fresh sign-in tests. Its
@@ -81,6 +83,8 @@ func browser(t *testing.T, f *fakeIdP, state func(string) string) func(string) e
 			"response_type":         "code",
 			"client_id":             "meho-cli",
 			"code_challenge_method": "S256",
+			// No offline_access: the sign-in never gives a long login.
+			"scope": "openid",
 		} {
 			if got := q.Get(key); got != want {
 				t.Errorf("sign-in link %s = %q, want %q", key, got, want)
@@ -206,5 +210,45 @@ func TestRunFreshSignInNeedsAnAuthorizationEndpoint(t *testing.T) {
 	_, err := RunFreshSignIn(context.Background(), &DiscoveryDocument{TokenEndpoint: "x"}, "meho-cli", FreshSignInOptions{})
 	if err == nil || !strings.Contains(err.Error(), "authorization_endpoint") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// TestFreshSignInTokenSourceRenewsInMemory checks that an expired
+// sign-in token is renewed with its refresh token, without a new
+// sign-in, and that the renewal asks for no new scope (#5515).
+func TestFreshSignInTokenSourceRenewsInMemory(t *testing.T) {
+	var refreshes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse token form: %v", err)
+		}
+		if r.Form.Get("grant_type") != "refresh_token" || r.Form.Get("refresh_token") != "r1" {
+			t.Errorf("token form = %v, want a refresh with r1", r.Form)
+		}
+		if r.Form.Get("client_id") != "meho-cli-approve" {
+			t.Errorf("client_id = %q", r.Form.Get("client_id"))
+		}
+		refreshes++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "renewed", "token_type": "Bearer", "expires_in": 300, "refresh_token": "r2",
+		})
+	}))
+	t.Cleanup(srv.Close)
+	doc := &DiscoveryDocument{Issuer: srv.URL, AuthorizationEndpoint: srv.URL + "/auth", TokenEndpoint: srv.URL + "/token"}
+	expired := &oauth2.Token{AccessToken: "first", RefreshToken: "r1", Expiry: time.Now().Add(-time.Minute)}
+
+	src := FreshSignInTokenSource(context.Background(), doc, "meho-cli-approve", expired, srv.Client())
+	for i := 0; i < 2; i++ {
+		tok, err := src.Token()
+		if err != nil {
+			t.Fatalf("Token: %v", err)
+		}
+		if tok.AccessToken != "renewed" {
+			t.Errorf("access token = %q, want the renewed one", tok.AccessToken)
+		}
+	}
+	if refreshes != 1 {
+		t.Errorf("refreshes = %d, want 1 (the renewed token is reused)", refreshes)
 	}
 }

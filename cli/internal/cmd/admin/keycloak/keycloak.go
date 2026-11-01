@@ -93,6 +93,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 		realm                 string
 		adminUsername         string
 		cliClientID           string
+		cliApproveClientID    string
 		mcpClientID           string
 		backplaneAudience     string
 		mcpResourceURI        string
@@ -118,8 +119,9 @@ func newBootstrapClientsCmd() *cobra.Command {
 		Long: "bootstrap-clients provisions every realm resource " +
 			"`meho login` and the MCP browser-flow onramp need:\n\n" +
 			"  * the public device-code client (default name `meho-cli`)\n" +
+			"  * the public client of the fresh browser sign-in of `meho approvals approve` (default name `meho-cli-approve`): PKCE on a 127.0.0.1 loopback only, no device flow, no offline_access. Only its tokens can approve on the command line\n" +
 			"  * the public authorization-code+PKCE MCP client (default name `meho-mcp`)\n" +
-			"  * 8 protocol mappers on each client (audience-meho-backplane, meho-mcp-audience, groups-claim, and the User Attribute mappers tenant-id, tenant-role, approver, platform-admin and meho-tenants)\n" +
+			"  * 8 protocol mappers on the CLI and MCP clients (audience-meho-backplane, meho-mcp-audience, groups-claim, and the User Attribute mappers tenant-id, tenant-role, approver, platform-admin and meho-tenants); the approval client gets the same without meho-mcp-audience\n" +
 			"  * 4 default client scopes on each client (basic, roles, web-origins, acr) — including the load-bearing `basic` scope that carries the `sub` claim in Keycloak 25+\n" +
 			"  * the `mcp:read`, `mcp:execute` and `mcp:admin` client scopes, plus `offline_access`, as optional scopes on the MCP client — MEHO's MCP clients ask for them at login, and Keycloak refuses a login that asks for a scope the client does not offer\n" +
 			"  * the five MEHO role groups, each with a `tenant_id`, a `tenant_role` and a `meho_tenant` attribute:\n" +
@@ -195,6 +197,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 				AdminUsername:                adminUsername,
 				AdminPassword:                adminPassword,
 				CLIClientID:                  cliClientID,
+				CLIApproveClientID:           cliApproveClientID,
 				MCPClientID:                  mcpClientID,
 				BackplaneAudience:            backplaneAudience,
 				MCPResourceURI:               mcpResourceURI,
@@ -273,6 +276,8 @@ func newBootstrapClientsCmd() *cobra.Command {
 		"master-realm admin username (or set KEYCLOAK_ADMIN_USER)")
 	cmd.Flags().StringVar(&cliClientID, "cli-client-id", "meho-cli",
 		"public client_id for the device-code flow (matches chart's `config.keycloakCliClientId`)")
+	cmd.Flags().StringVar(&cliApproveClientID, "cli-approve-client-id", "meho-cli-approve",
+		"public client_id for the fresh browser sign-in of `meho approvals approve` (matches chart's `config.keycloakCliApproveClientId`)")
 	cmd.Flags().StringVar(&mcpClientID, "mcp-client-id", "meho-mcp",
 		"public client_id for the MCP browser-flow client")
 	cmd.Flags().StringVar(&backplaneAudience, "backplane-audience", "meho-backplane",

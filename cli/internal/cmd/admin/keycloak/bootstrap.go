@@ -35,6 +35,13 @@ type BootstrapOptions struct {
 	// CLI's auth-config discovery resolves it.
 	CLIClientID string
 
+	// CLIApproveClientID is the public client of the fresh browser
+	// sign-in of `meho approvals approve` (#5515); defaults to
+	// "meho-cli-approve". Must match the chart's
+	// keycloakCliApproveClientId: only a token made for this client can
+	// approve on the command line or REST.
+	CLIApproveClientID string
+
 	// MCPClientID is the public authorization-code+PKCE client name
 	// used by browser-flow MCP clients — the mcp-remote stdio shim
 	// (Claude Desktop), MCP Inspector, and Claude Code / Cursor
@@ -131,6 +138,9 @@ func (o BootstrapOptions) withDefaults() BootstrapOptions {
 	if o.CLIClientID == "" {
 		o.CLIClientID = "meho-cli"
 	}
+	if o.CLIApproveClientID == "" {
+		o.CLIApproveClientID = "meho-cli-approve"
+	}
 	if o.MCPClientID == "" {
 		o.MCPClientID = "meho-mcp"
 	}
@@ -195,7 +205,8 @@ func (o BootstrapOptions) validate() error {
 				"(MEHO normalises MCP_RESOURCE_URI server-side; the " +
 				"audience claim in the token must match the no-slash form)")
 	}
-	if o.CLIClientID == "meho-backplane" || o.MCPClientID == "meho-backplane" {
+	if o.CLIClientID == "meho-backplane" || o.MCPClientID == "meho-backplane" ||
+		o.CLIApproveClientID == "meho-backplane" {
 		return errors.New(
 			"refusing to provision a client named meho-backplane: " +
 				"that is the realm's confidential resource-server " +
@@ -506,6 +517,48 @@ func (o BootstrapOptions) desiredCLIClient() *clientRep {
 	return c
 }
 
+// desiredApproveMappers returns the mappers of the approval client: the
+// mappers of desiredMappers without `meho-mcp-audience`. The token of
+// an approval sign-in is only for the approve call, not for /mcp.
+func (o BootstrapOptions) desiredApproveMappers() []protocolMapperRep {
+	var mappers []protocolMapperRep
+	for _, m := range o.desiredMappers() {
+		if m.Name != "meho-mcp-audience" {
+			mappers = append(mappers, m)
+		}
+	}
+	return mappers
+}
+
+// desiredCLIApproveClient builds the ClientRepresentation for the public
+// client of the approval sign-in (#5515): browser sign-in with PKCE on a
+// 127.0.0.1 loopback redirect only, no device flow and no
+// offline_access. MEHO accepts an approve on the command line or REST
+// only with a token made for this client.
+func (o BootstrapOptions) desiredCLIApproveClient() *clientRep {
+	return &clientRep{
+		ClientID:                  o.CLIApproveClientID,
+		Name:                      "MEHO CLI approvals",
+		Description:               "Public client for the fresh browser sign-in of `meho approvals approve` (loopback, PKCE). Only its tokens can approve on the command line or REST. Provisioned by `meho admin keycloak bootstrap-clients`.",
+		Enabled:                   boolPtr(true),
+		PublicClient:              boolPtr(true),
+		StandardFlowEnabled:       boolPtr(true),
+		ImplicitFlowEnabled:       boolPtr(false),
+		DirectAccessGrantsEnabled: boolPtr(false),
+		ServiceAccountsEnabled:    boolPtr(false),
+		FrontchannelLogout:        boolPtr(false),
+		Attributes: map[string]string{
+			"pkce.code.challenge.method":                  "S256",
+			"oauth2.device.authorization.grant.enabled":   "false",
+			"use.refresh.tokens":                          "true",
+			"client.use.lightweight.access.token.enabled": "false",
+		},
+		RedirectURIs:        append([]string{}, cliRedirectURIs...),
+		WebOrigins:          []string{},
+		DefaultClientScopes: append([]string{"profile", "email"}, requiredDefaultScopes()...),
+	}
+}
+
 // desiredMCPClient builds the ClientRepresentation for the public
 // authorization-code+PKCE client used by browser MCP clients. The
 // 6 mappers + 4 default scopes apply identically — only the flow
@@ -542,13 +595,15 @@ func (o BootstrapOptions) desiredMCPClient() *clientRep {
 // Used by the cobra command to print the "set these in your chart"
 // summary, and by tests for assertions.
 type Result struct {
-	CLIClientID      string // clientId (not UUID) of the device-code client
-	CLIClientUUID    string // internal UUID, useful for downstream debugging
-	MCPClientID      string // clientId of the MCP browser-flow client
-	MCPClientUUID    string
-	AdminGroupUUID   string // UUID of MEHO-Admins
-	AdminUserCreated bool
-	AdminUserJoined  bool // this run added the user to MEHO-Admins or MEHO-Platform-Admins
+	CLIClientID       string // clientId (not UUID) of the device-code client
+	CLIClientUUID     string // internal UUID, useful for downstream debugging
+	ApproveClientID   string // clientId of the approval sign-in client
+	ApproveClientUUID string
+	MCPClientID       string // clientId of the MCP browser-flow client
+	MCPClientUUID     string
+	AdminGroupUUID    string // UUID of MEHO-Admins
+	AdminUserCreated  bool
+	AdminUserJoined   bool // this run added the user to MEHO-Admins or MEHO-Platform-Admins
 	// AddedTenantID is the id of the --add-tenant tenant; AddedTenantIDNew
 	// is true when this run made it.
 	AddedTenantID    string
@@ -566,6 +621,9 @@ type Result struct {
 //     User Attribute mappers (tenant_id, tenant_role, approver,
 //     platform_admin) and meho-tenants (the meho_tenants list)
 //  3. 4 default client scopes (basic / roles / web-origins / acr)
+//     3a. Public approval sign-in client (`meho-cli-approve`, #5515) with
+//     the same mappers minus `meho-mcp-audience` and the same 4 default
+//     scopes
 //  4. Public MCP browser-flow client (`meho-mcp`)
 //  5. Same 8 mappers + 4 default scopes on the MCP client, **plus**
 //     `offline_access`, `mcp:read`, `mcp:execute` and `mcp:admin` as
@@ -664,6 +722,29 @@ func Bootstrap(
 		res.MapperEventsLog = append(res.MapperEventsLog, cliOptionalEvents...)
 	}
 
+	// --- Approval sign-in client (#5515) ------------------------------------
+
+	approveUUID, approveEvents, err := reconcileClient(ctx, c, opts.desiredCLIApproveClient())
+	if err != nil {
+		return nil, fmt.Errorf(
+			"reconcile approval client %q: %w", opts.CLIApproveClientID, err)
+	}
+	res.ApproveClientID = opts.CLIApproveClientID
+	res.ApproveClientUUID = approveUUID
+	res.MapperEventsLog = append(res.MapperEventsLog, approveEvents...)
+	approveMapperEvents, err := reconcileMappers(
+		ctx, c, approveUUID, opts.desiredApproveMappers())
+	if err != nil {
+		return nil, fmt.Errorf("reconcile approval client mappers: %w", err)
+	}
+	res.MapperEventsLog = append(res.MapperEventsLog, approveMapperEvents...)
+	approveScopeEvents, err := reconcileDefaultScopes(
+		ctx, c, approveUUID, requiredDefaultScopes())
+	if err != nil {
+		return nil, fmt.Errorf("reconcile approval client default scopes: %w", err)
+	}
+	res.MapperEventsLog = append(res.MapperEventsLog, approveScopeEvents...)
+
 	// --- MCP browser-flow client --------------------------------------------
 
 	desiredMCP := opts.desiredMCPClient()
@@ -752,8 +833,11 @@ func dryRunSummary(
 	fmt.Fprintf(out, "==> would provision against %s realm=%s\n",
 		opts.KeycloakBaseURL, opts.Realm)
 	fmt.Fprintf(out, "==> CLI device-code client: %s\n", opts.CLIClientID)
+	fmt.Fprintf(out, "==> approval sign-in client: %s (the mappers below "+
+		"without meho-mcp-audience; no device flow, no offline_access)\n",
+		opts.CLIApproveClientID)
 	fmt.Fprintf(out, "==> MCP browser-flow client: %s\n", opts.MCPClientID)
-	fmt.Fprintln(out, "==> protocol mappers (each on both clients):")
+	fmt.Fprintln(out, "==> protocol mappers (each on the CLI and MCP clients):")
 	for _, m := range opts.desiredMappers() {
 		fmt.Fprintf(out, "    - %s (%s)\n", m.Name, m.ProtocolMapper)
 	}
@@ -771,7 +855,7 @@ func dryRunSummary(
 	for _, s := range specs {
 		fmt.Fprintf(out, "    - %s: %s\n", s.Name, formatAttributes(s.Attrs))
 	}
-	fmt.Fprintln(out, "==> default client scopes (each on both clients):")
+	fmt.Fprintln(out, "==> default client scopes (each on all three clients):")
 	for _, s := range requiredDefaultScopes() {
 		fmt.Fprintf(out, "    - %s\n", s)
 	}
@@ -806,6 +890,7 @@ func dryRunSummary(
 	}
 	return &Result{
 		CLIClientID:     opts.CLIClientID,
+		ApproveClientID: opts.CLIApproveClientID,
 		MCPClientID:     opts.MCPClientID,
 		ConfigKeysToSet: buildConfigKeySummary(opts),
 	}, nil
@@ -1209,6 +1294,9 @@ func buildConfigKeySummary(opts BootstrapOptions) []string {
 		"  (env: KEYCLOAK_CLI_CLIENT_ID=" + opts.CLIClientID + ")",
 		"# Surfaced via GET /api/v1/auth-config as `cli_client_id`;",
 		"# `meho login` resolves it automatically.",
+		"config.keycloakCliApproveClientId: " + opts.CLIApproveClientID,
+		"  (env: KEYCLOAK_CLI_APPROVE_CLIENT_ID=" + opts.CLIApproveClientID + ")",
+		"# Surfaced as `cli_approve_client_id`; `meho approvals approve` signs in with it.",
 		"",
 		"MCP browser-flow client_id (paste into your MCP client config — mcp-remote shim / MCP Inspector / Claude Code): " + opts.MCPClientID,
 	}

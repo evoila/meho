@@ -461,6 +461,23 @@ async def test_upgrade_adds_what_a_newer_realm_file_brings(
     assert "user admin: kept" in out
 
 
+async def test_upgrade_adds_the_approval_sign_in_client(capfd: pytest.CaptureFixture[str]) -> None:
+    """A running realm from before #5515 gets the ``meho-cli-approve`` client."""
+    old = _realm_as_imported()
+    old["clients"] = [c for c in old["clients"] if c["clientId"] != "meho-cli-approve"]
+    kc = FakeKeycloak(bootstrap=None)
+    kc.import_realm(old)
+
+    await finish_realm(_plan(_REALM_FILE), _ENV, kc, FakeStore())
+
+    client = kc.clients["meho-cli-approve"]
+    assert client["publicClient"] is True
+    assert client["attributes"]["oauth2.device.authorization.grant.enabled"] == "false"
+    assert client["optionalClientScopes"] == []
+    assert client["redirectUris"] == ["http://127.0.0.1:*"]
+    assert "client meho-cli-approve: created" in capfd.readouterr().out
+
+
 async def test_output_never_contains_a_secret_value(
     realm_file: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:

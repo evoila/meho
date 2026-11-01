@@ -197,10 +197,12 @@ def _make_operator(
         tenant_role=role,
         principal_kind=principal_kind,
         approver=approver,
-        # A person who just signed in, so the REST approve routes accept the
-        # reviewer (#3979). Each call is a new sign-in.
+        # A person who just signed in with the approval sign-in, so the REST
+        # approve routes accept the reviewer (#3979, #5515). Each call is a
+        # new sign-in.
         auth_time=int(time.time()),
         sid=str(uuid.uuid4()),
+        azp="meho-cli-approve",
     )
 
 

@@ -7,6 +7,8 @@
   "resetPasswordAllowed": false,
   "rememberMe": false,
   "bruteForceProtected": true,
+  "ssoSessionIdleTimeout": 3600,
+  "ssoSessionMaxLifespan": 36000,
   "offlineSessionMaxLifespanEnabled": true,
   "offlineSessionMaxLifespan": 604800,
   "attributes": {

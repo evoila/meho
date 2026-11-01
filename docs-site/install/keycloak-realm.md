@@ -303,6 +303,56 @@ Two more things must be true:
   so a value changed by hand goes back to 48 hours unless you pass the
   flag.
 
+## The web console session
+
+The web console keeps its own session on the MEHO server. It ends after
+**1 hour without use**, and after **10 hours** at most. The console
+renews its login at Keycloak in the background. If Keycloak has ended
+its own session earlier, the renewal fails and the console session ends
+too. So set the realm's SSO session to the same values:
+
+| Realm setting | Value | Where |
+|---|---|---|
+| SSO Session Idle (`ssoSessionIdleTimeout`) | **`3600`** seconds (1 hour) | **Realm settings → Sessions** |
+| SSO Session Max (`ssoSessionMaxLifespan`) | **`36000`** seconds (10 hours) | **Realm settings → Sessions** |
+
+Keycloak's defaults are 30 minutes and 10 hours. With them, the console
+session ends after 30 minutes without use.
+
+When the session ends, the console shows "Your session ended. Please
+sign in again." and a **Sign in** button. After the login, the person is
+back on the same page.
+
+The two MEHO settings are `UI_SESSION_SLIDING_EXTENSION_SECONDS`
+(default `3600`) and `UI_SESSION_ABSOLUTE_LIFETIME_SECONDS` (default
+`36000`). If you change them, change the realm values to match.
+
+**Why the console has no long login.** The console does not ask for
+`offline_access`:
+
+- The console session lives on the MEHO server, not in the browser.
+- A long login would still work after the person logs out in the
+  browser.
+- When the login server remembers the browser, a new login is quick.
+
+**On an existing realm, set the two values once.** The Keycloak that
+ships with the MEHO chart reads the realm file only when it creates the
+realm. Its setup job adds clients and groups, but it does not change
+realm settings. So on a running realm, do one of these:
+
+- In the Keycloak admin console, open **Realm settings → Sessions** and
+  set **SSO Session Idle** to 1 hour and **SSO Session Max** to 10
+  hours.
+- Or use the MEHO Keycloak connector (`keycloak.realm.update`). It asks
+  for an approval. Put the two values in a file and run:
+
+  ```bash
+  cat > realm-sessions.json <<'JSON'
+  {"ssoSessionIdleTimeout": 3600, "ssoSessionMaxLifespan": 36000}
+  JSON
+  meho keycloak realm update --target <your-keycloak-target> -f realm-sessions.json
+  ```
+
 ## Approve-only principal
 
 By default, clearing the approval queue needs the **operator** role. For

@@ -130,6 +130,22 @@ no secret; the token lives in the keyring, or in a `0600`-mode
 `credentials.json` sibling on headless hosts where no keyring is
 available.
 
+### How long the login lasts
+
+`meho login` asks for a long login by default (the OIDC scope
+`offline_access`). The CLI renews it by itself, so you log in once. On
+MEHO's built-in login server it ends after 48 hours without use, or
+after 7 days at most. Then run `meho login` again.
+
+- `meho login --offline=false` asks for a short login instead. It ends
+  after 30 minutes without use (the realm's default).
+- If the login server does not offer the long login (an older realm),
+  `meho login` logs in without it and prints one line that says so. Ask
+  your admin to fix the realm: see
+  [How long each login lasts](../install/keycloak-realm.md#how-long-each-login-lasts).
+- The long login is stored like the token: in the OS keyring, or in the
+  `0600` file. Treat it as a secret.
+
 Two useful overrides:
 
 - `meho login --client-id <id>` / `--issuer <url>` skip or override the

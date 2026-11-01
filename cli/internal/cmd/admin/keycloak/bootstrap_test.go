@@ -48,10 +48,17 @@ type fakeKeycloak struct {
 	users          map[string]*userRep            // keyed by UUID
 	userGroups     map[string][]string            // user UUID -> group UUIDs
 	passwords      map[string]string              // user UUID -> last reset password
+	flows          map[string]*fakeFlow           // login flows, keyed by alias
 
 	// Counts requests per (method, path-template) so tests can assert
 	// idempotency: a re-run must not increment "POST /clients".
 	calls map[string]int
+
+	// flowCalls counts the requests to the login flow API. The request
+	// number failFlowCallAt (1-based; 0 = never) answers HTTP 500 once:
+	// a run that stops half-way through the flow setup.
+	flowCalls      int
+	failFlowCallAt int
 }
 
 func newFakeKeycloak() *fakeKeycloak {
@@ -76,8 +83,116 @@ func newFakeKeycloak() *fakeKeycloak {
 		users:      map[string]*userRep{},
 		userGroups: map[string][]string{},
 		passwords:  map[string]string{},
+		flows:      map[string]*fakeFlow{},
 		calls:      map[string]int{},
 	}
+}
+
+// fakeFlow is one login flow of the fake realm with its steps.
+type fakeFlow struct {
+	ID       string
+	TopLevel bool
+	Steps    []*fakeFlowStep
+}
+
+type fakeFlowStep struct {
+	ID          string
+	Provider    string
+	Subflow     string
+	Requirement string
+}
+
+// flowSteps lists a flow's steps the way Keycloak does: the steps of a
+// sub-flow follow the sub-flow.
+func (f *fakeKeycloak) flowSteps(alias string, level int) []map[string]any {
+	var out []map[string]any
+	for _, s := range f.flows[alias].Steps {
+		if s.Subflow != "" {
+			out = append(out, map[string]any{
+				"id": s.ID, "displayName": s.Subflow, "authenticationFlow": true,
+				"requirement": s.Requirement, "level": level,
+			})
+			out = append(out, f.flowSteps(s.Subflow, level+1)...)
+			continue
+		}
+		out = append(out, map[string]any{
+			"id": s.ID, "displayName": "display of " + s.Provider, "providerId": s.Provider,
+			"authenticationFlow": false, "requirement": s.Requirement, "level": level,
+		})
+	}
+	return out
+}
+
+// handleFlows serves the login flow endpoints; false when sub is not one.
+func (f *fakeKeycloak) handleFlows(w http.ResponseWriter, r *http.Request, sub string) bool {
+	const prefix = "authentication/flows"
+	if !strings.HasPrefix(sub, prefix) {
+		return false
+	}
+	f.calls[r.Method+" /authentication/flows..."]++
+	f.flowCalls++
+	if f.flowCalls == f.failFlowCallAt {
+		http.Error(w, "Request timed out", http.StatusInternalServerError)
+		return true
+	}
+	rest := strings.TrimPrefix(strings.TrimPrefix(sub, prefix), "/")
+	switch {
+	case rest == "" && r.Method == http.MethodGet:
+		var list []flowRep
+		for alias, fl := range f.flows {
+			if fl.TopLevel {
+				list = append(list, flowRep{ID: fl.ID, Alias: alias})
+			}
+		}
+		writeJSON(w, http.StatusOK, list)
+	case rest == "" && r.Method == http.MethodPost:
+		var rep flowRep
+		_ = json.NewDecoder(r.Body).Decode(&rep)
+		if _, ok := f.flows[rep.Alias]; ok || !rep.TopLevel || rep.BuiltIn {
+			w.WriteHeader(http.StatusConflict)
+			return true
+		}
+		f.flows[rep.Alias] = &fakeFlow{ID: f.mintID(), TopLevel: true}
+		w.WriteHeader(http.StatusCreated)
+	default:
+		alias, tail, _ := strings.Cut(rest, "/")
+		parent, ok := f.flows[alias]
+		if !ok {
+			http.Error(w, "Parent flow doesn't exist", http.StatusBadRequest)
+			return true
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		switch {
+		case tail == "executions/execution" && r.Method == http.MethodPost:
+			provider, _ := body["provider"].(string)
+			parent.Steps = append(parent.Steps, &fakeFlowStep{
+				ID: f.mintID(), Provider: provider, Requirement: "DISABLED"})
+			w.WriteHeader(http.StatusCreated)
+		case tail == "executions/flow" && r.Method == http.MethodPost:
+			name, _ := body["alias"].(string)
+			f.flows[name] = &fakeFlow{ID: f.mintID()}
+			parent.Steps = append(parent.Steps, &fakeFlowStep{
+				ID: f.mintID(), Subflow: name, Requirement: "DISABLED"})
+			w.WriteHeader(http.StatusCreated)
+		case tail == "executions" && r.Method == http.MethodGet:
+			writeJSON(w, http.StatusOK, f.flowSteps(alias, 0))
+		case tail == "executions" && r.Method == http.MethodPut:
+			for _, fl := range f.flows {
+				for _, s := range fl.Steps {
+					if s.ID == body["id"] {
+						s.Requirement, _ = body["requirement"].(string)
+						w.WriteHeader(http.StatusNoContent)
+						return true
+					}
+				}
+			}
+			http.Error(w, "Illegal execution", http.StatusNotFound)
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (f *fakeKeycloak) mintID() string {
@@ -121,6 +236,9 @@ func (f *fakeKeycloak) handler() http.HandlerFunc {
 			return
 		}
 		sub := rest[slash+1:]
+		if f.handleFlows(w, r, sub) {
+			return
+		}
 
 		switch {
 		case sub == "clients" && r.Method == http.MethodGet:
@@ -151,6 +269,7 @@ func (f *fakeKeycloak) handler() http.HandlerFunc {
 			}
 			id := f.mintID()
 			c.ID = id
+			dropEmptyAttributes(&c)
 			f.clients[id] = &c
 			w.Header().Set("Location",
 				fmt.Sprintf("https://fake/admin/realms/r/clients/%s", id))
@@ -176,6 +295,7 @@ func (f *fakeKeycloak) handler() http.HandlerFunc {
 				return
 			}
 			c.ID = uuid
+			dropEmptyAttributes(&c)
 			f.clients[uuid] = &c
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(sub, "/protocol-mappers/models") &&
@@ -302,6 +422,20 @@ func (f *fakeKeycloak) handler() http.HandlerFunc {
 				}
 			}
 			f.optionalScopes[uuid] = append(f.optionalScopes[uuid], sid)
+			w.WriteHeader(http.StatusNoContent)
+		case strings.Contains(sub, "/optional-client-scopes/") &&
+			r.Method == http.MethodDelete:
+			f.calls["DELETE /clients/{uuid}/optional-client-scopes/{sid}"]++
+			parts := strings.Split(sub, "/")
+			uuid := parts[1]
+			sid := parts[len(parts)-1]
+			var kept []string
+			for _, already := range f.optionalScopes[uuid] {
+				if already != sid {
+					kept = append(kept, already)
+				}
+			}
+			f.optionalScopes[uuid] = kept
 			w.WriteHeader(http.StatusNoContent)
 		case sub == "groups" && r.Method == http.MethodGet:
 			f.calls["GET /groups"]++
@@ -436,6 +570,16 @@ func (f *fakeKeycloak) handler() http.HandlerFunc {
 	}
 }
 
+// dropEmptyAttributes mimics Keycloak: an attribute sent with an empty
+// value is removed from the client, not stored.
+func dropEmptyAttributes(c *clientRep) {
+	for k, v := range c.Attributes {
+		if v == "" {
+			delete(c.Attributes, k)
+		}
+	}
+}
+
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -488,9 +632,12 @@ func TestBootstrap_FreshRealmCreatesEverything(t *testing.T) {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 
-	// Two clients created (CLI + MCP).
-	if len(fake.clients) != 2 {
-		t.Errorf("expected 2 clients, got %d", len(fake.clients))
+	// Three clients created (CLI, approval sign-in, MCP).
+	if len(fake.clients) != 3 {
+		t.Errorf("expected 3 clients, got %d", len(fake.clients))
+	}
+	if res.ApproveClientID != "meho-cli-approve" {
+		t.Errorf("ApproveClientID = %q, want meho-cli-approve", res.ApproveClientID)
 	}
 	if res.CLIClientID != "meho-cli" {
 		t.Errorf("CLIClientID = %q, want meho-cli", res.CLIClientID)
@@ -499,15 +646,22 @@ func TestBootstrap_FreshRealmCreatesEverything(t *testing.T) {
 		t.Errorf("MCPClientID = %q, want meho-mcp", res.MCPClientID)
 	}
 
-	// Each client has 8 mappers.
+	// The CLI and MCP clients have 8 mappers each; the approval client
+	// has the same without meho-mcp-audience.
 	for uuid, mappers := range fake.mappers {
-		if len(mappers) != 8 {
-			t.Errorf("client %s has %d mappers, want 8",
-				uuid, len(mappers))
-		}
 		names := make(map[string]bool)
 		for _, m := range mappers {
 			names[m.Name] = true
+		}
+		if fake.clients[uuid].ClientID == "meho-cli-approve" {
+			if len(mappers) != 7 || names["meho-mcp-audience"] {
+				t.Errorf("approval client has mappers %v, want 7 without meho-mcp-audience", names)
+			}
+			continue
+		}
+		if len(mappers) != 8 {
+			t.Errorf("client %s has %d mappers, want 8",
+				uuid, len(mappers))
 		}
 		for _, want := range []string{
 			"audience-meho-backplane",
@@ -696,9 +850,9 @@ func TestBootstrap_SkipUserProvisioningKeepsGroupsOmitsUser(t *testing.T) {
 		t.Errorf("expected 0 users when skipped, got %d",
 			len(fake.users))
 	}
-	// Both clients still landed.
-	if len(fake.clients) != 2 {
-		t.Errorf("expected 2 clients, got %d", len(fake.clients))
+	// All three clients still landed.
+	if len(fake.clients) != 3 {
+		t.Errorf("expected 3 clients, got %d", len(fake.clients))
 	}
 }
 
@@ -775,16 +929,9 @@ func TestBootstrap_MapperShapeMatchesReferenceScript(t *testing.T) {
 	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
-	// Pull any client's mappers (both have the same set).
-	var mappers []protocolMapperRep
-	for _, m := range fake.mappers {
-		mappers = m
-		break
-	}
-	byName := map[string]protocolMapperRep{}
-	for _, m := range mappers {
-		byName[m.Name] = m
-	}
+	// The CLI client has the full set (the approval client has no
+	// meho-mcp-audience).
+	byName := fake.clientMappers(t, "meho-cli")
 
 	// audience-meho-backplane — emits into `aud`.
 	bp := byName["audience-meho-backplane"]
@@ -898,14 +1045,12 @@ func TestBootstrap_AllFourDefaultScopesApplied(t *testing.T) {
 	}
 }
 
-// TestBootstrap_CLIOfflineAccessOptInAssignsScopeAndIdle is the opt-in
-// contract for #2902: when a deployment sets
-// CLIOfflineSessionIdleSeconds (the `--cli-offline-access` flag), the
-// device-code CLI client gains `offline_access` as an OPTIONAL scope
-// (never default) plus a bounded `client.offline.session.idle.timeout`
-// attribute — the same opt-in shape #912 gave the MCP client, but off
-// by default for the CLI.
-func TestBootstrap_CLIOfflineAccessOptInAssignsScopeAndIdle(t *testing.T) {
+// TestBootstrap_CLIOfflineAccessAssignsScopeAndIdle: with
+// CLIOfflineSessionIdleSeconds set (the `--cli-offline-access` flag,
+// 48h by default), the device-code CLI client gains `offline_access`
+// as an OPTIONAL scope (never default) plus a bounded
+// `client.offline.session.idle.timeout` attribute.
+func TestBootstrap_CLIOfflineAccessAssignsScopeAndIdle(t *testing.T) {
 	fake := newFakeKeycloak()
 	opts := fullOpts()
 	opts.CLIOfflineSessionIdleSeconds = 172800
@@ -934,12 +1079,12 @@ func TestBootstrap_CLIOfflineAccessOptInAssignsScopeAndIdle(t *testing.T) {
 		}
 	}
 	if !foundOptional {
-		t.Errorf("meho-cli missing optional scope offline_access when "+
-			"opted in; got optionalScopes=%v", fake.optionalScopes[cliUUID])
+		t.Errorf("meho-cli missing optional scope offline_access; "+
+			"got optionalScopes=%v", fake.optionalScopes[cliUUID])
 	}
 
 	// ...and NOT as a default scope (else every device login would mint
-	// a refresh token even without --offline).
+	// an offline token even with --offline=false).
 	for _, sid := range fake.defaultScopes[cliUUID] {
 		if sid == "scope-offline-access" {
 			t.Errorf("meho-cli has offline_access as DEFAULT — must be " +
@@ -954,12 +1099,11 @@ func TestBootstrap_CLIOfflineAccessOptInAssignsScopeAndIdle(t *testing.T) {
 	}
 }
 
-// TestBootstrap_DefaultRunLeavesCLIOfflineAccessOff is the
-// off-by-default contract for #2902: a bootstrap run that does NOT opt
-// in must leave the CLI client exactly as before — no offline_access
-// scope and no offline-session-idle attribute — so existing
-// deployments are unaffected.
-func TestBootstrap_DefaultRunLeavesCLIOfflineAccessOff(t *testing.T) {
+// TestBootstrap_ZeroLeavesCLIOfflineAccessOff: with
+// `--cli-offline-access=0` (CLIOfflineSessionIdleSeconds = 0) the CLI
+// client gets no offline_access scope and no offline-session-idle
+// attribute.
+func TestBootstrap_ZeroLeavesCLIOfflineAccessOff(t *testing.T) {
 	fake := newFakeKeycloak()
 	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
@@ -977,13 +1121,94 @@ func TestBootstrap_DefaultRunLeavesCLIOfflineAccessOff(t *testing.T) {
 	}
 	for _, sid := range fake.optionalScopes[cliUUID] {
 		if sid == "scope-offline-access" {
-			t.Errorf("default run assigned offline_access to meho-cli; " +
-				"must be opt-in via --cli-offline-access")
+			t.Errorf("--cli-offline-access=0 assigned offline_access " +
+				"to meho-cli")
 		}
 	}
 	if _, ok := cliClient.Attributes["client.offline.session.idle.timeout"]; ok {
-		t.Errorf("default run set client.offline.session.idle.timeout on " +
-			"meho-cli; must be opt-in only")
+		t.Errorf("--cli-offline-access=0 set " +
+			"client.offline.session.idle.timeout on meho-cli")
+	}
+}
+
+// TestBootstrap_ZeroRemovesExistingCLIOfflineAccess: a run with the
+// default gives the CLI client the long login. A later run with
+// `--cli-offline-access=0` takes it away again: the optional scope is
+// removed and the idle limit is dropped. A client PUT alone would not
+// do that, since Keycloak never changes scope assignments on update.
+// A third run with 0 changes nothing more.
+func TestBootstrap_ZeroRemovesExistingCLIOfflineAccess(t *testing.T) {
+	fake := newFakeKeycloak()
+	withLongLogin := fullOpts()
+	withLongLogin.CLIOfflineSessionIdleSeconds = 172800
+	if _, _, err := runBootstrapOnce(t, fake, withLongLogin); err != nil {
+		t.Fatalf("first Bootstrap: %v", err)
+	}
+	cliUUID := fake.clientUUID(t, "meho-cli")
+	if !fake.hasOptionalScope(cliUUID, "scope-offline-access") {
+		t.Fatalf("first run did not assign offline_access to meho-cli")
+	}
+
+	const deleteKey = "DELETE /clients/{uuid}/optional-client-scopes/{sid}"
+	res, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("second Bootstrap (=0): %v", err)
+	}
+	if fake.hasOptionalScope(cliUUID, "scope-offline-access") {
+		t.Errorf("--cli-offline-access=0 left offline_access on meho-cli; "+
+			"got optionalScopes=%v", fake.optionalScopes[cliUUID])
+	}
+	if got := fake.calls[deleteKey]; got != 1 {
+		t.Errorf("DELETE optional scope called %d times, want 1", got)
+	}
+	if !hasEvent(res, "[removed] optional scope offline_access") {
+		t.Errorf("events do not report the removal:\n%v", res.MapperEventsLog)
+	}
+	if v, ok := fake.clients[cliUUID].Attributes["client.offline.session.idle.timeout"]; ok {
+		t.Errorf("--cli-offline-access=0 left "+
+			"client.offline.session.idle.timeout=%q on meho-cli", v)
+	}
+	// The MCP client keeps its long login.
+	if !fake.hasOptionalScope(fake.clientUUID(t, "meho-mcp"), "scope-offline-access") {
+		t.Errorf("--cli-offline-access=0 removed offline_access from meho-mcp")
+	}
+
+	if res, _, err = runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("third Bootstrap (=0): %v", err)
+	}
+	if got := fake.calls[deleteKey]; got != 1 {
+		t.Errorf("third run called DELETE again: total %d, want 1", got)
+	}
+	if !hasEvent(res, "[skip]    optional scope offline_access (not assigned)") {
+		t.Errorf("third run does not report the skip:\n%v", res.MapperEventsLog)
+	}
+}
+
+// TestBootstrapClientsCmd_CLIOfflineAccessFlagDefault: the CLI client
+// gets the long login by default (48h); a bare flag means the same.
+func TestBootstrapClientsCmd_CLIOfflineAccessFlagDefault(t *testing.T) {
+	f := newBootstrapClientsCmd().Flags().Lookup("cli-offline-access")
+	if f == nil {
+		t.Fatalf("--cli-offline-access flag not registered")
+	}
+	if f.DefValue != "172800" {
+		t.Errorf("--cli-offline-access default = %q, want 172800", f.DefValue)
+	}
+	if f.NoOptDefVal != "172800" {
+		t.Errorf("bare --cli-offline-access = %q, want 172800", f.NoOptDefVal)
+	}
+}
+
+// TestBootstrapClientsCmd_CLIOfflineAccessZeroParses: `=0` is accepted
+// and turns the long CLI login off.
+func TestBootstrapClientsCmd_CLIOfflineAccessZeroParses(t *testing.T) {
+	cmd := newBootstrapClientsCmd()
+	if err := cmd.Flags().Parse([]string{"--cli-offline-access=0"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got, err := cmd.Flags().GetInt("cli-offline-access")
+	if err != nil || got != 0 {
+		t.Errorf("--cli-offline-access=0 parsed as %d (err %v), want 0", got, err)
 	}
 }
 
@@ -1293,6 +1518,38 @@ func TestBootstrap_MCPClientOffersMCPScopes(t *testing.T) {
 }
 
 // groupByName returns the stored group with this exact name, or nil.
+// clientUUID finds a client in the fake by its clientId.
+func (f *fakeKeycloak) clientUUID(t *testing.T, clientID string) string {
+	t.Helper()
+	for uuid, c := range f.clients {
+		if c.ClientID == clientID {
+			return uuid
+		}
+	}
+	t.Fatalf("client %s not found", clientID)
+	return ""
+}
+
+// hasEvent reports whether the run logged the given event line.
+func hasEvent(res *Result, want string) bool {
+	for _, e := range res.MapperEventsLog {
+		if e == want {
+			return true
+		}
+	}
+	return false
+}
+
+// hasOptionalScope reports whether the scope is optional on the client.
+func (f *fakeKeycloak) hasOptionalScope(clientUUID, scopeID string) bool {
+	for _, sid := range f.optionalScopes[clientUUID] {
+		if sid == scopeID {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fakeKeycloak) groupByName(name string) *groupRep {
 	for _, g := range f.groups {
 		if g.Name == name {
@@ -1573,9 +1830,227 @@ func TestBootstrapClientsCmd_RemovedFlagsStop(t *testing.T) {
 // makes the client create fail with HTTP 500.
 func TestBootstrap_ClientDescriptionsFitKeycloak(t *testing.T) {
 	opts := fullOpts().withDefaults()
-	for _, c := range []*clientRep{opts.desiredCLIClient(), opts.desiredMCPClient()} {
+	for _, c := range []*clientRep{opts.desiredCLIClient(), opts.desiredCLIApproveClient(), opts.desiredMCPClient()} {
 		if n := len(c.Description); n > 255 {
 			t.Errorf("%s description is %d characters, want at most 255", c.ClientID, n)
 		}
+	}
+}
+
+// TestBootstrap_ApproveClientShape checks the client of the approval
+// sign-in (#5515): browser sign-in with PKCE on a 127.0.0.1 loopback
+// only, no device flow, no offline_access, the four default scopes.
+func TestBootstrap_ApproveClientShape(t *testing.T) {
+	fake := newFakeKeycloak()
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	var c *clientRep
+	for _, rep := range fake.clients {
+		if rep.ClientID == "meho-cli-approve" {
+			c = rep
+		}
+	}
+	if c == nil {
+		t.Fatal("meho-cli-approve client not created")
+	}
+	if c.PublicClient == nil || !*c.PublicClient || c.StandardFlowEnabled == nil || !*c.StandardFlowEnabled {
+		t.Errorf("want a public client with the browser flow: %+v", c)
+	}
+	if c.DirectAccessGrantsEnabled == nil || *c.DirectAccessGrantsEnabled {
+		t.Errorf("direct access grants must be off")
+	}
+	if got := c.Attributes["oauth2.device.authorization.grant.enabled"]; got != "false" {
+		t.Errorf("device flow = %q, want false", got)
+	}
+	if got := c.Attributes["pkce.code.challenge.method"]; got != "S256" {
+		t.Errorf("PKCE = %q, want S256", got)
+	}
+	if got := c.Attributes["use.refresh.tokens"]; got != "false" {
+		t.Errorf("refresh tokens = %q, want false", got)
+	}
+	if got := c.Attributes["access.token.lifespan"]; got != "900" {
+		t.Errorf("access token lifespan = %q, want 900 (the approval window)", got)
+	}
+	if !slices.Equal(c.RedirectURIs, []string{"http://127.0.0.1:*"}) {
+		t.Errorf("redirect URIs = %v", c.RedirectURIs)
+	}
+	if len(c.OptionalClientScopes) != 0 {
+		t.Errorf("optional scopes = %v, want none (no offline_access)", c.OptionalClientScopes)
+	}
+	if got := fake.defaultScopes[c.ID]; len(got) != 4 {
+		t.Errorf("default scopes = %v, want the four", got)
+	}
+	flow := fake.flows[approvalFlowAlias]
+	if flow == nil {
+		t.Fatalf("login flow %q not created", approvalFlowAlias)
+	}
+	if got := c.AuthenticationFlowBindingOverrides["browser"]; got != flow.ID {
+		t.Errorf("browser flow of the approval client = %q, want %q", got, flow.ID)
+	}
+}
+
+// The approval client's login flow has the password form and the
+// one-time code step, and nothing else.
+func TestBootstrap_ApprovalFlowSteps(t *testing.T) {
+	fake := newFakeKeycloak()
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if got := approvalFlowStepLines(fake); !slices.Equal(got, wantApprovalFlowStepLines) {
+		t.Errorf("steps = %v, want %v", got, wantApprovalFlowStepLines)
+	}
+	// Only the approval client is bound to a flow of its own.
+	for _, c := range fake.clients {
+		if c.ClientID != "meho-cli-approve" && len(c.AuthenticationFlowBindingOverrides) > 0 {
+			t.Errorf("client %s has a login flow binding", c.ClientID)
+		}
+	}
+}
+
+// seedApprovalFlow gives the fake realm the approval flow with all its
+// steps, as a finished run leaves it.
+func seedApprovalFlow(fake *fakeKeycloak) *fakeFlow {
+	flow := &fakeFlow{ID: "flow-existing", TopLevel: true}
+	fake.flows[approvalFlowAlias] = flow
+	for _, s := range approvalFlowSteps() {
+		if s.Subflow != "" {
+			fake.flows[s.Subflow] = &fakeFlow{ID: fake.mintID()}
+		}
+		fake.flows[s.Parent].Steps = append(fake.flows[s.Parent].Steps, &fakeFlowStep{
+			ID: fake.mintID(), Provider: s.Provider, Subflow: s.Subflow, Requirement: s.Requirement,
+		})
+	}
+	return flow
+}
+
+// approvalFlowStepLines lists the approval flow's steps of the fake as
+// "<level> <name> <requirement>" lines.
+func approvalFlowStepLines(fake *fakeKeycloak) []string {
+	var got []string
+	for _, s := range fake.flowSteps(approvalFlowAlias, 0) {
+		name, _ := s["providerId"].(string)
+		if s["authenticationFlow"] == true {
+			name = s["displayName"].(string)
+		}
+		got = append(got, fmt.Sprintf("%d %s %s", s["level"], name, s["requirement"]))
+	}
+	return got
+}
+
+var wantApprovalFlowStepLines = []string{
+	"0 auth-username-password-form REQUIRED",
+	"0 " + approvalCodeFlowAlias + " CONDITIONAL",
+	"1 conditional-user-configured REQUIRED",
+	"1 auth-otp-form REQUIRED",
+}
+
+// A finished flow is kept without a change; an existing approval client
+// without the binding gets it, and gets the token settings of the
+// approval client.
+func TestBootstrap_ReRunKeepsFlowAndBindsExistingClient(t *testing.T) {
+	fake := newFakeKeycloak()
+	seedApprovalFlow(fake)
+	old := fullOpts().withDefaults().desiredCLIApproveClient()
+	old.ID = "uuid-existing-approve"
+	old.Attributes["use.refresh.tokens"] = "true"
+	delete(old.Attributes, "access.token.lifespan")
+	fake.clients[old.ID] = old
+
+	res, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if got := fake.clients[old.ID].AuthenticationFlowBindingOverrides["browser"]; got != "flow-existing" {
+		t.Errorf("browser flow = %q, want flow-existing", got)
+	}
+	if got := fake.clients[old.ID].Attributes; got["use.refresh.tokens"] != "false" || got["access.token.lifespan"] != "900" {
+		t.Errorf("token settings of the existing approval client = %v, want no refresh token and 900", got)
+	}
+	if n := fake.calls["POST /authentication/flows..."] + fake.calls["PUT /authentication/flows..."]; n != 0 {
+		t.Errorf("changed the flow API %d times, want 0", n)
+	}
+	if !slices.Contains(res.MapperEventsLog, `[skip] login flow "meho approval sign-in" exists`) {
+		t.Errorf("events miss the kept flow line: %v", res.MapperEventsLog)
+	}
+}
+
+// A run that stops at any call of the flow setup leaves a half-made
+// flow. The next run finishes it and binds the approval client to it.
+func TestBootstrap_FinishesAFlowSetupThatStoppedHalfWay(t *testing.T) {
+	clean := newFakeKeycloak()
+	if _, _, err := runBootstrapOnce(t, clean, fullOpts()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	setupCalls := clean.flowCalls
+	if setupCalls < 10 {
+		t.Fatalf("a clean run made %d flow API calls, want the whole setup", setupCalls)
+	}
+	for stopAt := 1; stopAt <= setupCalls; stopAt++ {
+		t.Run(fmt.Sprintf("stop at call %d", stopAt), func(t *testing.T) {
+			fake := newFakeKeycloak()
+			fake.failFlowCallAt = stopAt
+			if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err == nil {
+				t.Fatal("the stopped run reported no error")
+			}
+			for _, c := range fake.clients {
+				if c.ClientID == "meho-cli-approve" {
+					t.Fatal("the stopped run made the approval client")
+				}
+			}
+
+			res, _, err := runBootstrapOnce(t, fake, fullOpts())
+			if err != nil {
+				t.Fatalf("the next run: %v", err)
+			}
+			if got := approvalFlowStepLines(fake); !slices.Equal(got, wantApprovalFlowStepLines) {
+				t.Errorf("steps = %v, want %v", got, wantApprovalFlowStepLines)
+			}
+			flow := fake.flows[approvalFlowAlias]
+			for _, c := range fake.clients {
+				if c.ClientID == "meho-cli-approve" && c.AuthenticationFlowBindingOverrides["browser"] != flow.ID {
+					t.Errorf("browser flow of the approval client = %q, want %q", c.AuthenticationFlowBindingOverrides["browser"], flow.ID)
+				}
+			}
+			// A stop after the last change leaves a finished flow, so the
+			// next run keeps it.
+			finished := slices.ContainsFunc(res.MapperEventsLog, func(e string) bool {
+				return strings.HasPrefix(e, `[created] login flow "meho approval sign-in"`) ||
+					strings.HasPrefix(e, `[updated] login flow "meho approval sign-in": finished`) ||
+					e == `[skip] login flow "meho approval sign-in" exists`
+			})
+			if !finished {
+				t.Errorf("events miss the flow line: %v", res.MapperEventsLog)
+			}
+		})
+	}
+}
+
+// A flow with a step the bootstrap does not make is kept as it is, and
+// the approval client is not bound to it.
+func TestBootstrap_DoesNotBindAFlowWithOtherSteps(t *testing.T) {
+	fake := newFakeKeycloak()
+	flow := seedApprovalFlow(fake)
+	flow.Steps = append(flow.Steps, &fakeFlowStep{
+		ID: fake.mintID(), Provider: "auth-cookie", Requirement: "ALTERNATIVE"})
+
+	res, _, err := runBootstrapOnce(t, fake, fullOpts())
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	for _, c := range fake.clients {
+		if c.ClientID == "meho-cli-approve" && len(c.AuthenticationFlowBindingOverrides) != 0 {
+			t.Errorf("the approval client is bound to %v, want no binding", c.AuthenticationFlowBindingOverrides)
+		}
+	}
+	if n := fake.calls["POST /authentication/flows..."] + fake.calls["PUT /authentication/flows..."]; n != 0 {
+		t.Errorf("changed the flow API %d times, want 0", n)
+	}
+	want := `[skip] login flow "meho approval sign-in" has other steps than the bootstrap makes; the approval client is not bound to it`
+	if !slices.Contains(res.MapperEventsLog, want) {
+		t.Errorf("events miss the line %q: %v", want, res.MapperEventsLog)
+	}
+	if got := approvalFlowStepLines(fake); !slices.Equal(got, append(slices.Clone(wantApprovalFlowStepLines), "0 auth-cookie ALTERNATIVE")) {
+		t.Errorf("the flow was changed: %v", got)
 	}
 }

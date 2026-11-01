@@ -412,8 +412,8 @@ def test_eager_import_connectors_boots_clean_with_all_connectors_aligned() -> No
     connector subpackages in-process. The re-import re-executes every
     connector module body, which re-populates module-level aggregate
     registries that live *outside* the connector subpackages — notably the
-    composite preview-builder maps (``vmware_rest``'s
-    ``_WRITE_PREVIEW_BUILDERS`` and the central ``_PREVIEW_BUILDERS``,
+    composite preview-builder maps (``vmware_rest``'s composite rows'
+    ``preview`` builders and the central ``_PREVIEW_BUILDERS``,
     argocd's equivalents, …) — with FRESH function objects. An in-process
     re-import therefore leaks those fresh builders into whichever connector
     preview test xdist later schedules on the same worker, breaking its

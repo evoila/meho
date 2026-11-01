@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 __all__ = [
     "HOST_CERTIFICATES_GROUP_KEY",
     "HOST_CERTIFICATES_WHEN_TO_USE",
-    "HOST_CERTIFICATE_TYPED_OPS",
+    "TYPED_OPS",
     "VMWARE_HOST_CERTIFICATE_SHOW_OP",
     "VMWARE_HOST_TPM_ATTESTATION_OP",
     "host_certificate_show_impl",
@@ -521,8 +521,11 @@ VMWARE_HOST_TPM_ATTESTATION_OP = VmwareTypedOp(
     },
 )
 
-#: The two typed reads, in registration order.
-HOST_CERTIFICATE_TYPED_OPS: Final[tuple[VmwareTypedOp, ...]] = (
+#: The two typed reads; ``typed_ops.py`` collects them.
+TYPED_OPS: Final[tuple[VmwareTypedOp, ...]] = (
     VMWARE_HOST_CERTIFICATE_SHOW_OP,
     VMWARE_HOST_TPM_ATTESTATION_OP,
 )
+WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
+    HOST_CERTIFICATES_GROUP_KEY: HOST_CERTIFICATES_WHEN_TO_USE
+}

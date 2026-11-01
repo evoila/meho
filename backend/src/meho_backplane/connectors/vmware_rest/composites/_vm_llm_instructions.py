@@ -503,21 +503,26 @@ VM_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
         ),
     },
     _P + "folder.create": {
-        "when_to_call": "Call to create a VM folder under a parent VM folder.",
+        "when_to_call": (
+            "Call to create a VM, host, datastore or network folder under a parent folder "
+            "of the same kind."
+        ),
         "preconditions": (
-            "Give the parent as parent_folder (name) or parent_folder_id (moid). Each "
-            "datacenter has a root VM folder named 'vm', so on a multi-datacenter "
-            "vCenter pass parent_folder_id or datacenter."
+            "Give the parent as parent_folder (name, with folder_type for a host, "
+            "datastore or network folder) or parent_folder_id (moid). Each datacenter has "
+            "root folders named 'vm', 'host', 'datastore' and 'network', so on a "
+            "multi-datacenter vCenter pass parent_folder_id or datacenter."
         ),
         "output_shape": (
             "{status: created|parent_not_found|ambiguous_parent, parent_folder, "
-            "parent_folder_id, datacenter, new_folder_name, folder, candidate_folders, "
+            "parent_folder_id, datacenter, folder_type, new_folder_name, folder, "
+            "folder_info: {folder, name, parent_folder_id, child_type}, candidate_folders, "
             "issues: [{category, severity, message}], guidance}."
         ),
         "next_step": (
-            "Use folder (the new moid) as the folder of vm.create or vm.clone_from_template. "
-            "On ambiguous_parent, call again with one of candidate_folders as "
-            "parent_folder_id."
+            "Use folder (the new moid) as the folder of vm.create or vm.clone_from_template, "
+            "or move objects into it with object.move. On ambiguous_parent, call again "
+            "with one of candidate_folders as parent_folder_id."
         ),
     },
     _P + "folder.delete": {

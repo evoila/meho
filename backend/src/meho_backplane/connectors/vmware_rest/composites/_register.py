@@ -58,6 +58,10 @@ from meho_backplane.connectors.vmware_rest.alarm_state import (
 from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
     register_vmware_governed_subops,
 )
+from meho_backplane.connectors.vmware_rest.composites._inventory_schemas import (
+    INVENTORY_GROUP_KEY,
+    INVENTORY_WHEN_TO_USE,
+)
 from meho_backplane.connectors.vmware_rest.composites._migration_inventory import (
     register_migration_inventory_dispatch_surface,
 )
@@ -130,9 +134,10 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "dangerous) or runs a VM group on a host group "
         "(cluster.drs_vm_host_rule.create, caution); delete a DRS rule "
         "(cluster.drs_rule.delete, destructive); create a resource pool "
-        "(resource_pool.create, caution) or delete one (resource_pool.delete, "
-        "dangerous). Pair with 'host' for one host's maintenance and with 'vm' "
-        "to move VMs."
+        "(resource_pool.create, caution), change its CPU and memory shares, limits "
+        "and reservations (resource_pool.update, dangerous) or delete one "
+        "(resource_pool.delete, dangerous). Pair with 'host' for one host's "
+        "maintenance and with 'vm' to move VMs."
     ),
     "events": (
         "Use for vCenter events: what changed, and when. Reads: the latest "
@@ -213,8 +218,9 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "(vm.snapshot.delete, destructive) or all of them (vm.snapshot.delete_all, "
         "destructive); consolidate a VM's disks (vm.disks.consolidate, caution); "
         "delete a powered-off VM and its "
-        "disks (vm.destroy, destructive); create a VM folder (folder.create, "
-        "dangerous) or delete an empty one (folder.delete, destructive). Pair "
+        "disks (vm.destroy, destructive); create a VM, host, datastore or network "
+        "folder (folder.create, dangerous) or delete an empty one (folder.delete, "
+        "destructive). Pair "
         "with 'storage', 'networking' or 'cluster' for the reads a create or a "
         "move needs."
     ),
@@ -284,6 +290,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     INSTALL_GROUP_KEY: INSTALL_WHEN_TO_USE,
     # Shared with the two typed host-access reads: the same key and text.
     HOST_ACCESS_GROUP_KEY: HOST_ACCESS_WHEN_TO_USE,
+    # Datacenter create / delete, object rename / move.
+    INVENTORY_GROUP_KEY: INVENTORY_WHEN_TO_USE,
 }
 
 

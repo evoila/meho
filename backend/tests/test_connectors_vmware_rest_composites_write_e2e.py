@@ -3121,9 +3121,21 @@ class _FolderCreateVmwareConnector:
         return {"value": [{"folder": "group-v1", "name": "prod"}]}
 
     async def _post_vmomi_json(
-        self, target: Any, path: str, *, operator: Operator, json: Any = None
+        self, target: Any, path: str, *, operator: Operator, json: Any = None, **_kw: Any
     ) -> Any:
         self.vmomi_calls.append(path)
+        if path.endswith("/RetrievePropertiesEx"):
+            return {
+                "objects": [
+                    {
+                        "obj": {"type": "Folder", "value": self.new_folder_moid},
+                        "propSet": [
+                            {"name": "name", "val": "cluster-nodes"},
+                            {"name": "parent", "val": {"type": "Folder", "value": "group-v1"}},
+                        ],
+                    }
+                ]
+            }
         return {"type": "Folder", "value": self.new_folder_moid}
 
     @property
@@ -3140,8 +3152,8 @@ async def test_folder_create_queue_approve_resume_with_2681_envelope(
 
     The synchronous-write proof end-to-end: on the approved resume the
     ``CreateFolder`` fires exactly once and its returned Folder MoRef is the
-    result, with **no** ``RetrievePropertiesEx`` task poll (the whole vmomi
-    call log is the single CreateFolder).
+    result, with no task poll -- only one ``RetrievePropertiesEx`` read-back
+    of the new folder follows.
     """
     recorder = _FolderCreateVmwareConnector()
     await _bootstrap(recorder, stub_embedding_service)
@@ -3202,8 +3214,12 @@ async def test_folder_create_queue_approve_resume_with_2681_envelope(
     assert result2.status == "ok", result2.error
     assert result2.result["status"] == "created"
     assert result2.result["folder"] == "group-v99"
-    # CreateFolder is synchronous: exactly one vmomi call, never polled.
-    assert recorder.vmomi_calls == ["/Folder/group-v1/CreateFolder"]
+    # CreateFolder is synchronous: one write, never polled, then one read-back.
+    assert recorder.vmomi_calls == [
+        "/Folder/group-v1/CreateFolder",
+        "/PropertyCollector/propertyCollector/RetrievePropertiesEx",
+    ]
+    assert result2.result["folder_info"]["parent_folder_id"] == "group-v1"
 
 
 @pytest.mark.asyncio

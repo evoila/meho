@@ -83,7 +83,7 @@ import httpx
 import pytest
 import respx
 
-from meho_backplane.connectors.vmware_rest.composites import _host, _write
+from meho_backplane.connectors.vmware_rest.composites import _host, _resource_pool_update, _write
 from meho_backplane.operations.ingest import parse_openapi
 from tests.acceptance._vcenter_spec import (
     VCENTER_SPEC_REASON,
@@ -121,13 +121,14 @@ def _required_raw_sub_op_ids() -> set[str]:
     skips them (their handlers run their own pre-flight).
     """
     raw: set[str] = set()
-    for name in dir(_write):
-        if not name.startswith("_SUB_OPS_"):
-            continue
-        for op_id in getattr(_write, name):
-            if op_id.startswith("vmware.composite."):
+    for module in (_write, _resource_pool_update):
+        for name in dir(module):
+            if not name.startswith("_SUB_OPS_"):
                 continue
-            raw.add(op_id)
+            for op_id in getattr(module, name):
+                if op_id.startswith("vmware.composite."):
+                    continue
+                raw.add(op_id)
     return raw
 
 
@@ -220,6 +221,17 @@ def test_resource_pool_create_sub_op_manifest_is_expected() -> None:
     assert set(_write._SUB_OPS_RESOURCE_POOL_CREATE) == {
         "POST:/vcenter/resource-pool",
         "GET:/vcenter/resource-pool",
+    }
+
+
+def test_resource_pool_update_sub_op_manifest_is_expected() -> None:
+    """resource_pool.update reads the pool, then sends one PATCH (both REST)."""
+    assert [n for n in dir(_resource_pool_update) if n.startswith("_SUB_OPS_")] == [
+        "_SUB_OPS_RESOURCE_POOL_UPDATE"
+    ]
+    assert set(_resource_pool_update._SUB_OPS_RESOURCE_POOL_UPDATE) == {
+        "GET:/vcenter/resource-pool/{resourcePool}",
+        "PATCH:/vcenter/resource-pool/{resourcePool}",
     }
 
 
@@ -841,9 +853,13 @@ def test_cluster_drs_rule_create_vi_json_sub_op_manifest_is_the_expected_pair() 
 
 
 def test_folder_create_vi_json_sub_op_manifest_is_the_expected_single() -> None:
-    """Pin the folder.create vi-json manifest — one synchronous CreateFolder, no poll."""
+    """Pin the folder.create vi-json manifest — one synchronous CreateFolder, no poll.
+
+    The ``RetrievePropertiesEx`` is the read-back of the new folder.
+    """
     assert set(_write._VIM_SUB_OPS_FOLDER_CREATE) == {
         "POST:/Folder/{moId}/CreateFolder",
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
     }
 
 
@@ -1332,7 +1348,9 @@ from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
     _drs_group,
     _drs_group_delete,
     _drs_rule_delete,
+    _inventory_tree,
     _library_delete,
+    _object_rename_move,
     _snapshot,
     _snapshot_cleanup,
     _teardown,
@@ -1431,6 +1449,52 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
             "POST:/VirtualMachineSnapshot/{moId}/RemoveSnapshot_Task",
         },
     ),
+    # --- Inventory tree changes: start ---
+    # Datacenter create: the root folder from ServiceContent, the synchronous
+    # CreateDatacenter, then the read-back.
+    "_VIM_SUB_OPS_DATACENTER_CREATE": (
+        _inventory_tree,
+        {
+            "POST:/ServiceInstance/{moId}/RetrieveServiceContent",
+            "POST:/Folder/{moId}/CreateDatacenter",
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        },
+    ),
+    # Datacenter delete: the datacenter and its four root folders, the names
+    # of what blocks it (paged), then one Destroy_Task.
+    "_VIM_SUB_OPS_DATACENTER_DELETE": (
+        _inventory_tree,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+            "POST:/Datacenter/{moId}/Destroy_Task",
+        },
+    ),
+    # Object rename: one Rename_Task path per managed-object type.
+    "_VIM_SUB_OPS_OBJECT_RENAME": (
+        _object_rename_move,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualMachine/{moId}/Rename_Task",
+            "POST:/Folder/{moId}/Rename_Task",
+            "POST:/Datacenter/{moId}/Rename_Task",
+            "POST:/ClusterComputeResource/{moId}/Rename_Task",
+            "POST:/Datastore/{moId}/Rename_Task",
+            "POST:/StoragePod/{moId}/Rename_Task",
+            "POST:/Network/{moId}/Rename_Task",
+            "POST:/DistributedVirtualSwitch/{moId}/Rename_Task",
+            "POST:/DistributedVirtualPortgroup/{moId}/Rename_Task",
+            "POST:/ResourcePool/{moId}/Rename_Task",
+        },
+    ),
+    "_VIM_SUB_OPS_OBJECT_MOVE": (
+        _object_rename_move,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/Folder/{moId}/MoveIntoFolder_Task",
+        },
+    ),
+    # --- Inventory tree changes: end ---
     # Delete all snapshots of a VM, and consolidate its disks.
     "_VIM_SUB_OPS_VM_SNAPSHOT_DELETE_ALL": (
         _snapshot_cleanup,

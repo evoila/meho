@@ -149,11 +149,12 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
     CompositeSpec(
         op_id="vmware.composite.folder.create",
         handler=folder_create_composite,
-        summary="Create a VM folder under a parent folder (synchronous vim CreateFolder).",
+        summary="Create a VM, host, datastore or network folder under a parent folder.",
         description=(
-            "Creates a VM folder under a parent VM folder, given by name or by "
-            "moid. A parent name that matches no folder or several is refused "
-            "before anything changes. Like 'govc folder.create'."
+            "Creates a folder under a parent folder of the same kind, given by name "
+            "or by moid (vim CreateFolder), then reads it back. A parent name that "
+            "matches no folder or several is refused before anything changes. Like "
+            "'govc folder.create'."
         ),
         parameter_schema=FOLDER_CREATE_PARAMETER_SCHEMA,
         response_schema=FOLDER_CREATE_RESPONSE_SCHEMA,

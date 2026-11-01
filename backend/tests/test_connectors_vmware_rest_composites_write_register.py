@@ -665,6 +665,40 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "answer_failed",
             "answer_unknown",
         },
+        # --- Inventory tree changes and resource pool update: start ---
+        "vmware.composite.datacenter.create": {"created"},
+        "vmware.composite.datacenter.delete": {
+            "deleted",
+            "unchanged",
+            "invalid_request",
+            "precondition_failed",
+            "still_present",
+            "timeout",
+        },
+        "vmware.composite.object.rename": {
+            "renamed",
+            "unchanged",
+            "invalid_request",
+            "not_found",
+            "timeout",
+        },
+        "vmware.composite.object.move": {
+            "moved",
+            "partial",
+            "failed",
+            "unchanged",
+            "invalid_request",
+            "not_found",
+            "precondition_failed",
+            "timeout",
+        },
+        "vmware.composite.resource_pool.update": {
+            "updated",
+            "unchanged",
+            "not_found",
+            "refused",
+        },
+        # --- Inventory tree changes and resource pool update: end ---
         # Host membership (#4349): the add answers accepted at once.
         "vmware.composite.host.add": {
             "accepted",

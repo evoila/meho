@@ -314,7 +314,10 @@ async def _sensor_operator(snap: _SensorSnapshot) -> Operator:
     internal-only marker (#2757) that routes its Vault JWT logins to
     ``vault_check_runner_role`` when an operator has provisioned a dedicated
     bounded role; unset, that marker is a no-op and the login keeps
-    ``vault_oidc_role``. It is the *only* site that sets the marker.
+    ``vault_oidc_role``. The inbound event intake
+    (:func:`~meho_backplane.events.ingest.service._build_ingest_operator`)
+    is the only other site that sets the marker: it presents the same
+    runner token, so it must log in under the same role.
     """
     return Operator(
         sub=snap.identity_sub,

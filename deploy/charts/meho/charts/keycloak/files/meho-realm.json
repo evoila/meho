@@ -5,12 +5,17 @@
   "sslRequired": "external",
   "registrationAllowed": false,
   "resetPasswordAllowed": false,
-  "rememberMe": false,
+  "rememberMe": true,
+  "ssoSessionIdleTimeoutRememberMe": 2592000,
+  "ssoSessionMaxLifespanRememberMe": 2592000,
   "bruteForceProtected": true,
   "ssoSessionIdleTimeout": 3600,
   "ssoSessionMaxLifespan": 36000,
   "offlineSessionMaxLifespanEnabled": true,
   "offlineSessionMaxLifespan": 604800,
+  "webAuthnPolicyPasswordlessPasskeysEnabled": true,
+  "webAuthnPolicyPasswordlessUserVerificationRequirement": "required",
+  "webAuthnPolicyPasswordlessRequireResidentKey": "Yes",
   "attributes": {
     "CreateDefaultClientScopes": "true"
   },

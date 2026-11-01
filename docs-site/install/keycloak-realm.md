@@ -411,6 +411,124 @@ token. Its **Token Claim Name** must match the backplane's
 tenant role (`read_only`), so the capability adds approval power
 without adding dispatch power.
 
+## Remember the browser, and passkeys
+
+Two realm settings make a login rare for a person:
+
+- **Remember the browser for 30 days.** The login page shows a
+  **Remember me** box. When the person ticks it, Keycloak keeps the
+  login in that browser for 30 days. A new `meho login`, a Claude Code
+  login or a console login in that browser then asks no password and no
+  code.
+- **Passkeys.** A passkey is a login key kept on the device, for example
+  Touch ID, Windows Hello or a security key. A login with a passkey asks
+  no password and no one-time code. It is faster, and it does not work
+  on a fake login page.
+
+The Keycloak that ships with the MEHO chart has both settings in new
+installs. On your own Keycloak, or on a built-in realm that already runs,
+set them once (see [A realm that already runs](#a-realm-that-already-runs)).
+
+| Where in the Keycloak admin console | Setting | Value |
+|---|---|---|
+| Realm settings → **Login** | Remember me | On |
+| Realm settings → **Sessions** | SSO Session Idle Remember Me | 30 days |
+| Realm settings → **Sessions** | SSO Session Max Remember Me | 30 days |
+| Authentication → Policies → **Webauthn Passwordless Policy** | Enable Passkeys | On |
+| Authentication → Policies → **Webauthn Passwordless Policy** | User verification requirement | Required (the device asks for a PIN or a fingerprint) |
+| Authentication → Policies → **Webauthn Passwordless Policy** | Require discoverable credential | Yes |
+
+### What stays strict
+
+- **Approvals on the command line and through REST still ask every
+  time.** The fresh sign-in for an approval
+  (see [Why approve needs a fresh sign-in](#why-approve-needs-a-fresh-sign-in))
+  sends `prompt=login` and `max_age=0`. Keycloak then asks again, also in
+  a remembered browser: password and code, or a passkey. MEHO also checks
+  the sign-in time in the token. A token from a remembered browser keeps
+  the time of the first sign-in, so a browser cookie alone cannot approve
+  on the command line or through REST.
+- **Approvals in the console accept a click.** In the web interface the
+  click of the signed-in person is the proof. MEHO asks for no new
+  sign-in there. So whoever uses a remembered browser can also approve in
+  the console. See the next section for how to end such a login.
+- **The console keeps its own limit.** MEHO ends a console session after
+  `UI_SESSION_ABSOLUTE_LIFETIME_SECONDS` (12 hours by default). The longer
+  Keycloak login does not make it longer. After that limit the console
+  sends the person to the login page. In a remembered browser, that login
+  asks nothing.
+
+### The risk, and how to end a login
+
+Whoever uses the unlocked computer has the person's login for up to 30
+days. So lock the computer when you leave it. To end a remembered login:
+
+- **The person** logs out in that browser: **Log out** in the MEHO
+  console, or **Sign out** on the Keycloak account page.
+- **An admin** ends all sessions of the person: in the Keycloak admin
+  console, open the person under **Users**, tab **Sessions**, and sign
+  out each session. Or through MEHO with `keycloak.user.logout`
+  (`meho keycloak user logout --username <name>`; it waits for approval).
+
+The next login then asks for the password and the code again.
+
+### Add a passkey
+
+A person adds a passkey on the Keycloak account page
+(`<keycloak-url>/realms/meho/account`), under **Account security →
+Signing in**. On the next login, the person
+clicks **Sign in with Passkey**, or picks the passkey that the browser
+offers in the user name field. When a passkey was used, Keycloak skips the
+one-time code.
+
+A passkey also works for the fresh sign-in of an approval: the password
+page shows **Sign in with Passkey** too. If you set
+`APPROVAL_ONE_TIME_CODE_ACR_VALUES`, MEHO records a passkey approval as a
+normal fresh sign-in, because the code step did not run.
+
+**Lost passkey.** The person logs in with password and code, as before.
+Or an admin removes the passkey in the Keycloak admin console (Users → the
+person → **Credentials** → delete the passkey), and the person adds a new
+one.
+
+### A realm that already runs
+
+Keycloak reads the chart's realm file only at its first start. The
+chart's realm finishing job cannot change realm settings either: its
+account `meho-admin` may only manage clients and users. So a realm that
+already runs gets these settings once, in one of two ways:
+
+- **Through MEHO**, with `keycloak.realm.update` (it waits for
+  approval). Put the values in a file, for example `realm-login.json`:
+
+    ```json
+    {
+      "rememberMe": true,
+      "ssoSessionIdleTimeoutRememberMe": 2592000,
+      "ssoSessionMaxLifespanRememberMe": 2592000,
+      "webAuthnPolicyPasswordlessPasskeysEnabled": true,
+      "webAuthnPolicyPasswordlessUserVerificationRequirement": "required",
+      "webAuthnPolicyPasswordlessRequireResidentKey": "Yes"
+    }
+    ```
+
+    Then run `meho keycloak realm update --target <keycloak-target>
+    --realm meho -f realm-login.json`. MEHO reads the realm, changes only
+    these fields, and writes it back.
+
+- **By hand**, in the Keycloak admin console, with the table above.
+
+**A realm made before Keycloak 26.4.** Keycloak 26.4 added a step to the
+browser flow of new realms: **Condition - credential**, in the sub-flow
+**Browser - Conditional 2FA**. It skips the one-time code after a passkey
+login. An upgrade does not add it to an older realm. Without it, a passkey
+login still asks for the code. Check the browser flow under
+**Authentication**. If the step is missing, add it as Keycloak's
+[passkeys guide](https://www.keycloak.org/docs/latest/server_admin/index.html#passkeys_server_administration_guide)
+shows: a **Condition - credential** step, **Required**, for the credential
+type `webauthn-passwordless`. The built-in Keycloak of the chart started
+with a newer version, so its realm has the step.
+
 ## Wire it into Helm
 
 Tell the chart which client the CLI should use (already shown in

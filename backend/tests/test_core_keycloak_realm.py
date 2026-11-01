@@ -69,6 +69,24 @@ def test_realm_name_and_session_limits(realm: dict[str, Any]) -> None:
     assert realm["offlineSessionMaxLifespan"] == 7 * 24 * 3600
 
 
+def test_browser_is_remembered_for_30_days(realm: dict[str, Any]) -> None:
+    # With "Remember me" ticked, a new login in the same browser asks nothing
+    # for 30 days. The fresh sign-in for an approval still asks every time.
+    thirty_days = 30 * 24 * 3600
+    assert realm["rememberMe"] is True
+    assert realm["ssoSessionIdleTimeoutRememberMe"] == thirty_days
+    assert realm["ssoSessionMaxLifespanRememberMe"] == thirty_days
+
+
+def test_passkeys_are_on_and_need_user_verification(realm: dict[str, Any]) -> None:
+    # A passkey replaces password plus code. The device must check the
+    # person (a PIN or a fingerprint), and the key must be one the browser
+    # can offer without a user name first.
+    assert realm["webAuthnPolicyPasswordlessPasskeysEnabled"] is True
+    assert realm["webAuthnPolicyPasswordlessUserVerificationRequirement"] == "required"
+    assert realm["webAuthnPolicyPasswordlessRequireResidentKey"] == "Yes"
+
+
 def test_browser_session_limits_match_the_console(realm: dict[str, Any]) -> None:
     # The login server keeps a browser session for 1 hour without use and
     # 10 hours at most: the same as the console's own session (#5518).

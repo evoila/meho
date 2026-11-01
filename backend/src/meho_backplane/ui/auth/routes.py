@@ -124,6 +124,7 @@ from meho_backplane.ui.templating import get_templates
 
 __all__ = [
     "AUTHORIZATION_STATE_EXPIRED_DETAIL",
+    "FRESH_SIGN_IN_QUERY",
     "LOGIN_BINDING_COOKIE_PREFIX",
     "LOGIN_PATH",
     "SESSION_COOKIE_NAME",
@@ -168,6 +169,12 @@ SESSION_TTL_MARGIN_SECONDS: Final[int] = 60
 #: renewal at the login server). The login route then shows one plain
 #: line and a "Sign in" button instead of going straight to Keycloak.
 SESSION_ENDED_REASON: Final[str] = "session_ended"
+
+#: Name of the login route's query parameter that asks Keycloak for a new
+#: sign-in with credentials (``prompt=login`` and ``max_age=0``), also in a
+#: browser that Keycloak remembers. The approvals console sends a person
+#: here when their sign-in is too old to approve.
+FRESH_SIGN_IN_QUERY: Final[str] = "fresh_sign_in"
 
 #: Default landing path when no ``?return_to`` is supplied on
 #: ``/ui/auth/login``. T5 (#866) lands the dashboard at ``/ui/``.
@@ -316,15 +323,22 @@ def _safe_return_to(raw: str | None) -> str:
     return candidate
 
 
-def login_location(return_to: str, *, session_ended: bool = False) -> str:
-    """Build ``/ui/auth/login?return_to=<path>``, plus the session-ended flag.
+def login_location(
+    return_to: str, *, session_ended: bool = False, fresh_sign_in: bool = False
+) -> str:
+    """Build ``/ui/auth/login?return_to=<path>``, plus the optional flags.
 
     *return_to* is percent-encoded wholesale; the login route checks it
-    again with :func:`_safe_return_to` before it uses it.
+    again with :func:`_safe_return_to` before it uses it. *session_ended*
+    adds ``reason=session_ended``. *fresh_sign_in* adds
+    ``fresh_sign_in=1``: the login then asks for the credentials again,
+    also in a remembered browser (the approvals console uses it).
     """
     location = f"{LOGIN_PATH}?return_to={quote(return_to, safe='')}"
     if session_ended:
         location = f"{location}&reason={SESSION_ENDED_REASON}"
+    if fresh_sign_in:
+        location = f"{location}&{FRESH_SIGN_IN_QUERY}=1"
     return location
 
 
@@ -429,6 +443,7 @@ async def _handle_login(
     request: Request,
     return_to: Annotated[str | None, Query()] = None,
     reason: Annotated[str | None, Query()] = None,
+    fresh_sign_in: Annotated[str | None, Query()] = None,
 ) -> Response:
     """Mint a PKCE authorization URL and 302 the browser to Keycloak.
 
@@ -443,9 +458,15 @@ async def _handle_login(
     line ("Your session ended. Please sign in again.") and a "Sign in"
     button that starts the normal login with the same ``return_to``.
     Any other ``reason`` value is ignored.
+
+    ``?fresh_sign_in=1`` asks Keycloak for a new sign-in with
+    credentials (``prompt=login`` and ``max_age=0``), also in a browser
+    that Keycloak remembers. An approval in the console needs such a
+    recent sign-in. Any other value is ignored.
     """
     log = structlog.get_logger(__name__)
     return_to = _safe_return_to(return_to)
+    force_sign_in = fresh_sign_in == "1"
     if reason == SESSION_ENDED_REASON:
         page = get_templates().TemplateResponse(
             request,
@@ -458,6 +479,7 @@ async def _handle_login(
         url, state, browser_binding = await build_authorization_request(
             redirect_uri=compute_redirect_uri(),
             return_to=return_to,
+            fresh_sign_in=force_sign_in,
         )
     except OAuthFlowConfigurationError:
         log.warning("ui_auth_oauth_not_configured", route="login")
@@ -475,7 +497,9 @@ async def _handle_login(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="upstream_auth_provider_unreachable",
         ) from exc
-    log.info("ui_auth_login_redirect", state=state, return_to=return_to)
+    log.info(
+        "ui_auth_login_redirect", state=state, return_to=return_to, fresh_sign_in=force_sign_in
+    )
     response = RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
     # Hand the initiating browser its login-binding cookie so the
     # callback can prove this same browser completes the flow (F10 #272).

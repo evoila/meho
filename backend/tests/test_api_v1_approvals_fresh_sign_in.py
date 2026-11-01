@@ -168,7 +168,7 @@ def _assert_challenge(response: httpx.Response, max_age: int = 900) -> None:
     challenge = response.headers["www-authenticate"]
     assert challenge.startswith('Bearer error="insufficient_user_authentication"')
     assert f"max_age={max_age}" in challenge
-    assert "approve in the web interface, or sign in again" in response.json()["detail"]
+    assert "sign in again: an approve needs a fresh approval sign-in" in response.json()["detail"]
 
 
 @pytest.mark.asyncio

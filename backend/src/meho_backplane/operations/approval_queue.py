@@ -1507,8 +1507,8 @@ async def _check_sign_in_use(
     sign-in may approve several requests (#5515). A ``destructive`` request
     is the exception: its sign-in must have approved nothing else, and
     after it that sign-in approves nothing more
-    (:class:`ApprovalSignInReusedError` in both cases). A web click is
-    never checked.
+    (:class:`ApprovalSignInReusedError` in both cases). The check is the
+    same for an approve on REST and in the web interface.
 
     The earlier approves of the sign-in are the person's
     ``approval.decision`` audit rows with the same ``sign_in_key``,
@@ -1527,8 +1527,6 @@ async def _check_sign_in_use(
     have an audit time before ``auth_time``.
     """
     key = approval_auth.sign_in_key(operator.sub)
-    if key is None or approval_auth.auth_time is None:
-        return False
     destructive = _is_destructive(request)
     from meho_backplane.settings import get_settings
 
@@ -1634,11 +1632,11 @@ async def approve_request(
         reason: Optional human-readable approval reason (recorded in the
             audit payload). Mirrors :func:`reject_request`.
         approval_auth: How the person proved they were present (#3979): a
-            web click, a fresh sign-in or a one-time code. Recorded in the
-            audit payload as ``approval_auth``. Inside the approval window
-            one token sign-in may approve several requests; a
-            ``destructive`` request needs a sign-in of its own (#5515).
-            Every production approve path passes it.
+            fresh sign-in or a one-time code, on REST or in the web
+            interface. Recorded in the audit payload as ``approval_auth``.
+            Inside the approval window one sign-in may approve several
+            requests; a ``destructive`` request needs a sign-in of its own
+            (#5515). Every production approve path passes it.
 
     Returns:
         The updated, flushed :class:`ApprovalRequest`.

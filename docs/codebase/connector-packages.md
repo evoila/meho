@@ -313,7 +313,9 @@ To test before you push anywhere, load the image into a
    kind load docker-image meho-overlay:dev-1 --name <cluster>
    ```
 
-3. Set these chart values:
+3. Put these chart values into your values file, in place of the release
+   tag. Do not pass a tag on the `helm` command line: it would win over
+   the file.
 
    ```yaml
    image:

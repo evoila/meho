@@ -346,6 +346,8 @@ you need nothing outside the cluster. The kind example file
    `coreKeycloak` and `coreVault`. Add the answers of your cluster:
 
    ```yaml
+   image:
+     tag: <release tag>                # or your own image; see below
    ingress:
      className: nginx                  # your ingress controller's class
      host: meho.example.com            # a name your browser reaches
@@ -361,6 +363,13 @@ you need nothing outside the cluster. The kind example file
        tenantId: <another new UUID>
    ```
 
+   To test your own image, put its `image` block here in place of the
+   release tag: `repository`, `tag`, an empty `digest` and
+   `pullPolicy: Never`, as in
+   [`codebase/connector-packages.md`, "Try your image on a local kind cluster"](codebase/connector-packages.md#try-your-image-on-a-local-kind-cluster).
+   Do not pass a tag on the `helm` command line (`--set image.tag=...`):
+   it wins over the file and asks for an image the cluster does not have.
+
 3. **Keep the three keys at the end of `values-single-node.yaml`:**
    `postgres.credentialsSecret`, `vault.address` and `config.vaultAddr`.
    The chart needs them even with all built-in parts on, until it fills
@@ -371,12 +380,39 @@ you need nothing outside the cluster. The kind example file
    ```bash
    helm upgrade --install meho ./deploy/charts/meho/ \
      --namespace meho --create-namespace --wait --wait-for-jobs --timeout 15m \
-     --set image.tag=<release tag> \
      -f deploy/linux-server/values-single-node.yaml -f my-values.yaml
    ```
 
    Keep `--wait`: without it, Helm says `deployed` while a pod still fails.
-5. **Log in.** The install makes two people with temporary passwords. The
+5. **Trust the certificate.** The install makes a certificate for
+   `ingress.host`, signed by a small CA it makes at the same time
+   ([`codebase/core-secrets.md`](codebase/core-secrets.md)). Your
+   workstation does not know this CA. So `meho login` stops with a
+   certificate error before the browser opens, and the browser warns.
+   Save the CA certificate from the TLS Secret and trust it:
+
+   ```bash
+   kubectl -n meho get secret meho-core-tls -o jsonpath='{.data.ca\.crt}' \
+     | base64 -d > meho-ca.crt
+   ```
+
+   - `meho login` and the browsers Chrome, Edge and Safari use the trust
+     store of the operating system. Add the file to it. On macOS:
+     `security add-trusted-cert -k ~/Library/Keychains/login.keychain-db meho-ca.crt`.
+     On Ubuntu and Debian: copy it to
+     `/usr/local/share/ca-certificates/meho-ca.crt` and run
+     `sudo update-ca-certificates`. On Windows, as administrator:
+     `certutil -addstore Root meho-ca.crt`.
+   - Firefox on Windows and macOS reads the system store too. On Linux it
+     has its own store: import the file under Settings, Privacy & Security,
+     Certificates.
+   - The Claude Code plugin and the Claude Desktop bundle take the file
+     through `MEHO_CA_CERT` or their CA bundle field. See
+     [`cross-repo/mcp-client-setup.md`](cross-repo/mcp-client-setup.md).
+
+   A new install, or a change of `ingress.host`, makes a new CA. Then trust
+   the new file and remove the old one.
+6. **Log in.** The install makes two people with temporary passwords. The
    first login needs a browser: Keycloak asks for a new password, a name
    and an email. See [`codebase/core-bootstrap.md`](codebase/core-bootstrap.md).
    Give the people an email on a normal domain, such as `example.com`.

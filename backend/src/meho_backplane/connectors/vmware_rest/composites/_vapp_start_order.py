@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._teardown import (
     STATUS_INVALID_REQUEST,
     STATUS_PRECONDITION_FAILED,
@@ -48,7 +49,6 @@ from meho_backplane.connectors.vmware_rest.vim_body import VIM_TYPE_NAME_KEY, vi
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
-    "VAPP_START_ORDER_COMPOSITES",
+    "COMPOSITES",
     "entity_config_spec",
     "vapp_start_order_set_composite",
 ]
@@ -215,26 +215,25 @@ async def _start_order_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return preview
 
 
-register_preview_builder(OP_ID_VAPP_START_ORDER_SET, _start_order_preview)
-
-
-#: The registration row, as ``_CompositeSpec`` keyword arguments.
-VAPP_START_ORDER_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_VAPP_START_ORDER_SET,
-        "handler": vapp_start_order_set_composite,
-        "summary": "Set the start order, delays and start and stop actions of VMs in a vApp.",
-        "description": (
+#: The registration rows; ``_register.py`` collects ``COMPOSITES`` from every module.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_VAPP_START_ORDER_SET,
+        handler=vapp_start_order_set_composite,
+        summary="Set the start order, delays and start and stop actions of VMs in a vApp.",
+        description=(
             "Changes how a vApp, named by its id, starts and stops the given VMs: start "
             "group, start and stop delay, wait for the guest, start and stop action. Fields "
             "left out keep their value. Waits for approval."
         ),
-        "parameter_schema": VAPP_START_ORDER_SET_PARAMETER_SCHEMA,
-        "response_schema": VAPP_START_ORDER_SET_RESPONSE_SCHEMA,
-        "group_key": "cluster",
-        "tags": ["composite", "write", "vapp", "start-order", "vi-json"],
-        "safety_level": "caution",
-        "requires_approval": True,
-        "llm_instructions": VAPP_START_ORDER_SET_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=VAPP_START_ORDER_SET_PARAMETER_SCHEMA,
+        response_schema=VAPP_START_ORDER_SET_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "write", "vapp", "start-order", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=VAPP_START_ORDER_SET_LLM_INSTRUCTIONS,
+        preview=_start_order_preview,
+        classifier_other=True,
+    ),
 )

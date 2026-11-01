@@ -46,6 +46,7 @@ from meho_backplane.connectors.vmware_rest.appliance_local_account_password impo
     read_new_password,
     safe_vendor_text,
 )
+from meho_backplane.operations import register_plain_fields
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -585,3 +586,15 @@ async def local_account_policy_set_impl(
         "after": after,
         "read_note": note,
     }
+
+
+#: Dates and day counts about the password, never the password. The default
+#: view of an answer would hide them for their name.
+_PASSWORD_ATTRIBUTE_FIELDS: Final = (
+    "last_password_change",
+    "password_expires_at",
+    "days_until_password_expires",
+    *_DAY_FIELDS_READ,
+)
+for _op_id in (LIST_OP_ID, GET_OP_ID, POLICY_SET_OP_ID):
+    register_plain_fields(_op_id, _PASSWORD_ATTRIBUTE_FIELDS)

@@ -25,6 +25,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._teardown import (
     STATUS_INVALID_REQUEST,
     STATUS_PRECONDITION_FAILED,
@@ -53,7 +54,6 @@ from meho_backplane.connectors.vmware_rest.composites._vapp_schemas import (
     VAPP_MOID_PATTERN,
 )
 from meho_backplane.connectors.vmware_rest.composites._write import _OP_DESTROY_VAPP_TASK
-from meho_backplane.operations._preview import register_preview_builder
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -61,7 +61,7 @@ if TYPE_CHECKING:
     from meho_backplane.operations._preview import PreviewContext
 
 __all__ = [
-    "VAPP_DELETE_COMPOSITES",
+    "COMPOSITES",
     "plan_vapp_delete",
     "vapp_delete_composite",
 ]
@@ -174,26 +174,24 @@ async def _vapp_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return blast_radius(plan)
 
 
-register_preview_builder(OP_ID_VAPP_DELETE, _vapp_delete_preview)
-
-
-#: The registration row, as ``_CompositeSpec`` keyword arguments.
-VAPP_DELETE_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_VAPP_DELETE,
-        "handler": vapp_delete_composite,
-        "summary": "Delete a powered-off vApp and every VM in it, with their disks.",
-        "description": (
+#: The registration rows; ``_register.py`` collects ``COMPOSITES`` from every module.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_VAPP_DELETE,
+        handler=vapp_delete_composite,
+        summary="Delete a powered-off vApp and every VM in it, with their disks.",
+        description=(
             "Deletes a vApp, named by its id, and every VM in it with their disks. The "
             "vApp and its VMs must be powered off. This cannot be undone. A second person "
             "always approves, after a preview."
         ),
-        "parameter_schema": VAPP_DELETE_PARAMETER_SCHEMA,
-        "response_schema": VAPP_DELETE_RESPONSE_SCHEMA,
-        "group_key": "cluster",
-        "tags": ["composite", "write", "vapp", "delete", "vi-json"],
-        "safety_level": "destructive",
-        "requires_approval": True,
-        "llm_instructions": VAPP_DELETE_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=VAPP_DELETE_PARAMETER_SCHEMA,
+        response_schema=VAPP_DELETE_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "write", "vapp", "delete", "vi-json"],
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions=VAPP_DELETE_LLM_INSTRUCTIONS,
+        preview=_vapp_delete_preview,
+    ),
 )

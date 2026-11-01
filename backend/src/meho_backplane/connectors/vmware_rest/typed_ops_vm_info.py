@@ -36,32 +36,53 @@ the PropertyCollector ``RetrievePropertiesEx`` vi-json method:
   :class:`VirtualMachineUsageOnDatastore` (``committed`` /
   ``uncommitted`` / ``unshared`` bytes per datastore).
 
+* ``config.hardware.device`` -- the virtual disks (size, file, thin or
+  thick, controller) and network adapters (port group, MAC address,
+  connected or not), parsed by :mod:`~.vm_devices`.
+* ``guest.disk`` -- the guest file systems (mount point, capacity, free
+  space); VMware Tools must run.
+
 Field names + units are the vim25 / VI-JSON wire contract (camelCase);
-values are passed through without re-mapping the vim enums.
+values are passed through without re-mapping the vim enums. The names of
+distributed port groups are read in one more best-effort property read;
+when it fails they are ``null``.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors.base import ConnectorResourceNotFoundError
+from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp, _unwrap_value
 from meho_backplane.connectors.vmware_rest.vim_body import (
     retrieve_properties_body,
     unwrap_vim_value,
 )
+from meho_backplane.connectors.vmware_rest.vim_view import read_props
+from meho_backplane.connectors.vmware_rest.vm_devices import (
+    DISKS_SCHEMA,
+    FILESYSTEMS_SCHEMA,
+    NICS_SCHEMA,
+    parse_disks,
+    parse_filesystems,
+    parse_nics,
+    portgroup_moids,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
+    "TYPED_OPS",
     "VMWARE_VM_INFO_OP",
     "VM_INFO_GROUP_KEY",
     "VM_INFO_WHEN_TO_USE",
+    "WHEN_TO_USE_BY_GROUP",
     "build_vm_info_retrieve_params",
     "vm_info_impl",
 ]
@@ -86,6 +107,8 @@ _PROP_TOOLS_STATUS = "guest.toolsStatus"
 _PROP_TOOLS_RUNNING = "guest.toolsRunningStatus"
 _PROP_HEARTBEAT = "guestHeartbeatStatus"
 _PROP_PER_DATASTORE = "storage.perDatastoreUsage"
+_PROP_DEVICES = "config.hardware.device"
+_PROP_GUEST_DISKS = "guest.disk"
 _VM_INFO_PATH_SET = (
     _PROP_NAME,
     _PROP_POWER_STATE,
@@ -95,7 +118,12 @@ _VM_INFO_PATH_SET = (
     _PROP_TOOLS_RUNNING,
     _PROP_HEARTBEAT,
     _PROP_PER_DATASTORE,
+    _PROP_DEVICES,
+    _PROP_GUEST_DISKS,
 )
+
+#: Errors of the best-effort port group name read.
+_NAME_READ_ERRORS = (httpx.HTTPError, RuntimeError, ConnectorUpstreamError)
 
 VM_INFO_GROUP_KEY = "vmware-vm-info"
 
@@ -248,6 +276,33 @@ async def _resolve_vm_moid_by_name(
     return moids[0]
 
 
+async def _portgroup_names(
+    connector: VmwareRestConnector,
+    operator: Operator,
+    target: VsphereTargetLike,
+    devices: Any,
+) -> dict[str, str]:
+    """``{moid: name}`` of the distributed port groups the VM uses; ``{}`` when the read fails."""
+    moids = portgroup_moids(devices)
+    if not moids:
+        return {}
+    try:
+        found = await read_props(
+            connector,
+            target,
+            operator,
+            mo_type="DistributedVirtualPortgroup",
+            moids=moids,
+            path_set=("name",),
+        )
+    except _NAME_READ_ERRORS as exc:
+        _log.info("vmware_vm_info_portgroup_names_not_read", error=type(exc).__name__)
+        return {}
+    return {
+        moid: name for moid, obj in found.items() if isinstance(name := obj.props.get("name"), str)
+    }
+
+
 async def vm_info_impl(
     connector: VmwareRestConnector,
     operator: Operator,
@@ -293,6 +348,8 @@ async def vm_info_impl(
         promote_managed_object_not_found=True,
     )
     props = _extract_vm_props(props_result)
+    devices = props.get(_PROP_DEVICES)
+    portgroup_names = await _portgroup_names(connector, operator, target, devices)
 
     row: dict[str, Any] = {
         "vm": vm_moid,
@@ -304,6 +361,9 @@ async def vm_info_impl(
         "tools_running_status": props.get(_PROP_TOOLS_RUNNING),
         "heartbeat_status": props.get(_PROP_HEARTBEAT),
         "per_datastore_usage": _parse_per_datastore_usage(props.get(_PROP_PER_DATASTORE)),
+        "disks": parse_disks(devices),
+        "nics": parse_nics(devices, portgroup_names),
+        "guest_filesystems": parse_filesystems(props.get(_PROP_GUEST_DISKS)),
     }
     _log.info(
         "vmware_vm_info_read",
@@ -419,6 +479,9 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
             },
             "description": "Per-datastore usage from ``storage.perDatastoreUsage``.",
         },
+        "disks": DISKS_SCHEMA,
+        "nics": NICS_SCHEMA,
+        "guest_filesystems": FILESYSTEMS_SCHEMA,
     },
     "required": ["vm"],
 }
@@ -427,9 +490,11 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
 VM_INFO_WHEN_TO_USE = (
     "Use to triage a single VM's live state: power state (raw vim enum), "
     "guest IP, VMware Tools status + running status, guest heartbeat "
-    "colour, and per-datastore storage usage -- addressed by moid or "
-    "name. The main hung-appliance read: a VM that is 'poweredOn' but has "
-    "no guest_ip and a red/gray heartbeat is stuck. Reads the "
+    "colour, per-datastore storage usage, the virtual disks (size, file, thin "
+    "or thick, controller), the network adapters (port group, MAC address, "
+    "connected or not) and the guest file systems (mount point, size, free "
+    "space) -- addressed by moid or name. The main hung-appliance read: a VM "
+    "that is 'poweredOn' but has no guest_ip and a red/gray heartbeat is stuck. Reads the "
     "VirtualMachine managed object's runtime.powerState, guest.*, "
     "guestHeartbeatStatus, and storage.perDatastoreUsage via "
     "PropertyCollector directly on the connector session, so it works "
@@ -440,12 +505,12 @@ VM_INFO_WHEN_TO_USE = (
 VMWARE_VM_INFO_OP = VmwareTypedOp(
     op_id="vmware.vm.info",
     handler_attr="vm_info",
-    summary="One VM's power state, guest IP, VMware Tools status, heartbeat and datastore use.",
+    summary="One VM's state, guest IP, Tools, heartbeat, disks, network adapters and file systems.",
     description=(
         "Returns one VM's live state, by moid (vm) or name: power state, guest IP and host "
-        "name, VMware Tools status, heartbeat colour and the space it uses per datastore. An "
-        "unknown name gives a not_found result; a name that fits two VMs is an error. "
-        "Read-only."
+        "name, Tools status, heartbeat, space per datastore, disks, network adapters and "
+        "guest file systems. An unknown name gives not_found; a name of two VMs is an "
+        "error. Read-only."
     ),
     parameter_schema=_PARAMETER_SCHEMA,
     response_schema=_RESPONSE_SCHEMA,
@@ -457,7 +522,8 @@ VMWARE_VM_INFO_OP = VmwareTypedOp(
         "when_to_call": (
             "Call to check whether a VM is on, has an IP, runs VMware Tools and has a "
             "healthy heartbeat, or how much datastore space it uses. It is the first read "
-            "for a VM that does not answer. It also checks whether a VM of that name exists."
+            "for a VM that does not answer. It also checks whether a VM of that name exists, "
+            "and shows the VM's disks, network adapters and how full its file systems are."
         ),
         "parameter_hints": {
             "vm": "VM moid (e.g. 'vm-42'); supply exactly one of vm / name.",
@@ -471,7 +537,12 @@ VMWARE_VM_INFO_OP = VmwareTypedOp(
             "{vm, name, power_state: poweredOn|poweredOff|suspended, guest_ip, "
             "guest_hostname, tools_status, tools_running_status, heartbeat_status: "
             "gray|green|yellow|red, per_datastore_usage: [{datastore, committed_bytes, "
-            "uncommitted_bytes, unshared_bytes}]}."
+            "uncommitted_bytes, unshared_bytes}], disks: [{key, label, capacity_bytes, file, "
+            "datastore, provisioning: thin|thick_lazy_zeroed|thick_eager_zeroed, controller, "
+            "controller_type, unit_number}], nics: [{key, label, adapter_type, mac_address, "
+            "network, network_name, connected, start_connected}], guest_filesystems: "
+            "[{mount_point, filesystem_type, capacity_bytes, free_bytes}]}. "
+            "guest_filesystems is empty when VMware Tools does not run."
         ),
         "next_step": (
             "A VM that is poweredOn with no guest_ip and a red or gray heartbeat is "
@@ -480,3 +551,6 @@ VMWARE_VM_INFO_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_VM_INFO_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {VM_INFO_GROUP_KEY: VM_INFO_WHEN_TO_USE}

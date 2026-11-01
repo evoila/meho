@@ -64,6 +64,7 @@ __all__ = [
     "CDROM_ROW_SCHEMA",
     "DISK_ROW_SCHEMA",
     "HARDWARE_REST_CALLS",
+    "TYPED_OPS",
     "VMWARE_VM_HARDWARE_SHOW_OP",
     "VM_HARDWARE_GROUP_KEY",
     "VM_HARDWARE_PARAMETER_SCHEMA",
@@ -71,6 +72,7 @@ __all__ = [
     "VM_HARDWARE_WHEN_TO_USE",
     "VM_MOID_PATTERN",
     "VM_SELECTOR_PROPERTIES",
+    "WHEN_TO_USE_BY_GROUP",
     "cdrom_view",
     "check_vm_moid",
     "read_cdrom_rows",
@@ -486,12 +488,14 @@ async def vm_hardware_show_impl(
 # ---------------------------------------------------------------------------
 
 VM_HARDWARE_WHEN_TO_USE: Final = (
-    "Use to read the virtual hardware of one VM: CPU count and cores per socket, "
-    "memory size, whether CPU and memory hot add is on, each CD drive (ISO file, host "
-    "device or client device; connected or not), each disk (size, VMDK file), each SCSI, "
-    "SATA and NVMe disk controller with the devices on it, and whether the VMware Tools "
-    "installer is mounted. Read-only. For "
-    "power state, guest IP and Tools status use vmware.vm.info instead."
+    "Use to read the virtual hardware and settings of one VM. Reads: "
+    "vmware.vm.hardware.show (CPU count and cores per socket, memory size, CPU and memory "
+    "hot add, each CD drive, each disk, each SCSI, SATA and NVMe controller with its "
+    "devices, and whether the VMware Tools installer is mounted); vmware.vm.boot.show "
+    "(firmware, EFI secure boot, boot delay, enter-setup flag, boot order); "
+    "vmware.vm.advanced_settings.show (the extraConfig keys and values). For power state, "
+    "guest IP and Tools status use vmware.vm.info instead. The matching changes are in "
+    "the 'vm' group."
 )
 
 VMWARE_VM_HARDWARE_SHOW_OP = VmwareTypedOp(
@@ -542,3 +546,6 @@ VMWARE_VM_HARDWARE_SHOW_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_VM_HARDWARE_SHOW_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {VM_HARDWARE_GROUP_KEY: VM_HARDWARE_WHEN_TO_USE}

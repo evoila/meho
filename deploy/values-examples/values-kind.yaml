@@ -9,7 +9,11 @@
 # wiring up real Vault + Keycloak + Postgres. Operator identity is *faked*:
 # the chart points at in-cluster mock endpoints, the backplane comes up,
 # the federation probes register, and `meho status` returns a sensible
-# response. It is **not** a functional federation deploy — for that, see
+# response. It is **not** a functional federation deploy. For a real login,
+# policy check and Vault on the same throwaway cluster, use the chart's
+# built-in PostgreSQL, Keycloak and Vault instead: see "A throwaway install
+# with the built-in parts" in `docs/deploying.md`. For a production-shaped
+# install against your own Keycloak, Vault and PostgreSQL, see
 # `values-rdc-example.yaml`.
 #
 # Prerequisites (one-time per cluster):
@@ -125,8 +129,10 @@ config:
   # above doesn't actually run device-code — this value just exercises
   # the env-var plumbing and lets `GET /api/v1/auth-config` return a
   # non-empty `cli_client_id` so the response shape matches what a
-  # real deploy would serve. For a functional `meho login` end-to-end,
-  # use `values-rdc-example.yaml` against a real Keycloak realm with
+  # real deploy would serve. For a working `meho login` on a throwaway
+  # cluster, the easier way is the chart's built-in Keycloak (see "A
+  # throwaway install with the built-in parts" in `docs/deploying.md`).
+  # Against your own Keycloak realm, use `values-rdc-example.yaml` with
   # a pre-created public `meho-cli` client.
   keycloakCliClientId: meho-cli
   vaultAddr: http://mock-vault.meho.svc:8200

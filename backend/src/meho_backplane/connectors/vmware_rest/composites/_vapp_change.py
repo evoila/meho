@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._teardown import (
     STATUS_INVALID_REQUEST,
     STATUS_PRECONDITION_FAILED,
@@ -68,7 +69,6 @@ from meho_backplane.connectors.vmware_rest.vim_body import VIM_TYPE_NAME_KEY, vi
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
@@ -79,7 +79,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
-    "VAPP_CHANGE_COMPOSITES",
+    "COMPOSITES",
     "create_vapp_body",
     "vapp_create_composite",
     "vapp_power_composite",
@@ -463,44 +463,43 @@ async def _power_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return await _preview_or_error(ctx, f"vApp {params['vapp']}", build)
 
 
-register_preview_builder(OP_ID_VAPP_CREATE, _create_preview)
-register_preview_builder(OP_ID_VAPP_POWER, _power_preview)
-
-
-#: The registration rows, as ``_CompositeSpec`` keyword arguments.
-VAPP_CHANGE_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_VAPP_CREATE,
-        "handler": vapp_create_composite,
-        "summary": "Create an empty vApp in a cluster or resource pool.",
-        "description": (
+#: The registration rows; ``_register.py`` collects ``COMPOSITES`` from every module.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_VAPP_CREATE,
+        handler=vapp_create_composite,
+        summary="Create an empty vApp in a cluster or resource pool.",
+        description=(
             "Creates an empty vApp, a container that starts and stops its VMs in a set "
             "order, in a cluster's root resource pool or in a given pool, shown in a VM "
             "folder. Default resources. Waits for approval."
         ),
-        "parameter_schema": VAPP_CREATE_PARAMETER_SCHEMA,
-        "response_schema": VAPP_CREATE_RESPONSE_SCHEMA,
-        "group_key": "cluster",
-        "tags": ["composite", "write", "vapp", "resource-pool", "vi-json"],
-        "safety_level": "caution",
-        "requires_approval": True,
-        "llm_instructions": VAPP_CREATE_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_VAPP_POWER,
-        "handler": vapp_power_composite,
-        "summary": "Power a vApp on or off; its VMs follow the vApp start order.",
-        "description": (
+        parameter_schema=VAPP_CREATE_PARAMETER_SCHEMA,
+        response_schema=VAPP_CREATE_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "write", "vapp", "resource-pool", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=VAPP_CREATE_LLM_INSTRUCTIONS,
+        preview=_create_preview,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_VAPP_POWER,
+        handler=vapp_power_composite,
+        summary="Power a vApp on or off; its VMs follow the vApp start order.",
+        description=(
             "Powers on a vApp, named by its id, so vCenter starts its VMs in their start "
             "order, or powers it off so they stop in the reverse order. Returns the vApp "
             "state and each VM's power state. Waits for approval."
         ),
-        "parameter_schema": VAPP_POWER_PARAMETER_SCHEMA,
-        "response_schema": VAPP_POWER_RESPONSE_SCHEMA,
-        "group_key": "cluster",
-        "tags": ["composite", "write", "vapp", "power", "vi-json"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": VAPP_POWER_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=VAPP_POWER_PARAMETER_SCHEMA,
+        response_schema=VAPP_POWER_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "write", "vapp", "power", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VAPP_POWER_LLM_INSTRUCTIONS,
+        preview=_power_preview,
+        classifier_other=True,
+    ),
 )

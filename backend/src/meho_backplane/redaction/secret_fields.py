@@ -43,7 +43,8 @@ kept.
 Used by the dispatch error path (``operations/_errors.py`` and
 ``operations/_vendor_text.py``) and by the flight-recorder trace scrub
 (``flight_recorder/_content.py``). The normal result path does not use it:
-there a field like ``password`` is removed only for a credential read
+there ``operations/_secret_values.py`` hides a field like ``password`` in
+every answer, with the fields an operation declared as plain left in place
 (``docs/codebase/redaction.md``).
 """
 

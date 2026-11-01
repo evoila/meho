@@ -906,8 +906,14 @@ def _build_secret_ref_outside_tenant_scope_detail(
     secret_ref: str,
     tenant_prefix: str,
     expected_secret_ref: str,
+    plain_path: bool = True,
 ) -> dict[str, object]:
     """Build the T11-compliant ``secret_ref_outside_tenant_scope`` 422 detail.
+
+    ``plain_path=False`` means the ref holds a ``.`` / ``..`` segment, a
+    ``%`` or a backslash. The message then names that rule instead of the
+    tenant subtree, because that refusal does not depend on a prefix
+    (``tenant_prefix`` is empty when the prefix setting is empty).
 
     #2091 (Initiative #2150). Mirrors :func:`_build_unknown_product_detail`
     and the ``docs/codebase/error-message-shape.md`` convention: a stable
@@ -923,12 +929,20 @@ def _build_secret_ref_outside_tenant_scope_detail(
     write surfaces via :func:`_enforce_secret_ref_tenant_scope` so the
     two cannot drift on the constraint's diagnostic shape.
     """
-    return {
-        "kind": "secret_ref_outside_tenant_scope",
-        "secret_ref": secret_ref,
-        "tenant_prefix": tenant_prefix,
-        "expected_secret_ref": expected_secret_ref,
-        "message": (
+    if not plain_path:
+        message = (
+            f"secret_ref={secret_ref!r} has a '.' or '..' segment, a '%' or a "
+            f"backslash, which the backplane refuses in a KV path: Vault or "
+            f"the HTTP client could resolve it to a different place than the "
+            f"one written. Stage the credential at {expected_secret_ref!r} "
+            f"and re-run the import, or omit secret_ref to let the server "
+            f"derive that path. See "
+            f"docs/codebase/connectors-vault-tenant-scope.md for the path "
+            f"rules and docs/codebase/error-message-shape.md for the error "
+            f"convention."
+        )
+    else:
+        message = (
             f"secret_ref={secret_ref!r} is outside the operator's readable "
             f"tenant subtree {tenant_prefix!r}. At dispatch the backplane "
             f"resolves the target's credential on the {DEFAULT_KV_MOUNT!r} "
@@ -944,8 +958,27 @@ def _build_secret_ref_outside_tenant_scope_detail(
             f"namespace convention and "
             f"docs/codebase/error-message-shape.md for the error "
             f"convention."
-        ),
+        )
+    return {
+        "kind": "secret_ref_outside_tenant_scope",
+        "secret_ref": secret_ref,
+        "tenant_prefix": tenant_prefix,
+        "expected_secret_ref": expected_secret_ref,
+        "message": message,
     }
+
+
+def _tenant_prefix_or_empty(operator: Operator) -> str:
+    """Render *operator*'s tenant prefix, normalised; ``""`` when the prefix check is off.
+
+    An empty ``VAULT_KV_TENANT_SCOPE_PREFIX`` (mid-migration deploy) has no
+    subtree to enforce, so only the plain-path rule applies, as at
+    dispatch time.
+    """
+    template = get_settings().vault_kv_tenant_scope_prefix.strip()
+    if not template:
+        return ""
+    return rendered_tenant_prefix(operator, template=template).strip().strip("/")
 
 
 def _enforce_secret_ref_tenant_scope(
@@ -978,15 +1011,15 @@ def _enforce_secret_ref_tenant_scope(
       (:data:`~meho_backplane.connectors._shared.vault_creds.DEFAULT_KV_MOUNT`);
     * the operator's prefix is rendered from
       :attr:`~meho_backplane.settings.Settings.vault_kv_tenant_scope_prefix`
-      via :func:`~meho_backplane.connectors.vault.tenant_scope.rendered_tenant_prefix`;
+      (:func:`_tenant_prefix_or_empty`);
     * matching is on a path-segment boundary, so a ``tenants/<id>``
       prefix cannot be satisfied by ``tenants/<id>-evil/...``;
     * a ref with a ``.`` / ``..`` segment, a ``%`` or a backslash is
-      refused even when it starts with the prefix
+      refused with any prefix setting, also an empty one
       (:func:`~meho_backplane.connectors.vault.tenant_scope.is_plain_kv_path`);
     * an **empty** template (``VAULT_KV_TENANT_SCOPE_PREFIX=""``, the
-      guard-disabled mid-migration state) makes this check a no-op —
-      there is no defined subtree to enforce.
+      mid-migration state) turns off only the prefix match: any plain
+      ref passes.
 
     Only an *explicitly supplied* ``secret_ref`` is checked. The
     server-derived default
@@ -1018,17 +1051,15 @@ def _enforce_secret_ref_tenant_scope(
         # convention does not apply, so there is nothing to enforce.
         return
 
-    template = get_settings().vault_kv_tenant_scope_prefix.strip()
-    if not template:
-        # Guard disabled (mid-migration deploy) — no defined subtree to
-        # enforce; preserve pre-#2091 behaviour exactly.
-        return
-
-    prefix = rendered_tenant_prefix(operator, template=template)
-    normalised_prefix = prefix.strip().strip("/")
     candidate = f"{DEFAULT_KV_MOUNT}/{secret_ref.strip().strip('/')}"
-    in_prefix = candidate == normalised_prefix or candidate.startswith(normalised_prefix + "/")
-    if in_prefix and is_plain_kv_path(candidate):
+    plain_path = is_plain_kv_path(candidate)
+    normalised_prefix = _tenant_prefix_or_empty(operator)
+    in_prefix = (
+        not normalised_prefix
+        or candidate == normalised_prefix
+        or candidate.startswith(normalised_prefix + "/")
+    )
+    if in_prefix and plain_path:
         return
 
     try:
@@ -1043,9 +1074,11 @@ def _enforce_secret_ref_tenant_scope(
         detail=_build_secret_ref_outside_tenant_scope_detail(
             secret_ref=secret_ref,
             # Re-append the trailing "/" for readability: the prefix names
-            # a subtree, and the rendered template carries it too.
-            tenant_prefix=normalised_prefix + "/",
+            # a subtree, and the rendered template carries it too. Empty
+            # when the prefix check is off.
+            tenant_prefix=normalised_prefix + "/" if normalised_prefix else "",
             expected_secret_ref=expected_secret_ref,
+            plain_path=plain_path,
         ),
     )
 

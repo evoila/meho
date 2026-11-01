@@ -65,7 +65,10 @@ refactor was needed.**
 tenant prefix is still refused when it has a `.` or `..` segment, a `%`
 (a URL-encoded character such as `%2e%2e` or `%2f`) or a backslash
 (`is_plain_kv_path`). The HTTP client or Vault could resolve such a path
-to a place outside the prefix. A KV path never needs any of them.
+to a place outside the prefix. A KV path never needs any of them. This
+rule runs first and with any prefix setting: an empty
+`VAULT_KV_TENANT_SCOPE_PREFIX` turns off only the prefix match. The
+error's `reason` says which rule refused the path, without the path.
 
 ## Secret refs in operation parameters
 
@@ -215,7 +218,9 @@ override once the migration completes; a custom-layout deploy may keep it
 empty as its steady state (migrating to `secret/tenants/{tenant_id}/` later
 is optional — see the runbook's "Custom / non-standard layout" subsection).
 A fresh deploy (all secrets under `tenants/<tenant_id>/`) needs no action —
-the default already enforces.
+the default already enforces. An empty prefix turns off only the prefix
+match: a path with a `.` or `..` segment, a `%` or a backslash is still
+refused.
 
 **Platform-path exemption.** A closed allow-list of fixed, shared,
 non-tenant platform secrets (`PLATFORM_EXEMPT_PATHS` in `tenant_scope.py`)
@@ -355,7 +360,8 @@ importing clean and failing every dispatch with an opaque Vault
 mount-pinned `<mount>/<secret_ref>` (the dispatch-time credential read
 addresses the default `secret` mount), matching is on a path-segment
 boundary, a ref with a `.` / `..` segment, a `%` or a backslash is
-refused, and the empty-prefix opt-out makes the gate a no-op. Only an
+refused (also with an empty prefix), and the empty-prefix opt-out turns
+off only the prefix match. Only an
 *explicit* ref is checked — the derived per-tenant default (#1723) and
 an explicit-null clear pass untouched.
 
@@ -395,22 +401,24 @@ invited widening the deploy-owned policy (the wrong fix). See
 
 [`backend/tests/test_connectors_vault_tenant_scope.py`](../../backend/tests/test_connectors_vault_tenant_scope.py):
 unit boundary cases on `enforce_tenant_scope` (in-namespace pass,
-out-of-namespace deny, look-alike sibling prefix, cross-mount, disabled
-default, system-tenant exemption) plus dispatch-level coverage that **every**
+out-of-namespace deny, look-alike sibling prefix, cross-mount, empty prefix
+with a plain path and with a `..` / `%` / backslash path, system-tenant
+exemption) plus dispatch-level coverage that **every**
 KV-v2 handler denies a cross-tenant path (`exception_class=VaultTenantScopeError`,
 no Vault login) and allows an in-namespace path unchanged.
 
 [`backend/tests/test_param_secret_ref_scope.py`](../../backend/tests/test_param_secret_ref_scope.py):
 secret refs in operation parameters (own tenant passes; another tenant,
 `..`, `.`, URL-encoded and backslash variants and a free mount are
-refused before any Vault call; the `gsm:` allowlist and its empty
-default; one test per operation family), the check-runner start rule and
-per-read check, and the target write gate's `..` refusal.
+refused before any Vault call, the variants also with an empty prefix;
+the `gsm:` allowlist and its empty default; one test per operation
+family), the check-runner start rule and per-read check, and the target
+write gate's `..` refusal with and without a prefix.
 
 The #2091 write-time gate is covered in
 [`backend/tests/test_api_v1_targets.py`](../../backend/tests/test_api_v1_targets.py)
 (the "#2091 — secret_ref tenant-scope fail-fast" cluster: POST/PATCH
-reject, segment boundary, derived-default pass, guard-disabled no-op,
+reject, segment boundary, derived-default pass, guard-disabled pass of a plain ref,
 plus the #2585 GSM-backend / `gsm:`-scheme pass-through cases);
 the dispatch-time `connector_vault_forbidden` mapping in
 [`backend/tests/test_operations_connector_vault_forbidden.py`](../../backend/tests/test_operations_connector_vault_forbidden.py).

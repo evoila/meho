@@ -2236,7 +2236,8 @@ class Settings(BaseModel):
     #: candidate and would deny every legitimate per-tenant call. A deploy
     #: still mid-migration (secrets under the retired per-``sub`` layout)
     #: opts **out** by setting ``VAULT_KV_TENANT_SCOPE_PREFIX=""`` until its
-    #: secrets are relocated. Pre-#1725 this defaulted empty (guard off).
+    #: secrets are relocated; a path with a ``.`` / ``..`` segment, a ``%``
+    #: or a backslash is refused even then. Earlier releases defaulted empty.
     #: Set via ``VAULT_KV_TENANT_SCOPE_PREFIX``.
     vault_kv_tenant_scope_prefix: str = "secret/tenants/{tenant_id}/"
 

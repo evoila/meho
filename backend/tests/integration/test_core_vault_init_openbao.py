@@ -188,6 +188,11 @@ def env(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Env]:
         .with_env("SKIP_CHOWN", "true")
         .with_volume_mapping(str(_OPENBAO_CONFIG), "/openbao/config", "ro")
         .with_exposed_ports(8200)
+        # No DNS search domains. A CI runner passes its own search domains
+        # and "ndots:5" into the container, so "keycloak" is first looked up
+        # with each domain added. A real host found that way would win over
+        # the Keycloak container on this network.
+        .with_kwargs(dns_search=["."])
     )
     try:
         keycloak.start()

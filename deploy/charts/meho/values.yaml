@@ -591,6 +591,19 @@ config:
   # `GET /ready` → `features.approval_queue.delegated_decision_posture`
   # shows the stance. See `docs/codebase/approvals.md`.
   approvalAllowDelegatedDecision: "false"
+  # -- How old a sign-in may be, in seconds, for an action that needs a
+  # fresh sign-in: turning approval off for an operation (#4711), and
+  # approving on the command line or REST (#3979). From 30 to 3600.
+  # Rendered into `FRESH_SIGN_IN_MAX_AGE_SECONDS`. An older sign-in gets
+  # 401 and `meho approvals approve` opens a new browser sign-in. One
+  # sign-in allows one approval. The web interface is not affected: the
+  # click is the proof.
+  freshSignInMaxAgeSeconds: "300"
+  # -- Comma-separated `acr` values that mean the person entered a one-time
+  # code from their authenticator app (#3979). Rendered into
+  # `APPROVAL_ONE_TIME_CODE_ACR_VALUES`. Empty (the default) turns the
+  # one-time code step off. The sign-in must still be recent.
+  approvalOneTimeCodeAcrValues: ""
   # -- Operator-console (`/ui/*`) OAuth client_id (#2594, Goal #336). The
   # browser BFF login (`GET /ui/auth/login`) runs an OAuth 2.1
   # authorization-code + PKCE grant server-side against the operator's
@@ -888,6 +901,10 @@ gsm:
 # matches the runner's service-account claims too. Recipe:
 # `docs/cross-repo/vault-provisioning.md` § "Bounding the check-runner
 # principal".
+#
+# On a Vault install the backplane enforces the first option: the check
+# runner does not start unless `VAULT_CHECK_RUNNER_ROLE` (set it through
+# `extraEnv`) names a Vault role of its own, not `config.vaultOidcRole`.
 #
 # `clientId` is non-secret operator config; `clientSecret` is wired
 # exclusively as a `secretKeyRef` — never a plaintext chart value. Default

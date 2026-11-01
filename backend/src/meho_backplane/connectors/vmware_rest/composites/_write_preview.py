@@ -72,7 +72,9 @@ resolved VM + host group sets).
 ``vm.nic.repoint``        live-read: ``{vm, name, nic, mac_address,
                           current_backing, requested_backing}`` network from->to
 ``vm.device.cdrom``       live-read: ``{vm, name, cdrom, action,
-                          current_backing, state}`` (the host-local ISO path)
+                          current_backing, state, requested_backing}``
+                          drive from->to (``requested_backing`` is
+                          ``None`` for ``remove`` / ``disconnect``)
 ``guest.customization_``  echo: spec_name, os_type, hostname_scheme,
 ``spec.create``           nic_count, static_ip_summary (IDENTITY only --
                           never the Windows admin / product-key /
@@ -85,6 +87,10 @@ teardown deletes (#3339)  live-read: the mandatory ``blast_radius`` built from
 ``cluster.drs_rule.``     live-read: the same ``blast_radius`` from the
 ``delete``                handler's plan -- the rule's type, enabled,
                           mandatory, VMs or groups
+``cluster.drs_group.``    live-read: the handler's plan -- members before,
+``members.set``           added, removed, the rules that use the group
+``cluster.drs_group.``    live-read: the ``blast_radius`` from the handler's
+``delete``                plan -- the group, its members, blocking rules
 ``datastore.dir.create``  echo: datastore, path, create_parents
 ========================  ====================================================
 
@@ -195,8 +201,17 @@ from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
     datastore_dir_create_preview,
     datastore_file_delete_preview,
 )
+from meho_backplane.connectors.vmware_rest.composites._drs_group import (
+    cluster_drs_group_members_set_preview,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_group_delete import (
+    cluster_drs_group_delete_preview,
+)
 from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
     cluster_drs_rule_delete_preview,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_vm_host_rule_existing import (
+    existing_groups_preview,
 )
 from meho_backplane.connectors.vmware_rest.composites._library_delete import (
     content_library_delete_preview,
@@ -990,8 +1005,11 @@ async def _cluster_drs_vm_host_rule_create_preview(ctx: PreviewContext) -> dict[
     — capped at :data:`_PREVIEW_RESOLVED_CAP` with the uncapped ``total_*``
     counts, plus the best-effort cluster display name. The reconfigure write
     never fires here. Declines without a resolved connector or on malformed
-    params.
+    params. With ``use_existing_groups=true`` it shows the members of the two
+    existing groups instead.
     """
+    if ctx.params.get("use_existing_groups"):
+        return await existing_groups_preview(ctx)
     cluster = ctx.params.get("cluster")
     rule_name = ctx.params.get("rule_name")
     vm_group_name = ctx.params.get("vm_group_name")
@@ -1144,14 +1162,29 @@ async def _vm_nic_repoint_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-async def _vm_device_cdrom_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Preview ``vm.device.cdrom`` — live-read the current backing + state.
+_CDROM_BACKING_PREVIEW_KEYS = ("type", "iso_file", "host_device", "device_access_type")
 
-    The host-local ISO path in the current backing is exactly what the
-    approver needs to see before removing / updating / disconnecting the
-    device. Reads the CD-ROM via :func:`._write._read_cdrom` and the VM
-    ``name`` via :func:`._write._read_vm_info`; no DELETE / PATCH /
-    disconnect fires here.
+
+def _cdrom_requested_backing(action: str, backing: Any) -> dict[str, Any] | None:
+    """Return the new CD-ROM backing an ``update`` sets, or ``None``.
+
+    ``remove`` and ``disconnect`` set no new backing. An ``update`` without
+    a ``backing`` object is refused by the handler before any write, so it
+    also previews as ``None``.
+    """
+    if action != "update" or not isinstance(backing, dict):
+        return None
+    return {key: backing[key] for key in _CDROM_BACKING_PREVIEW_KEYS if key in backing}
+
+
+async def _vm_device_cdrom_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.device.cdrom`` — live-read the current backing, show the new one.
+
+    The approver sees the drive from->to: the current backing (with the
+    host-local ISO path) and state, read via :func:`._write._read_cdrom`,
+    next to ``requested_backing`` -- the new backing an ``update`` sets
+    (``None`` for ``remove`` / ``disconnect``). The VM ``name`` comes from
+    :func:`._write._read_vm_info`; no DELETE / PATCH / disconnect fires here.
     """
     vm = ctx.params.get("vm")
     cdrom = ctx.params.get("cdrom")
@@ -1183,6 +1216,7 @@ async def _vm_device_cdrom_preview(ctx: PreviewContext) -> dict[str, Any] | None
         "action": action,
         "current_backing": cdrom_info.get("backing") if cdrom_info else None,
         "state": cdrom_info.get("state") if cdrom_info else None,
+        "requested_backing": _cdrom_requested_backing(action, ctx.params.get("backing")),
     }
 
 
@@ -1875,6 +1909,11 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     # The DRS rule delete is destructive too: its blast radius is the
     # handler's own plan (the rule, its type, its VMs or groups).
     "vmware.composite.cluster.drs_rule.delete": cluster_drs_rule_delete_preview,
+    # The DRS group ops: the handler's own plan. The member change shows the
+    # members before, what is added and removed, and the rules that use the
+    # group; the destructive delete shows the group as its blast radius.
+    "vmware.composite.cluster.drs_group.members.set": cluster_drs_group_members_set_preview,
+    "vmware.composite.cluster.drs_group.delete": cluster_drs_group_delete_preview,
     # Licence assign: live-read of the asset's licence now and the licence it
     # would get, from the handler's own plan. Keys are masked.
     "vmware.composite.license.assign": license_assign_preview,
@@ -1886,7 +1925,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 52 write-composite park-time preview builders. Import-time.
+    """Wire the 54 write-composite park-time preview builders. Import-time.
 
     The read composites register no builder here. The one read that can
     wait for approval, the ``caution`` ``vm.guest.file.read``, registers

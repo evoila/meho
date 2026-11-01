@@ -190,6 +190,13 @@ _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
         # flight recorder drop its bodies (the OAuth form carries the session
         # JWT as the ``assertion``; the token response carries the token).
         "vcfa.provider.api_token.create",
+        # ``vault.token.create_and_store`` makes a Vault token and writes it
+        # straight to a Vault KV path or a Kubernetes Secret; the handler
+        # returns only the accessor, expiry, policies and destination. Same
+        # posture as ``vcfa.provider.api_token.create``: aggregate-only
+        # broadcast, and the flight recorder keeps no bodies (the token rides
+        # in the Vault create response and in the write request).
+        "vault.token.create_and_store",
         # The handoff export returns a one-time handoff token: not the value,
         # but it can fetch the value once. Aggregate-only keeps it off the feed.
         "secret.handoff.export",
@@ -257,6 +264,12 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # aggregate-only rather than shipping it on the feed.
         "keycloak.user.create",
         "keycloak.user.reset_password",
+        # The AD password set. Same shape as the Keycloak pair: the password
+        # comes from Vault at run time, and params carry only the
+        # ``password_ref`` reference. The pin keeps even that off the feed and
+        # stores the approval input encrypted, and the flight recorder keeps
+        # no body for it.
+        "msad.user.set-password",
         # G-Node/RKE2-T3 #2430 — the RKE2 node-config write op. Its ``patch``
         # param carries key -> value edits, and an RKE2 ``config.yaml`` body
         # holds ``token:`` / ``agent-token:`` join credentials, so a plain
@@ -410,6 +423,22 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # ``vmware.appliance.local_account.policy.set`` sends only expiry
         # numbers and flags, so it is NOT pinned.
         "vmware.appliance.local_account.password.set",
+        # The VCF Installer proxy change and resource calculation. Like
+        # ``vcfa.provider.user.create``, their params carry only Vault paths
+        # (``password_secret_ref`` / ``password_refs``); the passwords are read
+        # in-process and sent only in the request BODY. The pin keeps those
+        # bodies out of traces and collapses the broadcast to aggregate-only.
+        "installer.system.proxy.set",
+        "installer.sddc.resources.calculate",
+        # The two steps of a new vCenter install that send a password (#4394):
+        # the appliance import (the root password, ``root_password_secret_ref``)
+        # and the setup start (the SSO password,
+        # ``sso_admin_password_secret_ref``). The params carry only Vault
+        # paths; the passwords go only into the vCenter request bodies. The
+        # pin keeps those bodies out of the flight recorder and the params out
+        # of the broadcast.
+        "vmware.composite.vcenter.appliance.deploy",
+        "vmware.composite.vcenter.install",
         # The Keycloak login test. Its params carry only a Vault *path*
         # (``password_secret_ref``); the password is read in-process and sent
         # only in the token request BODY, and the token answer carries an
@@ -417,6 +446,14 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # flight-recorder spans, collapses the broadcast to aggregate-only and
         # keeps a waiting approval's params in the encrypted handoff store.
         "keycloak.user.check_login",
+        # The three Cloud Builder changes that send a bring-up spec. Their
+        # params carry only Vault paths (``secrets``); the passwords are read
+        # in-process and go only into the Cloud Builder request BODY. The pin
+        # keeps those bodies out of the flight recorder and the params out of
+        # the broadcast.
+        "installer.cb.validation.start",
+        "installer.cb.sddc.start",
+        "installer.cb.sddc.retry",
     }
 )
 

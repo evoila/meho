@@ -144,6 +144,7 @@ writeFileSync(
     "    mehoCaCert: process.env.MEHO_CA_CERT ?? null,",
     "    mehoClientId: process.env.MEHO_MCP_CLIENT_ID ?? null,",
     "    mehoScopes: process.env.MEHO_MCP_SCOPES ?? null,",
+    "    mehoTenant: process.env.MEHO_TENANT ?? null,",
     "  }) + '\\n',",
     ");",
     "// STUB_REPORT_AFTER_WRITE: report the locks again after the first write.",
@@ -465,6 +466,39 @@ test("guard: an empty or whitespace-only scopes falls back to the default surfac
       scope: "mcp:read mcp:execute offline_access",
     });
   }
+});
+
+// The current tenant (#5242): the `tenant` setting becomes the Meho-Tenant
+// header that MEHO reads (backend auth/current_tenant.py TENANT_HEADER).
+test("tenant: the tenant setting is sent as the Meho-Tenant header and MEHO_TENANT scrubbed", () => {
+  const res = runLauncher(["https://meho.internal.example/mcp"], {
+    MEHO_TENANT: "  tenant-b  ",
+  });
+  assert.equal(res.status, 0, res.stderr);
+  const diag = JSON.parse(res.stdout);
+  assert.deepEqual(diag.argv.slice(7), ["--header", "Meho-Tenant: tenant-b"]);
+  assert.equal(diag.argv[2], "https://meho.internal.example/mcp");
+  assert.equal(diag.mehoTenant, null); // scrubbed from mcp-remote's env
+});
+
+test("tenant: an empty, whitespace, or unsubstituted ${user_config.tenant} sends no header", () => {
+  for (const value of [undefined, "", "   ", "${user_config.tenant}"]) {
+    const env = value === undefined ? {} : { MEHO_TENANT: value };
+    const res = runLauncher(["https://meho.internal.example/mcp"], env);
+    assert.equal(res.status, 0, res.stderr);
+    const diag = JSON.parse(res.stdout);
+    assert.equal(diag.argv.length, 7, `value ${JSON.stringify(value)}: ${diag.argv}`);
+    assert.ok(!diag.argv.includes("--header"));
+    assert.equal(diag.mehoTenant, null);
+  }
+});
+
+test("manifest: the optional tenant setting is delivered as MEHO_TENANT", () => {
+  const { tenant } = MANIFEST.user_config;
+  assert.equal(tenant.type, "string");
+  assert.equal(tenant.required, false);
+  assert.equal(tenant.default, undefined, "no default: one tenant needs no setting");
+  assert.equal(MANIFEST.server.mcp_config.env.MEHO_TENANT, "${user_config.tenant}");
 });
 
 test("guard: a non-https endpoint is rejected before importing mcp-remote", () => {

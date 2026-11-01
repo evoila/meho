@@ -38,7 +38,7 @@ A second run changes nothing. The Job's output names objects and says
 | `deploy/charts/meho/templates/_core-vault-init.tpl` | The name, the plan and the pod template (the hash covers the pod template). |
 | `deploy/charts/meho/files/openbao/policies/*.hcl` | The 8 policies. `JWT_ACCESSOR` in the tenant policies is replaced by the Job with the accessor of the `jwt` login. |
 | `backend/tests/test_core_vault_init.py` | Unit tests against a fake OpenBao. The fake checks every call of a later run against the policies, so it proves `meho-configurator` is enough. |
-| `backend/tests/integration/test_core_vault_init_openbao.py` | The Job against a real OpenBao and a real Keycloak: two tenants, the admin login, the scheduler token, the second run. |
+| `backend/tests/integration/test_core_vault_init_openbao.py` | The Job against a real OpenBao and a real Keycloak: two tenants, the admin login, the scheduler token, the second run. OpenBao starts without DNS search domains, so `keycloak` always means the Keycloak container and never a host that a runner's search domain finds. |
 | `backend/tests/test_chart_core_openbao.py` | Chart renders: the objects, the Role, the plan, the name hash, nothing cluster-wide. |
 
 What the Job sets up in OpenBao:

@@ -1256,6 +1256,15 @@ class KeycloakConnector(HttpConnector):
             params=params,
         )
 
+    async def invalidate_credentials(self, target: KeycloakTargetLike) -> None:
+        """Drop the kept admin token for *target* (#2396, #3879).
+
+        The next call reads the admin credential from Vault again and logs in
+        with it. Called after a failed login and after a target change.
+        """
+        async with self._token_lock:
+            self._admin_tokens.pop(target_cache_key(target), None)
+
     async def aclose(self) -> None:
         """Clear cached admin tokens then tear down the httpx pool.
 

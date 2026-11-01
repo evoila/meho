@@ -1408,8 +1408,9 @@ async def test_auth_approle_generate_secret_id_redacts_against_dev_vault(
     The minted SecretID lands in the *response*, so the op classifies
     ``credential_mint``. The caller's OperationResult carries the SecretID
     (the point of minting), but the test checks that exact value is absent
-    from the stored audit row. Non-idempotent: a second call mints
-    a distinct SecretID.
+    from the stored audit row, its ``payload`` and its raw copy
+    (``raw_payload``). Non-idempotent: a second call mints a distinct
+    SecretID.
     """
     target, addr = vault_e2e
     _root_client(addr).auth.approle.create_or_update_approle(
@@ -1433,9 +1434,10 @@ async def test_auth_approle_generate_secret_id_redacts_against_dev_vault(
         operator_sub="op-ar-sid",
         expected_op_class="credential_mint",
     )
-    # The secret must not reach the stored audit row.
-    assert minted_secret_id not in json.dumps(row.payload, default=str), (
-        "secret leaked into the audit row for vault.auth.approle.generate_secret_id"
+    # The secret is in neither copy of the stored audit row.
+    assert row.raw_payload is not None
+    assert minted_secret_id not in json.dumps([row.payload, row.raw_payload], default=str), (
+        "secret found in the audit row for vault.auth.approle.generate_secret_id"
     )
     # Non-idempotent: a second mint yields a distinct SecretID.
     second = await dispatch(
@@ -1456,8 +1458,8 @@ async def test_auth_approle_generate_secret_id_redacts_against_dev_vault(
 # The writes (identity entity/alias/group + token create/revoke_accessor)
 # register requires_approval=True, so these tests pass ``_approved=True``
 # (the approvals-API resume flag) to drive the authorized execution path.
-# token.create's minted client token is response-side secret material;
-# the test checks that exact value is absent from the stored audit row.
+# token.create returns only the accessor of the new token; the test checks
+# that no token is in the result or the stored audit row.
 # The identity/token core backends are always mounted on a dev Vault.
 # ---------------------------------------------------------------------------
 
@@ -1608,16 +1610,14 @@ async def test_identity_entity_alias_write_against_dev_vault(
 
 
 @pytest.mark.asyncio
-async def test_token_create_redacts_token_against_dev_vault(
+async def test_token_create_returns_no_token_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
 ) -> None:
-    """token.create mints a token in the response; absent from the audit row.
+    """token.create returns the accessor of a real token, never the token.
 
-    The minted client_token lands in the *response*, so the op classifies
-    ``credential_mint``. The caller's OperationResult carries the token
-    (the point of minting), but the test checks that exact value is absent
-    from the stored audit row. Non-idempotent: a second call mints a
-    distinct token.
+    The token is in neither copy of the audit row (``payload`` and
+    ``raw_payload``). Vault knows the token by its accessor. Non-idempotent:
+    a second call makes a token with another accessor.
     """
     target, addr = vault_e2e
     result = await dispatch(
@@ -1629,21 +1629,19 @@ async def test_token_create_redacts_token_against_dev_vault(
         _approved=True,
     )
     assert result.status == "ok", result.error
-    minted_token = result.result["client_token"]
-    assert minted_token, "the minted token must reach the caller's OperationResult"
-    assert result.result["accessor"]
-    # The minted token actually works against the live Vault.
-    assert _root_client(addr).sys.read_health_status(method="GET") is not None
+    assert "client_token" not in result.result
+    accessor = result.result["accessor"]
+    assert accessor
+    looked_up = _root_client(addr).auth.token.lookup_accessor(accessor)["data"]
+    assert looked_up["accessor"] == accessor
     row = await _assert_audited(
         "vault.token.create",
         operator_sub="op-token-create",
         expected_op_class="credential_mint",
     )
-    # The secret must not reach the stored audit row.
-    assert minted_token not in json.dumps(row.payload, default=str), (
-        "secret leaked into the audit row for vault.token.create"
-    )
-    # Non-idempotent: a second create yields a distinct token.
+    assert row.raw_payload is not None
+    assert "client_token" not in json.dumps([row.payload, row.raw_payload], default=str)
+    # Non-idempotent: a second create makes another token.
     second = await dispatch(
         operator=_make_operator(sub="op-token-create-2"),
         connector_id="vault-1.x",
@@ -1653,7 +1651,7 @@ async def test_token_create_redacts_token_against_dev_vault(
         _approved=True,
     )
     assert second.status == "ok", second.error
-    assert second.result["client_token"] != minted_token
+    assert second.result["accessor"] != accessor
 
 
 @pytest.mark.asyncio
@@ -1807,6 +1805,183 @@ async def test_token_role_write_read_list_against_dev_vault(
     assert after["renewable"] is False
     assert after["orphan"] is True
     assert after["token_period"] == 3600
+
+
+# ---------------------------------------------------------------------------
+# token group — make a token and store it (vault.token.create_and_store)
+# ---------------------------------------------------------------------------
+
+#: Policy for MEHO's own login in the create-and-store tests: make tokens from
+#: the two test roles and write the KV path. No root, no sudo.
+_STORE_LOGIN_POLICY = """
+path "auth/token/create/e2e-store" { capabilities = ["update"] }
+path "auth/token/create/e2e-with-parent" { capabilities = ["update"] }
+path "secret/data/e2e-store/*" { capabilities = ["create", "read", "update"] }
+"""
+
+
+def _seed_token_store(addr: str) -> None:
+    """Two token roles (orphan and not) and the policy MEHO's login gets."""
+    root = _root_client(addr)
+    root.sys.create_or_update_policy(name="e2e-store-login", policy=_STORE_LOGIN_POLICY)
+    root.sys.create_or_update_policy(
+        name="e2e-store-reader",
+        policy='path "secret/data/e2e-store/*" {\n  capabilities = ["read"]\n}\n',
+    )
+    for role_name, orphan in (("e2e-store", True), ("e2e-with-parent", False)):
+        root.auth.token.create_or_update_role(
+            role_name=role_name, allowed_policies=["e2e-store-reader"], orphan=orphan
+        )
+
+
+def _production_like_login(addr: str) -> Any:
+    """MEHO's login as in production: a normal token with no parent, revoked at the end.
+
+    A JWT login token has no parent token, and ``vault_client_for_operator``
+    revokes it when the block ends. So does this one; only the way the token
+    is obtained differs (dev mode has no JWT auth method).
+    """
+
+    @asynccontextmanager
+    async def _login(
+        _operator: Any, *, role: str | None = None, mount_path: str | None = None
+    ) -> AsyncIterator[hvac.Client]:
+        login = _root_client(addr).auth.token.create_orphan(policies=["e2e-store-login"], ttl="10m")
+        client = hvac.Client(url=addr, token=login["auth"]["client_token"])
+        try:
+            yield client
+        finally:
+            client.auth.token.revoke_self()
+
+    return _login
+
+
+def _live_accessors(addr: str) -> set[str]:
+    listing = _root_client(addr).auth.token.list_accessors()
+    return set(listing["data"]["keys"]) if listing else set()
+
+
+@pytest.mark.asyncio
+async def test_token_create_and_store_keeps_the_token_valid_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stored token works after the call; it is in no result or audit row.
+
+    MEHO's own login (not root) ends, and is revoked, when the call ends. The
+    new token is an orphan, so it stays valid: ``lookup-self`` with it works.
+    """
+    target, addr = vault_e2e
+    _seed_token_store(addr)
+    monkeypatch.setattr(_auth_vault, "vault_client_for_operator", _production_like_login(addr))
+
+    result = await dispatch(
+        operator=_make_operator(sub="op-token-store"),
+        connector_id="vault-1.x",
+        op_id="vault.token.create_and_store",
+        target=target,
+        params={
+            "role_name": "e2e-store",
+            "ttl": "30m",
+            "store": {"vault_kv": {"path": "e2e-store/app"}},
+        },
+        _approved=True,
+    )
+
+    assert result.status == "ok", result.error
+    assert result.result["stored_to"]["kind"] == "vault_kv"
+    assert "e2e-store-reader" in result.result["policies"]
+    stored = _root_client(addr).secrets.kv.v2.read_secret_version(
+        path="e2e-store/app", mount_point=_KV_MOUNT, raise_on_deleted_version=True
+    )["data"]["data"]
+    token = stored["token"]
+    looked_up = hvac.Client(url=addr, token=token).auth.token.lookup_self()["data"]
+    assert looked_up["accessor"] == result.result["accessor"]
+    assert looked_up["orphan"] is True
+    assert token not in json.dumps(result.model_dump(mode="json"))
+    row = await _assert_audited(
+        "vault.token.create_and_store",
+        operator_sub="op-token-store",
+        expected_op_class="credential_mint",
+    )
+    assert token not in json.dumps([row.payload, row.raw_payload], default=str)
+
+
+@pytest.mark.asyncio
+async def test_token_create_and_store_with_a_parent_leaves_no_token_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A role without ``orphan=true``: the call fails and no new token is left."""
+    target, addr = vault_e2e
+    _seed_token_store(addr)
+    monkeypatch.setattr(_auth_vault, "vault_client_for_operator", _production_like_login(addr))
+    before = _live_accessors(addr)
+
+    result = await dispatch(
+        operator=_make_operator(sub="op-token-store-parent"),
+        connector_id="vault-1.x",
+        op_id="vault.token.create_and_store",
+        target=target,
+        params={
+            "role_name": "e2e-with-parent",
+            "store": {"vault_kv": {"path": "e2e-store/parent"}},
+        },
+        _approved=True,
+    )
+
+    assert result.status == "error"
+    assert "orphan=true" in result.extras["remediation"]
+    assert _live_accessors(addr) <= before
+
+
+@pytest.mark.asyncio
+async def test_token_create_and_store_keeps_a_path_made_in_the_meantime_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new path is created with ``cas=0``: a path another writer made first is kept.
+
+    The patch handler is replaced by one that reads the path as missing,
+    which is what happens when the other writer lands right after the
+    read. The put then runs with ``cas=0`` against the real Vault, which
+    refuses it; the other writer's fields stay and no new token is left.
+    """
+    from meho_backplane.connectors.vault import ops as kv_ops
+
+    target, addr = vault_e2e
+    _seed_token_store(addr)
+    monkeypatch.setattr(_auth_vault, "vault_client_for_operator", _production_like_login(addr))
+    root = _root_client(addr)
+    root.secrets.kv.v2.create_or_update_secret(
+        path="e2e-store/raced", secret={"owner": "other-writer"}, mount_point=_KV_MOUNT
+    )
+    before = _live_accessors(addr)
+
+    async def _read_as_missing(*_args: Any) -> dict[str, Any]:
+        raise hvac.exceptions.InvalidPath("no secret")
+
+    monkeypatch.setattr(kv_ops, "vault_kv_patch", _read_as_missing)
+
+    result = await dispatch(
+        operator=_make_operator(sub="op-token-store-raced"),
+        connector_id="vault-1.x",
+        op_id="vault.token.create_and_store",
+        target=target,
+        params={
+            "role_name": "e2e-store",
+            "store": {"vault_kv": {"path": "e2e-store/raced"}},
+        },
+        _approved=True,
+    )
+
+    assert result.status == "error"
+    assert "could not be written" in result.extras["remediation"]
+    stored = root.secrets.kv.v2.read_secret_version(
+        path="e2e-store/raced", mount_point=_KV_MOUNT, raise_on_deleted_version=True
+    )["data"]["data"]
+    assert stored == {"owner": "other-writer"}
+    assert _live_accessors(addr) <= before
 
 
 # ---------------------------------------------------------------------------

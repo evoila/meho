@@ -874,12 +874,12 @@ In the Keycloak realm that hosts `meho-backplane`, create a new
 | --- | --- | --- |
 | Client ID | `meho-cli` (suggested) | Matches the default in `values-rdc-example.yaml`. Any short identifier works — set `config.keycloakCliClientId` (`KEYCLOAK_CLI_CLIENT_ID`) to whatever you choose. |
 | Client authentication | **Off** (public client) | The device grant cannot be completed by a confidential client; the CLI has nowhere to store a secret. Confidential client + device-grant → `401 unauthorized_client` from Keycloak's device endpoint (Wall #1). |
-| Authentication flow → Standard flow | Off | The CLI doesn't run the authorization-code grant. |
+| Authentication flow → Standard flow | **On**, PKCE method `S256` | `meho approvals approve` uses it for the fresh browser sign-in an approval needs (#3979). `meho login` still uses the device grant. |
 | Authentication flow → Direct access grants | Off | Resource-owner password is explicitly out of scope. |
 | Authentication flow → Implicit flow | Off | Deprecated by OAuth 2.1. |
 | Authentication flow → Service accounts roles | Off | Public clients can't hold credentials. |
 | Authentication flow → **OAuth 2.0 Device Authorization Grant** | **On** | Required for `meho login` ([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)). |
-| Valid redirect URIs | (none) | Device flow doesn't redirect. |
+| Valid redirect URIs | `http://127.0.0.1:*` | The loopback callback of that fresh sign-in ([RFC 8252](https://www.rfc-editor.org/rfc/rfc8252#section-7.3)). Nothing else. |
 
 #### Step 3 — Add the 8 protocol mappers to `meho-cli`
 

@@ -227,6 +227,7 @@ def _decide(request_id: uuid.UUID, *, decider_sub: str) -> Any:
         mock_discovery_and_jwks(r, public_jwks(key))
         token = mint_token(
             key,
+            fresh_sign_in=True,
             sub=decider_sub,
             tenant_role=TenantRole.OPERATOR.value,
             tenant_id=str(_TENANT_ID),

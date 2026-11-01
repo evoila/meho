@@ -91,6 +91,7 @@ any durable artifact.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from typing import Protocol, runtime_checkable
 
 import hvac.exceptions
@@ -100,6 +101,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError, vault_client_for_operator
 from meho_backplane.connectors._shared.credential_backend import (
+    WRAPPED_CREDENTIAL_SCHEME,
     CredentialsReadError,
     parse_credential_scheme,
     register_credential_backend,
@@ -115,11 +117,15 @@ __all__ = [
     "CredentialsReadError",
     "OperatorTokenRequiredError",
     "SecretRefReadError",
+    "SecretRefScopeError",
     "VaultCredentialBackend",
     "VaultCredentialsReadError",
+    "check_param_secret_ref",
     "load_basic_credentials",
     "load_param_secret_data",
     "load_vault_secret_data",
+    "missing_secret_field_map_sources",
+    "secret_field_map_of",
     "secret_ref_prefix",
     "strip_credential_value",
 ]
@@ -172,6 +178,11 @@ class BasicCredentialsTargetLike(Protocol):
       (never a credential value).
     * ``secret_ref`` — the Vault KV-v2 path string the helper reads.
       ``None`` is rejected with a clear error (an unconfigured target).
+
+    A target may also carry an optional ``secret_field_map`` (#3711). It is
+    not part of the Protocol because most target-like stubs (a secret ref
+    taken from op params, for example) must not have one; the loaders read
+    it with :func:`secret_field_map_of`.
     """
 
     name: str
@@ -268,6 +279,27 @@ class SecretRefReadError(VaultCredentialsReadError):
         )
 
 
+class SecretRefScopeError(SecretRefReadError):
+    """A secret named in the op params is not one the caller may name.
+
+    Raised by :func:`check_param_secret_ref` before any store read: a Vault
+    path outside the caller's tenant prefix, a ``gsm:`` secret in a project
+    that ``GSM_PARAM_ALLOWED_PROJECTS`` does not list, or a store kind a
+    parameter may not name. It is a :class:`SecretRefReadError`, so the
+    dispatcher turns it into the same ``vault_credentials_read_error``
+    result. The message names the param, the ref cut by
+    :func:`secret_ref_prefix` and the reason, never the full path.
+    """
+
+    def __init__(self, *, param: str, secret_ref: str, reason: str) -> None:
+        self.param = param
+        self.ref_prefix = secret_ref_prefix(secret_ref)
+        self.cause_class = type(self).__name__
+        VaultCredentialsReadError.__init__(
+            self, f"{param} at {self.ref_prefix!r} was refused before any read: {reason}"
+        )
+
+
 def _structural_unwrap(payload: object, *, target_name: str) -> dict[str, object]:
     """Unwrap hvac's ``read_secret_version`` payload to the secret data dict.
 
@@ -334,12 +366,67 @@ def _require_secret_ref(target: BasicCredentialsTargetLike) -> str:
     return target.secret_ref.strip()
 
 
+def secret_field_map_of(target: object) -> Mapping[str, str]:
+    """Return *target*'s ``secret_field_map``, or an empty map (#3711).
+
+    The map is ``{connector_field: source_field}``. Only a real target row
+    (or its wire projection) carries it; a stub target built around some
+    other secret ref has no such attribute and gets an empty map, so the
+    map never applies to a secret that is not the target's own.
+    """
+    field_map = getattr(target, "secret_field_map", None)
+    return field_map if isinstance(field_map, Mapping) else {}
+
+
+def _field_map_for_read(target: BasicCredentialsTargetLike) -> Mapping[str, str]:
+    """Return the map to apply to one read of *target*'s secret (#3711).
+
+    The map is applied exactly once between the centre and a satellite
+    runner. A ``wrapped:`` credential is brokered at the centre from the
+    **mapped** view of the target's secret (``broker_wrapped_credential``
+    reads through :func:`load_vault_secret_data`), so the runner that
+    unwraps it gets the connector's view already and must not apply the
+    map again. With two entries that chain, for example ``username ->
+    host_login`` and ``guest_username -> username``, a second pass would
+    give ``guest_username`` the host login. Every other ref (standing
+    ``vault:`` / ``gsm:`` / schemeless) applies the target's own map.
+    """
+    ref = target.secret_ref
+    if ref and parse_credential_scheme(ref.strip()) == WRAPPED_CREDENTIAL_SCHEME:
+        return {}
+    return secret_field_map_of(target)
+
+
+def _apply_secret_field_map(
+    secret_data: dict[str, object], field_map: Mapping[str, str]
+) -> dict[str, object]:
+    """Return *secret_data* as the connector should see it (#3711).
+
+    For every ``connector_field -> source_field`` entry, the connector field
+    takes the value of the source field: a read of ``X`` returns the
+    secret's ``map.get(X, X)``. When the source field is missing, the
+    connector field is missing too, so the connector reports it the same
+    way it reports any missing field. Unmapped fields are left as they are.
+    The input dict is not changed.
+    """
+    if not field_map:
+        return secret_data
+    view = dict(secret_data)
+    for connector_field, source_field in field_map.items():
+        if source_field in secret_data:
+            view[connector_field] = secret_data[source_field]
+        else:
+            view.pop(connector_field, None)
+    return view
+
+
 def _extract_fields(
     secret_data: dict[str, object],
     fields: tuple[str, ...],
     *,
     target_name: str,
     secret_ref: str,
+    field_map: Mapping[str, str],
 ) -> dict[str, str]:
     """Pull *fields* out of the secret data dict as a flat ``{field: str}``.
 
@@ -354,9 +441,14 @@ def _extract_fields(
     credentials: dict[str, str] = {}
     for field in fields:
         if field not in secret_data:
+            mapped = (
+                f" (mapped to source field {field_map[field]!r} by the target's secret_field_map)"
+                if field in field_map
+                else ""
+            )
             raise VaultCredentialsReadError(
                 f"vault secret for target {target_name!r} (secret_ref={secret_ref!r}) "
-                f"is missing required field {field!r}"
+                f"is missing required field {field!r}{mapped}"
             )
         credentials[field] = strip_credential_value(secret_data[field])
     return credentials
@@ -430,6 +522,11 @@ class VaultCredentialBackend:
                 "'kv/data/' / 'data/' prefix — Vault adds the '/data/' segment for "
                 "KV-v2 reads, so a prefixed value double-resolves to a 404."
             )
+
+        if operator.check_runner_dispatch:
+            # The check runner reads for every tenant with one Vault login,
+            # so each of its reads must stay inside the sensor's tenant.
+            _enforce_vault_tenant_scope(operator, mount=mount, path=secret_ref)
 
         async with vault_client_for_operator(operator) as client:
             payload = await asyncio.to_thread(
@@ -565,8 +662,13 @@ async def load_basic_credentials(
     # → the Vault KV-v2 read) selects the backend. ``store_ref`` is the
     # scheme-stripped ref, named in a missing-field error.
     store_ref, secret_data = await _resolve_and_load(target, operator, mount=mount)
+    field_map = _field_map_for_read(target)
     credentials = _extract_fields(
-        secret_data, fields, target_name=target.name, secret_ref=store_ref
+        _apply_secret_field_map(secret_data, field_map),
+        fields,
+        target_name=target.name,
+        secret_ref=store_ref,
+        field_map=field_map,
     )
 
     # Log only non-secret attribution: target / host / the field *names*
@@ -617,7 +719,8 @@ async def load_vault_secret_data(
     read-phase precondition / unwrap failures raise
     :class:`VaultCredentialsReadError`.
     """
-    _store_ref, secret_data = await _resolve_and_load(target, operator, mount=mount)
+    _store_ref, raw_data = await _resolve_and_load(target, operator, mount=mount)
+    secret_data = _apply_secret_field_map(raw_data, _field_map_for_read(target))
 
     # Log only the field-name set (no values). Sorted for a stable log
     # shape that diff-friendly observability tooling can pattern-match
@@ -629,6 +732,105 @@ async def load_vault_secret_data(
         fields=sorted(secret_data.keys()),
     )
     return secret_data
+
+
+async def missing_secret_field_map_sources(
+    target: BasicCredentialsTargetLike,
+    operator: Operator,
+    *,
+    mount: str = DEFAULT_KV_MOUNT,
+) -> list[str]:
+    """Return the mapped source fields *target*'s secret does not have (#3711).
+
+    Reads the target's own secret (same read as the other loaders) and
+    checks that every source field named in its ``secret_field_map`` is
+    present. Returns the missing source field names, sorted; an empty list
+    means the map is complete. A target with no map returns an empty list
+    without reading the secret. Field names only: no value is returned or
+    logged. Read errors propagate as in :func:`load_vault_secret_data`.
+    """
+    field_map = secret_field_map_of(target)
+    if not field_map:
+        return []
+    _store_ref, secret_data = await _resolve_and_load(target, operator, mount=mount)
+    return sorted({src for src in field_map.values() if src not in secret_data})
+
+
+def _enforce_vault_tenant_scope(operator: Operator, *, mount: str, path: str) -> None:
+    """Run the Vault tenant path check for one read.
+
+    Imported here, not at module level: importing the ``vault`` connector
+    package from this module would load the whole connector and its ops.
+    """
+    from meho_backplane.connectors.vault.tenant_scope import enforce_tenant_scope
+
+    enforce_tenant_scope(operator, mount=mount, path=path, read_only=True)
+
+
+def check_param_secret_ref(
+    operator: Operator | None,
+    secret_ref: str,
+    *,
+    param: str,
+    mount: str = DEFAULT_KV_MOUNT,
+) -> None:
+    """Refuse a secret ref from the op params that the caller may not name.
+
+    Runs before any store read, for every secret ref an operation takes
+    from its params (not for the target's own ``secret_ref``). The ref
+    resolves to a store the same way the loaders resolve it:
+
+    * **Vault** (``vault:`` or a schemeless ref on a Vault install): the
+      ``<mount>/<path>`` must pass the tenant path check
+      (:func:`~meho_backplane.connectors.vault.tenant_scope.enforce_tenant_scope`):
+      inside the caller's tenant prefix, with no ``.`` / ``..`` segment, no
+      ``%`` and no backslash.
+    * **Google Secret Manager** (``gsm:`` or a schemeless ref on a
+      ``credentialBackend=gsm`` install): the project must be listed in
+      ``GSM_PARAM_ALLOWED_PROJECTS``. An empty list refuses every one,
+      because MEHO reads these secrets with its own Google identity.
+    * **Any other store kind** is refused.
+
+    An empty ref passes: the read itself then fails with its own "no
+    secret_ref" error. ``operator=None`` stands for the system operator
+    (the SSH connectors' probe path), which has no tenant to check.
+
+    Raises :class:`SecretRefScopeError` naming *param*.
+    """
+    from meho_backplane.connectors.vault.tenant_scope import VaultTenantScopeError
+
+    ref = secret_ref.strip()
+    if not ref:
+        return
+    scheme = parse_credential_scheme(ref)
+    default_backend = scheme if scheme is not None else get_settings().credential_backend
+    kind, store_ref = split_credential_ref(ref, default_backend=default_backend)
+    if kind == "vault":
+        if operator is None:
+            return
+        try:
+            _enforce_vault_tenant_scope(operator, mount=mount, path=store_ref)
+        except VaultTenantScopeError as exc:
+            raise SecretRefScopeError(
+                param=param,
+                secret_ref=ref,
+                reason="the path is outside the caller's tenant",
+            ) from exc
+        return
+    if kind == "gsm":
+        project = store_ref.partition("#")[0].partition("/")[0].strip()
+        if project and project in get_settings().gsm_param_allowed_project_set:
+            return
+        raise SecretRefScopeError(
+            param=param,
+            secret_ref=ref,
+            reason="the Google Cloud project is not listed in GSM_PARAM_ALLOWED_PROJECTS",
+        )
+    raise SecretRefScopeError(
+        param=param,
+        secret_ref=ref,
+        reason=f"a {kind!r} secret cannot be named in a parameter",
+    )
 
 
 async def load_param_secret_data(
@@ -652,7 +854,11 @@ async def load_param_secret_data(
     The transport errors matter: the login phase already maps them to
     :class:`VaultClientError`, but the read phase does not, and their
     message carries the request URL and so the full secret path.
+
+    Before the read, :func:`check_param_secret_ref` checks the ref; a ref
+    the caller may not name raises :class:`SecretRefScopeError`.
     """
+    check_param_secret_ref(operator, target.secret_ref or "", param=param, mount=mount)
     try:
         return await load_vault_secret_data(target, operator, mount=mount)
     except (

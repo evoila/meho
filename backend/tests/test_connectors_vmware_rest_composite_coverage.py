@@ -43,6 +43,8 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.datastore.usage",
         # ``datastore.refresh`` is pinned ``write`` in ``_WRITE_OPS``: it is
         # ``safe`` but makes the host rescan, so it is not a plain read.
+        # #3814: ``.orphan_dirs`` is not a classifier suffix -> ``other``; a read.
+        "vmware.composite.datastore.orphan_dirs",
         "vmware.composite.network.portgroup.audit",
         "vmware.composite.vm.clone",
         "vmware.composite.vm.deploy_from_library",
@@ -63,10 +65,14 @@ _CLASSIFIER_OTHER = frozenset(
         # vlan.set ends in ``.set`` (not a write suffix) -> the classifier's
         # generic ``other`` branch, like security.set.
         "vmware.composite.network.portgroup.vlan.set",
+        # The DRS group member change ends in ``.set`` too -> ``other``.
+        "vmware.composite.cluster.drs_group.members.set",
         "vmware.composite.vm.resize",
         "vmware.composite.vm.nic.repoint",
         "vmware.composite.vm.device.cdrom",
         "vmware.composite.vm.tools.installer.unmount",
+        "vmware.composite.vm.cdrom.mount_library_iso",
+        "vmware.composite.vm.cdrom.unmount_library_iso",
         # #3880: ``.show`` / ``.set`` are not classifier suffixes -> ``other``.
         "vmware.composite.vm.resource_allocation.show",
         "vmware.composite.vm.resource_allocation.set",
@@ -92,6 +98,9 @@ _CLASSIFIER_OTHER = frozenset(
         # ``other``, like ``host.service_control``.
         "vmware.composite.alarm.acknowledge",
         "vmware.composite.alarm.reset",
+        # #4394: ``.answer`` is not a classifier suffix -> ``other``. The
+        # deploy and the install send a password: they are credential_write.
+        "vmware.composite.vcenter.deployment.answer",
         # ``.inventory`` is not a classifier suffix -> ``other``; a read.
         "vmware.migration.inventory",
     }

@@ -338,6 +338,7 @@ from meho_backplane.operations._errors import (
     wrap_ok_result,
 )
 from meho_backplane.operations._handler_resolve import (
+    forget_target_if_changed,
     get_or_create_connector_instance,
     import_handler,
     is_unbound_method,
@@ -2281,10 +2282,16 @@ def _apply_redaction_middleware(
     schema's ``Annotated[str | None]`` field). ``None`` tenant id
     (the chassis-era audit shape) flows through as ``None`` so the
     resolver only matches a non-tenant-scoped override.
+
+    For a ``credential_mint`` op (an op whose answer holds a new
+    credential, such as a Vault SecretID or a Harbor robot secret) the
+    ``raw`` copy that goes to the audit row gets the secret-named values
+    replaced (:func:`scrub_secret_named_values`). The caller-bound
+    ``redacted`` copy is unchanged.
     """
     tenant = str(operator.tenant_id) if operator.tenant_id is not None else None
     try:
-        return apply_connector_boundary_redaction(
+        redaction = apply_connector_boundary_redaction(
             raw,
             connector_id=connector_id,
             tenant=tenant,
@@ -2292,6 +2299,12 @@ def _apply_redaction_middleware(
         )
     except Exception as exc:
         return result_connector_error(op_id, exc, 0.0)
+    if classify_op(op_id) != "credential_mint":
+        return redaction
+    # An op that makes a new credential returns it to the caller, but the
+    # audit row's raw copy keeps only the other fields.
+    audit_raw, _ = scrub_secret_named_values(redaction.raw)
+    return redaction.model_copy(update={"raw": audit_raw})
 
 
 def _handle_metadata_for_audit(handle: ResultHandle | None) -> dict[str, Any] | None:
@@ -3379,6 +3392,7 @@ async def dispatch(
             op_id=op_id,
             triple=(product, version, impl_id),
             started=started,
+            target=target,
         )
     # #4139: an op that needs a target (every ingested op, or a typed op
     # bound to a connector) and got none fails here with one clear line,
@@ -3685,6 +3699,12 @@ async def dispatch(
                 exception_message or "",
                 _elapsed_ms(started),
             )
+
+        # #3879: a target changed on another server (or by this one, before
+        # this process saw it) must not be served with the login kept for its
+        # old values. One dict lookup per dispatch; a drop only on a change.
+        if target is not None:
+            await forget_target_if_changed(target)
 
         # --- Steps 6/7/8/9: branch + reduce + audit + broadcast -----------
         return await _execute_and_audit(

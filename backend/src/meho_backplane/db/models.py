@@ -1296,6 +1296,16 @@ class Target(Base):
     # backfill. The dispatch path that consumes it lives in
     # :mod:`meho_backplane.connectors.adapters.http`.
     tls_server_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Per-target secret field names (#3711): ``{connector_field: source_field}``.
+    # When a connector reads field ``X`` from the target's secret, the
+    # credential reader returns the secret's ``map.get(X, X)`` field instead.
+    # Field names only, never a value. ``NULL`` means no map. Added by
+    # migration ``0128``; nullable, so no backfill.
+    secret_field_map: Mapped[dict[str, str] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
     extras: Mapped[dict[str, object]] = mapped_column(
         _PORTABLE_JSON,
         nullable=False,
@@ -6764,7 +6774,8 @@ class ApprovalRequest(Base):
       ``GET /api/v1/approvals/{id}/result`` to resume by poll instead of a
       second submit. It is the same reduced envelope the approver already
       sees inline: a set-shaped response rides a JSONFlux ``handle``
-      (v0.1-spec §4), never a raw body. NULL until captured — a pending /
+      (v0.1-spec §4), never a raw body, plus the ``extras.approval_guidance``
+      stamp the store adds for the run summary (#5377). NULL until captured — a pending /
       rejected / expired row, an agent-run request resumed in-process (which
       does not route through the shared operator resume path), and every
       pre-0096 row keep NULL. Internal to the ``/result`` surface only; like
@@ -7013,6 +7024,16 @@ class ApprovalRequest(Base):
     # The MEHO release the request was made under (#5030). See the class
     # docstring. Added by migration ``0120``.
     release_id: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # How many times the requester ran this approved request again after
+    # its run failed (#5417). ``0`` until the first re-run. The re-run claim
+    # adds one in the same conditional UPDATE that clears ``resume_result``,
+    # so two re-runs sent at the same time cannot both run, and the audit
+    # row names the attempt (``rerun_count + 1``; the first run is attempt
+    # 1). ``resumed_at`` stays a one-way latch for the first run. Added by
+    # migration ``0129``.
+    rerun_count: Mapped[int] = mapped_column(
+        sa.Integer(), nullable=False, default=0, server_default=sa.text("0")
+    )
 
     __table_args__ = (
         Index(

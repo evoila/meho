@@ -70,7 +70,8 @@ Mapping rules the importer applies:
 - **Recognised top-level keys** map 1:1 to real columns: `name`,
   `aliases`, `product`, `host`, `port`, `fqdn`, `secret_ref`,
   `auth_model`, `vpn_required`, `notes`, `preferred_impl_id`,
-  `verify_tls`, `tls_ca_pin`, `tls_server_name`, `extras`.
+  `verify_tls`, `tls_ca_pin`, `tls_server_name`, `secret_field_map`,
+  `extras`.
 - **`name`, `product`, and `host` are required** and validated
   locally before any HTTP request.
 - **Unknown keys are not errors** — they spill into the target's
@@ -86,6 +87,29 @@ Mapping rules the importer applies:
   `extras.exception_message`.
 
 You can leave `secret_ref` out entirely — see the next section.
+
+### Use a secret with different field names
+
+A connector reads fixed field names from the secret. For example, SSH
+reads `ssh_private_key` and `username`. If your secret already holds the
+right values under other names, you do not need a copy. Tell MEHO which
+field to read instead with `secret_field_map`:
+
+```yaml
+targets:
+  - name: web-01
+    product: linux
+    host: web-01.example.com
+    secret_field_map:
+      ssh_private_key: private_key   # the connector field: the field in your secret
+      username: login
+```
+
+On the CLI, use `--secret-field ssh_private_key=private_key` with
+`meho targets add`, `meho targets update` or `meho targets import`.
+`meho targets probe` then checks that every field the map points to
+exists in the secret. It names any missing field, never a value. For SSH,
+a field named `private_key` also works with no map at all.
 
 ## Stage the secret
 
@@ -190,6 +214,27 @@ meho targets update lab-prom --clear secret-ref --extra scheme=http
 `--extra` on `update` replaces the whole `extras` map, so pass every key
 you want to keep. `--clear extra` removes every extra, and `--clear alias`
 removes every alias. In YAML, write `secret_ref: null`.
+
+## Change a secret
+
+MEHO keeps a login for each target for a while, so it does not have to
+log in on every call. When you change a secret only in Vault (or your
+secret store), MEHO keeps using the old login until it expires.
+
+To make MEHO read the secret again right away, send the same
+`secret_ref` again:
+
+```bash
+meho targets update lab-vcenter --secret-ref tenants/<tenant-id>/lab-vcenter
+```
+
+Any change to how MEHO reaches or logs in to a target (for example
+`--host`, `--secret-ref`, or `--extra`) does the same: the next call
+logs in with the new values.
+
+The MEHO server that gets the update drops its login at once. Any
+other backplane server, and any satellite runner, drops its login on
+its next call to that target.
 
 ## Import and verify
 

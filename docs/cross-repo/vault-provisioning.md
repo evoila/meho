@@ -380,6 +380,17 @@ sensor check-runner's service principal) on a `credentialBackend: vault`
 install. **Do this first — enabling `checkRunner.*` without it widens what
 background dispatch can read.**
 
+**The backplane enforces it.** With a runner principal
+(`CHECK_RUNNER_CLIENT_ID` / `CHECK_RUNNER_CLIENT_SECRET`) and `VAULT_ADDR`
+set, the check runner does not start unless `VAULT_CHECK_RUNNER_ROLE`
+names a role of its own (not the same as `VAULT_OIDC_ROLE`). It logs
+`sensor_runner_refused` and no Sensor is evaluated. So use Option A below
+and set `VAULT_CHECK_RUNNER_ROLE` (for example through the chart's
+`extraEnv`), or turn `checkRunner.enabled` off. Each Vault read the runner
+makes is also checked against the sensor's tenant subtree
+(`VAULT_KV_TENANT_SCOPE_PREFIX`), so give each tenant's Sensor secrets a
+path under that tenant.
+
 Role `meho-mcp` above is deliberately loose: `user_claim=sub` with
 `bound_audiences` as its *only* binding and no `bound_subject` /
 `bound_claims`, paired with a policy that grants read on the whole

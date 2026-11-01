@@ -11,6 +11,9 @@ here with its method, introspected from the live module constants:
 * the calls of the reads (``typed_reads.VENDOR_CALLS``): the local
   site list, site pairings, service meshes, appliances, the service mesh
   diagnostics, one job, alerts and the inventory;
+* the calls of the profile changes (``profile_writes.VENDOR_CALLS``) and of
+  the site pairing change and the certificate trust
+  (``site_pairing_writes.VENDOR_CALLS``);
 * the calls of the service mesh changes and the task read
   (``service_mesh_writes.VENDOR_CALLS``);
 * the calls of the network extension operations
@@ -48,7 +51,9 @@ from meho_backplane.connectors.hcx import manager_restart as _manager_restart_mo
 from meho_backplane.connectors.hcx import manager_setup as _manager_setup_module
 from meho_backplane.connectors.hcx import migrations as _migrations_module
 from meho_backplane.connectors.hcx import network_extension as _network_extension_module
+from meho_backplane.connectors.hcx import profile_writes as _profile_writes_module
 from meho_backplane.connectors.hcx import service_mesh_writes as _service_mesh_writes_module
+from meho_backplane.connectors.hcx import site_pairing_writes as _site_pairing_writes_module
 from meho_backplane.connectors.hcx import typed_reads as _typed_reads_module
 from tests._spec_shelf import (
     assert_op_ids_served,
@@ -71,6 +76,7 @@ def _declared_api_op_ids() -> set[str]:
 
     Every ``*_PATH`` constant of the connector module (``POST``), plus every
     ``(method, path)`` pair of ``typed_reads.VENDOR_CALLS``,
+    ``profile_writes.VENDOR_CALLS``, ``site_pairing_writes.VENDOR_CALLS``,
     ``service_mesh_writes.VENDOR_CALLS``, ``network_extension.VENDOR_CALLS``
     and ``migrations.MIGRATION_VENDOR_CALLS``, and the migration query of the
     restart (``manager_restart.MIGRATION_QUERY_CALL``).
@@ -81,6 +87,11 @@ def _declared_api_op_ids() -> set[str]:
         if name.endswith("_PATH") and isinstance(value, str) and value.startswith("/")
     }
     read_calls = {f"{method}:{path}" for method, path in _typed_reads_module.VENDOR_CALLS}
+    setup_calls = {
+        f"{method}:{path}"
+        for module in (_profile_writes_module, _site_pairing_writes_module)
+        for method, path in module.VENDOR_CALLS
+    }
     mesh_calls = {f"{method}:{path}" for method, path in _service_mesh_writes_module.VENDOR_CALLS}
     extension_calls = {
         f"{method}:{path}" for method, path in _network_extension_module.VENDOR_CALLS
@@ -90,7 +101,7 @@ def _declared_api_op_ids() -> set[str]:
     }
     restart_method, restart_path = _manager_restart_module.MIGRATION_QUERY_CALL
     restart_calls = {f"{restart_method}:{restart_path}"}
-    main_api_calls = connector_calls | read_calls | mesh_calls | extension_calls
+    main_api_calls = connector_calls | read_calls | setup_calls | mesh_calls | extension_calls
     return main_api_calls | migration_calls | restart_calls
 
 
@@ -112,6 +123,17 @@ def test_hcx_hand_coded_op_id_manifest_is_pinned() -> None:
         "POST:/hybridity/api/service/inventory/vc/list",
         "POST:/hybridity/api/service/inventory/vc/datastores/query",
         "POST:/hybridity/api/service/inventory/networks",
+        "GET:/hybridity/api/interconnect/computeProfiles",
+        "POST:/hybridity/api/interconnect/computeProfiles",
+        "GET:/hybridity/api/interconnect/computeProfiles/{computeProfileId}",
+        "PUT:/hybridity/api/interconnect/computeProfiles/{computeProfileId}",
+        "GET:/hybridity/api/networks",
+        "POST:/hybridity/api/networks",
+        "GET:/hybridity/api/networks/{networkId}",
+        "PUT:/hybridity/api/networks/{networkId}",
+        "POST:/hybridity/api/cloudConfigs",
+        "DELETE:/hybridity/api/endpointPairing/{endpointId}",
+        "POST:/hybridity/api/admin/certificates",
         "POST:/hybridity/api/interconnect/serviceMesh",
         "GET:/hybridity/api/interconnect/serviceMesh/{serviceMeshId}",
         "PUT:/hybridity/api/interconnect/serviceMesh/{serviceMeshId}",

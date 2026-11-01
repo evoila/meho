@@ -42,6 +42,9 @@ documentation that a running HCX Manager serves, so the vendor API files
 can be pinned. The other reads (``hcx.about``, site pairings, service
 meshes, appliances, the service mesh diagnostics, jobs, alerts and the
 inventory) live in :mod:`meho_backplane.connectors.hcx.typed_reads`.
+The profile changes live in :mod:`meho_backplane.connectors.hcx.profile_writes`,
+the site pairing change and the certificate trust in
+:mod:`meho_backplane.connectors.hcx.site_pairing_writes`.
 The service mesh changes and the task read ``hcx.task.get`` live in
 :mod:`meho_backplane.connectors.hcx.service_mesh_writes`. The network
 extension operations (list, extend, unextend, Mobility Optimized
@@ -446,6 +449,38 @@ class HcxConnector(HcxManagerSetupOps, HttpConnector):
         from meho_backplane.connectors.hcx.typed_reads import hcx_inventory_network_list_impl
 
         return await hcx_inventory_network_list_impl(self, operator, target, params)
+
+    async def profile_list(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.profile.list`` shim."""
+        from meho_backplane.connectors.hcx.profile_writes import hcx_profile_list_impl
+
+        return await hcx_profile_list_impl(self, operator, target, params)
+
+    async def profile_set(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.profile.set`` shim."""
+        from meho_backplane.connectors.hcx.profile_writes import hcx_profile_set_impl
+
+        return await hcx_profile_set_impl(self, operator, target, params)
+
+    async def site_pairing_set(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.site_pairing.set`` shim."""
+        from meho_backplane.connectors.hcx.site_pairing_writes import hcx_site_pairing_set_impl
+
+        return await hcx_site_pairing_set_impl(self, operator, target, params)
+
+    async def certificate_trust(
+        self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``hcx.certificate.trust`` shim."""
+        from meho_backplane.connectors.hcx.site_pairing_writes import hcx_certificate_trust_impl
+
+        return await hcx_certificate_trust_impl(self, operator, target, params)
 
     async def service_mesh_create(
         self, operator: Operator, target: HcxTargetLike, params: dict[str, Any]

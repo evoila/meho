@@ -80,6 +80,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=HOST_MOVE_LLM_INSTRUCTIONS,
         preview=_host_membership._host_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id=_host_membership.OP_ID_HOST_CONNECT,
@@ -97,6 +98,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=HOST_CONNECT_LLM_INSTRUCTIONS,
         preview=_host_membership._host_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id=_host_membership.OP_ID_HOST_DISCONNECT,
@@ -115,6 +117,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=HOST_DISCONNECT_LLM_INSTRUCTIONS,
         preview=_host_membership._host_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id=_host_remove.OP_ID_HOST_REMOVE,

@@ -103,6 +103,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.clone"],
         preview=_vm_clone_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.deploy_from_library",
@@ -122,6 +123,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.deploy_from_library"],
         preview=_vm_deploy_from_library_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.import_from_library",
@@ -139,6 +141,8 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.import_from_library"],
+        no_preview=True,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.snapshot.revert",
@@ -157,6 +161,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.snapshot.revert"],
         preview=_vm_snapshot_revert_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.destroy",
@@ -177,6 +182,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.destroy"],
         preview=_vm_destroy_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.migrate",
@@ -195,6 +201,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.migrate"],
         preview=_vm_migrate_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.power.bulk",
@@ -213,6 +220,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.power.bulk"],
         preview=_vm_power_bulk_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.power",
@@ -231,6 +239,7 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.power"],
         preview=_vm_power_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id="vmware.composite.vm.clone_from_template",
@@ -249,5 +258,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=True,
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.vm.clone_from_template"],
         preview=_vm_clone_from_template_preview,
+        classifier_other=True,
     ),
 )

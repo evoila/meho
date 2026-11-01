@@ -105,5 +105,6 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         requires_approval=False,
         llm_instructions=SUPERVISOR_LIBRARY_LLM_INSTRUCTIONS["vmware.composite.namespace.status"],
         not_on_8_0=SUPERVISOR_9X_REASON,
+        classifier_other=True,
     ),
 )

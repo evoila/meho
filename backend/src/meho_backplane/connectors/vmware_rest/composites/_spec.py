@@ -55,3 +55,11 @@ class CompositeSpec(NamedTuple):
     # Why the composite is not on the vmware-rest-8.0 catalog. ``None``: it
     # is on both catalogs.
     not_on_8_0: str | None = None
+    # True: a write that waits for approval with no preview of its effect, on
+    # purpose; the approver sees only the parameters. The coverage test
+    # checks that every other approval write has a preview builder.
+    no_preview: bool = False
+    # True: the broadcast classifier (``classify_op``) puts this op id in its
+    # generic ``other`` class, on purpose. The coverage test checks that this
+    # flag matches the classifier, so a new op id gets a conscious decision.
+    classifier_other: bool = False

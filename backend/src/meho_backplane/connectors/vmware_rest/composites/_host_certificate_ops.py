@@ -5,7 +5,9 @@
 
 ``_register.py`` collects :data:`COMPOSITES`, and ``_governed_subops.py`` reads
 :data:`HOST_CERTIFICATE_GOVERNED_SUBOPS`. Every change has
-``requires_approval=True``. The rows share the group
+``requires_approval=True``, carries the approval preview of
+:mod:`._host_certificate` and says that the broadcast classifier puts its op
+id in ``other`` (the changes send no secret). The rows share the group
 :data:`~meho_backplane.connectors.vmware_rest.host_certificate.HOST_CERTIFICATES_GROUP_KEY`
 with the two typed reads (certificate and TPM).
 """
@@ -54,6 +56,8 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions=CERTIFICATE_RENEW_LLM_INSTRUCTIONS,
+        preview=_host_certificate.certificate_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id=_host_certificate.OP_ID_HOST_CERTIFICATE_CSR,
@@ -70,6 +74,8 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         safety_level="caution",
         requires_approval=True,
         llm_instructions=CERTIFICATE_CSR_LLM_INSTRUCTIONS,
+        preview=_host_certificate.certificate_preview,
+        classifier_other=True,
     ),
     CompositeSpec(
         op_id=_host_certificate.OP_ID_HOST_CERTIFICATE_INSTALL,
@@ -87,6 +93,8 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions=CERTIFICATE_INSTALL_LLM_INSTRUCTIONS,
+        preview=_host_certificate.certificate_preview,
+        classifier_other=True,
     ),
 )
 

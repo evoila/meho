@@ -54,7 +54,7 @@ from meho_backplane.connectors.vmware_rest.vim_body import (
     vim_moref,
 )
 from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, poll_vim_task
-from meho_backplane.operations._preview import preview_failure_reason, register_preview_builder
+from meho_backplane.operations._preview import preview_failure_reason
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -65,6 +65,7 @@ __all__ = [
     "OP_ID_HOST_CERTIFICATE_CSR",
     "OP_ID_HOST_CERTIFICATE_INSTALL",
     "OP_ID_HOST_CERTIFICATE_RENEW",
+    "certificate_preview",
     "host_certificate_csr_composite",
     "host_certificate_renew_composite",
     "wanted_certificate",
@@ -397,7 +398,7 @@ def _install_wanted(params: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
 
-async def _certificate_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+async def certificate_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """The host and its certificate now, and what the change does. A failed read never blocks."""
     host = ctx.params.get("host")
     if not isinstance(host, str) or ctx.connector_instance is None:
@@ -436,8 +437,3 @@ async def _certificate_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         preview["what_happens_next"] = _WHAT_HAPPENS[op_id]
     preview["checked_at"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     return preview
-
-
-register_preview_builder(OP_ID_HOST_CERTIFICATE_RENEW, _certificate_preview)
-register_preview_builder(OP_ID_HOST_CERTIFICATE_CSR, _certificate_preview)
-register_preview_builder(OP_ID_HOST_CERTIFICATE_INSTALL, _certificate_preview)

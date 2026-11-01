@@ -596,7 +596,7 @@ async def test_preview_shows_the_host_and_its_certificate(op_id: str) -> None:
     pem, _start, end = make_certificate()
     ctx = preview_ctx({"host": HOST, "certificate_pem": pem}, conn)
     ctx = dataclasses.replace(ctx, descriptor=SimpleNamespace(op_id=op_id))
-    preview = await _host_certificate._certificate_preview(ctx)
+    preview = await _host_certificate.certificate_preview(ctx)
     assert preview is not None
     assert preview["host_name"] == f"<esxi-host-{HOST}>"
     assert preview["certificate_now"]["valid_to"] == OLD_INFO["notAfter"]
@@ -608,6 +608,6 @@ async def test_preview_shows_the_host_and_its_certificate(op_id: str) -> None:
 
 async def test_preview_lists_a_missing_host_and_never_raises() -> None:
     conn = CertVim()
-    preview = await _host_certificate._certificate_preview(preview_ctx({"host": HOST}, conn))
+    preview = await _host_certificate.certificate_preview(preview_ctx({"host": HOST}, conn))
     assert preview is not None
     assert preview["unavailable"] == ["the host: vCenter has no host with this id"]

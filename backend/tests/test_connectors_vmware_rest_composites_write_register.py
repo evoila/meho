@@ -685,6 +685,7 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
         "vmware.composite.object.move": {
             "moved",
             "partial",
+            "failed",
             "unchanged",
             "invalid_request",
             "not_found",

@@ -15,7 +15,9 @@
   is ``dangerous``. MEHO reads the folder and every object first: it refuses an
   unknown folder or object, and an object the folder cannot hold (a VM into a
   host folder, for example). Objects already in the folder are skipped. After
-  the task MEHO reads each object's parent again.
+  the task MEHO reads each object's parent again, also after a failed task:
+  vCenter moves the objects one by one and stops at the first fault, so the
+  answer names the objects that moved before it.
 
 Each object is named by its kind and its moid, never by name: after approval
 the change must run on the object the approver saw. Both wait for approval and
@@ -71,7 +73,10 @@ class ObjectKind(NamedTuple):
 
     mo_type: str
     moid_pattern: str
-    #: The ``Folder.childType`` entry a folder needs to hold this kind.
+    #: The ``Folder.childType`` entry a folder needs to hold this kind, without
+    #: the ``vim.`` prefix. A datastore cluster is a folder in the vim model, so
+    #: it needs ``Folder``; a distributed switch and a distributed port group go
+    #: into a network folder, whose ``childType`` names ``Network``.
     folder_child_type: str
 
 
@@ -83,11 +88,9 @@ OBJECT_KINDS: Final[dict[str, ObjectKind]] = {
     "cluster": ObjectKind("ClusterComputeResource", r"^domain-c[0-9]+$", "ComputeResource"),
     "standalone_host": ObjectKind("ComputeResource", r"^domain-s[0-9]+$", "ComputeResource"),
     "datastore": ObjectKind("Datastore", r"^datastore-[0-9]+$", "Datastore"),
-    "datastore_cluster": ObjectKind("StoragePod", r"^group-p[0-9]+$", "StoragePod"),
+    "datastore_cluster": ObjectKind("StoragePod", r"^group-p[0-9]+$", "Folder"),
     "network": ObjectKind("Network", r"^network-[0-9]+$", "Network"),
-    "distributed_switch": ObjectKind(
-        "DistributedVirtualSwitch", r"^dvs-[0-9]+$", "DistributedVirtualSwitch"
-    ),
+    "distributed_switch": ObjectKind("DistributedVirtualSwitch", r"^dvs-[0-9]+$", "Network"),
     "distributed_portgroup": ObjectKind(
         "DistributedVirtualPortgroup", r"^dvportgroup-[0-9]+$", "Network"
     ),
@@ -111,11 +114,10 @@ _RENAME_OPS: Final[dict[str, str]] = {
     "resource_pool": "POST:/ResourcePool/{moId}/Rename_Task",
 }
 RENAME_KINDS: Final[tuple[str, ...]] = tuple(_RENAME_OPS)
-#: A resource pool moves with ``MoveIntoResourcePool`` and a distributed port
-#: group stays on its switch, so ``MoveIntoFolder`` takes neither.
-MOVE_KINDS: Final[tuple[str, ...]] = tuple(
-    k for k in OBJECT_KINDS if k not in ("resource_pool", "distributed_portgroup")
-)
+#: A resource pool moves with ``MoveIntoResourcePool``, so ``MoveIntoFolder``
+#: does not take it. A distributed port group moves between network folders
+#: and stays on its switch.
+MOVE_KINDS: Final[tuple[str, ...]] = tuple(k for k in OBJECT_KINDS if k != "resource_pool")
 
 _OP_MOVE_INTO_FOLDER_TASK: Final = "POST:/Folder/{moId}/MoveIntoFolder_Task"
 
@@ -130,6 +132,10 @@ _VIM_SUB_OPS_OBJECT_MOVE: Final[tuple[str, ...]] = (
 
 #: Folders an object can move into: VM, host, datastore, network or datacenter folders.
 MOVE_FOLDER_MOID_PATTERN: Final = OBJECT_KINDS["folder"].moid_pattern
+
+#: The letter after ``group-`` of the folders that hold a kind whose
+#: ``childType`` entry is ``Folder``, which does not tell the folder's kind.
+_FOLDER_LETTER_OF_KIND: Final[dict[str, str]] = {"datastore_cluster": "s"}
 
 #: Objects per move; the parameter schema refuses more.
 MOVE_MAX_OBJECTS: Final = 50
@@ -168,11 +174,13 @@ async def _run_task(
     params: dict[str, Any],
     label: str,
 ) -> OperationResult | VimTaskResult:
-    """Gate + send one ``*_Task`` and poll it; a fault raises with its type and text.
+    """Gate + send one ``*_Task`` and poll it to its end.
 
     A fault can come at once (vCenter refuses the call, HTTP 500 with the vim
-    fault) or at the end of the task. Both raise, so the call is recorded as
-    failed and the answer carries the fault.
+    fault): that raises, so the call is recorded as failed and the answer
+    carries the fault. A fault at the end of the task comes back in the
+    outcome (``state == "error"``): the caller decides what to read back
+    before it reports the fault.
     """
     try:
         gate, payload = await _write_vmomi_sub_op(
@@ -197,12 +205,15 @@ async def _run_task(
         task=_unwrap_value(payload),
         timeout_seconds=_TASK_TIMEOUT_SECONDS,
     )
-    if outcome.state == TASK_STATE_ERROR:
-        raise RuntimeError(
-            f"{label}: vCenter task {outcome.task} failed "
-            f"({outcome.fault_type or 'fault'}): {outcome.error_message or '<no message>'}"
-        )
     return outcome
+
+
+def _task_fault(outcome: VimTaskResult, label: str) -> str:
+    """The fault of a task that ended in error, as one line."""
+    return (
+        f"{label}: vCenter task {outcome.task} failed "
+        f"({outcome.fault_type or 'fault'}): {outcome.error_message or '<no message>'}"
+    )
 
 
 # ===========================================================================
@@ -258,6 +269,8 @@ async def object_rename_composite(
     )
     if isinstance(outcome, OperationResult):
         return outcome
+    if outcome.state == TASK_STATE_ERROR:
+        raise RuntimeError(_task_fault(outcome, "object.rename"))
     envelope["task"] = outcome.task
     if outcome.timed_out:
         return {
@@ -342,17 +355,27 @@ async def _read_objects(
     return rows
 
 
+def _child_type_name(raw: str) -> str:
+    """``vim.Datastore`` and ``Datastore`` are the same ``childType`` entry."""
+    return raw.removeprefix("vim.")
+
+
 def _fits(row: dict[str, Any], folder: str, child_types: list[str]) -> bool:
     """Whether the folder can hold the object.
 
-    The folder's ``childType`` must name the object's kind. A folder moves
-    only into a folder of its own kind (a VM folder into a VM folder): the
-    letter after ``group-`` is the same.
+    The folder's ``childType`` must name the object's kind. It says only
+    ``Folder`` for a folder and for a datastore cluster (a folder in the vim
+    model), so for those the letter after ``group-`` decides: a folder moves
+    into a folder of its own kind (a VM folder into a VM folder), a datastore
+    cluster into a datastore folder.
     """
     kind = row["object_type"]
     if OBJECT_KINDS[kind].folder_child_type not in child_types:
         return False
-    return kind != "folder" or str(row["moid"])[:7] == folder[:7]
+    if kind == "folder":
+        return str(row["moid"])[:7] == folder[:7]
+    letter = _FOLDER_LETTER_OF_KIND.get(kind)
+    return letter is None or folder[:7] == f"group-{letter}"
 
 
 class _MovePlan(NamedTuple):
@@ -395,7 +418,7 @@ async def _plan_move(
     raw_types = props.get("childType")
     if not isinstance(raw_types, list):
         raw_types = []
-    child_types = [t for t in raw_types if isinstance(t, str)]
+    child_types = [_child_type_name(t) for t in raw_types if isinstance(t, str)]
     rows = await _read_objects(connector, target, operator, objects)
     envelope["objects"] = rows
     missing = [r["moid"] for r in rows if not r["present"]]
@@ -452,6 +475,8 @@ async def object_move_composite(
     envelope["objects"] = [
         {**r, "parent_before": before.get(r["moid"]), "moved": r["parent"] == folder} for r in rows
     ]
+    if outcome.state == TASK_STATE_ERROR:
+        return _move_failed(envelope, outcome)
     if all(r["moved"] for r in envelope["objects"]):
         return {**envelope, "status": "moved"}
     return {
@@ -459,6 +484,26 @@ async def object_move_composite(
         "status": "partial",
         "issues": [issue("connector", "warning", "some objects did not read back in the folder")],
         "guidance": "Check the rows with moved=false.",
+    }
+
+
+def _move_failed(envelope: dict[str, Any], outcome: VimTaskResult) -> dict[str, Any]:
+    """The answer of a move whose task failed, with the objects as read back.
+
+    vCenter moves the objects one by one and stops at the first fault, so the
+    objects before it are in the folder. The rows say which.
+    """
+    folder = envelope["folder"]
+    moved = [r["moid"] for r in envelope["objects"] if r["moved"] and r["parent_before"] != folder]
+    return {
+        **envelope,
+        "status": "failed",
+        "issues": [issue("connector", "error", _task_fault(outcome, "object.move"))],
+        "guidance": (
+            f"vCenter moved {', '.join(moved)} before the fault; the others stayed where they were."
+            if moved
+            else "Nothing moved."
+        ),
     }
 
 

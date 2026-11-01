@@ -585,16 +585,57 @@ async def test_move_into_a_missing_folder_is_not_found(gate: GateRecorder) -> No
     assert gate.calls == []
 
 
-async def test_move_task_fault_reaches_the_answer(gate: GateRecorder) -> None:
+async def test_move_task_fault_with_nothing_moved_is_failed(gate: GateRecorder) -> None:
     conn = _move_fake()
     conn.task_faults["MoveIntoFolder_Task"] = ("InvalidFolder", "The folder is not valid.")
-    with pytest.raises(RuntimeError, match=r"InvalidFolder.*not valid"):
-        await _run(
-            _object_rename_move.object_move_composite,
-            conn,
-            folder="group-v7",
-            objects=[{"object_type": "vm", "moid": "vm-42"}],
-        )
+    out = await _run(
+        _object_rename_move.object_move_composite,
+        conn,
+        folder="group-v7",
+        objects=[{"object_type": "vm", "moid": "vm-42"}],
+    )
+    assert out["status"] == "failed"
+    assert out["issues"][0]["severity"] == "error"
+    assert "InvalidFolder" in out["issues"][0]["message"]
+    assert out["objects"][0]["moved"] is False
+    assert out["objects"][0]["parent"] == "group-v4"
+    assert out["guidance"] == "Nothing moved."
+
+
+class _FirstMovesThenFaults(InventoryFake):
+    """vCenter moves the first object, then the task fails on the second."""
+
+    async def _post_vmomi_json(self, target: Any, path: str, **kwargs: Any) -> Any:
+        if path.endswith("/MoveIntoFolder_Task"):
+            self._move(path.split("/")[2], kwargs["json"]["list"][:1])
+            self.task_faults["MoveIntoFolder_Task"] = ("DuplicateName", "The name exists.")
+        return await super()._post_vmomi_json(target, path, **kwargs)
+
+
+async def test_move_task_fault_names_the_objects_moved_before_it(gate: GateRecorder) -> None:
+    """A failed task still reads every object back: the first one changed location."""
+    conn = _FirstMovesThenFaults()
+    conn.add("Folder", "group-v7", name="<target-folder>", childType=["Folder", "VirtualMachine"])
+    conn.add("VirtualMachine", "vm-42", name="<vm-a>", parent=moref("Folder", "group-v4"))
+    conn.add("VirtualMachine", "vm-44", name="<vm-c>", parent=moref("Folder", "group-v4"))
+    out = await _run(
+        _object_rename_move.object_move_composite,
+        conn,
+        folder="group-v7",
+        objects=[{"object_type": "vm", "moid": "vm-42"}, {"object_type": "vm", "moid": "vm-44"}],
+    )
+    assert out["status"] == "failed"
+    assert out["issues"][0]["severity"] == "error"
+    assert "DuplicateName" in out["issues"][0]["message"]
+    rows = {r["moid"]: r for r in out["objects"]}
+    assert rows["vm-42"]["parent_before"] == "group-v4"
+    assert rows["vm-42"]["parent"] == "group-v7"
+    assert rows["vm-42"]["moved"] is True
+    assert rows["vm-44"]["parent"] == "group-v4"
+    assert rows["vm-44"]["moved"] is False
+    assert out["guidance"] == (
+        "vCenter moved vm-42 before the fault; the others stayed where they were."
+    )
 
 
 async def test_move_immediate_vim_fault_reaches_the_answer(gate: GateRecorder) -> None:
@@ -620,6 +661,72 @@ async def test_move_that_does_not_read_back_is_partial(gate: GateRecorder) -> No
     )
     assert out["status"] == "partial"
     assert out["objects"][0]["moved"] is False
+
+
+def _vendor_folders_fake() -> InventoryFake:
+    """Folders with the vendor's own ``childType`` shapes, and what moves into them."""
+    conn = InventoryFake()
+    conn.add("Folder", "group-n7", name="<net-folder>", childType=["vim.Folder", "vim.Network"])
+    conn.add("Folder", "group-s6", name="<ds-folder>", childType=["vim.Folder", "vim.Datastore"])
+    conn.add("Folder", "group-v4", name="vm", childType=["Folder", "VirtualMachine", "VirtualApp"])
+    conn.add("DistributedVirtualSwitch", "dvs-3", name="<dvs>", parent=moref("Folder", "group-n1"))
+    conn.add(
+        "DistributedVirtualPortgroup",
+        "dvportgroup-15",
+        name="<pg>",
+        parent=moref("Folder", "group-n1"),
+    )
+    conn.add("StoragePod", "group-p9", name="<ds-cluster>", parent=moref("Folder", "group-s1"))
+    conn.add("Datastore", "datastore-2", name="<ds>", parent=moref("Folder", "group-s1"))
+    conn.add("VirtualMachine", "vm-42", name="<vm-a>", parent=moref("Folder", "group-v1"))
+    return conn
+
+
+@pytest.mark.parametrize(
+    ("folder", "kind", "moid"),
+    [
+        ("group-n7", "distributed_switch", "dvs-3"),
+        ("group-n7", "distributed_portgroup", "dvportgroup-15"),
+        ("group-s6", "datastore_cluster", "group-p9"),
+        ("group-s6", "datastore", "datastore-2"),
+        ("group-v4", "vm", "vm-42"),
+    ],
+)
+async def test_move_takes_the_vendor_child_type_shapes(
+    gate: GateRecorder, folder: str, kind: str, moid: str
+) -> None:
+    """``vim.`` names count; a switch and a port group are Network, a datastore cluster a Folder."""
+    conn = _vendor_folders_fake()
+    out = await _run(
+        _object_rename_move.object_move_composite,
+        conn,
+        folder=folder,
+        objects=[{"object_type": kind, "moid": moid}],
+    )
+    assert out["status"] == "moved"
+    mo_type = _object_rename_move.OBJECT_KINDS[kind].mo_type
+    assert conn.calls_to("MoveIntoFolder_Task") == [
+        (f"/Folder/{folder}/MoveIntoFolder_Task", {"list": [moref(mo_type, moid)]})
+    ]
+    (row,) = out["objects"]
+    assert row["parent_before"] != folder
+    assert row["parent"] == folder
+    assert row["moved"] is True
+
+
+async def test_move_refuses_a_datastore_cluster_into_a_vm_folder(gate: GateRecorder) -> None:
+    """Both folders hold ``Folder``; the letter after ``group-`` tells them apart."""
+    conn = _vendor_folders_fake()
+    out = await _run(
+        _object_rename_move.object_move_composite,
+        conn,
+        folder="group-v4",
+        objects=[{"object_type": "datastore_cluster", "moid": "group-p9"}],
+    )
+    assert out["status"] == "precondition_failed"
+    assert "cannot hold" in out["issues"][0]["message"]
+    assert gate.calls == []
+    assert conn.calls_to("MoveIntoFolder_Task") == []
 
 
 async def test_move_preview_names_the_folder_and_the_objects() -> None:

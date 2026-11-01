@@ -365,7 +365,8 @@ _MOVE_ROW_SCHEMA: Final[dict[str, Any]] = {
         },
         "moved": {
             "type": "boolean",
-            "description": "Whether it reads back in the folder (after a move only).",
+            "description": "Whether it reads back in the folder (after a move only, also "
+            "after a failed one).",
         },
     },
 }
@@ -378,6 +379,7 @@ _OBJECT_MOVE_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
             "enum": [
                 "moved",
                 "partial",
+                "failed",
                 "unchanged",
                 "invalid_request",
                 "not_found",
@@ -386,10 +388,12 @@ _OBJECT_MOVE_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
             ],
             "description": (
                 "moved: every object reads back in the folder; partial: some do not; "
-                "unchanged: all were in it, nothing sent; invalid_request: bad ids; "
+                "failed: the task failed, the rows say which objects moved before the "
+                "fault; unchanged: all were in it, nothing sent; invalid_request: bad ids; "
                 "not_found: no such folder; precondition_failed: an object is missing or "
                 "the folder cannot hold it, nothing moved; timeout: the task did not end "
-                "in time. A vCenter fault fails the call with its text."
+                "in time. A vCenter fault before the task starts fails the call with its "
+                "text."
             ),
         },
         "folder": {"type": "string", "description": "The folder id."},
@@ -404,8 +408,9 @@ _OBJECT_MOVE_RESPONSE_SCHEMA: Final[dict[str, Any]] = {
 
 _OBJECT_MOVE_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     "when_to_call": (
-        "Call to move VMs, folders, clusters, hosts, datastores, networks, switches or "
-        "datacenters into another folder of the same datacenter."
+        "Call to move VMs, folders, clusters, hosts, datastores, datastore clusters, "
+        "networks, distributed switches, distributed port groups or datacenters into "
+        "another folder of the same datacenter."
     ),
     "preconditions": (
         "The folder must hold the objects' kind: VMs into a VM folder, clusters and hosts "
@@ -414,13 +419,14 @@ _OBJECT_MOVE_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
         "needs a grant; the change waits for approval."
     ),
     "output_shape": (
-        "{status: moved|partial|unchanged|invalid_request|not_found|precondition_failed|"
-        "timeout, folder, folder_name, objects: [{object_type, moid, name, present, "
-        "parent, parent_before, moved}], task, issues, guidance}."
+        "{status: moved|partial|failed|unchanged|invalid_request|not_found|"
+        "precondition_failed|timeout, folder, folder_name, objects: [{object_type, moid, "
+        "name, present, parent, parent_before, moved}], task, issues, guidance}."
     ),
     "next_step": (
-        "Safe to run twice: objects already in the folder are skipped. On partial, check "
-        "the rows with moved=false. To move a resource pool, use the cluster group."
+        "Safe to run twice: objects already in the folder are skipped. On partial or "
+        "failed, check the rows: moved=true changed location and permissions. To move a "
+        "resource pool, use the cluster group."
     ),
 }
 

@@ -2048,7 +2048,7 @@ enum) are:
 | `datacenter.create` | `created` (synchronous `CreateDatacenter`, then a read-back into `datacenter_info`; a vim fault such as `DuplicateName` raises `connector_error` with the fault type and text) |
 | `datacenter.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present`, `timeout` (the teardown envelope; `precondition_failed` while the datacenter holds anything, listed in `blockers`) |
 | `object.rename` | `renamed`, `unchanged`, `invalid_request`, `not_found`, `timeout` (refusals happen before any write and carry an `error` issue; a vim fault raises `connector_error`) |
-| `object.move` | `moved`, `partial`, `unchanged`, `invalid_request`, `not_found`, `precondition_failed`, `timeout` (`partial` when some objects do not read back in the folder) |
+| `object.move` | `moved`, `partial`, `failed`, `unchanged`, `invalid_request`, `not_found`, `precondition_failed`, `timeout` (`partial` when some objects do not read back in the folder; `failed` when the task failed, with the objects read back so the rows say which moved before the fault) |
 | `resource_pool.update` | `updated`, `unchanged`, `not_found`, `refused` (`refused` when vCenter answers 400; nothing changed) |
 | `network.portgroup.create` | `created`, `invalid_vlan_spec`, `timeout` (vim `CreateDVPortgroup_Task` polled, #3091; `invalid_vlan_spec` refuses a trunk+access clash before any write; `timeout` when the poll gives up; a task *fault* — e.g. `DuplicateName` — raises `connector_error`. The `created` envelope carries a read-back `observed` = `{name, vlan}` off the new portgroup's `config`. The trunk / access VLAN specs are `InheritablePolicy` subtypes, so each wire body carries `inherited: false` — without it vCenter defaults `inherited: true` and drops the `vlanId`, silently creating an untagged (VLAN 0) portgroup, #3356) |
 | `network.portgroup.security.set` | `updated`, `no_change_requested`, `timeout` (vim `ReconfigureDVPortgroup_Task` polled, #3091; `no_change_requested` refuses when none of the three booleans is supplied, before any read/write; `timeout` when the poll gives up; a task *fault* raises `connector_error`. Carries `previous` (pre-write security triple) + `observed` (post-write triple) read-backs) |
@@ -2976,13 +2976,21 @@ them).
 - **`object.move`**: MEHO reads the folder (`name`, `childType`) and each
   object (one read each: vCenter fails a property read as a whole when one
   object in it does not exist). It refuses before any write when an object
-  is missing, when the folder's `childType` does not name the object's kind,
-  or when a folder would move into a folder of another kind (the letter after
-  `group-` differs). Objects already in the folder are skipped; all of them
-  in it gives `unchanged`. A resource pool (it moves with
-  `MoveIntoResourcePool`) and a distributed port group (it stays on its
-  switch) are not taken. The move is `dangerous` because the folder's
-  permissions then apply to the objects.
+  is missing or when the folder cannot hold it. The folder's `childType`
+  must name the object's kind; `vim.Datastore` and `Datastore` count the
+  same. A folder and a datastore cluster (a folder in the vim model) both
+  fall under `Folder`, so for them the letter after `group-` decides: a
+  folder moves into a folder of its own kind, a datastore cluster into a
+  datastore folder. A distributed switch and a distributed port group fall
+  under `Network`, the network folder's entry; the port group stays on its
+  switch. Objects already in the folder are skipped; all of them in it gives
+  `unchanged`. A resource pool is not taken (it moves with
+  `MoveIntoResourcePool`). vCenter moves the objects one by one and stops at
+  the first fault, so after a failed task MEHO reads every object back and
+  answers `failed`: the fault in an `error` issue, `moved=true` on the rows
+  whose location (and so permissions) changed, and the moved ids in
+  `guidance`. The move is `dangerous` because the folder's permissions then
+  apply to the objects.
 - **`resource_pool.update`**: vCenter resets every field of an allocation
   that the PATCH leaves out (no reservation means 0, no limit means -1, no
   shares means NORMAL). So MEHO reads the pool, puts the asked changes on top
@@ -2993,8 +3001,9 @@ them).
   message in `guidance`.
 - **Faults**: a vim fault, at once (HTTP 500 with the fault) or at the end of
   the task, raises with the fault type and text, so the dispatcher records
-  `connector_error`. A task that does not end in 600 s gives `timeout` with an
-  `error` issue.
+  `connector_error`. The one exception is a move whose task fails: it answers
+  `failed` with the objects read back (above). A task that does not end in
+  600 s gives `timeout` with an `error` issue.
 
 Code: `composites/_inventory_tree.py` (datacenter create and delete),
 `composites/_object_rename_move.py` (rename and move),

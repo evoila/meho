@@ -13,9 +13,14 @@
 * HCX refuses an appliance that extends a network, or too few free
   appliances, and the error reaches the answer; an appliance older than
   HCX 4.3 is refused before any change;
-* the dissolve preview lists the extensions the group serves;
-* a failed job shows its error in ``hcx.job.get``, and a login that expired
-  after the start makes a new login.
+* the approval request of a dissolve lists the extensions the group
+  serves; ``preview_operation`` shows no plan, because it never contacts
+  the Manager; a missing group still waits for approval and then answers
+  ``not_found``;
+* the status read ``hcx.task.get`` follows a started task: state, progress
+  and the vendor error; after an expired login it logs in again; a Manager
+  that does not answer gives ``not_reachable``; a failed job shows its
+  error in ``hcx.job.get``.
 
 Fixture values are made up; no real host, user or id appears here.
 """
@@ -27,7 +32,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 import httpx
@@ -35,8 +40,9 @@ import pytest
 import respx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from tenacity import wait_none
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.hcx import (
     HCX_CONNECTOR_ID,
     HCX_IMPL_ID,
@@ -52,15 +58,22 @@ from meho_backplane.connectors.hcx.ha_group_ops import (
 from meho_backplane.connectors.hcx.typed_ops import HCX_TYPED_WHEN_TO_USE_BY_GROUP
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
+from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches, set_default_reducer
+from meho_backplane.operations._composite_preview import PLAN_NOT_SHOWN_NOTE
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
     reset_handler_cache,
 )
 from meho_backplane.operations._preview import PreviewContext, build_proposed_effect
 from meho_backplane.operations._validate import validate_params
+from meho_backplane.operations.approval_queue import (
+    approve_request,
+    resume_dispatch_after_approval,
+)
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.operations.meta_tools import call_operation, preview_operation
 from meho_backplane.settings import get_settings
 
 _HOST = "hcx-ha.test.invalid"
@@ -75,6 +88,8 @@ _PASSWORD = "ha-password-value"
 _GROUP_ID = "ha-group-0001"
 _APPLIANCE_ID = "ne-0001"
 _TASK_ID = "task-0001"
+_TASK_PATH = f"/hybridity/api/interconnect/tasks/{_TASK_ID}"
+_TARGET_NAME = "hcx-ha"
 _TENANT_ID = UUID("00000000-0000-0000-0000-0000000000e5")
 _SET = "hcx.network_extension.ha.set"
 _LIST = "hcx.network_extension.ha.list"
@@ -192,14 +207,15 @@ class _HcxTarget:
         self.auth_model = "shared_service_account"
 
 
-def _operator() -> Operator:
+def _operator(sub: str = "op-ha-hcx-typed") -> Operator:
     return Operator(
-        sub="op-ha-hcx-typed",
+        sub=sub,
         name="HCX HA Operator",
         email=None,
         raw_jwt="op.ha.hcx.typed.jwt",
         tenant_id=_TENANT_ID,
         tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.USER,
     )
 
 
@@ -212,6 +228,59 @@ async def _registered(_stub_embedding: AsyncMock, session: AsyncSession) -> None
     await register_hcx_typed_operations()
     instance = get_or_create_connector_instance(HcxConnector)
     instance._session_loader = _session_loader  # type: ignore[attr-defined]
+
+
+@pytest.fixture
+async def _target_row(_registered: None, session: AsyncSession) -> None:
+    """A stored target, so ``call_operation`` and ``preview_operation`` resolve it by name."""
+    session.add(
+        TargetORM(
+            tenant_id=_TENANT_ID,
+            name=_TARGET_NAME,
+            aliases=[],
+            product=HCX_PRODUCT,
+            host=_HOST,
+            port=443,
+            fqdn=None,
+            secret_ref="targets/op-ha/hcx-ha",
+            auth_model="shared_service_account",
+            vpn_required=False,
+            extras={},
+            fingerprint={"version": "4.11.0"},
+            notes="seeded by test_connectors_hcx_ha_groups",
+        )
+    )
+    await session.commit()
+
+
+def _args(params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "connector_id": HCX_CONNECTOR_ID,
+        "op_id": _SET,
+        "target": _TARGET_NAME,
+        "params": params,
+    }
+
+
+async def _approval_effect(call: dict[str, Any]) -> tuple[UUID, dict[str, Any]]:
+    """The approval request a parked call made, and the preview stored on it."""
+    request_id = UUID(call["extras"]["approval_request_id"])
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        effect: dict[str, Any] = dict(row.proposed_effect)
+        return request_id, effect
+
+
+async def _approve_and_resume(request_id: UUID) -> Any:
+    approver = _operator("op-ha-hcx-approver")
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=approver, params=None)
+        await s.commit()
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        return await resume_dispatch_after_approval(operator=approver, request=row, params=None)
 
 
 async def _dispatch(op_id: str, params: dict[str, Any], *, approved: bool = False) -> Any:
@@ -278,6 +347,7 @@ async def test_ops_are_registered_with_the_risk_of_the_table(session: AsyncSessi
         assert row.source_kind == "typed"
         assert (row.safety_level, row.requires_approval) == (safety, approval)
         assert row.parameter_schema["examples"]
+        assert row.summary and row.description
         assert "\n" not in row.summary and len(row.description) <= 300
     assert GROUP_NETWORK_EXTENSION_HA in HCX_TYPED_WHEN_TO_USE_BY_GROUP
 
@@ -626,27 +696,33 @@ async def _preview(params: dict[str, Any]) -> dict[str, Any] | None:
 
 def _radius(effect: dict[str, Any] | None) -> dict[str, Any]:
     assert effect is not None
-    return effect["preview"]["blast_radius"] if "preview" in effect else effect["blast_radius"]
+    radius: dict[str, Any] = (
+        effect["preview"]["blast_radius"] if "preview" in effect else effect["blast_radius"]
+    )
+    return radius
+
+
+def _extension(stretch_id: str, appliance_id: str) -> dict[str, Any]:
+    return {
+        "stretchId": stretch_id,
+        "sourceNetwork": {"networkName": f"<network-{stretch_id}>"},
+        "sourceAppliance": {"applianceId": appliance_id},
+    }
+
+
+_EXTENSION_ROWS = [
+    _extension("stretch-0002", "ne-0101"),
+    _extension("stretch-0001", "ne-0101"),
+    _extension("stretch-other", "ne-0909"),
+]
 
 
 @pytest.mark.asyncio
 async def test_dissolve_preview_lists_the_extensions_the_group_serves() -> None:
-    def extension(stretch_id: str, appliance_id: str) -> dict[str, Any]:
-        return {
-            "stretchId": stretch_id,
-            "sourceNetwork": {"networkName": f"<network-{stretch_id}>"},
-            "sourceAppliance": {"applianceId": appliance_id},
-        }
-
-    extensions = [
-        extension("stretch-0002", "ne-0101"),
-        extension("stretch-0001", "ne-0101"),
-        extension("stretch-other", "ne-0909"),
-    ]
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
         _login(mock)
         mock.get(_GROUPS).respond(200, json={"items": [_group()]})
-        mock.get(_EXTENSIONS).respond(200, json={"items": extensions})
+        mock.get(_EXTENSIONS).respond(200, json={"items": _EXTENSION_ROWS})
         radius = _radius(await _preview(_DISSOLVE))
 
     assert radius["object"]["kind"] == "ha_group"
@@ -681,8 +757,193 @@ async def test_build_preview_has_no_blast_radius() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Status reads
+# The public path: preview_operation, call_operation and the approval request
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_target_row")
+async def test_preview_operation_shows_no_plan_and_contacts_no_manager() -> None:
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        vendor = mock.route().respond(200, json={"items": []})
+        preview = await preview_operation(_operator(), _args(_DISSOLVE))
+
+    assert preview["status"] == "ok", preview
+    assert vendor.call_count == 0
+    assert preview["plan_shown"] is False
+    assert preview["plan_note"] == PLAN_NOT_SHOWN_NOTE
+    assert "blast_radius" not in json.dumps(preview)
+    assert preview["preview_hash"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_target_row")
+async def test_dissolve_approval_request_lists_the_extensions_then_runs() -> None:
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        _mount_reads(mock, groups=[_group()])
+        mock.get(_EXTENSIONS).respond(200, json={"items": _EXTENSION_ROWS})
+        delete = mock.delete(f"{_GROUPS}/{_GROUP_ID}").respond(202, json=_accepted())
+
+        call = await call_operation(_operator(), _args(_DISSOLVE))
+        assert call["status"] == "awaiting_approval", call
+        assert delete.call_count == 0
+        request_id, effect = await _approval_effect(call)
+        resumed = await _approve_and_resume(request_id)
+
+    assert effect["preview_populated"] is True
+    radius = effect["blast_radius"]
+    assert radius["object"]["id"] == _GROUP_ID
+    assert [c["id"] for c in radius["children"]] == ["stretch-0001", "stretch-0002"]
+    assert resumed.status == "ok", resumed
+    assert resumed.result["status"] == "accepted"
+    assert resumed.result["interconnect_task_id"] == _TASK_ID
+    assert delete.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_target_row")
+async def test_dissolve_of_a_missing_group_waits_for_approval_then_says_not_found() -> None:
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        _mount_reads(mock, groups=[])
+        delete = mock.route(method="DELETE").respond(202, json=_accepted())
+
+        call = await call_operation(_operator(), _args(_DISSOLVE))
+        assert call["status"] == "awaiting_approval", call
+        request_id, effect = await _approval_effect(call)
+        resumed = await _approve_and_resume(request_id)
+
+    assert effect["preview_unavailable"] is True
+    assert "does not exist" in effect["preview_error"]
+    assert resumed.status == "ok", resumed
+    assert resumed.result["status"] == "not_found"
+    assert delete.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Status reads: hcx.task.get follows the started task
+# ---------------------------------------------------------------------------
+
+
+def _task(status: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "interconnectTaskId": _TASK_ID,
+        "type": "<task-type>",
+        "status": status,
+        "progress": 40,
+        "message": "<status-text>",
+        "entityDetails": {"id": _GROUP_ID, "type": "<entity-type>", "name": "<ha-group-name>"},
+        "steps": [{"title": "<step>", "status": status, "jobId": "job-0001"}],
+        **extra,
+    }
+
+
+async def _start_build(mock: respx.MockRouter) -> str:
+    """Start a build; returns the task id the answer names for ``hcx.task.get``."""
+    _mount_reads(mock)
+    mock.post(_GROUPS).respond(202, json=_accepted())
+    started = await _dispatch(_SET, _BUILD, approved=True)
+    assert started.status == "ok", started.error
+    assert started.result["status"] == "accepted"
+    assert started.result["status_read"] == "hcx.task.get"
+    return str(started.result["interconnect_task_id"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_registered")
+async def test_task_get_follows_the_started_task_to_its_end() -> None:
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        task_id = await _start_build(mock)
+        task = mock.get(_TASK_PATH)
+        task.side_effect = [
+            httpx.Response(200, json=_task("RUNNING")),
+            httpx.Response(200, json=_task("SUCCESS", progress=100)),
+        ]
+        running = await _dispatch("hcx.task.get", {"task_id": task_id})
+        done = await _dispatch("hcx.task.get", {"task_id": task_id})
+
+    assert running.status == "ok", running.error
+    assert (running.result["status"], running.result["done"]) == ("RUNNING", False)
+    assert running.result["progress"] == 40
+    assert running.result["entity_id"] == _GROUP_ID
+    assert done.status == "ok", done.error
+    assert (done.result["status"], done.result["done"]) == ("SUCCESS", True)
+    assert done.result["steps"][0]["job_id"] == "job-0001"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_registered")
+async def test_task_get_gives_the_vendor_error_of_a_failed_task() -> None:
+    failed = _task(
+        "FAILED",
+        message="HA group creation failed",
+        steps=[
+            {
+                "title": "<step>",
+                "status": "FAILED",
+                "jobId": "job-0001",
+                "errors": [{"message": "Standby appliance is down"}],
+            }
+        ],
+    )
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        task_id = await _start_build(mock)
+        mock.get(_TASK_PATH).respond(200, json=failed)
+        result = await _dispatch("hcx.task.get", {"task_id": task_id})
+
+    assert result.status == "ok", result.error
+    assert result.result["done"] is True
+    assert result.result["error"] == "HA group creation failed; Standby appliance is down"
+    assert result.result["steps"][0]["job_id"] == "job-0001"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_registered")
+async def test_task_get_after_the_start_logs_in_again_when_the_login_expired() -> None:
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        login = mock.post(_SESSIONS)
+        login.side_effect = [
+            httpx.Response(200, headers={"x-hm-authorization": "ha-hm-token-1"}),
+            httpx.Response(200, headers={"x-hm-authorization": "ha-hm-token-2"}),
+        ]
+        task_id = await _start_build(mock)
+        task = mock.get(_TASK_PATH)
+        task.side_effect = [httpx.Response(401), httpx.Response(200, json=_task("SUCCESS"))]
+        result = await _dispatch("hcx.task.get", {"task_id": task_id})
+
+    assert result.status == "ok", result.error
+    assert login.call_count == 2
+    assert task.calls[1].request.headers["x-hm-authorization"] == "ha-hm-token-2"
+    assert (result.result["status"], result.result["done"]) == ("SUCCESS", True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_registered")
+@pytest.mark.parametrize(
+    "transport_error",
+    [httpx.ConnectError("[Errno 111] Connection refused"), httpx.ReadTimeout("timed out")],
+    ids=["refused", "timeout"],
+)
+async def test_task_get_after_the_start_says_not_reachable_when_the_manager_does_not_answer(
+    transport_error: httpx.TransportError,
+) -> None:
+    hcx = get_or_create_connector_instance(HcxConnector)
+    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
+        _login(mock)
+        task_id = await _start_build(mock)
+        task = mock.get(_TASK_PATH).mock(side_effect=transport_error)
+        with patch.object(hcx._request_json.retry, "wait", wait_none()):  # type: ignore[attr-defined]
+            result = await _dispatch("hcx.task.get", {"task_id": task_id})
+
+    assert result.status == "ok", result.error
+    assert task.called
+    assert result.result["status"] == "not_reachable"
+    assert result.result["interconnect_task_id"] == task_id
+    assert result.result["done"] is False
+    assert result.result["checked_at"]
 
 
 @pytest.mark.asyncio
@@ -697,34 +958,6 @@ async def test_a_failed_job_shows_its_error_in_job_get() -> None:
     assert result.status == "ok", result.error
     assert result.result["didFail"] is True
     assert result.result["errorMessage"] == "Standby is down"
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("_registered")
-async def test_a_read_after_the_start_logs_in_again_when_the_login_expired() -> None:
-    async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:
-        login = mock.post(_SESSIONS)
-        login.side_effect = [
-            httpx.Response(200, headers={"x-hm-authorization": "ha-hm-token-1"}),
-            httpx.Response(200, headers={"x-hm-authorization": "ha-hm-token-2"}),
-        ]
-        mock.get(_APPLIANCES).respond(200, json={"items": [_appliance()]})
-        mock.post(_TASKS).respond(200, json={"items": []})
-        groups = mock.get(_GROUPS)
-        groups.side_effect = [
-            httpx.Response(200, json={"items": []}),
-            httpx.Response(401),
-            httpx.Response(200, json={"items": [_group()]}),
-        ]
-        mock.post(_GROUPS).respond(202, json=_accepted())
-        started = await _dispatch(_SET, _BUILD, approved=True)
-        result = await _dispatch(_LIST, {})
-
-    assert started.result["status"] == "accepted"
-    assert result.status == "ok", result.error
-    assert login.call_count == 2
-    assert groups.calls[2].request.headers["x-hm-authorization"] == "ha-hm-token-2"
-    assert result.result["items"][0]["group_id"] == _GROUP_ID
 
 
 @pytest.mark.asyncio

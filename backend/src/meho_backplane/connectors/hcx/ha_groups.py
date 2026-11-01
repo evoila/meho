@@ -32,9 +32,11 @@ Before a start the operation checks:
   the same appliance or group starts nothing (``already_running``). This
   check helps; it is not a lock.
 
-The preview of a dissolve lists the network extensions the group serves.
-They keep running on the appliance pair that was active; only the HA
-protection ends.
+The approval request of a dissolve lists the network extensions the
+group serves (the ``blast_radius`` block). They keep running on the
+appliance pair that was active; only the HA protection ends. The
+``preview_operation`` tool never contacts the HCX Manager, so it shows no
+plan for a dissolve; only the approval request does.
 
 The paths come from Broadcom's "HCX Workload Migration APIs" reference
 (Create, List and Delete HA Group) and the HCX user guide (activating,
@@ -345,9 +347,12 @@ def _extension_child(row: dict[str, Any]) -> dict[str, Any]:
 async def _ha_set_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """The ``blast_radius`` of a dissolve: the group and the network extensions it serves.
 
-    Read-only. Raises when the group does not exist, so the request is
-    refused before it waits for approval. Declines (``None``) for a build,
-    and without a live HCX connector or target.
+    Read-only. Raises when the group does not exist. The shared preview
+    code catches that: the request still waits for approval, the approval
+    request says the preview is unavailable and why, and after approval the
+    run answers ``not_found`` and sends no change. Declines (``None``) for a
+    build, and without a live HCX connector or target (the
+    ``preview_operation`` tool passes none).
     """
     from meho_backplane.connectors.hcx.connector import HcxConnector
 

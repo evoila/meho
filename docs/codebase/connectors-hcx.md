@@ -762,7 +762,9 @@ After a start:
 - Use MEHO's async mode (`async: true`,
   `docs/codebase/async-governed-dispatch.md`), so MEHO keeps the answer
   with the task id under a run handle even if the reply is lost.
-- Follow the task with `hcx.task.get` until it ends. A failed task step
+- Follow the task with `hcx.task.get` (pass `interconnect_task_id` as
+  `task_id`) until it ends. A Manager that does not answer gives
+  `not_reachable` with the task id; ask again later. A failed task step
   names a job id; `hcx.job.get` shows that job's error.
 - After a lost reply, do not start again blindly. Read
   `hcx.network_extension.ha.list` first: after a build, a group with the
@@ -772,14 +774,18 @@ After a start:
 - A status read logs in again when the login expired after the start: the
   dispatcher drops the token on `401` and runs the read once more.
 
-The preview of a dissolve (`preview_operation`, and the approval card)
-reads the group and `GET /hybridity/api/l2Extensions`, and fills the
-`blast_radius` block: the group with its members and state, and as
-`children` the network extensions whose source appliance is a member of
-the group. These networks keep running on the pair that was active; only
-the HA protection ends. The preview refuses a group that does not exist,
-so the request fails before it waits for approval. A build has no
-preview of its own (the approval card shows the inputs).
+The approval request of a dissolve reads the group and
+`GET /hybridity/api/l2Extensions`, and fills the `blast_radius` block:
+the group with its members and state, and as `children` the network
+extensions whose source appliance is a member of the group. These
+networks keep running on the pair that was active; only the HA protection
+ends. The `preview_operation` tool does not show this block: it never
+contacts the HCX Manager, so its answer says that the plan is shown on
+the approval request. When the group does not exist, the request still
+waits for approval; the approval request says the preview is unavailable
+and why, and after approval the run answers `not_found` and sends no
+change. A build has no preview of its own (the approval request shows
+the inputs).
 
 ### Shutdown
 
@@ -897,9 +903,9 @@ is sent.
   HA group of an extension is found by its source appliance, because the
   extension rows name no group. The live proof confirms all three.
 - The HA build and dissolve answer with an interconnect task id, not a
-  job id. The status read of an interconnect task is `hcx.task.get`, which
-  ships with the service mesh changes. Until it is merged, follow the work
-  with `hcx.network_extension.ha.list`.
+  job id. The status read of an interconnect task is `hcx.task.get` (pass
+  `interconnect_task_id` as `task_id`), the same read the service mesh
+  changes use.
 
 ## References
 

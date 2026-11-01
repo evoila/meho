@@ -205,11 +205,15 @@ _SET = HcxTypedOp(
             "action": {"type": "string", "description": "build or dissolve."},
             "group_id": string_schema("Id of the HA group, when known."),
             "interconnect_task_id": string_schema(
-                "Id of the vendor task to follow with hcx.task.get; null when nothing started."
+                "Id of the vendor task; pass it as task_id to hcx.task.get. Null when nothing "
+                "started."
             ),
             "status_read": {
                 "type": "string",
-                "description": "The read that follows the task: hcx.task.get with the task id.",
+                "description": (
+                    "The read that follows the task: hcx.task.get with interconnect_task_id "
+                    "as task_id."
+                ),
             },
             "group_state": string_schema("State of the group before the call, when known."),
             "warnings": {
@@ -240,8 +244,10 @@ _SET = HcxTypedOp(
             "and the HCX Enterprise licence; HCX refuses otherwise and the error is in the "
             "answer. Dissolve ends the HA protection of every network the group extends: "
             "they keep running on the active pair, but one more appliance failure takes "
-            "them down. Call preview_operation first to see those networks. A second "
-            "person must approve the call. " + _ASYNC_HINT
+            "them down. preview_operation does not list those networks: it never contacts "
+            "the HCX Manager. The approval request lists them, as the blast radius of the "
+            "dissolve, so the approver sees them. A second person must approve the call. "
+            + _ASYNC_HINT
         ),
         "output_shape": (
             "{status: accepted|already_grouped|already_running|not_found, action, group_id, "
@@ -249,7 +255,7 @@ _SET = HcxTypedOp(
             "errors}. accepted never means done."
         ),
         "next_step": (
-            "Call hcx.task.get with interconnect_task_id until done is true, then "
+            "Call hcx.task.get with interconnect_task_id as task_id until done is true, then "
             "hcx.network_extension.ha.list: after a build the group shows ACTIVE and "
             "STANDBY roles; after a dissolve the group is gone. A failed task step names a "
             "job_id; hcx.job.get shows its error. If the reply was lost, do not start "

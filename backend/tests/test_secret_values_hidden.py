@@ -5,8 +5,8 @@
 
 * ``vault.kv.read`` and ``vmware.composite.vm.guest.env.read`` return the
   names without the values by default, whatever the key names are.
-* ``reveal_secret: true`` returns the raw values to a person. An agent, or a
-  hosted agent run, is refused with an audit row.
+* ``reveal_secret: true`` returns the raw values to a person, a PEM private
+  key included. An agent, or a hosted agent run, is refused with an audit row.
 * ``audit_log.raw_payload`` stores a keyed fingerprint in place of every
   hidden value; the same value gives the same fingerprint in two rows.
 * The free-text rules catch ``DB_PASSWORD=...`` style text and PEM private
@@ -45,6 +45,7 @@ from meho_backplane.operations._secret_values import (
     fingerprint_hidden_values,
     fingerprinted_paths,
     hide_secret_values,
+    reveal_hidden_values,
 )
 from meho_backplane.redaction import redact
 from meho_backplane.redaction.resolver import get_default_policy
@@ -234,6 +235,36 @@ def test_guest_env_read_keeps_names_and_hides_values() -> None:
     }
 
 
+def test_guest_env_read_takes_the_names_from_the_raw_answer() -> None:
+    """A free-text rule took a whole ``NAME=value`` entry apart; the raw entry has the name."""
+    raw = {"vm": "vm-1", "variables": ["PATH=/usr/bin", f"DB_PASSWORD={_PASSWORD}"]}
+    redacted = {"vm": "vm-1", "variables": ["PATH=/usr/bin", "[REDACTED:api_key]"]}
+    shown = hide_secret_values("vmware.composite.vm.guest.env.read", redacted, raw=raw)
+    assert shown["variables"] == [f"PATH={_HIDDEN}", f"DB_PASSWORD={_HIDDEN}"]
+    # When the entries do not line up, the redacted entries are used.
+    short = {"vm": "vm-1", "variables": ["PATH=/usr/bin"]}
+    shown = hide_secret_values("vmware.composite.vm.guest.env.read", redacted, raw=short)
+    assert shown["variables"] == [f"PATH={_HIDDEN}", _HIDDEN]
+
+
+def test_reveal_puts_back_the_hidden_fields_and_keeps_the_other_redaction() -> None:
+    raw = {"data": {"private_key": _PRIVATE_KEY, "pin": _PIN}, "note": f"Bearer {_TOKEN}"}
+    redacted = {
+        "data": {"private_key": "[REDACTED:pem_private_key]\n", "pin": _PIN},
+        "note": "Bearer [REDACTED:bearer_token]",
+    }
+    shown = hide_secret_values("vault.kv.read", redacted, raw=raw)
+    revealed = reveal_hidden_values(raw, redacted, shown)
+    assert revealed == {
+        "data": {"private_key": _PRIVATE_KEY, "pin": _PIN},
+        "note": "Bearer [REDACTED:bearer_token]",
+    }
+    # A hidden subtree comes back whole; a key the raw answer lacks stays as redacted.
+    nested = {"a": {"k": _PASSWORD}}
+    assert reveal_hidden_values(nested, {"a": {"k": "[REDACTED:x]"}}, {"a": _HIDDEN}) == nested
+    assert reveal_hidden_values({}, {"a": "b"}, {"a": "x"}) == {"a": "b"}
+
+
 def test_name_scrub_hides_numbers_only_when_asked() -> None:
     answer = {"password": 12345678, "pin_set": True, "count": 3}
     unchanged, found = scrub_secret_named_values(answer)
@@ -345,14 +376,15 @@ async def test_reveal_by_a_person_returns_values_and_audit_stores_fingerprints(
     first = await _read(operator, reveal=True)
     second = await _read(operator, reveal=True)
 
-    # The caller gets the answer as the handler gave it, minus the free-text
-    # redaction of the PEM block.
+    # The caller gets the secret fields as the handler gave them, the PEM
+    # private key included.
     for result in (first, second):
         assert result.status == "ok", result.error
         assert result.result["data"]["password"] == _PASSWORD
         assert result.result["data"]["token"] == _TOKEN
         assert result.result["data"]["number"] == _PIN
-        assert result.result["data"]["private_key"] == "[REDACTED:pem_private_key]\n"
+        assert result.result["data"]["private_key"] == _PRIVATE_KEY
+        assert result.result["version"] == 7
 
     rows = await _audit_rows("vault.kv.read")
     assert len(rows) == 2
@@ -396,13 +428,21 @@ async def test_guest_env_read_hides_values_by_default(stub_embedding_service: As
     result = await _read(_operator(PrincipalKind.USER), reveal=False, op_id=op_id)
 
     assert result.status == "ok", result.error
-    # The free-text rule already took the second entry apart, so it is
-    # hidden whole.
-    assert result.result["variables"] == [f"PATH={_HIDDEN}", _HIDDEN, f"API_PAT={_HIDDEN}"]
+    # The free-text rule took the second entry apart; its name still shows.
+    assert result.result["variables"] == [
+        f"PATH={_HIDDEN}",
+        f"DB_PASSWORD={_HIDDEN}",
+        f"API_PAT={_HIDDEN}",
+    ]
     assert result.result["vm"] == "vm-1"
     (row,) = await _audit_rows(op_id)
     assert row.payload["reveal_secret"] is False
     assert [value for value in (_PASSWORD, _TOKEN) if value in json.dumps(row.raw_payload)] == []
+    assert set(fingerprinted_paths(row.raw_payload)) == {
+        "variables.0",
+        "variables.1",
+        "variables.2",
+    }
 
 
 # ---------------------------------------------------------------------------

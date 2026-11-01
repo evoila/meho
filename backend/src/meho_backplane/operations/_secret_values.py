@@ -12,6 +12,9 @@ redaction:
   other operation, values under secret-shaped key names are hidden, numbers
   included. The caller of a secret read gets this view unless a person
   passes ``reveal_secret: true``.
+* :func:`reveal_hidden_values` builds the answer of a person's reveal: the
+  redacted answer, with every value the default view hides put back as the
+  connector returned it. The redaction of the other fields stays.
 * :func:`fingerprint_hidden_values` builds the copy of the raw answer that
   goes to ``audit_log.raw_payload``. Every value that differs between the
   raw answer and the default view is replaced by a keyed fingerprint
@@ -33,9 +36,11 @@ __all__ = [
     "FINGERPRINT_PREFIX",
     "SECRET_VALUE_PLACEHOLDER",
     "fingerprint_hidden_values",
+    "fingerprint_value",
     "fingerprinted_paths",
     "hide_secret_values",
     "hides_secret_values",
+    "reveal_hidden_values",
 ]
 
 #: What a hidden value of a secret read is replaced with.
@@ -56,12 +61,13 @@ def _hide_all(node: Any) -> Any:
     return SECRET_VALUE_PLACEHOLDER
 
 
-def _hide_kv_data(answer: Any) -> Any:
+def _hide_kv_data(answer: Any, raw: Any) -> Any:
     """``vault.kv.read``: keep the key names under ``data``, hide every value.
 
     The other fields (``version``) carry no secret and stay. An answer of
     another shape is hidden whole.
     """
+    del raw
     if not isinstance(answer, Mapping) or not isinstance(answer.get("data"), Mapping):
         return _hide_all(answer)
     shown, _ = scrub_secret_named_values(
@@ -79,20 +85,34 @@ def _hide_env_value(entry: Any) -> Any:
     return SECRET_VALUE_PLACEHOLDER
 
 
-def _hide_env_values(answer: Any) -> Any:
+def _env_entries(answer: Mapping[str, Any], raw: Any) -> list[Any]:
+    """The ``variables`` entries whose names are kept: the raw ones when they line up.
+
+    A free-text rule may have replaced a whole ``DB_PASSWORD=...`` entry in
+    the redacted answer, name included. The raw answer still has the name.
+    """
+    redacted_entries: list[Any] = answer["variables"]
+    if isinstance(raw, Mapping) and isinstance(raw.get("variables"), list):
+        raw_entries: list[Any] = raw["variables"]
+        if len(raw_entries) == len(redacted_entries):
+            return raw_entries
+    return redacted_entries
+
+
+def _hide_env_values(answer: Any, raw: Any) -> Any:
     """``vmware.composite.vm.guest.env.read``: keep the variable names, hide the values."""
     if not isinstance(answer, Mapping) or not isinstance(answer.get("variables"), list):
         return _hide_all(answer)
     shown, _ = scrub_secret_named_values(
         {key: value for key, value in answer.items() if key != "variables"}, hide_numbers=True
     )
-    shown["variables"] = [_hide_env_value(entry) for entry in answer["variables"]]
+    shown["variables"] = [_hide_env_value(entry) for entry in _env_entries(answer, raw)]
     return shown
 
 
 #: Operations whose answer is made of secret values. By default the caller
 #: gets the names only.
-_VALUE_HIDING_OPS: Final[dict[str, Callable[[Any], Any]]] = {
+_VALUE_HIDING_OPS: Final[dict[str, Callable[[Any, Any], Any]]] = {
     "vault.kv.read": _hide_kv_data,
     "vmware.composite.vm.guest.env.read": _hide_env_values,
 }
@@ -103,16 +123,53 @@ def hides_secret_values(op_id: str) -> bool:
     return op_id in _VALUE_HIDING_OPS
 
 
-def hide_secret_values(op_id: str, answer: Any) -> Any:
-    """Return the default view of *answer* (see the module docstring)."""
+def hide_secret_values(op_id: str, answer: Any, *, raw: Any = None) -> Any:
+    """Return the default view of *answer* (see the module docstring).
+
+    *answer* is the redacted answer. *raw* is the answer as the connector
+    returned it; the guest environment read takes the variable names from
+    it, because a free-text rule may have replaced a whole ``NAME=value``
+    entry in *answer*.
+    """
     hide = _VALUE_HIDING_OPS.get(op_id)
     if hide is not None:
-        return hide(answer)
+        return hide(answer, raw)
     shown, _ = scrub_secret_named_values(answer, hide_numbers=True)
     return shown
 
 
-def _fingerprint(value: Any) -> str:
+def reveal_hidden_values(raw: Any, redacted: Any, shown: Any) -> Any:
+    """Return *redacted* with every value that *shown* hides put back from *raw*.
+
+    The answer of a person's ``reveal_secret: true``. *shown* is *redacted*
+    after :func:`hide_secret_values`. Where the two differ, the default view
+    hid a secret field, and the person gets the raw value of that field: a
+    free-text rule in the redaction (a PEM block, a token) does not replace
+    the value of a field the person asked to see. Where the two are equal,
+    the redacted value stays, so the redaction of the other fields holds.
+    """
+    if isinstance(raw, Mapping) and isinstance(redacted, Mapping) and isinstance(shown, Mapping):
+        return {
+            key: reveal_hidden_values(raw.get(key, _MISSING), value, shown.get(key, _MISSING))
+            for key, value in redacted.items()
+        }
+    if (
+        isinstance(raw, list)
+        and isinstance(redacted, list)
+        and isinstance(shown, list)
+        and len(raw) == len(redacted) == len(shown)
+    ):
+        return [
+            reveal_hidden_values(raw_item, item, shown_item)
+            for raw_item, item, shown_item in zip(raw, redacted, shown, strict=True)
+        ]
+    if raw is _MISSING or (type(redacted) is type(shown) and redacted == shown):
+        return redacted
+    return raw
+
+
+def fingerprint_value(value: Any) -> str:
+    """One keyed fingerprint of *value* (its canonical JSON)."""
     canonical = json.dumps(value, sort_keys=True, default=str, separators=(",", ":"))
     return f"{FINGERPRINT_PREFIX}{compute_audit_digest_hash(canonical)}]"
 
@@ -136,7 +193,7 @@ def fingerprint_hidden_values(raw: Any, shown: Any) -> Any:
         ]
     if shown is not _MISSING and type(raw) is type(shown) and raw == shown:
         return raw
-    return _fingerprint(raw)
+    return fingerprint_value(raw)
 
 
 def fingerprinted_paths(node: Any, path: str = "") -> frozenset[str]:

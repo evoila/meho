@@ -17,7 +17,7 @@ recorded-fixture E2E.
 
 Source: `backend/src/meho_backplane/connectors/vcf_fleet/`.
 
-The connector ships three typed reads. **Versions** says where the call
+The connector ships fifteen typed operations: ten reads and five changes. **Versions** says where the call
 exists: the product versions of the connector implementation that
 registers it (`fleet-rest`, `>=8.0,<9.1`). An 8.x or 9.0 target resolves
 here; a 9.1 or newer target resolves to `fleet-lcm` (see "Dual
@@ -28,6 +28,18 @@ implementation").
 | `fleet.about` | Read the appliance's API version, product version and build. | `GET /lcm/lcops/api/v2/about` | read (`safe`, no approval) | 8.x, 9.0 |
 | `fleet.environment.list` | List the Fleet environments with the products deployed in each. | `GET /lcm/lcops/api/v2/environments` | read (`safe`, no approval) | 8.x, 9.0 |
 | `fleet.api_file.get` | Read one documentation page or API description file the appliance serves (the Lifecycle APIs or the Content Management APIs). Returns path, HTTP status, content type, size, SHA-256 and the version and build; the text is in parts behind a result handle. | `GET {path}`; version and build from `GET /lcm/lcops/api/v2/about` | read (`safe`, no approval) | 8.x, 9.0 |
+| `fleet.health` | Read the appliance health: name, version, build, disk use, and the state of each service (`all_up` plus one row per service). A part that fails is named in its error field. | `GET /lcm/lcops/api/v2/settings/system-details`, `GET /lcm/health/api/v2/status` | read (`safe`, no approval) | 8.18, 9.0 |
+| `fleet.environment.get` | Read one environment with its products, versions and nodes. Secret values are replaced. | `GET /lcm/lcops/api/v2/environments/{environmentId}` | read (`safe`, no approval) | 8.18, 9.0 |
+| `fleet.datacenter.list` | List the datacenters and their vCenters, one row per vCenter. No password is returned. | `GET /lcm/lcops/api/v2/datacenters`, `GET /lcm/lcops/api/v2/datacenters/{dataCenterVmid}/vcenters` | read (`safe`, no approval) | 8.18, 9.0 |
+| `fleet.product.inventory_sync` | Start an inventory sync of one product in an environment, unless one already runs. Returns `accepted` (or `already_running`) with the request id. | `GET /lcm/request/api/v2/requests`, then `POST /lcm/lcops/api/v2/environments/{environmentId}/products/{productId}/inventory-sync` | change (`caution`, waits for approval) | 8.18, 9.0 |
+| `fleet.request.list` | List lifecycle requests with state, plain outcome and error text, newest first; filter by state or outcome. Each row names the environment and product of the request, from its inputs. | `GET /lcm/request/api/v2/requests` | read (`safe`, no approval) | 8.18, 9.0 |
+| `fleet.request.get` | Read one request: state, outcome, the environment and product of the request, and, when it failed, its error causes (the first is the failed step). Says `not_reachable` when the appliance does not answer. | `GET /lcm/request/api/v2/requests/{requestId}`, `GET /lcm/request/api/v2/requests/{requestId}/error-causes` | read (`safe`, no approval) | 8.18, 9.0 |
+| `fleet.request.retry` | Retry a failed request, optionally with corrected inputs. Returns `accepted`, `not_started` or `failed`, with the steps. | `GET /lcm/request/api/v2/requests/{requestId}`, `GET .../error-causes`, then `PATCH /lcm/request/api/v2/requests/{requestId}/retry` | change (`dangerous`, waits for approval) | 8.18, 9.0 |
+| `fleet.locker.password.list` | List the locker passwords: alias, user name, description and whether a product uses it (`referenced`). Never the password. | `GET /lcm/locker/api/v2/passwords` | read (`safe`, no approval) | 8.18, 9.0 |
+| `fleet.locker.password.add` | Add a locker password. The password comes from Vault (`password_ref`). Returns the new entry, never the password. | `POST /lcm/locker/api/v2/passwords` | change (`caution`, waits for approval) | 8.18, 9.0 |
+| `fleet.locker.certificate.list` | List the locker certificates: alias, subject, issuer, SHA-1, health, whether a product uses it, and the end date when the appliance lists it. | `GET /lcm/locker/api/v2/certificates` | read (`safe`, no approval) | 8.18, 9.0 |
+| `fleet.locker.certificate.import` | Import a PEM chain (its private key from Vault), or let the appliance generate a certificate. Returns id, subject and dates, never a key. | `POST /lcm/locker/api/v2/certificates/import`, `POST /lcm/locker/api/v2/certificates` | change (`caution`, waits for approval) | 8.18, 9.0 |
+| `fleet.product.certificate.replace` | Replace the certificate of a product in an environment, after a pre-validation. Returns `accepted` with the request id; `fleet.request.get` reads it. | `POST /lcm/lcops/api/v2/environments/{environmentId}/products/{productId}/certificates/{certificateId}/pre-validate` then `PUT /lcm/lcops/api/v2/environments/{environmentId}/products/{productId}/certificates/{certificateId}` | change (`dangerous`, waits for approval) | 8.18, 9.0 |
 
 VCF Fleet is the rebrand of vRealize Suite Lifecycle Manager (vRSLCM) under
 the VCF 9 umbrella; the appliance still identifies as vRSLCM in its internal
@@ -382,10 +394,274 @@ the record's size. The read never returns a cut file.
 
 Tests: `backend/tests/test_connectors_vcf_fleet_api_file.py`.
 
+### Requests, environments, inventory sync, health and datacenters
+
+Seven typed operations in `lifecycle.py` (handlers, on the
+`FleetLifecycleOps` base class of `VcfFleetConnector`) and
+`lifecycle_ops.py` (metadata). `typed_ops.py` adds them to
+`FLEET_TYPED_OPS` and holds the group texts. Groups: `fleet-about`
+(`fleet.about`, `fleet.health`), `fleet-inventory` (the environment reads,
+`fleet.datacenter.list` and the inventory sync) and `fleet-requests` (the
+three request operations). The paths come from the vendor's API reference
+for vRealize Suite Lifecycle Manager and the Aria Suite Lifecycle 8.18
+programming guide ("Retry an install or import request").
+
+- **Request state.** `state` is the vendor's state; `outcome` puts it in
+  plain words: `queued`, `running`, `succeeded`, `failed`, `cancelled`,
+  or `unknown` for a state not in `OUTCOME_BY_STATE`. The vendor gives no
+  progress number and no list of steps, so `fleet.request.get` returns the
+  error causes of a failed request; the first one is the failed step.
+- **Request inputs.** Of the vendor's request inputs (`inputMap`) only
+  the environment id and the product id are returned, as `environment_id`
+  and `product_id` (`null` when the request has none). After a lost reply
+  to a start, they tell which request is yours when several of the same
+  type run. The other inputs are not returned: they can hold passwords.
+- **Status read.** `fleet.request.get` follows every start of this
+  connector. When the appliance does not answer (a connection or time-out
+  error, or a 502, 503 or 504, for example during its own upgrade), it
+  returns `outcome: not_reachable` with the request id and `checked_at`.
+  It never says `failed` then. Both of its reads are covered: when the
+  request read worked and the error-causes read did not, `state` keeps
+  what the request read said and `outcome` is still `not_reachable`. MEHO
+  keeps no job state between calls; the caller keeps the request id (or
+  the async run handle of the start).
+- **Login again.** Fleet sends the stored user and password with every
+  call. On a `401` the request read and the two changes drop the cached
+  login, read it again from Vault and repeat the call once. A `401` means
+  the appliance refused the call before it ran.
+- **Inventory sync (`fleet.product.inventory_sync`).** Before the start it
+  lists the requests and looks for a queued or running request whose type
+  or name says inventory sync and whose `environmentId` and `productId`
+  inputs equal the given ids, each as a whole value. Other input text does
+  not count, so a sync of another product that only mentions these ids is
+  not a match. If one runs, it returns `already_running` with that request id
+  and starts nothing. This check is a help, not a lock: two callers can
+  both check before either starts. Otherwise it sends the start and returns
+  `accepted` with the request id the appliance gives. It never says the
+  sync is done. Use MEHO's async mode (`async: true`, see
+  [`async-governed-dispatch.md`](async-governed-dispatch.md)) for the
+  start, so a lost reply keeps the request id under a run handle. After a
+  lost reply, read `fleet.request.list` (outcome `running`) before you
+  start again.
+- **Retry (`fleet.request.retry`).** Three steps: read the request, read
+  its error causes, then send the causes back with `retry: true`
+  (`PATCH .../retry`). Corrected inputs go in `properties`, by the names in
+  the error causes; an unknown name is refused before the change. A secret
+  input is a locker reference (`locker:password:<id>:<alias>`), never the
+  value. A request that did not fail, or has no error causes, gives
+  `not_started` and nothing is sent. When any step fails with a vendor or
+  transport error, the answer is `status: failed` with the vendor's error
+  and `steps` lists what ran, what failed and what did not run; nothing is
+  undone. After a lost reply,
+  read the request first: if it is running again, the retry went through.
+- **Health (`fleet.health`).** Two reads: the system details (version,
+  build, disk use) and the service state (`/lcm/health/api/v2/status`:
+  `vrlcm-server`, `postgres`, `blackstone`, `bootstrap`). A part that fails
+  with a vendor error other than `401` is named in `system_details_error`
+  or `health_error`, and the other part still answers. The Task named
+  `/lcm/bootstrap/api/status` for the service state; the vendor API
+  reference documents `/lcm/health/api/v2/status` instead, and its answer
+  carries the bootstrap state, so the operation reads that.
+- **Secrets.** MEHO's shared secret-field scrub (`scrub_secret_fields` in
+  `redaction/secret_fields.py`, see [`redaction.md`](redaction.md)) runs on
+  every vendor object and every vendor text an answer carries. A field with
+  a secret name (`is_secret_param_name`) is replaced by
+  `[REDACTED:param_name]`, at any depth: environment product and node
+  properties, error-cause inputs, and a quoted pair such as
+  `"adminPassword": "..."` inside an error text, a request reason or a
+  vendor error body. The datacenter list builds its rows from named fields
+  only, so the vCenter password the vendor sends (`vcPassword`) never
+  reaches the answer.
+- **Versions.** The calls exist on every version this connector serves
+  (Aria Suite Lifecycle 8.x and VCF 9.0 fleet management), so no operation
+  stops early with a version message. A live proof on 8.18 and 9.0 is a
+  separate lab test.
+
+Tests: `backend/tests/test_connectors_vcf_fleet_lifecycle.py`.
+
+### Upgrades, binaries and new environments
+
+Seven typed ops in `changes_ops.py`. Their handlers are on the
+`FleetChangeHandlers` mixin in `changes.py`; `VcfFleetConnector`
+inherits it. They exist on Aria Suite Lifecycle 8.18 and VCF 9.0 fleet
+management (the whole `fleet-rest-9.0` range, `>=8.0,<9.1`), so no op has
+its own version check.
+
+| Operation | What it does | Vendor call | Risk | Returns | Versions |
+|---|---|---|---|---|---|
+| `fleet.binary.list` | Lists the install and upgrade files the appliance has. | `GET /lcm/lcops/api/v2/settings/product-binaries` | safe (read) | `{binaries: [{filePath, name, type}]}` | 8.18, 9.0 |
+| `fleet.binary.map` | Finds the files at a local or NFS path, then maps them. | `POST .../settings/product-binaries`, then `POST .../settings/product-binaries/download` | caution | `{status, request_id, status_read, binaries, steps}` | 8.18, 9.0 |
+| `fleet.product.upgrade.precheck` | Starts the pre-check of a product upgrade. | `POST .../environments/{environmentId}/products/{productId}/upgrade/pre-validate` | caution | `{status, request_id, status_read, environment_id, product_id}` | 8.18, 9.0 |
+| `fleet.product.upgrade` | Starts the upgrade of a product. Sends `preValidate: true` unless `skip_precheck` is set. | `POST .../environments/{environmentId}/products/{productId}/upgrade` | dangerous | same as the pre-check | 8.18, 9.0 |
+| `fleet.environment.precheck` | Starts the check of a new environment spec. | `POST /lcm/lcops/api/v2/environments/pre-validate` | caution | `{status, request_id, status_read, environment_name}` | 8.18, 9.0 |
+| `fleet.environment.create` | Starts creating an environment: deploys or imports its products. | `POST /lcm/lcops/api/v2/environments` | dangerous | same as the pre-check | 8.18, 9.0 |
+| `fleet.environment.delete` | Starts deleting an environment; with `delete_vms` also its VMs in vCenter. | `DELETE /lcm/lcops/api/v2/environments/{environmentId}` with a `DeleteEnvironmentRequestDTO` body | destructive | `{status, request_id, status_read, environment_id, delete_vms}` | 8.18, 9.0 |
+
+Every change has `requires_approval: true`. A person's call waits until a
+second person approves it. An agent needs a grant for a `dangerous` change
+and is always refused for the delete.
+
+**Vendor jobs.** Each change answers with the vendor's `requestId` at once.
+The op returns `status: "accepted"`, the `request_id`, and `status_read`
+(`fleet.request.get` with that id). `accepted` means started, not done.
+The caller reads `fleet.request.get` until the request ends. MEHO keeps no
+job state between calls. Use MEHO's async mode (`async: true`, see
+[`async-governed-dispatch.md`](async-governed-dispatch.md)) for a start, so
+the request id is kept under a run handle even when the reply is lost.
+
+**A running request stops a second start.** Before an upgrade, an upgrade
+pre-check or an environment create, the op reads
+`GET /lcm/request/api/v2/requests`. When a request that has not ended
+(`CREATED`, `SUBMITTED`, `INPROGRESS`) names the same object, the op starts
+nothing and returns that request's id and state:
+
+- `status: "already_running"` when it is of the same kind.
+- `status: "blocked"` (with a `reason`) when an upgrade pre-check runs and an
+  upgrade is asked, or the other way round. A pre-check does not stand in
+  for the upgrade, so the upgrade is never reported as running when only its
+  pre-check runs.
+
+The kind comes from the request type, name or reason: `upgrade` together
+with a check word (`validat`, `precheck`, `pre-check`) is an upgrade
+pre-check, `upgrade` alone is an upgrade, `create environment` is a create.
+"Same object" means the environment and product ids (or the environment
+name) are whole values in the request's `inputMap`. Part of a value does
+not count: a running create of `Production-DR` does not stop a create of
+`Production`. An empty name never matches. This is a help, not a lock: two
+callers can both check before either starts, and the check sees only
+requests that still run. When the request list cannot be read, the start
+does not run.
+
+**After a lost reply.** Do not start again blindly. With the request id,
+read `fleet.request.get`. Without one, read the saved async result (run the
+start with `async: true`, so the request id is kept under a run handle), or
+`fleet.request.list`: a request of this kind on this object, running or
+ended, is yours. For a create or delete, read `fleet.environment.list` too;
+for a binary map, `fleet.binary.list`. Start again only when none of them
+shows the request or its result. A second call of the start finds a running
+request, but not one that ended: it would start the job again.
+
+**Two steps in `fleet.binary.map`.** The `find` step answers at once with
+the files it found; the `map` step is a vendor job. When a step fails with a
+vendor error, the answer has `status: "failed"` and `steps`: the steps that
+ran, the step that failed with the vendor's error text, and the steps that
+did not run. A transport error (a time-out, a lost connection) keeps the
+same report. In the `find` step it is a failure like any other: nothing was
+started. In the `map` step the answer has `status: "unknown"`: the step is
+reported as `unknown` with the error, `binaries` lists what was sent, and
+`reason` says to read `fleet.request.list` and `fleet.binary.list` before a
+new call, because the appliance may be mapping the files. Nothing is undone.
+
+**No secret in clear text.** An environment spec must name every password,
+certificate and licence by its locker reference (`locker:password:...`,
+`locker:license:...`): the appliance resolves it from its own secret store.
+A field named like a password or secret, or a licence field, with any other
+value is refused, whatever its type (a text, a number, a list or an object),
+and so is a private key anywhere in the spec. The check
+(`spec_secret_problem`) is registered as the params check of both
+environment ops (`register_params_check` in `operations/_validate.py`), so
+the dispatcher and `preview_operation` refuse the spec as `invalid_params`
+right after the schema check, before the policy gate. A clear secret
+therefore never waits in the approval queue, and the refusal names the
+field, never the value. The handlers check the spec again before the vendor
+call. The upgrade `license_ref` must be a locker reference too (its schema
+says so). Store a password in the locker first, from a Vault reference. The
+environment ops carry the tag `credential`, so the flight recorder keeps no
+request or answer body.
+
+**The delete preview.** `environment_delete_preview` reads
+`GET /lcm/lcops/api/v2/environments/{environmentId}` and fills the
+`blast_radius` block: the environment (`object`), its products with version
+and node count (`children`), and what cannot be undone (`irreversibility`;
+with `delete_vms` the VMs are gone for good). A missing environment (HTTP
+400 or 404, or an empty answer) makes the builder raise, so the delete is
+refused before it waits for approval.
+
+Tests: `backend/tests/test_connectors_vcf_fleet_changes.py`.
+
+### Locker and product certificates
+
+Five typed ops, in two groups: `fleet-locker` (the two locker reads and
+the two locker changes) and `fleet-product-certificates` (the replace).
+Metadata: `typed_ops_locker.py`. Bodies: `locker.py` and
+`product_certificate.py`. Each handler is a short bound method on
+`VcfFleetConnector`.
+
+**Lists.** `fleet.locker.password.list` and `fleet.locker.certificate.list`
+read every page (`from` and `size`, 100 rows per page, at most 50 pages).
+They stop when a page brings no new row. The answer is a flat list under
+`passwords` or `certificates`, with `count` and the vendor's `total`. A long
+list goes behind a result handle. Each row keeps only named fields: a
+password row never has the `password` field, and a certificate row never has
+a key. The vendor's "used by" is the `referenced` flag.
+
+**Secrets.** A secret input is a Vault reference, `'<vault-path>#<field>'`:
+`password_ref`, `private_key_ref` and `passphrase_ref`. MEHO reads the value
+when the approved call runs, under the caller's identity. A bad reference or
+an empty field stops the op before any vendor call. The answer of
+`fleet.locker.certificate.import` keeps the id, alias, `certInfo`,
+`validity` and `validations`; it drops `key`, `certChain` and `leafCert`
+(the generate answer holds the new private key).
+
+The two ops that send a secret (`fleet.locker.password.add` and
+`fleet.locker.certificate.import`) are pinned as credential writes in
+`broadcast/events.py`. So the broadcast shows no params, the flight
+recorder keeps no body, and the dispatcher withholds the vendor's error
+text. To still say why the appliance refused, these ops raise
+`FleetLockerVendorError`: its `remediation` holds the vendor's
+`errorCode`, `message` and `recommendations` (cut to 2000 characters),
+unless the vendor's full answer holds the secret or a long line of it. The
+check (`connectors/_shared/secret_echo.py`) runs on the whole answer before
+the cut and looks for the value as is, JSON-escaped, URL-encoded and
+HTML-escaped. When it finds one, the text says so instead. Each of the two has an
+approval preview (in `locker.py`) that shows the alias, the user or the
+certificate fields and the Vault references, never a value.
+
+**The replace (a vendor job).** `fleet.product.certificate.replace` runs
+four steps and returns as soon as the appliance accepts the replace:
+
+1. `check_running_requests` reads `GET /lcm/request/api/v2/requests`. A
+   certificate request (type, name or reason says "certificate") for the
+   same environment and product that has not ended (`CREATED`,
+   `SUBMITTED`, `QUEUED`, `INPROGRESS`) wins: the op returns
+   `already_running` with its id and starts nothing. This is a help, not a
+   lock: two callers can both check before either starts.
+2. `pre_validate` posts the pre-validation. It is a lifecycle request of
+   its own.
+3. `wait_for_pre_validation` reads
+   `GET /lcm/request/api/v2/requests/{requestId}/pre-validation-report`
+   every 5 seconds, for at most 180 seconds. A 404 means "not ready yet".
+   The replace goes on only when the report says `COMPLETED` and
+   `overallStatus: true`. Otherwise the answer lists the failing checks.
+4. `replace` sends the `PUT`. The answer is `accepted`, with the
+   vendor's `request_id` and `status_read: fleet.request.get`.
+
+Each answer lists every step as `done`, `failed`, `unknown` or `not_run`.
+A failed step stops the op; nothing is undone. A step that gets no answer
+says `not reachable at <time>`. If the reply to the `PUT` is lost, the
+answer is `unknown`. Then do not call again blindly. First list the
+running requests (`fleet.request.list` with outcome `running`). Your
+request is the certificate request whose `environment_id` and `product_id`
+equal the ids you gave; the type alone is not enough when another product
+gets a certificate at the same time. Read it with `fleet.request.get`,
+which returns the two ids too. Call the replace with
+MEHO's async mode (`async: true`, see `async-governed-dispatch.md`), so the
+answer with the request id is stored under a run handle.
+
+The connector sends HTTP Basic on every request. So no login can expire
+between the start and a status read. The status read itself,
+`fleet.request.get`, is a separate op of this connector.
+
+Not checked live yet: the vendor's paging (`from` as an offset), the
+request type name of a certificate replace, and the report states. The
+live proof runs after the merge.
+
+Tests: `backend/tests/test_connectors_vcf_fleet_locker.py`.
+
 ### Remaining ingested breadth (enabled generically)
 
-The reads outside the audited typed set — datacenters, vcenters, the
-`fleet.environment.get` detail read, products, and LCM requests — stay as
+The reads that have no typed operation (for example the product list and
+the vCenter detail) stay as
 ordinary `source_kind="ingested"` `endpoint_descriptor` rows that land via
 G0.7 spec ingestion and stay browsable as profiled-dispatch breadth. They are
 enabled through the **generic review flow** —
@@ -429,10 +705,18 @@ The runbook for end-to-end ingest + enable + verify is
   must inject a custom `credentials_loader` on construction.
 - **The `/lcm` API files are not pinned yet.** The reconcile lane
   (`tests/test_connectors_vcf_fleet_spec_reconcile.py`) skips its served
-  check until the shelf holds `vcf-fleet-9.0/`. The manifest-pin test runs
-  always; it lists the documentation pages and folders of
+  check until the shelf holds `vcf-fleet-9.0/`. It then also checks the
+  locker and product-certificate calls with their real method (the
+  `VENDOR_CALLS` of `locker.py` and `product_certificate.py`). The
+  manifest-pin test runs always; it lists the documentation pages and folders of
   `fleet.api_file.get` as `GET`, marked "documentation path, not in the API
   file", and keeps them out of the served check.
+- **The upgrade pre-check path is not in the published API reference.**
+  `POST .../products/{productId}/upgrade/pre-validate` follows the vendor's
+  pattern for the other pre-checks (patches, certificates, scale-up), but the
+  published reference (up to 8.16) does not list it. The live test on 8.18
+  and 9.0 decides it. The upgrade itself is safe either way: it sends
+  `preValidate: true`, so the appliance checks before it changes anything.
 - **The documentation paths come from the vendor's guides.** Their first
   live use is the pinning of the Aria Suite Lifecycle 8.18 files. If a page
   loads its file from a path the rule refuses, file a bug for this read

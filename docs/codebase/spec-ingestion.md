@@ -629,8 +629,18 @@ the answer with `[REDACTED:param_name]`. That list stays the only list of
 secret reads. The SDDC Manager row `sddc` / `9.0` carries the first set:
 the `/v1/credentials` reads, the depot, backup and proxy settings, host
 prechecks, VASA providers, the management-component task spec, users and
-identity providers. Stored rows change at the next ingest (see "Applying
-corrected floors to existing rows" below).
+identity providers. The vCenter rows `vmware` / `9.0` and `vmware` / `8.0`
+share one set (a YAML anchor): proxy settings, content libraries, report
+download tokens, deployment and migration specs, guest customization specs,
+identity providers and broker clients, Supervisor image registries, and the
+older-API host config and precheck remediation result. Each REST path is on
+both guards twice: as the vendor file writes it and under the `/api` base,
+because the parser folds a relative `servers.url` into every path
+(`_server_base_path` in `ingest/openapi.py`). The list also holds the VCF
+Installer bring-up spec read `GET:/v1/sddcs/{id}/spec`; it has no catalog
+row, so a manual ingest of it gets the redaction guard only. Stored rows
+change at the next ingest (see "Applying corrected floors to existing
+rows" below).
 
 #### Applying corrected floors to existing rows
 
@@ -2089,7 +2099,10 @@ consume so the wire contract is defined once:
   land. `ConnectorListItem.state` (G0.9.1-T1 / #773) is `"ingested"`
   for DB-backed rows the dispatcher can resolve and `"registered"`
   for class-side-only rows the dispatcher cannot resolve yet — see
-  the listing-integrity contract section above.
+  the listing-integrity contract section above. A third value,
+  `"package_not_installed"` (#5560), marks a connector whose rows all
+  come from a connector package that is not installed; see
+  `connector-packages.md`, "When a package is removed".
   `ConnectorListItem.next_step` (G0.13-T3 / #1133) is the workflow-
   completion hint: a `NextStep` object (verb + rationale) on
   `state="registered"` rows, `null` on `state="ingested"` rows — see

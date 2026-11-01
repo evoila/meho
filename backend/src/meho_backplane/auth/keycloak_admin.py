@@ -259,7 +259,7 @@ class KeycloakAdminClient:
                 tenant_id=str(tenant_id),
                 owner_sub=operator.sub,
                 audience=settings.keycloak_audience,
-                tenant_role="tenant_admin",
+                tenant_role="operator",
             )
     """
 

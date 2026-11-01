@@ -41,6 +41,7 @@ from meho_backplane.connectors._shared.vault_creds import (
     strip_credential_value,
 )
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
+from meho_backplane.operations import register_plain_fields
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:
@@ -286,3 +287,7 @@ async def password_set_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 
 
 register_preview_builder(PASSWORD_SET_OP_ID, password_set_preview)
+
+
+# The date the new password expires, never the password.
+register_plain_fields(PASSWORD_SET_OP_ID, ("password_expires_at",))

@@ -19,6 +19,8 @@ from urllib.parse import quote
 
 import httpx
 
+__all__ = ["mentions_secret", "response_text"]
+
 
 def response_text(response: httpx.Response) -> str:
     """The body of *response* as text, or ``""`` when it cannot be read."""

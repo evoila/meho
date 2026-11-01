@@ -643,12 +643,13 @@ def _assert_fetchable_remote_url(url: str) -> None:
 
     2. **Destination guard** — the hostname is resolved via
        ``socket.getaddrinfo`` and every returned address is checked
-       with :mod:`ipaddress`. Any candidate that is private,
-       loopback, link-local, ULA, unspecified, multicast, or
-       otherwise reserved triggers immediate rejection. This covers
-       at minimum ``127.0.0.0/8``, ``10.0.0.0/8``,
-       ``172.16.0.0/12``, ``192.168.0.0/16``, ``169.254.0.0/16``
-       (cloud metadata), ``::1``, ``fc00::/7``, ``fe80::/10``.
+       with :mod:`ipaddress`. Any candidate that is not globally
+       routable (``not is_global``), private, loopback, link-local,
+       ULA, unspecified, multicast, or otherwise reserved triggers
+       immediate rejection. This covers at minimum ``127.0.0.0/8``,
+       ``10.0.0.0/8``, ``172.16.0.0/12``, ``192.168.0.0/16``,
+       ``169.254.0.0/16`` (cloud metadata), ``100.64.0.0/10``
+       (carrier-grade NAT), ``::1``, ``fc00::/7``, ``fe80::/10``.
 
     The same check is called for every redirect hop in
     :func:`_load_spec_bytes` so a benign-looking initial host cannot
@@ -694,10 +695,13 @@ def _screen_fetch_host(hostname: str) -> list[str]:
     Fails **closed**, unlike the target guard: an unresolvable name is
     rejected here (the ingest path has no split-horizon fail-open case),
     and there is no allowlist — the fetch path is public-https-only. Every
-    resolved address must be public; any private / loopback / link-local /
-    ULA / unspecified / multicast / reserved candidate rejects the whole
-    fetch. The message stays path-free (no resolved IP echoed) so the
-    response is not a network-topology oracle.
+    resolved address must be public; any candidate that is not globally
+    routable (``not is_global``, which also covers carrier-grade NAT
+    ``100.64.0.0/10``) or is private / loopback / link-local / ULA /
+    unspecified / multicast / reserved rejects the whole fetch. The
+    explicit classes stay next to ``is_global`` because global-scope
+    multicast reports ``is_global=True``. The message stays path-free (no
+    resolved IP echoed) so the response is not a network-topology oracle.
 
     Raises:
         InvalidSpecError: The hostname is unresolvable, resolves to no
@@ -718,7 +722,8 @@ def _screen_fetch_host(hostname: str) -> list[str]:
         except ValueError as exc:
             raise InvalidSpecError("spec URI resolved to an unrecognised address format") from exc
         if (
-            addr.is_private
+            not addr.is_global
+            or addr.is_private
             or addr.is_loopback
             or addr.is_link_local
             or addr.is_reserved

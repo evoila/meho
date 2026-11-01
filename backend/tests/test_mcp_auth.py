@@ -309,7 +309,7 @@ def test_runner_kind_token_is_rejected_at_mcp(
 
 
 def test_www_authenticate_header_has_rfc9728_shape(client: TestClient) -> None:
-    """Header value is exactly ``Bearer resource_metadata="<url>"``.
+    """Header value is exactly ``Bearer resource_metadata="<url>", scope="<scopes>"``.
 
     The MCP client parses this header to discover the metadata URL; a
     syntactically different shape (missing quotes, wrong parameter
@@ -321,9 +321,15 @@ def test_www_authenticate_header_has_rfc9728_shape(client: TestClient) -> None:
     )
 
     www_auth = response.headers["www-authenticate"]
-    # Format: `Bearer resource_metadata="<url>"`. Quote the URL so clients
-    # tolerate parameters with `/` and `:` (RFC 9728 §5.1 example).
-    expected = f'Bearer resource_metadata="{_BACKPLANE_URL}/.well-known/oauth-protected-resource"'
+    # Format: `Bearer resource_metadata="<url>", scope="<scopes>"`. Quote
+    # the URL so clients tolerate parameters with `/` and `:` (RFC 9728 §5.1
+    # example). The scope carries offline_access, so a client that follows
+    # MCP 2025-11-25 "Scope Selection Strategy" asks for a login that renews
+    # itself.
+    expected = (
+        f'Bearer resource_metadata="{_BACKPLANE_URL}/.well-known/oauth-protected-resource", '
+        'scope="mcp:read mcp:execute offline_access"'
+    )
     assert www_auth == expected
 
 

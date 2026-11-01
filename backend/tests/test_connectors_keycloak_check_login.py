@@ -84,8 +84,8 @@ _ACCESS_TOKEN = "access-canary-token-91ab-must-not-leak"
 _REFRESH_TOKEN = "refresh-canary-token-37cd-must-not-leak"
 _SECRETS_THAT_MUST_NOT_LEAK = (_PASSWORD, _ACCESS_TOKEN, _REFRESH_TOKEN)
 
-_PASSWORD_REF = "keycloak/master/admin-old"
-_NO_KEY_REF = "keycloak/master/no-password-key"
+_PASSWORD_REF = f"tenants/{_TENANT_ID}/keycloak/master/admin-old"
+_NO_KEY_REF = f"tenants/{_TENANT_ID}/keycloak/master/no-password-key"
 _PARAMS: dict[str, Any] = {
     "realm": _REALM,
     "username": "admin",

@@ -101,6 +101,9 @@ class HostSecurityVim:
             "Config.HostAgent.plugins.solo.enableMob": ("boolean", False),
             "UserVars.ExamplePassword": ("string", SECRET_PASSWORD),
             "Misc.ReadOnlyThing": ("string", "fixed"),
+            # Password policy settings: they name a password but hold none.
+            "Security.PasswordHistory": ("int", 0),
+            "Security.PasswordQualityControl": ("string", "retry=3 min=disabled,disabled,7"),
         }
         self.definitions = [
             _option_def(
@@ -125,6 +128,14 @@ class HostSecurityVim:
             _option_def(
                 "Misc.ReadOnlyThing",
                 {"_typeName": "StringOption", "defaultValue": "fixed", "valueIsReadonly": True},
+            ),
+            _option_def(
+                "Security.PasswordHistory",
+                {"_typeName": "IntOption", "min": 0, "max": 5, "defaultValue": 0},
+            ),
+            _option_def(
+                "Security.PasswordQualityControl",
+                {"_typeName": "StringOption", "defaultValue": "retry=3 min=disabled,disabled,7"},
             ),
         ]
         self.rulesets = [

@@ -35,16 +35,22 @@ from meho_backplane.connectors.vmware_rest.composites._host_access_writes import
     host_lockdown_set_composite,
     host_snmp_set_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._host_security_schemas import (
+    ADVANCED_SETTINGS_SET,
+)
 from meho_backplane.connectors.vmware_rest.composites._host_security_writes import (
     host_advanced_settings_set_composite,
     host_firewall_ruleset_set_composite,
 )
+from meho_backplane.connectors.vmware_rest.host_security import is_secret_key
 from meho_backplane.connectors.vmware_rest.typed_ops_host_security import (
     advanced_settings_show_impl,
     firewall_show_impl,
 )
 from meho_backplane.connectors.vmware_rest.vcenter_deployment import SecretValueError
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
+from meho_backplane.operations._secret_values import plain_fields_of
+from meho_backplane.operations._validate import validate_params
 from meho_backplane.redaction.flight_recorder import classify_body_exclusion
 from tests._vmware_host_security_fake import (
     HOST,
@@ -152,8 +158,35 @@ async def test_advanced_settings_show_marks_changed_values_and_hides_secrets() -
     assert rows["UserVars.SuppressShellWarning"]["value_type"] == "long"
     assert rows["Misc.ReadOnlyThing"]["read_only"] is True
     assert rows["UserVars.ExamplePassword"]["value"] == "<hidden>"
+    assert rows["Security.PasswordHistory"]["value"] == 0
+    assert rows["Security.PasswordQualityControl"]["value"] == "retry=3 min=disabled,disabled,7"
     assert SECRET_PASSWORD not in json.dumps(out)
     assert vim.body_of("QueryOptions") == {}
+
+
+@pytest.mark.parametrize(
+    ("key", "definition", "secret"),
+    [
+        ("UserVars.ExamplePassword", None, True),
+        ("UserVars.ExamplePassword", {"value_type": "string", "choices": None}, True),
+        ("Config.HostAgent.plugins.vimsvc.authToken", None, True),
+        ("Snmp.Community", None, True),
+        # A password policy setting names a password but holds a rule about it.
+        ("Security.PasswordHistory", None, False),
+        ("Security.PasswordMaxDays", None, False),
+        ("Security.PasswordQualityControl", None, False),
+        # A number, a switch or a choice never holds a secret.
+        ("UserVars.TokenTimeout", {"value_type": "int", "choices": None}, False),
+        ("UserVars.TokenCheck", {"value_type": "boolean", "choices": None}, False),
+        ("UserVars.TokenMode", {"value_type": "string", "choices": ["on", "off"]}, False),
+        ("UserVars.TokenTimeout", None, True),
+        ("Net.BlockGuestBPDU", None, False),
+    ],
+)
+def test_is_secret_key_tells_a_secret_from_a_policy_or_a_number(
+    key: str, definition: dict[str, Any] | None, secret: bool
+) -> None:
+    assert is_secret_key(key, definition) is secret
 
 
 async def test_advanced_settings_show_filters_by_prefix_and_changed_only() -> None:
@@ -273,6 +306,59 @@ async def test_advanced_settings_set_sends_the_typed_value_and_reads_back(
     assert gate.calls[0]["op_id"] == "POST:/OptionManager/{moId}/UpdateOptions"
 
 
+@pytest.mark.parametrize(
+    ("key", "value", "value_type"),
+    [
+        ("Security.PasswordHistory", 3, "int"),
+        ("Security.PasswordQualityControl", "retry=5 min=disabled,disabled,8", "string"),
+    ],
+)
+async def test_advanced_settings_set_takes_a_plain_value_for_a_password_policy_setting(
+    gate: GateRecorder, settings_vault: list[dict[str, Any]], key: str, value: Any, value_type: str
+) -> None:
+    vim = HostSecurityVim()
+    out = await _call(
+        host_advanced_settings_set_composite,
+        vim,
+        {"host": "esxi-a", "settings": [{"key": key, "value": value}]},
+    )
+    assert out["status"] == "applied", out
+    assert vim.writes() == ["UpdateOptions"]
+    assert vim.body_of("UpdateOptions")["changedValue"][0]["value"] == {
+        "_typeName": value_type,
+        "_value": value,
+    }
+    # The policy holds no secret, so the answer shows it.
+    assert out["requested"]["settings"] == {key: value}
+    assert out["after"][key] == value
+    assert "<hidden>" not in json.dumps(out)
+    assert settings_vault == []
+
+
+def test_advanced_settings_set_shows_the_password_policy_values_in_the_answer() -> None:
+    """The default answer view hides a password-named key; these hold no secret."""
+    plain = plain_fields_of("vmware.composite.host.advanced_settings.set")
+    assert plain == {
+        "Security.PasswordHistory",
+        "Security.PasswordMaxDays",
+        "Security.PasswordQualityControl",
+    }
+    assert all(not is_secret_key(key) for key in plain)
+
+
+async def test_advanced_settings_set_checks_a_password_policy_value(gate: GateRecorder) -> None:
+    vim = HostSecurityVim()
+    out = await _call(
+        host_advanced_settings_set_composite,
+        vim,
+        {"host": "esxi-a", "settings": [{"key": "Security.PasswordHistory", "value": 9}]},
+    )
+    assert out["status"] == "invalid_value", out
+    assert out["keys"] == ["Security.PasswordHistory"]
+    assert "between 0 and 5" in out["guidance"]
+    assert vim.writes() == []
+
+
 async def test_advanced_settings_set_unchanged_sends_nothing(gate: GateRecorder) -> None:
     vim = HostSecurityVim()
     out = await _call(
@@ -337,6 +423,31 @@ async def test_advanced_settings_set_refuses_a_plain_secret_value(
     text = json.dumps(out) + json.dumps(gate.calls, default=str)
     assert "new-pw" not in text
     assert SECRET_PASSWORD not in text
+
+
+@pytest.mark.parametrize(
+    ("setting", "problem"),
+    [
+        ({"key": "Security.PasswordHistory", "value": 3}, None),
+        ({"key": SECRET_KEY, "value_secret_ref": "esxi/example"}, None),
+        ({"key": SECRET_KEY, "value_secret_ref": "esxi/example", "value_secret_key": "pw"}, None),
+        ({"key": SECRET_KEY, "value": "x", "value_secret_ref": "esxi/example"}, "oneOf"),
+        ({"key": SECRET_KEY}, "oneOf"),
+        ({"key": SECRET_KEY, "value_secret_mount": "kv"}, "oneOf"),
+    ],
+)
+def test_advanced_settings_set_schema_takes_value_or_secret_ref_one_of_them(
+    setting: dict[str, Any], problem: str | None
+) -> None:
+    """The schema says it with ``oneOf``: exactly one of value and value_secret_ref."""
+    errors = validate_params(
+        ADVANCED_SETTINGS_SET["parameter_schema"], {"host": "esxi-a", "settings": [setting]}
+    )
+    if problem is None:
+        assert errors == []
+    else:
+        assert [e["validator"] for e in errors] == [problem], errors
+        assert errors[0]["path"] == "$.settings[0]"
 
 
 async def test_advanced_settings_set_reads_a_secret_from_vault_and_never_shows_it(

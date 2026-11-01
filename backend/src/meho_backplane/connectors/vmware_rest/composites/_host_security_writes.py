@@ -9,9 +9,13 @@
   setting's type (and be inside its range or one of its choices). The value
   is sent with the type vSphere expects (``int``, ``long``, ``boolean``,
   ``float`` or ``string``); a ``long`` setting refuses an ``int`` value.
-  A setting whose key names a secret (a password, token or community) takes
-  its value only from Vault (``value_secret_ref``); a plain ``value`` for it
-  is refused before anything is read. A value from Vault goes only into the
+  A setting that holds a secret (``is_secret_key``: its key names a
+  password, token or community, it is not a password policy setting, and it
+  is free text) takes its value only from Vault (``value_secret_ref``); a
+  plain ``value`` for it is refused before anything is read. Any string
+  setting may take its value from Vault. A password policy setting
+  (``PASSWORD_POLICY_KEYS``) takes a plain value and the answer shows it.
+  A value from Vault goes only into the
   vCenter request body and shows as ``<hidden>`` in every answer. The op is
   pinned ``credential_write`` (``broadcast/events.py``), so the flight
   recorder keeps no body (the read-back answers hold the value too), the
@@ -44,6 +48,7 @@ from meho_backplane.connectors.vmware_rest.host_security import (
     HIDDEN_VALUE,
     OP_QUERY_OPTIONS,
     OP_RETRIEVE_PROPERTIES,
+    PASSWORD_POLICY_KEYS,
     firewall_state,
     is_secret_key,
     locate,
@@ -56,6 +61,7 @@ from meho_backplane.connectors.vmware_rest.vcenter_deployment import (
     read_secret_param,
 )
 from meho_backplane.connectors.vmware_rest.vim_body import unwrap_vim_value
+from meho_backplane.operations import register_plain_fields
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -99,6 +105,11 @@ VIM_SUB_OPS_FIREWALL_RULESET_SET: Final[tuple[str, ...]] = (
     _OP_DISABLE_RULESET,
 )
 
+# The answer keys ``before``, ``after`` and ``requested.settings`` by setting
+# key. A password policy setting names a password but holds a count or a
+# rule, so the answer shows its value.
+register_plain_fields(OP_ID_ADVANCED_SETTINGS_SET, PASSWORD_POLICY_KEYS)
+
 
 # ---------------------------------------------------------------------------
 # host.advanced_settings.set
@@ -136,17 +147,23 @@ _SECRET_REF: Final = "value_secret_ref"
 _DEFAULT_VALUE_KEY: Final = "value"
 
 
-def _is_hidden(setting: dict[str, Any]) -> bool:
-    """A setting whose value never shows: a secret key, or a value from Vault."""
-    return is_secret_key(setting["key"]) or _SECRET_REF in setting
+def _is_hidden(setting: dict[str, Any], definitions: dict[str, dict[str, Any]] | None) -> bool:
+    """A setting whose value never shows: it holds a secret, or its value comes from Vault.
+
+    Without *definitions* (before the host's settings are read) the key alone
+    decides; with them, a number, a switch or a choice is never hidden.
+    """
+    key = setting["key"]
+    definition = definitions.get(key) if definitions is not None else None
+    return is_secret_key(key, definition) or _SECRET_REF in setting
 
 
-def hidden_keys(settings: Any) -> set[str]:
+def hidden_keys(settings: Any, definitions: dict[str, dict[str, Any]] | None = None) -> set[str]:
     """The keys of *settings* (raw params) whose value never shows."""
     return {
         s["key"]
         for s in (settings if isinstance(settings, list) else [])
-        if isinstance(s, dict) and isinstance(s.get("key"), str) and _is_hidden(s)
+        if isinstance(s, dict) and isinstance(s.get("key"), str) and _is_hidden(s, definitions)
     }
 
 
@@ -155,14 +172,16 @@ def settings_view(values: dict[str, Any], hidden: set[str]) -> dict[str, Any]:
     return {key: HIDDEN_VALUE if key in hidden else value for key, value in values.items()}
 
 
-def requested_settings(settings: Any) -> dict[str, Any]:
+def requested_settings(
+    settings: Any, definitions: dict[str, dict[str, Any]] | None = None
+) -> dict[str, Any]:
     """What the call asks for, from the raw params: ``{key: value}``, secrets hidden."""
     rows = [
         s
         for s in (settings if isinstance(settings, list) else [])
         if isinstance(s, dict) and isinstance(s.get("key"), str)
     ]
-    return settings_view({s["key"]: s.get("value") for s in rows}, hidden_keys(rows))
+    return settings_view({s["key"]: s.get("value") for s in rows}, hidden_keys(rows, definitions))
 
 
 def _check_settings(
@@ -181,19 +200,23 @@ def _check_settings(
     both = [s["key"] for s in settings if ("value" in s) == (_SECRET_REF in s)]
     if both:
         return wanted, ("invalid_value", "Give value or value_secret_ref, one of them.", both)
-    plain_secret = [s["key"] for s in settings if "value" in s and is_secret_key(s["key"])]
-    if plain_secret:
-        return wanted, (
-            "secret_value_required",
-            "This setting holds a secret. Store the value in Vault and give value_secret_ref.",
-            plain_secret,
-        )
     unknown = [s["key"] for s in settings if s["key"] not in definitions]
     if unknown:
         return wanted, ("unknown_setting", "The host has no setting with this key.", unknown)
     read_only = [s["key"] for s in settings if definitions[s["key"]]["read_only"]]
     if read_only:
         return wanted, ("read_only_setting", "These settings cannot be changed.", read_only)
+    plain_secret = [
+        s["key"]
+        for s in settings
+        if "value" in s and is_secret_key(s["key"], definitions[s["key"]])
+    ]
+    if plain_secret:
+        return wanted, (
+            "secret_value_required",
+            "This setting holds a secret. Store the value in Vault and give value_secret_ref.",
+            plain_secret,
+        )
     not_text = [
         s["key"]
         for s in settings
@@ -258,7 +281,6 @@ async def host_advanced_settings_set_composite(
 ) -> dict[str, Any] | OperationResult:
     """Set one or more advanced settings of one host; a secret comes from Vault."""
     settings = list(params["settings"])
-    hidden = hidden_keys(settings)
     requested = {"settings": requested_settings(settings)}
     host_moid, manager, refusal = await locate(
         connector, operator, target, params.get("host"), "advancedOption"
@@ -270,6 +292,9 @@ async def host_advanced_settings_set_composite(
         connector, operator, target, "OptionManager", manager, "supportedOption"
     )
     definitions = option_definitions(unwrap_vim_value(supported))
+    # Now the settings' types are known: a number or a choice is never hidden.
+    hidden = hidden_keys(settings, definitions)
+    requested = {"settings": requested_settings(settings, definitions)}
     wanted, problem = _check_settings(settings, definitions)
     if problem is not None:
         status, guidance, keys = problem

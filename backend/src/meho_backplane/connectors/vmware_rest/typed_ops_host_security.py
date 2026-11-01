@@ -78,7 +78,7 @@ def _setting_row(key: str, value: Any, definition: dict[str, Any] | None) -> dic
         "read_only": definition["read_only"] if definition else None,
         "label": definition["label"] if definition else None,
     }
-    if is_secret_key(key):
+    if is_secret_key(key, definition):
         row["value"] = HIDDEN_VALUE
         row["default"] = HIDDEN_VALUE
     return row
@@ -208,7 +208,7 @@ _SETTING_ROW: dict[str, Any] = {
     "type": "object",
     "properties": {
         "key": {"type": "string", "description": "Setting name, such as 'Syslog.global.logDir'."},
-        "value": {"description": "Current value; '<hidden>' when the key names a secret."},
+        "value": {"description": "Current value; '<hidden>' when the setting holds a secret."},
         "default": {"description": "Default value; null when unknown."},
         "is_default": {
             "type": ["boolean", "null"],

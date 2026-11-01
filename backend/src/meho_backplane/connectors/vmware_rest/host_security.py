@@ -28,8 +28,8 @@ no builder for these methods yet, so a single-host target gets
 ``needs_vcenter`` before any call.
 
 Secrets: SNMP community strings never leave this module (the answer counts
-them), and an advanced setting whose key names a password, secret, token or
-community shows ``<hidden>`` instead of its value.
+them), and an advanced setting that holds a secret shows ``<hidden>``
+instead of its value (:func:`is_secret_key`).
 """
 
 from __future__ import annotations
@@ -60,6 +60,7 @@ __all__ = [
     "OP_QUERY_LOCKDOWN_EXCEPTIONS",
     "OP_QUERY_OPTIONS",
     "OP_RETRIEVE_PROPERTIES",
+    "PASSWORD_POLICY_KEYS",
     "HostSettingReadError",
     "call_query",
     "firewall_state",
@@ -93,9 +94,24 @@ OP_QUERY_OPTIONS: Final = "POST:/OptionManager/{moId}/QueryOptions"
 OP_QUERY_LOCKDOWN_EXCEPTIONS: Final = "POST:/HostAccessManager/{moId}/QueryLockdownExceptions"
 OP_QUERY_AVAILABLE_PARTITION: Final = "POST:/HostDiagnosticSystem/{moId}/QueryAvailablePartition"
 
-#: Shown in place of the value of a setting whose key names a secret.
+#: Shown in place of the value of a setting that holds a secret.
 HIDDEN_VALUE: Final = "<hidden>"
 _SECRET_KEY = re.compile(r"passw|secret|token|community|private.?key", re.IGNORECASE)
+#: A password policy setting names a password but holds a rule about
+#: passwords, not one: ``Security.PasswordHistory``, ``Security.PasswordMaxDays``,
+#: ``Security.PasswordQualityControl``.
+_POLICY_KEY = re.compile(
+    r"passw\w*(history|max|min|days|quality|control|policy|expir|length|lock|retry|complex|reuse)",
+    re.IGNORECASE,
+)
+#: The password policy settings of ESXi. The answer of the change shows their
+#: values (``register_plain_fields``): the default view of every answer would
+#: hide them for their name.
+PASSWORD_POLICY_KEYS: Final[tuple[str, ...]] = (
+    "Security.PasswordHistory",
+    "Security.PasswordMaxDays",
+    "Security.PasswordQualityControl",
+)
 
 #: ``optionType._typeName`` -> the VI-JSON primitive type of the value.
 _VALUE_TYPES: Final[dict[str, str]] = {
@@ -237,9 +253,20 @@ async def query_options(
     return out
 
 
-def is_secret_key(key: str) -> bool:
-    """True when an advanced setting's key names a secret."""
-    return bool(_SECRET_KEY.search(key))
+def is_secret_key(key: str, definition: dict[str, Any] | None = None) -> bool:
+    """True when an advanced setting holds a secret.
+
+    Its key names a password, secret, token or community, and it is not a
+    password policy setting (``Security.PasswordHistory`` holds a count,
+    ``Security.PasswordQualityControl`` a rule). With the setting's
+    *definition* (:func:`option_definitions`), only a free-text setting can
+    hold a secret: a number, a switch or a choice never does.
+    """
+    if definition is not None and (
+        definition["value_type"] != "string" or definition["choices"] is not None
+    ):
+        return False
+    return bool(_SECRET_KEY.search(key)) and not _POLICY_KEY.search(key)
 
 
 def _default(option_type: dict[str, Any]) -> Any:

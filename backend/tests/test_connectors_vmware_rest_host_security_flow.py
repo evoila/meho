@@ -431,9 +431,51 @@ async def test_a_secret_setting_waits_for_approval_and_the_value_is_stored_nowhe
         resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
     assert resume.status == "ok", resume.error
     assert resume.result["status"] == "applied"
-    assert resume.result["after"] == {_SECRET_KEY: "<hidden>"}
+    # The composite hides the value; the dispatcher's default view hides the
+    # password-named key once more with its own marker.
+    assert resume.result["after"] == {_SECRET_KEY: "[REDACTED:param_name]"}
     assert vim.writes() == ["UpdateOptions"]
     assert vim.options[_SECRET_KEY] == ("string", _NEW_PASSWORD)
+
+
+@pytest.mark.usefixtures("_db_env")
+async def test_a_password_policy_setting_takes_a_plain_value_and_shows_it() -> None:
+    """``Security.PasswordHistory`` names a password but holds a count."""
+    key = "Security.PasswordHistory"
+    vim = HostSecurityVim()
+    await _bootstrap(vim)
+    call = await call_operation(
+        _operator("op-requester"),
+        {
+            "connector_id": "vmware-rest-9.0",
+            "op_id": "vmware.composite.host.advanced_settings.set",
+            "target": _TARGET_NAME,
+            "params": {"host": "esxi-a", "settings": [{"key": key, "value": 3}]},
+        },
+    )
+    assert call["status"] == "awaiting_approval", call
+    request_id = UUID(call["extras"]["approval_request_id"])
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        preview = row.proposed_effect["preview"]
+    assert preview["current"] == {key: 0}
+    assert preview["requested"] == {"settings": {key: 3}}
+
+    approver = _operator("op-approver")
+    async with get_sessionmaker()() as s:
+        approved = await approve_request(s, request_id, operator=approver, params=None)
+        await s.commit()
+    assert approved.status == "approved"
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "applied"
+    assert resume.result["before"] == {key: 0}
+    assert resume.result["after"] == {key: 3}
+    assert vim.options[key] == ("int", 3)
 
     _assert_no_secret("the result", resume.model_dump_json())
     async with get_sessionmaker()() as s:

@@ -13,6 +13,9 @@
   error names up to 5 close ids (``extras.did_you_mean``, #4136).
 * ``connector_package_not_installed`` -- the enabled op exists, but the
   connector package that wrote it is not installed (#5037).
+* ``connector_code_not_installed`` -- the code of the connector is not in
+  this MEHO: its rows have no package name, no handler imports and no
+  class resolves (#5585).
 * ``unknown_op`` -- the connector exists but has no such enabled op. The
   error names the other caller-visible connectors that have the op
   (``extras.connectors_with_op``), or points at ``search_operations``
@@ -31,8 +34,13 @@ from typing import Any
 from uuid import UUID
 
 from meho_backplane.connectors import OperationResult
+from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations._catalog_guard import catalog_refuses_target
+from meho_backplane.operations._code_presence import (
+    connector_code_missing,
+    result_connector_code_not_installed,
+)
 from meho_backplane.operations._errors import (
     result_connector_package_not_installed,
     result_unknown_connector,
@@ -74,6 +82,12 @@ async def op_miss_result(
         return result_connector_package_not_installed(
             op_id, connector_id, package, _elapsed_ms(started)
         )
+    async with get_sessionmaker()() as session:
+        code_missing = await connector_code_missing(
+            session, tenant_id=tenant_id, product=product, version=version, impl_id=impl_id
+        )
+    if code_missing:
+        return result_connector_code_not_installed(op_id, connector_id, _elapsed_ms(started))
     known_op_count = await count_known_ops(
         tenant_id=tenant_id, product=product, version=version, impl_id=impl_id
     )

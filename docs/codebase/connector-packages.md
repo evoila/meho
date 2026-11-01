@@ -512,6 +512,46 @@ MEHO (ingested ops are `NULL` too).
 share one database: each one hides only the rows of the packages it does
 not have.
 
+### Rows with no package name
+
+A row written by an image that had a connector built in has no package
+name (`owner_package` is `NULL`). When a later image does not have that
+code, the package rule above lets the row pass. So MEHO also checks the
+code itself (`operations/_code_presence.py`, #5585). The code of a
+connector is missing when all of these are true:
+
+- it has a visible typed or composite row with no package name;
+- it has no visible row of an installed package;
+- none of the handlers (`handler_ref`) of those rows imports;
+- no connector class resolves for its product and version.
+
+Then:
+
+- The connector list shows it with `state="code_not_installed"`, zero
+  counts and `dispatchable=false`. Its `next_step` says that the code of
+  the connector is not in this MEHO. The row has no package name, so the
+  text names no package. The MCP short row shows
+  `status="code_not_installed"`, and the CLI table shows `no-code`.
+- `search_operations` (also its exact-op mode) returns no hits and
+  `outcome="code_not_installed"`. `list_operation_groups` returns no
+  group.
+- A call or a preview answers `connector_code_not_installed`, with the
+  connector id in `extras.connector_id`, in place of
+  `handler_unreachable`. The descriptor lookup does not find the rows.
+- Nothing is deleted or written. When the code is back, the same rows
+  work again, with the operator's settings.
+
+Not hit: a family with no class whose handlers import (`net.*`,
+`secret.*`), a connector with a class, and a connector where at least
+one handler imports. In the last case only the op whose handler is
+missing fails, with `handler_unreachable`: during an upgrade, two
+releases can share one database (`operations/dead_handler_sweep.py`).
+
+Like "installed", this is worked out per MEHO process and never stored
+on a row. Whether a handler imports is kept for the life of the process
+(`handler_imports`), so a check does not import every handler on every
+call. The usual check reads one row: a handler that imports ends it.
+
 Limit: an op of a package whose handler lives outside the package's own
 folders (for example in a built-in shared module) is recorded as built
 in.

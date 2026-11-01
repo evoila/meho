@@ -2102,7 +2102,9 @@ consume so the wire contract is defined once:
   the listing-integrity contract section above. A third value,
   `"package_not_installed"` (#5560), marks a connector whose rows all
   come from a connector package that is not installed; see
-  `connector-packages.md`, "When a package is removed".
+  `connector-packages.md`, "When a package is removed". A fourth value,
+  `"code_not_installed"` (#5585), marks a connector whose code is not in
+  this MEHO; see the same section, "Rows with no package name".
   `ConnectorListItem.next_step` (G0.13-T3 / #1133) is the workflow-
   completion hint: a `NextStep` object (verb + rationale) on
   `state="registered"` rows, `null` on `state="ingested"` rows — see

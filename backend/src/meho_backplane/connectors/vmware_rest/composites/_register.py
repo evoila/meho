@@ -88,6 +88,9 @@ from meho_backplane.connectors.vmware_rest.composites._drs_group_delete import (
 from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
     cluster_drs_rule_delete_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._folder_teardown import (
+    folder_teardown_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
     register_vmware_governed_subops,
 )
@@ -277,6 +280,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     FOLDER_CREATE_RESPONSE_SCHEMA,
     FOLDER_DELETE_PARAMETER_SCHEMA,
     FOLDER_DELETE_RESPONSE_SCHEMA,
+    FOLDER_TEARDOWN_PARAMETER_SCHEMA,
+    FOLDER_TEARDOWN_RESPONSE_SCHEMA,
     GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA,
     GUEST_CUSTOMIZATION_SPEC_CREATE_RESPONSE_SCHEMA,
     GUEST_ENV_READ_PARAMETER_SCHEMA,
@@ -532,7 +537,9 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "caution), revert to one (vm.snapshot.revert, dangerous) or delete one "
         "(vm.snapshot.delete, destructive); delete a powered-off VM and its "
         "disks (vm.destroy, destructive); create a VM folder (folder.create, "
-        "dangerous) or delete an empty one (folder.delete, destructive). Pair "
+        "dangerous) or delete an empty one (folder.delete, destructive); power "
+        "off and delete every VM in one folder, then the folder "
+        "(folder.teardown, destructive). Pair "
         "with 'storage', 'networking' or 'cluster' for the reads a create or a "
         "move needs."
     ),
@@ -1982,6 +1989,33 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.folder.delete"],
     ),
     _CompositeSpec(
+        op_id="vmware.composite.folder.teardown",
+        handler=folder_teardown_composite,
+        summary="Power off and delete every VM in one VM folder, then the folder.",
+        description=(
+            "Deletes a disposable system in one VM folder: powers off and deletes every "
+            "VM and template under it, then the sub-folders and the folder. A VM, "
+            "sub-folder or disk missing from the expected lists, a vApp or a managed VM "
+            "stops the call. Destructive: a second person must always approve it."
+        ),
+        parameter_schema=FOLDER_TEARDOWN_PARAMETER_SCHEMA,
+        response_schema=FOLDER_TEARDOWN_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=[
+            "composite",
+            "write",
+            "vm",
+            "inventory",
+            "vi-json",
+            "teardown",
+            "destroy",
+            "destructive",
+        ],
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions=VM_LLM_INSTRUCTIONS["vmware.composite.folder.teardown"],
+    ),
+    _CompositeSpec(
         op_id="vmware.composite.datastore.file.delete",
         handler=datastore_file_delete_composite,
         summary="Delete a file or folder on a datastore. Refused for files of registered VMs.",
@@ -2155,16 +2189,17 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 71 composites total -- 16 read (T5 / #508 + the datastore
+    Scope: 72 composites total -- 16 read (T5 / #508 + the datastore
     cache-refresh read datastore.refresh / #3789 + the VM allocation read
     vm.resource_allocation.show / #3880 + the 4 guest-ops
     reads / #3100 + the supervisor status + the vSphere Namespace status
     (#3502) / storage-policy list / two SUBSCRIBED content-library reads) +
-    55 write (the two caution alarm changes ``alarm.acknowledge`` /
+    56 write (the two caution alarm changes ``alarm.acknowledge`` /
     ``alarm.reset`` / #4383 + the licence assign ``license.assign``, the VM
     snapshot create (caution) + delete (destructive), the seven #3339 teardown
     composites -- six destructive deletes
-    + the caution ``datastore.dir.create`` -- + the destructive DRS rule delete
+    + the caution ``datastore.dir.create`` -- + the destructive whole-folder
+    teardown ``folder.teardown`` / #4624 + the destructive DRS rule delete
     ``cluster.drs_rule.delete`` + T6 / #509 + the caution VM
     allocation write
     ``vm.resource_allocation.set`` / #3880 + the

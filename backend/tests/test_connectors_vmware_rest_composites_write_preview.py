@@ -122,6 +122,7 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.network.portgroup.delete",
         "vmware.composite.host.standard_portgroup.delete",
         "vmware.composite.folder.delete",
+        "vmware.composite.folder.teardown",
         "vmware.composite.datastore.file.delete",
         "vmware.composite.datastore.dir.create",
         "vmware.composite.content_library.delete",

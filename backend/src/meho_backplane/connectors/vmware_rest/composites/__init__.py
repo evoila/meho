@@ -125,6 +125,9 @@ from meho_backplane.connectors.vmware_rest.composites._drs_group_delete import (
 from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
     cluster_drs_rule_delete_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._folder_teardown import (
+    folder_teardown_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._guest import (
     guest_env_read_composite,
     guest_file_read_composite,
@@ -266,6 +269,7 @@ __all__ = [
     "event_tail_composite",
     "folder_create_composite",
     "folder_delete_composite",
+    "folder_teardown_composite",
     "guest_customization_spec_create_composite",
     "guest_env_read_composite",
     "guest_file_read_composite",

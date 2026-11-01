@@ -28,15 +28,13 @@ All code that touches the new password is in this module:
 
 from __future__ import annotations
 
-import html
-import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
-from urllib.parse import quote
 
 import httpx
 
+from meho_backplane.connectors._shared.secret_echo import mentions_secret
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
     load_param_secret_data,
@@ -186,12 +184,6 @@ def _response_text(response: httpx.Response) -> str:
         return ""
 
 
-def _mentions_secret(texts: Iterable[str], secret: str) -> bool:
-    """True when any text holds *secret* as is, JSON-escaped, URL-encoded or HTML-escaped."""
-    forms = {secret, json.dumps(secret)[1:-1], quote(secret, safe=""), html.escape(secret)}
-    return any(form in text for text in texts for form in forms if form)
-
-
 def safe_vendor_text(
     response: httpx.Response, secrets: Iterable[str] = ()
 ) -> tuple[str | None, list[str]]:
@@ -203,7 +195,7 @@ def safe_vendor_text(
     """
     error_type, messages = vapi_error(response)
     texts = [_response_text(response), error_type or "", *messages]
-    if any(_mentions_secret(texts, secret) for secret in secrets if secret):
+    if any(mentions_secret(texts, secret) for secret in secrets if secret):
         return None, []
     return error_type, messages
 

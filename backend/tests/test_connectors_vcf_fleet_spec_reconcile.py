@@ -80,6 +80,8 @@ from meho_backplane.connectors.vcf_fleet import api_file as _api_file
 from meho_backplane.connectors.vcf_fleet import changes as _changes
 from meho_backplane.connectors.vcf_fleet import connector as _connector
 from meho_backplane.connectors.vcf_fleet import lifecycle as _lifecycle
+from meho_backplane.connectors.vcf_fleet import locker as _locker
+from meho_backplane.connectors.vcf_fleet import product_certificate as _product_certificate
 from tests._spec_shelf import (
     assert_op_ids_served,
     openapi_served_op_ids,
@@ -123,6 +125,33 @@ def _declared_op_ids() -> set[str]:
     declared = {f"GET:{path}" for path in paths}
     calls = (*_lifecycle.VENDOR_CALLS, *_changes.VENDOR_CALLS)
     return declared | {f"{method}:{path}" for method, path in calls}
+
+
+def _write_op_ids() -> set[str]:
+    """The locker and product-certificate calls, with their real method.
+
+    These modules list every call as ``(method, path)`` in ``VENDOR_CALLS``,
+    so the POST and PUT calls are checked with their own method.
+    """
+    calls = (*_locker.VENDOR_CALLS, *_product_certificate.VENDOR_CALLS)
+    return {f"{method}:{path}" for method, path in calls}
+
+
+def test_locker_and_product_certificate_calls_are_pinned() -> None:
+    """Guard: the locker and product-certificate call set is what the ops send."""
+    assert _write_op_ids() == {
+        "GET:/lcm/locker/api/v2/passwords",
+        "POST:/lcm/locker/api/v2/passwords",
+        "GET:/lcm/locker/api/v2/certificates",
+        "POST:/lcm/locker/api/v2/certificates",
+        "POST:/lcm/locker/api/v2/certificates/import",
+        "GET:/lcm/request/api/v2/requests",
+        "POST:/lcm/lcops/api/v2/environments/{environmentId}/products/{productId}"
+        "/certificates/{certificateId}/pre-validate",
+        "GET:/lcm/request/api/v2/requests/{requestId}/pre-validation-report",
+        "PUT:/lcm/lcops/api/v2/environments/{environmentId}/products/{productId}"
+        "/certificates/{certificateId}",
+    }
 
 
 def test_hand_coded_path_surface_is_pinned() -> None:
@@ -216,5 +245,5 @@ def test_declared_op_ids_are_served_by_the_pinned_vrslcm_spec() -> None:
     """
     spec_path = require_shelf_spec(_SPEC_DIR, _SPEC_FILE)
     served = openapi_served_op_ids(spec_path)
-    declared = _declared_op_ids()
+    declared = _declared_op_ids() | _write_op_ids()
     assert_op_ids_served(declared, served, spec_label=_SPEC_LABEL)

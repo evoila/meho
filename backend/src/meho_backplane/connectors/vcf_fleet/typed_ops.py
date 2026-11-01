@@ -69,6 +69,10 @@ from meho_backplane.connectors.vcf_fleet.changes_ops import (
     CHANGE_WHEN_TO_USE_BY_GROUP,
 )
 from meho_backplane.connectors.vcf_fleet.lifecycle_ops import LIFECYCLE_OPS
+from meho_backplane.connectors.vcf_fleet.typed_ops_locker import (
+    FLEET_LOCKER_OPS,
+    FLEET_LOCKER_WHEN_TO_USE_BY_GROUP,
+)
 
 __all__ = [
     "FLEET_TYPED_OPS",
@@ -110,6 +114,7 @@ FLEET_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "It refuses every other path."
     ),
     **CHANGE_WHEN_TO_USE_BY_GROUP,
+    **FLEET_LOCKER_WHEN_TO_USE_BY_GROUP,
 }
 
 _PART_ITEM_SCHEMA: dict[str, Any] = {
@@ -391,11 +396,13 @@ _API_FILE_GET = FleetTypedOp(
 #: The typed ops :class:`VcfFleetConnector` registers at lifespan startup:
 #: the about probe, the environment list, the API description read, the
 #: request, environment, inventory sync, health and datacenter ops, then the
-#: upgrade, binary and environment changes (``changes_ops``).
+#: upgrade, binary and environment changes (``changes_ops``), then the
+#: locker and product-certificate ops (``typed_ops_locker``).
 FLEET_TYPED_OPS: tuple[FleetTypedOp, ...] = (
     _ABOUT,
     _ENVIRONMENT_LIST,
     _API_FILE_GET,
     *LIFECYCLE_OPS,
     *CHANGE_OPS,
+    *FLEET_LOCKER_OPS,
 )

@@ -12318,7 +12318,7 @@
           "ui-auth"
         ],
         "summary": "Ui Auth Login",
-        "description": "Mint a PKCE authorization URL and 302 the browser to Keycloak.\n\n``?return_to=<path>`` is the originally-requested path the\noperator was bounced from (the middleware writes it). Declared as\na typed FastAPI ``Query`` parameter so the OpenAPI document\nreflects the real query-string contract; the value is validated\nvia :func:`_safe_return_to` to block open-redirect abuse.\n\n``?reason=session_ended`` is set when a session the browser still\nheld has ended. Then the route answers with a small page: one plain\nline (\"Your session ended. Please sign in again.\") and a \"Sign in\"\nbutton that starts the normal login with the same ``return_to``.\nAny other ``reason`` value is ignored.",
+        "description": "Mint a PKCE authorization URL and 302 the browser to Keycloak.\n\n``?return_to=<path>`` is the originally-requested path the\noperator was bounced from (the middleware writes it). Declared as\na typed FastAPI ``Query`` parameter so the OpenAPI document\nreflects the real query-string contract; the value is validated\nvia :func:`_safe_return_to` to block open-redirect abuse.\n\n``?reason=session_ended`` is set when a session the browser still\nheld has ended. Then the route answers with a small page: one plain\nline (\"Your session ended. Please sign in again.\") and a \"Sign in\"\nbutton that starts the normal login with the same ``return_to``.\nAny other ``reason`` value is ignored.\n\n``?fresh_sign_in=1`` asks Keycloak for a new sign-in with\ncredentials (``prompt=login`` and ``max_age=0``), also in a browser\nthat Keycloak remembers. An approval in the console needs such a\nrecent sign-in. Any other value is ignored.",
         "operationId": "ui_auth_login_ui_auth_login_get",
         "parameters": [
           {
@@ -12339,6 +12339,16 @@
               "type": "string",
               "nullable": true,
               "title": "Reason"
+            }
+          },
+          {
+            "name": "fresh_sign_in",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Fresh Sign In"
             }
           }
         ],

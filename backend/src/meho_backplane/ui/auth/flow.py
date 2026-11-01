@@ -383,6 +383,7 @@ async def build_authorization_request(
     *,
     redirect_uri: str,
     return_to: str,
+    fresh_sign_in: bool = False,
 ) -> tuple[str, str, str]:
     """Mint a PKCE-protected authorization URL and register the verifier.
 
@@ -405,6 +406,13 @@ async def build_authorization_request(
         The path the operator was trying to reach when the middleware
         redirected them to login. Stored alongside the verifier so
         the callback handler can finish the round-trip cleanly.
+    fresh_sign_in
+        Ask Keycloak for a new sign-in with credentials: the URL carries
+        ``prompt=login`` and ``max_age=0`` (OIDC Core 1.0 section
+        3.1.2.1). Keycloak then ignores its SSO cookie, also in a
+        remembered browser, and the new token's ``auth_time`` is now.
+        The approvals console uses this when the person's sign-in is too
+        old to approve.
 
     Raises
     ------
@@ -426,11 +434,13 @@ async def build_authorization_request(
     # browser to tie the flow to the user-agent that started it.
     browser_binding = generate_token(48)
     resource = _resource_indicator(settings)
+    extra: dict[str, str] = {"prompt": "login", "max_age": "0"} if fresh_sign_in else {}
     async with _build_oauth_client(settings, redirect_uri=redirect_uri) as client:
         url, state = client.create_authorization_url(
             endpoints.authorization_endpoint,
             code_verifier=code_verifier,
             resource=resource,
+            **extra,
         )
     await get_verifier_store().put(
         state,

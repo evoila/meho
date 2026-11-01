@@ -885,10 +885,15 @@ def test_has_fresh_sign_in() -> None:
 def test_fresh_sign_in_max_age_comes_from_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``FRESH_SIGN_IN_MAX_AGE_SECONDS`` sets the check and the 401 challenge."""
-    monkeypatch.setenv("FRESH_SIGN_IN_MAX_AGE_SECONDS", "60")
+    """``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`` sets the check and the 401 challenge.
+
+    Turning approval off needs a fresh sign-in each time (#5515), so it
+    reads the per-action limit, not the approval window.
+    """
+    monkeypatch.setenv("PER_ACTION_SIGN_IN_MAX_AGE_SECONDS", "60")
+    monkeypatch.setenv("FRESH_SIGN_IN_MAX_AGE_SECONDS", "900")
     get_settings.cache_clear()
-    assert get_settings().fresh_sign_in_max_age_seconds == 60
+    assert get_settings().per_action_sign_in_max_age_seconds == 60
     now = time.time()
     tenant_id = uuid.uuid4()
     assert has_fresh_sign_in(_operator(tenant_id, auth_time=int(now) - 30), now=now)
@@ -957,6 +962,22 @@ async def test_rest_without_fresh_sign_in_cannot_turn_approval_off(
     response, report = _patch(token_kwargs, _OFF)
     assert response.status_code == 401, response.text
     assert 'error="insufficient_user_authentication"' in response.headers["www-authenticate"]
+    assert "approval_off_needs_fresh_sign_in" in response.json()["detail"]
+    assert report.json() == {"overrides": []}
+
+
+@pytest.mark.asyncio
+async def test_rest_approval_window_does_not_cover_turning_approval_off(
+    embedding: AsyncMock,
+) -> None:
+    """A 400-second-old sign-in is inside the approval window but too old here (#5515)."""
+    await _register_typed(embedding, requires_approval=True)
+    response, report = _patch(
+        {"platform_admin": True, "extra_claims": {"auth_time": int(time.time()) - 400}}, _OFF
+    )
+    assert get_settings().fresh_sign_in_max_age_seconds == 900
+    assert response.status_code == 401, response.text
+    assert response.headers["www-authenticate"].endswith("max_age=300")
     assert "approval_off_needs_fresh_sign_in" in response.json()["detail"]
     assert report.json() == {"overrides": []}
 

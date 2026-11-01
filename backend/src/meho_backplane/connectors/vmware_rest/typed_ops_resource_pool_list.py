@@ -50,7 +50,9 @@ __all__ = [
     "RESOURCE_POOL_LIST_GROUP_KEY",
     "RESOURCE_POOL_LIST_PATH",
     "RESOURCE_POOL_LIST_WHEN_TO_USE",
+    "TYPED_OPS",
     "VMWARE_RESOURCE_POOL_LIST_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "resource_pool_list_impl",
 ]
 
@@ -499,3 +501,8 @@ VMWARE_RESOURCE_POOL_LIST_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_RESOURCE_POOL_LIST_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {
+    RESOURCE_POOL_LIST_GROUP_KEY: RESOURCE_POOL_LIST_WHEN_TO_USE
+}

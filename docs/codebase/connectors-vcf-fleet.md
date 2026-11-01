@@ -32,8 +32,8 @@ implementation").
 | `fleet.environment.get` | Read one environment with its products, versions and nodes. Secret values are replaced. | `GET /lcm/lcops/api/v2/environments/{environmentId}` | read (`safe`, no approval) | 8.18, 9.0 |
 | `fleet.datacenter.list` | List the datacenters and their vCenters, one row per vCenter. No password is returned. | `GET /lcm/lcops/api/v2/datacenters`, `GET /lcm/lcops/api/v2/datacenters/{dataCenterVmid}/vcenters` | read (`safe`, no approval) | 8.18, 9.0 |
 | `fleet.product.inventory_sync` | Start an inventory sync of one product in an environment, unless one already runs. Returns `accepted` (or `already_running`) with the request id. | `GET /lcm/request/api/v2/requests`, then `POST /lcm/lcops/api/v2/environments/{environmentId}/products/{productId}/inventory-sync` | change (`caution`, waits for approval) | 8.18, 9.0 |
-| `fleet.request.list` | List lifecycle requests with state, plain outcome and error text, newest first; filter by state or outcome. | `GET /lcm/request/api/v2/requests` | read (`safe`, no approval) | 8.18, 9.0 |
-| `fleet.request.get` | Read one request: state, outcome and, when it failed, its error causes (the first is the failed step). Says `not_reachable` when the appliance does not answer. | `GET /lcm/request/api/v2/requests/{requestId}`, `GET /lcm/request/api/v2/requests/{requestId}/error-causes` | read (`safe`, no approval) | 8.18, 9.0 |
+| `fleet.request.list` | List lifecycle requests with state, plain outcome and error text, newest first; filter by state or outcome. Each row names the environment and product of the request, from its inputs. | `GET /lcm/request/api/v2/requests` | read (`safe`, no approval) | 8.18, 9.0 |
+| `fleet.request.get` | Read one request: state, outcome, the environment and product of the request, and, when it failed, its error causes (the first is the failed step). Says `not_reachable` when the appliance does not answer. | `GET /lcm/request/api/v2/requests/{requestId}`, `GET /lcm/request/api/v2/requests/{requestId}/error-causes` | read (`safe`, no approval) | 8.18, 9.0 |
 | `fleet.request.retry` | Retry a failed request, optionally with corrected inputs. Returns `accepted`, `not_started` or `failed`, with the steps. | `GET /lcm/request/api/v2/requests/{requestId}`, `GET .../error-causes`, then `PATCH /lcm/request/api/v2/requests/{requestId}/retry` | change (`dangerous`, waits for approval) | 8.18, 9.0 |
 | `fleet.locker.password.list` | List the locker passwords: alias, user name, description and whether a product uses it (`referenced`). Never the password. | `GET /lcm/locker/api/v2/passwords` | read (`safe`, no approval) | 8.18, 9.0 |
 | `fleet.locker.password.add` | Add a locker password. The password comes from Vault (`password_ref`). Returns the new entry, never the password. | `POST /lcm/locker/api/v2/passwords` | change (`caution`, waits for approval) | 8.18, 9.0 |
@@ -411,6 +411,11 @@ programming guide ("Retry an install or import request").
   or `unknown` for a state not in `OUTCOME_BY_STATE`. The vendor gives no
   progress number and no list of steps, so `fleet.request.get` returns the
   error causes of a failed request; the first one is the failed step.
+- **Request inputs.** Of the vendor's request inputs (`inputMap`) only
+  the environment id and the product id are returned, as `environment_id`
+  and `product_id` (`null` when the request has none). After a lost reply
+  to a start, they tell which request is yours when several of the same
+  type run. The other inputs are not returned: they can hold passwords.
 - **Status read.** `fleet.request.get` follows every start of this
   connector. When the appliance does not answer (a connection or time-out
   error, or a 502, 503 or 504, for example during its own upgrade), it
@@ -535,8 +540,11 @@ Each answer lists every step as `done`, `failed`, `unknown` or `not_run`.
 A failed step stops the op; nothing is undone. A step that gets no answer
 says `not reachable at <time>`. If the reply to the `PUT` is lost, the
 answer is `unknown`. Then do not call again blindly. First list the
-requests (`fleet.request.list`), look for a certificate request for this
-product, and read it with `fleet.request.get`. Call the replace with
+running requests (`fleet.request.list` with outcome `running`). Your
+request is the certificate request whose `environment_id` and `product_id`
+equal the ids you gave; the type alone is not enough when another product
+gets a certificate at the same time. Read it with `fleet.request.get`,
+which returns the two ids too. Call the replace with
 MEHO's async mode (`async: true`, see `async-governed-dispatch.md`), so the
 answer with the request id is stored under a run handle.
 

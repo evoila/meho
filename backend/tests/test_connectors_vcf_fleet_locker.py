@@ -753,7 +753,9 @@ async def _dispatch_approved(op_id: str, params: dict[str, Any]) -> dict[str, An
     return dumped
 
 
-def _vendor_request(vmid: str, state: str) -> dict[str, Any]:
+def _vendor_request(
+    vmid: str, state: str, environment_id: str = _ENV, product_id: str = _PRODUCT
+) -> dict[str, Any]:
     return {
         "vmid": vmid,
         "requestName": "Update product certificate",
@@ -764,7 +766,11 @@ def _vendor_request(vmid: str, state: str) -> dict[str, Any]:
         "errorCause": None,
         "createdBy": "<user>",
         "lastUpdatedOn": 7,
-        "inputMap": {"environmentId": _ENV, "productId": _PRODUCT},
+        "inputMap": {
+            "environmentId": environment_id,
+            "productId": product_id,
+            "certificatePassphrase": "secret-passphrase",
+        },
     }
 
 
@@ -815,26 +821,47 @@ async def test_replace_then_status_read_follows_the_request(
 async def test_lost_reply_is_recovered_with_the_request_list_and_read(
     _registered: None, _fast_poll: None
 ) -> None:
-    """After a lost reply, the request list finds the certificate request; the read follows it."""
+    """After a lost reply, the request list names the product of each certificate request.
+
+    Two certificate requests run, for two products. The caller picks its own
+    by ``environment_id`` and ``product_id``, not by position or type, and the
+    read confirms both ids. No other request input is returned.
+    """
     async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
         _mock_replace_calls(mock).mock(side_effect=httpx.ReadTimeout("read timed out"))
         lost = await _dispatch_approved("fleet.product.certificate.replace", _REPLACE)
         assert lost["status"] == "ok", lost
         assert lost["result"]["status"] == "unknown"
         assert "request_id" not in lost["result"]
-        # The appliance did start the request although the reply was lost.
+        # The appliance did start the request although the reply was lost. Another
+        # certificate request, for another product, runs too and is listed first.
+        other = _vendor_request("req-0001", "INPROGRESS", product_id="product-other")
         started = _vendor_request("req-0002", "INPROGRESS")
-        mock.get(_REQUESTS).respond(200, json=[started])
+        mock.get(_REQUESTS).respond(200, json=[other, started])
         listed = await _dispatch_approved("fleet.request.list", {"outcome": "running"})
         rows = listed["result"]["requests"]
-        found = next(row for row in rows if "CERTIFICATE" in str(row["type"]).upper())
+        assert [row["request_id"] for row in rows] == ["req-0001", "req-0002"]
+        mine = [
+            row
+            for row in rows
+            if row["environment_id"] == _REPLACE["environment_id"]
+            and row["product_id"] == _REPLACE["product_id"]
+        ]
+        assert [row["request_id"] for row in mine] == ["req-0002"]
+        found = mine[0]
         mock.get(f"{_REQUESTS}/{found['request_id']}").respond(200, json=started)
         read = await _dispatch_approved("fleet.request.get", {"request_id": found["request_id"]})
     assert listed["status"] == "ok", listed
-    assert found["request_id"] == "req-0002"
+    assert rows[0]["product_id"] == "product-other"
+    for row in rows:
+        assert "inputMap" not in row
+        assert "secret-passphrase" not in json.dumps(row)
     assert read["status"] == "ok", read
     assert read["result"]["request_id"] == "req-0002"
     assert read["result"]["outcome"] == "running"
+    assert read["result"]["environment_id"] == _REPLACE["environment_id"]
+    assert read["result"]["product_id"] == _REPLACE["product_id"]
+    assert "secret-passphrase" not in json.dumps(read["result"])
 
 
 # ---------------------------------------------------------------------------

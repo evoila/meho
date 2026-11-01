@@ -1342,6 +1342,7 @@ def test_host_vi_json_paths_exist_in_the_pinned_spec() -> None:
 # vi-json.yaml like the #3091 portgroup writes above.
 # ---------------------------------------------------------------------------
 
+from meho_backplane.connectors.vmware_rest import typed_ops_inventory_find  # noqa: E402
 from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
     _datastore_files,
     _drs_group,
@@ -1351,6 +1352,7 @@ from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
     _library_delete,
     _object_rename_move,
     _snapshot,
+    _snapshot_cleanup,
     _teardown,
     _teardown_network,
 )
@@ -1493,6 +1495,34 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
         },
     ),
     # --- Inventory tree changes: end ---
+    # Delete all snapshots of a VM, and consolidate its disks.
+    "_VIM_SUB_OPS_VM_SNAPSHOT_DELETE_ALL": (
+        _snapshot_cleanup,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualMachine/{moId}/RemoveAllSnapshots_Task",
+        },
+    ),
+    "_VIM_SUB_OPS_VM_DISKS_CONSOLIDATE": (
+        _snapshot_cleanup,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/VirtualMachine/{moId}/ConsolidateVMDisks_Task",
+        },
+    ),
+    # The container-view reads of vm.list, inventory.find and the snapshot list of
+    # every VM, plus the inventory-path search (typed reads, not governed writes).
+    "INVENTORY_FIND_CALLS": (
+        typed_ops_inventory_find,
+        {
+            "POST:/ServiceInstance/{moId}/RetrieveServiceContent",
+            "POST:/ViewManager/{moId}/CreateContainerView",
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/PropertyCollector/{moId}/ContinueRetrievePropertiesEx",
+            "POST:/ContainerView/{moId}/DestroyView",
+            "POST:/SearchIndex/{moId}/FindByInventoryPath",
+        },
+    ),
 }
 
 

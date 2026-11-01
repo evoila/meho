@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Final
 import httpx
 
 from meho_backplane.connectors.vmware_rest.composite_issues import issue
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _parse_vsphere_error,
     _read_sub_op,
@@ -29,7 +30,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     _vsphere_fault_detail,
     _write_sub_op,
 )
-from meho_backplane.operations._preview import preview_failure_reason, register_preview_builder
+from meho_backplane.operations._preview import preview_failure_reason
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
     from meho_backplane.operations._preview import PreviewContext
 
-__all__ = ["OP_ID_RESOURCE_POOL_UPDATE", "RESOURCE_POOL_UPDATE_COMPOSITE"]
+__all__ = ["COMPOSITES", "OP_ID_RESOURCE_POOL_UPDATE"]
 
 OP_ID_RESOURCE_POOL_UPDATE: Final = "vmware.composite.resource_pool.update"
 
@@ -189,9 +190,6 @@ async def _resource_pool_update_preview(ctx: PreviewContext) -> dict[str, Any] |
     }
 
 
-register_preview_builder(OP_ID_RESOURCE_POOL_UPDATE, _resource_pool_update_preview)
-
-
 # ---------------------------------------------------------------------------
 # Schemas, AI guidance and the registration row
 # ---------------------------------------------------------------------------
@@ -321,21 +319,24 @@ RESOURCE_POOL_UPDATE_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     ),
 }
 
-#: The registration row, as ``_CompositeSpec`` keyword arguments.
-RESOURCE_POOL_UPDATE_COMPOSITE: Final[dict[str, Any]] = {
-    "op_id": OP_ID_RESOURCE_POOL_UPDATE,
-    "handler": resource_pool_update_composite,
-    "summary": "Change the CPU and memory shares, limits and reservations of a resource pool.",
-    "description": (
-        "Changes the CPU or memory allocation of one resource pool, named by its id. Reads "
-        "the pool first and keeps every field you leave out. Returns the pool before and "
-        "after. Waits for approval."
+#: The registration row; ``_register.py`` collects it at start-up.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_RESOURCE_POOL_UPDATE,
+        handler=resource_pool_update_composite,
+        summary="Change the CPU and memory shares, limits and reservations of a resource pool.",
+        description=(
+            "Changes the CPU or memory allocation of one resource pool, named by its id. Reads "
+            "the pool first and keeps every field you leave out. Returns the pool before and "
+            "after. Waits for approval."
+        ),
+        parameter_schema=RESOURCE_POOL_UPDATE_PARAMETER_SCHEMA,
+        response_schema=RESOURCE_POOL_UPDATE_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "write", "cluster", "resource-pool"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=RESOURCE_POOL_UPDATE_LLM_INSTRUCTIONS,
+        preview=_resource_pool_update_preview,
     ),
-    "parameter_schema": RESOURCE_POOL_UPDATE_PARAMETER_SCHEMA,
-    "response_schema": RESOURCE_POOL_UPDATE_RESPONSE_SCHEMA,
-    "group_key": "cluster",
-    "tags": ["composite", "write", "cluster", "resource-pool"],
-    "safety_level": "dangerous",
-    "requires_approval": True,
-    "llm_instructions": RESOURCE_POOL_UPDATE_LLM_INSTRUCTIONS,
-}
+)

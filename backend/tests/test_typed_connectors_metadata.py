@@ -92,9 +92,13 @@ _VMWARE_COMPOSITE_GROUPS: Final[frozenset[str]] = frozenset(
         "content_library",
         # Shared with the two typed licence reads.
         "vmware-licensing",
+        # Host local users and Active Directory; shared with two typed reads.
+        "vmware-host-access",
         "alarms",
         # The migration inventory read.
         "migration",
+        # The host security changes; shared with the two typed reads.
+        "vmware-host-security",
         # Install a new vCenter; shared with the typed status read.
         "vcenter_install",
         # Datacenter create / delete, object rename / move.

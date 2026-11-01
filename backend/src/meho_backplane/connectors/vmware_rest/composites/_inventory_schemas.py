@@ -11,8 +11,8 @@ The four operations of the ``inventory`` group:
 * ``vmware.composite.object.rename`` (caution) and
   ``vmware.composite.object.move`` (dangerous) -- :mod:`._object_rename_move`.
 
-Each row is a dict of ``_CompositeSpec`` keyword arguments, so
-:mod:`._register` adds them with one line.
+The registration rows are ``COMPOSITES``; :mod:`._register` collects them
+from every module of the package at start-up.
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ from meho_backplane.connectors.vmware_rest.composites._inventory_tree import (
     DATACENTER_FOLDER_MOID_PATTERN,
     OP_ID_DATACENTER_CREATE,
     OP_ID_DATACENTER_DELETE,
+    _datacenter_create_preview,
+    _datacenter_delete_preview,
     datacenter_create_composite,
     datacenter_delete_composite,
 )
@@ -33,9 +35,12 @@ from meho_backplane.connectors.vmware_rest.composites._object_rename_move import
     OP_ID_OBJECT_MOVE,
     OP_ID_OBJECT_RENAME,
     RENAME_KINDS,
+    _object_move_preview,
+    _object_rename_preview,
     object_move_composite,
     object_rename_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites.schemas import (
     _DELETE_STATUS_COMMON,
     _ISSUE_ITEM_SCHEMA,
@@ -43,7 +48,7 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     _teardown_response_schema,
 )
 
-__all__ = ["INVENTORY_COMPOSITES", "INVENTORY_GROUP_KEY", "INVENTORY_WHEN_TO_USE"]
+__all__ = ["COMPOSITES", "INVENTORY_GROUP_KEY", "INVENTORY_WHEN_TO_USE"]
 
 INVENTORY_GROUP_KEY: Final = "inventory"
 
@@ -419,74 +424,80 @@ _OBJECT_MOVE_LLM_INSTRUCTIONS: Final[dict[str, Any]] = {
     ),
 }
 
-#: The registration rows, as ``_CompositeSpec`` keyword arguments.
-INVENTORY_COMPOSITES: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "op_id": OP_ID_DATACENTER_CREATE,
-        "handler": datacenter_create_composite,
-        "summary": "Create a new, empty datacenter in a vCenter.",
-        "description": (
+#: The registration rows; ``_register.py`` collects them at start-up.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_DATACENTER_CREATE,
+        handler=datacenter_create_composite,
+        summary="Create a new, empty datacenter in a vCenter.",
+        description=(
             "Creates a datacenter in the root folder or in a datacenter folder "
             "(Folder.CreateDatacenter), then reads it back with its four root folders. "
             "Waits for approval."
         ),
-        "parameter_schema": _DATACENTER_CREATE_PARAMETER_SCHEMA,
-        "response_schema": _DATACENTER_CREATE_RESPONSE_SCHEMA,
-        "group_key": INVENTORY_GROUP_KEY,
-        "tags": ["composite", "write", "inventory", "datacenter", "vi-json"],
-        "safety_level": "caution",
-        "requires_approval": True,
-        "llm_instructions": _DATACENTER_CREATE_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_DATACENTER_DELETE,
-        "handler": datacenter_delete_composite,
-        "summary": "Delete an empty datacenter.",
-        "description": (
+        parameter_schema=_DATACENTER_CREATE_PARAMETER_SCHEMA,
+        response_schema=_DATACENTER_CREATE_RESPONSE_SCHEMA,
+        group_key=INVENTORY_GROUP_KEY,
+        tags=["composite", "write", "inventory", "datacenter", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=_DATACENTER_CREATE_LLM_INSTRUCTIONS,
+        preview=_datacenter_create_preview,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_DATACENTER_DELETE,
+        handler=datacenter_delete_composite,
+        summary="Delete an empty datacenter.",
+        description=(
             "Deletes one datacenter (Datacenter.Destroy_Task). Refused before any change "
             "while it holds a host, cluster, VM, datastore, network or folder; the answer "
             "names each one. A second person must always approve."
         ),
-        "parameter_schema": _DATACENTER_DELETE_PARAMETER_SCHEMA,
-        "response_schema": _DATACENTER_DELETE_RESPONSE_SCHEMA,
-        "group_key": INVENTORY_GROUP_KEY,
-        "tags": ["composite", "write", "inventory", "datacenter", "destroy", "destructive"],
-        "safety_level": "destructive",
-        "requires_approval": True,
-        "llm_instructions": _DATACENTER_DELETE_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_OBJECT_RENAME,
-        "handler": object_rename_composite,
-        "summary": "Rename one inventory object (VM, folder, cluster, datastore, network, ...).",
-        "description": (
+        parameter_schema=_DATACENTER_DELETE_PARAMETER_SCHEMA,
+        response_schema=_DATACENTER_DELETE_RESPONSE_SCHEMA,
+        group_key=INVENTORY_GROUP_KEY,
+        tags=["composite", "write", "inventory", "datacenter", "destroy", "destructive"],
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions=_DATACENTER_DELETE_LLM_INSTRUCTIONS,
+        preview=_datacenter_delete_preview,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_OBJECT_RENAME,
+        handler=object_rename_composite,
+        summary="Rename one inventory object (VM, folder, cluster, datastore, network, ...).",
+        description=(
             "Renames one object, named by kind and id (ManagedEntity.Rename_Task), then "
             "reads the name back. Sends nothing when it has the name already. Waits for "
             "approval."
         ),
-        "parameter_schema": _OBJECT_RENAME_PARAMETER_SCHEMA,
-        "response_schema": _OBJECT_RENAME_RESPONSE_SCHEMA,
-        "group_key": INVENTORY_GROUP_KEY,
-        "tags": ["composite", "write", "inventory", "rename", "vi-json"],
-        "safety_level": "caution",
-        "requires_approval": True,
-        "llm_instructions": _OBJECT_RENAME_LLM_INSTRUCTIONS,
-    },
-    {
-        "op_id": OP_ID_OBJECT_MOVE,
-        "handler": object_move_composite,
-        "summary": "Move inventory objects into a folder; the folder's permissions then apply.",
-        "description": (
+        parameter_schema=_OBJECT_RENAME_PARAMETER_SCHEMA,
+        response_schema=_OBJECT_RENAME_RESPONSE_SCHEMA,
+        group_key=INVENTORY_GROUP_KEY,
+        tags=["composite", "write", "inventory", "rename", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=_OBJECT_RENAME_LLM_INSTRUCTIONS,
+        preview=_object_rename_preview,
+        classifier_other=True,
+    ),
+    CompositeSpec(
+        op_id=OP_ID_OBJECT_MOVE,
+        handler=object_move_composite,
+        summary="Move inventory objects into a folder; the folder's permissions then apply.",
+        description=(
             "Moves up to 50 objects into one folder (Folder.MoveIntoFolder_Task). Refuses "
             "a missing object or one the folder cannot hold, before any change. Reads each "
             "object's parent back. Waits for approval."
         ),
-        "parameter_schema": _OBJECT_MOVE_PARAMETER_SCHEMA,
-        "response_schema": _OBJECT_MOVE_RESPONSE_SCHEMA,
-        "group_key": INVENTORY_GROUP_KEY,
-        "tags": ["composite", "write", "inventory", "move", "vi-json"],
-        "safety_level": "dangerous",
-        "requires_approval": True,
-        "llm_instructions": _OBJECT_MOVE_LLM_INSTRUCTIONS,
-    },
+        parameter_schema=_OBJECT_MOVE_PARAMETER_SCHEMA,
+        response_schema=_OBJECT_MOVE_RESPONSE_SCHEMA,
+        group_key=INVENTORY_GROUP_KEY,
+        tags=["composite", "write", "inventory", "move", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=_OBJECT_MOVE_LLM_INSTRUCTIONS,
+        preview=_object_move_preview,
+        classifier_other=True,
+    ),
 )

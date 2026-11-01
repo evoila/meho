@@ -1,6 +1,6 @@
 {
   "name": "meho",
-  "version": "0.31.0",
+  "version": "0.32.0",
   "description": "MEHO-first operations for Claude Code: MCP wiring to a MEHO backplane via the mcp-remote stdio shim, plus the Layer-2 routing discipline as skills.",
   "author": {
     "name": "evoila Group"

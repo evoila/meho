@@ -59,13 +59,15 @@ func newLoginCmd() *cobra.Command {
 			"that backend. Set MEHO_KEYRING_DISABLE=1 to force the file " +
 			"backend unconditionally (useful on shared dev hosts where the " +
 			"keyring belongs to another session, or in CI).\n\n" +
-			"Staying logged in across idle timeouts: by default the " +
-			"device-code token dies at the realm's SSO idle timeout, forcing " +
-			"a fresh device dance. Pass --offline to request a long-lived " +
-			"offline refresh token (OIDC offline_access) so the CLI silently " +
-			"renews across idle gaps; the backplane's meho-cli client must be " +
-			"provisioned to allow it (see `meho admin keycloak " +
-			"bootstrap-clients --cli-offline-access`).\n\n" +
+			"Staying logged in: by default login asks for a long login " +
+			"(the OIDC `offline_access` scope). The CLI then renews the " +
+			"login by itself. On MEHO's built-in login server it ends after " +
+			"48 hours without use, or after 7 days at most. Pass " +
+			"--offline=false for a short login that ends at the realm's SSO " +
+			"idle timeout (30 minutes on a default Keycloak). When the login " +
+			"server does not offer `offline_access` to the meho-cli client " +
+			"(an older realm), login retries without it and prints one line " +
+			"that says how an admin fixes the realm.\n\n" +
 			"Discovery: by default the CLI fetches the backplane's auth-config " +
 			"endpoint at <backplane-url>/api/v1/auth-config to learn the realm " +
 			"issuer and the public device-code client_id. Pass --issuer and/or " +
@@ -176,28 +178,12 @@ func newLoginCmd() *cobra.Command {
 			flowCtx, cancelFlow := auth.NewDeviceFlowContext(parentCtx)
 			defer cancelFlow()
 
-			// --offline requests a long-lived offline refresh token (OIDC
-			// offline_access) so the session survives the realm's SSO
-			// idle timeout. Sugar over `--scope offline_access`; openid
-			// is ensured alongside so the offline session stays a proper
-			// OIDC session (mirrors RunDeviceFlow's default-scope
-			// injection). The backplane's meho-cli client must allow
-			// offline_access (provision with `meho admin keycloak
-			// bootstrap-clients --cli-offline-access`), else Keycloak
-			// rejects the device request with invalid_scope.
-			if offline && !slices.Contains(scopes, "offline_access") {
-				if len(scopes) == 0 {
-					scopes = []string{"openid"}
-				}
-				scopes = append(scopes, "offline_access")
-			}
-
-			result, err := auth.RunDeviceFlow(flowCtx, doc, cfg.ClientID, auth.DeviceFlowOptions{
+			result, err := deviceLogin(flowCtx, doc, cfg.ClientID, auth.DeviceFlowOptions{
 				HTTPClient:    httpClient,
 				Scopes:        scopes,
 				Prompter:      prompter,
 				ParentContext: parentCtx,
-			})
+			}, offline, errOut)
 			if err != nil {
 				// The device-authorization and token endpoints also live
 				// on the Keycloak host, so the same split-DNS hint
@@ -245,13 +231,12 @@ func newLoginCmd() *cobra.Command {
 		"OAuth client_id to use for the device-code flow (auto-discovered when blank)")
 	cmd.Flags().StringSliceVar(&scopes, "scope", nil,
 		"OAuth scopes to request (default: openid). Repeat or comma-separate for multiple.")
-	cmd.Flags().BoolVar(&offline, "offline", false,
-		"request a long-lived offline refresh token (adds the OIDC "+
-			"`offline_access` scope) so you stay logged in across SSO idle "+
-			"timeouts instead of re-running the device dance. Requires the "+
-			"backplane's meho-cli client to allow offline_access (provision "+
-			"via `meho admin keycloak bootstrap-clients --cli-offline-access`). "+
-			"The refresh token is stored like any credential (OS keyring "+
+	cmd.Flags().BoolVar(&offline, "offline", true,
+		"ask for a long login that renews itself (adds the OIDC "+
+			"`offline_access` scope). On by default; --offline=false asks "+
+			"for a short login that ends at the realm's SSO idle timeout. "+
+			"When the login server refuses the scope, login retries without "+
+			"it. The refresh token is stored like any credential (OS keyring "+
 			"first, 0600 file fallback) — treat it as a long-lived secret")
 	cmd.Flags().BoolVar(&insecureAllowHTTP, "insecure-allow-http", false,
 		"permit a plaintext http:// backplane URL for a localhost backplane only "+
@@ -266,6 +251,40 @@ func newLoginCmd() *cobra.Command {
 			"with 'TOKEN=$(meho login --print-token <backplane-url>)'. WARNING: the value is a live bearer "+
 			"credential — never log it or paste it into shared channels")
 	return cmd
+}
+
+// offlineFallbackNote is the one line `meho login` prints when the
+// login server refuses `offline_access` and the login goes on without it.
+const offlineFallbackNote = "note: the login server does not offer a long login " +
+	"(offline_access) to this client, so this login ends after a short time " +
+	"without use (30 minutes on a default Keycloak). To fix it, an admin " +
+	"upgrades MEHO, or runs `meho admin keycloak bootstrap-clients` on a " +
+	"Keycloak that MEHO does not install."
+
+// deviceLogin runs the device flow. With offline it also asks for
+// `offline_access` (and `openid`, so the session stays an OIDC
+// session), unless --scope already names it. When the login server
+// answers `invalid_scope` to a scope this function added (a realm
+// whose meho-cli client does not offer it), it prints
+// offlineFallbackNote to errOut and runs the flow again without it.
+// The device prompt is shown only after the server accepts the
+// request, so the person sees one prompt.
+func deviceLogin(ctx context.Context, doc *auth.DiscoveryDocument, clientID string, opts auth.DeviceFlowOptions, offline bool, errOut io.Writer) (*auth.LoginResult, error) {
+	short := opts.Scopes
+	if !offline || slices.Contains(short, "offline_access") {
+		return auth.RunDeviceFlow(ctx, doc, clientID, opts)
+	}
+	if len(short) == 0 {
+		short = []string{"openid"}
+	}
+	opts.Scopes = append(slices.Clone(short), "offline_access")
+	result, err := auth.RunDeviceFlow(ctx, doc, clientID, opts)
+	if err == nil || !auth.IsInvalidScope(err) {
+		return result, err
+	}
+	fmt.Fprintln(errOut, offlineFallbackNote)
+	opts.Scopes = short
+	return auth.RunDeviceFlow(ctx, doc, clientID, opts)
 }
 
 // hintKeycloakResolution rewraps err when it was caused by DNS

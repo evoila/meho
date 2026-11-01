@@ -57,7 +57,6 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
 )
 from meho_backplane.connectors.vmware_rest.composites.schemas import DATACENTER_MOID_PATTERN
 from meho_backplane.connectors.vmware_rest.ovf_import_control import OP_RETRIEVE_SERVICE_CONTENT
-from meho_backplane.operations._preview import register_preview_builder
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -368,7 +367,3 @@ async def _datacenter_delete_preview(ctx: PreviewContext) -> dict[str, Any] | No
     if plan.refusal is None and not plan.present:
         raise ValueError(f"datacenter {datacenter!r} does not exist; there is nothing to delete")
     return blast_radius(plan)
-
-
-register_preview_builder(OP_ID_DATACENTER_CREATE, _datacenter_create_preview)
-register_preview_builder(OP_ID_DATACENTER_DELETE, _datacenter_delete_preview)

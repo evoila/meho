@@ -42,7 +42,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
 )
 from meho_backplane.connectors.vmware_rest.vim_body import vim_moref
 from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, poll_vim_task
-from meho_backplane.operations._preview import preview_failure_reason, register_preview_builder
+from meho_backplane.operations._preview import preview_failure_reason
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -484,7 +484,3 @@ async def _object_move_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "folder_name": envelope["folder_name"],
         "objects": envelope["objects"],
     }
-
-
-register_preview_builder(OP_ID_OBJECT_RENAME, _object_rename_preview)
-register_preview_builder(OP_ID_OBJECT_MOVE, _object_move_preview)

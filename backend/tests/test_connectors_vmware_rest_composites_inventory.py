@@ -45,7 +45,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _write,
 )
 from meho_backplane.connectors.vmware_rest.composites._inventory_schemas import (
-    INVENTORY_COMPOSITES,
+    COMPOSITES as INVENTORY_COMPOSITES,
 )
 from meho_backplane.connectors.vmware_rest.composites._register import (
     register_vmware_composite_operations,
@@ -782,7 +782,7 @@ async def test_pool_update_preview_shows_what_it_will_send() -> None:
 
 
 def test_inventory_parameter_schemas_check_the_inputs() -> None:
-    schemas = {row["op_id"]: row["parameter_schema"] for row in INVENTORY_COMPOSITES}
+    schemas = {row.op_id: row.parameter_schema for row in INVENTORY_COMPOSITES}
     move = Draft202012Validator(schemas[_MOVE])
     too_many = [{"object_type": "vm", "moid": f"vm-{n}"} for n in range(51)]
     assert not move.is_valid({"folder": "group-v7", "objects": too_many})

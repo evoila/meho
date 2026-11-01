@@ -110,6 +110,9 @@ from meho_backplane.connectors.vmware_rest.composites._host import (
 from meho_backplane.connectors.vmware_rest.composites._host_cluster_llm_instructions import (
     HOST_CLUSTER_LLM_INSTRUCTIONS,
 )
+from meho_backplane.connectors.vmware_rest.composites._host_config_ops import (
+    HOST_CONFIG_COMPOSITES,
+)
 from meho_backplane.connectors.vmware_rest.composites._host_membership_ops import (
     HOST_MEMBERSHIP_COMPOSITES,
 )
@@ -548,9 +551,13 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "(host.detach_from_vds, dangerous); mount an NFS export as a datastore "
         "(host.datastore_mount_nfs, dangerous); mark disks as flash or HDD "
         "(host.disk_mark_flash, dangerous); start, stop or restart an allowed "
-        "host service (host.service_control, dangerous). Choose the host by "
-        "name or moref. Pair with 'networking' before host.detach_from_vds, and "
-        "with 'cluster' or 'vm' for the reads before a change."
+        "host service (host.service_control, dangerous); set the NTP servers "
+        "(host.ntp.set, dangerous), the DNS servers, search domains and host "
+        "name (host.dns.set, dangerous) or the remote syslog targets "
+        "(host.syslog.set, dangerous). To read a host's NTP, DNS and syslog "
+        "settings, use vmware.host.config.show. Choose the host by name or "
+        "moref. Pair with 'networking' before host.detach_from_vds, and with "
+        "'cluster' or 'vm' for the reads before a change."
     ),
     "guest": (
         "Use for guest OS customization: how a cloned VM gets its host name and "
@@ -1509,8 +1516,8 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         summary="Start, stop or restart an allowed host service; optionally set its start policy.",
         description=(
             "Starts, stops or restarts one ESXi host service and can set when it starts. Only "
-            "TSM-SSH, TSM, ntpd and ptpd are allowed; any other service is refused before "
-            "anything changes. Like 'govc host.service'."
+            "TSM-SSH, TSM, ntpd, ptpd, snmpd, sfcbd-watchdog and slpd are allowed; others are "
+            "refused before anything changes. Like 'govc host.service'."
         ),
         parameter_schema=HOST_SERVICE_CONTROL_PARAMETER_SCHEMA,
         response_schema=HOST_SERVICE_CONTROL_RESPONSE_SCHEMA,
@@ -2145,6 +2152,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     # Host membership (#4349): add (a vendor job), move, connect, disconnect,
     # remove; the rows live in their own module.
     *(_CompositeSpec(**row) for row in HOST_MEMBERSHIP_COMPOSITES),
+    # Set NTP, DNS and the syslog targets of one host, dangerous / approval;
+    # the rows live in their own module.
+    *(_CompositeSpec(**row) for row in HOST_CONFIG_COMPOSITES),
 )
 
 

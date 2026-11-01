@@ -178,6 +178,10 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.host.connect",
     "vmware.composite.host.disconnect",
     "vmware.composite.host.remove",
+    # Host NTP, DNS and syslog: dangerous + approval.
+    "vmware.composite.host.ntp.set",
+    "vmware.composite.host.dns.set",
+    "vmware.composite.host.syslog.set",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -377,6 +381,18 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
         "meho_backplane.connectors.vmware_rest.composites._vcenter_answer."
         "vcenter_deployment_answer_composite"
     ),
+    "vmware.composite.host.ntp.set": (
+        "meho_backplane.connectors.vmware_rest.composites._host_config_writes."
+        "host_ntp_set_composite"
+    ),
+    "vmware.composite.host.dns.set": (
+        "meho_backplane.connectors.vmware_rest.composites._host_config_writes."
+        "host_dns_set_composite"
+    ),
+    "vmware.composite.host.syslog.set": (
+        "meho_backplane.connectors.vmware_rest.composites._host_config_writes."
+        "host_syslog_set_composite"
+    ),
     "vmware.composite.guest.customization_spec.create": (
         "meho_backplane.connectors.vmware_rest.composites._write."
         "guest_customization_spec_create_composite"
@@ -503,6 +519,9 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.host.remove": "host",
     "vmware.composite.host.evacuate": "host",
     "vmware.composite.host.maintenance.exit": "host",
+    "vmware.composite.host.ntp.set": "host",
+    "vmware.composite.host.dns.set": "host",
+    "vmware.composite.host.syslog.set": "host",
     "vmware.composite.host.detach_from_vds": "host",
     "vmware.composite.network.portgroup.create": "networking",
     "vmware.composite.network.portgroup.security.set": "networking",

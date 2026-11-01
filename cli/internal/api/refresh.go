@@ -96,7 +96,7 @@ func (b *tokenBox) refresh(ctx context.Context) error {
 	// and never forwards Config.Scopes, so an explicit scope here would
 	// be inert. Omitting scope is also the correct behaviour — per RFC
 	// 6749 §6 an omitted scope preserves the originally-granted scope,
-	// which is exactly what keeps a `meho login --offline` token offline
+	// which is exactly what keeps an offline `meho login` token offline
 	// across rotations. Narrowing the scope on refresh (e.g. back to
 	// ["openid"]) is what Keycloak rejects with invalid_scope for
 	// offline sessions (#2902).

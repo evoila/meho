@@ -34,6 +34,7 @@ from meho_backplane.connectors.vmware_rest.composites._library_local_schemas imp
     CONTENT_LIBRARY_CREATE_PARAMETER_SCHEMA,
     CONTENT_LIBRARY_CREATE_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vmware_rest.composites._spec import CompositeSpec
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _OP_FIND_LIBRARY,
     _OP_LIST_DATASTORES,
@@ -46,7 +47,6 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
 from meho_backplane.operations._preview import (
     PreviewContext,
     preview_failure_reason,
-    register_preview_builder,
 )
 
 if TYPE_CHECKING:
@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
-    "CONTENT_LIBRARY_CREATE_COMPOSITE",
+    "COMPOSITES",
     "content_library_create_composite",
 ]
 
@@ -241,24 +241,24 @@ async def _content_library_create_preview(ctx: PreviewContext) -> dict[str, Any]
     return {**effect, "summary": summary, "datastore_id": datastore_id, "existing": existing}
 
 
-register_preview_builder(OP_ID_CONTENT_LIBRARY_CREATE, _content_library_create_preview)
-
-
-#: The registration row, as ``_CompositeSpec`` keyword arguments.
-CONTENT_LIBRARY_CREATE_COMPOSITE: Final[dict[str, Any]] = {
-    "op_id": OP_ID_CONTENT_LIBRARY_CREATE,
-    "handler": content_library_create_composite,
-    "summary": "Create a local content library on one datastore.",
-    "description": (
-        "Creates a local content library on a datastore (found by name) and reads it "
-        "back. If a local library with this name exists, nothing is sent (unchanged). "
-        "Waits until a second person approves."
+#: The registration row.
+COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
+    CompositeSpec(
+        op_id=OP_ID_CONTENT_LIBRARY_CREATE,
+        handler=content_library_create_composite,
+        summary="Create a local content library on one datastore.",
+        description=(
+            "Creates a local content library on a datastore (found by name) and reads it "
+            "back. If a local library with this name exists, nothing is sent (unchanged). "
+            "Waits until a second person approves."
+        ),
+        parameter_schema=CONTENT_LIBRARY_CREATE_PARAMETER_SCHEMA,
+        response_schema=CONTENT_LIBRARY_CREATE_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=["composite", "write", "content-library", "local"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=CONTENT_LIBRARY_CREATE_LLM_INSTRUCTIONS,
+        preview=_content_library_create_preview,
     ),
-    "parameter_schema": CONTENT_LIBRARY_CREATE_PARAMETER_SCHEMA,
-    "response_schema": CONTENT_LIBRARY_CREATE_RESPONSE_SCHEMA,
-    "group_key": "content_library",
-    "tags": ["composite", "write", "content-library", "local"],
-    "safety_level": "caution",
-    "requires_approval": True,
-    "llm_instructions": CONTENT_LIBRARY_CREATE_LLM_INSTRUCTIONS,
-}
+)

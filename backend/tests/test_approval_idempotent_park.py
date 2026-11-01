@@ -662,7 +662,9 @@ async def test_agent_resume_moves_list_and_show_off_started(
         await approve_request(s, row.id, operator=_operator(sub="op-approver"))
         await s.commit()
 
-    async def _redispatch(_operator: Any, _arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _redispatch(
+        _operator: Any, _arguments: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
         return envelope
 
     monkeypatch.setattr(meta_tools_module, "call_operation_with_approval", _redispatch)

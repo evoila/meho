@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 from jsonschema import Draft202012Validator
 
+from meho_backplane.connectors.vcf_automation.day2_ops import VCFA_DAY2_OPS
 from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
 from meho_backplane.connectors.vcf_automation.feature_flag_ops import VCFA_FEATURE_FLAG_OPS
 from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
@@ -26,7 +27,7 @@ from meho_backplane.connectors.vcf_automation.network_ops import VCFA_NETWORK_OP
 from meho_backplane.connectors.vcf_automation.provisioning_ops import VCFA_PROVISIONING_OPS
 from meho_backplane.connectors.vcf_automation.typed_ops import VCFA_TYPED_OPS
 from meho_backplane.connectors.vra8.infra_ops import VRA8_INFRA_OPS
-from meho_backplane.connectors.vra8.typed_ops import VRA8_TYPED_OPS
+from meho_backplane.connectors.vra8.typed_ops import VRA8_DAY2_OPS, VRA8_TYPED_OPS
 
 _OPS: list[Any] = [
     *VCFA_TYPED_OPS,
@@ -35,7 +36,9 @@ _OPS: list[Any] = [
     *VCFA_NETWORK_OPS,
     *VCFA_DEPLOY_OPS,
     *VCFA_FEATURE_FLAG_OPS,
+    *VCFA_DAY2_OPS,
     *VRA8_TYPED_OPS,
+    *VRA8_DAY2_OPS,
     *VCFA_INFRA_OPS,
     *VRA8_INFRA_OPS,
 ]
@@ -44,8 +47,8 @@ _OPS: list[Any] = [
 _REAL_LOOKING = re.compile(r"\b\d{1,3}(\.\d{1,3}){3}\b|\b[a-z0-9-]+\.(com|net|org|local|lan)\b")
 
 
-def test_all_59_operations_are_covered() -> None:
-    assert len({op.op_id for op in _OPS}) == 59
+def test_all_76_operations_are_covered() -> None:
+    assert len({op.op_id for op in _OPS}) == 76
 
 
 @pytest.mark.parametrize("op", _OPS, ids=lambda op: op.op_id)

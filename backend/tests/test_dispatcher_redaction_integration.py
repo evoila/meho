@@ -6,9 +6,10 @@
 Acceptance criteria covered:
 
 * An operation returning a payload with a bearer token / kubeconfig
-  returns the **redacted** form to the caller; the raw is retrievable
-  from the audit row; a manifest is recorded.
-* User-path and agent-path calls both have redacted-out / raw-in-audit.
+  returns the **redacted** form to the caller; the audit row stores the
+  raw payload with a keyed fingerprint in place of each hidden value; a
+  manifest is recorded.
+* User-path and agent-path calls both have redacted-out / fingerprint-in-audit.
 * Per-``connector_id`` policy selection works (a registered override
   beats the default).
 * Default-safe: no policy registered → conservative default still
@@ -268,9 +269,11 @@ async def test_user_path_redacts_response_and_audits_raw(
     serialised = str(result.result)
     assert "Bearer eyJ" not in serialised
     assert "[REDACTED:authorization_header]" in serialised
-    assert "[REDACTED:kubeconfig]" in serialised
+    # The engine redacted the kubeconfig text; the default view of every
+    # answer then hides the whole secret-named field.
+    assert result.result["kubeconfig"] == "[REDACTED:param_name]"
 
-    # 2) Audit row holds raw payload + manifest.
+    # 2) Audit row holds the raw payload with fingerprints + manifest.
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
         rows = (
@@ -282,7 +285,8 @@ async def test_user_path_redacts_response_and_audits_raw(
     row = rows[0]
     assert row.status_code == 200
     assert row.raw_payload is not None
-    assert "Bearer eyJ" in str(row.raw_payload)
+    assert "Bearer eyJ" not in str(row.raw_payload)
+    assert "[FINGERPRINT:hmac-sha256:" in str(row.raw_payload)
     # 3) Manifest persisted as a list of dicts; at least authorization
     #    header + kubeconfig rules fired.
     assert isinstance(row.redaction_manifest, list)
@@ -299,7 +303,7 @@ async def test_agent_path_redacts_response_and_audits_raw(
 ) -> None:
     """Agent-path dispatch (``PrincipalKind.AGENT``) walks the same
     redaction middleware: the agent / LLM never sees the raw bearer,
-    the audit row still keeps the raw payload + manifest."""
+    the audit row keeps the raw payload with fingerprints + the manifest."""
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
     await register_typed_operation(
         product="vault",
@@ -343,7 +347,8 @@ async def test_agent_path_redacts_response_and_audits_raw(
         )
     assert len(rows) == 1
     row = rows[0]
-    assert "Bearer eyJ" in str(row.raw_payload)
+    assert "Bearer eyJ" not in str(row.raw_payload)
+    assert "[FINGERPRINT:hmac-sha256:" in str(row.raw_payload)
     assert isinstance(row.redaction_manifest, list)
     assert any(entry["rule"] == "strip-authorization-header" for entry in row.redaction_manifest)
     assert row.payload["redaction_policy_id"] == "connector-boundary-default"
@@ -458,7 +463,7 @@ async def test_default_safe_is_not_pass_through(
 
 
 @pytest.mark.asyncio
-async def test_refresh_token_label_redacted_in_caller_view_raw_retained_in_audit(
+async def test_refresh_token_label_redacted_in_caller_view_fingerprint_in_audit(
     stub_embedding_service: AsyncMock,
 ) -> None:
     """Regression: a connector response embedding ``refresh_token: <value>``
@@ -503,7 +508,7 @@ async def test_refresh_token_label_redacted_in_caller_view_raw_retained_in_audit
     assert raw_value not in serialised
     assert "[REDACTED:api_key]" in serialised
 
-    # 2) Audit row keeps the unredacted raw payload.
+    # 2) Audit row stores a fingerprint in place of the token.
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
         rows = (
@@ -518,7 +523,8 @@ async def test_refresh_token_label_redacted_in_caller_view_raw_retained_in_audit
     assert len(rows) == 1
     row = rows[0]
     assert row.raw_payload is not None
-    assert raw_value in str(row.raw_payload)
+    assert raw_value not in str(row.raw_payload)
+    assert "[FINGERPRINT:hmac-sha256:" in str(row.raw_payload)
 
     # 3) Manifest records a strip-api-key firing.
     assert isinstance(row.redaction_manifest, list)

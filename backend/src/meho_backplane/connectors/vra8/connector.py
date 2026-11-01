@@ -92,6 +92,11 @@ for Aria Automation 8 and VCF Automation 9 in
 :mod:`meho_backplane.connectors.vcf_automation._infra` and ``._infra_changes``. Every
 change waits for approval.
 
+The day-2 ops (group ``vcfa-vra8-day2``: day-2 actions, lease, delete, machines and
+disks) are written once for Aria Automation 8 and VCF Automation 9 in
+:mod:`meho_backplane.connectors.vcf_automation.day2_ops`; the shims below call
+:mod:`meho_backplane.connectors.vcf_automation._day2`. Every change waits for approval.
+
 One more read, ``vcfa.vra8.api_file.get`` (:mod:`.api_file`, group ``vcfa-vra8-api-files``),
 reads one API description page or file the appliance serves, so the 8.18 files can be
 pinned with their size, SHA-256 and the build the Orchestrator reports
@@ -574,6 +579,90 @@ class Vra8Connector(HttpConnector):
         from meho_backplane.connectors.vcf_automation import _infra_changes
 
         return await _infra_changes.project_create(
+            self, operator, target, params, prefix="vcfa.vra8"
+        )
+
+    # ------------------------------------------------------------------
+    # Day-2 ops, written once for Aria Automation 8 and VCF Automation 9.
+    # Thin shims over ``vcf_automation._day2``; metadata in
+    # ``vcf_automation.day2_ops`` (``VRA8_DAY2_OPS`` here).
+    # ------------------------------------------------------------------
+
+    async def deployment_actions_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.deployment.actions.list`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.deployment_actions_list(
+            self, operator, target, params, prefix="vcfa.vra8"
+        )
+
+    async def deployment_action_run(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.deployment.action.run`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.deployment_action_run(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def resource_action_run(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.resource.action.run`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.resource_action_run(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def deployment_lease_change(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.deployment.lease.change`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.deployment_lease_change(
+            self, operator, target, params, prefix="vcfa.vra8"
+        )
+
+    async def deployment_delete(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.deployment.delete`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.deployment_delete(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def machine_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.machine.list`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.machine_list(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def block_device_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.block_device.list`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.block_device_list(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def machine_create(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.machine.create`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2_create
+
+        return await _day2_create.machine_create(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def block_device_create(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.block_device.create`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2_create
+
+        return await _day2_create.block_device_create(
             self, operator, target, params, prefix="vcfa.vra8"
         )
 

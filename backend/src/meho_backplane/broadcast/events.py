@@ -86,6 +86,41 @@ __all__ = [
 ]
 
 
+#: Generic vCenter REST reads whose answer holds credentials, as the
+#: vendor ``vcenter.yaml`` writes the paths: proxy settings, content
+#: libraries, report download tokens, deployment and migration specs,
+#: guest customization specs, identity providers and broker clients, and
+#: Supervisor image registries. The vCenter 8.0 vendor file names some
+#: path parameters differently (``{library_id}``,
+#: ``{container_image_registry}``), so those reads appear in both
+#: spellings. :data:`_CREDENTIAL_READ_OPS` lists each one twice, with and
+#: without the ``/api`` base.
+_VCENTER_CREDENTIAL_READ_PATHS: Final[tuple[str, ...]] = (
+    "/appliance/networking/proxy",
+    "/appliance/networking/proxy/{protocol}",
+    "/content/library/{libraryId}",
+    "/content/local-library/{libraryId}",
+    "/content/subscribed-library/{libraryId}",
+    "/content/library/{library_id}",
+    "/content/local-library/{library_id}",
+    "/content/subscribed-library/{library_id}",
+    "/esx/hcl/reports/{report}",
+    "/vcenter/lcm/reports/{report}",
+    "/vcenter/deployment/install",
+    "/vcenter/deployment/upgrade",
+    "/vcenter/deployment/migrate",
+    "/vcenter/lcm/deployment/migration-upgrade",
+    "/vcenter/guest/customization-specs/{name}",
+    "/vcenter/identity/providers/{provider}",
+    "/vcenter/identity/broker/tenants/{tenant}/admin-client",
+    "/vcenter/identity/broker/tenants/operator-client",
+    "/vcenter/namespace-management/supervisors/{supervisor}/container-image-registries",
+    "/vcenter/namespace-management/supervisors/{supervisor}"
+    "/container-image-registries/{containerImageRegistry}",
+    "/vcenter/namespace-management/supervisors/{supervisor}"
+    "/container-image-registries/{container_image_registry}",
+)
+
 #: Op-ids that classify as ``credential_read``. Extensible — every
 #: future credential-access verb (e.g. ``vault.transit.decrypt``,
 #: ``secretsmanager.get``, ``onepassword.read``) gets added here when
@@ -149,6 +184,21 @@ _CREDENTIAL_READ_OPS: Final[frozenset[str]] = frozenset(
         "GET:/v1/users/local/admin",
         "GET:/v1/identity-providers",
         "GET:/v1/identity-providers/{id}",
+        # The VCF Installer bring-up spec carries the host, NSX, vCenter and
+        # SDDC Manager passwords.
+        "GET:/v1/sddcs/{id}/spec",
+        # Generic vCenter reads whose answer holds credentials. The catalog
+        # rows ``vmware`` / ``9.0`` and ``8.0`` raise them to caution with
+        # approval; this entry scrubs the answer and collapses the broadcast.
+        # Each REST path is listed as the spec writes it and under the
+        # ``/api`` base, because the parser folds a relative ``servers.url``
+        # into every path.
+        *(f"GET:{path}" for path in _VCENTER_CREDENTIAL_READ_PATHS),
+        *(f"GET:/api{path}" for path in _VCENTER_CREDENTIAL_READ_PATHS),
+        # The older-API (VI-JSON) host config (IPMI password) and precheck
+        # remediation result (host profile passwords).
+        "GET:/HostSystem/{moId}/config",
+        "GET:/HostSystem/{moId}/precheckRemediationResult",
         # #4617 -- a BIND config file can hold TSIG and rndc key secrets.
         # The answer is one text field, so the Tier-1 ``bind_key_secret``
         # rule does the redaction; this entry collapses the broadcast and
@@ -270,6 +320,13 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # stores the approval input encrypted, and the flight recorder keeps
         # no body for it.
         "msad.user.set-password",
+        # The fleet locker writes. The password and the private key come from
+        # Vault at run time and go in the request body; params carry only
+        # Vault references. The pin keeps the body out of the flight recorder
+        # (the generate answer holds the new private key) and the params off
+        # the feed.
+        "fleet.locker.password.add",
+        "fleet.locker.certificate.import",
         # G-Node/RKE2-T3 #2430 — the RKE2 node-config write op. Its ``patch``
         # param carries key -> value edits, and an RKE2 ``config.yaml`` body
         # holds ``token:`` / ``agent-token:`` join credentials, so a plain
@@ -279,11 +336,10 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         "rke2.node.config.update",
         # #2892 — the GOSC customization-spec create composite. Its params
         # carry Windows sysprep credentials (``windows_admin_password`` /
-        # ``windows_product_key`` / ``windows_domain_admin_password``). The
-        # ``password`` fields trip the key-name scrub, but ``product_key``
-        # does not (``key`` is neither an anywhere- nor a final-position
-        # secret token), so a plain ``write`` classification (the ``.create``
-        # suffix) would broadcast the product key in full. Pinning it
+        # ``windows_product_key`` / ``windows_domain_admin_password``). All
+        # three trip the key-name scrub (``product_key`` is a secret pair),
+        # and the pin makes the class explicit instead of relying on that
+        # runtime scrub for a plain ``write`` (the ``.create`` suffix). It
         # collapses the whole params dict to aggregate-only (#1503); the
         # park-time preview additionally echoes identity fields only. The
         # sibling ``vmware.composite.vm.customize`` carries only a spec-name
@@ -430,6 +486,21 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # ``vmware.appliance.local_account.policy.set`` sends only expiry
         # numbers and flags, so it is NOT pinned.
         "vmware.appliance.local_account.password.set",
+        # The HCX site pairing. Its params carry only a Vault *path*
+        # (``remote_secret_ref``); the remote site's user and password are
+        # read in-process and sent only in the ``POST
+        # /hybridity/api/cloudConfigs`` request BODY. The pin sets
+        # body_recorded=false for its flight-recorder spans, collapses the
+        # broadcast to aggregate-only and keeps a waiting approval's params in
+        # the encrypted handoff store.
+        "hcx.site_pairing.set",
+        # The VCF Installer proxy change and resource calculation. Like
+        # ``vcfa.provider.user.create``, their params carry only Vault paths
+        # (``password_secret_ref`` / ``password_refs``); the passwords are read
+        # in-process and sent only in the request BODY. The pin keeps those
+        # bodies out of traces and collapses the broadcast to aggregate-only.
+        "installer.system.proxy.set",
+        "installer.sddc.resources.calculate",
         # The two steps of a new vCenter install that send a password (#4394):
         # the appliance import (the root password, ``root_password_secret_ref``)
         # and the setup start (the SSO password,
@@ -439,6 +510,12 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # of the broadcast.
         "vmware.composite.vcenter.appliance.deploy",
         "vmware.composite.vcenter.install",
+        # Adding an ESXi host to vCenter (#4349): the params carry only a Vault
+        # path (``password_secret_ref``); the host password goes only into the
+        # ``AddHost_Task`` / ``AddStandaloneHost_Task`` request body. The pin
+        # keeps that body out of the flight recorder and the params out of the
+        # broadcast.
+        "vmware.composite.host.add",
         # The Keycloak login test. Its params carry only a Vault *path*
         # (``password_secret_ref``); the password is read in-process and sent
         # only in the token request BODY, and the token answer carries an
@@ -446,6 +523,23 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # flight-recorder spans, collapses the broadcast to aggregate-only and
         # keeps a waiting approval's params in the encrypted handoff store.
         "keycloak.user.check_login",
+        # The host local-user create and password change, and the host's
+        # Active Directory join. The params carry only a Vault path
+        # (``password_secret_ref``); the password goes only into the call to
+        # the host (``CreateUser`` / ``UpdateUser`` / ``JoinDomain_Task``).
+        # The pin keeps those bodies out of the flight recorder, the params
+        # out of the broadcast and the vendor text out of an error result.
+        "vmware.composite.host.local_user.create",
+        "vmware.composite.host.local_user.password.set",
+        "vmware.composite.host.ad.join",
+        # The three Cloud Builder changes that send a bring-up spec. Their
+        # params carry only Vault paths (``secrets``); the passwords are read
+        # in-process and go only into the Cloud Builder request BODY. The pin
+        # keeps those bodies out of the flight recorder and the params out of
+        # the broadcast.
+        "installer.cb.validation.start",
+        "installer.cb.sddc.start",
+        "installer.cb.sddc.retry",
     }
 )
 
@@ -1262,7 +1356,9 @@ _SECRET_NAME_TOKENS_FINAL: Final[frozenset[str]] = frozenset(
 #: positional rules above don't (``api_key``, ``private_key``,
 #: ``secret_id`` -- the Vault AppRole SecretID is secret material
 #: even though ``secret`` is non-final there; ``license_key`` -- a
-#: product licence is a credential a vendor file may show in clear).
+#: product licence is a credential a vendor file may show in clear;
+#: ``product_key`` -- the Windows product key of a vSphere guest
+#: customization spec, the same kind of value).
 _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
     {
         ("api", "key"),
@@ -1271,6 +1367,7 @@ _SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
         ("encryption", "key"),
         ("license", "key"),
         ("licence", "key"),
+        ("product", "key"),
         ("secret", "id"),
         ("secret", "value"),
         ("secret", "data"),
@@ -1359,7 +1456,9 @@ def is_secret_param_name_lowercased(name: str) -> bool:
     )
 
 
-def _scrub_secret_named_keys(node: Any) -> tuple[Any, bool]:
+def _scrub_secret_named_keys(
+    node: Any, *, hide_numbers: bool = False, plain_names: frozenset[str] = frozenset()
+) -> tuple[Any, bool]:
     """Replace values of secret-named keys; report whether any were found.
 
     The Tier-1 engine matches *labelled* secret shapes inside string
@@ -1376,31 +1475,54 @@ def _scrub_secret_named_keys(node: Any) -> tuple[Any, bool]:
     never ``bind_secret_id=true`` or ``secret_id_ttl=3600`` -- the
     Vault AppRole config attributes that would otherwise collapse a
     vetted full-detail write broadcast to aggregate on every dispatch.
+    With *hide_numbers* a number under a secret-shaped key is replaced
+    too (a PIN or a password stored as a number); booleans and ``None``
+    still pass through. A key in *plain_names* keeps its whole value, at
+    every depth, although its name is secret-shaped: an operation declared
+    that the field holds no secret (a date, a count, a policy, a file's
+    mode; :func:`meho_backplane.operations.register_plain_fields`).
     """
     if isinstance(node, Mapping):
         found = False
         scrubbed: dict[str, Any] = {}
         for key, value in node.items():
-            if _is_secret_param_name(str(key)) and isinstance(value, (str, Mapping, Sequence)):
-                scrubbed[str(key)] = _REDACTED_PARAM
+            name = str(key)
+            if name in plain_names:
+                scrubbed[name] = value
+                continue
+            if _is_secret_param_name(name) and _is_secret_value(value, hide_numbers):
+                scrubbed[name] = _REDACTED_PARAM
                 found = True
                 continue
-            child, child_found = _scrub_secret_named_keys(value)
-            scrubbed[str(key)] = child
+            child, child_found = _scrub_secret_named_keys(
+                value, hide_numbers=hide_numbers, plain_names=plain_names
+            )
+            scrubbed[name] = child
             found = found or child_found
         return scrubbed, found
     if isinstance(node, Sequence) and not isinstance(node, (str, bytes, bytearray)):
         items: list[Any] = []
         found = False
         for item in node:
-            child, child_found = _scrub_secret_named_keys(item)
+            child, child_found = _scrub_secret_named_keys(
+                item, hide_numbers=hide_numbers, plain_names=plain_names
+            )
             items.append(child)
             found = found or child_found
         return items, found
     return node, False
 
 
-def scrub_secret_named_values(node: Any) -> tuple[Any, bool]:
+def _is_secret_value(value: Any, hide_numbers: bool) -> bool:
+    """True when *value* under a secret-shaped key is replaced."""
+    if isinstance(value, (str, Mapping, Sequence)):
+        return True
+    return hide_numbers and isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def scrub_secret_named_values(
+    node: Any, *, hide_numbers: bool = False, plain_names: frozenset[str] = frozenset()
+) -> tuple[Any, bool]:
     """Key-name-aware secret scrub for a caller-bound dispatch response.
 
     Public entry to :func:`_scrub_secret_named_keys` (the same walk the
@@ -1413,17 +1535,20 @@ def scrub_secret_named_values(node: Any) -> tuple[Any, bool]:
     matches only *labelled* secret shapes inside string leaves, so a
     ``credential_read`` response like ``{"data": {"password": "..."}}``
     passes through it verbatim. The dispatcher runs this scrub on the
-    caller-bound response of a ``credential_read``-classified op by
-    default (#2467) so the raw value never reaches the ``call_operation``
-    caller / agent transcript; ``params.reveal_secret=true`` opts out.
-    The audit row keeps the raw result regardless (the raw payload is
-    captured before this scrub runs), mirroring the #2172 secret-handler
-    posture. Unlike :func:`scrub_broadcast_params` this does **not** run
-    the Tier-1 engine pass -- the boundary middleware already applied it
-    to the response, so this layer is only the structured-dict
-    key-name complement.
+    caller-bound answer of every operation by default so the raw value
+    never reaches the ``call_operation`` caller / agent transcript;
+    ``params.reveal_secret=true`` from a person or a service principal
+    opts out. The audit row stores a keyed fingerprint in place of each
+    value this scrub hides (:mod:`meho_backplane.operations._secret_values`).
+    Unlike :func:`scrub_broadcast_params` this does **not** run the Tier-1
+    engine pass -- the boundary middleware already applied it to the
+    response, so this layer is only the structured-dict key-name
+    complement. *hide_numbers* also replaces a number under a secret-shaped
+    key; the dispatch answer and the stored audit copy use it, the params
+    hash and the broadcast params scrub do not. *plain_names* are the
+    fields the operation declared as plain; they keep their value.
     """
-    return _scrub_secret_named_keys(node)
+    return _scrub_secret_named_keys(node, hide_numbers=hide_numbers, plain_names=plain_names)
 
 
 def scrub_broadcast_params(params: dict[str, Any]) -> tuple[dict[str, Any], bool]:

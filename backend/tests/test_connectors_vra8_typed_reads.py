@@ -81,6 +81,8 @@ _EXPECTED_GROUPS = {"vcfa-vra8-inventory", "vcfa-vra8-content", "vcfa-vra8-api-f
 #: The group of the infrastructure ops (tested in ``test_connectors_vra8_infra.py``);
 #: registered by the same registrar.
 _INFRA_GROUP = "vcfa-vra8-infra"
+#: The day-2 group (``VRA8_DAY2_OPS``), registered next to the read core.
+_DAY2_GROUP = "vcfa-vra8-day2"
 
 #: The reads that declare one required parameter.
 _REQUIRED_PARAMS = {
@@ -477,7 +479,7 @@ async def test_registered_groups_are_enabled(
     _stub_embedding: AsyncMock,
     session: AsyncSession,
 ) -> None:
-    """The read-core groups and the infra group land enabled with a when_to_use."""
+    """The read-core groups, the day-2 group and the infra group land enabled with a when_to_use."""
     await register_vra8_typed_operations()
 
     rows = (
@@ -492,7 +494,7 @@ async def test_registered_groups_are_enabled(
         .scalars()
         .all()
     )
-    assert {g.group_key for g in rows} == _EXPECTED_GROUPS | {_INFRA_GROUP}
+    assert {g.group_key for g in rows} == _EXPECTED_GROUPS | {_DAY2_GROUP, _INFRA_GROUP}
     assert all(g.review_status == "enabled" for g in rows)
     assert all(g.when_to_use.strip() for g in rows)
 
@@ -528,7 +530,7 @@ def test_typed_ops_table_is_exactly_the_read_core() -> None:
 
 
 def test_every_group_key_has_a_when_to_use() -> None:
-    assert set(VRA8_TYPED_WHEN_TO_USE_BY_GROUP) == _EXPECTED_GROUPS | {_INFRA_GROUP}
+    assert set(VRA8_TYPED_WHEN_TO_USE_BY_GROUP) == _EXPECTED_GROUPS | {_DAY2_GROUP, _INFRA_GROUP}
     used_groups = {op.group_key for op in VRA8_TYPED_OPS}
     assert used_groups == _EXPECTED_GROUPS
 

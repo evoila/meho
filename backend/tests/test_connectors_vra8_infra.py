@@ -128,6 +128,9 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
+_TENANT_ID = UUID("00000000-0000-0000-0000-000000004498")
+
+
 class _Target:
     """An Aria Automation 8.18 target (in the ``vcfa-vra8`` band ``>=8.0,<9.0``)."""
 
@@ -136,7 +139,7 @@ class _Target:
         self.fingerprint = type("_FP", (), {"version": "8.18"})()
         self.preferred_impl_id: str | None = None
         self.id: UUID = uuid.uuid4()
-        self.tenant_id: UUID = UUID("00000000-0000-0000-0000-000000004498")
+        self.tenant_id: UUID = _TENANT_ID
         self.name = "vra-infra"
         self.host = _HOST
         self.port = 443
@@ -150,7 +153,7 @@ _OPERATOR = Operator(
     name="vRA Infra Test",
     email=None,
     raw_jwt="<vra-infra-jwt>",
-    tenant_id=UUID("00000000-0000-0000-0000-000000004498"),
+    tenant_id=_TENANT_ID,
     tenant_role=TenantRole.TENANT_ADMIN,
 )
 
@@ -243,7 +246,7 @@ async def test_cloud_account_create_runs_with_the_vault_password() -> None:
         "name": "<account-name>",
         "host_name": "<vcenter-host>",
         "username": "<username>",
-        "password_secret_ref": "example/vcenter-account",
+        "password_secret_ref": f"tenants/{_TENANT_ID}/vcenter-account",
         "regions": [{"external_region_id": "Datacenter:dc-1", "name": "<datacenter>"}],
     }
     async with respx.mock(base_url=_BASE_URL, assert_all_called=False) as mock:

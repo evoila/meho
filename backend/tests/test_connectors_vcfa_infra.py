@@ -52,6 +52,7 @@ from tests._vcfa_provisioning_support import (
     BASE_URL,
     OPERATOR,
     PASSWORD,
+    TENANT_ID,
     mount_logins,
     resolved_target,
     run,
@@ -86,7 +87,7 @@ _CREATE_PARAMS: dict[str, Any] = {
     "name": "<account-name>",
     "host_name": "<vcenter-host>",
     "username": "<username>",
-    "password_secret_ref": "example/vcenter-account",
+    "password_secret_ref": f"tenants/{TENANT_ID}/vcenter-account",
     "regions": [{"external_region_id": "Datacenter:dc-1", "name": "<datacenter>"}],
 }
 
@@ -367,7 +368,7 @@ async def test_cloud_account_create_reads_the_password_from_vault(
     assert body["regions"] == [{"externalRegionId": "Datacenter:dc-1", "name": "<datacenter>"}]
     assert body["acceptSelfSignedCertificate"] is False
     assert post.calls.last.request.url.params["apiVersion"] == _API_VERSION
-    assert vault_secret["_last_ref"] == ("example/vcenter-account", "secret")
+    assert vault_secret["_last_ref"] == (_CREATE_PARAMS["password_secret_ref"], "secret")
     assert PASSWORD not in json.dumps(result)
 
 
@@ -379,7 +380,7 @@ async def test_nsx_account_goes_to_the_nsx_path(
         "name": "<nsx-account>",
         "host_name": "<nsx-host>",
         "username": "<username>",
-        "password_secret_ref": "example/nsx-account",
+        "password_secret_ref": f"tenants/{TENANT_ID}/nsx-account",
         "associated_cloud_account_ids": ["ca-1"],
         "manager_mode": False,
     }
@@ -472,7 +473,7 @@ async def test_the_add_preview_shows_the_vault_place_not_the_password(
     assert preview["would"] == "create"
     assert preview["host_name"] == "<vcenter-host>"
     assert preview["password_source"] == {
-        "secret_ref": "example/vcenter-account",
+        "secret_ref": _CREATE_PARAMS["password_secret_ref"],
         "mount": "secret",
         "key": "password",
     }

@@ -877,13 +877,28 @@ async def test_service_status_says_not_reachable_when_the_manager_does_not_answe
 # ---------------------------------------------------------------------------
 
 
-async def test_the_recorded_trace_holds_no_password_or_key(hcx: HcxConnector) -> None:
+async def _enable_tracing() -> None:
     async with get_sessionmaker()() as session:
         session.add(
             Tenant(id=_TENANT_ID, slug="hcx-setup", name="hcx-setup", flight_recorder_enabled=True)
         )
         await session.commit()
     reset_flight_recorder_config_cache_for_testing()
+
+
+async def _recorded_spans(audit_id: Any) -> list[DispatchTraceSpan]:
+    async with get_sessionmaker()() as session:
+        trace = (
+            await session.execute(select(DispatchTrace).where(DispatchTrace.audit_id == audit_id))
+        ).scalar_one()
+        spans = await session.execute(
+            select(DispatchTraceSpan).where(DispatchTraceSpan.trace_id == trace.id)
+        )
+        return list(spans.scalars().all())
+
+
+async def test_the_recorded_trace_holds_no_password_or_key(hcx: HcxConnector) -> None:
+    await _enable_tracing()
     async with respx.mock(assert_all_called=False) as mock:
         mock.get(_a(_HCX_CONFIG)).mock(
             side_effect=[
@@ -894,21 +909,43 @@ async def test_the_recorded_trace_holds_no_password_or_key(hcx: HcxConnector) ->
         mock.post(_a(_HCX_CONFIG)).respond(200, json=_items({"activationKey": _KEY}))
         result = await _run("hcx.manager.activate", {"activation_key_secret_ref": "hcx/activation"})
     assert result.status == "ok", result.error
-    async with get_sessionmaker()() as session:
-        trace = (
-            await session.execute(
-                select(DispatchTrace).where(DispatchTrace.audit_id == result.audit_id)
-            )
-        ).scalar_one()
-        spans = (
-            (
-                await session.execute(
-                    select(DispatchTraceSpan).where(DispatchTraceSpan.trace_id == trace.id)
-                )
-            )
-            .scalars()
-            .all()
-        )
+    spans = await _recorded_spans(result.audit_id)
     vendor_calls = [span for span in spans if span.span_kind == "vendor_call"]
     assert len(vendor_calls) == 3
     _no_secret_in([span.attributes for span in spans], _KEY, _ADMIN_PASSWORD)
+
+
+def _json_error(text: str) -> httpx.Response:
+    return httpx.Response(400, json={"errors": [{"message": text}]})
+
+
+def _text_error(text: str) -> httpx.Response:
+    return httpx.Response(400, text=text, headers={"content-type": "text/plain"})
+
+
+@pytest.mark.parametrize(
+    ("echo", "message_kept"), [(_json_error, True), (_text_error, False)], ids=["json", "text"]
+)
+async def test_the_recorded_trace_of_a_failed_call_holds_no_echoed_password(
+    hcx: HcxConnector, echo: Any, message_kept: bool
+) -> None:
+    """A vendor error that echoes the sent password (base64) is cut before the trace.
+
+    The JSON error keeps its message in the trace, without the password.
+    A body that is not JSON is omitted by the shared trace redaction.
+    """
+    await _enable_tracing()
+    echoed = base64.b64encode(_VC_PASSWORD.encode()).decode()
+    async with respx.mock(assert_all_called=False) as mock:
+        mock.post(_a(_VCENTER)).mock(
+            return_value=echo(f"Invalid credentials for <vc-user> ({echoed})")
+        )
+        result = await _run("hcx.manager.vcenter.set", _VC_PARAMS)
+    assert result.status == "error"
+    assert result.extras["http_status"] == 400
+    spans = await _recorded_spans(result.audit_id)
+    vendor_calls = [span for span in spans if span.span_kind == "vendor_call"]
+    assert len(vendor_calls) == 1
+    recorded = json.dumps(vendor_calls[0].attributes, default=str)
+    assert ("Invalid credentials" in recorded) is message_kept
+    _no_secret_in([span.attributes for span in spans], _VC_PASSWORD, _ADMIN_PASSWORD)

@@ -34,7 +34,9 @@ address HCX cannot reach gets a hint in ``remediation``.
 
 Traces: the flight recorder gets the request body with every secret value
 replaced, and the answer masked by
-:meth:`~meho_backplane.connectors.hcx.connector.HcxConnector.trace_response_body`.
+:meth:`~meho_backplane.connectors.hcx.connector.HcxConnector.trace_response_body`
+and then cut free of every secret the call sent, also in base64 form. A vendor
+error that echoes a sent password never reaches a stored trace.
 """
 
 from __future__ import annotations
@@ -184,6 +186,17 @@ def _mask_sent_secrets(value: Any) -> Any:
     return value
 
 
+def _scrub_values(value: Any, secrets: tuple[str, ...]) -> Any:
+    """A copy of *value* with every sent secret cut out of every text in it."""
+    if isinstance(value, dict):
+        return {key: _scrub_values(item, secrets) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_scrub_values(item, secrets) for item in value]
+    if isinstance(value, str):
+        return scrub(value, secrets)
+    return value
+
+
 def _messages_of(body: Any) -> list[str]:
     """The ``message`` texts of a vendor error body: top level, ``errors`` and row errors."""
     if not isinstance(body, dict):
@@ -309,6 +322,7 @@ class ApplianceApi:
         is. *timeout* replaces the client's 30 s read time for one call.
         """
         headers = {"Authorization": self._auth, "Accept": "application/json"}
+        secrets = tuple(secrets)
         start = flight_recorder_capture.span_start()
         try:
             response = await _read_capped_json_response(
@@ -331,9 +345,21 @@ class ApplianceApi:
             response=response,
             request_body=_mask_sent_secrets(json),
             request_content_type="application/json" if json is not None else None,
-            response_body=_mask_sent_secrets(self._connector.trace_response_body(response)),
+            response_body=self._trace_body(response, secrets),
         )
         return _checked_body(response, method, path, secrets)
+
+    def _trace_body(self, response: httpx.Response, secrets: tuple[str, ...]) -> Any:
+        """The answer for the trace: masked, then cut free of every sent secret.
+
+        A vendor error can echo a sent password (in its base64 form) in a
+        message text, which the field-name masks do not know. So the scrub
+        runs on every text of the answer, also on an answer that is not JSON.
+        """
+        masked = self._connector.trace_response_body(response)
+        if masked is None:
+            return scrub(response.text, secrets)
+        return _scrub_values(_mask_sent_secrets(masked), secrets)
 
 
 async def _appliance_credentials(

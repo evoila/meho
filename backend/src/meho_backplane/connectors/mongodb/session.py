@@ -32,6 +32,7 @@ op surface:
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Any
 
 from pymongo import AsyncMongoClient
@@ -122,6 +123,16 @@ def assert_read_command(command: str) -> None:
         )
 
 
+def _host_for_pymongo(dial: str) -> str:
+    """Put a checked IPv6 address in brackets, the form pymongo expects."""
+    try:
+        if ipaddress.ip_address(dial).version == 6:
+            return f"[{dial}]"
+    except ValueError:
+        pass
+    return dial
+
+
 async def connect_client(
     target: Any,
     operator: Operator | None,
@@ -164,6 +175,8 @@ async def connect_client(
       does not add replica-set members it learns from the server.
     * A host name trusted verbatim on the allowlist is dialed by name, so it
       must be one plain host: a connection string or a seed list is refused.
+    * pymongo does not take a bare IPv6 address, so a checked IPv6 address
+      is given in brackets.
     """
     dial = await dial_host(target.host)
     if "/" in dial or "," in dial:
@@ -172,7 +185,7 @@ async def connect_client(
             "host name or IP address, not a connection string or a list of hosts"
         )
     connect_kwargs: dict[str, Any] = {
-        "host": dial,
+        "host": _host_for_pymongo(dial),
         "port": getattr(target, "port", None) or DEFAULT_PORT,
         "serverSelectionTimeoutMS": timeout_ms,
         "connectTimeoutMS": timeout_ms,

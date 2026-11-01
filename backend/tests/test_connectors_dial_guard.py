@@ -48,7 +48,14 @@ from meho_backplane.connectors.mongodb import session as mongo_session
 from meho_backplane.connectors.mssql import session as mssql_session
 from meho_backplane.connectors.postgres import session as pg_session
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
+from meho_backplane.connectors.secret import handoff as handoff_module
 from meho_backplane.connectors.vmware_rest import ovf_upload_tls
+from meho_backplane.connectors.vmware_rest._transfer import (
+    Destination,
+    SourceFile,
+    TransferError,
+    copy_files,
+)
 from meho_backplane.targets.ssrf_guard import (
     TARGET_SSRF_ALLOWLIST_ENV,
     TargetDestinationBlockedError,
@@ -59,6 +66,7 @@ _REAL_UNRESOLVED = dial_guard._unresolved
 
 _PUBLIC_IP = "93.184.216.34"
 _PUBLIC_IP_2 = "93.184.216.35"
+_PUBLIC_IP6 = "2606:2800:220:1:248:1893:25c8:1946"
 
 #: Fake DNS: name -> answers. A name missing here does not resolve.
 _DNS: dict[str, list[str]] = {
@@ -66,6 +74,7 @@ _DNS: dict[str, list[str]] = {
     "private.example.test": ["10.0.0.7"],
     "metadata.example.test": ["169.254.169.254"],
     "mixed.example.test": [_PUBLIC_IP, "127.0.0.1"],
+    "v6.example.test": [_PUBLIC_IP6],
 }
 
 
@@ -305,6 +314,22 @@ async def test_mongodb_client_knows_only_the_checked_address(_live: pytest.Monke
 
 
 @pytest.mark.asyncio
+async def test_mongodb_gives_a_checked_ipv6_address_in_brackets(
+    _live: pytest.MonkeyPatch,
+) -> None:
+    """pymongo does not take a bare IPv6 address; the client still holds one checked seed."""
+    mongo = await mongo_session.connect_client(_target("v6.example.test"), None)
+    try:
+        description = mongo.topology_description
+        assert description.topology_type_name == "Single"
+        assert list(description.server_descriptions()) == [
+            (_PUBLIC_IP6, mongo_session.DEFAULT_PORT)
+        ]
+    finally:
+        await mongo.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "host",
     [
@@ -444,3 +469,96 @@ async def test_k8s_probe_reports_a_blocked_host_as_not_reachable() -> None:
     result = await KubernetesConnector().probe(_target("private.example.test"))
     assert result.ok is False
     assert "TargetDestinationBlockedError" in (result.reason or "")
+
+
+# ---------------------------------------------------------------------------
+# Secret handoff store client and vCenter file copy destination
+# ---------------------------------------------------------------------------
+
+
+def _record_dials(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every TCP connect the HTTP clients try, and refuse it."""
+    dialed: list[str] = []
+
+    async def _refuse(self: Any, host: str, port: int, **kwargs: Any) -> Any:
+        dialed.append(host)
+        raise httpcore.ConnectError("refused in test")
+
+    monkeypatch.setattr("httpcore.AnyIOBackend.connect_tcp", _refuse)
+    return dialed
+
+
+def _store(monkeypatch: pytest.MonkeyPatch, host: str) -> Any:
+    monkeypatch.setattr(
+        handoff_module, "get_settings", lambda: types.SimpleNamespace(vault_timeout_seconds=5.0)
+    )
+    return handoff_module._RemoteStore(
+        label="store target 'vault-a'", host=host, url=f"https://{host}", verify=True
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host", ["gone.example.test", "private.example.test"])
+async def test_handoff_store_client_refuses_before_connecting(
+    _live: pytest.MonkeyPatch, host: str
+) -> None:
+    dialed = _record_dials(_live)
+    async with handoff_module._build_store_client(_store(_live, host)) as client:
+        with pytest.raises(handoff_module.SecretHandoffDestinationBlockedError):
+            await client.post("/v1/sys/wrapping/unwrap", json={})
+    assert dialed == []
+
+
+@pytest.mark.asyncio
+async def test_handoff_store_client_dials_only_the_checked_ip(_live: pytest.MonkeyPatch) -> None:
+    dialed = _record_dials(_live)
+    async with handoff_module._build_store_client(_store(_live, "public.example.test")) as client:
+        with pytest.raises(httpx.ConnectError):
+            await client.post("/v1/sys/wrapping/unwrap", json={})
+    assert dialed
+    assert set(dialed) <= {_PUBLIC_IP, _PUBLIC_IP_2}
+
+
+async def _copy_to(base_url: str) -> None:
+    async def _noop() -> None:
+        return None
+
+    async with httpx.AsyncClient() as source_client:
+        await copy_files(
+            [SourceFile(name="disk-1.vmdk", url="https://vcenter.example.test/d", size=1)],
+            Destination(base_url=base_url, token_ref="tenants/t1/backup-store"),
+            operator=object(),  # type: ignore[arg-type]
+            target=types.SimpleNamespace(name="vc-1", host="vcenter.example.test"),
+            source_client=source_client,
+            source_headers={},
+            keep_alive=_noop,
+            cleanup=_noop,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host", ["gone.example.test", "private.example.test"])
+async def test_file_copy_destination_refuses_before_connecting(
+    _live: pytest.MonkeyPatch, host: str
+) -> None:
+    dialed = _record_dials(_live)
+    _live.setattr(
+        "meho_backplane.connectors.vmware_rest._transfer._read_token",
+        AsyncMock(return_value="dest-token"),
+    )
+    with pytest.raises(TransferError):
+        await _copy_to(f"https://{host}/backups/")
+    assert dialed == []
+
+
+@pytest.mark.asyncio
+async def test_file_copy_destination_dials_only_the_checked_ip(_live: pytest.MonkeyPatch) -> None:
+    dialed = _record_dials(_live)
+    _live.setattr(
+        "meho_backplane.connectors.vmware_rest._transfer._read_token",
+        AsyncMock(return_value="dest-token"),
+    )
+    with pytest.raises(TransferError):
+        await _copy_to("https://public.example.test/backups/")
+    assert dialed
+    assert set(dialed) <= {_PUBLIC_IP, _PUBLIC_IP_2}

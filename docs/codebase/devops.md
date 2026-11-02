@@ -2172,9 +2172,12 @@ run, not a broken `main`.
   list that is written out or named at module level (also one in
   `pytestmark`), times the `params` of every fixture with `params` in the
   file and in the `conftest.py` files above it, as if every test used
-  every such fixture. The larger of that count and the map's count is
-  used, so a new or expanded test counts fully, also when a shared
-  fixture multiplies it. When the file's count is uncertain (a
+  every such fixture. An empty list counts as one item, as pytest
+  collects one skipped test for it, so an unused fixture with an empty
+  `params` list never hides a file from the limit. The larger of that
+  count and the map's count is used, so a new or expanded test counts
+  fully, also when a shared fixture multiplies it. When the file's count
+  is uncertain (a
   parametrize or params list built by code, a `pytestmark` that is not
   one plain assignment at module level, `pytest_generate_tests`, a
   `conftest.py` that names `pytest_plugins`, a test class with a base

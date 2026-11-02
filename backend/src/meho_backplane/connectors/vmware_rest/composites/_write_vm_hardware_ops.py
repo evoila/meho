@@ -132,11 +132,11 @@ COMPOSITES: Final[tuple[CompositeSpec, ...]] = (
     CompositeSpec(
         op_id="vmware.composite.vm.device.cdrom",
         handler=vm_device_cdrom_composite,
-        summary="Remove / update / disconnect a VM CD-ROM device.",
+        summary="Remove / update / connect / disconnect a VM CD-ROM device.",
         description=(
             "Removes a VM's CD-ROM drive, changes its backing (for example from a "
-            "host-local ISO to CLIENT_DEVICE) or disconnects it. The current "
-            "backing is read first, so the approver sees it."
+            "host-local ISO to CLIENT_DEVICE), or connects or disconnects it. The "
+            "current backing is read first, so the approver sees it."
         ),
         parameter_schema=VM_DEVICE_CDROM_PARAMETER_SCHEMA,
         response_schema=VM_DEVICE_CDROM_RESPONSE_SCHEMA,

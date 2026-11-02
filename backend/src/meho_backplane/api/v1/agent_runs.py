@@ -70,6 +70,7 @@ from meho_backplane.agent.invocation import (
     RUN_INPUT_MAX_CHARS,
     AgentDisabledError,
     AgentNotFoundError,
+    AgentNotOwnedError,
     AgentRunNotFoundError,
     AgentRunOutcome,
     AgentRunSummary,
@@ -317,7 +318,9 @@ async def run_agent(
     Sync (default) blocks up to ``agent_sync_timeout_seconds`` and returns
     the final output at 200; a longer run converts to async and returns a
     handle at 202. ``async=true`` returns the handle immediately. A
-    cross-tenant / absent name is 404; a disabled definition is 409; a
+    cross-tenant / absent name is 404; a disabled definition is 409; an
+    agent login that asks for a definition other than its own is 403
+    (``agent_not_owned``; a person may start any definition); a
     budget-refused run (per-identity cap reached, per-tenant or global
     kill switch on — G11.5-T6 #1080) is 429 with the reason in the
     ``detail`` body so the operator sees which gate fired.
@@ -344,6 +347,11 @@ async def run_agent(
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
             detail="agent_disabled",
+        ) from exc
+    except AgentNotOwnedError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="agent_not_owned",
         ) from exc
     except BudgetExceededError as exc:
         raise HTTPException(
@@ -575,6 +583,11 @@ async def run_agent_events(
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
             detail="agent_disabled",
+        ) from exc
+    except AgentNotOwnedError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="agent_not_owned",
         ) from exc
     except BudgetExceededError as exc:
         raise HTTPException(

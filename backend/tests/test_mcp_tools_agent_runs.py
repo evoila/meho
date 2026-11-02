@@ -37,11 +37,15 @@ from meho_backplane.agent.invocation import (
     reset_agent_invoker_for_testing,
 )
 from meho_backplane.agent.run import PydanticAgentRun
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentDefinition, AgentRun, Tenant
+from meho_backplane.main import app
+from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from tests.mcp_test_fixtures import (
+    OPERATOR_TENANT_ID,
+    build_operator,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
     post_mcp,
@@ -302,6 +306,31 @@ async def test_run_unknown_agent_is_invalid_params(
     body = resp.json()
     assert "error" in body
     assert body["error"]["message"] == "agent_not_found"
+
+
+@pytest.mark.asyncio
+async def test_agent_login_runs_only_its_own_definition(
+    seeded_operator_tenant: None,  # noqa: F811
+) -> None:
+    """An agent login gets a permission refusal for another agent's definition."""
+    await _seed_definition(tenant_id=OPERATOR_TENANT_ID, name="other-bot")
+    _install_invoker()
+    agent = build_operator(TenantRole.OPERATOR).model_copy(
+        update={"principal_kind": PrincipalKind.AGENT, "client_id": "agent:triage"}
+    )
+
+    async def _fake_verify() -> Operator:
+        return agent
+
+    app.dependency_overrides[verify_mcp_jwt_and_bind] = _fake_verify
+    try:
+        with TestClient(app) as client:
+            resp = _call(client, "meho_agents_run", {"name": "other-bot", "input": "go"})
+    finally:
+        app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+    body = resp.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert body["error"]["message"] == "agent_not_owned"
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

@@ -118,9 +118,10 @@ _NETWORK_LIST = VcfaTypedOp(
             "job_id": field(["string", "null"], "The job id that was given, echoed."),
             "state": field(
                 ["string", "null"],
-                "For a read of one object (id or name): its job state, not_found or "
-                "ambiguous. not_reachable when the appliance did not answer; "
-                "invalid_request for bad params. Null for a plain list.",
+                "For a read of one object (id, name, org_id with region_id for regional "
+                "networking, provider_gateway_id with ip_space_id for one link): its job "
+                "state, not_found or ambiguous. not_reachable when the appliance did not "
+                "answer; invalid_request for bad params. Null for a plain list.",
             ),
             "vendor_status": field(["string", "null"], "The vendor status of that one object."),
             "job_state": field(
@@ -407,12 +408,15 @@ _GATEWAY_SET = VcfaTypedOp(
         output_shape=(
             "{status: accepted | already_running | unchanged | invalid_request | "
             "precondition_failed | failed_part_way, operation, object, job_id, steps, "
-            "step_failed, steps_not_run, status_read, guidance}. failed_part_way lists the "
-            "links that started, the one that failed with the vendor's error, and the rest."
+            "step_failed, steps_not_run, status_read, guidance}. Each link is its own job: "
+            "each step carries its job_id and status_read. failed_part_way lists the links "
+            "that started, the one that stopped the op (refused with the vendor's error, or "
+            "outcome unknown after a lost answer), and the rest."
         ),
         next_step=(
-            "Read the gateway with status_read until it is succeeded, then give an "
-            "organization networking with vcfa.provider.regional_networking.set."
+            "Read with status_read until state is succeeded (a new gateway: the gateway; "
+            "links: each step's status_read), then give an organization networking with "
+            "vcfa.provider.regional_networking.set."
         ),
         result_scalars=START_SCALARS,
     ),

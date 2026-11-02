@@ -51,6 +51,7 @@ STATUS_READ = obj(
                 "id": field("string", "The object id, when known."),
                 "job_id": field("string", "The vendor task id, when known."),
                 "provider_gateway_id": field("string", "The gateway id, for its IP space links."),
+                "ip_space_id": field("string", "The IP space id, for one IP space link."),
             },
         ),
     },
@@ -62,7 +63,7 @@ START_RESPONSE: Final[dict[str, Any]] = {
         "status": field(
             "string",
             "accepted: the job started (not done yet); already_running: a job runs on this "
-            "object, nothing started; failed_part_way: a later step was refused.",
+            "object, nothing started; failed_part_way: a step was refused or got no answer.",
             enum=[
                 "accepted",
                 "already_running",
@@ -84,22 +85,32 @@ START_RESPONSE: Final[dict[str, Any]] = {
                 },
             )
         ),
-        "job_id": field(["string", "null"], "The vendor task id from the 202 answer."),
+        "job_id": field(
+            ["string", "null"], "The vendor task id from the 202 answer (of the first step)."
+        ),
         "steps": list_of(
-            "The steps that started, in order.",
+            "The steps that started, in order. Each is its own vendor job.",
             {
                 "step": field("string", "The step name."),
                 "status": field("string", "accepted"),
                 "job_id": field(["string", "null"], "The vendor task id of the step."),
+                "status_read": STATUS_READ,
             },
         ),
         "step_failed": nullable(
             obj(
-                "Only on failed_part_way: the step that failed.",
+                "Only on failed_part_way: the step that stopped the op.",
                 {
                     "step": field("string", "The step name."),
-                    "http_status": field("integer", "The vendor's HTTP status."),
-                    "error": field("string", "The vendor's error text."),
+                    "outcome": field(
+                        "string",
+                        "refused: the vendor refused it, nothing started. unknown: it got no "
+                        "answer (a time-out or a connection error); it may have started.",
+                        enum=["refused", "unknown"],
+                    ),
+                    "http_status": field(["integer", "null"], "The vendor's HTTP status."),
+                    "error": field("string", "The vendor's error text, or the error."),
+                    "status_read": STATUS_READ,
                 },
             )
         ),

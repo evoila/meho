@@ -778,12 +778,24 @@ async def test_gateway_links_fail_part_way(vcfa: VcfAutomationConnector) -> None
     out = result["result"]
     assert out["status"] == "failed_part_way", out
     assert out["steps"] == [
-        {"step": f"link_ip_space:{second}", "status": "accepted", "job_id": TASK_ID}
+        {
+            "step": f"link_ip_space:{second}",
+            "status": "accepted",
+            "job_id": TASK_ID,
+            "status_read": _link_read(second, job_id=TASK_ID),
+        }
     ]
-    assert out["step_failed"]["step"] == f"link_ip_space:{third}"
-    assert out["step_failed"]["http_status"] == 400
-    assert "another region" in out["step_failed"]["error"]
+    assert out["step_failed"] == {
+        "step": f"link_ip_space:{third}",
+        "outcome": "refused",
+        "http_status": 400,
+        "error": json.dumps({"message": "IP Space is in another region."}, separators=(",", ":")),
+        "status_read": _link_read(third),
+    }
     assert out["steps_not_run"] == [f"link_ip_space:{fourth}"]
+    # The answer's own job id and status read are those of the first link.
+    assert out["job_id"] == TASK_ID
+    assert out["status_read"] == _link_read(second, job_id=TASK_ID)
     assert post.call_count == 2
     first_body = json.loads(post.calls[0].request.content)
     assert first_body == {
@@ -802,6 +814,122 @@ async def test_gateway_with_every_link_is_unchanged(vcfa: VcfAutomationConnector
     assert result["result"]["status"] == "unchanged"
     assert links.calls.last.request.url.params["filter"] == f"providerGatewayRef.id=={GATEWAY_ID}"
     assert not post.called
+
+
+def _link_read(ip_space_id: str, *, job_id: str | None = None) -> dict[str, Any]:
+    """The status read of one link, as a step names it."""
+    params = {"kind": "ip_space_associations", "provider_gateway_id": GATEWAY_ID}
+    params["ip_space_id"] = ip_space_id
+    if job_id is not None:
+        params["job_id"] = job_id
+    return {"op_id": "vcfa.provider.network.list", "params": params}
+
+
+async def test_gateway_links_stop_when_a_link_gets_no_answer(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    """Step two times out: step one keeps its job id, step two's outcome is unknown."""
+    second, third, fourth = IP_SPACE_ID + "-2", IP_SPACE_ID + "-3", IP_SPACE_ID + "-4"
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(f"{V90}/providerGateways").respond(200, json=page([gateway()]))
+        mock.get(f"{V90}/ipSpaceAssociations").respond(200, json=page([link()]))
+        post = mock.post(f"{V90}/ipSpaceAssociations").mock(
+            side_effect=[_accepted(), httpx.ReadTimeout("timed out")]
+        )
+        result = await run(
+            "vcfa.provider.provider_gateway.set",
+            {**_GATEWAY_PARAMS, "ip_space_ids": [IP_SPACE_ID, second, third, fourth]},
+        )
+    assert result["status"] == "ok", result
+    out = result["result"]
+    assert out["status"] == "failed_part_way", out
+    assert out["steps"] == [
+        {
+            "step": f"link_ip_space:{second}",
+            "status": "accepted",
+            "job_id": TASK_ID,
+            "status_read": _link_read(second, job_id=TASK_ID),
+        }
+    ]
+    assert out["step_failed"] == {
+        "step": f"link_ip_space:{third}",
+        "outcome": "unknown",
+        "http_status": None,
+        "error": "ReadTimeout: timed out",
+        "status_read": _link_read(third),
+    }
+    assert out["steps_not_run"] == [f"link_ip_space:{fourth}"]
+    assert out["job_id"] == TASK_ID
+    assert out["status_read"] == _link_read(second, job_id=TASK_ID)
+    assert "may or may not have started" in out["guidance"]
+    assert post.call_count == 2
+
+
+async def test_gateway_links_with_no_answer_on_the_first_link(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    """No link started: the answer's status read is the one of the unknown link."""
+    second = IP_SPACE_ID + "-2"
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(f"{V90}/providerGateways").respond(200, json=page([gateway()]))
+        mock.get(f"{V90}/ipSpaceAssociations").respond(200, json=page([link()]))
+        mock.post(f"{V90}/ipSpaceAssociations").mock(
+            side_effect=httpx.ConnectError("connection refused")
+        )
+        result = await run(
+            "vcfa.provider.provider_gateway.set",
+            {**_GATEWAY_PARAMS, "ip_space_ids": [IP_SPACE_ID, second]},
+        )
+    out = result["result"]
+    assert out["status"] == "failed_part_way", out
+    assert out["steps"] == []
+    assert out["step_failed"]["outcome"] == "unknown"
+    assert out["steps_not_run"] == []
+    assert out["job_id"] is None
+    assert out["status_read"] == _link_read(second)
+
+
+@pytest.mark.parametrize(
+    ("vendor", "task_status", "state"),
+    [("REALIZED", "success", "succeeded"), ("REALIZATION_FAILED", "error", "failed")],
+)
+async def test_gateway_link_follow_up_reads_the_link_and_its_job(
+    vcfa: VcfAutomationConnector, vendor: str, task_status: str, state: str
+) -> None:
+    """The status read a link step returns ends in succeeded or failed."""
+    second = IP_SPACE_ID + "-2"
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(f"{V90}/providerGateways").respond(200, json=page([gateway()]))
+        mock.get(f"{V90}/ipSpaceAssociations").respond(200, json=page([link()]))
+        mock.post(f"{V90}/ipSpaceAssociations").mock(return_value=_accepted())
+        started = await run(
+            "vcfa.provider.provider_gateway.set",
+            {**_GATEWAY_PARAMS, "ip_space_ids": [IP_SPACE_ID, second]},
+        )
+    assert started["result"]["status"] == "accepted", started
+    follow = started["result"]["steps"][0]["status_read"]
+    assert follow == started["result"]["status_read"] == _link_read(second, job_id=TASK_ID)
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        links = mock.get(f"{V90}/ipSpaceAssociations").respond(
+            200, json=page([{**link(second, link_id=LINK_ID + "-2"), "status": vendor}])
+        )
+        mock.get(TASK).respond(
+            200, json=_task(task_status, progress=100, error={"message": "NSX refused it"})
+        )
+        result = await run(follow["op_id"], follow["params"])
+    out = result["result"]
+    assert out["state"] == state
+    assert out["job_state"] == state
+    assert out["vendor_status"] == vendor
+    assert out["count"] == 1
+    assert out["error"] == ("NSX refused it" if state == "failed" else None)
+    assert links.calls.last.request.url.params["filter"] == (
+        f"providerGatewayRef.id=={GATEWAY_ID};ipSpaceRef.id=={second}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -923,6 +1051,79 @@ async def test_regional_networking_that_exists_is_unchanged(vcfa: VcfAutomationC
         f"regionRef.id=={REGION_ID};orgRef.id=={ORG_ID}"
     )
     assert not post.called
+
+
+@pytest.mark.parametrize(
+    ("vendor", "state"), [("REALIZED", "succeeded"), ("REALIZATION_FAILED", "failed")]
+)
+async def test_regional_networking_follow_up_after_already_running(
+    vcfa: VcfAutomationConnector, vendor: str, state: str
+) -> None:
+    """The status read of already_running names the org and region, and ends."""
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(ORG_PATH).respond(200, json=org())
+        mock.get(f"{V90}/regionalNetworkingSettings").respond(
+            200, json=page([regional(status="CONFIGURING")])
+        )
+        post = mock.post(f"{V90}/regionalNetworkingSettings").mock(return_value=_accepted())
+        started = await run("vcfa.provider.regional_networking.set", dict(_REGIONAL_PARAMS))
+    assert started["result"]["status"] == "already_running", started
+    assert not post.called
+    follow = started["result"]["status_read"]
+    assert follow["params"] == {
+        "kind": "regional_networking",
+        "org_id": ORG_ID,
+        "region_id": REGION_ID,
+    }
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(f"{V90}/regionalNetworkingSettings").respond(
+            200, json=page([regional(status=vendor)])
+        )
+        result = await run(follow["op_id"], follow["params"])
+    out = result["result"]
+    assert out["state"] == state
+    assert out["vendor_status"] == vendor
+    assert out["count"] == 1
+
+
+async def test_regional_networking_follow_up_when_the_task_is_gone(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    """The task read answers 404: the state comes from the object named by org and region."""
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(f"{V90}/regionalNetworkingSettings").respond(200, json=page([regional()]))
+        mock.get(TASK).respond(404, json={"message": "no task"})
+        result = await run(
+            "vcfa.provider.network.list",
+            {
+                "kind": "regional_networking",
+                "org_id": ORG_ID,
+                "region_id": REGION_ID,
+                "job_id": TASK_ID,
+            },
+        )
+    out = result["result"]
+    assert out["state"] == "succeeded"
+    assert out["vendor_status"] == "REALIZED"
+    assert out["job"]["read"] is False
+    assert out["job_state"] == "unknown"
+
+
+async def test_regional_networking_list_of_a_region_has_no_single_state(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    """Only one of the pair: a plain list, state stays null."""
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        mock.get(f"{V90}/regionalNetworkingSettings").respond(200, json=page([regional()]))
+        result = await run(
+            "vcfa.provider.network.list", {"kind": "regional_networking", "region_id": REGION_ID}
+        )
+    assert result["result"]["state"] is None
+    assert result["result"]["count"] == 1
 
 
 async def test_link_row_names_both_sides(vcfa: VcfAutomationConnector) -> None:

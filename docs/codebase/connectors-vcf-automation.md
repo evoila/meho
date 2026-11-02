@@ -421,7 +421,7 @@ calls follow the vendor's "Provider Infrastructure APIs" reference lists of
 | `vcfa.provider.org.update` | Changes an organization's display name, description, on/off state and publish rights (`GET`, then `PUT /cloudapi/1.0.0/orgs/{orgUrn}`). Its name and kind never change. Turning it off stops its users from signing in. | `{status, org, previous, job_id, guidance}` | dangerous, approval | 9.x |
 | `vcfa.provider.org.networking.set` | Turns networking on or off and sets the short name for logs (`…/orgs/{orgUrn}/networkingSettings`). The short name is the id of the organization's NSX project, so MEHO never changes it once set. | `{status, org_id, settings, previous, guidance}` | dangerous, approval | 9.x |
 | `vcfa.provider.ip_space.set` | Creates an IP space (`POST …/ipSpaces`) or adds ranges and changes the default limits of one (`PUT …/ipSpaces/{ipSpaceId}`). A new range needs `range_is_new_in_nsx: true`. | start answer (below) | dangerous, approval | 9.x |
-| `vcfa.provider.provider_gateway.set` | Creates a provider gateway on a free Tier-0 gateway with its first IP spaces (`POST …/providerGateways`), or links missing IP spaces to an existing one (`POST …/ipSpaceAssociations`, one per IP space). | start answer | dangerous, approval | 9.x |
+| `vcfa.provider.provider_gateway.set` | Creates a provider gateway on a free Tier-0 gateway with its first IP spaces (`POST …/providerGateways`), or links missing IP spaces to an existing one (`POST …/ipSpaceAssociations`, one per IP space; each link is its own job with its own `status_read` in `steps`). | start answer | dangerous, approval | 9.x |
 | `vcfa.provider.regional_networking.set` | Gives an organization networking in a region (`POST …/regionalNetworkingSettings`). VCF Automation then makes its NSX project, transit gateway and default VPC. | start answer | dangerous, approval | 9.x |
 | `vcfa.provider.network.delete` | Removes regional networking, a provider gateway (its IP space links go with it), an IP space or one IP space link (`DELETE`). | `{status, kind, object, blockers, job_id, status_read, guidance}` | destructive, preview + approval | 9.x |
 
@@ -436,7 +436,11 @@ calls follow the vendor's "Provider Infrastructure APIs" reference lists of
   delete with HTTP 202, an empty body and the task in the `Location`
   header, and then works on its own. A start returns `accepted` with the
   task id (`job_id`) and `status_read` (the op and params to read next; the
-  params carry the `job_id`). It never says the work is done. The object's `status` shows the progress;
+  params carry the `job_id`). It never says the work is done. The status
+  read names one object by `id`, by `name`, or by the pair the start used:
+  `org_id` and `region_id` for regional networking, `provider_gateway_id`
+  and `ip_space_id` for one IP space link. Only then does it answer a
+  `state`; a plain list answers `state: null` and the rows. The object's `status` shows the progress;
   each row maps it to `job_state`: `PENDING` queued, `CONFIGURING` running,
   `REALIZED` succeeded, `REALIZATION_FAILED` failed. The object holds no
   error text; the vendor task does. So when the status read gets the
@@ -473,9 +477,16 @@ calls follow the vendor's "Provider Infrastructure APIs" reference lists of
   `failed` then. An expired login is handled by
   the connector's usual 401 re-login.
 - **Part-way failure.** Linking IP spaces to an existing gateway sends one
-  link per IP space. When one is refused, the answer is `failed_part_way`
-  with `steps` (the links that started), `step_failed` (with the vendor's
-  error) and `steps_not_run`. Nothing is undone; running the op again links
+  link per IP space, and each link is its own vendor job: each step in
+  `steps` carries its `job_id` and its own `status_read` (the link by
+  gateway and IP space, with the job id); the answer's own `job_id` and
+  `status_read` are those of the first link. When a link is refused, or gets
+  no answer (a time-out or a connection error), the answer is
+  `failed_part_way` with `steps` (the links that started, with their job
+  ids), `step_failed` and `steps_not_run`. `step_failed.outcome` is
+  `refused` (with the vendor's error; nothing started) or `unknown` (the
+  link may or may not have started; its `status_read` tells: `not_found`
+  means it was not made). Nothing is undone; running the op again links
   only what is missing.
 - **Checks before a start.** The Tier-0 list is always read with a
   `regionId` or `networkProviderId` filter: without one the appliance

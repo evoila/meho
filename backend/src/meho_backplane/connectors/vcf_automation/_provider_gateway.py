@@ -9,10 +9,12 @@ gateway with its first IP spaces (``ipSpaceRefs``). The backing type is
 ``NSX_TIER0``, or ``NSX_VRF_TIER0`` for a Tier-0 VRF. The reference pages only
 show ``backingType`` as a string; the two values come from the vendor's Go SDK
 (``go-vcloud-director`` v3, ``types/v56/tm.go``). An existing gateway: link the
-IP spaces it does not have yet, one ``POST`` to the IP space links each. When a
-link is refused part-way, the answer lists the links that started, the one
-that failed (with the vendor's error) and the ones that did not run; nothing
-is undone.
+IP spaces it does not have yet, one ``POST`` to the IP space links each. Every
+link is its own vendor job, so every step carries its own status read (the
+link by gateway and IP space, with its job id). When a link is refused or gets
+no answer part-way, the answer lists the links that started, the one that
+stopped the op (with the vendor's error, or ``outcome: unknown`` after a lost
+answer) and the ones that did not run; nothing is undone.
 """
 
 from __future__ import annotations
@@ -121,6 +123,14 @@ def _gateway_body(params: Mapping[str, Any], tier0: Mapping[str, Any]) -> dict[s
     return body
 
 
+def _link_read(gateway_id: str, ip_space_id: str, job_id: str | None = None) -> dict[str, Any]:
+    """The status read of one link: the gateway and the IP space name it."""
+    read = status_read(
+        "ip_space_associations", provider_gateway_id=gateway_id, ip_space_id=ip_space_id
+    )
+    return read_with_job(read, job_id)
+
+
 async def _link_ip_spaces(
     connector: VcfAutomationConnector,
     target: VcfAutomationTargetLike,
@@ -128,25 +138,43 @@ async def _link_ip_spaces(
     gateway: Mapping[str, Any],
     missing: Sequence[str],
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    """One link per IP space; stops at the first refused link. ``(steps, failed)``."""
+    """One link per IP space, in order. ``(steps, stopped)``.
+
+    Stops at the first link that is refused (``outcome: refused``, with the
+    vendor's error) or that gets no answer (``outcome: unknown``: a time-out
+    or a connection error, so the link may or may not have started). The
+    steps before it stay in the answer with their job ids.
+    """
     path = provider_path(target, PROVIDER_IP_SPACE_ASSOCIATIONS_PATH)
+    gateway_id = str(gateway.get("id"))
     steps: list[dict[str, Any]] = []
     for ip_space_id in missing:
-        body = {"ipSpaceRef": {"id": ip_space_id}, "providerGatewayRef": {"id": gateway.get("id")}}
+        step = f"link_ip_space:{ip_space_id}"
+        body = {"ipSpaceRef": {"id": ip_space_id}, "providerGatewayRef": {"id": gateway_id}}
+        stopped: dict[str, Any] = {"step": step, "status_read": _link_read(gateway_id, ip_space_id)}
         try:
             resp = await send(connector, target, operator, "POST", path, body=body)
         except httpx.HTTPStatusError as exc:
-            failed = {
-                "step": f"link_ip_space:{ip_space_id}",
+            stopped |= {
+                "outcome": "refused",
                 "http_status": exc.response.status_code,
                 "error": exc.response.text[:500],
             }
-            return steps, failed
+            return steps, stopped
+        except httpx.TransportError as exc:
+            stopped |= {
+                "outcome": "unknown",
+                "http_status": None,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            return steps, stopped
+        job_id = job_id_of(resp)
         steps.append(
             {
-                "step": f"link_ip_space:{ip_space_id}",
+                "step": step,
                 "status": "accepted",
-                "job_id": job_id_of(resp),
+                "job_id": job_id,
+                "status_read": _link_read(gateway_id, ip_space_id, job_id),
             }
         )
     return steps, None
@@ -175,32 +203,46 @@ async def _gateway_links(
             status_read=read,
             guidance="the gateway exists and has every IP space linked; nothing was started",
         )
-    steps, failed = await _link_ip_spaces(connector, target, operator, gateway, missing)
-    if failed is None:
+    steps, stopped = await _link_ip_spaces(connector, target, operator, gateway, missing)
+    # The answer's own job id and status read are those of the first link; every
+    # step carries its own, because every link is its own vendor job.
+    first = steps[0] if steps else None
+    if stopped is None:
         return start_result(
             "accepted",
             operation="link_ip_spaces",
             object=view,
-            job_id=steps[0]["job_id"],
+            job_id=first["job_id"] if first else None,
             steps=steps,
-            status_read=status_read("ip_space_associations", provider_gateway_id=gateway["id"]),
+            status_read=first["status_read"] if first else None,
             guidance=(
-                "VCF Automation accepted the links; read them with the status read. " + ASYNC_NOTE
+                "VCF Automation accepted the links; each is its own job. Read each step's "
+                "status_read until its state is succeeded. " + ASYNC_NOTE
             ),
         )
-    done = {step["step"] for step in steps} | {failed["step"]}
+    done = {step["step"] for step in steps} | {stopped["step"]}
+    if stopped["outcome"] == "refused":
+        guidance = (
+            "a link was refused; the links before it were started and are not undone. Read "
+            "the links, fix the cause and run the op again: it links only what is missing"
+        )
+    else:
+        guidance = (
+            "a link got no answer, so VCF Automation may or may not have started it; the links "
+            "before it were started and are not undone. Read step_failed.status_read: "
+            "not_found means the link was not made. Then run the op again: it links only what "
+            "is missing"
+        )
     return start_result(
         "failed_part_way",
         operation="link_ip_spaces",
         object=view,
+        job_id=first["job_id"] if first else None,
         steps=steps,
-        step_failed=failed,
+        step_failed=stopped,
         steps_not_run=[f"link_ip_space:{i}" for i in missing if f"link_ip_space:{i}" not in done],
-        status_read=status_read("ip_space_associations", provider_gateway_id=gateway["id"]),
-        guidance=(
-            "a link was refused; the links before it were started and are not undone. Read "
-            "the links, fix the cause and run the op again: it links only what is missing"
-        ),
+        status_read=first["status_read"] if first else stopped["status_read"],
+        guidance=guidance,
     )
 
 

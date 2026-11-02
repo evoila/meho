@@ -249,6 +249,14 @@ class _Kind:
     row: Callable[[Mapping[str, Any]], dict[str, Any]]
     #: FIQL field per filter param (``region_id`` → ``regionRef.id``).
     filters: Mapping[str, str]
+    #: The filter sets that name one object, besides ``id`` and ``name``: a
+    #: status read with all params of one set reads a single object.
+    pairs: tuple[tuple[str, ...], ...] = ()
+
+    def names_one(self, params: Mapping[str, Any]) -> bool:
+        """True when *params* name one object of this kind."""
+        sets = (("id",), ("name",), *self.pairs)
+        return any(all(params.get(key) is not None for key in keys) for keys in sets)
 
 
 KINDS: Final[dict[str, _Kind]] = {
@@ -272,6 +280,7 @@ KINDS: Final[dict[str, _Kind]] = {
         "ipSpaceAssociationId",
         _association_row,
         {"provider_gateway_id": "providerGatewayRef.id", "ip_space_id": "ipSpaceRef.id"},
+        pairs=(("provider_gateway_id", "ip_space_id"),),
     ),
     "regional_networking": _Kind(
         PROVIDER_REGIONAL_NETWORKING_PATH,
@@ -284,6 +293,7 @@ KINDS: Final[dict[str, _Kind]] = {
             "provider_gateway_id": "providerGatewayRef.id",
             "name": "name",
         },
+        pairs=(("org_id", "region_id"),),
     ),
     "edge_clusters": _Kind(
         PROVIDER_EDGE_CLUSTERS_PATH,
@@ -499,7 +509,13 @@ async def _object_rows(
 
 
 def _single_state(rows: list[dict[str, Any]], one_object: bool) -> tuple[Any, Any]:
-    """``(state, vendor_status)`` of a read that names one object."""
+    """``(state, vendor_status)`` of a read that names one object.
+
+    A read names one object with ``id``, ``name``, or a pair that identifies
+    it: the organization and region of regional networking, the gateway and
+    IP space of an IP space link. These pairs are what the start ops put in
+    their status reads.
+    """
     if not one_object:
         return None, None
     if not rows:
@@ -551,7 +567,7 @@ async def provider_network_list(
     except (httpx.HTTPError, RuntimeError) as exc:
         # Keep the object rows already read; only the job read got no answer.
         return not_reachable({**base, "count": len(rows), "items": rows}, exc)
-    one_object = kind in KINDS and (params.get("id") is not None or params.get("name") is not None)
+    one_object = kind in KINDS and KINDS[kind].names_one(params)
     state, vendor_status = _single_state(rows, one_object)
     guidance = None
     if state == "failed":

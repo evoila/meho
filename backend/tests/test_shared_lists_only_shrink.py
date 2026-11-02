@@ -48,34 +48,75 @@ def _module_file(root: Path, module: str) -> Path:
     raise ListNotFoundError(f"module {module} not found under backend/src")
 
 
+def _is_name(node: ast.AST, name: str) -> bool:
+    return isinstance(node, ast.Name) and node.id == name
+
+
+def _changes(node: ast.expr, name: str) -> bool:
+    """Is ``node`` a store, delete, slice store or method call on ``name``?"""
+    if isinstance(node, ast.Name):
+        return node.id == name and not isinstance(node.ctx, ast.Load)
+    if isinstance(node, ast.Subscript):
+        return _is_name(node.value, name) and not isinstance(node.ctx, ast.Load)
+    if isinstance(node, ast.Call):
+        return isinstance(node.func, ast.Attribute) and _is_name(node.func.value, name)
+    return False
+
+
+def _other_changes(tree: ast.Module, name: str, owner: ast.Assign | ast.AnnAssign) -> list[int]:
+    """Return the line of every place, except the assignment ``owner``, that changes ``name``.
+
+    Anywhere in the file, also inside a block or a function: a second
+    assignment, ``+=``, ``del``, a slice assignment, and any method call such
+    as ``.append(...)`` or ``.extend(...)``.
+    """
+    own_targets = owner.targets if isinstance(owner, ast.Assign) else [owner.target]
+    return sorted(
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.expr)
+        and not any(node is target for target in own_targets)
+        and _changes(node, name)
+    )
+
+
 def python_list(module: str, name: str) -> Callable[[Path], int]:
     """Count the entries of a list, tuple or set literal named ``name`` in ``module``.
 
-    The file is parsed, not imported. Only a top-level assignment counts.
+    The file is parsed, not imported. Only one top-level assignment of a
+    plain literal counts. Any other change to the name anywhere in the file
+    (``+=``, ``.append(...)``, ``.extend(...)``, a slice assignment, a second
+    assignment) and a starred entry make the list uncountable, so the check
+    fails instead of missing a new entry.
     """
 
     def count(root: Path) -> int:
         path = _module_file(root, module)
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        values: list[ast.expr | None] = []
-        for node in tree.body:
-            if isinstance(node, ast.Assign) and any(
-                isinstance(target, ast.Name) and target.id == name for target in node.targets
-            ):
-                values.append(node.value)
-            elif (
-                isinstance(node, (ast.AnnAssign, ast.AugAssign))
-                and isinstance(node.target, ast.Name)
-                and node.target.id == name
-            ):
-                values.append(node.value if isinstance(node, ast.AnnAssign) else None)
-        if not values:
+        owners = [
+            node
+            for node in tree.body
+            if (isinstance(node, ast.Assign) and any(_is_name(t, name) for t in node.targets))
+            or (isinstance(node, ast.AnnAssign) and _is_name(node.target, name))
+        ]
+        if not owners:
             raise ListNotFoundError(f"{module} has no top-level name {name}")
-        if len(values) > 1 or not isinstance(values[0], (ast.List, ast.Tuple, ast.Set)):
+        owner = owners[0]
+        literal = owner.value
+        if len(owners) > 1 or not isinstance(literal, (ast.List, ast.Tuple, ast.Set)):
             raise ListNotCountableError(
-                f"{module}.{name} is not one plain list, tuple or set literal"
+                f"the name {name} is not one plain list, tuple or set literal"
             )
-        return len(values[0].elts)
+        changes = _other_changes(tree, name, owner)
+        if changes:
+            raise ListNotCountableError(
+                f"the list is changed again after its literal "
+                f"(line {', line '.join(str(line) for line in changes)})"
+            )
+        starred = [elt for elt in literal.elts if isinstance(elt, ast.Starred)]
+        if starred:
+            raise ListNotCountableError(f"the list has a starred entry on line {starred[0].lineno}")
+        return len(literal.elts)
 
     return count
 
@@ -268,6 +309,19 @@ def test_module_that_is_deleted_asks_to_remove_the_row(tmp_path: Path) -> None:
         pytest.param('__all__ = ["a"] + OTHER\n', id="built-from-parts"),
         pytest.param('__all__ = ["a", "b"]\n__all__ += ["c"]\n', id="extended-later"),
         pytest.param('__all__ = ["a", "b"]\n__all__ = ["a", "b"]\n', id="assigned-twice"),
+        pytest.param('__all__ = ["a", "b"]\n__all__.append("c")\n', id="append"),
+        pytest.param('__all__ = ["a", "b"]\n__all__.extend(["c"])\n', id="extend"),
+        pytest.param('__all__ = ["a", "b"]\n__all__.insert(0, "c")\n', id="insert"),
+        pytest.param('__all__ = ["a", "b"]\n__all__[2:2] = ["c"]\n', id="slice-assigned"),
+        pytest.param('__all__ = ["a", *["b", "c"]]\n', id="starred-entry"),
+        pytest.param('__all__ = ["a", "b"]\n__all__ = ("a", "b", "c")\n', id="replaced"),
+        pytest.param(
+            '__all__ = ["a", "b"]\nif True:\n    __all__.append("c")\n', id="append-in-a-block"
+        ),
+        pytest.param(
+            '__all__ = ["a", "b"]\n\n\ndef f():\n    global __all__\n    __all__ += ["c"]\n',
+            id="grown-inside-a-function",
+        ),
     ],
 )
 def test_list_that_cannot_be_counted_fails(tmp_path: Path, body: str) -> None:
@@ -275,6 +329,18 @@ def test_list_that_cannot_be_counted_fails(tmp_path: Path, body: str) -> None:
     problem = check_shared_list(_row(), tmp_path)
     assert problem is not None
     assert "cannot be counted" in problem
+
+
+def test_later_change_names_its_line(tmp_path: Path) -> None:
+    _write_module(tmp_path, '__all__ = [\n    "a",\n    "b",\n]\n\n__all__.extend(["c"])\n')
+    problem = check_shared_list(_row(), tmp_path)
+    assert problem is not None
+    assert "is changed again after its literal (line 6)" in problem
+
+
+def test_reading_the_list_is_not_a_change(tmp_path: Path) -> None:
+    _write_module(tmp_path, '__all__ = ["a", "b"]\nNAMES = sorted(__all__)\nprint(__all__[0])\n')
+    assert check_shared_list(_row(), tmp_path) is None
 
 
 def _file_row(pin: int, path: str = "ci/old-list.txt") -> SharedList:

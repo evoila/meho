@@ -54,6 +54,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "VM_CLONE_FROM_VM_OP_ID",
+    "_VIM_SUB_OPS_VM_CLONE_FROM_VM",
     "build_clone_body",
     "vm_clone_from_vm_composite",
     "vm_clone_from_vm_preview",

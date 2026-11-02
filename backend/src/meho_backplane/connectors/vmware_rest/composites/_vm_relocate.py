@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "VM_RELOCATE_OP_ID",
+    "_VIM_SUB_OPS_VM_RELOCATE",
     "build_relocate_spec",
     "vm_relocate_composite",
     "vm_relocate_preview_builder",

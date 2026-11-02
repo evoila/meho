@@ -85,6 +85,11 @@ surface: ``vcfa.vra8.project.list`` / ``.deployment.list`` / ``.deployment.get``
 with **zero catalog ingest**. Set-shaped results are reduced to a JSONFlux handle by
 the dispatcher. A write surface is deliberately out of scope for this read core.
 
+The day-2 ops (group ``vcfa-vra8-day2``: day-2 actions, lease, delete, machines and
+disks) are written once for Aria Automation 8 and VCF Automation 9 in
+:mod:`meho_backplane.connectors.vcf_automation.day2_ops`; the shims below call
+:mod:`meho_backplane.connectors.vcf_automation._day2`. Every change waits for approval.
+
 One more read, ``vcfa.vra8.api_file.get`` (:mod:`.api_file`, group ``vcfa-vra8-api-files``),
 reads one API description page or file the appliance serves, so the 8.18 files can be
 pinned with their size, SHA-256 and the build the Orchestrator reports
@@ -94,6 +99,7 @@ pinned with their size, SHA-256 and the build the Orchestrator reports
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -112,6 +118,8 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.vmware_shared.vra_governance import VraGovCalls
+from meho_backplane.connectors.vmware_shared.vra_handlers import VraSharedHandlers
 from meho_backplane.connectors.vra8._paths import _ABOUT_PATH
 from meho_backplane.connectors.vra8.session import (
     Vra8CredentialsLoader,
@@ -144,7 +152,7 @@ def _session_cache_key(target: Any) -> tuple[str, ...]:
     return credential_cache_key(target, domain)
 
 
-class Vra8Connector(HttpConnector):
+class Vra8Connector(HttpConnector, VraSharedHandlers):
     """vRealize Automation 8.x REST connector — two-step bearer session mint.
 
     Minted bearers cached in :attr:`_session_tokens` per credential
@@ -457,6 +465,36 @@ class Vra8Connector(HttpConnector):
 
         return await vra8_about_impl(self, operator, target, params)
 
+    def vra_gov_calls(self, operator: Operator, target: Any) -> VraGovCalls:
+        """The bearer GET and send of the shared governance ops.
+
+        The approval, policy, ABX and subscription handlers are inherited from
+        :class:`~meho_backplane.connectors.vmware_shared.vra_handlers.VraSharedHandlers`;
+        the metadata is in :mod:`.governance_ops`.
+        """
+
+        async def get(path: str, query: Mapping[str, Any] | None) -> dict[str, Any]:
+            params = dict(query) if query is not None else None
+            return await self._vra_get(target, path, operator=operator, params=params)
+
+        async def send(
+            method: str,
+            path: str,
+            query: Mapping[str, Any] | None,
+            body: Mapping[str, Any] | None,
+        ) -> Any:
+            return await self._post_json(
+                target,
+                path,
+                operator=operator,
+                verb=method,
+                params=dict(query) if query is not None else None,
+                json=dict(body) if body is not None else None,
+                extra_headers={"Accept": _JSON_ACCEPT},
+            )
+
+        return VraGovCalls(get=get, send=send, prefix="vcfa.vra8")
+
     async def api_file_get(
         self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -469,6 +507,90 @@ class Vra8Connector(HttpConnector):
         from meho_backplane.connectors.vra8.api_file import vra8_api_file_get_impl
 
         return await vra8_api_file_get_impl(self, operator, target, params)
+
+    # ------------------------------------------------------------------
+    # Day-2 ops, written once for Aria Automation 8 and VCF Automation 9.
+    # Thin shims over ``vcf_automation._day2``; metadata in
+    # ``vcf_automation.day2_ops`` (``VRA8_DAY2_OPS`` here).
+    # ------------------------------------------------------------------
+
+    async def deployment_actions_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.deployment.actions.list`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.deployment_actions_list(
+            self, operator, target, params, prefix="vcfa.vra8"
+        )
+
+    async def deployment_action_run(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.deployment.action.run`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.deployment_action_run(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def resource_action_run(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.resource.action.run`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.resource_action_run(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def deployment_lease_change(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.deployment.lease.change`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.deployment_lease_change(
+            self, operator, target, params, prefix="vcfa.vra8"
+        )
+
+    async def deployment_delete(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.deployment.delete`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.deployment_delete(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def machine_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.machine.list`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.machine_list(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def block_device_list(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.block_device.list`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2
+
+        return await _day2.block_device_list(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def machine_create(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.machine.create`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2_create
+
+        return await _day2_create.machine_create(self, operator, target, params, prefix="vcfa.vra8")
+
+    async def block_device_create(
+        self, operator: Operator, target: Vra8TargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``vcfa.vra8.block_device.create`` shim -- see ``vcf_automation._day2``."""
+        from meho_backplane.connectors.vcf_automation import _day2_create
+
+        return await _day2_create.block_device_create(
+            self, operator, target, params, prefix="vcfa.vra8"
+        )
 
     # ------------------------------------------------------------------
     # Dispatch-path session-recovery hooks (#2067 / #2396)

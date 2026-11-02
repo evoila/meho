@@ -89,7 +89,9 @@ if TYPE_CHECKING:
 __all__ = [
     "TASKS_HISTORY_GROUP_KEY",
     "TASKS_HISTORY_WHEN_TO_USE",
+    "TYPED_OPS",
     "VMWARE_TASKS_HISTORY_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "CollectorCleanupError",
     "build_task_filter_spec",
     "tasks_history_impl",
@@ -691,3 +693,6 @@ VMWARE_TASKS_HISTORY_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_TASKS_HISTORY_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {TASKS_HISTORY_GROUP_KEY: TASKS_HISTORY_WHEN_TO_USE}

@@ -111,7 +111,7 @@ _OP_DISABLE: Final = "POST:/vcenter/namespace-management/clusters/{cluster}?acti
 _OP_GET_CLUSTER: Final = "GET:/vcenter/namespace-management/clusters/{cluster}"
 
 #: REST governed-child manifests (parallel to ``_write._SUB_OPS_*``). Referenced
-#: by :mod:`._governed_subops` so the discovery surface publishes each write
+#: by the composite rows so the discovery surface publishes each write
 #: composite's grant set, and asserted by the reconcile lane.
 _SUB_OPS_SUPERVISOR_ENABLE: tuple[str, ...] = (_OP_ENABLE_ON_COMPUTE_CLUSTER,)
 _SUB_OPS_SUPERVISOR_DISABLE: tuple[str, ...] = (_OP_DISABLE,)

@@ -10,11 +10,19 @@ redaction:
   operation in :data:`_VALUE_HIDING_OPS` (a Vault secret read, the guest
   environment read) every value is hidden and only the names stay. For any
   other operation, values under secret-shaped key names are hidden, numbers
-  included. The caller of a secret read gets this view unless a person
-  passes ``reveal_secret: true``.
-* :func:`reveal_hidden_values` builds the answer of a person's reveal: the
-  redacted answer, with every value the default view hides put back as the
+  included, except the fields the operation declared as plain
+  (:func:`register_plain_fields`). The caller of every operation gets this
+  view unless a person or a service principal passes ``reveal_secret: true``.
+  An operation that makes a new credential is the exception: the dispatcher
+  returns it to the caller.
+* :func:`reveal_hidden_values` builds the answer of a reveal: the redacted
+  answer, with every value the default view hides put back as the
   connector returned it. The redaction of the other fields stays.
+  ``reveal_secret`` is a dispatch control, not a parameter of the
+  operation: :func:`split_reveal_secret` takes it off the params before
+  they are hashed, checked and handed to the connector, and
+  :func:`with_reveal_secret` puts it back on the params an approval
+  request stores, so an approved run keeps the choice.
 * :func:`fingerprint_hidden_values` builds the copy of the raw answer that
   goes to ``audit_log.raw_payload``. Every value that differs between the
   raw answer and the default view is replaced by a keyed fingerprint
@@ -26,7 +34,7 @@ redaction:
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Final
 
 from meho_backplane.broadcast.events import scrub_secret_named_values
@@ -34,13 +42,18 @@ from meho_backplane.operations._validate import compute_audit_digest_hash
 
 __all__ = [
     "FINGERPRINT_PREFIX",
+    "REVEAL_SECRET_PARAM",
     "SECRET_VALUE_PLACEHOLDER",
     "fingerprint_hidden_values",
     "fingerprint_value",
     "fingerprinted_paths",
     "hide_secret_values",
     "hides_secret_values",
+    "plain_fields_of",
+    "register_plain_fields",
     "reveal_hidden_values",
+    "split_reveal_secret",
+    "with_reveal_secret",
 ]
 
 #: What a hidden value of a secret read is replaced with.
@@ -48,6 +61,10 @@ SECRET_VALUE_PLACEHOLDER: Final[str] = "[REDACTED:secret_value]"
 
 #: Start of a fingerprint in ``audit_log.raw_payload``.
 FINGERPRINT_PREFIX: Final[str] = "[FINGERPRINT:hmac-sha256:"
+
+#: The dispatch control a person or a service principal sets to get the
+#: hidden values of an answer back.
+REVEAL_SECRET_PARAM: Final[str] = "reveal_secret"
 
 _MISSING: Final[object] = object()
 
@@ -123,6 +140,53 @@ def hides_secret_values(op_id: str) -> bool:
     return op_id in _VALUE_HIDING_OPS
 
 
+#: Per operation, the fields whose name looks like a secret but whose value
+#: is not one. Filled at import time by the connector modules and by a
+#: connector package's registrar, like the preview builders.
+_PLAIN_FIELDS: Final[dict[str, frozenset[str]]] = {}
+
+
+def split_reveal_secret(params: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Return *params* without ``reveal_secret``, and whether it was set.
+
+    The flag is not a parameter of the operation: it stays off the params
+    hash, off the schema check and off the connector call. Without the
+    flag *params* is returned as is.
+    """
+    if REVEAL_SECRET_PARAM not in params:
+        return params, False
+    reveal_secret = bool(params[REVEAL_SECRET_PARAM])
+    without = {key: value for key, value in params.items() if key != REVEAL_SECRET_PARAM}
+    return without, reveal_secret
+
+
+def with_reveal_secret(params: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of *params* with ``reveal_secret: true`` set."""
+    return {**params, REVEAL_SECRET_PARAM: True}
+
+
+def register_plain_fields(op_id: str, field_names: Iterable[str]) -> None:
+    """Declare the fields of *op_id* that hold no secret although their name says so.
+
+    The default view of every answer hides the value under a secret-shaped
+    field name (``password``, ``token``, ``api_key``, ...). Some operations
+    return such a name with a plain value: ``password_expires_at`` is a
+    date, ``secret_id_ttl`` a number of seconds, ``image_pull_secrets`` a
+    list of names, ``token`` in the RKE2 posture read the mode and owner of
+    the token file. A connector, built-in or from a package, declares them
+    here, and the view keeps each one with its whole value, at every depth
+    of the answer. A field that is not declared stays hidden, so a
+    forgotten declaration never shows a secret. Registering again replaces
+    the earlier set.
+    """
+    _PLAIN_FIELDS[op_id] = frozenset(str(name) for name in field_names)
+
+
+def plain_fields_of(op_id: str) -> frozenset[str]:
+    """The declared plain fields of *op_id*; empty when none were declared."""
+    return _PLAIN_FIELDS.get(op_id, frozenset())
+
+
 def hide_secret_values(op_id: str, answer: Any, *, raw: Any = None) -> Any:
     """Return the default view of *answer* (see the module docstring).
 
@@ -134,14 +198,17 @@ def hide_secret_values(op_id: str, answer: Any, *, raw: Any = None) -> Any:
     hide = _VALUE_HIDING_OPS.get(op_id)
     if hide is not None:
         return hide(answer, raw)
-    shown, _ = scrub_secret_named_values(answer, hide_numbers=True)
+    shown, _ = scrub_secret_named_values(
+        answer, hide_numbers=True, plain_names=plain_fields_of(op_id)
+    )
     return shown
 
 
 def reveal_hidden_values(raw: Any, redacted: Any, shown: Any) -> Any:
     """Return *redacted* with every value that *shown* hides put back from *raw*.
 
-    The answer of a person's ``reveal_secret: true``. *shown* is *redacted*
+    The answer of a ``reveal_secret: true`` by a person or a service
+    principal. *shown* is *redacted*
     after :func:`hide_secret_values`. Where the two differ, the default view
     hid a secret field, and the person gets the raw value of that field: a
     free-text rule in the redaction (a PEM block, a token) does not replace

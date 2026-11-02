@@ -56,9 +56,8 @@ References
   ``\\`` are the only escapes. See ``NewWarningHeader`` /
   ``ParseWarningHeaders`` in ``k8s.io/apimachinery/pkg/util/net/http.go``
   and https://kubernetes.io/blog/2020/09/03/warnings/ (#3842).
-* Redaction op-class (reused, not reinvented):
-  :data:`meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS`
-  (shipped by #1401).
+* Redaction op-class (reused, not reinvented): ``credential_write``,
+  declared in ``kubernetes/op_classes.py`` (shipped by #1401).
 """
 
 from __future__ import annotations

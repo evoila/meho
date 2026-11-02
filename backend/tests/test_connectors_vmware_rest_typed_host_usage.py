@@ -31,9 +31,11 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest.typed_ops import (
-    VMWARE_HOST_USAGE_OP,
     VMWARE_TYPED_OPS,
     VMWARE_TYPED_WHEN_TO_USE_BY_GROUP,
+)
+from meho_backplane.connectors.vmware_rest.typed_ops_host_usage import (
+    VMWARE_HOST_USAGE_OP,
     build_host_usage_retrieve_params,
     host_usage_impl,
 )

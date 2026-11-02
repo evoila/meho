@@ -32,6 +32,7 @@ apparatus was retired in #2358 (T7 of #2266).
 from typing import Final
 
 from meho_backplane.connectors.registry import register_connector_v2
+from meho_backplane.connectors.vcf_fleet import op_classes  # noqa: F401 -- declares the op classes
 from meho_backplane.connectors.vcf_fleet.connector import VcfFleetConnector
 from meho_backplane.connectors.vcf_fleet.session import (
     SessionCredentials,

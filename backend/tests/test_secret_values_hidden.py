@@ -1,12 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Secret reads hide their values, only people may reveal them, and the audit stores fingerprints.
+"""Answers hide secret values, only people may reveal them, and the audit stores fingerprints.
 
 * ``vault.kv.read`` and ``vmware.composite.vm.guest.env.read`` return the
   names without the values by default, whatever the key names are.
+* Every other operation, built in or from a connector package, hides the
+  value of a secret-named field (``password``, ``api_token``,
+  ``client_secret``) in its answer and in the rows stored behind a result
+  handle. An operation declares the fields that hold no secret although
+  their name says so (``register_plain_fields``); they stay.
 * ``reveal_secret: true`` returns the raw values to a person, a PEM private
   key included. An agent, or a hosted agent run, is refused with an audit row.
+* A call that waits for approval keeps the reveal choice: the approved run
+  returns the values the person asked for. The choice is stored with the
+  params on the approval request, outside the hash that ties the approval
+  to the call.
+* An operation that makes a new credential still returns it to the caller.
 * ``audit_log.raw_payload`` stores a keyed fingerprint in place of every
   hidden value; the same value gives the same fingerprint in two rows.
 * The free-text rules catch ``DB_PASSWORD=...`` style text and PEM private
@@ -25,33 +35,48 @@ import pytest
 from sqlalchemy import select
 
 import meho_backplane.operations._audit as audit_module
+from meho_backplane import connector_packages
 from meho_backplane.audit_query.policy_replay import _comparable_recorded_manifest
 from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast.events import scrub_secret_named_values
+from meho_backplane.connector_packages import record_installed_connector_packages
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import ApprovalRequest, AuditLog, EndpointDescriptor
 from meho_backplane.operations import (
+    PassThroughReducer,
     dispatch,
+    register_plain_fields,
     register_typed_operation,
     reset_dispatcher_caches,
+    set_default_reducer,
 )
 from meho_backplane.operations._secret_values import (
     SECRET_VALUE_PLACEHOLDER,
     fingerprint_hidden_values,
     fingerprinted_paths,
     hide_secret_values,
+    plain_fields_of,
     reveal_hidden_values,
 )
+from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations.approval_queue import (
+    approve_request,
+    resume_dispatch_after_approval,
+)
+from meho_backplane.operations.approval_rerun import rerun_failed_request
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.redaction import redact
 from meho_backplane.redaction.resolver import get_default_policy
 from meho_backplane.settings import get_settings
+from tests._result_store_helpers import MemoryResultStore
 
 _HIDDEN = SECRET_VALUE_PLACEHOLDER
+_HIDDEN_FIELD = "[REDACTED:param_name]"
 _FINGERPRINT = "[FINGERPRINT:hmac-sha256:"
 
 # Assembled from fragments so secret scanners do not flag the test source.
@@ -114,9 +139,11 @@ def stub_embedding_service() -> AsyncMock:
     return service
 
 
-def _operator(principal_kind: PrincipalKind = PrincipalKind.USER) -> Operator:
+def _operator(
+    principal_kind: PrincipalKind = PrincipalKind.USER, *, sub: str = "op-secret-values-test"
+) -> Operator:
     return Operator(
-        sub="op-secret-values-test",
+        sub=sub,
         name="Test Operator",
         email=None,
         raw_jwt="<test-raw-jwt>",
@@ -164,7 +191,9 @@ async def _guest_env_handler(
     }
 
 
-async def _register(op_id: str, handler: Any, embedding_service: AsyncMock) -> None:
+async def _register(
+    op_id: str, handler: Any, embedding_service: AsyncMock, *, requires_approval: bool = False
+) -> None:
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
     await register_typed_operation(
         product="vault",
@@ -176,6 +205,7 @@ async def _register(op_id: str, handler: Any, embedding_service: AsyncMock) -> N
         description="Read a secret.",
         parameter_schema={"type": "object", "properties": {"path": {"type": "string"}}},
         safety_level="safe",
+        requires_approval=requires_approval,
         when_to_use=None,
         embedding_service=embedding_service,
     )
@@ -489,3 +519,371 @@ def test_pem_public_key_and_certificate_are_kept() -> None:
     cert = "-----BEGIN " + "CERTIFICATE-----\nabc\n-----END CERTIFICATE-----"
     assert redact(text, get_default_policy()).redacted == text
     assert redact(cert, get_default_policy()).redacted == cert
+
+
+# ---------------------------------------------------------------------------
+# Every other operation: secret-named fields are hidden, declared plain fields stay
+# ---------------------------------------------------------------------------
+
+_API_TOKEN = "planted" + "-api-token-3"
+_CLIENT_SECRET = "planted" + "-client-secret-4"
+_EXPIRES_AT = "2027-03-01T00:00:00Z"
+_PACKAGE = "example-connectors"
+_ROWS = 120
+
+
+def _device_rows() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": f"device-{index}",
+            "password": _PASSWORD,
+            "api_token": _API_TOKEN,
+            "client_secret": _CLIENT_SECRET,
+            "password_expires_at": _EXPIRES_AT,
+        }
+        for index in range(_ROWS)
+    ]
+
+
+async def _builtin_device_list(operator: Operator, target: Any, params: dict[str, Any]) -> Any:
+    """Module-level stand-in for a built-in ``safe`` read with many rows."""
+    return _device_rows()
+
+
+async def _package_device_list(operator: Operator, target: Any, params: dict[str, Any]) -> Any:
+    """Module-level stand-in for a read a connector package registers."""
+    return {"devices": _device_rows()[:3], "count": 3}
+
+
+async def _mint_handler(operator: Operator, target: Any, params: dict[str, Any]) -> Any:
+    """Module-level stand-in for an operation that makes a new credential."""
+    return {"secret_id": _TOKEN, "secret_id_accessor": "accessor-1", "secret_id_ttl": 600}
+
+
+def _field_values() -> list[str]:
+    return [_PASSWORD, _API_TOKEN, _CLIENT_SECRET]
+
+
+@pytest.fixture
+def _plain_fields_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("meho_backplane.operations._secret_values._PLAIN_FIELDS", {})
+
+
+@pytest.fixture
+def _package_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Treat this test module as a folder that the package installed."""
+    monkeypatch.setattr(connector_packages, "_CONNECTORS_MODULE_PREFIX", "tests.")
+    monkeypatch.setattr(connector_packages, "_installed_folders", {})
+    record_installed_connector_packages({"test_secret_values_hidden": _PACKAGE})
+
+
+async def _owner_package(op_id: str) -> str | None:
+    async with get_sessionmaker()() as fresh:
+        row = (
+            await fresh.execute(select(EndpointDescriptor).where(EndpointDescriptor.op_id == op_id))
+        ).scalar_one()
+        return row.owner_package
+
+
+def test_plain_fields_stay_in_the_default_view(_plain_fields_registry: None) -> None:
+    register_plain_fields("made_up.read", ("password_expires_at", "token"))
+    answer = {
+        "password": "x",
+        "password_expires_at": _EXPIRES_AT,
+        "token": {"path": "/t", "mode": "0600", "token_file_secret": "kept whole"},
+        "nested": {"token": {"mode": "0600"}, "api_token": "y"},
+    }
+
+    assert plain_fields_of("made_up.read") == {"password_expires_at", "token"}
+    assert plain_fields_of("other.read") == frozenset()
+    assert hide_secret_values("made_up.read", answer) == {
+        "password": _HIDDEN_FIELD,
+        "password_expires_at": _EXPIRES_AT,
+        "token": {"path": "/t", "mode": "0600", "token_file_secret": "kept whole"},
+        "nested": {"token": {"mode": "0600"}, "api_token": _HIDDEN_FIELD},
+    }
+    assert hide_secret_values("other.read", answer)["password_expires_at"] == _HIDDEN_FIELD
+
+
+async def test_builtin_read_hides_secret_named_fields_in_the_answer_and_the_stored_rows(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A built-in ``safe`` read: no secret field reaches the caller or the stored rows."""
+    op_id = "vault.device.list"
+    await _register(op_id, _builtin_device_list, stub_embedding_service)
+    operator = _operator(PrincipalKind.AGENT)
+    store = MemoryResultStore()
+    set_default_reducer(JsonFluxReducer(store=store))
+    try:
+        result = await _read(operator, reveal=False, op_id=op_id)
+    finally:
+        set_default_reducer(PassThroughReducer())
+
+    assert result.status == "ok", result.error
+    assert result.handle is not None
+    assert [value for value in _field_values() if value in result.model_dump_json()] == []
+    assert operator.tenant_id is not None
+    stored = await store.fetch_rows(
+        tenant_id=operator.tenant_id, operator_sub=operator.sub, handle_id=result.handle.handle_id
+    )
+    assert stored is not None
+    assert len(stored.rows) == _ROWS
+    for row in stored.rows:
+        assert row["password"] == _HIDDEN_FIELD
+        assert row["api_token"] == _HIDDEN_FIELD
+        assert row["client_secret"] == _HIDDEN_FIELD
+        assert row["name"].startswith("device-")
+    (audit,) = await _audit_rows(op_id)
+    assert [value for value in _field_values() if value in json.dumps(audit.raw_payload)] == []
+    assert audit.raw_payload[0]["password"].startswith(_FINGERPRINT)
+    assert "reveal_secret" not in audit.payload
+
+
+async def test_package_read_hides_secret_named_fields_and_keeps_its_plain_fields(
+    stub_embedding_service: AsyncMock, _package_installed: None, _plain_fields_registry: None
+) -> None:
+    """A read from a connector package is protected the same way, and can declare plain fields."""
+    op_id = "vault.device.list_from_package"
+    await _register(op_id, _package_device_list, stub_embedding_service)
+    assert await _owner_package(op_id) == _PACKAGE
+    # What the package's registrar does for a date that only looks like a secret.
+    register_plain_fields(op_id, ("password_expires_at",))
+
+    hidden = await _read(_operator(PrincipalKind.AGENT), reveal=False, op_id=op_id)
+
+    assert hidden.status == "ok", hidden.error
+    assert hidden.result["count"] == 3
+    for device in hidden.result["devices"]:
+        assert device["password"] == _HIDDEN_FIELD
+        assert device["api_token"] == _HIDDEN_FIELD
+        assert device["client_secret"] == _HIDDEN_FIELD
+        assert device["password_expires_at"] == _EXPIRES_AT
+    assert [value for value in _field_values() if value in hidden.model_dump_json()] == []
+
+    revealed = await _read(_operator(PrincipalKind.USER), reveal=True, op_id=op_id)
+
+    assert revealed.status == "ok", revealed.error
+    assert revealed.result["devices"][0]["password"] == _PASSWORD
+    assert revealed.result["devices"][0]["api_token"] == _API_TOKEN
+    rows = await _audit_rows(op_id)
+    assert [row.payload.get("reveal_secret") for row in rows] == [None, True]
+    for row in rows:
+        assert [value for value in _field_values() if value in json.dumps(row.raw_payload)] == []
+        assert row.raw_payload["devices"][0]["password_expires_at"] == _EXPIRES_AT
+
+
+async def test_reveal_by_an_agent_is_refused_on_a_plain_read(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    op_id = "vault.device.list"
+    await _register(op_id, _builtin_device_list, stub_embedding_service)
+
+    result = await _read(_operator(PrincipalKind.AGENT), reveal=True, op_id=op_id)
+
+    assert result.status == "denied"
+    assert result.result is None
+    assert [value for value in _field_values() if value in result.model_dump_json()] == []
+    (row,) = await _audit_rows(op_id)
+    assert row.payload["result_status"] == "denied"
+    assert row.payload["reveal_secret"] is True
+
+
+async def test_an_operation_that_makes_a_credential_still_returns_it(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The caller gets the new SecretID; the audit row keeps only the other fields."""
+    op_id = "vault.auth.approle.generate_secret_id"
+    await _register(op_id, _mint_handler, stub_embedding_service)
+
+    result = await _read(_operator(PrincipalKind.USER), reveal=False, op_id=op_id)
+
+    assert result.status == "ok", result.error
+    assert result.result["secret_id"] == _TOKEN
+    assert result.result["secret_id_accessor"] == "accessor-1"
+    (row,) = await _audit_rows(op_id)
+    assert _TOKEN not in json.dumps(row.raw_payload)
+    assert row.raw_payload["secret_id"] == _HIDDEN_FIELD
+    assert "reveal_secret" not in row.payload
+
+
+# ---------------------------------------------------------------------------
+# A call that waits for approval keeps the reveal choice
+# ---------------------------------------------------------------------------
+
+
+async def _approval_requests() -> list[ApprovalRequest]:
+    async with get_sessionmaker()() as fresh:
+        return list((await fresh.execute(select(ApprovalRequest))).scalars().all())
+
+
+async def _park_approve_and_run(op_id: str, *, reveal: bool) -> Any:
+    """A person's call waits for approval; another person approves and runs it."""
+    requester = _operator(PrincipalKind.USER, sub="requester")
+    parked = await _read(requester, reveal=reveal, op_id=op_id)
+    assert parked.status == "awaiting_approval", parked.error
+    request_id = UUID(parked.extras["approval_request_id"])
+
+    reviewer = _operator(PrincipalKind.USER, sub="reviewer")
+    async with get_sessionmaker()() as session:
+        approved = await approve_request(session, request_id, operator=reviewer)
+        await session.commit()
+    return await resume_dispatch_after_approval(operator=reviewer, request=approved, params=None)
+
+
+async def test_reveal_choice_survives_the_wait_for_approval(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The approved run returns the values the requester asked for, once."""
+    op_id = "vault.device.list_from_package"
+    await _register(op_id, _package_device_list, stub_embedding_service, requires_approval=True)
+
+    result = await _park_approve_and_run(op_id, reveal=True)
+
+    assert result.status == "ok", result.error
+    assert result.result["devices"][0]["password"] == _PASSWORD
+    assert result.result["devices"][0]["api_token"] == _API_TOKEN
+    (request,) = await _approval_requests()
+    # The choice is stored on the request, not in the params or the hash.
+    assert request.params == {"path": "app/db"}
+    assert request.reveal_secret is True
+    assert request.params_hash == compute_params_hash({"path": "app/db"})
+    (row,) = await _audit_rows(op_id)
+    assert row.payload["reveal_secret"] is True
+    assert [value for value in _field_values() if value in json.dumps(row.raw_payload)] == []
+
+
+async def test_approved_run_without_the_flag_keeps_the_default_view(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    op_id = "vault.device.list_from_package"
+    await _register(op_id, _package_device_list, stub_embedding_service, requires_approval=True)
+
+    result = await _park_approve_and_run(op_id, reveal=False)
+
+    assert result.status == "ok", result.error
+    assert result.result["devices"][0]["password"] == _HIDDEN_FIELD
+    assert [value for value in _field_values() if value in result.model_dump_json()] == []
+    (request,) = await _approval_requests()
+    assert request.params == {"path": "app/db"}
+    assert request.reveal_secret is False
+    (row,) = await _audit_rows(op_id)
+    assert "reveal_secret" not in row.payload
+
+
+#: The runs of :func:`_credential_write_fails_once`, one entry per run.
+_credential_write_runs: list[int] = []
+
+
+async def _credential_write_fails_once(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> Any:
+    """Module-level credential write: the first run fails, every later run answers."""
+    _credential_write_runs.append(1)
+    if len(_credential_write_runs) == 1:
+        raise RuntimeError("the vendor did not answer")
+    return {"devices": _device_rows()[:1], "count": 1}
+
+
+@pytest.fixture
+def _no_vault_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Take the Vault permission check off ``vault.kv.put``: these tests have no Vault."""
+    from meho_backplane.operations import _preview
+
+    monkeypatch.delitem(_preview._PERMISSION_PREFLIGHTS, "vault.kv.put", raising=False)
+
+
+async def _register_failing_credential_write(embedding_service: AsyncMock) -> str:
+    _credential_write_runs.clear()
+    op_id = "vault.kv.put"
+    await _register(op_id, _credential_write_fails_once, embedding_service, requires_approval=True)
+    return op_id
+
+
+@pytest.mark.usefixtures("_no_vault_preflight")
+async def test_reveal_choice_survives_a_failed_credential_write_and_its_rerun(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A credential write keeps its params only until the first run. The reveal
+    choice stays on the request, so the re-run returns the values the requester
+    asked for, also when the params sent again carry the flag."""
+    op_id = await _register_failing_credential_write(stub_embedding_service)
+
+    failed = await _park_approve_and_run(op_id, reveal=True)
+
+    assert failed.status == "error", failed.error
+    (request,) = await _approval_requests()
+    assert request.params is None
+    assert request.execution_handle is not None
+    assert request.reveal_secret is True
+    assert request.resume_result is not None
+    assert request.resume_result["status"] == "error"
+
+    requester = _operator(PrincipalKind.USER, sub="requester")
+    outcome = await rerun_failed_request(
+        operator=requester,
+        request_id=request.id,
+        params={"path": "app/db", "reveal_secret": True},
+    )
+
+    assert outcome.attempt == 2
+    assert outcome.result.status == "ok", outcome.result.error
+    assert outcome.result.result["devices"][0]["password"] == _PASSWORD
+    assert outcome.result.result["devices"][0]["api_token"] == _API_TOKEN
+    assert len(_credential_write_runs) == 2
+    rows = await _audit_rows(op_id)
+    assert [row.payload.get("reveal_secret") for row in rows] == [True, True]
+    assert [value for value in _field_values() if value in json.dumps(rows[-1].raw_payload)] == []
+
+
+@pytest.mark.usefixtures("_no_vault_preflight")
+async def test_rerun_without_the_flag_keeps_the_stored_reveal_choice(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    op_id = await _register_failing_credential_write(stub_embedding_service)
+    failed = await _park_approve_and_run(op_id, reveal=True)
+    assert failed.status == "error", failed.error
+    (request,) = await _approval_requests()
+
+    outcome = await rerun_failed_request(
+        operator=_operator(PrincipalKind.USER, sub="requester"),
+        request_id=request.id,
+        params={"path": "app/db"},
+    )
+
+    assert outcome.result.status == "ok", outcome.result.error
+    assert outcome.result.result["devices"][0]["password"] == _PASSWORD
+
+
+@pytest.mark.usefixtures("_no_vault_preflight")
+async def test_rerun_flag_does_not_turn_on_a_reveal_the_call_did_not_ask_for(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    op_id = await _register_failing_credential_write(stub_embedding_service)
+    failed = await _park_approve_and_run(op_id, reveal=False)
+    assert failed.status == "error", failed.error
+    (request,) = await _approval_requests()
+    assert request.reveal_secret is False
+
+    outcome = await rerun_failed_request(
+        operator=_operator(PrincipalKind.USER, sub="requester"),
+        request_id=request.id,
+        params={"path": "app/db", "reveal_secret": True},
+    )
+
+    assert outcome.result.status == "ok", outcome.result.error
+    assert outcome.result.result["devices"][0]["password"] == _HIDDEN_FIELD
+    assert [value for value in _field_values() if value in outcome.result.model_dump_json()] == []
+
+
+async def test_reveal_by_an_agent_is_refused_before_the_call_waits_for_approval(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    op_id = "vault.device.list_from_package"
+    await _register(op_id, _package_device_list, stub_embedding_service, requires_approval=True)
+
+    result = await _read(_operator(PrincipalKind.AGENT), reveal=True, op_id=op_id)
+
+    assert result.status == "denied"
+    assert await _approval_requests() == []
+    (row,) = await _audit_rows(op_id)
+    assert row.payload["result_status"] == "denied"

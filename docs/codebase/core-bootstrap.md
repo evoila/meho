@@ -114,6 +114,12 @@ Design: `docs/decisions/2026-10-28-several-tenants-per-person.md`.
 
 Turn it on only on a test install: it is a login with fixed admin claims.
 
+It is a machine login (a service account), not a person. So it cannot do
+what only a person may do: registering an agent and creating a grant both
+answer 403 `human_principal_required` (`auth/rbac.py`,
+`ensure_human_principal`). A proof that uses an agent also needs a
+person's login, for example the first admin.
+
 ## The company login (off by default)
 
 A site connects its company login system (an OpenID Connect server such as
@@ -255,8 +261,38 @@ Steps of the realm stage, in order:
    existing group gets the attributes the file (or the tenant) names, when
    a value differs; its other attributes stay (output: `kept (attributes
    set)`). An existing client gets the mappers and the scope assignments
-   it lacks, and its secret is set when the file names one. Nothing is
-   deleted, and an existing mapper or scope is not changed.
+   it lacks, and its secret is set when the file names one. Its token
+   settings (`use.refresh.tokens`, `access.token.lifespan`) are set to the
+   values of the file when they differ (output: `kept (token settings
+   set)`); today only `meho-cli-approve` names a lifespan, and it gets no
+   refresh token. It also gets the client attributes of
+   `ADDED_CLIENT_ATTRIBUTES` that it does not have yet (today only
+   `client.offline.session.idle.timeout`, the 48-hour idle limit of the
+   long login of `meho-cli` and `meho-mcp`, #5516); output `attribute
+   <name> added`. An attribute the client has already keeps its value,
+   because an admin may have set it. Nothing is deleted, and an existing
+   mapper or scope is not changed. So an upgrade gives `meho-cli` of an
+   older realm the scope `offline_access` and the idle limit, and `meho
+   login` gets a long login.
+   Before the clients come the **login flows** of the realm file
+   (`core/keycloak_flows.py`, #5515). Today that is one flow, `meho
+   approval sign-in`: the password form, then the one-time code when the
+   person has set one up. A missing flow is made with its steps. A run
+   that stops half-way (a timeout, a restart) can leave a flow with
+   missing steps or steps that are still off; the next run adds the
+   missing steps and sets the requirements of the file (output:
+   `completed (an earlier run had not finished it)`). A flow that then
+   still has other steps than the file is kept as it is, and the step
+   prints `kept, but its steps differ from the realm file; no client is
+   bound to it`: such a flow is left out of the bindings, so a new
+   `meho-cli-approve` is made without a flow of its own, and an existing
+   binding is not changed. A client that names a flow in
+   `authenticationFlowBindingOverrides` (only `meho-cli-approve`) is bound
+   to it (output: `kept (login flow set)`). Reading and making login flows
+   needs `manage-realm`. Without it the step prints `not checked (no right
+   to read login flows)` and the Job goes on; the client is then made
+   without its own flow. A fresh install gets the flow and the binding from
+   the realm import, so this matters only for a realm made before #5515.
 4. **CI login**, when on.
    Then the **company login**, when on (see "The company login").
 5. **First login.** Read `<release>-core-first-login`; make it when missing
@@ -271,9 +307,10 @@ Steps of the realm stage, in order:
    first-start account stays and the Job stops.
 
 Rights: `meho-admin` has `manage-clients` and `manage-users` on realm
-`meho` (from the realm file), which covers steps 3 to 5; with the company
-login on, the chart adds `manage-identity-providers` and `manage-realm`
-(see "Rights" under the company login). Only the first-start account can do
+`meho` (from the realm file), which covers steps 3 to 5 except the login
+flows; with the company login on, the chart adds `manage-identity-providers`
+and `manage-realm` (see "Rights" under the company login), and then the
+Job can make the login flows too. Only the first-start account can do
 step 6, and only it is needed there.
 
 ### Network rules
@@ -302,11 +339,22 @@ when nothing is missing. The Secrets it makes carry only the label
 
 ## Known issues and limits
 
-- The stage adds, it never removes or rewrites. A changed group attribute,
+- The stage adds, it never removes or rewrites. Adding a missing client
+  attribute from `ADDED_CLIENT_ATTRIBUTES` keeps this rule. A changed group attribute,
   a changed mapper setting or a renamed client in a newer realm file does
   not reach a running realm; an operator changes it in Keycloak.
 - The `users` entry of the realm file (the roles of `meho-admin`'s service
   account) is applied at the first start only.
+- Realm settings at the top of the realm file reach a new realm only.
+  Today these are the remember-me login (`rememberMe`, and
+  `ssoSessionIdleTimeoutRememberMe` and `ssoSessionMaxLifespanRememberMe`
+  at 30 days) and the passkey policy
+  (`webAuthnPolicyPasswordlessPasskeysEnabled`, user verification
+  `required`, discoverable credential `Yes`). The stage cannot set them:
+  `meho-admin` has no `manage-realm` right (unless the company login is on).
+  A running realm gets them once with `keycloak.realm.update` or by hand;
+  see `docs-site/install/keycloak-realm.md`, "Remember the browser, and
+  passkeys".
 - A person who exists is never touched: not their groups, not their
   password. To start over for one person, delete the person in Keycloak;
   the Job makes them again from the Secret.

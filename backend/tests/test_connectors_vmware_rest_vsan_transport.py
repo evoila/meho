@@ -48,6 +48,7 @@ from meho_backplane.connectors.vmware_rest._mount import (
 from meho_backplane.connectors.vmware_rest.soap_vsan import (
     build_vsan_envelope,
     parse_fault_object,
+    parse_vsan_result,
     vsan_soap_action,
 )
 from meho_backplane.connectors.vmware_rest.vim_body import vim_moref
@@ -857,15 +858,38 @@ def test_build_vsan_envelope_sends_true_false_values() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("name", "value"),
-    [
-        ("vmCreateTimeout", 120),
-        ("perspective", "defaultView"),
-        ("fields", ["objectHealth"]),
-        ("spec", {"_typeName": "VsanClusterHealthQuerySpec"}),
-    ],
-)
+def test_build_vsan_envelope_sends_text_numbers_lists_and_data_objects() -> None:
+    """#4444: strings, whole numbers, lists and data objects, in the order of the dict."""
+    envelope = build_vsan_envelope(
+        "VsanPerformanceManager",
+        "vsan-performance-manager",
+        "VsanPerfQueryPerf",
+        {
+            "querySpecs": [
+                {
+                    "_typeName": "VsanPerfQuerySpec",
+                    "entityRefId": "cluster-domclient:*",
+                    "startTime": "2026-10-30T09:00:00Z",
+                    "labels": ["iopsRead", "a<b"],
+                    "interval": 300,
+                    "group": None,
+                }
+            ],
+            "cluster": vim_moref("ClusterComputeResource", "domain-c7"),
+        },
+    )
+    assert (
+        '<VsanPerfQueryPerf xmlns="urn:vsan">'
+        '<_this type="VsanPerformanceManager">vsan-performance-manager</_this>'
+        "<querySpecs><entityRefId>cluster-domclient:*</entityRefId>"
+        "<startTime>2026-10-30T09:00:00Z</startTime>"
+        "<labels>iopsRead</labels><labels>a&lt;b</labels><interval>300</interval></querySpecs>"
+        '<cluster type="ClusterComputeResource">domain-c7</cluster></VsanPerfQueryPerf>'
+    ) in envelope
+    assert "_typeName" not in envelope
+
+
+@pytest.mark.parametrize(("name", "value"), [("ratio", 1.5), ("missing", None)])
 def test_build_vsan_envelope_refuses_argument_types_it_cannot_send(name: str, value: Any) -> None:
     with pytest.raises(TypeError, match=name):
         build_vsan_envelope(
@@ -874,6 +898,18 @@ def test_build_vsan_envelope_refuses_argument_types_it_cannot_send(name: str, va
             "VsanQueryVcClusterHealthSummary",
             {name: value},
         )
+
+
+def test_parse_vsan_result_reads_every_returnval() -> None:
+    """#4444: a method that returns an array sends one ``returnval`` per entry."""
+
+    def answer(*values: str) -> str:
+        inner = "".join(f"<returnval>{value}</returnval>" for value in values)
+        return _soap_envelope(f'<MResponse xmlns="urn:vsan">{inner}</MResponse>')
+
+    assert parse_vsan_result(answer("<a>1</a>", "<a>2</a>"), "M") == [{"a": "1"}, {"a": "2"}]
+    assert parse_vsan_result(answer("<a>1</a>"), "M") == {"a": "1"}
+    assert parse_vsan_result(answer(), "M") is None
 
 
 def test_vsan_soap_action_names_the_vsan_version() -> None:

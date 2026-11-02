@@ -536,6 +536,13 @@ starts it, through `run_scheduled`). The two use identity like this:
 | Grants that limit each call | the person's **and** the agent's (stricter wins) | the agent's |
 | Role and flags of each tool call | the person's role, but at most `operator`; no `approver`, self-approval or `platform_admin` flag | the agent's (`operator`) |
 
+An agent login can also start a direct run, but only of its own definition:
+the one whose `identity_ref` is the agent's client id (the `azp` claim of its
+token). The check sits in the invoker's definition loader, so the run route,
+the event stream and the scheduled path all refuse the same case. REST
+answers 403 `agent_not_owned`, MCP a permission refusal with the same
+message. A person may start any definition of the tenant.
+
 A direct run works "on behalf of" the person: the person stays the subject
 and the agent is the actor (RFC 8693 `sub` + `act`). `run` and
 `stream_events` bind the agent with `auth/delegation.py::actor_delegation`

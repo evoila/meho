@@ -637,6 +637,69 @@ connector registers the same ops as `vcfa.vra8.*` (see
   against `vra-catalog-deployment.json` and `vra-iaas.json` of the pinned
   `vra-sdk-go` v0.6.5 shelf.
 
+**Sign-in with LDAP or OIDC.** Four provider-plane ops read and set how
+people sign in to VCF Automation: the provider's own LDAP, and each org's
+LDAP and OIDC. They are in the group `vcfa-provider-identity`. Metadata is in
+`identity_ops.py`; the handlers are in `_identity.py` (shared parts and the
+read), `_identity_ldap.py` and `_identity_oidc.py`; the approval previews are
+in `_identity_preview.py`. Wire facts follow `go-vcloud-director` v3
+(`govcd/tm_ldap.go`, `govcd/org_oidc.go`, `govcd/trusted_certificates.go`).
+
+| op_id | what it does and returns | risk level / approval | wire | versions |
+|---|---|---|---|---|
+| `vcfa.provider.identity.show` | the provider's LDAP, and each org's LDAP and OIDC, as flat `rows` (`applies_to`, `org`, `kind`, server or OIDC fields, `error`) plus `org_count`; never a password or client secret | safe | `GET /api/admin/extension/settings/ldapSettings`, `GET /api/admin/org/{id}/settings/ldap`, `GET /api/admin/org/{id}/settings/oauth` (+ `GET /cloudapi/1.0.0/orgs`) | 9.x |
+| `vcfa.provider.ldap.set` | sets the provider's LDAP; returns `status` (`set`, `unreachable`, `tls_failed`, `certificate_not_trusted`, `certificate_mismatch`, `refused`, `not_confirmed`, `invalid_request`), the settings and the certificate fingerprint | dangerous, approval | `POST /cloudapi/1.0.0/testConnection`, `POST /cloudapi/1.0.0/ssl/trustedCertificates`, `PUT /api/admin/extension/settings/ldapSettings` (`DELETE …/trustedCertificates/{id}` undoes a trust when the `PUT` is refused or the connection breaks) | 9.x |
+| `vcfa.provider.org.ldap.set` | sets an org's LDAP: `none`, `system` (the provider's) or `custom` (its own server); same answer, plus `refused_by_meho` | dangerous, approval | as above, with `PUT /api/admin/org/{id}/settings/ldap` | 9.x |
+| `vcfa.provider.org.oidc.set` | sets or removes an org's OIDC; returns `status` (`set`, `removed`, `well_known_failed`, `refused`, `refused_by_meho`, `invalid_request`) and the settings | dangerous, approval | `POST /api/admin/org/{id}/settings/oauth/openIdProviderConfig`, `PUT` / `GET` / `DELETE /api/admin/org/{id}/settings/oauth` | 9.x |
+
+- **Classic API.** The settings calls use the classic `/api` paths with
+  `Accept: application/*+json;version=40.0` (the cloudapi header gets HTTP
+  406) and `Content-Type: application/*+json`. The org id in the path is the
+  uuid, checked and percent-encoded. The 9.x VCF Automation references list
+  no classic `/api` call; the VMware Cloud Director API 39.1 reference
+  lists all of them. `tests/test_connectors_vcf_automation_identity_reconcile.py`
+  checks the classic calls against that list and the cloudapi calls against
+  the 9.0, 9.1 and 9.1.1 provider lists. A live check is a separate task.
+- **Secrets.** The bind password (`password_secret_ref`) and the client
+  secret (`client_secret_ref`) are Vault paths. MEHO reads them when the
+  approved call runs and sends them only in the `PUT` body. The three
+  changes have the `credential` tag and the class `credential_write` in
+  `op_classes.py`: no request body in the flight recorder, no params
+  on the broadcast, and the dispatcher withholds the vendor text of a raised
+  error. A vendor refusal of the `PUT` answers `refused` with
+  `vendor_message`, where any text that holds the secret is replaced. The
+  views copy named fields only, so a password or client secret the vendor
+  sends back never reaches a result.
+- **LDAP checks.** The appliance first tests the connection. A server it
+  cannot reach answers `unreachable`. For LDAPS with a certificate the
+  appliance does not trust, the answer is `certificate_not_trusted` with
+  `certificate_sha256`. The call must then name that fingerprint in
+  `trust_certificate_sha256`; the run trusts the certificate only when the
+  server still shows it (else `certificate_mismatch`). When the vendor
+  refuses the `PUT` (a wrong bind password), MEHO removes the certificate
+  it trusted in this run, so nothing changes. When the connection breaks
+  during the `PUT`, MEHO removes that certificate too and answers
+  `not_confirmed`: the settings may or may not have changed, so the caller
+  reads them with `identity.show`. Active Directory gets the
+  vendor SDK's default attribute maps; OpenLDAP needs `user_attributes`
+  and `group_attributes`.
+- **OIDC.** The appliance reads the well-known address
+  (`openIdProviderConfig`); an address that does not answer gives
+  `well_known_failed`. MEHO adds the client id, the secret, the address and
+  the claim names, and checks that the endpoints and the subject, email and
+  name claims are set. After the `PUT` it reads the settings again (the
+  vendor SDK does the same).
+- **The provider's own org.** `org.ldap.set` refuses the org `System`, and
+  `org.oidc.set` refuses to remove or turn off (`enabled: false`) its OIDC:
+  the provider admin signs in there (`refused_by_meho`, nothing is sent and
+  Vault is not read).
+- **Preview.** Each change has its own approval preview: the inputs, the
+  secret only as its Vault path, the current settings, what is affected
+  and, for LDAPS, the certificate fingerprint and whether it matches. The
+  OIDC preview shows the `enabled` the call sends; a call with
+  `enabled: false` has the action `turn_off_org_oidc`, so the approver sees
+  that the org's users lose that sign-in.
+
 Source: `backend/src/meho_backplane/connectors/vcf_automation/`.
 
 The connector is **dual-plane**: a single registry triple covers both the
@@ -706,6 +769,9 @@ domains.
   work** above), built from the shared `Day2OpSpec` list that the `vra8`
   connector also uses. `VCFA_DEPLOYMENT_DELETE` is the delete, built from the
   same list and kept in `VCFA_DEPLOY_OPS`.
+- **`VCFA_IDENTITY_OPS`** (`identity_ops.py`) — the four sign-in ops (see
+  **Sign-in with LDAP or OIDC** above), validated by the same
+  `validate_typed_ops()`.
 - **`VCFA_PRODUCT` / `VCFA_VERSION` / `VCFA_IMPL_ID` /
   `VCFA_CONNECTOR_ID`** (`__init__.py`) — DB-side keys. Since #1814 the
   registry key `VcfAutomationConnector.product` was unified to `"vcfa"`,

@@ -3,8 +3,9 @@
 
 """Typed-op metadata + registrar for :class:`SaltConnector`.
 
-Six reads on Aria Automation Config 8.18 and VCF 9.1 Salt, each one or
-more RaaS RPC calls (bodies in :mod:`meho_backplane.connectors.salt.reads`):
+Six reads and six changes on Aria Automation Config 8.18 and VCF 9.1 Salt,
+each one or more RaaS RPC calls. The reads (bodies in
+:mod:`meho_backplane.connectors.salt.reads`):
 
 * ``salt.about`` -- ``api.get_versions`` and ``master.get_master_presence``;
 * ``salt.minion.list`` -- ``minions.get_minion_key_state``,
@@ -13,6 +14,16 @@ more RaaS RPC calls (bodies in :mod:`meho_backplane.connectors.salt.reads`):
 * ``salt.job.list`` -- ``cmd.get_cmds`` (job runs with state, user, start);
 * ``salt.job.result`` -- ``ret.get_returns`` for one ``jid``;
 * ``salt.target.list`` -- ``tgt.get_target_group``.
+
+The changes, each waiting for a person's approval:
+
+* ``salt.key.accept`` / ``.reject`` / ``.delete`` --
+  ``minions.set_minion_key_state`` (bodies in
+  :mod:`meho_backplane.connectors.salt.key_writes`);
+* ``salt.job.run_state`` / ``.run_command`` -- ``cmd.route_cmd`` on the
+  minions ``tgt.get_target_group_minions`` resolved for the approver;
+  ``salt.job.cancel`` -- ``cmd.stop_job`` (bodies in
+  :mod:`meho_backplane.connectors.salt.job_writes`).
 
 The dataclass + tuple + registrar shape mirrors
 :mod:`meho_backplane.connectors.srm.typed_ops`.
@@ -30,7 +41,17 @@ from meho_backplane.connectors.salt._op_common import (
     KEY_STATES,
     SaltTypedOp,
 )
+from meho_backplane.connectors.salt._ops_job_writes import (
+    JOB_CANCEL_OP,
+    RUN_COMMAND_OP,
+    RUN_STATE_OP,
+)
 from meho_backplane.connectors.salt._ops_jobs import JOB_LIST_OP, JOB_RESULT_OP
+from meho_backplane.connectors.salt._ops_key_writes import (
+    KEY_ACCEPT_OP,
+    KEY_DELETE_OP,
+    KEY_REJECT_OP,
+)
 from meho_backplane.connectors.salt._ops_minions import (
     ABOUT_OP,
     KEY_LIST_OP,
@@ -59,15 +80,18 @@ SALT_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "knows with their status (salt.about). One read."
     ),
     GROUP_MINIONS: (
-        "Use to see the Salt minions (the managed machines): each minion's key state, "
-        "master, presence, last contact and OS (salt.minion.list), the minion keys by "
-        "state (salt.key.list), and the saved targets, the minion groups that jobs run "
-        "on (salt.target.list). Three reads."
+        "Use for the Salt minions (the managed machines). Reads: each minion's key "
+        "state, master, presence, last contact and OS (salt.minion.list), the minion "
+        "keys by state (salt.key.list), and the saved targets that jobs run on "
+        "(salt.target.list). Changes: accept, reject or delete minion keys "
+        "(salt.key.accept, salt.key.reject, salt.key.delete)."
     ),
     GROUP_JOBS: (
-        "Use to see Salt job runs: recent runs with function, target, state, user and "
-        "start time (salt.job.list), and the result of one run per minion, with the "
-        "failed states named (salt.job.result). Two reads."
+        "Use for Salt jobs. Reads: recent runs with function, target, state, user and "
+        "start time (salt.job.list), and the state and result of one run per minion "
+        "(salt.job.result). Changes: apply states to a target (salt.job.run_state), run "
+        "a shell command on a target (salt.job.run_command), stop a running job "
+        "(salt.job.cancel)."
     ),
 }
 
@@ -78,6 +102,12 @@ SALT_TYPED_OPS: tuple[SaltTypedOp, ...] = (
     JOB_LIST_OP,
     JOB_RESULT_OP,
     TARGET_LIST_OP,
+    KEY_ACCEPT_OP,
+    KEY_REJECT_OP,
+    KEY_DELETE_OP,
+    RUN_STATE_OP,
+    RUN_COMMAND_OP,
+    JOB_CANCEL_OP,
 )
 
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Metadata of the seven Orchestrator reads (the bodies live in ``typed_reads``).
+"""Metadata of seven Orchestrator reads (the bodies live in ``typed_reads``).
 
 ``vro.about``, ``vro.health``, ``vro.workflow.list``, ``vro.workflow.get``,
 ``vro.execution.list``, ``vro.execution.get`` and ``vro.execution.logs``.
@@ -24,34 +24,15 @@ from meho_backplane.connectors.vro.op_types import (
 )
 from meho_backplane.connectors.vro.typed_reads import DEFAULT_LIST_LIMIT, LOG_TEXT_MAX
 
-__all__ = ["VRO_READ_OPS", "VRO_WHEN_TO_USE_BY_GROUP"]
+__all__ = ["EXECUTION_ID_SCHEMA", "MAX_RESULTS_SCHEMA", "VRO_READ_OPS", "WORKFLOW_ID_SCHEMA"]
 
-#: Group texts: which reads each group holds, in plain words.
-VRO_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
-    GROUP_SERVER: (
-        "Use to read the Orchestrator server itself: its version, build and API "
-        "version (vro.about) and the health of its services (vro.health). Two reads."
-    ),
-    GROUP_WORKFLOWS: (
-        "Use to find Orchestrator workflows by name or category (vro.workflow.list) "
-        "and to read one workflow with its inputs and outputs (vro.workflow.get). "
-        "Two reads; running a workflow is not in this group."
-    ),
-    GROUP_EXECUTIONS: (
-        "Use to look at the runs of a workflow: list the runs with state, start, end "
-        "and user (vro.execution.list), read one run with its inputs, outputs and "
-        "error (vro.execution.get), and read the log lines of one run "
-        "(vro.execution.logs). Three reads."
-    ),
-}
-
-_WORKFLOW_ID = id_schema(
+WORKFLOW_ID_SCHEMA = id_schema(
     "Id of the workflow, as vro.workflow.list returns it (the id field of a row)."
 )
-_EXECUTION_ID = id_schema(
+EXECUTION_ID_SCHEMA = id_schema(
     "Id of the workflow run, as vro.execution.list returns it (the id field of a row)."
 )
-_MAX_RESULTS: dict[str, Any] = {
+MAX_RESULTS_SCHEMA: dict[str, Any] = {
     "type": "integer",
     "minimum": 1,
     "maximum": 10000,
@@ -231,7 +212,7 @@ _WORKFLOW_LIST = VroTypedOp(
                 "maxLength": 200,
                 "description": "Keep workflows in the category with exactly this name.",
             },
-            "max_results": _MAX_RESULTS,
+            "max_results": MAX_RESULTS_SCHEMA,
             "start_index": _START_INDEX,
         },
         "additionalProperties": False,
@@ -284,7 +265,7 @@ _WORKFLOW_GET = VroTypedOp(
     ),
     parameter_schema={
         "type": "object",
-        "properties": {"workflow_id": _WORKFLOW_ID},
+        "properties": {"workflow_id": WORKFLOW_ID_SCHEMA},
         "required": ["workflow_id"],
         "additionalProperties": False,
         "examples": [{"workflow_id": "<workflow-id>"}],
@@ -347,8 +328,8 @@ _EXECUTION_LIST = VroTypedOp(
     parameter_schema={
         "type": "object",
         "properties": {
-            "workflow_id": _WORKFLOW_ID,
-            "max_results": _MAX_RESULTS,
+            "workflow_id": WORKFLOW_ID_SCHEMA,
+            "max_results": MAX_RESULTS_SCHEMA,
             "start_index": _START_INDEX,
         },
         "required": ["workflow_id"],
@@ -405,7 +386,7 @@ _EXECUTION_GET = VroTypedOp(
     ),
     parameter_schema={
         "type": "object",
-        "properties": {"workflow_id": _WORKFLOW_ID, "execution_id": _EXECUTION_ID},
+        "properties": {"workflow_id": WORKFLOW_ID_SCHEMA, "execution_id": EXECUTION_ID_SCHEMA},
         "required": ["workflow_id", "execution_id"],
         "additionalProperties": False,
         "examples": [{"workflow_id": "<workflow-id>", "execution_id": "<execution-id>"}],
@@ -484,8 +465,8 @@ _EXECUTION_LOGS = VroTypedOp(
     parameter_schema={
         "type": "object",
         "properties": {
-            "workflow_id": _WORKFLOW_ID,
-            "execution_id": _EXECUTION_ID,
+            "workflow_id": WORKFLOW_ID_SCHEMA,
+            "execution_id": EXECUTION_ID_SCHEMA,
             "max_lines": {
                 "type": "integer",
                 "minimum": 1,

@@ -57,6 +57,7 @@ from meho_backplane.connectors.adapters.ssh import (
     _POOL_TTL_S,
     SshHostKeyUnpinnedError,
     _known_hosts_from_secret,
+    _pool_key,
     _secret_flag_is_true,
 )
 from meho_backplane.connectors.adapters.ssh import SshConnector as _SshConnectorDirect
@@ -380,8 +381,8 @@ async def test_different_targets_get_different_connections(
 
     assert ssh_a is not ssh_b
     # Pool is keyed on the tenant-unique ``(tenant_id, id)`` tuple.
-    assert (target_a.tenant_id, target_a.id, SYSTEM_OPERATOR_SUB) in conn._connections
-    assert (target_b.tenant_id, target_b.id, SYSTEM_OPERATOR_SUB) in conn._connections
+    assert _pool_key(target_a, None) in conn._connections
+    assert _pool_key(target_b, None) in conn._connections
     await conn.aclose()
 
 
@@ -409,8 +410,8 @@ async def test_same_name_different_tenant_get_distinct_connections(
 
     assert ssh_a is not ssh_b
     assert len(conn._connections) == 2
-    assert (target_a.tenant_id, target_a.id, SYSTEM_OPERATOR_SUB) in conn._connections
-    assert (target_b.tenant_id, target_b.id, SYSTEM_OPERATOR_SUB) in conn._connections
+    assert _pool_key(target_a, None) in conn._connections
+    assert _pool_key(target_b, None) in conn._connections
     # Re-fetching B's connection returns B's, not A's (no first-writer bleed).
     assert await conn._connect(target_b) is ssh_b
     await conn.aclose()
@@ -490,10 +491,7 @@ async def test_run_command_timeout_raises_asyncio_timeout_error() -> None:
         # never runs — the path string is deliberately unregistered.
         secret_ref="meho/testing/ssh/unused-timeout-path",
     )
-    conn._connections[(target.tenant_id, target.id, SYSTEM_OPERATOR_SUB)] = (
-        mock_conn,
-        time.monotonic(),
-    )
+    conn._connections[_pool_key(target, None)] = (mock_conn, time.monotonic())
 
     with pytest.raises(asyncio.TimeoutError):
         await conn._run_command(target, "sleep 60", timeout=0.05)
@@ -781,7 +779,7 @@ async def test_idle_ttl_evicts_stale_connection(
     ssh_first = await conn._connect(target)
 
     # Backdate last_used to simulate idle expiry.
-    conn._connections[(target.tenant_id, target.id, SYSTEM_OPERATOR_SUB)] = (
+    conn._connections[_pool_key(target, None)] = (
         ssh_first,
         time.monotonic() - _POOL_TTL_S - 1.0,
     )

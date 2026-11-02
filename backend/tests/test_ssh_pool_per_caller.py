@@ -9,6 +9,11 @@ SSH login (``asyncssh.connect``) and the Vault read
 people only, so the tests show that every caller gets a connection only
 after their own Vault read passed, also when another caller's connection
 to the same target is already open.
+
+The check runner runs a Sensor under the ``sub`` of the person who made it,
+with the runner's own token and Vault role (``check_runner_dispatch``). So
+the runner stand-in here carries a person's ``sub``, and the Vault stand-in
+tells the runner apart by that marker, not by the ``sub``.
 """
 
 from __future__ import annotations
@@ -54,10 +59,15 @@ def _person(sub: str, role: TenantRole = TenantRole.OPERATOR) -> Operator:
     )
 
 
-def _check_runner() -> Operator:
-    """The identity the Sensor runner dispatches with: its own token, not a person's."""
+def _check_runner(sub: str) -> Operator:
+    """The identity the Sensor runner dispatches with.
+
+    Shaped like ``checks.runner._sensor_operator``: the ``sub`` of the
+    person who made the Sensor, the runner's own token, and the
+    ``check_runner_dispatch`` marker that picks the runner's Vault role.
+    """
     return Operator(
-        sub="__sensor__",
+        sub=sub,
         name=None,
         email=None,
         raw_jwt="runner.test.jwt",
@@ -65,6 +75,11 @@ def _check_runner() -> Operator:
         tenant_role=TenantRole.OPERATOR,
         check_runner_dispatch=True,
     )
+
+
+def _reader(operator: Operator) -> str:
+    """Name the Vault reader as the stand-in records it: ``runner:<sub>`` for the runner."""
+    return f"runner:{operator.sub}" if operator.check_runner_dispatch else operator.sub
 
 
 class _FakeLogin:
@@ -95,7 +110,13 @@ class _Completed:
 
 
 class _Harness:
-    """Counts Vault reads and SSH logins per caller."""
+    """Counts Vault reads and SSH logins per caller.
+
+    ``allowed`` names the readers whose Vault read passes, as
+    :func:`_reader` spells them: a person by ``sub``, the check runner
+    as ``runner:<sub>``. The runner's role is refused unless it is named,
+    whatever ``sub`` the Sensor carries.
+    """
 
     def __init__(self, allowed: set[str]) -> None:
         self.allowed = allowed
@@ -104,9 +125,10 @@ class _Harness:
 
     async def read_secret(self, target: Any, operator: Operator, **_kwargs: Any) -> dict[str, Any]:
         del target
-        self.vault_reads.append(operator.sub)
-        if operator.sub not in self.allowed:
-            raise VaultRoleDeniedError(f"read refused for {operator.sub}")
+        reader = _reader(operator)
+        self.vault_reads.append(reader)
+        if reader not in self.allowed:
+            raise VaultRoleDeniedError(f"read refused for {reader}")
         return dict(_SECRET)
 
     async def connect(self, *_args: Any, **kwargs: Any) -> _FakeLogin:
@@ -130,7 +152,8 @@ async def _run(conn: LinuxSshConnector, target: _Target, operator: Operator | No
 
 
 def _refused_callers() -> list[Operator | None]:
-    return [_person("bob"), _check_runner(), None]
+    """A person without access, a Sensor of a person with access, and no operator."""
+    return [_person("bob"), _check_runner("alice"), None]
 
 
 @pytest.mark.asyncio
@@ -140,7 +163,7 @@ async def test_cold_pool_refuses_each_caller_whose_vault_read_is_refused(harness
     for caller in _refused_callers():
         with pytest.raises(VaultRoleDeniedError):
             await _run(conn, target, caller)
-    assert harness.vault_reads == ["bob", "__sensor__", SYSTEM_OPERATOR_SUB]
+    assert harness.vault_reads == ["bob", "runner:alice", SYSTEM_OPERATOR_SUB]
     assert harness.logins == []
     assert conn._connections == {}
 
@@ -160,10 +183,47 @@ async def test_warm_pool_still_asks_vault_for_each_new_caller(harness: Any) -> N
         with pytest.raises(VaultRoleDeniedError):
             await _run(conn, target, caller)
 
-    assert harness.vault_reads == ["alice", "bob", "__sensor__", SYSTEM_OPERATOR_SUB]
+    assert harness.vault_reads == ["alice", "bob", "runner:alice", SYSTEM_OPERATOR_SUB]
     assert len(harness.logins) == 1
     assert list(conn._connections) == [_pool_key(target, alice)]
     assert not harness.logins[0].closed
+
+
+@pytest.mark.asyncio
+async def test_sensor_of_a_person_never_reuses_their_login(harness: Any) -> None:
+    """The check runner runs a Sensor under its creator's ``sub``.
+
+    The runner's own Vault role is refused here. After the person opened a
+    connection, the Sensor with the same ``sub`` must still run the
+    runner's Vault read, be refused, and get no connection.
+    """
+    conn = LinuxSshConnector()
+    target = _Target()
+    alice, sensor_of_alice = _person("alice"), _check_runner("alice")
+
+    await _run(conn, target, alice)
+    assert len(harness.logins) == 1
+
+    with pytest.raises(VaultRoleDeniedError):
+        await _run(conn, target, sensor_of_alice)
+
+    assert harness.vault_reads == ["alice", "runner:alice"]
+    assert len(harness.logins) == 1
+    assert _pool_key(target, sensor_of_alice) != _pool_key(target, alice)
+    assert list(conn._connections) == [_pool_key(target, alice)]
+
+    # The other way round too: the person never gets the Sensor's login.
+    harness.allowed.add("runner:carol")
+    carol, sensor_of_carol = _person("carol"), _check_runner("carol")
+    await _run(conn, target, sensor_of_carol)
+    await _run(conn, target, carol)
+    await _run(conn, target, sensor_of_carol)
+    await _run(conn, target, carol)
+
+    assert harness.vault_reads == ["alice", "runner:alice", "runner:carol", "carol"]
+    assert len(harness.logins) == 3
+    assert conn._connections[_pool_key(target, sensor_of_carol)][0] is harness.logins[1]
+    assert conn._connections[_pool_key(target, carol)][0] is harness.logins[2]
 
 
 @pytest.mark.asyncio

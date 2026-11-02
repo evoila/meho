@@ -68,9 +68,11 @@ policy), not a rewrite.
 
 `LinuxSshConnector` subclasses the shared `SshConnector` adapter and
 **inherits** the asyncssh connection pool (keyed on the tenant-unique
-`(tenant_id, id)` cache key plus the caller's `sub`, so each caller logs
-in once after their own Vault read; 5-minute idle TTL; one handshake lock
-per key), the per-command timeout, the one-flight-recorder-span-per-command
+`(tenant_id, id)` cache key plus the caller's kind and `sub`, so each
+caller logs in once after their own Vault read, and a Sensor run by the
+check runner under a person's `sub` never gets that person's login;
+5-minute idle TTL; one handshake lock per key), the per-command timeout,
+the one-flight-recorder-span-per-command
 seam, and `aclose()`. It overrides only `fingerprint` / `probe` /
 `execute` and adds `about` plus the per-op bound-method handler shims. It
 does **not** override `_auth_config`; it therefore inherits the base

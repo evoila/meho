@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ACCESS_OPS",
+    "OPS",
     "access_review_body",
     "access_review_result",
     "k8s_auth_can_i",
@@ -368,3 +369,6 @@ ACCESS_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=K8S_AUTH_RULES_LLM_INSTRUCTIONS,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = ACCESS_OPS

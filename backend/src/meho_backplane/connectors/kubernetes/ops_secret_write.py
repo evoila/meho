@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.kubernetes.kubeconfig import KubernetesTargetLike
 
 __all__ = [
+    "OPS",
     "SECRET_WRITE_OPS",
     "KubernetesSecretConflictError",
     "KubernetesSecretImmutableError",
@@ -504,3 +505,6 @@ SECRET_WRITE_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=_SECRET_DELETE_LLM,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = SECRET_WRITE_OPS

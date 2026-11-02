@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.kubernetes.kubeconfig import KubernetesTargetLike
 
 __all__ = [
+    "OPS",
     "WORKLOAD_KINDS",
     "WORKLOAD_SET_OPS",
     "k8s_workload_list",
@@ -347,3 +348,6 @@ WORKLOAD_SET_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=K8S_WORKLOAD_LIST_LLM_INSTRUCTIONS,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = WORKLOAD_SET_OPS

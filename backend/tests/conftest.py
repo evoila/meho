@@ -205,7 +205,7 @@ def _default_database_url(
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     from meho_backplane.db import engine as engine_module
-    from meho_backplane.db.engine import dispose_engine, reset_engine_for_testing
+    from meho_backplane.db.engine import reset_engine_for_testing
 
     db_path = tmp_path / "default.db"
     url = f"sqlite+aiosqlite:///{db_path}"
@@ -243,21 +243,29 @@ def _default_database_url(
     reset_engine_for_testing()
     yield
 
+    to_close = list(made_engines)
+    cached = engine_module._engine
+    if cached is not None and cached not in to_close:
+        to_close.append(cached)
+
     async def _close_engines() -> None:
-        await dispose_engine()
-        for made in made_engines:
+        for made in to_close:
             await made.dispose()
 
-    # The test's own event loop may already be closed here, so the engines
-    # are closed on a new loop. aiosqlite closes a connection on whatever
-    # loop is running, so this works for the pools of every test.
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(_close_engines())
-    except Exception as exc:
-        warnings.warn(f"closing the test database engines failed: {exc!r}", stacklevel=1)
-    finally:
-        loop.close()
+    # Make a loop only when there is an engine to close: some tests replace
+    # ``socket.socket`` until their own teardown, and a new loop opens a
+    # socket pair. The test's own event loop may already be closed here, so
+    # the engines are closed on a new loop. aiosqlite closes a connection on
+    # whatever loop is running, so this works for the pools of every test.
+    if to_close:
+        try:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(_close_engines())
+            finally:
+                loop.close()
+        except Exception as exc:
+            warnings.warn(f"closing the test database engines failed: {exc!r}", stacklevel=1)
     reset_engine_for_testing()
     get_settings.cache_clear()
 

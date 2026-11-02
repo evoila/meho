@@ -47,8 +47,8 @@ VM_NIC_CONNECT_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "required": ["vm", "nic"],
     "additionalProperties": False,
     "examples": [
-        {"vm": "vm-42", "nic": "4000", "action": "connect"},
-        {"vm": "vm-42", "nic": "4000", "action": "disconnect"},
+        {"vm": "<vm-id>", "nic": "4000", "action": "connect"},
+        {"vm": "<vm-id>", "nic": "4000", "action": "disconnect"},
     ],
 }
 
@@ -146,8 +146,8 @@ VM_SERIAL_PORT_ADD_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     "oneOf": [{"required": ["file"]}, {"required": ["network_location"]}],
     "additionalProperties": False,
     "examples": [
-        {"vm": "vm-42", "file": "[<datastore-name>] <folder>/serial.log"},
-        {"vm": "vm-42", "network_location": "telnet://:<port>", "network_role": "server"},
+        {"vm": "<vm-id>", "file": "[<datastore-name>] <folder>/serial.log"},
+        {"vm": "<vm-id>", "network_location": "telnet://:<port>", "network_role": "server"},
     ],
 }
 
@@ -289,8 +289,8 @@ VM_CPU_MEMORY_OPTIONS_SET_PARAMETER_SCHEMA: Final[dict[str, Any]] = {
     },
     "additionalProperties": False,
     "examples": [
-        {"vm": "vm-42", "cpu_hot_add_enabled": True, "memory_hot_add_enabled": True},
-        {"vm": "vm-42", "cpu_shares_level": "custom", "cpu_shares": 4000},
+        {"vm": "<vm-id>", "cpu_hot_add_enabled": True, "memory_hot_add_enabled": True},
+        {"vm": "<vm-id>", "cpu_shares_level": "custom", "cpu_shares": 4000},
     ],
 }
 

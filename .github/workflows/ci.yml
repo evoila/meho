@@ -754,7 +754,9 @@ jobs:
             spec-shelf/docs/vcenter-8.0/vi-json-8.0u2.yaml \
             spec-shelf/docs/vcenter-8.0/vi-json-8.0u3.yaml \
             spec-shelf/docs/vcenter-8.0/vsan/8.0u1/vsan-8.0u1-methods.txt \
+            spec-shelf/docs/vcenter-8.0/vsan/8.0u1/vsanmgmtObjects.py \
             spec-shelf/docs/vcenter-8.0/vsan/8.0u2/vsan-8.0u2-methods.txt \
+            spec-shelf/docs/vcenter-8.0/vsan/8.0u2/vsanmgmtObjects.py \
             spec-shelf/docs/vcenter-9.0/vcenter.yaml \
             spec-shelf/docs/vcenter-9.0/vi-json.yaml \
             spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json \
@@ -2233,7 +2235,9 @@ jobs:
             spec-shelf/docs/vcenter-8.0/vi-json-8.0u2.yaml \
             spec-shelf/docs/vcenter-8.0/vi-json-8.0u3.yaml \
             spec-shelf/docs/vcenter-8.0/vsan/8.0u1/vsan-8.0u1-methods.txt \
+            spec-shelf/docs/vcenter-8.0/vsan/8.0u1/vsanmgmtObjects.py \
             spec-shelf/docs/vcenter-8.0/vsan/8.0u2/vsan-8.0u2-methods.txt \
+            spec-shelf/docs/vcenter-8.0/vsan/8.0u2/vsanmgmtObjects.py \
             spec-shelf/docs/vcenter-9.0/vcenter.yaml \
             spec-shelf/docs/vcenter-9.0/vi-json.yaml \
             spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json \

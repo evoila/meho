@@ -5,7 +5,8 @@
 
 The real connector over mocked HTTP on the vCenter 8 VI-JSON path: each
 vendor state, a failed task (fault type and text), a task vCenter no longer
-knows, no answer from vCenter (``not_reachable``, never ``failed``), and a
+knows, no answer from vCenter and a service that is not available (both
+``not_reachable``, never ``failed``; the next read goes on), and a
 login that expired between the start and the read (a new login, then the
 state). Plus the operation metadata.
 """
@@ -88,7 +89,10 @@ def _info(state: str, **extra: Any) -> dict[str, Any]:
     }
 
 
-async def _read(responses: list[httpx.Response | Exception]) -> tuple[dict[str, Any], Any]:
+async def _read_many(
+    responses: list[httpx.Response | Exception], calls: int
+) -> tuple[list[dict[str, Any]], Any]:
+    """*calls* reads of task-7 on one connector; the answers in order."""
     connector = VmwareRestConnector(session_loader=_stub_loader)
     try:
         async with respx.mock(base_url=_BASE) as mock:
@@ -97,13 +101,21 @@ async def _read(responses: list[httpx.Response | Exception]) -> tuple[dict[str, 
             )
             mock.get("/api/about").respond(200, json={"version": "8.0.3"})
             read = mock.post(_READ).mock(side_effect=responses)
-            out = await connector.task_info(_operator(), _Target(), {"task": "task-7"})
-        return out, (session, read)
+            outs = [
+                await connector.task_info(_operator(), _Target(), {"task": "task-7"})
+                for _ in range(calls)
+            ]
+        return outs, (session, read)
     finally:
         connector._session_tokens.clear()
         for client in connector._clients.values():
             await client.aclose()
         connector._clients.clear()
+
+
+async def _read(responses: list[httpx.Response | Exception]) -> tuple[dict[str, Any], Any]:
+    outs, mocks = await _read_many(responses, 1)
+    return outs[0], mocks
 
 
 @pytest.mark.parametrize("state", ["queued", "running"])
@@ -166,6 +178,34 @@ async def test_no_answer_is_not_reachable_with_task_and_time() -> None:
     assert out["unreachable_reason"] == "connect_failed"
     assert out["checked_at"]
     assert "not a failure" in out["guidance"]
+
+
+@pytest.mark.parametrize("status", [502, 503, 504])
+async def test_a_service_that_is_not_available_is_not_reachable_and_the_read_goes_on(
+    status: int,
+) -> None:
+    outs, (_session, read) = await _read_many(
+        [
+            httpx.Response(status, text="Service Unavailable"),
+            httpx.Response(200, json=_info_result(_info("success"))),
+        ],
+        2,
+    )
+    down, up = outs
+    assert down["state"] == "not_reachable"
+    assert down["reachable"] is False
+    assert down["done"] is False
+    assert down["task"] == "task-7"
+    assert down["checked_at"]
+    assert down["unreachable_reason"] == "service_unavailable"
+    assert "not a failure" in down["guidance"]
+    assert up["state"] == "success"
+    assert read.call_count == 2
+
+
+async def test_another_http_error_is_a_fault_of_the_read() -> None:
+    with pytest.raises(httpx.HTTPStatusError):
+        await _read([httpx.Response(500, json={"_typeName": "InvalidArgument"})])
 
 
 async def test_an_expired_login_logs_in_again_and_reads_the_task() -> None:

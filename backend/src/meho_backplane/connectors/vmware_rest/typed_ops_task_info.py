@@ -15,8 +15,11 @@ object and the times. Two more states, neither a failure of the task:
 * ``not_found`` -- vCenter no longer knows the task (it keeps tasks for a
   limited time) or the id is wrong.
 * ``not_reachable`` -- vCenter did not answer (for example during its own
-  upgrade). The answer keeps the task id and the time of the read; MEHO keeps
-  no job state between calls.
+  upgrade), or its web server answered that the service behind it is not
+  available (HTTP 502, 503 or 504, as during a vCenter maintenance). The
+  answer keeps the task id and the time of the read, so the caller reads
+  again later; MEHO keeps no job state between calls. Any other HTTP error is
+  a fault of the read and raises.
 
 A login that expired since the start is renewed by the connector's VI-JSON
 seam (``_post_vmomi_json`` logs in again on ``NotAuthenticated``).
@@ -48,6 +51,8 @@ _log = structlog.get_logger(__name__)
 
 _TASK_MO_TYPE: Final = "Task"
 _TERMINAL: Final = frozenset({"success", "error"})
+#: vCenter's web server answers so while the service behind it is down.
+_SERVICE_UNAVAILABLE: Final = frozenset({502, 503, 504})
 _VENDOR_STATES: Final = frozenset({"queued", "running", *_TERMINAL})
 
 _GUIDANCE: Final[dict[str, str]] = {
@@ -60,8 +65,8 @@ _GUIDANCE: Final[dict[str, str]] = {
         "Read the object itself, or vmware.tasks.recent."
     ),
     "not_reachable": (
-        "vCenter did not answer. This is not a failure of the task. Read again in a few "
-        "minutes with the same task id."
+        "vCenter did not answer, or its service is not available now. This is not a "
+        "failure of the task. Read again in a few minutes with the same task id."
     ),
 }
 
@@ -89,6 +94,13 @@ def _answer(task: str, state: str) -> dict[str, Any]:
     }
 
 
+def _not_reachable(task: str, target_name: str, reason: str) -> dict[str, Any]:
+    answer = _answer(task, "not_reachable")
+    answer["unreachable_reason"] = reason
+    _log.info("vmware_task_info_not_reachable", target=target_name, task=task, reason=reason)
+    return answer
+
+
 async def task_info_impl(
     connector: VmwareRestConnector,
     operator: Operator,
@@ -104,10 +116,11 @@ async def task_info_impl(
             connector, target, operator, mo_type=_TASK_MO_TYPE, moid=task, props=["info"]
         )
     except httpx.TransportError as exc:
-        answer = _answer(task, "not_reachable")
-        answer["unreachable_reason"] = unreachable_reason(exc)
-        _log.info("vmware_task_info_not_reachable", target=target.name, task=task)
-        return answer
+        return _not_reachable(task, target.name, unreachable_reason(exc))
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code not in _SERVICE_UNAVAILABLE:
+            raise
+        return _not_reachable(task, target.name, "service_unavailable")
     info = props.get("info") if props is not None else None
     if not isinstance(info, dict):
         return _answer(task, "not_found")
@@ -166,8 +179,9 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         "error_type": {**_NULLABLE_STR, "description": "The vendor's fault type on error."},
         "unreachable_reason": {
             "type": ["string", "null"],
-            "enum": ["connect_failed", "timeout", "tls_verify_failed", None],
-            "description": "Why vCenter did not answer; null when it answered.",
+            "enum": ["connect_failed", "timeout", "tls_verify_failed", "service_unavailable", None],
+            "description": "Why vCenter did not answer (service_unavailable: its web server "
+            "answered HTTP 502, 503 or 504); null when it answered.",
         },
         "guidance": {"type": "string", "description": "What to do next, in plain words."},
     },

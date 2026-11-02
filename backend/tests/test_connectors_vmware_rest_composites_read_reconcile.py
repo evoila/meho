@@ -154,6 +154,15 @@ def test_vsan_read_paths_are_the_reconciled_keys() -> None:
     """Pin the vSAN VI-JSON paths the connector calls (sandbox-safe, always runs)."""
     assert {vsan_vi_json_op_id(method) for method in vsan_methods()} == {
         "POST:/vsan/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary",
+        # The vSAN reads vmware.vsan.* (#4444).
+        "POST:/vsan/VsanVcClusterConfigSystem/{moId}/VsanClusterGetConfig",
+        "POST:/vsan/VimClusterVsanVcStretchedClusterSystem/{moId}/VSANVcGetWitnessHosts",
+        "POST:/vsan/VsanSpaceReportSystem/{moId}/VsanQuerySpaceUsage",
+        "POST:/vsan/VsanPerformanceManager/{moId}/VsanPerfQueryPerf",
+        "POST:/vsan/VsanObjectSystem/{moId}/QuerySyncingVsanObjectsSummary",
+        "POST:/vsan/VsanObjectSystem/{moId}/VsanQueryObjectIdentities",
+        "POST:/vsan/VsanResourceCheckSystem/{moId}/VsanPerformResourceCheck",
+        "POST:/vsan/VsanResourceCheckSystem/{moId}/VsanGetResourceCheckStatus",
     }
 
 

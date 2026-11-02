@@ -52,7 +52,9 @@ __all__ = [
     "CLUSTER_PROPERTY_PATHS",
     "CLUSTER_SUMMARY_FIELDS",
     "DATACENTER_LIST_PATH",
+    "TYPED_OPS",
     "VMWARE_CLUSTER_LIST_OP",
+    "WHEN_TO_USE_BY_GROUP",
     "cluster_list_impl",
 ]
 
@@ -389,3 +391,6 @@ VMWARE_CLUSTER_LIST_OP = VmwareTypedOp(
         ),
     },
 )
+
+TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_CLUSTER_LIST_OP,)
+WHEN_TO_USE_BY_GROUP: dict[str, str] = {CLUSTER_LIST_GROUP_KEY: CLUSTER_LIST_WHEN_TO_USE}

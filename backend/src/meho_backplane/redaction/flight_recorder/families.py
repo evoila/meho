@@ -139,6 +139,20 @@ SECRET_FAMILY_PATTERNS: Final[tuple[str, ...]] = (
     "*.keys.*",
     "*:*/key",
     "*:*/keys",
+    # VCF deployment specs, logins and depot accounts. The typed operations
+    # that send these bodies carry the ``credential`` tag. These globs give
+    # the ingested copies of the same vendor calls the same result: SDDC
+    # Manager domain specs, VCF Installer and Cloud Builder SddcSpecs
+    # (validate, start, retry, resource calculation, the discovery logins,
+    # the stored spec read) and the depot and proxy accounts.
+    "POST:/v1/domains",
+    "POST:/v1/domains/validations",
+    "POST:/v1/sddcs",
+    "POST:/v1/sddcs/*",
+    "PATCH:/v1/sddcs/*",
+    "GET:/v1/sddcs/*/spec",
+    "PUT:/v1/system/settings/depot",
+    "PATCH:/v1/system/proxy-configuration",
 )
 
 #: Secret-bearing tag *tokens*. A descriptor tag is treated as

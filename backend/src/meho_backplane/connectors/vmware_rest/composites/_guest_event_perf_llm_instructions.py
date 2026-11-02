@@ -80,12 +80,14 @@ GUEST_EVENT_PERF_LLM_INSTRUCTIONS: Final[dict[str, dict[str, Any]]] = {
         "preconditions": _GUEST_LOGIN,
         "parameter_hints": {"names": "Variable names; omit to read all of them."},
         "output_shape": (
-            "{vm, process_manager_moid, variables: ['NAME=value'], count}. A long list "
-            "comes back as a result handle."
+            "{vm, process_manager_moid, variables: ['NAME=[REDACTED:secret_value]'], "
+            "count}. The values are hidden; only the names show. A long list comes back "
+            "as a result handle."
         ),
         "next_step": (
-            "Split each entry at the first '=' to get name and value. To change the "
-            "environment of a program you start, use vm.guest.program.run with env."
+            "Split each entry at the first '=' to get the name. Only a person can pass "
+            "reveal_secret: true to see the values. To change the environment of a "
+            "program you start, use vm.guest.program.run with env."
         ),
     },
     _P + "vm.guest.file.read": {

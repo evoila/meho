@@ -48,8 +48,8 @@ by variable **name** (``$env:VC_USER`` / ``$env:VC_PW``, the persisted
 ``_shared.pwsh`` safety contract that the encoded script body (visible on the
 remote argv) must carry no credential material.
 
-``holodeck.router.patch`` is additionally pinned into
-:data:`~meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS` as
+``holodeck.router.patch`` is additionally declared ``credential_write`` in
+``holodeck/op_classes.py`` as
 defence-in-depth: should a future param-shape change ever place credential
 material in its params, the broadcast collapses to aggregate-only rather than
 shipping it on the feed (the ``rke2.node.config.update`` / ``keycloak.*``
@@ -1013,8 +1013,8 @@ def _echo_deploy_config(params: dict[str, Any]) -> dict[str, Any]:
     return echo
 
 
-#: Deploy-lifecycle ops pinned into
-#: :data:`~meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS` as broadcast
+#: Deploy-lifecycle ops declared ``credential_write`` in
+#: ``holodeck/op_classes.py`` as broadcast
 #: defence-in-depth. Only ``holodeck.router.patch`` (BroadcomBuildToken
 #: adjacency); ``holodeck.config.apply`` keeps its param-echo preview (no
 #: secret is ever a param) and is intentionally absent. Kept in sync with the

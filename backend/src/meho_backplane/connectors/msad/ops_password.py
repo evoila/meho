@@ -70,9 +70,11 @@ from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.pwsh import ps_single_quote, pwsh_run
 from meho_backplane.connectors._shared.vault_creds import (
     CredentialsReadError,
+    check_param_secret_ref,
     strip_credential_value,
 )
 from meho_backplane.connectors.msad.ops import SSH_TRANSPORT_NOTE, MsadOp
+from meho_backplane.operations import register_plain_fields
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
 if TYPE_CHECKING:
@@ -92,6 +94,7 @@ __all__ = [
 
 #: The op id of the password set.
 SET_PASSWORD_OP_ID: str = "msad.user.set-password"
+PASSWORD_EXPIRY_OP_ID: str = "msad.user.password-expiry"
 
 #: ``msDS-UserPasswordExpiryTimeComputed`` when the password never expires.
 NEVER_EXPIRES_FILETIME: int = 0x7FFFFFFFFFFFFFFF
@@ -235,6 +238,10 @@ async def _read_password(
         host=host if isinstance(host, str) and host else "unknown",
         secret_ref=path,
     )
+    # The path comes from the params: check it before the read. A refused
+    # path raises SecretRefScopeError unchanged, so the dispatcher answers
+    # vault_credentials_read_error with only the path's first segment.
+    check_param_secret_ref(operator, path, param="password_ref")
     try:
         data = await connector._resolve_secret(stub, operator)
     except (VaultClientError, CredentialsReadError) as exc:
@@ -391,7 +398,7 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
 
 PASSWORD_OPS: tuple[MsadOp, ...] = (
     MsadOp(
-        op_id="msad.user.password-expiry",
+        op_id=PASSWORD_EXPIRY_OP_ID,
         handler_attr="msad_user_password_expiry",
         summary="Read when one AD account's password was last set and when it expires.",
         description=(
@@ -525,3 +532,8 @@ PASSWORD_OPS: tuple[MsadOp, ...] = (
         },
     ),
 )
+
+
+# A date and a day count about the password, never the password.
+register_plain_fields(SET_PASSWORD_OP_ID, ("password_last_set",))
+register_plain_fields(PASSWORD_EXPIRY_OP_ID, ("password_last_set", "password_age_days"))

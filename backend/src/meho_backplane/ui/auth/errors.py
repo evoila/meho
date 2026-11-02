@@ -16,8 +16,9 @@ This module ships the app-level exception handler
 :class:`starlette.exceptions.HTTPException` (FastAPI routes raise
 :class:`fastapi.HTTPException`, a subclass, so one registration
 covers both -- the override pattern from the FastAPI handling-errors
-guide). The handler intercepts exactly two recoverable shapes, both
-only when the request ``Accept`` header names ``text/html``:
+guide). The handler intercepts exactly two recoverable shapes, for
+htmx requests and for requests whose ``Accept`` header names
+``text/html``:
 
 * **Session expired** (G0.25 #1694) -- status ``401`` **and** detail
   :data:`~meho_backplane.ui.auth.refresh.SESSION_EXPIRED_DETAIL`
@@ -27,7 +28,12 @@ only when the request ``Accept`` header names ``text/html``:
   :class:`~meho_backplane.ui.auth.middleware.UISessionMiddleware` uses
   for missing sessions -- plus a ``meho_session`` cookie clear (the row
   is terminally dead once a refresh has failed; RFC 6749 § 6 gives the
-  BFF nothing left to present).
+  BFF nothing left to present). An htmx request (``HX-Request: true``)
+  gets the middleware's htmx answer instead: ``204`` + ``HX-Redirect``
+  to the same login URL, with ``return_to`` taken from
+  ``HX-Current-URL`` (the page, not the fragment). Both login URLs carry
+  ``reason=session_ended``, so the person sees "Your session ended.
+  Please sign in again." before the login.
 
 * **Expired callback state** (G0.29 #2089, Leg 1) -- status ``400``
   **and** detail
@@ -65,8 +71,6 @@ References
 
 from __future__ import annotations
 
-from urllib.parse import quote
-
 import structlog
 from fastapi import Request, Response, status
 from fastapi.exception_handlers import http_exception_handler
@@ -78,6 +82,8 @@ from meho_backplane.ui.auth.routes import (
     AUTHORIZATION_STATE_EXPIRED_DETAIL,
     LOGIN_PATH,
     clear_session_cookie,
+    login_location,
+    page_from_htmx_current_url,
 )
 
 __all__ = ["ui_session_expired_exception_handler"]
@@ -120,6 +126,13 @@ def _is_expired_callback_state_request(request: Request, exc: StarletteHTTPExcep
     )
 
 
+def _request_path_with_query(request: Request) -> str:
+    """Return the request's path, plus its query string when there is one."""
+    path = request.url.path
+    query = request.url.query
+    return f"{path}?{query}" if query else path
+
+
 def _login_redirect(request: Request) -> RedirectResponse:
     """302 to login carrying the original path+query as ``return_to``.
 
@@ -128,13 +141,29 @@ def _login_redirect(request: Request) -> RedirectResponse:
     the value is percent-encoded wholesale and re-validated by the
     login route's ``_safe_return_to`` before it lands in any
     follow-up ``Location``, so a crafted path cannot become an open
-    redirect here either.
+    redirect here either. ``reason=session_ended`` makes the login
+    route show the "Your session ended" line first.
     """
-    path = request.url.path
-    query = request.url.query
-    full_path = f"{path}?{query}" if query else path
-    location = f"{LOGIN_PATH}?return_to={quote(full_path, safe='')}"
+    location = login_location(_request_path_with_query(request), session_ended=True)
     response = RedirectResponse(url=location, status_code=status.HTTP_302_FOUND)
+    response.headers["cache-control"] = "no-store"
+    return response
+
+
+def _htmx_login_redirect(request: Request) -> Response:
+    """204 + ``HX-Redirect`` to login, for a failed renewal on an htmx request.
+
+    The same answer the session middleware gives an htmx request with no
+    session (#161): an htmx request follows a ``302`` silently, so the
+    person would see a dead control. ``HX-Redirect`` makes htmx load the
+    login page as a full page instead. ``return_to`` is the page the
+    person is on (htmx's ``HX-Current-URL``), not the fragment URL; the
+    request path is the fallback when the header is missing.
+    """
+    page = page_from_htmx_current_url(request.headers.get("hx-current-url"))
+    return_to = page or _request_path_with_query(request)
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    response.headers["hx-redirect"] = login_location(return_to, session_ended=True)
     response.headers["cache-control"] = "no-store"
     return response
 
@@ -160,23 +189,34 @@ def _login_restart_redirect() -> RedirectResponse:
 
 
 async def _handle_session_expired(request: Request, exc: StarletteHTTPException) -> Response:
-    """Map the refresh-failure 401 to a login bounce (HTML) or JSON body.
+    """Map the refresh-failure 401 to a login bounce (htmx, HTML) or JSON body.
+
+    htmx requests get ``204`` + ``HX-Redirect``, full page loads get a
+    ``302``, everything else keeps the JSON body.
 
     The dead session cookie is dropped in both branches -- the row is
     terminally unloadable once refresh has failed, so the client has
     no further use for the id.
     """
     accept = request.headers.get("accept", "")
-    if "text/html" in accept:
+    response: Response
+    if request.headers.get("hx-request", "").strip().lower() == "true":
         structlog.get_logger(__name__).info(
             "ui_session_expired_redirect",
             path=request.url.path,
+            is_htmx=True,
         )
-        response: Response = _login_redirect(request)
+        response = _htmx_login_redirect(request)
+    elif "text/html" in accept:
+        structlog.get_logger(__name__).info(
+            "ui_session_expired_redirect",
+            path=request.url.path,
+            is_htmx=False,
+        )
+        response = _login_redirect(request)
     else:
-        # JSON callers (htmx fragment fetches without an HTML Accept,
-        # scripted probes) keep the structured body the AC pins; only
-        # the dead cookie is dropped.
+        # JSON callers (scripted probes) keep the structured body the
+        # AC pins; only the dead cookie is dropped.
         response = await http_exception_handler(request, exc)
     clear_session_cookie(response)
     return response

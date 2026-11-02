@@ -98,11 +98,12 @@ _NAME_PATTERN: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_\-\.]+$")
 _CLIENT_ID_PREFIX: str = "agent:"
 
 #: ``tenant_role`` stamped into the agent client's access token (#1487).
-#: An agent acts with tenant-admin scope inside its tenant; the
-#: per-principal permission model (G11.2-T3) is the finer-grained gate,
-#: not this coarse JWT role. Matches the ``agent:test-bot`` integration
-#: realm fixture, the only agent client that authenticates end-to-end.
-_AGENT_TENANT_ROLE: str = TenantRole.TENANT_ADMIN.value
+#: An agent acts with operator rights inside its tenant. Tenant-admin
+#: work is for people. The per-principal permission model (G11.2-T3) is
+#: the finer-grained gate on what the agent may run. The token check
+#: (:func:`meho_backplane.auth.jwt._cap_agent_role`) also reads an older
+#: agent token that still says ``tenant_admin`` as ``operator``.
+_AGENT_TENANT_ROLE: str = TenantRole.OPERATOR.value
 
 
 def _keycloak_client_id(name: str) -> str:

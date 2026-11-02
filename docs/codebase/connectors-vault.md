@@ -321,9 +321,11 @@ target registration) is documented in
   handlers also return a value-free confirmation (username/mount/policies,
   never the password). `generate_secret_id` mints a SecretID in its
   **response** → `credential_mint`; it is **non-idempotent** (a fresh
-  SecretID per call), flagged as such in its `llm_instructions`, and the
-  minted value reaches only the caller's `OperationResult` (never the
-  audit row or broadcast). `delete` / `approle.write` carry no secret and
+  SecretID per call), flagged as such in its `llm_instructions`. The
+  caller's `OperationResult` carries the SecretID; the audit row's raw
+  copy has it replaced (`[REDACTED:param_name]`, the `credential_mint`
+  rule in `dispatcher._apply_redaction_middleware`), and the broadcast is
+  aggregate-only. `delete` / `approle.write` carry no secret and
   classify plain `write` off their suffix. Registered from its own
   module via the `register_vault_auth_write_operations()` call at the end
   of `register_vault_typed_operations()`. `_reclassify_not_found` /
@@ -453,10 +455,15 @@ target registration) is documented in
   | `vault.token.role.list` | `auth.token.list_roles` | safe | False | `read` |
   | `vault.token.create_and_store` | `auth.token.create(role_name=...)` / `auth.token.create_orphan`, then the `vault.kv.patch` / `vault.kv.put` or `k8s.secret.update` handler | dangerous | True | `credential_mint` |
 
-  `token.create` mints a client token in its **response** →
-  `credential_mint` (aggregate-only broadcast; the token reaches only the
-  caller's `OperationResult`, never the audit row or feed). It is
-  **non-idempotent** (a fresh token per call). `revoke_accessor` is
+  `token.create` makes a client token but **never returns it**: the
+  handler keeps only the `accessor` and the `policies` from Vault's
+  answer, so the token is in no result, audit row, approval result or run
+  record. MEHO makes the token under its own Vault login for the call, and
+  Vault revokes a child token when that login is revoked at the end of the
+  call. To get a token you can use, call `vault.token.create_and_store`
+  (an orphan token, written to a Vault KV path or a Kubernetes Secret).
+  The op classifies `credential_mint` (aggregate-only broadcast). It is
+  **non-idempotent** (a new token per call). `revoke_accessor` is
   **surgical** — it revokes exactly one token by accessor; there is
   intentionally **no bulk-revoke op** (the vault skill's loudest
   Don't-rule). Token accessors are non-secret reference handles, so they
@@ -819,10 +826,11 @@ Response-side secret-mint ops (`vault.token.create`,
 `vault.auth.approle.generate_secret_id`, and
 `vault.token.create_and_store`, which never returns its token) classify
 `credential_mint`
-alongside `harbor.robot.create`: the minted value is in the response, so
-the broadcast collapses to aggregate-only and the audit row keeps only a
-`params_hash`, while the caller's `OperationResult` still carries the
-secret. See `docs/codebase/broadcast.md` for the full sensitivity
+alongside `harbor.robot.create`: the broadcast collapses to aggregate-only,
+and the audit row's raw copy has every secret-named value replaced.
+`vault.auth.approle.generate_secret_id` and `harbor.robot.create` still
+return the secret in the caller's `OperationResult`; `vault.token.create`
+and `vault.token.create_and_store` return no token at all. See `docs/codebase/broadcast.md` for the full sensitivity
 taxonomy.
 
 `vault.sys.policy.write` (G3.15-T2 #1410) classifies `write` via the

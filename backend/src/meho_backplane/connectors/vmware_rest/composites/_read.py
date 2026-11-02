@@ -159,6 +159,7 @@ __all__ = [
     "event_tail_composite",
     "network_portgroup_audit_composite",
     "performance_summary_composite",
+    "read_portgroup_switch_vlan_and_backing",
 ]
 
 
@@ -266,6 +267,11 @@ _PORTGROUP_AUDIT_PATHS: tuple[str, ...] = (
     _PROP_DVPG_DEFAULT_PORT_CONFIG,
     _PROP_NETWORK_VM,
 )
+#: The backing type of a distributed portgroup (read by ``vmware.network.list``
+#: only, not by the audit): ``standard`` (made by vCenter) or ``nsx`` (an NSX
+#: segment, made by NSX Manager). Since vSphere 7.0; unset means ``standard``.
+_PROP_DVPG_BACKING_TYPE = "config.backingType"
+_DVPG_DEFAULT_BACKING_TYPE = "standard"
 
 # Per-composite sub-op-id tuples. Each tuple lists the raw-REST /
 # vi-json sub-ops the composite issues directly on the connector
@@ -1354,6 +1360,64 @@ async def _read_vm_names(
     return names
 
 
+def _dvs_refs(pg_props: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """The parent-switch MoRefs in a ``{portgroup moid: properties}`` read."""
+    return [
+        ref for props in pg_props.values() if isinstance(ref := props.get(_PROP_DVPG_DVS), dict)
+    ]
+
+
+def _portgroup_switch_and_vlan(
+    props: dict[str, Any], dvs_names: dict[str, str]
+) -> tuple[str | None, str | None, dict[str, Any] | None]:
+    """``(switch moid, switch name, VLAN view)`` of one distributed portgroup.
+
+    The VLAN view is the one :func:`_vlan_identity_view` renders, or ``None``
+    for a private VLAN or a shape the switch did not report.
+    """
+    dvs_moid = _moref_value(props.get(_PROP_DVPG_DVS))
+    dvs_name = dvs_names.get(dvs_moid) if dvs_moid is not None else None
+    port_setting = props.get(_PROP_DVPG_DEFAULT_PORT_CONFIG)
+    raw_vlan = port_setting.get("vlan") if isinstance(port_setting, dict) else None
+    return dvs_moid, dvs_name, _vlan_identity_view(_observed_vlan_identity(raw_vlan))
+
+
+async def read_portgroup_switch_vlan_and_backing(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    portgroup_moids: list[str],
+) -> dict[str, tuple[str | None, str | None, dict[str, Any] | None, str | None]]:
+    """Read the parent switch, default VLAN and backing type of distributed portgroups.
+
+    Returns ``{portgroup moid: (switch moid, switch name, VLAN view, backing
+    type)}`` for every moid passed. The backing type is ``standard`` or
+    ``nsx``; an unset value is the vendor default ``standard``, and a
+    portgroup the read did not return gets ``None``. The same vim reads as
+    the portgroup audit (plus ``config.backingType``): one
+    ``RetrievePropertiesEx`` over the portgroups, then one per switch type
+    for the switch names. No call is made for an empty list. A failed read
+    raises (:exc:`httpx.HTTPError` or :exc:`RuntimeError`).
+    """
+    pg_props = await _retrieve_props_by_moid(
+        connector,
+        target,
+        operator,
+        _DVPG_MO_TYPE,
+        portgroup_moids,
+        [_PROP_DVPG_DVS, _PROP_DVPG_DEFAULT_PORT_CONFIG, _PROP_DVPG_BACKING_TYPE],
+    )
+    dvs_names = await _read_dvs_names(connector, target, operator, _dvs_refs(pg_props))
+    found: dict[str, tuple[str | None, str | None, dict[str, Any] | None, str | None]] = {}
+    for moid in portgroup_moids:
+        props = pg_props.get(moid, {})
+        backing = props.get(_PROP_DVPG_BACKING_TYPE)
+        if not isinstance(backing, str):
+            backing = _DVPG_DEFAULT_BACKING_TYPE if props else None
+        found[moid] = (*_portgroup_switch_and_vlan(props, dvs_names), backing)
+    return found
+
+
 def _portgroup_vm_moids(props: dict[str, Any]) -> list[str]:
     """The moids in a portgroup's ``vm`` property (VMs with a NIC on it)."""
     refs = props.get(_PROP_NETWORK_VM)
@@ -1435,27 +1499,21 @@ async def network_portgroup_audit_composite(
     pg_props = await _retrieve_props_by_moid(
         connector, target, operator, _DVPG_MO_TYPE, list(listed), list(_PORTGROUP_AUDIT_PATHS)
     )
-    dvs_refs = [
-        ref for props in pg_props.values() if isinstance(ref := props.get(_PROP_DVPG_DVS), dict)
-    ]
-    dvs_names = await _read_dvs_names(connector, target, operator, dvs_refs)
+    dvs_names = await _read_dvs_names(connector, target, operator, _dvs_refs(pg_props))
 
     rows: list[tuple[dict[str, Any], list[str]]] = []
     for pg_id, entry in listed.items():
         props = pg_props.get(pg_id, {})
-        dvs_moid = _moref_value(props.get(_PROP_DVPG_DVS))
-        dvs_name = dvs_names.get(dvs_moid) if dvs_moid is not None else None
+        dvs_moid, dvs_name, vlan = _portgroup_switch_and_vlan(props, dvs_names)
         if filter_dvs and filter_dvs not in (dvs_moid, dvs_name):
             continue
-        port_setting = props.get(_PROP_DVPG_DEFAULT_PORT_CONFIG)
-        raw_vlan = port_setting.get("vlan") if isinstance(port_setting, dict) else None
         row = {
             "id": pg_id,
             "name": entry.get("name"),
             "dvs": dvs_moid,
             "dvs_name": dvs_name,
             "type": entry.get("type"),
-            "vlan": _vlan_identity_view(_observed_vlan_identity(raw_vlan)),
+            "vlan": vlan,
         }
         rows.append((row, _portgroup_vm_moids(props)))
 

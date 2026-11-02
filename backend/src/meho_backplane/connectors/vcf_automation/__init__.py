@@ -39,9 +39,10 @@ from meho_backplane.connectors.registry import register_connector_v2
 
 # Imported for its side effect: registers the park-time preview builders of
 # the provisioning writes (#3890), the image name change, the feature-flag
-# change and the provider networking changes, like the keycloak / vmware-rest
-# previews.
+# change, the deployment delete and the provider networking changes, like the
+# keycloak / vmware-rest previews.
 from meho_backplane.connectors.vcf_automation import (  # noqa: F401
+    _day2,
     _feature_flags,
     _images,
     _provider_gateway,
@@ -50,11 +51,13 @@ from meho_backplane.connectors.vcf_automation import (  # noqa: F401
     _provider_org_settings,
     _provider_regional_networking,
     _provisioning_preview,
+    op_classes,
 )
 from meho_backplane.connectors.vcf_automation.connector import (
     VcfAutomationConfigurationError,
     VcfAutomationConnector,
 )
+from meho_backplane.connectors.vcf_automation.day2_ops import VCFA_DAY2_OPS
 from meho_backplane.connectors.vcf_automation.deploy_ops import VCFA_DEPLOY_OPS
 from meho_backplane.connectors.vcf_automation.feature_flag_ops import VCFA_FEATURE_FLAG_OPS
 from meho_backplane.connectors.vcf_automation.image_ops import VCFA_IMAGE_OPS
@@ -141,6 +144,7 @@ register_typed_op_registrar(register_vcfa_typed_operations)
 
 __all__ = [
     "VCFA_CONNECTOR_ID",
+    "VCFA_DAY2_OPS",
     "VCFA_DEPLOY_OPS",
     "VCFA_FEATURE_FLAG_OPS",
     "VCFA_IMAGE_OPS",

@@ -164,7 +164,9 @@ The steps:
 
 Two credential-backend shapes are supported. Both use the same chart; they
 differ only in `config.credentialBackend` and the credential-store block
-the schema then requires. The recommended flow substitutes an example
+the schema then requires. For a test cluster, the chart can also bring
+its own PostgreSQL, Keycloak and Vault: see
+[A throwaway install with the built-in parts](#a-throwaway-install-with-the-built-in-parts). The recommended flow substitutes an example
 values file rather than long `--set` strings (the `--set` form is in
 [`codebase/devops.md`](codebase/devops.md#install--upgrade)).
 
@@ -300,7 +302,9 @@ Bound the role first if it isn't:
   Vault JWT role whose policy covers only the secrets your Sensors evaluate,
   and point the backplane at that role with `VAULT_CHECK_RUNNER_ROLE` (#2757)
   so only background dispatch uses it while interactive logins keep
-  `VAULT_OIDC_ROLE`.
+  `VAULT_OIDC_ROLE`. The inbound event intake reads event source secrets
+  with the same token and role, so the role's policy must also cover
+  `secret/data/tenants/+/event-sources/*` (the recipe lists the paths).
 - **Otherwise** — add an **exact-match** `bound_claims` to `meho-mcp` keyed
   on a claim value only operator tokens carry, e.g. a dedicated
   `meho-operator` realm role. A `bound_claims_type=glob` `"*"` is not a
@@ -314,11 +318,119 @@ which one is in force, are in
 The chart prints the same warning in its `helm install` notes whenever
 `checkRunner.enabled: true` meets `config.credentialBackend: vault`.
 
+On a Vault install the backplane requires the preferred recipe: with a
+runner principal and `VAULT_ADDR` set, the check runner does not start
+unless `VAULT_CHECK_RUNNER_ROLE` names a role of its own (not
+`VAULT_OIDC_ROLE`). Set it through `extraEnv`, or turn
+`checkRunner.enabled` off.
+
 Diagnostics: the `gsm_secret_accessed` structlog event carries an
 `auth_path` of `wif`, `sa_direct`, or `sa_direct_fallback`, so you can see
 which identity served a given read. A read that could not resolve any
 identity fails with `connector_error: GcpSecretManagerReadError` — never a
 Vault-named error on a Vault-free deploy (#2642).
+
+### A throwaway install with the built-in parts
+
+Use this for a test cluster, for example [kind](https://kind.sigs.k8s.io/),
+when you need a real login, a real policy check and a real Vault. The chart
+brings its own PostgreSQL, Keycloak and OpenBao (an open-source Vault), so
+you need nothing outside the cluster. The kind example file
+(`values-kind.yaml`) is not enough for this: it runs with mocks only.
+
+1. **Install an ingress controller** in the cluster. kind has none; see
+   kind's Ingress guide.
+2. **Write a values file.** Start from
+   [`../deploy/linux-server/values-single-node.yaml`](../deploy/linux-server/values-single-node.yaml),
+   the values of the single-server install. It turns on `corePostgres`,
+   `coreKeycloak` and `coreVault`. Add the answers of your cluster:
+
+   ```yaml
+   image:
+     tag: <release tag>                # or your own image; see below
+   ingress:
+     className: nginx                  # your ingress controller's class
+     host: meho.example.com            # a name your browser reaches
+   networkPolicy:
+     ingressControllerNamespace: ingress-nginx
+     postgresCIDR: 10.244.0.0/16       # the pod range; kind's default
+     vaultCIDR: 10.244.0.0/16
+   coreKeycloak:
+     hostname: meho.example.com        # the same as ingress.host
+     firstTenantId: <a new UUID>
+     ci:                               # optional: a login for scripts
+       enabled: true
+       tenantId: <another new UUID>
+   ```
+
+   To test your own image, put its `image` block here in place of the
+   release tag: `repository`, `tag`, an empty `digest` and
+   `pullPolicy: Never`, as in
+   [`codebase/connector-packages.md`, "Try your image on a local kind cluster"](codebase/connector-packages.md#try-your-image-on-a-local-kind-cluster).
+   Do not pass a tag on the `helm` command line (`--set image.tag=...`):
+   it wins over the file and asks for an image the cluster does not have.
+
+3. **Keep the three keys at the end of `values-single-node.yaml`:**
+   `postgres.credentialsSecret`, `vault.address` and `config.vaultAddr`.
+   The chart needs them even with all built-in parts on, until it fills
+   them in itself (#4047). Without them, Helm refuses the values with
+   errors about empty or invalid fields, and does not say why.
+4. **Install and wait:**
+
+   ```bash
+   helm upgrade --install meho ./deploy/charts/meho/ \
+     --namespace meho --create-namespace --wait --wait-for-jobs --timeout 15m \
+     -f deploy/linux-server/values-single-node.yaml -f my-values.yaml
+   ```
+
+   Keep `--wait`: without it, Helm says `deployed` while a pod still fails.
+5. **Trust the certificate.** The install makes a certificate for
+   `ingress.host`, signed by a small CA it makes at the same time
+   ([`codebase/core-secrets.md`](codebase/core-secrets.md)). Your
+   workstation does not know this CA. So `meho login` stops with a
+   certificate error before the browser opens, and the browser warns.
+   Save the CA certificate from the TLS Secret and trust it:
+
+   ```bash
+   kubectl -n meho get secret meho-core-tls -o jsonpath='{.data.ca\.crt}' \
+     | base64 -d > meho-ca.crt
+   ```
+
+   - `meho login` and the browsers Chrome, Edge and Safari use the trust
+     store of the operating system. Add the file to it. On macOS:
+     `security add-trusted-cert -k ~/Library/Keychains/login.keychain-db meho-ca.crt`.
+     On Ubuntu and Debian: copy it to
+     `/usr/local/share/ca-certificates/meho-ca.crt` and run
+     `sudo update-ca-certificates`. On Windows, as administrator:
+     `certutil -addstore Root meho-ca.crt`.
+   - Firefox on Windows and macOS reads the system store too. On Linux it
+     has its own store: import the file under Settings, Privacy & Security,
+     Certificates.
+   - The Claude Code plugin and the Claude Desktop bundle take the file
+     through `MEHO_CA_CERT` or their CA bundle field. See
+     [`cross-repo/mcp-client-setup.md`](cross-repo/mcp-client-setup.md).
+
+   A new install, or a change of `ingress.host`, makes a new CA. Then trust
+   the new file and remove the old one.
+6. **Log in.** The install makes two people with temporary passwords. The
+   first login needs a browser: Keycloak asks for a new password, a name
+   and an email. See [`codebase/core-bootstrap.md`](codebase/core-bootstrap.md).
+   Give the people an email on a normal domain, such as `example.com`.
+   Today MEHO refuses a person whose email ends in `.local` or `.test`
+   (#5561).
+
+The CI login (`coreKeycloak.ci`) is a machine login. It cannot register an
+agent or create a grant; both answer 403 `human_principal_required`. A
+proof that uses an agent also needs a person's login. See
+[`codebase/core-bootstrap.md`, "The CI login"](codebase/core-bootstrap.md#the-ci-login-off-by-default).
+
+To test your own image on kind (`kind load docker-image` and
+`image.pullPolicy: Never`), see
+[`codebase/connector-packages.md`](codebase/connector-packages.md#try-your-image-on-a-local-kind-cluster).
+
+Throw the cluster away after the test. With `coreKeycloak.ci` on, the
+install has a login with fixed admin rights, so never use it for real
+work.
 
 ### Operator console (`/ui/*`) — optional, either backend
 
@@ -479,7 +591,8 @@ Append a row here in the same PR that carries an upgrade-relevant change
 | **v0.37.0** | No schema migration in this release (alembic head stays `0115`). **Security:** the flight recorder no longer stores the request and answer bodies of seven typed deployment and depot operations (`sddc.domain.validate`, `sddc.domain.create`, `installer.sddc.spec.validate`, `installer.sddc.bringup.start`, `installer.sddc.bringup.retry`, `installer.composite.sddc.bringup`, `installer.system.depot.set`), which hold deployment passwords and licence keys (#4856). `filelock` 4.2.4 fixes CVE-2026-112940, and the image scan also skips Pillow CVE-2026-112398 until 2026-11-30 (#4865). **Breaking:** `sddc.license.list` returns `key_masked` instead of `key`, and `vrops.license.info` now masks with the same rule, dashes kept (#4853). New typed operations: VM snapshots (#4846), VM hardware and CD drives (#4843), vSphere licences (#4847), vCenter appliance local accounts (#4851), vCenter alarms (#4852), the Site Recovery Manager connector (#4799), HCX reads (#4798), GitHub repository create and view (#4832, #4838), VCF Automation network, deployment and image operations (#4795, #4797). Fixed: `vault.kv.patch` asks for `read` + `update` before it waits for approval (#4837); sensors check their rule against the full result (#4819). | (1) From 0.35.x, do the v0.36.0 row first. (2) Tenants with the flight recorder on: traces written before the upgrade keep the bodies of the seven operations until they expire. Check the trace retention, and change (rotate) the passwords and keys that went through these operations if needed. (3) Scripts that read `key` from `sddc.license.list` must read `key_masked`. (4) `vmware.appliance.local_account.password.set` can wait for approval only with approval custody on (`approvalHandoff.enabled` and `approvalHandoff.secretName`; `GET /ready` shows `features.approval_custody`). The approver needs Vault read access to the password path, and the vCenter service account needs the SSO group `SystemConfiguration.BashShellAdministrators` for the two account changes. (5) Install the v0.37.0 CLI. No settings change; the built-in OpenBao (`coreVault`, off by default) gets `coreVault.unseal.resources` (#4769). |
 | **v0.38.0** | Three schema migrations: the alembic head advances **`0115` → `0118`**. All of them only add: `0116` the column `check_dashboard_sensors.last_member_state`, the state of each sensor as its dashboard counts it (#5114); `0117` the table `service_principal_read_scope` (#5126); `0118` the column `runner_principal.wire_version` (#5168). Nothing changes at the upgrade itself. The new columns start empty. A service principal without a read scope may read every target, as before. The first check after the upgrade records each sensor's state without a mail, so the upgrade sends no burst of mails for problems the dashboard already shows. After a rollback, every service principal reads every target again. A satellite runner on another wire version is refused with HTTP 409 `runner_wire_version_mismatch`. A runner that sends no version counts as version 1, so runners in use today keep working (#5168). More generic vCenter changes become `dangerous` and wait for approval, after the next catalog ingest (#5117). The audit parameter hash now has a key, so a hash from before the upgrade cannot be compared with one from after it. Requests that wait for approval during the upgrade still work (#4907). | Back up the database. Run the catalog ingest of `vmware/9.0` and `vmware/8.0` again, so the new vCenter approval levels take effect. If a satellite runner logs `runner_wire_version_mismatch`, update the side that the message names. Do not compare audit parameter hashes across the upgrade. Full list: the `[0.38.0]` CHANGELOG section. |
 | **v0.39.0** | Nine schema migrations: the alembic head advances **`0118` → `0127`**. All of them only add: `0119` the approval status `withdrawn` and its two columns, `0120` the table `tenant_operation_setting`, `0121` the table `ingested_auth_profile`, `0122` the table `operation_catalog_state`, `0123` `operation_group.code_text_hash`, `0124` the runner package set column, `0125` `endpoint_descriptor.owner_package`, `0126` `approval_request.release_id`, `0127` the table `operation_policy_override`. After a rollback to v0.38.0, a request withdrawn under v0.39.0 breaks v0.38.0's read of that request and its list of all approvals (`status=all`) with a server error, because v0.38.0 does not know the status `withdrawn`; a list of one status still works. The upgrade ends every approval that still waits: a `pending` request from an older release expires with the reason `release_changed`, and an approved request from an older release that has not run is refused (#5170). With the built-in PostgreSQL the migration now runs in the `migrate` init container of the MEHO pod, not in a hook Job (#5248). A vCenter multi-step write step is checked against the grants of the connector the target uses, `vmware-rest-8.0` for vCenter 8.0.x (#5222). The Vault policy, identity and token operations log in with the target's `vault_role` and do not fall back (#5290, #5328). The Valkey and busybox images are pinned by digest, and `docker.io/busybox` maps to `<registry>/library/busybox` (#5299). Operator changes to an operation's risk level and approval flag are now stored apart from the value in code, in `operation_policy_override` (#5260). They stay after a restart and a re-ingest. An edit can only make an operation stricter; lowering a risk level needs a pull request. Turning approval off needs `platform_admin`, a reason and a fresh sign-in (REST) or the console; it is never allowed for a destructive operation, and the MCP tool `meho_connector_edit_op` can no longer do it. A tenant admin's change to a built-in operation applies to their tenant only; a platform admin removes it with `meho connector remove-override --tenant <uuid>`. New setting `FRESH_SIGN_IN_MAX_AGE_SECONDS` (default `300`). | Back up the database. Decide waiting approvals before the upgrade, or ask the requesters to send them again. With the built-in PostgreSQL, run `helm upgrade` with `--wait`. Run the catalog ingest of `vi-json.yaml` again for `vmware/9.0` and `vmware/8.0` (#5255), and ingest again every connector made with `--auth-scheme` (#5152). Write step grants for vCenter 8.0.x targets again with `vmware-rest-8.0`. Give each Vault target's `vault_role` the rights its policy, identity and token calls need. With your own image registry, copy every line of `images.txt`. Edits to risk levels and approval flags made before this release were written to the operation row, so the next start (typed) or re-ingest (ingested) puts the value from code back: re-apply each stricter edit once with `meho connector edit-op`, and check `meho connector overrides --reduced-approval` after the upgrade. Scripts that turned approval off with a plain API token or through MCP must change: use the console, or the CLI right after `meho login`. Full list: the "Breaking changes" and "Steps after the upgrade" parts of the `[0.39.0]` CHANGELOG section. |
-| **Unreleased** | An approve on the command line or REST now needs a fresh sign-in (#3979): the token's sign-in time must be at most `FRESH_SIGN_IN_MAX_AGE_SECONDS` old (chart `config.freshSignInMaxAgeSeconds`, default 300), and one sign-in gives one approval. `meho approvals approve` opens the browser sign-in for this. A long-lived token gets `401`. The web interface is not affected. | Run `meho admin keycloak bootstrap-clients` again, or turn on the standard flow (PKCE `S256`) with the redirect address `http://127.0.0.1:*` on the `meho-cli` client by hand. Scripts that approve with a long-lived token must use the web interface or the CLI. |
+| **v0.40.0** | Three schema migrations: the alembic head advances **`0127` → `0130`**. Each one only adds a column: `0128` `targets.secret_field_map` (#5209), `0129` `approval_request.rerun_count` (#5421), `0130` `approval_request.target_hash` (#5520). Requests made before the upgrade have no target hash, so MEHO skips the target check for them. The upgrade ends every approval request that still waits, as in v0.39.0: a `pending` request from v0.39.0 expires with the reason `release_changed`. Agents act with operator rights, so an agent token gets 403 `insufficient_role` on every route that needs `tenant_admin` (#5508). `vault.kv.read` and `vmware.composite.vm.guest.env.read` return names without values (#5521), and `vault.token.create` returns no token (#5527). A secret ref in an operation parameter is refused with `vault_credentials_read_error` when it is outside the caller's tenant path, or when it is a `gsm:` ref of a project that the new setting `GSM_PARAM_ALLOWED_PROJECTS` (empty by default) does not list (#5511). On a Vault install with `checkRunner.enabled: true`, no Sensor runs until `VAULT_CHECK_RUNNER_ROLE` names a Vault role other than `VAULT_OIDC_ROLE`, and event intake logs in with the same role (#5511, #5529). An approve on the command line or REST needs a fresh sign-in: the sign-in must be at most `FRESH_SIGN_IN_MAX_AGE_SECONDS` old (chart `config.freshSignInMaxAgeSeconds`, default 300), and one sign-in gives one approval. `meho approvals approve` opens the browser sign-in for this. A long-lived token gets `401`. The web interface does not change (#5399). Generic vCenter calls that stop, restart, disconnect, remediate or open access, and generic vCenter reads that return credentials, wait for approval after the next catalog ingest (#5441, #5525). `linux.file.read` and `linux.log.tail` read only under `/etc`, `/var/log`, `/var/lib` and `/run` and a few named system files, check the real path with every symlink followed, and refuse key, token and password files; on a host where `/var/log` is a symlink, reads under it are refused (#5524). | Back up the database. Decide waiting approvals before the upgrade, or ask the requesters to send them again. On a Vault install with `checkRunner.enabled: true`, create a Vault role for the check runner and set `VAULT_CHECK_RUNNER_ROLE` to it through `extraEnv`, or turn `checkRunner.enabled` off. The role's policy covers the secrets your Sensors read and the event source secrets (`secret/data/tenants/+/event-sources/*` and the matching `secret/metadata/` path); recipe: [`cross-repo/vault-provisioning.md` § "Bounding the check-runner principal"](cross-repo/vault-provisioning.md#7-bounding-the-check-runner-principal-2642). Put the secrets that operations name in parameters (for example `secret_env`, `password_ref`, `guest_secret_ref`) under the caller's tenant path, `tenants/<tenant_id>/` with the default prefix. List the Google projects of `gsm:` refs in parameters in `GSM_PARAM_ALLOWED_PROJECTS`, comma-separated. Existing Keycloak realm: on each client that people use for `meho login` (`meho-cli` by default), turn on the standard flow, PKCE `S256` and the redirect address `http://127.0.0.1:*`, for example with the operation `keycloak.client.update`. Do not run `meho admin keycloak bootstrap-clients` for this: on an existing realm it also rewrites the `meho-cli` and `meho-mcp` clients and their tenant and role mappers. Until then, approve in the web interface. Load the generic vCenter connectors `vmware-rest-9.0` and `vmware-rest-8.0` again with `meho connector ingest` and the same API files you used before. `--catalog vmware/9.0` and `--catalog vmware/8.0` load only a small API file that ships with MEHO: use them only if you loaded that file before. Built-in OpenBao (`coreVault.enabled: true`) that you set up by hand: first put a root token into the Secret `<release>-core-vault-init` (key `token`); the new setup Job takes OpenBao over with it and then revokes it (#5362). A person in several tenants picks one with `meho tenants use <name>`, or sets `MEHO_TENANT` for the Claude Code plugin or the "tenant" setting of the Claude Desktop bundle; in this release the web interface answers `tenant_not_chosen` for such a person (#5392, #5444, #5445). Install the v0.40.0 CLI. Scripts must change: a script that needs a secret value runs as a person or a service principal and sends `reveal_secret: true`; use `vault.token.create_and_store` in place of `vault.token.create`; do tenant admin work as a person or with a service login; approve in the web interface or with the CLI, not with a long-lived token; use the new names of the inventory connector (#5407). Read kernel parameters with `linux.sysctl.read`, not with `linux.file.read`. Full list: the "Breaking changes" and "Steps after the upgrade" parts of the `[0.40.0]` CHANGELOG section. |
+| **v0.41.0** | No schema migration in this release (alembic head stays `0130`). **Security:** on a vCenter 8.0 target, the generic reads of a content library, a local library, a subscribed library and a Supervisor container image registry return every secret field as `[REDACTED:param_name]`, and after the next load of the connector they wait for approval, the same as on vCenter 9.0 (#5541). The Claude Code plugin (0.31.1) and the Claude Desktop bundle ship `qs` 6.17.0 with the upstream fix for CVE-2026-110816 (#5150). MEHO reads from the login whether a person is in the SA-Operators group of the current tenant; approvals do not use it yet. The new setting `JWT_SELF_APPROVER_GROUP` (default `MEHO-SA-Operators`) names the group for a login without a tenant list (#5394). | Load the generic vCenter connector `vmware-rest-8.0` again with `meho connector ingest` and the same API files you used before, so the approval of these reads takes effect. The small API file that `--catalog vmware/8.0` loads does not have these reads: if you loaded only that file, skip this step. Claude Desktop users install `meho-claude-desktop-0.41.0.mcpb` from the release; Claude Code users run `claude plugin update meho@meho` and restart Claude Code. No settings change. Full list: the `[0.41.0]` CHANGELOG section. |
 
 ## Operational chart knobs
 

@@ -103,6 +103,8 @@ _VMWARE_COMPOSITE_GROUPS: Final[frozenset[str]] = frozenset(
         "vcenter_install",
         # Datacenter create / delete, object rename / move.
         "inventory",
+        # Host certificate changes; shared with the certificate and TPM reads.
+        "vmware-host-certificates",
     }
 )
 _BIND9_GROUPS: Final[frozenset[str]] = frozenset({"identity", "zone", "record", "config"})

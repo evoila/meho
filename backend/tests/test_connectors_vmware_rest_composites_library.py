@@ -37,7 +37,7 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast.events import _CREDENTIAL_WRITE_OPS, classify_op
+from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest.composites import _library, _write
 from meho_backplane.connectors.vmware_rest.composites._library import (
@@ -606,10 +606,9 @@ async def test_create_preview_echoes_identity_only_never_the_password() -> None:
 
 def test_create_op_is_pinned_credential_write() -> None:
     """The create op broadcasts aggregate-only (its params carry a password)."""
-    assert "vmware.composite.content_library.subscribed.create" in _CREDENTIAL_WRITE_OPS
     assert classify_op("vmware.composite.content_library.subscribed.create") == "credential_write"
-    # The sync / reads carry no secret and are not pinned.
-    assert "vmware.composite.content_library.subscribed.sync" not in _CREDENTIAL_WRITE_OPS
+    # The sync / reads carry no secret and are not declared credential writes.
+    assert classify_op("vmware.composite.content_library.subscribed.sync") != "credential_write"
 
 
 def test_governed_subop_manifest_lists_the_two_writes() -> None:

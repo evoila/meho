@@ -31,3 +31,7 @@
 parallel = true
 relative_files = true
 source = meho_backplane
+# Record which test function ran each line (#5642). The nightly combine job
+# turns that into the unit test map that pull requests use to pick their
+# tests. It needs the C tracer: the faster sysmon core cannot record it.
+dynamic_context = test_function

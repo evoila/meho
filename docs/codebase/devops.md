@@ -1742,7 +1742,7 @@ workflow files, this doc, and the changelog.
 | Job | Surface | Steps |
 | --- | --- | --- |
 | `python-lint` (`Python lint + typecheck (ruff + mypy)`) | `backend/src/` + `backend/tests/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict`. Non-required; whole-tree, unshardable-by-file, runs once on a GitHub-hosted runner (#3251, #4626). |
-| `python-unit-shard` (`Python unit shard N/6`) | `backend/` unit + acceptance subtree, split 6 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). A pull request that changes one connector runs one leg instead (`Python unit tests for connector <name>`, see [One-connector unit run](#one-connector-unit-run-5297)). |
+| `python-unit-shard` (`Python unit shard N/6`) | `backend/` unit + acceptance subtree, split 6 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). A pull request that changes one connector runs one leg instead (`Python unit tests for connector <name>`, see [One-connector unit run](#one-connector-unit-run-5297)). Another pull request may run one leg with the tests the test map picked (`Python unit tests picked by the test map`, see [Test map run](#test-map-run-5642)). |
 | `python-outside-backend` (`Python tests that read files outside backend`) | the backend tests that read files outside `backend/` | Runs only on a PR with no `backend/` change (`backend_python=false`) that is not docs-only. `pytest -n 3` over the fixed list in `backend/tests/_outside_backend_tests.py`, on a GitHub-hosted runner. Non-required; the fan-in requires it on that path (#5296). See [No-backend path (#5296)](#no-backend-path-5296). |
 | `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252); on a no-backend diff it requires `python-outside-backend` to pass (#5296). |
 | `python-integration-shard` (`Python integration shard N/4`) | `backend/tests/integration/` + the G0.7 vSphere canary module, split 4 ways | `uv sync --locked --all-groups` -> `pytest -x -rs` over a file set split by measured time, against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. No xdist inside a shard. Non-required matrix (#5384). |
@@ -2036,8 +2036,10 @@ runs one short job instead.
 - **Classification (fail-closed).** The `changes` job has a third output,
   `backend_python`. It starts `true` and is `false` only when the event is
   `pull_request`, the diff could be computed, no changed path apart from
-  `.md` files is under `backend/`, and `.github/workflows/ci.yml` did not
-  change. `push` and `merge_group` always keep it `true`. It uses the same
+  `.md` files is under `backend/`, and neither `.github/workflows/ci.yml`
+  nor the spec-shelf lists (`ci/spec-shelf/`, `scripts/ci/spec_shelf.sh`)
+  changed. The shelf check runs only in the unit and integration shards,
+  so a new list file must not skip them. `push` and `merge_group` always keep it `true`. It uses the same
   `HEAD^1..HEAD` diff as `docs_only`. The diff runs with
   `core.quotePath=false`, so a path with non-ASCII characters (for example
   `café.json`) is printed as is and the `backend/` check sees it. Git still
@@ -2119,6 +2121,92 @@ the six shards, so every test still runs before a change lands on `main`.
   So a new test that scans every connector cannot be left out of the
   short run by mistake.
 
+### Test map run (#5642)
+
+A pull request that would run all the `python-unit-shard` legs can run
+**one** unit job instead, with only the tests its change can break. The
+job is named `Python unit tests picked by the test map`. The merge queue
+and pushes to `main` always run all the shards, so every test still runs
+before a change lands on `main`. A wrong pick costs one failed merge-queue
+run, not a broken `main`.
+
+- **The map.** It says which tests run each source file. The nightly run
+  makes it. `backend/.coveragerc.ci` sets `dynamic_context = test_function`,
+  so the coverage data records which test function ran each line. That
+  needs the C tracer (`COVERAGE_CORE=ctrace`), which is slower, so the
+  coverage pytest step may take 45 minutes. Each coverage shard also writes
+  a pytest junit file with every test id. The combine job runs
+  `tests/_unit_test_map.py build` and uploads the artifact `unit-test-map`
+  (kept 8 days). It does this only on the `schedule` run, and only when all
+  eight shards delivered their data. A crashed worker leaves a junit file
+  but no coverage data (the worker writes its data only at the end of its
+  session), and the download of that shard still works. So the tool checks
+  each junit file: one that reports a crashed worker, or whose tests are
+  not in the coverage data, means no map that night. A pull request with
+  the `ci-coverage-validate` label never makes a map.
+- **Who decides.** The `changes` job, step `map`. It runs only on a pull
+  request that is not docs-only, has a backend change and is not a
+  one-connector run. It downloads the newest `unit-test-map` artifact of a
+  run of this repo on `main` (the job has `actions: read` for that). It
+  pipes the changed files into `python3 backend/tests/_unit_test_map.py pick`
+  (standard library only). The step `upload-selection` stores the picked
+  list as the artifact `unit-test-selection`. The output `test_map` is
+  `true` only when both worked.
+- **The rules.** A changed source file picks the tests that ran it. A
+  changed test file picks its own tests. A source file that no test ran
+  (its code runs only on import, like most `*_schemas.py` files) picks,
+  by import analysis, every test file that imports it directly or through
+  other modules, plus the tests that the map links to those modules. The
+  analysis does not follow `conftest.py` files; when a unit `conftest.py`
+  imports the changed file itself, all the shards run. Docs pick nothing.
+  Every other file means all the shards: a migration, a template or data
+  file, a `conftest.py` or test helper, `pyproject.toml`, `uv.lock`, a
+  workflow, the Go CLI, a source file the map does not know (a new one).
+  No map, a map older than 7 days, 2,000 or more picked tests, or any
+  error also means all the shards. Every selected run also runs
+  `CONTRACT_TESTS` from `backend/tests/_unit_connector_select.py`.
+- **How the tests are counted.** The map says how many test items each
+  test runs, and that count is used for a test id and for a test file the
+  pull request did not change. A test file the pull request changed, or
+  that the map does not know, is counted from its source: its test
+  functions and `Test*` classes, times the cases of each `parametrize`
+  list that is written out or named at module level (also one in
+  `pytestmark`), times the `params` of every fixture with `params` in the
+  file and in the `conftest.py` files above it, as if every test used
+  every such fixture. An empty list counts as one item, as pytest
+  collects one skipped test for it, so an unused fixture with an empty
+  `params` list never hides a file from the limit. The larger of that
+  count and the map's count is used, so a new or expanded test counts
+  fully, also when a shared fixture multiplies it. When the file's count
+  is uncertain (a
+  parametrize or params list built by code, a `pytestmark` that is not
+  one plain assignment at module level, `pytest_generate_tests`, a
+  `conftest.py` that names `pytest_plugins`, a test class with a base
+  from another file, or a bare decorator name from another file), all
+  the shards run. On 2026-11-02 the count was certain for 1,078 of the
+  1,235 unit test files: right for 1,074, and higher than pytest collects
+  for 4 files whose parametrized fixture only some tests use.
+- **Old test ids.** The map can be a few days old. A test id whose file is
+  gone is dropped. A test id that its file no longer defines picks the
+  whole file, so pytest never gets an id it cannot find.
+- **The log.** The step prints one line, also as a notice, for example
+  `test map from 2026-11-01 (commit abc1234): 940 of 24,112 tests` or
+  `full suite: a migration changed (backend/alembic/versions/0118_x.py)`.
+- **The required check.** The fan-in `python-unit-lane` is unchanged; the
+  required check `Python (ruff + mypy + pytest)` keeps its name and its
+  strict rule. A selected run does not upload its per-test times.
+- **What the map cannot see.** Coverage links a test only to the lines that
+  run inside the test function. Code that runs only in fixtures, at app
+  start or in background tasks gets no test, so the map can pick too few
+  tests for a change there. Tests that a decorator wraps (coverage names
+  them after the decorator, like `functools.test_x`) and tests added after
+  the map was made run only when their own file changes, and in the merge
+  queue.
+- **Tests.** `tests/test_unit_test_map.py` checks the rules on a small fake
+  tree, runs the real step script from `ci.yml` with a fake `gh`, and
+  checks the wiring. `tests/test_ci_coverage_shards.py` checks that the map
+  step waits for every coverage shard.
+
 ### Runner-CPU rule
 
 **`pytest-xdist -n` must stay below the runner container's usable
@@ -2154,7 +2242,7 @@ repo. `ci.yml` provisions them at runtime, gated on a secret:
 - Both Python test jobs (`python-unit-shard` and
   `python-integration-shard` — every shard of each) carry a
   secret-gated "Checkout vendor vCenter spec-shelf" step: a cone-mode sparse
-  checkout of `docs/vcenter-9.0/` from the private
+  checkout of the listed shelf folders (for example `docs/vcenter-9.0/`) from the private
   `evoila-bosnia/claude-rdc-hetzner-dc` shelf repo into
   `$GITHUB_WORKSPACE/spec-shelf`, authenticated by the **`SPEC_SHELF_TOKEN`**
   repo secret (fine-grained PAT, Contents read-only, that single repo).
@@ -2162,9 +2250,8 @@ repo. `ci.yml` provisions them at runtime, gated on a secret:
   `$GITHUB_WORKSPACE/spec-shelf/docs` on both jobs. When the secret is absent
   (fork PRs, Dependabot runs, not-yet-provisioned repos) the checkout step
   skips, the directory doesn't exist, and the resolvers
-  (`backend/tests/_spec_shelf.py`, the product-agnostic #2980 harness the
-  vcenter-specific `backend/tests/acceptance/_vcenter_spec.py` delegates its
-  shelf-root branch to) return `None` → the lanes
+  (`backend/tests/_spec_shelf.py`, the product-agnostic #2980 harness)
+  return `None` → the lanes
   `pytest.skip()` exactly as before the wiring. When the secret exists, all
   five lanes run for real, and a fail-loud verify step turns any shelf-layout
   drift into a job failure instead of a silent regression to lane-skip.
@@ -2174,9 +2261,18 @@ repo. `ci.yml` provisions them at runtime, gated on a secret:
   rule of record: `docs/decisions/spec-reconcile-guards-standard.md`.
   The vSphere canary that first set this rule left with evoila's own
   connectors (#3345) and runs in the private connector package.
+- The required shelf files are listed in `ci/spec-shelf/`, one small
+  `.txt` file per product version, one file path per line. The script
+  `scripts/ci/spec_shelf.sh` reads the lists: a step before the checkout
+  prints the shelf folders as its `paths` output (the checkout's
+  `sparse-checkout` input), and the verify step checks each file and
+  prints one line per file. A missing file fails the job with the
+  "Spec-shelf layout drift" error; a missing, empty or bad list fails it
+  too. `ci.yml` names no shelf file. Tests:
+  `backend/tests/test_ci_spec_shelf_lists.py`.
 - Per-vendor reconcile lanes beyond vCenter (#2981-#2993) extend the same
-  wiring — one `sparse-checkout` line + one verify line per product dir,
-  same `SPEC_SHELF_TOKEN`, never a new secret. Standard + extension
+  wiring — one new list file per product version, no change in
+  `ci.yml`, same `SPEC_SHELF_TOKEN`, never a new secret. Standard + extension
   mechanics + red-lane protocol:
   [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 - The `secrets` context is unavailable in step-level `if:`, so the gate is
@@ -2290,12 +2386,15 @@ coverage out of the required unit lane for good (the OOM story in
 push-only job, #3172 sharded that job, and #4910 moved it to the nightly
 run. The `quality-gate.yml` whole-job
 `continue-on-error` means a missing or late artefact never blocks a
-merge. `COVERAGE_CORE=sysmon` (#739) swaps coverage.py's default C
+merge. `COVERAGE_CORE=sysmon` (#739) swapped coverage.py's default C
 tracer for the PEP 669 `sys.monitoring` backend (Python 3.12+,
 supported by coverage.py 7.4+; the lockfile pins 7.14). Sysmon's
 event-driven model removes most of the per-line tracing tax; line
 counts matched the C tracer exactly (2913/11832 in both), so the
-SonarCloud signal is unaffected.
+SonarCloud signal is unaffected. Since #5642 the coverage shards use the C tracer
+again (`COVERAGE_CORE=ctrace`): they record which test ran each line for
+the test map, and sysmon cannot record that (see
+[Test map run](#test-map-run-5642)).
 
 ### Fork-PR guard
 

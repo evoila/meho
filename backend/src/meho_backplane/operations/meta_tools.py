@@ -91,6 +91,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup, PermissionVerdict
 from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.operations._code_presence import connector_code_missing
 from meho_backplane.operations._contract import UnknownOperationError, build_operation_contract
 from meho_backplane.operations._errors import (
     result_ambiguous_target,
@@ -292,6 +293,10 @@ SEARCH_LIMIT_MAX: int = 50
 #:   connector package that is not installed in this MEHO (#5560), whether
 #:   they are enabled or not. The advisory names the package. Nothing can
 #:   be called until the package is installed again.
+#: * ``code_not_installed`` — the code of the connector is not in this MEHO
+#:   (#5585): its rows have no package name, no handler imports and no
+#:   class resolves. Also the answer in exact-op mode. Nothing can be
+#:   called until a MEHO with this code runs.
 SearchOutcome = Literal[
     "matched",
     "ambiguous",
@@ -299,6 +304,7 @@ SearchOutcome = Literal[
     "unknown_group",
     "zero_enabled_operations",
     "package_not_installed",
+    "code_not_installed",
 ]
 SEARCH_OUTCOMES: Final[tuple[str, ...]] = get_args(SearchOutcome)
 
@@ -952,6 +958,9 @@ async def list_operation_groups(
       meaningful (the connector exists; nothing is enabled yet). The
       distinction ends the "empty catalog" trap where a mis-shaped
       ``connector_id`` looked indistinguishable from an empty connector.
+    * A connector whose code is not in this MEHO also returns an empty
+      ``groups`` list (#5585,
+      :func:`~meho_backplane.operations._code_presence.connector_code_missing`).
 
     Pagination (G0.18-T5 #1358)
     ---------------------------
@@ -986,7 +995,11 @@ async def list_operation_groups(
         cursor=cursor,
     )
     async with sessionmaker() as session:
-        groups = (await session.execute(group_stmt)).scalars().all()
+        code_missing = await connector_code_missing(
+            session, tenant_id=operator.tenant_id, product=product, version=version, impl_id=impl_id
+        )
+        # A connector whose code is not in this MEHO offers no group (#5585).
+        groups = [] if code_missing else (await session.execute(group_stmt)).scalars().all()
         counts = await _count_ops_per_group(
             session, [g.id for g in groups], tenant_id=operator.tenant_id
         )
@@ -1173,6 +1186,12 @@ def _search_guidance(
             f"operation on this connector.",
             [f"Ask an operator to install the connector package {package!r} again."],
         )
+    if outcome == "code_not_installed":
+        return (
+            "The code of this connector is not in this MEHO, so none of its "
+            "operations can run. Do not call any operation on this connector.",
+            ["Ask an operator to run a MEHO image that has the code of this connector."],
+        )
     if outcome == "unknown_group":
         return (
             f"Group {group_key!r} does not exist on this connector or has no "
@@ -1339,7 +1358,8 @@ async def search_operations(
     ``unknown_group`` (``narrowing`` lists the visible group keys),
     ``zero_enabled_operations`` (an abstention advisory, no op ids), or
     ``package_not_installed`` (the advisory names the missing connector
-    package, #5560).
+    package, #5560), or ``code_not_installed`` (the code of the connector
+    is not in this MEHO, #5585; also in exact-op mode).
     ``advisory`` explains a non-``matched`` outcome in one sentence;
     ``narrowing`` holds at most :data:`SEARCH_NARROWING_MAX` next steps.
     Hit order is the retriever's; the outcome never re-ranks.
@@ -1361,6 +1381,21 @@ async def search_operations(
         version=version,
         impl_id=impl_id,
     )
+    async with get_sessionmaker()() as session:
+        code_missing = await connector_code_missing(
+            session, tenant_id=operator.tenant_id, product=product, version=version, impl_id=impl_id
+        )
+    if code_missing:
+        # Both modes: the code is missing, so no op is offered (#5585).
+        advisory, narrowing = _search_guidance("code_not_installed", group_key=None)
+        _log.info("search_operations_code_not_installed", connector_id=connector_id)
+        return {
+            "hits": [],
+            "query_duration_ms": 0.0,
+            "outcome": "code_not_installed",
+            "advisory": advisory,
+            "narrowing": narrowing,
+        }
     if op_id is not None:
         contract = await build_operation_contract(
             tenant_id=operator.tenant_id,

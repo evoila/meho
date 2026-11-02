@@ -230,6 +230,7 @@ The dispatcher never raises; it always returns an `OperationResult`. Every error
 |-------------------------|---------------------------------------------------------------------------------------|
 | `unknown_op`            | Natural key didn't resolve a descriptor.                                              |
 | `connector_package_not_installed` | The op's row was written by a connector package that is not installed in this MEHO. The row is hidden, not deleted. `extras.package` names the package. See [connector packages](../codebase/connector-packages.md). |
+| `connector_code_not_installed` | The code of the op's connector is not in this MEHO: its rows have no package name, no handler imports and no connector class resolves. The rows are hidden, not deleted. `extras.connector_id` names the connector. See [connector packages](../codebase/connector-packages.md), "Rows with no package name". |
 | `invalid_params`        | `params` failed JSON Schema validation.                                               |
 | `no_connector`          | Resolver couldn't pick a connector for the target. `extras.exception_message` carries the resolver's diagnostic text (G0.14-T1 #1142). |
 | `ambiguous_connector`   | Resolver matched two or more connectors and the tie-break ladder couldn't pick. `extras.exception_message` carries the candidate list + remediation step ("set `target.preferred_impl_id` to one of them"). G0.14-T1 (#1142). |

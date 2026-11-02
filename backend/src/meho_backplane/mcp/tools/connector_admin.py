@@ -182,9 +182,10 @@ def connector_review_status(item: ConnectorListItem) -> str:
     partly enabled and partly disabled (none staged) is ``"mixed"``. No
     filter except ``all`` returns a mixed row. A connector whose
     connector package is not installed is ``"package_not_installed"``
-    (#5560).
+    (#5560), and one whose code is not in this MEHO is
+    ``"code_not_installed"`` (#5585).
     """
-    if item.state in ("registered", "package_not_installed"):
+    if item.state in ("registered", "package_not_installed", "code_not_installed"):
         return item.state
     if item.staged_group_count > 0:
         return "staged"

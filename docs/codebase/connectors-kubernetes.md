@@ -483,8 +483,8 @@ the names of its Jobs that still run and each container's name, image,
 env var names and command size, never an env value or the command text.
 
 **Secret redaction reuses the shipped `credential_write` op-class
-(#1401), not a new mechanism.** `k8s.secret.create` was already in
-`_CREDENTIAL_WRITE_OPS` (`broadcast/events.py`); G3.14-T1 adds
+(#1401), not a new mechanism.** `k8s.secret.create` was already a
+`credential_write` (today declared in `kubernetes/op_classes.py`); G3.14-T1 adds
 `k8s.job.create` (a Job pod-template's inline `env` can carry secret
 material in `params`). `classify_op` returns `credential_write`, so
 `redact_payload` collapses the broadcast event to aggregate-only
@@ -522,8 +522,8 @@ context (the same pattern as keycloak's `password_secret_ref`, #2401):
   free: the seam dispatches on scheme, so a `gsm:` ref resolves on a GSM
   deployment with no extra connector code.
 
-The redaction above is unchanged and still applies: the op stays pinned in
-`_CREDENTIAL_WRITE_OPS`, and only the *ref* (never a value) is ever in
+The redaction above is unchanged and still applies: the op stays declared
+`credential_write` in `kubernetes/op_classes.py`, and only the *ref* (never a value) is ever in
 `params`, so the audit row hashes a path and the broadcast stays
 aggregate-only. A resolved payload missing the requested field raises
 `KubernetesSecretRefError` (never a bare `KeyError`, never echoing a
@@ -646,7 +646,7 @@ two ops in the `config` group, next to `k8s.secret.create`.
   written, run it again".
 - Result: `{name, namespace, type, mode, data_keys, keys_set, keys_removed,
   updated}`. Key names only, never a value.
-- The op is pinned in `_CREDENTIAL_WRITE_OPS` like `k8s.secret.create`.
+- The op is declared `credential_write` in `kubernetes/op_classes.py` like `k8s.secret.create`.
   While it waits for approval its params live in the approval hand-off
   store, not on the approval row, and the broadcast is aggregate-only.
 - Its preview (`_secret_update_preview`) shows `name`, `namespace`, `mode`,
@@ -715,8 +715,8 @@ flow is: `call_operation k8s.secret.read_to_ref … register_as=<guest>`
 
 **Governance (mirrors `sddc.credential.list`).** Three layers: (1)
 `safety_level="caution"` + `requires_approval=True` (the policy gate
-parks an unapproved dispatch); (2) the op-id is pinned in
-`broadcast.events._CREDENTIAL_READ_OPS`, so `classify_op` returns
+parks an unapproved dispatch); (2) the op-id is declared `credential_read`
+in `kubernetes/op_classes.py`, so `classify_op` returns
 `credential_read` and audit + broadcast rows collapse to aggregate-only;
 (3) the result is value-free **by construction** (only the ref + a
 SHA-256 + byte length), so the connector-boundary `credential_read`
@@ -797,7 +797,7 @@ match. `ops_secret_compare.py` answers that without showing the value.
   caller's tenant), `not_found` or `key_not_found`; the call does not
   fail. Other Kubernetes errors, a Vault login failure or an unreachable
   Vault fail the call.
-- `safe`, no approval. The op id is on `_CREDENTIAL_READ_OPS`, so the
+- `safe`, no approval. The op id is declared `credential_read` in `kubernetes/op_classes.py`, so the
   flight recorder never stores the Secret body and the broadcast shows
   only the outcome.
 

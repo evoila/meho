@@ -17,7 +17,10 @@ through the same class.
 
 from typing import Final
 
-from meho_backplane.connectors.hcx import service_mesh_writes  # noqa: F401 -- registers the delete preview
+from meho_backplane.connectors.hcx import (
+    op_classes,  # noqa: F401 -- declares the op classes
+    service_mesh_writes,  # noqa: F401 -- registers the delete preview
+)
 from meho_backplane.connectors.hcx.connector import HcxConnector, HcxManagerVersion
 from meho_backplane.connectors.hcx.session import (
     HcxSessionLoader,

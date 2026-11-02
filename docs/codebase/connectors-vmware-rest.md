@@ -274,8 +274,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
      `{spec_name, os_type, hostname_scheme, nic_count, static_ip_summary}`
      — it never touches the credential params, so no secret can reach the
      durable `ApprovalRequest.proposed_effect` row by construction.
-  2. **Broadcast frame.** `guest.customization_spec.create` is pinned into
-     `broadcast/events._CREDENTIAL_WRITE_OPS`, so `redact_payload` collapses
+  2. **Broadcast frame.** `guest.customization_spec.create` is declared
+     `credential_write` in `vmware_rest/op_classes.py`, so `redact_payload` collapses
      its params to aggregate-only on the feed. The pin is required (not just
      nice-to-have): the `password`-suffixed fields trip the runtime
      key-name scrub, but `product_key` does not (`key` is neither an
@@ -359,7 +359,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   hard-coded). `guest.program.run`'s `arguments` / `env` values may carry
   secrets and are kept off the governed surfaces (result / audit-hash /
   preview / gate) and clamped to aggregate-only on broadcast via the
-  `_CREDENTIAL_WRITE_OPS` pin; the resume-bound `ApprovalRequest.params` and
+  `credential_write` declaration in `vmware_rest/op_classes.py`; the resume-bound `ApprovalRequest.params` and
   flight-recorder spans still carry them (same characteristic as
   `guest.file.write`'s `content`), so operators must not pass bare secrets
   there. The design fork (vim guest-ops over a
@@ -407,7 +407,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   composites, not the generic-ingested row:** the subscribe body carries a
   `subscription_info.password` (BASIC auth) needing credential hygiene the raw
   ingested row cannot provide (broadcast aggregate-only via the
-  `_CREDENTIAL_WRITE_OPS` pin on `subscribed.create`, a park-time preview that
+  `credential_write` declaration of `subscribed.create` in `vmware_rest/op_classes.py`, a park-time preview that
   echoes identity fields only — never the password / username, `params_hash`-only
   audit), and the connector's governed ops must dispatch on a fresh boot with
   zero catalog ingest (a generic row requires a runtime spec-ingest +
@@ -2029,6 +2029,10 @@ enum) are:
 | `vm.clone` | `completed` (the pinned deploy operation is synchronous — its 200 body is the new VM id, #2970; deploy failures raise `connector_error`) |
 | `vm.deploy_from_library` | `deployed`, `deploy_failed`, `deploy_error`, `invalid_reference`, `library_not_found`, `ambiguous_library`, `item_not_found`, `ambiguous_item`, `resolve_error` (OVF/OVA deploy, #2909; the synchronous deploy's 200 body is a `DeploymentResult` — `succeeded=false` → `deploy_failed` with the report's per-issue messages, an HTTP 400/404 for an invalid/missing placement resource → `deploy_error`, and a faulted content-library `find` during name resolution → `resolve_error` (#3071), both with a structured message carrying the vCenter status — so a placement/mapping/resolution error is a structured status, never a raw vendor fault; the VM is deployed under a unique deploy name and renamed on success, and a failed deploy deletes the partial VM it left and adds a `cleanup` issue, #3697) |
 | `vm.import_from_library` | `deployed`, `deploy_failed`, `deploy_error`, plus the same resolution statuses as `vm.deploy_from_library` (typed HttpNfcLease OVF import, #3229; the deploy-envelope family is reused — `CreateImportSpec` descriptor rejection → `deploy_failed`, a vim control-plane / lease / disk-upload fault → `deploy_error` — plus a per-disk `transfer` manifest; see the dedicated section) |
+| `vm.pci_device.add` | `added`, `unchanged`, `refused`, `not_found`, `invalid_request`, `timeout` (vim `ReconfigVM_Task` polled; a task fault raises `connector_error`) |
+| `vm.pci_device.remove` | `removed`, `unchanged`, `still_present`, `refused`, `not_found`, `invalid_request`, `timeout` (same task path as the add) |
+| `vm.screenshot` | `taken`, `refused`, `not_found`, `invalid_request`, `timeout` (vim `CreateScreenshot_Task` polled, then the PNG file read; a task fault, a failed file read or a file over `max_bytes` raises `connector_error`) |
+| `vm.keys.send` | `sent`, `refused`, `not_found`, `invalid_request` (synchronous `PutUsbScanCodes`; a vim fault raises `connector_error`) |
 | `vm.snapshot.revert` | `reverted`, `ambiguous`, `not_found`, `timeout` (vim `RevertToSnapshot_Task` polled; a task fault raises `connector_error`, #2970; by `snapshot_name` or `snapshot_id`, an id not in the VM's tree is `not_found`) |
 | `vm.snapshot.create` | `created`, `unchanged` (a snapshot with the name exists; nothing written), `not_found`, `invalid_request`, `timeout` (vim `CreateSnapshotEx_Task` polled; a task fault raises `connector_error`) |
 | `vm.snapshot.delete` | `deleted`, `unchanged` (no snapshot with the id), `invalid_request`, `still_present`, `timeout` (vim `RemoveSnapshot_Task` polled; the teardown envelope) |
@@ -3053,6 +3057,77 @@ Code: `typed_ops_snapshot_list.py`, `snapshot_tree.py`, `composites/_snapshot.py
 consolidate; its rows are in `composites/_snapshot_cleanup_ops.py`) and
 `composites/_write.py` (revert). The governed sub-op manifests are on the
 composite rows.
+
+### PCI passthrough devices, console screenshot and key send
+
+Four VM changes that exist only in the VIM API, so all four use VI-JSON on
+vCenter. Every one waits for approval.
+
+| Operation | What it does | Returns | Risk |
+|---|---|---|---|
+| `vmware.composite.vm.pci_device.add` | Adds one PCI passthrough device to a powered-off VM: `pci_id` (DirectPath I/O, one host device by its PCI address) or `dynamic_device` (`vendor_id`, `device_id`, optional `custom_label`; vCenter picks a free device at power-on). Reserves all VM memory unless `reserve_all_memory` is false. `EnvironmentBrowser.QueryConfigTarget`, then `VirtualMachine.ReconfigVM_Task` | `{status, vm, vm_name, requested, device, pci_devices, task, task_state, guidance}` | `dangerous` |
+| `vmware.composite.vm.pci_device.remove` | Removes one PCI passthrough device, by `device_key`, from a powered-off VM. `VirtualMachine.ReconfigVM_Task` | `{status, vm, vm_name, device_key, device, pci_devices, task, task_state, guidance}` | `dangerous` |
+| `vmware.composite.vm.screenshot` | Takes a console screenshot of a running VM. `VirtualMachine.CreateScreenshot_Task`, then `GET /folder/{path}?dcPath=...&dsName=...` (vCenter datastore file access) | `{status, vm, vm_name, file, size_bytes, media_type, encoding, content_lines, task, task_state, guidance}` | `caution` |
+| `vmware.composite.vm.keys.send` | Presses keys from a fixed list on a running VM's console: Ctrl+Alt+Del, Enter, Esc, Tab, Backspace, F1 to F12 and the arrow keys. `VirtualMachine.PutUsbScanCodes` | `{status, vm, vm_name, keys, keys_sent, power_state, guidance}` | `dangerous` |
+
+| Versions | Catalog |
+|---|---|
+| vCenter 8.0 U1, 8.0 U2, 8.0 U3 | `vmware-rest-8.0` |
+| vCenter 9.0, 9.1, 9.1.1 | `vmware-rest-9.0` |
+
+Every VI-JSON call is in the pinned 8.0 U1, U2, U3 and 9.0 `vi-json.yaml`, so
+no version stops early.
+
+- **PCI rows.** `pci_devices` is a flat list, one row per
+  `VirtualPCIPassthrough`: `device_key`, `label`, `kind` (`directpath` or
+  `dynamic`), `pci_id`, `vendor_id`, `device_id`, `device_name`,
+  `custom_label`. vCenter sends some PCI ids as signed 16-bit numbers; the rows
+  show them unsigned.
+- **PCI add.** The VM must be powered off (`refused` otherwise, nothing sent).
+  The add asks the VM's environment browser which devices its host offers
+  (`ConfigTarget.pciPassthrough` and `.dynamicPassthrough`). A device the host
+  does not offer gives `invalid_request` with the devices it does offer. The
+  DirectPath I/O backing copies `id`, `systemId`, `vendorId` and `deviceName`
+  from the host device and sends `deviceId` as hex text, like the vendor
+  samples. A VM that already has the same `pci_id` gets `unchanged`. After the
+  task it reads the devices again and returns the new one.
+- **PCI remove.** Sends the device as it was read. A key the VM does not have
+  gives `unchanged`. `removed` only when a new read no longer shows it.
+- **Screenshot.** The VM must be powered on. The task result is the datastore
+  path of the PNG (`[datastore] folder/file.png`); vCenter keeps the file in
+  the VM's folder. vCenter's datastore file access takes a vim SOAP session
+  cookie, not the REST token. The connector keeps one such session per target
+  (`_ensure_file_access_session`, the same login the vSAN and storage-policy
+  calls use) and every file read reuses it, so repeated screenshots do not
+  each open a vCenter session. An HTTP 401 on the read means the session
+  expired: the connector drops it, logs in again and reads once more.
+  `invalidate_session` drops it too. The `dcPath` is the datacenter's folder
+  path. The read is streamed
+  with a byte cap (`max_bytes`, default 2 MiB, at most 8 MiB): a larger file
+  is refused, not cut. A file with a `Content-Encoding` is refused too. The
+  PNG comes back as base64 rows (`content_lines`), so a long image becomes a
+  result handle.
+- **Key send.** The keys are names from an `enum`; a value that is not on the
+  list gives `invalid_request` before any vendor call. There are no letters or
+  digits, so the call cannot type a command. Each key is one
+  `UsbScanCodeSpecKeyEvent` with `usbHidCode = (HID usage id << 16) | 7`, as
+  govc sends it; Ctrl+Alt+Del sets the `leftControl` and `leftAlt` modifiers.
+  Not safe to run twice: each call presses the keys again.
+- **Approval.** All four have `requires_approval=True`. A person's call waits
+  until a second person approves. An agent's `caution` screenshot waits for
+  approval; an agent's `dangerous` call is refused without a grant, and with a
+  grant it waits for approval. The approval previews show the VM, its power
+  state and the device or keys.
+- **Not here:** console tickets for a browser, vGPU devices, and answering a
+  VM question.
+
+Code: `composites/_vm_pci_device.py` and `composites/_vm_pci_backing.py` (PCI),
+`composites/_vm_console.py` (screenshot and keys), schemas and AI guidance in
+`composites/_vm_console_pci_schemas.py`. Tests:
+`test_connectors_vmware_rest_composites_vm_pci_console.py` and
+`test_connectors_vmware_rest_vm_pci_console_reconcile.py` (checks the calls and
+the data objects against the pinned VI-JSON files; skips without the spec
+shelf).
 
 ### AI guidance of the host and cluster operations
 
@@ -5724,6 +5799,88 @@ no live vCenter) and
 `tests/test_connectors_vmware_rest_datacenter_list_reconcile.py` (the paths,
 the filter and the summary fields against the pinned vCenter 8.0 U3 and 9.0
 `vcenter.yaml`).
+
+### Host certificates and TPM attestation
+
+An agent or an operator can read a host certificate, renew it, make a
+certificate signing request (CSR), install a CA-signed certificate, and read
+the TPM attestation of hosts. Every change waits for a second person to
+approve it. All five operations are written by hand and need no spec ingest.
+They share one group, `vmware-host-certificates`, on both catalogs
+(`vmware-rest-8.0` and `vmware-rest-9.0`). All five need a vCenter target; a
+single ESXi host target answers `needs_vcenter` and nothing is sent.
+
+| Operation | What it does | What it returns | Risk | Versions |
+|---|---|---|---|---|
+| `vmware.host.certificate.show` | Reads `HostCertificateManager.certificateInfo` of one host. | `status` (`ok`, `not_found`, `needs_vcenter`, `unreadable`), `certificate` (`kind`, `subject`, `issuer`, `valid_from`, `valid_to`, `days_left`, `vcenter_status`), `read_note` | `safe` | 8.0, 9.x |
+| `vmware.host.tpm.attestation` | For the hosts of a cluster, or one host: `capability.tpmSupported`, `tpmVersion`, `txtEnabled` and `summary.tpmAttestation`. With `include_report`, also `HostSystem.QueryTpmAttestationReport` per connected host. | `hosts`: one flat row per host (`tpm_supported`, `tpm_version`, `attestation_status`, `attestation_time`, `attestation_message`, `report_log_reliable`, `report_pcr_count`, `report_event_count`, `read_note`) | `safe` | 8.0, 9.x |
+| `vmware.composite.host.certificate.renew` | Renews the host certificate from the vCenter certificate authority (VMCA): `CertificateManager.CertMgrRefreshCertificates_Task` on vCenter's certificate manager (from `ServiceContent`). The task is polled (600 s). | `status` (`renewed`, `not_verified`, `timeout`, `not_found`, `not_connected`, `needs_vcenter`), `certificate_before`, `certificate_after`, `task` | `dangerous`, waits for approval | 8.0, 9.x |
+| `vmware.composite.host.certificate.csr` | The host makes a new key and a CSR: `HostCertificateManager.GenerateCertificateSigningRequest`. The key stays on the host. | `status` (`generated`, ...), `csr_pem`, `common_name`, the certificate still in use | `caution`, waits for approval | 8.0, 9.x |
+| `vmware.composite.host.certificate.install` | Adds the CA chain to the host's trusted CAs (`ListCACertificates`, `ListCACertificateRevocationLists`, then `ReplaceCACertificatesAndCRLs` with the old list plus the new CAs), then `InstallServerCertificate` and `NotifyAffectedServices`. | `status` (`installed`, `not_verified`, `invalid_certificate`, ...), `certificate_wanted`, `ca_certificates_added`, `services_notified`, `certificate_before`, `certificate_after` | `dangerous`, waits for approval | 8.0, 9.x (on 8.0 U1 and U2 without `NotifyAffectedServices`) |
+
+Code: the shared reads and the group text in `host_certificate.py`; the two
+reads in `typed_ops_host_certificate.py`; the renew, the CSR and the approval
+previews in `composites/_host_certificate.py`; the install in
+`composites/_host_certificate_install.py`; the schemas and AI guidance in
+`composites/_host_certificate_schemas.py`; the registry rows (`COMPOSITES`,
+collected by `_register.py`), each with the vendor calls it may make, in
+`composites/_host_certificate_ops.py`.
+
+- **How it calls vCenter.** Every call is a VIM method or a property read,
+  sent as VI-JSON (`/sdk/vim25/<release>/...`). The changes go through the
+  governed write seam `_write_vmomi_sub_op`; the reads (`RetrievePropertiesEx`,
+  `RetrieveServiceContent`, `ListCACertificates`,
+  `ListCACertificateRevocationLists`, `QueryTpmAttestationReport`) do not.
+- **Before and after.** Each change reads the host first. A host that is not
+  connected answers `not_connected` and nothing is sent. Each change reads the
+  certificate before and after, and returns both. The renew answers `renewed`
+  only when the dates or the issuer changed, else `not_verified`. The install
+  compares the start and end dates the host reads back with the certificate
+  it sent: `installed`, or `not_verified`. The dates alone do not prove that
+  the host has this exact certificate (`certificateInfo` has no fingerprint),
+  so the install always sends: a certificate the host already shows the dates
+  of is installed again, and its CA chain is still added.
+- **Vendor faults.** A task fault or a refused method fails the call with the
+  vendor's fault type and text (for example `HostConfigFault` when the
+  certificate does not match the key of the last CSR). A poll timeout of the
+  renew answers `timeout` with the task id and an `error` issue.
+- **No private key.** The CSR keeps the key on the host, and the install
+  sends only the signed certificate and the public CA certificates. The input
+  schema of the install refuses any text with `PRIVATE KEY`, so such a call is
+  `invalid_params` before it waits for approval, and no approval request
+  stores it. The install also checks that each input is a PEM certificate
+  (`invalid_certificate`, nothing sent). `ProvisionServerPrivateKey` (an own
+  key from outside the host) is not offered.
+- **CA chain.** `ReplaceCACertificatesAndCRLs` replaces the whole list, so
+  the install reads the CA certificates and CRLs the host has and sends them
+  again with the new CAs. A CA the host already has is not added twice;
+  nothing is removed.
+- **Versions.** vCenter 8.0 U1 to U3 and 9.0 serve every method, except
+  `NotifyAffectedServices`, which is in the API from 8.0 U3 on. On vCenter
+  8.0 U1 and U2 the install checks the vCenter version (`_version_gate.py`),
+  installs the certificate without that call, and answers
+  `services_notified: false` with a note to restart the host's management
+  agents (hostd and vpxa) or reboot the host. The approval preview shows the
+  same note as `version_problem`. A notify that fails after the install is a
+  note too, not an error, because the certificate is already installed.
+- **Approval previews.** The three changes show the host, its connection
+  state, the certificate now and what happens next; the install also shows
+  the certificate it sends (`certificate_wanted`). A failed read is listed
+  under `unavailable` and never blocks the request.
+- **Group text.** The text of `vmware-host-certificates` names the two reads
+  and the three changes, and claims no safety level for the group.
+
+Tests: `tests/test_connectors_vmware_rest_host_certificate.py` (the handlers
+against a vim fake), `tests/test_connectors_vmware_rest_host_certificate_http.py`
+(the real connector against `respx` on the 8.0.3 and 9.0 paths),
+`tests/test_connectors_vmware_rest_host_certificate_approval.py` (the
+dispatcher: levels on both catalogs, each change waits for approval, a private
+key is refused before it waits) and
+`tests/test_connectors_vmware_rest_host_certificate_reconcile.py` (the vendor
+calls, request fields and read properties against the pinned `vi-json.yaml`
+of 9.0 and the three 8.0 files). `NotifyAffectedServices` is listed in
+`_NOT_IN_8_0_VI_JSON` of `test_connectors_vmware_rest_8_0_spec_reconcile.py`
+for 8.0 U1 and U2.
 
 ### Network list (`vmware.network.list`)
 

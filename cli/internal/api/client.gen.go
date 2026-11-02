@@ -6311,7 +6311,7 @@ type IngestRequest struct {
 	SpecInfoVersionsCompatible *[]string     `json:"spec_info_versions_compatible"`
 	Specs                      *[]SpecSource `json:"specs,omitempty"`
 
-	// TenantId Write scope for the ingested connector rows. Omit or pass null to ingest under the built-in / global scope (tenant_id IS NULL) — the same omit-equals-global semantics as the MCP tool meho_connector_ingest (tenant_admin only). Pass your own tenant UUID for a tenant-scoped ingest; another tenant's UUID is rejected with 403 unless the caller holds platform_admin, which may ingest into another tenant when it names that tenant here (the write is audited).
+	// TenantId Write scope for the ingested connector rows. Omit or pass null to ingest under the built-in / global scope (tenant_id IS NULL) — the same omit-equals-global semantics as the MCP tool meho_connector_ingest (platform_admin only: the rows are shared by every tenant). Pass your own tenant UUID for a tenant-scoped ingest; another tenant's UUID is rejected with 403 unless the caller holds platform_admin, which may ingest into another tenant when it names that tenant here (the write is audited).
 	TenantId *openapi_types.UUID `json:"tenant_id"`
 	Version  *string             `json:"version"`
 }

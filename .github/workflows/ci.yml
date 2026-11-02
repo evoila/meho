@@ -484,7 +484,17 @@ jobs:
     # The heavy runner pool (#761); its sizes live outside this repo. Only the
     # pytest sweep is CPU/memory-bound enough to want the extra cores;
     # ruff/mypy run once in python-lint on a GitHub-hosted runner.
-    runs-on: meho-runners-ci-heavy
+    # Two heavy runner sets share the same machines. Only merge-queue runs
+    # use `meho-runners-ci-heavy-queue` (6 runners: one per shard of one
+    # merge-queue run, so its size changes with the shard count). Every
+    # other event (pull requests, pushes to `main`, the nightly run) uses
+    # `meho-runners-ci-heavy`.
+    # Before the split, merge-queue shards waited behind pull request shards
+    # that were queued earlier, because GitHub gives jobs out in queue order.
+    # Pushes to `main` stay off the queue set: otherwise every merged commit
+    # would run its shards there twice (queue run, then push run), and the
+    # queue would merge only about half as fast.
+    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci-heavy-queue' || 'meho-runners-ci-heavy' }}
     strategy:
       # 6 shards (#3251 started with 3; #4655 raised it to 4 after the
       # slowest shard reached the 660 s budget; #5433 raised it to 5 when all
@@ -1598,6 +1608,8 @@ jobs:
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
        contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate'))
+    # Always `meho-runners-ci-heavy`, not the merge-queue set: this job never
+    # runs in the merge queue.
     runs-on: meho-runners-ci-heavy
     strategy:
       # 8 stride shards (#3172 started with 3) — see the SHARDED paragraph in

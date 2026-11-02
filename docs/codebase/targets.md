@@ -417,6 +417,13 @@ params={"target_id": "<target-uuid>"})`. It is the opposite of
   the same rule as the REST route. Any other role gets an error and the
   target stays. A call that waits for approval runs, once approved, under
   the login of the person who approved it, so that person's role counts.
+  One exception (#5480): in sandbox mode a service principal whose call
+  runs at once needs no `tenant_admin`. For this op that happens only under
+  a live delete grant. A service login has the `operator` role on purpose,
+  so without the exception the delete grant could never help. The handler
+  checks `sandbox_mode_active()`, the principal kind and the gate's verdict
+  (`policy_decision_var` is `auto-execute`). A call that ran after approval
+  keeps the role check.
 - **Approval.** `dangerous` with `requires_approval=True`; the name ends in
   `.remove`, so the delete rules apply. A second person must approve every
   call. See [`mcp.md`](mcp.md#admin-registry-writes-route-through-the-dispatcher).

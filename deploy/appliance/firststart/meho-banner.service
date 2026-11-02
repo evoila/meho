@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Writes the appliance's console banner (/etc/issue) at every boot, after
+# first start and before the console shows the login prompt (banner.sh).
+
+[Unit]
+Description=MEHO appliance console banner
+After=meho-firststart.service
+Before=getty-pre.target
+Wants=getty-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/meho/appliance/firststart/banner.sh
+
+[Install]
+WantedBy=multi-user.target

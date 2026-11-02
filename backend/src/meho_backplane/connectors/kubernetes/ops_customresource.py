@@ -88,6 +88,7 @@ __all__ = [
     "K8S_CR_LIST_LLM_INSTRUCTIONS",
     "K8S_CR_LIST_PARAMETER_SCHEMA",
     "K8S_CR_LIST_RESPONSE_SCHEMA",
+    "OPS",
     "crd_row",
     "crd_version_row",
     "custom_resource_row",
@@ -586,3 +587,6 @@ CUSTOM_RESOURCE_OPS: tuple[KubernetesOp, ...] = (
         llm_instructions=K8S_CR_INFO_LLM_INSTRUCTIONS,
     ),
 )
+
+#: Collected by :func:`~meho_backplane.connectors.kubernetes.ops.collect_ops`.
+OPS: tuple[KubernetesOp, ...] = CUSTOM_RESOURCE_OPS

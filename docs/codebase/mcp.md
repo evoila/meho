@@ -1288,7 +1288,8 @@ its name ends in `.remove`, so the rules for deletes apply: a person's call
 waits until a second person approves it, an agent login is refused, a
 service principal waits for a person and cannot get a standing grant for
 it, and only in sandbox mode can a delete grant made in the web console let
-a service principal run it at once. It is reached through
+a service principal run it at once. That call needs no `tenant_admin`: a
+service login has the `operator` role, and the delete grant is enough (#5480). It is reached through
 `call_operation` only; there is no `meho_*` tool for it. See
 [`targets.md`](targets.md#removing-a-target-targetsremove).
 

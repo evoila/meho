@@ -1269,6 +1269,79 @@ jobs:
           uv run pytest -n 3 --dist loadscope \
             --timeout=180 --timeout-method=signal "${FILES[@]}"
 
+  connector-package-template:
+    name: Connector package template
+    # #5564. Tests the made-up sample connector package in
+    # templates/connector-package/ against this repository's own code, so a
+    # change to the connector kit (backend/connector-kit/) that breaks the
+    # sample fails in the same pull request. No pinned MEHO tag: nothing to
+    # move after a release. The steps are the ones the template's README
+    # tells a connector author to run against the MEHO release they build for.
+    #
+    # Non-required check. Skipped for a docs-only pull request, like the other
+    # Python jobs. It does not skip when backend_python is false: a pull
+    # request that changes only the template must still test it.
+    #
+    # GitHub-hosted runner: it needs public tools only (uv, the PyPI index for
+    # the wheel build backend).
+    needs: changes
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       needs.changes.outputs.docs_only != 'true')
+    runs-on: ubuntu-latest
+    # About 3 minutes; the cap is a hang backstop.
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        # Same pinned uv as the other Python jobs (see python-lint).
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        with:
+          version: "0.13.0"
+          enable-cache: true
+
+      - name: Sync Python environment (locked)
+        run: uv sync --locked --all-groups
+
+      - name: Copy the sample connector and its tests into the checkout
+        # Only this job's checkout changes. Nothing is committed or built
+        # into an image.
+        run: |
+          set -euo pipefail
+          cp -r ../templates/connector-package/meho_backplane/connectors/example_widget \
+            src/meho_backplane/connectors/
+          cp -r ../templates/connector-package/tests tests/example_widget
+
+      - name: Check that MEHO lists the sample's connector
+        run: |
+          uv run python - <<'PY'
+          from meho_backplane.connectors.registry import _eager_import_connectors, list_connector_impls
+
+          _eager_import_connectors()
+          ids = sorted(f"{impl_id}-{version}" for _, version, impl_id in list_connector_impls() if impl_id)
+          assert "example-widget-1.x" in ids, f"example-widget-1.x is not in the connector list: {ids}"
+          print("connector list has example-widget-1.x")
+          PY
+
+      - name: Run the sample's tests and the operation contract check
+        run: >-
+          uv run pytest -o tmp_path_retention_policy=failed
+          --timeout=300 --timeout-method=signal
+          tests/example_widget tests/test_operation_contracts.py
+
+      - name: Build the sample's wheel and run the overlay wheel checks
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/connector-wheels"
+          uv build --wheel --out-dir "$out" ../templates/connector-package
+          python3 -I -S ../deploy/connector-overlay/overlay_check.py check-wheels --connectors "$out"
+
   python-unit-lane:
     name: Python (ruff + mypy + pytest)
     # FAN-IN carrying the branch-protection required context (#3251). This job

@@ -118,6 +118,16 @@ works the same way as a built-in typed connector (one with hand-written
 operations). The phpIPAM connector is a small, complete example:
 `backend/src/meho_backplane/connectors/phpipam/`.
 
+For a working start, copy the folder
+[`templates/connector-package/`](../../templates/connector-package/README.md).
+It holds a made-up connector package that imports MEHO only through the
+connector kit, with its tests, and its README says what to rename. The CI
+job "Connector package template" (`.github/workflows/ci.yml`) copies the
+sample into the checkout, runs its tests and the operation contract check,
+and runs the overlay wheel checks on its wheel. It runs on every pull
+request that is not docs-only, so a kit change that breaks the sample fails
+in the same pull request.
+
 The folder's `__init__.py` does three things when MEHO imports it:
 
 1. **Register the connector class** with `register_connector_v2` from the

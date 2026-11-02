@@ -7,9 +7,13 @@
 # (and the legacy `meho-runners` form during the migration window — see
 # #715 cutover and claude-rdc-hetzner-dc#611 retirement of the rke2-meho
 # pool). Drop `meho-runners` here when #611 retires that pool.
+# The two heavy sets: `meho-runners-ci-heavy-queue` (merge-queue runs only)
+# and `meho-runners-ci-heavy` (every other event).
 #
 # Reference: https://github.com/rhysd/actionlint/blob/main/docs/config.md
 self-hosted-runner:
   labels:
     - meho-runners
     - meho-runners-ci
+    - meho-runners-ci-heavy
+    - meho-runners-ci-heavy-queue

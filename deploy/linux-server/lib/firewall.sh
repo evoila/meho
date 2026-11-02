@@ -215,8 +215,10 @@ check_join_firewall() {
 # from the network. The chains input, forward and output carry the rules of
 # the MEHO appliance for traffic to the machine, through it and from it
 # (form-2 design, section 2, "One file for both forms"; ADR 0009 decision 1).
-# On a form-2 machine their policy is accept and they have no drop rule, so
-# they let every packet pass. The appliance build sets the three policies to
+# On a form-2 machine their policy is accept. Their only drop rules are the
+# loopback rules of CIS Ubuntu 24.04 rule 4.3.6 in the chain input, for
+# packets that the chain prerouting drops first, so they let every packet
+# pass that reaches them. The appliance build sets the three policies to
 # drop: the CIS Ubuntu 24.04 rules 4.3.5 to 4.3.8 look for a base chain with
 # policy drop on each of the hooks input, forward and output.
 render_firewall_rules() {
@@ -247,8 +249,9 @@ render_firewall_rules() {
 # The chain prerouting does this filtering. The chains input, forward and
 # output hold the rules of the MEHO appliance, for traffic to this machine,
 # through it and from it. The appliance sets their policy to drop. Here
-# their policy is accept and they have no drop rule, so every packet passes
-# them.
+# their policy is accept. Their only drop rules are for a loopback address
+# from a network card, which the chain prerouting drops first, so every
+# packet that reaches them passes.
 #
 # The file changes only the table inet meho. It never runs "flush ruleset",
 # because RKE2's network layer (Canal) and kube-proxy keep their own rules
@@ -278,12 +281,19 @@ EOF
     printf '}\n'
 }
 
-# render_interface_rules <iifname or oifname>: accept the interfaces of the
-# machine's own Kubernetes (FIREWALL_CLUSTER_INTERFACES).
+# render_interface_rules <iif or oif>: accept the interfaces of the machine's
+# own Kubernetes (FIREWALL_CLUSTER_INTERFACES). lo matches by its index (iif,
+# oif): it always exists, and CIS rule 4.3.6 looks for 'iif "lo" accept'. The
+# others match by name (iifname, oifname): Calico and flannel create them
+# later, and their names need a wildcard (nft(8), META EXPRESSIONS).
 render_interface_rules() {
     local match=$1 interface
     for interface in "${FIREWALL_CLUSTER_INTERFACES[@]}"; do
-        printf '        %s "%s" accept\n' "$match" "$interface"
+        if [[ $interface == lo ]]; then
+            printf '        %s "%s" accept\n' "$match" "$interface"
+        else
+            printf '        %sname "%s" accept\n' "$match" "$interface"
+        fi
     done
 }
 
@@ -313,6 +323,10 @@ EOF
 # mangle -150, dstnat -100. RKE2's port forwarding to Traefik is a
 # destination NAT at dstnat, so the chain at mangle sees the packet first,
 # with its original port, and connection tracking has already run.
+# kube-proxy (iptables mode) sets net.ipv4.conf.all.route_localnet to 1 for
+# NodePorts on 127.0.0.1. With it, the kernel no longer treats a loopback
+# source address from a network card as invalid (ip-sysctl, route_localnet),
+# so the chain drops it.
 render_prerouting_chain() {
     local cluster_cidr=$1 service_cidr=$2
     cat <<EOF
@@ -326,14 +340,16 @@ render_prerouting_chain() {
 
         # The machine itself and its pods.
 EOF
-    render_interface_rules iifname
+    render_interface_rules iif
     cat <<EOF
 
         # From here on, the packet came in on a network card.
         ct state established,related accept
         ct state invalid drop
 
-        # A pod or service address never comes from a network card.
+        # A loopback, pod or service address never comes from a network card.
+        ip saddr 127.0.0.0/8 drop
+        ip6 saddr ::1 drop
         ip saddr { ${cluster_cidr}, ${service_cidr} } drop
 
         # "fib daddr type local": the packet is for this machine, not passed on.
@@ -352,7 +368,11 @@ EOF
 # "fib daddr type local": the input hook sees only packets for this machine.
 # Programs on the machine (the kubelet, the API server, etcd) reach each
 # other over lo, also when they use the machine's own address. Pods reach
-# them over their cali interfaces.
+# them over their cali interfaces. Its only drop rules are the loopback
+# rules of CIS Ubuntu 24.04 rule 4.3.6. The check of that rule
+# (ComplianceAsCode, set_nftables_loopback_traffic) reads "nft list ruleset"
+# from the line "hook input" to the first line with a closing brace, so the
+# rules come before the first set of the chain.
 render_input_chain() {
     cat <<EOF
 
@@ -366,8 +386,13 @@ render_input_chain() {
         # The machine itself and its pods. Programs on this machine reach
         # each other over lo, also through the machine's own address.
 EOF
-    render_interface_rules iifname
+    render_interface_rules iif
     cat <<EOF
+
+        # From here on, the packet came in on a network card. A loopback
+        # address never comes from there (CIS Ubuntu 24.04 rule 4.3.6).
+        ip saddr 127.0.0.0/8 drop
+        ip6 saddr ::1 drop
 
         ct state established,related accept
 
@@ -415,6 +440,16 @@ EOF
 # reports (MLD) by default (force_mld_version 0, ip-sysctl), so both report
 # types pass: without them, a switch that follows MLD may stop passing the
 # IPv6 neighbour discovery to this machine.
+#
+# "fib daddr type local" accepts traffic to this machine's own addresses
+# after kube-proxy's destination NAT. A connection to a service whose
+# endpoint is this machine (the Kubernetes API service 10.43.0.1:443 goes to
+# <host>:6443) gets its new destination in the NAT of the output hook
+# (priority dstnat). This chain (priority filter) then still sees the network
+# card of the first route as oif, not lo, so 'oif "lo" accept' does not match
+# it. With the policy drop and without this rule, Calico's CNI plugin cannot
+# reach the API service and no new pod starts. nft(8) allows the "type"
+# result of fib in the output hook.
 render_output_chain() {
     local cluster_cidr=$1 service_cidr=$2
     cat <<EOF
@@ -428,8 +463,13 @@ render_output_chain() {
         # The machine itself and its pods, for example the health checks of
         # the kubelet.
 EOF
-    render_interface_rules oifname
+    render_interface_rules oif
     cat <<EOF
+
+        # This machine to its own addresses, also after the port forwarding
+        # of kube-proxy: for example the Kubernetes API service, whose
+        # endpoint is this machine.
+        fib daddr type local accept
 
         ct state established,related accept
         ip daddr { ${cluster_cidr}, ${service_cidr} } accept

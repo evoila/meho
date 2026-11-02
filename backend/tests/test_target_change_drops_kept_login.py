@@ -42,7 +42,7 @@ from meho_backplane.api.v1.targets import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
-from meho_backplane.connectors.adapters.ssh import SshConnector, SshTargetChangedError
+from meho_backplane.connectors.adapters.ssh import SshConnector, SshTargetChangedError, _pool_key
 from meho_backplane.connectors.github import GitHubPATCredentials, GitHubRestConnector
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector, _CachedToken
 from meho_backplane.connectors.proxmox.connector import ProxmoxConnector
@@ -231,19 +231,22 @@ class _Ssh(SshConnector):
 
 
 @pytest.mark.asyncio
-async def test_ssh_invalidate_credentials_closes_and_drops_the_pooled_connection() -> None:
+async def test_ssh_invalidate_credentials_closes_and_drops_every_pooled_connection() -> None:
     changed, other = _Target(), _Target(name="other")
     conn = _Ssh()
     old, kept = _FakeSshConnection(), _FakeSshConnection()
-    conn._connections[target_cache_key(changed)] = (old, 0.0)  # type: ignore[assignment]
-    conn._connections[target_cache_key(other)] = (kept, 0.0)  # type: ignore[assignment]
+    old_other_caller = _FakeSshConnection()
+    conn._connections[_pool_key(changed, None)] = (old, 0.0)  # type: ignore[assignment]
+    conn._connections[_pool_key(changed, _operator())] = (old_other_caller, 0.0)  # type: ignore[assignment]
+    conn._connections[_pool_key(other, None)] = (kept, 0.0)  # type: ignore[assignment]
 
     await conn.invalidate_credentials(changed)  # type: ignore[arg-type]
 
     assert old.closed
-    assert target_cache_key(changed) not in conn._connections
+    assert old_other_caller.closed
+    assert not any(key[:2] == target_cache_key(changed) for key in conn._connections)
     assert not kept.closed
-    assert target_cache_key(other) in conn._connections
+    assert _pool_key(other, None) in conn._connections
 
 
 @pytest.mark.asyncio
@@ -278,7 +281,7 @@ async def test_ssh_login_that_finishes_after_the_drop_is_not_kept() -> None:
 
     with patch.object(conn, "_auth_config", _auth), patch("asyncssh.connect", _fast_connect):
         assert await conn._connect(target) is fresh  # type: ignore[arg-type]
-    assert conn._connections[target_cache_key(target)][0] is fresh
+    assert conn._connections[_pool_key(target, None)][0] is fresh
 
 
 @pytest.mark.asyncio
@@ -326,7 +329,7 @@ async def test_ssh_call_that_waited_for_the_lock_during_the_drop_is_not_kept() -
 
     with patch.object(conn, "_auth_config", _auth), patch("asyncssh.connect", _fast_connect):
         assert await conn._connect(target) is fresh  # type: ignore[arg-type]
-    assert conn._connections[target_cache_key(target)][0] is fresh
+    assert conn._connections[_pool_key(target, None)][0] is fresh
 
 
 # ---------------------------------------------------------------------------

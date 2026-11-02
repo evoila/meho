@@ -123,16 +123,18 @@ _VCENTER_REGISTER = VcfaTypedOp(
             "it runs the next step (add, then refresh) and skips the steps that are done."
         ),
         preconditions=(
-            "Store the vCenter password in Vault and pass its path. Run preview_operation "
-            "first: it shows the certificate fingerprint. Check it against the certificate to "
-            "trust (the vCenter's own, or the issuer at the top when the chain has more than "
-            "one) before you approve. " + JOB_RULES
+            "Store the vCenter password in Vault and pass its path. The call waits for a "
+            "person's approval; the approval request shows the certificate fingerprint "
+            "(preview_operation does not, because the call writes a credential). The approver "
+            "checks it against the certificate to trust (the vCenter's own, or the issuer at "
+            "the top when the chain has more than one). " + JOB_RULES
         ),
         output_shape=(
             "{status, object: {kind, name, url, id, state}, job: {id, href, status_read}, "
             "certificate: {ssl_result, fingerprint_sha256, certificate_count, needs_trust}, "
-            "steps: [{step, result, detail, job_id, http_status, error}], checked_at, "
-            "guidance}. 'accepted' means the job started, not that it is done."
+            "steps: [{step, part, result, detail, job_id, http_status, error}], checked_at, "
+            "guidance}. 'accepted' means the job started, not that it is done. A step with "
+            "result 'uncertain' got no answer: read the vCenter before you call again."
         ),
         next_step=(
             "Read vcfa.provider.infra.list with job_id until the vCenter state is CONNECTED, "
@@ -346,7 +348,13 @@ _ORG_QUOTA_SET = VcfaTypedOp(
         "properties": {
             "org": {**NAME, "description": "The organization name."},
             "region": {**NAME, "description": "The region name or id."},
-            "name": {**NAME, "description": "The quota name (one quota per org and region)."},
+            "name": {
+                **NAME,
+                "description": (
+                    "The quota name (one quota per org and region; a quota of the org with "
+                    "this name in another region is refused)."
+                ),
+            },
             "description": {
                 "type": "string",
                 "maxLength": 512,
@@ -451,9 +459,11 @@ _ORG_QUOTA_SET = VcfaTypedOp(
         ),
         output_shape=(
             "{status, object: {kind, name, id, org, region}, job: {id, status_read}, steps: "
-            "[quota, storage_policies, vm_classes], warnings, checked_at, guidance}. "
+            "[quota, storage_policies (one row per storage policy request, told apart by "
+            "part), vm_classes], warnings, checked_at, guidance}. Each row has its own job_id. "
             "'failed_part_way' lists what ran, what failed and what did not run; nothing is "
-            "undone."
+            "undone. A row with result 'uncertain' got no answer: read the quota before you "
+            "call again."
         ),
         next_step=(
             "Read vcfa.provider.org_quota.list with job_id until the quota status is READY."

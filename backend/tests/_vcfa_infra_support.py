@@ -126,12 +126,18 @@ def vm_class() -> dict[str, Any]:
     return {"id": VMC_ID, "name": "best-effort-small", "region": REGION_REF, "cpuCount": 2}
 
 
-def vdc(*, status: str = "READY", cpu_limit: int = 10000) -> dict[str, Any]:
+def vdc(
+    *,
+    status: str = "READY",
+    cpu_limit: int = 10000,
+    vdc_id: str = VDC_ID,
+    region: dict[str, Any] = REGION_REF,
+) -> dict[str, Any]:
     return {
-        "id": VDC_ID,
+        "id": vdc_id,
         "name": "quota-a",
         "org": {"name": "example-org", "id": "urn:vcloud:org:11111111-2222-3333-4444-555555555555"},
-        "region": REGION_REF,
+        "region": region,
         "status": status,
         "supervisors": [{"name": "sup-example", "id": SUP_ID}],
         "zoneResourceAllocation": [

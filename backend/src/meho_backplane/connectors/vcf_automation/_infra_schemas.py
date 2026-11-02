@@ -125,13 +125,20 @@ K8S_NAME = {
 }
 
 STEP_ROWS = list_of(
-    "Every step of the change in order, with what happened to it.",
+    "Every step of the change in order, with what happened to it. A step that sends "
+    "several requests (the storage limits of a quota) has one row per request.",
     {
         "step": field("string", "The step name."),
+        "part": field(
+            ["string", "null"],
+            "Which request of the step this row is (the storage policy names); null for a "
+            "step with one request.",
+        ),
         "result": field(
             "string",
-            "done, started (a vendor job), skipped, failed or not_run.",
-            enum=["done", "started", "skipped", "failed", "not_run"],
+            "done, started (a vendor job), skipped, failed, uncertain (no answer: the change "
+            "may have happened, read the object first) or not_run.",
+            enum=["done", "started", "skipped", "failed", "uncertain", "not_run"],
         ),
         "detail": field(["string", "null"], "A short note on the result."),
         "job_id": field(["string", "null"], "The vendor job id of a started step."),

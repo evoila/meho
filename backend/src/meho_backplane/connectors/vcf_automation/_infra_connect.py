@@ -36,8 +36,10 @@ import httpx
 from meho_backplane.connectors.vcf_automation._infra_common import (
     Call,
     StepLog,
+    is_unreachable,
     job_from_response,
     now_iso,
+    part_way_guidance,
     uuid_of,
     vendor_error_text,
 )
@@ -98,21 +100,30 @@ async def run_step(
     action: Callable[[], Awaitable[httpx.Response]],
     *,
     hide: tuple[str, ...] = (),
+    part: str | None = None,
 ) -> httpx.Response:
-    """Run one vendor call of *step*.
+    """Run one vendor call of *step* (one *part* of it, when the step sends several).
 
     When it fails and no step changed anything yet, the error goes to the
     dispatcher as it is (nothing to report part-way). When an earlier step
-    already ran, the step is logged as failed with the vendor's text (each
-    *hide* value removed) and :class:`StepFailedError` stops the change.
+    already ran, the record of the step is kept and
+    :class:`StepFailedError` stops the change: a vendor error (a 4xx or 5xx
+    answer, a login that failed) marks the step ``failed`` with the vendor's
+    text (each *hide* value removed); no answer at all (no connection, a
+    time-out, a 502, 503 or 504) marks it ``uncertain``, because the system
+    may have made the change.
     """
     try:
         return await action()
-    except (httpx.HTTPStatusError, RuntimeError) as exc:
+    except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError) as exc:
         if not log.any_ran():
             raise
         status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
-        log.fail(step, vendor_error_text(exc, hide=hide), status)
+        text = vendor_error_text(exc, hide=hide)
+        if is_unreachable(exc):
+            log.uncertain(step, text, status, part=part)
+        else:
+            log.fail(step, text, status, part=part)
         raise StepFailedError(step) from exc
 
 
@@ -467,10 +478,10 @@ async def provider_vcenter_register(
                 certificate=_public_cert(cert),
                 guidance=(
                     "VCF Automation does not trust the vCenter certificate, and MEHO trusts a "
-                    "certificate only after a person approved its fingerprint. Run "
-                    "preview_operation for this call, compare the fingerprint with the "
-                    "certificate to trust (the vCenter's own, or the issuer at the top when "
-                    "the chain has more than one), and ask for approval. Nothing was written."
+                    "certificate only after a person approved its fingerprint. Ask for "
+                    "approval: the approval request shows the fingerprint. The approver "
+                    "compares it with the certificate to trust (the vCenter's own, or the "
+                    "issuer at the top when the chain has more than one). Nothing was written."
                 ),
             )
     password = None
@@ -490,11 +501,7 @@ async def provider_vcenter_register(
             log,
             obj=obj,
             certificate=_public_cert(cert),
-            guidance=(
-                "A step failed after an earlier step ran. The steps that ran are not undone. "
-                "Read vcfa.provider.infra.list, fix the cause, then call again; done steps "
-                "are skipped."
-            ),
+            guidance=part_way_guidance(log, _STATUS_READ),
         )
     return answer(
         "accepted", log, obj=obj, job=job, certificate=_public_cert(cert), guidance=_VC_NEXT[would]

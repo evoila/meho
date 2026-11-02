@@ -13,8 +13,15 @@
   answer (no connection, a time-out, ``502`` / ``503`` / ``504``) from a
   real failure, so a status read can say ``not_reachable`` instead.
 * **Steps.** A change runs named steps. :class:`StepLog` records each one as
-  done, started (a vendor job), skipped, failed or not run, so an answer
-  that fails part-way lists what ran, what failed and what did not run.
+  done, started (a vendor job), skipped, failed, uncertain (the system did
+  not answer a write) or not run, so an answer that fails part-way lists
+  what ran, what failed and what did not run. A step that sends more than
+  one request (the storage limits of a quota) keeps one record per request,
+  told apart by ``part``.
+* **Vendor error text.** :func:`vendor_error_text` shortens the vendor's
+  text and removes each value to hide in every form the text can carry it
+  (plain, JSON-escaped, HTML-escaped, URL-encoded). When a value could still
+  be in the text after that, the text is withheld.
 * **What the approver saw.** :func:`state_hash` hashes the fields of an
   object the change depends on. The preview stores it; the approved run
   compares it with a fresh read (:func:`approved_state_problem`).
@@ -23,11 +30,14 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
+from urllib.parse import quote, unquote
 
 import httpx
 
@@ -49,6 +59,7 @@ __all__ = [
     "job_from_response",
     "match_row",
     "now_iso",
+    "part_way_guidance",
     "read_job",
     "ref",
     "state_hash",
@@ -71,6 +82,18 @@ _JOB_STATE: Final[dict[str, str]] = {
 #: Longest vendor error text kept in an answer.
 _ERROR_TEXT_MAX: Final = 500
 _TASK_URN_PREFIX: Final = "urn:vcloud:task:"
+#: A JSON string escape: ``\uXXXX`` or one of ``\" \\ \/ \b \f \n \r \t``.
+_JSON_ESCAPE: Final = re.compile(r'\\u([0-9a-fA-F]{4})|\\(["\\/bfnrt])')
+_JSON_SHORT_ESCAPES: Final[dict[str, str]] = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+}
 
 
 @dataclass(frozen=True)
@@ -129,16 +152,65 @@ def is_unreachable(exc: BaseException) -> bool:
     return cause is not None and cause is not exc and is_unreachable(cause)
 
 
+def _json_unescaped(text: str) -> str:
+    """*text* with its JSON string escapes decoded (``\\"`` to ``"``, and so on)."""
+
+    def _one(match: re.Match[str]) -> str:
+        if match.group(1):
+            return chr(int(match.group(1), 16))
+        return _JSON_SHORT_ESCAPES[match.group(2)]
+
+    return _JSON_ESCAPE.sub(_one, text)
+
+
+def _forms_of(secret: str) -> list[str]:
+    """Every form a vendor text can carry *secret* in, longest first."""
+    forms = {
+        secret,
+        json.dumps(secret)[1:-1],
+        json.dumps(secret, ensure_ascii=False)[1:-1],
+        html.escape(secret),
+        html.escape(secret, quote=False),
+        quote(secret, safe=""),
+    }
+    return sorted((form for form in forms if form), key=len, reverse=True)
+
+
+def _decoded_views(text: str) -> list[str]:
+    """*text* and its decoded forms (JSON escapes, HTML entities, URL encoding), twice over."""
+    views = [text]
+    for _ in range(2):
+        views.extend(
+            [_json_unescaped(view) for view in views]
+            + [html.unescape(view) for view in views]
+            + [unquote(view) for view in views]
+        )
+    return views
+
+
 def vendor_error_text(exc: BaseException, *, hide: tuple[str, ...] = ()) -> str:
-    """The vendor's error text of *exc*, short, with each *hide* value removed."""
+    """The vendor's error text of *exc*, short, with each *hide* value removed.
+
+    A value is removed in every form the text can carry it: as it is, JSON-
+    escaped (a quote or a backslash in the value becomes ``\\"`` or ``\\\\`` in a
+    JSON body), HTML-escaped and URL-encoded. When a value is still found in
+    a decoded view of the text after that, the text is withheld and only the
+    HTTP status stays.
+    """
     if isinstance(exc, httpx.HTTPStatusError):
+        status: int | None = exc.response.status_code
         body = exc.response.text.strip()
-        text = f"HTTP {exc.response.status_code}: {body}" if body else str(exc)
+        text = f"HTTP {status}: {body}" if body else str(exc)
     else:
+        status = None
         text = str(exc) or type(exc).__name__
-    for secret in hide:
-        if secret:
-            text = text.replace(secret, "<hidden>")
+    secrets = [secret for secret in hide if secret]
+    for secret in secrets:
+        for form in _forms_of(secret):
+            text = text.replace(form, "<hidden>")
+    if any(secret in view for secret in secrets for view in _decoded_views(text)):
+        prefix = f"HTTP {status}: " if status is not None else ""
+        return f"{prefix}the vendor's error text is withheld because it may hold the password"
     return text[:_ERROR_TEXT_MAX]
 
 
@@ -243,27 +315,87 @@ def approved_state_problem(op_id: str, current_hash: str) -> str | None:
 
 @dataclass
 class StepLog:
-    """The steps of one change, in order, with what happened to each."""
+    """The steps of one change, in order, with what happened to each.
+
+    A step that sends one request has one record. A step that sends several
+    (the storage limits of a quota, one request per policy) has one record
+    per request, each with its own ``part`` (the policy name), result and
+    job id. A record is replaced when the same step and part is marked
+    again.
+    """
 
     names: tuple[str, ...]
-    rows: dict[str, dict[str, Any]] = field(default_factory=dict)
+    rows: list[dict[str, Any]] = field(default_factory=list)
 
-    def mark(self, step: str, result: str, detail: str | None = None, **extra: Any) -> None:
-        """Record *result* (done, started, skipped, failed) for *step*."""
-        self.rows[step] = {"step": step, "result": result, "detail": detail, **extra}
+    def mark(
+        self,
+        step: str,
+        result: str,
+        detail: str | None = None,
+        *,
+        part: str | None = None,
+        **extra: Any,
+    ) -> None:
+        """Record *result* (done, started, skipped, failed, uncertain) for *step* / *part*."""
+        row = {"step": step, "part": part, "result": result, "detail": detail, **extra}
+        for index, existing in enumerate(self.rows):
+            if existing["step"] == step and existing["part"] == part:
+                self.rows[index] = row
+                return
+        self.rows.append(row)
 
-    def fail(self, step: str, error: str, http_status: int | None) -> None:
+    def fail(
+        self, step: str, error: str, http_status: int | None, *, part: str | None = None
+    ) -> None:
         """Record that *step* failed with the vendor's *error*."""
-        self.mark(step, "failed", None, error=error, http_status=http_status)
+        self.mark(step, "failed", None, part=part, error=error, http_status=http_status)
+
+    def uncertain(
+        self, step: str, error: str, http_status: int | None, *, part: str | None = None
+    ) -> None:
+        """Record that the system did not answer the request of *step*.
+
+        The change may or may not have happened; the caller must read the
+        object before it calls again.
+        """
+        self.mark(step, "uncertain", None, part=part, error=error, http_status=http_status)
 
     def any_ran(self) -> bool:
         """True when a step already changed something (done or started)."""
-        return any(row["result"] in {"done", "started"} for row in self.rows.values())
+        return any(row["result"] in {"done", "started"} for row in self.rows)
+
+    def any_uncertain(self) -> bool:
+        """True when a request got no answer, so its change may have happened."""
+        return any(row["result"] == "uncertain" for row in self.rows)
 
     def as_list(self) -> list[dict[str, Any]]:
-        """Every step in order; a step not recorded is ``not_run``."""
+        """Every record in step order; a step without a record is ``not_run``."""
         out: list[dict[str, Any]] = []
         for name in self.names:
-            row = self.rows.get(name) or {"step": name, "result": "not_run", "detail": None}
-            out.append({"error": None, "http_status": None, "job_id": None, **row})
+            rows = [row for row in self.rows if row["step"] == name] or [
+                {"step": name, "part": None, "result": "not_run", "detail": None}
+            ]
+            for row in rows:
+                out.append({"error": None, "http_status": None, "job_id": None, **row})
         return out
+
+
+def part_way_guidance(log: StepLog, status_read: str) -> str:
+    """What the caller does after a ``failed_part_way`` answer.
+
+    When a request got no answer (an ``uncertain`` record), the system may
+    have made that change, so the caller reads the object with *status_read*
+    before it calls again.
+    """
+    if log.any_uncertain():
+        return (
+            "A request got no answer after an earlier step ran, so VCF Automation may or may "
+            f"not have made that change. The steps that ran are not undone. Read {status_read} "
+            "first to see the state and the jobs, then call again with the same inputs; done "
+            "steps are skipped."
+        )
+    return (
+        "A step failed after an earlier step ran. The steps that ran are not undone. Read "
+        f"{status_read}, fix the cause, then call again with the same inputs; done steps are "
+        "skipped."
+    )

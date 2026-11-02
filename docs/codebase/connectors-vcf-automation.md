@@ -625,7 +625,9 @@ and the provider API references of 9.0, 9.1 and 9.1.1.
   issuer's, not the vCenter's own. MEHO trusts it only after approval, and only when
   its SHA-256 fingerprint equals the one in the approval preview;
   otherwise `certificate_not_trusted` or `precondition_failed`, and
-  nothing is written.
+  nothing is written. The fingerprint shows on the approval request, not
+  in `preview_operation`: the op writes a credential, so
+  `preview_operation` answers `unavailable` for it.
 - **What the approver saw.** The previews of `region.set` and
   `org_quota.set` store a hash of the object as read and what each step
   would do; the approved run reads again and answers
@@ -634,15 +636,32 @@ and the provider API references of 9.0, 9.1 and 9.1.1.
 - **Part-way failure.** When a step fails after an earlier step ran, the
   answer is `failed_part_way` with every step: done or started, the one
   that failed (HTTP status and the vendor's text), and `not_run`. Nothing
-  is undone. A failure in the first step is a normal op error.
+  is undone. When the system gave no answer to a write (no connection, a
+  time-out, a `502`/`503`/`504`), the step is `uncertain`: the change may
+  have happened, and the guidance says to read the object first and then
+  call again. A failure in the first step is a normal op error.
+- **One record per request.** The storage limits of a quota go out as one
+  request per storage policy that changes (one `PUT` per changed limit,
+  one `POST` with a `values` list for the new ones). Each request keeps
+  its own row in `steps`, told apart by `part` (the policy names), with
+  its own result and `job_id`. So two started jobs keep two ids, and a
+  failure after one success keeps the first job.
+- **Which quota.** `org_quota.set` matches a quota by organization, name
+  and region. When the organization has a quota with that name in
+  another region only, the call answers `invalid_request`, names that
+  region and writes nothing; so does a name that matches more than one
+  quota in the region.
 - **Credentials.** The vCenter and NSX passwords come from
   `password_secret_ref` (Vault, read under the caller's identity) and go
   only into the request body. `op_classes.py` declares both register ops
   `credential_write` and they carry the `credential` tag, so their bodies
   stay out of traces, the broadcast is aggregate-only and the dispatcher
   withholds the vendor's error text. In a part-way answer the password is
-  removed from the vendor's text. The reads copy named fields only, so a
-  password the vendor echoes never reaches an answer.
+  removed from the vendor's text in every form the text can carry it
+  (plain, JSON-escaped, HTML-escaped, URL-encoded); when it could still be
+  in the text, the text is withheld and only the HTTP status stays. The
+  reads copy named fields only, so a password the vendor echoes never
+  reaches an answer.
 - **Out of scope.** Deleting regions and quotas, VM Apps orgs on classic
   provider VDCs, and namespace classes.
 

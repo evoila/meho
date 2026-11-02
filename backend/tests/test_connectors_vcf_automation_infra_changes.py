@@ -13,18 +13,24 @@ switched on again after the trust; the NSX body always has a description; a
 running job is not started twice; a ``202`` with an empty body works; a
 region needs a Supervisor and a storage policy; storage requests carry the
 ``values`` wrapper; a quota without storage or VM classes warns; a step that
-fails part-way lists what ran, what failed and what did not run; the
-approved run stops when the object changed; credentials never reach the
-answer, the log or the audit row.
+fails part-way lists what ran, what failed and what did not run; a request
+that gets no answer after an earlier step is ``uncertain``; each storage
+request keeps its own record and job id; a quota is matched by organization,
+name and region; the approved run stops when the object changed; credentials
+never reach the answer, the log or the audit row, also when the vendor
+echoes them JSON-escaped.
 """
 
 from __future__ import annotations
 
+import html
 import json
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
+from urllib.parse import quote
 
+import httpx
 import pytest
 import respx
 from sqlalchemy import select
@@ -32,6 +38,7 @@ from structlog.testing import capture_logs
 
 from meho_backplane.connectors.vcf_automation import VcfAutomationConnector
 from meho_backplane.connectors.vcf_automation import _lookups as lookups_module
+from meho_backplane.connectors.vcf_automation._infra_common import vendor_error_text
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import (
@@ -135,6 +142,11 @@ _QUOTA_PARAMS: dict[str, Any] = {
     ],
 }
 _VDC_CLASSES = f"{VDCS}/{quoted(VDC_ID)}/virtualMachineClasses"
+#: A password with a quote, a backslash, a slash and a non-ASCII letter: a JSON
+#: or HTML body carries it escaped, so a plain text search misses it.
+_TRICKY_PASSWORD = 'p"a\\ss/w\u00f6rd<1>'
+_TASK2_ID = "90909090-1111-2222-3333-444444444444"
+_TASK2_LOCATION = TASK_LOCATION.replace(TASK_ID, _TASK2_ID)
 
 
 @pytest.fixture(autouse=True)
@@ -206,6 +218,76 @@ async def _preview(op_id: str, params: dict[str, Any], connector: Any) -> dict[s
 
 def _steps(result: dict[str, Any]) -> dict[str, str]:
     return {row["step"]: row["result"] for row in result["result"]["steps"]}
+
+
+def _rows(result: dict[str, Any]) -> dict[tuple[str, str | None], dict[str, Any]]:
+    """The step records by (step, part)."""
+    return {(row["step"], row["part"]): row for row in result["result"]["steps"]}
+
+
+def _strings(node: Any) -> list[str]:
+    """Every string leaf of *node*, as it is (no JSON escaping)."""
+    if isinstance(node, dict):
+        return [leaf for value in node.values() for leaf in _strings(value)]
+    if isinstance(node, list):
+        return [leaf for value in node for leaf in _strings(value)]
+    return [node] if isinstance(node, str) else []
+
+
+def _carries(node: Any, secret: str) -> bool:
+    """True when a string of *node* holds *secret*, plain or JSON-escaped."""
+    forms = (secret, json.dumps(secret)[1:-1], json.dumps(secret, ensure_ascii=False)[1:-1])
+    return any(form in leaf for leaf in _strings(node) for form in forms)
+
+
+def _http_error(status: int, body: str) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", f"{BASE_URL}/cloudapi/1.0.0/virtualCenters")
+    response = httpx.Response(status, text=body, request=request)
+    return httpx.HTTPStatusError("vendor error", request=request, response=response)
+
+
+# ---------------------------------------------------------------------------
+# The vendor's error text never carries the password, in any encoding
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(f"bad login for svc / {_TRICKY_PASSWORD}", id="plain"),
+        pytest.param(json.dumps({"message": f"bad login / {_TRICKY_PASSWORD}"}), id="json"),
+        pytest.param(json.dumps({"message": _TRICKY_PASSWORD}, ensure_ascii=False), id="json-utf8"),
+        pytest.param(json.dumps(json.dumps({"m": _TRICKY_PASSWORD})), id="json-in-json"),
+        pytest.param(f"<error>{html.escape(_TRICKY_PASSWORD)}</error>", id="html"),
+        pytest.param(f"login={quote(_TRICKY_PASSWORD, safe='')}", id="url"),
+        pytest.param(html.escape(json.dumps(_TRICKY_PASSWORD)), id="json-then-html"),
+    ],
+)
+def test_vendor_error_text_hides_the_password_in_every_encoding(body: str) -> None:
+    text = vendor_error_text(_http_error(400, body), hide=(_TRICKY_PASSWORD,))
+    assert text.startswith("HTTP 400: ")
+    assert not _carries(text, _TRICKY_PASSWORD)
+    assert html.escape(_TRICKY_PASSWORD) not in text
+    assert quote(_TRICKY_PASSWORD, safe="") not in text
+
+
+def test_vendor_error_text_keeps_the_rest_and_withholds_what_it_cannot_clean() -> None:
+    clean = vendor_error_text(
+        _http_error(400, json.dumps({"message": f"bad login / {_TRICKY_PASSWORD}"})),
+        hide=(_TRICKY_PASSWORD,),
+    )
+    assert "bad login" in clean and "<hidden>" in clean
+    # JSON-escaped, then HTML-escaped: no single replacement matches, so the
+    # text is withheld instead of returned with the password in it.
+    withheld = vendor_error_text(
+        _http_error(400, f"<m>{html.escape(json.dumps(_TRICKY_PASSWORD))}</m>"),
+        hide=(_TRICKY_PASSWORD,),
+    )
+    assert (
+        withheld == "HTTP 400: the vendor's error text is withheld because it may hold the password"
+    )
+    plain = vendor_error_text(_http_error(400, "zone has not enough capacity"), hide=("pw",))
+    assert plain == "HTTP 400: zone has not enough capacity"
 
 
 # ---------------------------------------------------------------------------
@@ -436,6 +518,80 @@ async def test_vcenter_add_failure_after_the_trust_lists_the_steps(
     assert failed["http_status"] == 400
     assert "bad login" in failed["error"]
     assert PASSWORD not in json.dumps(result)
+
+
+async def test_vcenter_part_way_answer_hides_a_json_escaped_password(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _load(_target: Any, _operator: Any, *, mount: str = "secret") -> dict[str, Any]:
+        return {"password": _TRICKY_PASSWORD}
+
+    monkeypatch.setattr(lookups_module, "load_vault_secret_data", _load)
+    seen = {"would": "add", "certificate": {"fingerprint_sha256": CERT_FINGERPRINT}}
+    with (
+        respx.mock(base_url=BASE_URL, assert_all_called=False) as mock,
+        approved_with(_VC_OP, seen),
+    ):
+        _mount_vc(mock, [], "ERROR_UNTRUSTED_CERTIFICATE")
+        mock.post(TRUSTED_CERTS).respond(201, json={"id": "cert-1"})
+        add = mock.post(VCENTERS).respond(
+            400, json={"message": f"bad login for svc-example / {_TRICKY_PASSWORD}"}
+        )
+        result = await run(_VC_OP, _VC_PARAMS)
+    assert json.loads(add.calls.last.request.content)["password"] == _TRICKY_PASSWORD
+    out = result["result"]
+    assert out["status"] == "failed_part_way", out
+    failed = _rows(result)[("add", None)]
+    assert failed["result"] == "failed" and failed["http_status"] == 400
+    assert "bad login" in failed["error"] and "<hidden>" in failed["error"]
+    assert not _carries(result, _TRICKY_PASSWORD)
+    async with get_sessionmaker()() as session:
+        payloads = [
+            row.payload
+            for row in (await session.execute(select(AuditLog))).scalars().all()
+            if row.payload.get("op_id") == _VC_OP
+        ]
+    assert payloads
+    assert not any(_carries(payload, _TRICKY_PASSWORD) for payload in payloads)
+
+
+async def test_vcenter_add_without_an_answer_after_the_trust_is_uncertain(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    seen = {"would": "add", "certificate": {"fingerprint_sha256": CERT_FINGERPRINT}}
+    with (
+        respx.mock(base_url=BASE_URL, assert_all_called=False) as mock,
+        approved_with(_VC_OP, seen),
+    ):
+        _mount_vc(mock, [], "ERROR_UNTRUSTED_CERTIFICATE")
+        trust = mock.post(TRUSTED_CERTS).respond(201, json={"id": "cert-1"})
+        mock.post(VCENTERS).mock(side_effect=httpx.ReadTimeout("read timed out"))
+        result = await run(_VC_OP, _VC_PARAMS)
+    out = result["result"]
+    assert out["status"] == "failed_part_way", out
+    assert trust.called
+    assert _steps(result) == {
+        "trust_certificate": "done",
+        "add": "uncertain",
+        "enable": "not_run",
+        "refresh": "not_run",
+    }
+    add = _rows(result)[("add", None)]
+    assert add["http_status"] is None and "timed out" in add["error"]
+    assert "may or may not" in out["guidance"]
+    assert "Read vcfa.provider.infra.list first" in out["guidance"]
+    assert PASSWORD not in json.dumps(result)
+
+
+async def test_vcenter_add_without_an_answer_as_the_first_step_is_an_op_error(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        _mount_vc(mock, [], "SUCCESS")
+        mock.post(VCENTERS).mock(side_effect=httpx.ConnectError("no route"))
+        result = await run(_VC_OP, _VC_PARAMS)
+    assert result["status"] == "error", result
+    assert result["result"] is None
 
 
 async def test_vcenter_credentials_stay_out_of_the_audit_row(
@@ -787,3 +943,164 @@ async def test_quota_unknown_zone_is_invalid_request(vcfa: VcfAutomationConnecto
     assert result["result"]["status"] == "invalid_request"
     assert "zone-x" in result["result"]["guidance"]
     assert not post.called
+
+
+# ---------------------------------------------------------------------------
+# A quota is matched by organization, name and region
+# ---------------------------------------------------------------------------
+
+_REGION_B = {"name": "region-b", "id": "urn:vcloud:region:bbbbbbbb-1111-2222-3333-444444444444"}
+_VDC_B_ID = "urn:vcloud:vdc:bbbbbbbb-5555-6666-7777-888888888888"
+
+
+async def test_quota_change_picks_the_quota_of_the_requested_region(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    params = {**_QUOTA_PARAMS, "zones": [{**_QUOTA_PARAMS["zones"][0], "cpu_limit_mhz": 20000}]}
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        # The same organization has a quota of this name in region-b too.
+        _mount_quota(mock, [vdc(vdc_id=_VDC_B_ID, region=_REGION_B), vdc()])
+        mock.get(VDC_POLICIES).respond(200, json=page([vdc_policy()]))
+        mock.get(_VDC_CLASSES).respond(200, json=page([vm_class()]))
+        put_a = mock.put(f"{VDCS}/{quoted(VDC_ID)}").respond(
+            202, headers={"Location": TASK_LOCATION}
+        )
+        put_b = mock.put(f"{VDCS}/{quoted(_VDC_B_ID)}").respond(202)
+        result = await run(_QUOTA_OP, params)
+    out = result["result"]
+    assert out["status"] == "accepted", out
+    assert out["object"]["id"] == VDC_ID and out["object"]["region"]["name"] == "region-a"
+    assert put_a.called and not put_b.called
+    assert json.loads(put_a.calls.last.request.content)["region"] == REGION_REF
+
+
+async def test_quota_named_like_one_in_another_region_is_refused(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        _mount_quota(mock, [vdc(vdc_id=_VDC_B_ID, region=_REGION_B)])
+        post = mock.post(VDCS).respond(202)
+        put_b = mock.put(f"{VDCS}/{quoted(_VDC_B_ID)}").respond(202)
+        result = await run(_QUOTA_OP, _QUOTA_PARAMS)
+        preview = await _preview(_QUOTA_OP, _QUOTA_PARAMS, vcfa)
+    out = result["result"]
+    assert out["status"] == "invalid_request", out
+    assert "region-b" in out["guidance"] and "nothing was written" in out["guidance"]
+    assert not post.called and not put_b.called
+    assert preview["would"] == "invalid_request" and "region-b" in preview["reason"]
+
+
+# ---------------------------------------------------------------------------
+# Each storage request keeps its own record and job id
+# ---------------------------------------------------------------------------
+
+_TWO_POLICIES: dict[str, Any] = {
+    **_QUOTA_PARAMS,
+    "storage_policies": [
+        {"name": "gold", "storage_limit_mib": 204800},
+        {"name": "silver", "storage_limit_mib": 1024},
+    ],
+}
+
+
+async def test_quota_storage_requests_keep_one_record_each(vcfa: VcfAutomationConnector) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        _mount_quota(mock, [vdc()])
+        mock.get(VDC_POLICIES).respond(200, json=page([vdc_policy()]))
+        mock.get(_VDC_CLASSES).respond(200, json=page([]))
+        mock.put(f"{VDC_POLICIES}/{quoted(VDC_SP_ID)}").respond(
+            202, headers={"Location": TASK_LOCATION}
+        )
+        mock.post(VDC_POLICIES).respond(202, headers={"Location": _TASK2_LOCATION})
+        result = await run(_QUOTA_OP, _TWO_POLICIES)
+    out = result["result"]
+    assert out["status"] == "accepted", out
+    rows = _rows(result)
+    assert [row["step"] for row in out["steps"]] == [
+        "quota",
+        "storage_policies",
+        "storage_policies",
+        "vm_classes",
+    ]
+    assert rows[("storage_policies", "gold")]["result"] == "started"
+    assert rows[("storage_policies", "gold")]["job_id"] == TASK_ID
+    assert rows[("storage_policies", "silver")]["result"] == "started"
+    assert rows[("storage_policies", "silver")]["job_id"] == _TASK2_ID
+    assert out["job"]["id"] == TASK_ID
+    assert "each step record carries its own job_id" in out["guidance"]
+
+
+async def test_quota_storage_failure_after_one_request_keeps_the_first_job(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        _mount_quota(mock, [vdc()])
+        mock.get(VDC_POLICIES).respond(200, json=page([vdc_policy()]))
+        mock.get(_VDC_CLASSES).respond(200, json=page([]))
+        mock.put(f"{VDC_POLICIES}/{quoted(VDC_SP_ID)}").respond(
+            202, headers={"Location": TASK_LOCATION}
+        )
+        mock.post(VDC_POLICIES).respond(400, text="silver is not in this region")
+        put_classes = mock.put(_VDC_CLASSES).respond(200, json={})
+        result = await run(_QUOTA_OP, {**_TWO_POLICIES, "vm_classes": ["best-effort-small"]})
+    out = result["result"]
+    assert out["status"] == "failed_part_way", out
+    rows = _rows(result)
+    assert rows[("quota", None)]["result"] == "skipped"
+    assert rows[("storage_policies", "gold")]["result"] == "started"
+    assert rows[("storage_policies", "gold")]["job_id"] == TASK_ID
+    silver = rows[("storage_policies", "silver")]
+    assert silver["result"] == "failed" and silver["http_status"] == 400
+    assert "not in this region" in silver["error"]
+    assert rows[("vm_classes", None)]["result"] == "not_run"
+    assert not put_classes.called
+
+
+async def test_quota_storage_without_an_answer_after_the_quota_change_is_uncertain(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    params = {
+        **_QUOTA_PARAMS,
+        "zones": [{**_QUOTA_PARAMS["zones"][0], "cpu_limit_mhz": 20000}],
+        "storage_policies": [{"name": "silver", "storage_limit_mib": 1024}],
+        "vm_classes": ["best-effort-small"],
+    }
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        _mount_quota(mock, [vdc()])
+        mock.get(VDC_POLICIES).respond(200, json=page([vdc_policy()]))
+        mock.get(_VDC_CLASSES).respond(200, json=page([]))
+        mock.put(f"{VDCS}/{quoted(VDC_ID)}").respond(202, headers={"Location": TASK_LOCATION})
+        mock.post(VDC_POLICIES).mock(side_effect=httpx.ConnectTimeout("connect timed out"))
+        put_classes = mock.put(_VDC_CLASSES).respond(200, json={})
+        result = await run(_QUOTA_OP, params)
+    out = result["result"]
+    assert out["status"] == "failed_part_way", out
+    rows = _rows(result)
+    assert rows[("quota", None)]["result"] == "started"
+    assert rows[("quota", None)]["job_id"] == TASK_ID
+    silver = rows[("storage_policies", "silver")]
+    assert silver["result"] == "uncertain" and silver["http_status"] is None
+    assert "timed out" in silver["error"]
+    assert rows[("vm_classes", None)]["result"] == "not_run"
+    assert "Read vcfa.provider.org_quota.list first" in out["guidance"]
+    assert not put_classes.called
+
+
+async def test_quota_storage_gateway_error_after_the_quota_change_is_uncertain(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    params = {
+        **_QUOTA_PARAMS,
+        "zones": [{**_QUOTA_PARAMS["zones"][0], "cpu_limit_mhz": 20000}],
+        "storage_policies": [{"name": "silver", "storage_limit_mib": 1024}],
+    }
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        _mount_quota(mock, [vdc()])
+        mock.get(VDC_POLICIES).respond(200, json=page([vdc_policy()]))
+        mock.get(_VDC_CLASSES).respond(200, json=page([]))
+        mock.put(f"{VDCS}/{quoted(VDC_ID)}").respond(202, headers={"Location": TASK_LOCATION})
+        mock.post(VDC_POLICIES).respond(503, text="service unavailable")
+        result = await run(_QUOTA_OP, params)
+    silver = _rows(result)[("storage_policies", "silver")]
+    assert result["result"]["status"] == "failed_part_way", result
+    assert silver["result"] == "uncertain" and silver["http_status"] == 503

@@ -20,8 +20,12 @@ they run on the next call with the same inputs, once the quota reads
 READY. A quota without storage or VM classes gets a warning: namespaces in
 it fail later.
 
-Before a start, the op reads the quota: while its job still runs
-(``NOT_READY``) it starts nothing and says ``already_running``. The park
+Before a start, the op reads the quota of the organization with this name
+in this region. A quota of the organization with the same name in another
+region is left alone: the call answers ``invalid_request`` and writes
+nothing, because the vendor keeps one name per organization. While the
+quota's job still runs (``NOT_READY``) the op starts nothing and says
+``already_running``. The park
 preview stores a hash of the quota as read; the approved run reads it again
 and answers ``precondition_failed`` when it changed. A step that fails after
 an earlier step ran returns the steps that ran, the one that failed (with the
@@ -47,6 +51,7 @@ from meho_backplane.connectors.vcf_automation._infra_common import (
     job_from_response,
     match_row,
     now_iso,
+    part_way_guidance,
     ref,
     state_hash,
 )
@@ -185,20 +190,44 @@ async def _resolve(call: Call, params: Mapping[str, Any]) -> dict[str, Any]:
     return resolved
 
 
+def _match_quota(
+    rows: list[dict[str, Any]], name: str, org: Mapping[str, Any], region: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """The quota named *name* of *org* in *region*, ``None`` when new, or refuse.
+
+    Refuses (:exc:`InvalidRequestError`) when more than one quota matches,
+    or when the organization has a quota with this name in another region:
+    the call would then change or make the wrong quota.
+    """
+    same_name = [
+        row
+        for row in rows
+        if (row.get("org") or {}).get("id") == org.get("id")
+        and str(row.get("name") or "").casefold() == name.casefold()
+    ]
+    here = [row for row in same_name if (row.get("region") or {}).get("id") == region.get("id")]
+    if len(here) > 1:
+        raise InvalidRequestError(
+            f"{len(here)} quotas named {name!r} of organization {org.get('name')!r} exist in "
+            f"region {region.get('name')!r}, so MEHO cannot tell which one to change"
+        )
+    if not here and same_name:
+        other = (same_name[0].get("region") or {}).get("name")
+        raise InvalidRequestError(
+            f"a quota named {name!r} of organization {org.get('name')!r} already exists in "
+            f"region {other!r}, not in {region.get('name')!r}; use another name, or pass "
+            "that region to change it"
+        )
+    return here[0] if here else None
+
+
 async def _read_quota(
-    call: Call, name: str, org_id: Any
+    call: Call, name: str, org: Mapping[str, Any], region: Mapping[str, Any]
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], list[dict[str, Any]]]:
     """The quota as read, with its storage limits and VM classes (empty when new)."""
     connector, target, operator = call.connector, call.target, call.operator
-    vdc = next(
-        (
-            row
-            for row in await list_vcf(connector, target, operator, INFRA_VDCS_PATH)
-            if (row.get("org") or {}).get("id") == org_id
-            and str(row.get("name") or "").casefold() == name.casefold()
-        ),
-        None,
-    )
+    rows = await list_vcf(connector, target, operator, INFRA_VDCS_PATH)
+    vdc = _match_quota(rows, name, org, region)
     if vdc is None or vdc.get("status") == _NOT_READY:
         return vdc, [], []
     vdc_id = vdc.get("id")
@@ -259,7 +288,9 @@ class _Plan:
 
 async def _plan(call: Call, params: Mapping[str, Any]) -> _Plan:
     resolved = await _resolve(call, params)
-    vdc, storage, classes = await _read_quota(call, str(params["name"]), resolved["org"]["id"])
+    vdc, storage, classes = await _read_quota(
+        call, str(params["name"]), resolved["org"], resolved["region"]
+    )
     steps = _decide(resolved, vdc, storage, classes)
     current = None
     if vdc is not None:
@@ -307,8 +338,16 @@ class _QuotaRun:
     plan: _Plan
     log: StepLog
 
-    async def send(self, step: str, verb: str, path: str, body: Mapping[str, Any]) -> None:
-        """Send one call of *step* and log it as started (``202``) or done."""
+    async def send(
+        self,
+        step: str,
+        verb: str,
+        path: str,
+        body: Mapping[str, Any],
+        *,
+        part: str | None = None,
+    ) -> None:
+        """Send one call of *step* (one *part* of it) and log it as started (``202``) or done."""
         call = self.call
         resp = await run_step(
             self.log,
@@ -320,14 +359,18 @@ class _QuotaRun:
                 operator=call.operator,
                 json=body,
             ),
+            part=part,
         )
         if resp.status_code == 202:
             job = job_from_response(resp, status_read=_STATUS_READ)
-            self.log.mark(step, "started", "VCF Automation accepted the job", job_id=job["id"])
+            self.log.mark(
+                step, "started", "VCF Automation accepted the job", part=part, job_id=job["id"]
+            )
         else:
-            self.log.mark(step, "done", f"HTTP {resp.status_code}")
+            self.log.mark(step, "done", f"HTTP {resp.status_code}", part=part)
 
     async def storage(self) -> None:
+        """One request per storage policy that changes; each keeps its own record and job."""
         vdc = self.plan.vdc or {}
         by_rsp = {
             (row.get("regionStoragePolicy") or {}).get("id"): row for row in self.plan.storage
@@ -346,11 +389,21 @@ class _QuotaRun:
             elif row.get("storageLimitMiB") != limit:
                 urn = safe_segment(row.get("id"), "storage policy id")
                 path = INFRA_VDC_STORAGE_POLICY_PATH.format(vdcStoragePolicyUrn=urn)
-                await self.send("storage_policies", "PUT", path, {**row, "storageLimitMiB": limit})
+                await self.send(
+                    "storage_policies",
+                    "PUT",
+                    path,
+                    {**row, "storageLimitMiB": limit},
+                    part=str(rsp.get("name")),
+                )
         if new:
             # The vendor refuses a storage request without the "values" wrapper.
             await self.send(
-                "storage_policies", "POST", INFRA_VDC_STORAGE_POLICIES_PATH, {"values": new}
+                "storage_policies",
+                "POST",
+                INFRA_VDC_STORAGE_POLICIES_PATH,
+                {"values": new},
+                part=", ".join(str(item["regionStoragePolicy"].get("name")) for item in new),
             )
 
     async def run(self) -> None:
@@ -395,18 +448,14 @@ def _final_status(log: StepLog) -> str:
     return "changed" if "done" in results else "unchanged"
 
 
-_PART_WAY: Final = (
-    "A step failed after an earlier step ran. The steps that ran are not undone. Read "
-    "vcfa.provider.org_quota.list, fix the cause, then call again; steps that are already "
-    "done are skipped."
-)
 _RUNNING: Final = (
     "A job on this quota still runs; read vcfa.provider.org_quota.list until its status is "
     "READY. Nothing was started."
 )
 _NEXT: Final = (
-    "Read vcfa.provider.org_quota.list (with job_id) until the quota status is READY. A new "
-    "quota gets its storage limits and VM classes on the next call with the same inputs."
+    "Read vcfa.provider.org_quota.list (with job_id) until the quota status is READY; when "
+    "several steps started jobs, each step record carries its own job_id. A new quota gets "
+    "its storage limits and VM classes on the next call with the same inputs."
 )
 
 
@@ -422,8 +471,9 @@ async def provider_org_quota_set(
         plan = await _plan(Call(connector, target, operator), params)
     except InvalidRequestError as exc:
         guidance = (
-            f"{exc}; nothing was written. Read vcfa.provider.region.get for the zones, storage "
-            "policies and VM classes of the region"
+            f"{exc}; nothing was written. Read vcfa.provider.org_quota.list for the quotas of "
+            "the organization, and vcfa.provider.region.get for the zones, storage policies "
+            "and VM classes of the region"
         )
         return _answer("invalid_request", log, obj=None, guidance=guidance)
     obj = {
@@ -444,7 +494,13 @@ async def provider_org_quota_set(
     try:
         await _QuotaRun(Call(connector, target, operator), params, plan, log).run()
     except StepFailedError:
-        return _answer("failed_part_way", log, obj=obj, warnings=warnings, guidance=_PART_WAY)
+        return _answer(
+            "failed_part_way",
+            log,
+            obj=obj,
+            warnings=warnings,
+            guidance=part_way_guidance(log, _STATUS_READ),
+        )
     started = [row["job_id"] for row in log.as_list() if row["result"] == "started"]
     job = {"id": started[0], "status_read": _STATUS_READ} if started else None
     return _answer(_final_status(log), log, obj=obj, job=job, warnings=warnings, guidance=_NEXT)

@@ -1,0 +1,2 @@
+docs/vcf-operations-9.1/vcf-operations-openapi-9.1.0.json
+docs/vcf-operations-9.1/vcf-operations-openapi-9.1.1.json

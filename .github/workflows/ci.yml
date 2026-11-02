@@ -53,8 +53,9 @@
 # docs-only runs the FULL matrix. See the `changes` job's SAFETY NOTE.
 #
 # No-backend path (#5296): on a PR that changes no file under `backend/`
-# (apart from `.md` files) and does not change this file, the `changes`
-# detector sets `backend_python=false`. The same heavy Python lanes skip.
+# (apart from `.md` files), does not change this file and does not change
+# the spec-shelf lists (`ci/spec-shelf/`, `scripts/ci/spec_shelf.sh`), the
+# `changes` detector sets `backend_python=false`. The same heavy Python lanes skip.
 # One short job, `python-outside-backend` (GitHub-hosted runner), runs only
 # the backend tests that read files outside `backend/` (the Helm chart, the Go
 # CLI, the workflows, the docs). The fan-in requires that job to pass on this
@@ -199,7 +200,8 @@ jobs:
     #                matrix, and the `python-integration-shard` matrix) skip
     #                via their own `if:` and report success-by-skip (#3252).
     #   backend_python — `false` when a PR changes no file under `backend/`
-    #                (except `.md`) and does not change this file (#5296). The
+    #                (except `.md`), does not change this file and does not
+    #                change the spec-shelf lists (#5296). The
     #                same heavy Python lanes skip. The job
     #                `python-outside-backend` runs instead: only the backend
     #                tests that read files outside `backend/`. Fails CLOSED
@@ -320,15 +322,17 @@ jobs:
             fi
             # --- backend Python classification (#5296) ---
             # backend_python=false only when no changed path, apart from
-            # `.md` files, is under backend/ or is this workflow file.
+            # `.md` files, is under backend/, is this workflow file or is
+            # a spec-shelf list or its script: the shelf check runs only in
+            # the unit and integration shards.
             # grep exits 1 when it selects no line (every file is `.md`);
             # any other non-zero exit is an error and keeps the full run.
             rc=0
             non_md="$(grep -vE '\.md$' <<<"${changed}")" || rc=$?
             if [ "${rc}" -gt 1 ]; then
               echo "could not filter the changed files -> backend_python=true (fail-safe full run)"
-            elif grep -qE '^(backend/|\.github/workflows/ci\.yml$)' <<<"${non_md}"; then
-              echo "backend/ or ci.yml change detected -> backend_python=true (full run)"
+            elif grep -qE '^(backend/|\.github/workflows/ci\.yml$|ci/spec-shelf/|scripts/ci/spec_shelf\.sh$)' <<<"${non_md}"; then
+              echo "backend/, ci.yml or spec-shelf list change detected -> backend_python=true (full run)"
             else
               backend_python=false
               echo "no backend/ change -> backend_python=false (only the tests that read outside backend/)"
@@ -629,11 +633,27 @@ jobs:
           echo "$!" > "${RUNNER_TEMP}/memory-sampler.pid"
           echo "Memory sampling started: one sample per second."
 
+      - name: List the required spec-shelf files
+        # The required vendor API files are listed in ci/spec-shelf/, one
+        # small file per product version, so this workflow names none of
+        # them. scripts/ci/spec_shelf.sh prints the shelf folders for the
+        # sparse checkout below; the verify step after it checks each file.
+        id: spec-shelf-list
+        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          paths="$(bash scripts/ci/spec_shelf.sh paths ci/spec-shelf)"
+          {
+            echo 'paths<<SPEC_SHELF_PATHS_EOF'
+            echo "$paths"
+            echo 'SPEC_SHELF_PATHS_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Checkout vendor spec-shelf (secret-gated, #2949; nsx #2981)
-        # The vendor OpenAPI specs (vSphere: vcenter.yaml ~961 paths +
-        # vi-json.yaml ~2,195 paths; NSX: the manager-served
-        # nsx_api / nsx_policy_api pair, ~3,510 paths) are
-        # Broadcom/VMware vendor-licensed and deliberately NOT
+        # The vendor API files (listed in ci/spec-shelf/; for example
+        # the vSphere and NSX OpenAPI specs, thousands of paths) are
+        # vendor-licensed and deliberately NOT
         # committed to this public repo — they live in the operator's
         # private spec-shelf repo. This step fetches ONLY the pinned
         # shelf directories into the ephemeral runner workspace so the
@@ -657,7 +677,7 @@ jobs:
         # Sharded (#3251): every shard runs this checkout, because each
         # shard's file set may include the spec-backed reconcile
         # lanes; the cone-mode sparse + blob:none filter keeps it cheap
-        # (~0.4 MB argocd-3.3 + … a few tens of MB total), and the
+        # (about 150 MB in total, mostly the vSphere and NSX specs), and the
         # SPEC_SHELF_TOKEN PAT is read-only, so the parallel fetches are
         # safe.
         if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
@@ -668,58 +688,13 @@ jobs:
           path: spec-shelf
           # Cone-mode sparse checkout of the shelf directories only +
           # lazy blob filter: the runner materialises just the pinned
-          # spec files (~0.4 MB argocd-3.3 + ~9.8 MB azure-arm-2026.10 +
-          # ~0.1 MB cloud-builder-5.0 / -5.1 / -5.2 +
-          # ~13 MB esxi-9.0 + ~0.2 MB
-          # hetzner-robot-2026-04 + ~33 MB nsx-9.0 +
-          # ~0.1 MB salt-raas-8.18 + ~2 MB sddc-manager-9.0 +
-          # ~38 MB vcenter-8.0 + ~18 MB
-          # vcenter-9.0 + ~3 MB vcf-automation-9.0 + ~0.4 MB each
-          # vcf-automation-9.0-reference / -9.1 / -9.1.1 + ~0.4 MB
-          # vcf-installer-9.0 + ~0.4 MB vcf-installer-9.1 + ~5 MB
-          # vcf-operations-9.0 + ~5 MB vcf-operations-9.1 + ~0.1 MB
-          # vcf-operations-orchestrator-9.0
-          # / -9.1 + ~1.3 MB vcf-protection-and-recovery-9.1
-          # + ~0.4 MB vks-9.0 + ~6 MB vmware-cloud-director-10.6), not the
-          # whole consumer repo. No
+          # spec folders, not the whole consumer repo. The folders come
+          # from the lists in ci/spec-shelf/ (the step above). No
           # `ref:` pin — the shelf's default branch IS the
           # operator-curated pin (the directories are version-named),
           # matching the local-dev contract documented in
           # tests/acceptance/_vcenter_spec.py + tests/_spec_shelf.py.
-          # Keep the list sorted.
-          sparse-checkout: |
-            docs/argocd-3.3
-            docs/azure-arm-2026.10
-            docs/cloud-builder-5.0
-            docs/cloud-builder-5.1
-            docs/cloud-builder-5.2
-            docs/esxi-9.0
-            docs/fleet-lcm-9.0
-            docs/harbor-2.12
-            docs/hetzner-robot-2026-04
-            docs/keycloak-26.3
-            docs/loki-3.7
-            docs/nsx-9.0
-            docs/proxmox-8.4
-            docs/rabbitmq-4.3
-            docs/salt-raas-8.18
-            docs/sddc-manager-9.0
-            docs/sddc-manager-9.1
-            docs/vcenter-8.0
-            docs/vcenter-9.0
-            docs/vcf-automation-9.0
-            docs/vcf-automation-9.0-reference
-            docs/vcf-automation-9.1
-            docs/vcf-automation-9.1.1
-            docs/vcf-installer-9.0
-            docs/vcf-installer-9.1
-            docs/vcf-operations-9.0
-            docs/vcf-operations-9.1
-            docs/vcf-operations-orchestrator-9.0
-            docs/vcf-operations-orchestrator-9.1
-            docs/vcf-protection-and-recovery-9.1
-            docs/vks-9.0
-            docs/vmware-cloud-director-10.6
+          sparse-checkout: ${{ steps.spec-shelf-list.outputs.paths }}
           filter: blob:none
           # Read-only consumer; never pushes. Don't leave the token in
           # the shelf clone's local git config after checkout.
@@ -727,7 +702,7 @@ jobs:
 
       - name: Verify spec-shelf provisioned the pinned specs
         # Fail-loud layout guard: once the secret exists, a shelf
-        # layout move (or a sparse-checkout typo here) must fail THIS
+        # layout move (or a wrong line in ci/spec-shelf/) must fail THIS
         # job — otherwise the resolvers would return None and the spec
         # lanes would silently go back to skipping, undetected (the
         # exact regression #2949 closes). Without the secret this step
@@ -735,76 +710,7 @@ jobs:
         # Prints file *presence* only — never spec content.
         if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
         working-directory: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          for f in \
-            spec-shelf/docs/argocd-3.3/argocd-swagger.json \
-            spec-shelf/docs/azure-arm-2026.10/specification/resources/resource-manager/Microsoft.Resources/subscriptions/stable/2022-12-01/subscriptions.json \
-            spec-shelf/docs/cloud-builder-5.0/cloud-builder-5.0.0-reference-operations.tsv \
-            spec-shelf/docs/cloud-builder-5.1/cloud-builder-5.1.0-reference-operations.tsv \
-            spec-shelf/docs/cloud-builder-5.1/cloud-builder-5.1.1-reference-operations.tsv \
-            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.0-reference-operations.tsv \
-            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.1-reference-operations.tsv \
-            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.2-reference-operations.tsv \
-            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.3-reference-operations.tsv \
-            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.4-reference-operations.tsv \
-            spec-shelf/docs/esxi-9.0/wsdl/vim/vim.wsdl \
-            spec-shelf/docs/fleet-lcm-9.0/fleet-lcm-openapi.yaml \
-            spec-shelf/docs/harbor-2.12/harbor-swagger.yaml \
-            spec-shelf/docs/hetzner-robot-2026-04/webservice-en.md \
-            spec-shelf/docs/keycloak-26.3/keycloak-admin-openapi.json \
-            spec-shelf/docs/loki-3.7/loki-http-api.md \
-            spec-shelf/docs/nsx-9.0/nsx_api.openapi3.json \
-            spec-shelf/docs/nsx-9.0/nsx_policy_api.openapi3.json \
-            spec-shelf/docs/proxmox-8.4/apidata.js \
-            spec-shelf/docs/rabbitmq-4.3/http-api-index.md \
-            spec-shelf/docs/rabbitmq-4.3/rabbit_shovel_mgmt_shovels.erl \
-            spec-shelf/docs/salt-raas-8.18/salt-raas-8.18-reference-operations.tsv \
-            spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json \
-            spec-shelf/docs/sddc-manager-9.1/sddc-manager-openapi.json \
-            spec-shelf/docs/vcenter-8.0/vcenter.yaml \
-            spec-shelf/docs/vcenter-8.0/vi-json-8.0u1.yaml \
-            spec-shelf/docs/vcenter-8.0/vi-json-8.0u2.yaml \
-            spec-shelf/docs/vcenter-8.0/vi-json-8.0u3.yaml \
-            spec-shelf/docs/vcenter-8.0/vsan/8.0u1/vsan-8.0u1-methods.txt \
-            spec-shelf/docs/vcenter-8.0/vsan/8.0u2/vsan-8.0u2-methods.txt \
-            spec-shelf/docs/vcenter-9.0/vcenter.yaml \
-            spec-shelf/docs/vcenter-9.0/vi-json.yaml \
-            spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json \
-            spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-catalog-deployment.json \
-            spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-provider-infrastructure-apis-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-vm-apps-org-abx-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-vm-apps-org-approval-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-vm-apps-org-policies-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-provider-infrastructure-apis-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-abx-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-approval-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-event-broker-service-api-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-policies-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-provider-infrastructure-apis-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-vm-apps-org-abx-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-vm-apps-org-approval-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-vm-apps-org-event-broker-service-api-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-vm-apps-org-policies-reference-operations.tsv \
-            spec-shelf/docs/vcf-installer-9.0/vcf-installer-openapi.json \
-            spec-shelf/docs/vcf-installer-9.1/vcf-installer-openapi.json \
-            spec-shelf/docs/vcf-operations-9.0/vcf-operations-for-logs-openapi.json \
-            spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json \
-            spec-shelf/docs/vcf-operations-9.1/vcf-operations-openapi-9.1.0.json \
-            spec-shelf/docs/vcf-operations-9.1/vcf-operations-openapi-9.1.1.json \
-            spec-shelf/docs/vcf-operations-orchestrator-9.0/vcf-operations-orchestrator-9.0-reference-operations.tsv \
-            spec-shelf/docs/vcf-operations-orchestrator-9.1/vcf-operations-orchestrator-9.1-reference-operations.tsv \
-            spec-shelf/docs/vcf-protection-and-recovery-9.1/recovery-srm-v2.yaml \
-            spec-shelf/docs/vcf-protection-and-recovery-9.1/replication-vr-v2.yaml \
-            spec-shelf/docs/vks-9.0/vks-paths-from-vcenter.txt \
-            spec-shelf/docs/vmware-cloud-director-10.6/cloudapi-39.2.json \
-            spec-shelf/docs/vmware-cloud-director-10.6/api-39.1/vmware-cloud-director-api-39.1-reference-operations.tsv; do
-            if [ ! -f "$f" ]; then
-              echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
-              exit 1
-            fi
-          done
-          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; the Azure Resource Manager specs (subscriptions.json and the rest) present under spec-shelf/docs/azure-arm-2026.10/; the Cloud Builder reference lists present under spec-shelf/docs/cloud-builder-5.0/ + spec-shelf/docs/cloud-builder-5.1/ + spec-shelf/docs/cloud-builder-5.2/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; salt-raas-8.18-reference-operations.tsv present under spec-shelf/docs/salt-raas-8.18/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json + vra-catalog-deployment.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis, abx, approval and policies reference lists present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/, and the event-broker-service-api reference list under the 9.1 and 9.1.1 folders; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; vcf-operations-openapi-9.1.0.json + vcf-operations-openapi-9.1.1.json present under spec-shelf/docs/vcf-operations-9.1/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/; cloudapi-39.2.json + api-39.1/vmware-cloud-director-api-39.1-reference-operations.tsv present under spec-shelf/docs/vmware-cloud-director-10.6/"
+        run: bash scripts/ci/spec_shelf.sh verify ci/spec-shelf spec-shelf
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -2239,6 +2145,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
+      - name: List the required spec-shelf files
+        # The required vendor API files are listed in ci/spec-shelf/, one
+        # small file per product version, so this workflow names none of
+        # them. scripts/ci/spec_shelf.sh prints the shelf folders for the
+        # sparse checkout below; the verify step after it checks each file.
+        id: spec-shelf-list
+        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          paths="$(bash scripts/ci/spec_shelf.sh paths ci/spec-shelf)"
+          {
+            echo 'paths<<SPEC_SHELF_PATHS_EOF'
+            echo "$paths"
+            echo 'SPEC_SHELF_PATHS_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Checkout vendor spec-shelf (secret-gated, #2949; nsx #2981)
         # Same secret-gated sparse checkout as the python-unit-shard
         # job's spec-shelf step — see that step's comment for the
@@ -2251,39 +2174,7 @@ jobs:
           repository: evoila-bosnia/claude-rdc-hetzner-dc
           token: ${{ secrets.SPEC_SHELF_TOKEN }}
           path: spec-shelf
-          sparse-checkout: |
-            docs/argocd-3.3
-            docs/azure-arm-2026.10
-            docs/cloud-builder-5.0
-            docs/cloud-builder-5.1
-            docs/cloud-builder-5.2
-            docs/esxi-9.0
-            docs/fleet-lcm-9.0
-            docs/harbor-2.12
-            docs/hetzner-robot-2026-04
-            docs/keycloak-26.3
-            docs/loki-3.7
-            docs/nsx-9.0
-            docs/proxmox-8.4
-            docs/rabbitmq-4.3
-            docs/salt-raas-8.18
-            docs/sddc-manager-9.0
-            docs/sddc-manager-9.1
-            docs/vcenter-8.0
-            docs/vcenter-9.0
-            docs/vcf-automation-9.0
-            docs/vcf-automation-9.0-reference
-            docs/vcf-automation-9.1
-            docs/vcf-automation-9.1.1
-            docs/vcf-installer-9.0
-            docs/vcf-installer-9.1
-            docs/vcf-operations-9.0
-            docs/vcf-operations-9.1
-            docs/vcf-operations-orchestrator-9.0
-            docs/vcf-operations-orchestrator-9.1
-            docs/vcf-protection-and-recovery-9.1
-            docs/vks-9.0
-            docs/vmware-cloud-director-10.6
+          sparse-checkout: ${{ steps.spec-shelf-list.outputs.paths }}
           filter: blob:none
           persist-credentials: false
 
@@ -2292,76 +2183,7 @@ jobs:
         # python-unit-shard job's occurrence.
         if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
         working-directory: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          for f in \
-            spec-shelf/docs/argocd-3.3/argocd-swagger.json \
-            spec-shelf/docs/azure-arm-2026.10/specification/resources/resource-manager/Microsoft.Resources/subscriptions/stable/2022-12-01/subscriptions.json \
-            spec-shelf/docs/cloud-builder-5.0/cloud-builder-5.0.0-reference-operations.tsv \
-            spec-shelf/docs/cloud-builder-5.1/cloud-builder-5.1.0-reference-operations.tsv \
-            spec-shelf/docs/cloud-builder-5.1/cloud-builder-5.1.1-reference-operations.tsv \
-            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.0-reference-operations.tsv \
-            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.1-reference-operations.tsv \
-            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.2-reference-operations.tsv \
-            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.3-reference-operations.tsv \
-            spec-shelf/docs/cloud-builder-5.2/cloud-builder-5.2.4-reference-operations.tsv \
-            spec-shelf/docs/esxi-9.0/wsdl/vim/vim.wsdl \
-            spec-shelf/docs/fleet-lcm-9.0/fleet-lcm-openapi.yaml \
-            spec-shelf/docs/harbor-2.12/harbor-swagger.yaml \
-            spec-shelf/docs/hetzner-robot-2026-04/webservice-en.md \
-            spec-shelf/docs/keycloak-26.3/keycloak-admin-openapi.json \
-            spec-shelf/docs/loki-3.7/loki-http-api.md \
-            spec-shelf/docs/nsx-9.0/nsx_api.openapi3.json \
-            spec-shelf/docs/nsx-9.0/nsx_policy_api.openapi3.json \
-            spec-shelf/docs/proxmox-8.4/apidata.js \
-            spec-shelf/docs/rabbitmq-4.3/http-api-index.md \
-            spec-shelf/docs/rabbitmq-4.3/rabbit_shovel_mgmt_shovels.erl \
-            spec-shelf/docs/salt-raas-8.18/salt-raas-8.18-reference-operations.tsv \
-            spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json \
-            spec-shelf/docs/sddc-manager-9.1/sddc-manager-openapi.json \
-            spec-shelf/docs/vcenter-8.0/vcenter.yaml \
-            spec-shelf/docs/vcenter-8.0/vi-json-8.0u1.yaml \
-            spec-shelf/docs/vcenter-8.0/vi-json-8.0u2.yaml \
-            spec-shelf/docs/vcenter-8.0/vi-json-8.0u3.yaml \
-            spec-shelf/docs/vcenter-8.0/vsan/8.0u1/vsan-8.0u1-methods.txt \
-            spec-shelf/docs/vcenter-8.0/vsan/8.0u2/vsan-8.0u2-methods.txt \
-            spec-shelf/docs/vcenter-9.0/vcenter.yaml \
-            spec-shelf/docs/vcenter-9.0/vi-json.yaml \
-            spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json \
-            spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-catalog-deployment.json \
-            spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-provider-infrastructure-apis-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-vm-apps-org-abx-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-vm-apps-org-approval-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.0-reference/vcf-automation-9.0-vm-apps-org-policies-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-provider-infrastructure-apis-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-abx-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-approval-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-event-broker-service-api-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1/vcf-automation-9.1-vm-apps-org-policies-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-provider-infrastructure-apis-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-vm-apps-org-abx-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-vm-apps-org-approval-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-vm-apps-org-event-broker-service-api-reference-operations.tsv \
-            spec-shelf/docs/vcf-automation-9.1.1/vcf-automation-9.1.1-vm-apps-org-policies-reference-operations.tsv \
-            spec-shelf/docs/vcf-installer-9.0/vcf-installer-openapi.json \
-            spec-shelf/docs/vcf-installer-9.1/vcf-installer-openapi.json \
-            spec-shelf/docs/vcf-operations-9.0/vcf-operations-for-logs-openapi.json \
-            spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json \
-            spec-shelf/docs/vcf-operations-9.1/vcf-operations-openapi-9.1.0.json \
-            spec-shelf/docs/vcf-operations-9.1/vcf-operations-openapi-9.1.1.json \
-            spec-shelf/docs/vcf-operations-orchestrator-9.0/vcf-operations-orchestrator-9.0-reference-operations.tsv \
-            spec-shelf/docs/vcf-operations-orchestrator-9.1/vcf-operations-orchestrator-9.1-reference-operations.tsv \
-            spec-shelf/docs/vcf-protection-and-recovery-9.1/recovery-srm-v2.yaml \
-            spec-shelf/docs/vcf-protection-and-recovery-9.1/replication-vr-v2.yaml \
-            spec-shelf/docs/vks-9.0/vks-paths-from-vcenter.txt \
-            spec-shelf/docs/vmware-cloud-director-10.6/cloudapi-39.2.json \
-            spec-shelf/docs/vmware-cloud-director-10.6/api-39.1/vmware-cloud-director-api-39.1-reference-operations.tsv; do
-            if [ ! -f "$f" ]; then
-              echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
-              exit 1
-            fi
-          done
-          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; the Azure Resource Manager specs (subscriptions.json and the rest) present under spec-shelf/docs/azure-arm-2026.10/; the Cloud Builder reference lists present under spec-shelf/docs/cloud-builder-5.0/ + spec-shelf/docs/cloud-builder-5.1/ + spec-shelf/docs/cloud-builder-5.2/; vim.wsdl present under spec-shelf/docs/esxi-9.0/wsdl/vim/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; salt-raas-8.18-reference-operations.tsv present under spec-shelf/docs/salt-raas-8.18/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/ + spec-shelf/docs/sddc-manager-9.1/; vcenter.yaml + vi-json-8.0u1.yaml + vi-json-8.0u2.yaml + vi-json-8.0u3.yaml + vsan/8.0u1/vsan-8.0u1-methods.txt + vsan/8.0u2/vsan-8.0u2-methods.txt present under spec-shelf/docs/vcenter-8.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json + vra-catalog-deployment.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; the provider-infrastructure-apis, abx, approval and policies reference lists present under spec-shelf/docs/vcf-automation-9.0-reference/ + spec-shelf/docs/vcf-automation-9.1/ + spec-shelf/docs/vcf-automation-9.1.1/, and the event-broker-service-api reference list under the 9.1 and 9.1.1 folders; vcf-installer-openapi.json present under spec-shelf/docs/vcf-installer-9.0/ + spec-shelf/docs/vcf-installer-9.1/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/; vcf-operations-openapi-9.1.0.json + vcf-operations-openapi-9.1.1.json present under spec-shelf/docs/vcf-operations-9.1/; the orchestrator reference list present under spec-shelf/docs/vcf-operations-orchestrator-9.0/ + spec-shelf/docs/vcf-operations-orchestrator-9.1/; recovery-srm-v2.yaml + replication-vr-v2.yaml present under spec-shelf/docs/vcf-protection-and-recovery-9.1/; vks-paths-from-vcenter.txt present under spec-shelf/docs/vks-9.0/; cloudapi-39.2.json + api-39.1/vmware-cloud-director-api-39.1-reference-operations.tsv present under spec-shelf/docs/vmware-cloud-director-10.6/"
+        run: bash scripts/ci/spec_shelf.sh verify ci/spec-shelf spec-shelf
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-unit-shard's login step — the

@@ -520,9 +520,10 @@ role the token logs in under is picked in this order (first match wins):
 
 1. the dispatch target's `extras.vault_role`, when the target sets one
    (evoila/meho#3274);
-2. for the synthetic background-dispatch operator (a check run) only: the
+2. for the synthetic operators that present the check runner's token
+   only (a check run, and the inbound event intake's secret read): the
    dedicated check-runner role (`VAULT_CHECK_RUNNER_ROLE`,
-   evoila/meho#2757). When that variable is unset, a check run uses the
+   evoila/meho#2757). When that variable is unset, such a login uses the
    deployment-global `VAULT_OIDC_ROLE` directly and **skips step 3**;
 3. a per-tenant role from `VAULT_OIDC_ROLE_BY_TENANT` matching the
    operator's tenant (evoila/meho#3852). A check run never reaches this

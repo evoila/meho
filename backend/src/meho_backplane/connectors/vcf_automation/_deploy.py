@@ -3,15 +3,13 @@
 
 """Handlers for a deployment from a cloud template (VCF Automation tenant plane).
 
-Three ops: start a deploy request (or only a plan of it), read a deploy
-request until it ends, and delete one deployment. Metadata lives in
-:mod:`.deploy_ops`. The blueprint and deployment APIs take the same tenant
-bearer as ``/iaas/api`` (:func:`._routing.plane_for_path`).
+Two ops: start a deploy request (or only a plan of it) and read a deploy
+request until it ends. Metadata lives in :mod:`.deploy_ops`. The delete of a
+deployment is in :mod:`._day2` (shared with Aria Automation 8). The blueprint
+API takes the same tenant bearer as ``/iaas/api`` (:func:`._routing.plane_for_path`).
 
 An upstream 4xx/5xx raises :exc:`httpx.HTTPStatusError`; the dispatcher maps it
-to ``connector_error`` with ``http_status`` and ``upstream_message``. The one
-exception is a ``404`` on the delete: the deployment is already gone, so the
-op answers ``unchanged``.
+to ``connector_error`` with ``http_status`` and ``upstream_message``.
 """
 
 from __future__ import annotations
@@ -19,13 +17,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Final
 
-import httpx
-
 from meho_backplane.connectors.vcf_automation._lookups import find_by_odata_name, quote_segment
 from meho_backplane.connectors.vcf_automation._paths import (
     TENANT_BLUEPRINT_REQUEST_PATH,
     TENANT_BLUEPRINT_REQUESTS_PATH,
-    TENANT_DEPLOYMENT_API_DEPLOYMENT_PATH,
     TENANT_IAAS_API_VERSION,
 )
 from meho_backplane.connectors.vcf_automation.typed_ops import TENANT_DEPLOYMENTS_PATH
@@ -40,7 +35,6 @@ __all__ = [
     "blueprint_request_body",
     "tenant_blueprint_request_create",
     "tenant_blueprint_request_get",
-    "tenant_deployment_delete",
 ]
 
 #: Op param -> ``BlueprintRequest`` field.
@@ -153,35 +147,3 @@ async def tenant_blueprint_request_get(
     """``vcfa.tenant.blueprint_request.get`` — ``GET …/blueprint-requests/{requestId}``."""
     path = TENANT_BLUEPRINT_REQUEST_PATH.format(requestId=quote_segment(params["id"]))
     return await connector._request_json(target, "GET", path, operator=operator)
-
-
-async def tenant_deployment_delete(
-    connector: VcfAutomationConnector,
-    operator: Operator,
-    target: VcfAutomationTargetLike,
-    params: dict[str, Any],
-) -> dict[str, Any]:
-    """``vcfa.tenant.deployment.delete`` — ``DELETE /deployment/api/deployments/{deploymentId}``.
-
-    Starts the delete of the deployment and all its resources. A ``404``
-    (no such deployment) answers ``unchanged``, so a second run is safe.
-    """
-    path = TENANT_DEPLOYMENT_API_DEPLOYMENT_PATH.format(deploymentId=quote_segment(params["id"]))
-    try:
-        request = await connector._post_json(target, path, operator=operator, verb="DELETE")
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code != 404:
-            raise
-        return {
-            "status": "unchanged",
-            "request": None,
-            "guidance": "no deployment has this id; nothing was deleted",
-        }
-    return {
-        "status": "submitted",
-        "request": {key: request.get(key) for key in ("id", "name", "status", "deploymentId")},
-        "guidance": (
-            "the delete runs in the background; read vcfa.tenant.deployment.get with the "
-            "same id until it answers not found"
-        ),
-    }

@@ -276,12 +276,19 @@ async def test_install_checks_then_starts_and_answers_accepted(
     }
     assert out["issues"] == []
     assert "not done yet" in out["guidance"]
+    # The setup service reads each top-level key as a method parameter: the
+    # InstallSpec goes under "spec". A flat body gets 400 on a real 8.0.3 appliance.
     body = {
-        "auto_answer": False,
-        "vcsa_embedded": {
-            "ceip_enabled": False,
-            "standalone": {"sso_admin_password": _SSO_PASSWORD, "sso_domain_name": "vsphere.local"},
-        },
+        "spec": {
+            "auto_answer": False,
+            "vcsa_embedded": {
+                "ceip_enabled": False,
+                "standalone": {
+                    "sso_admin_password": _SSO_PASSWORD,
+                    "sso_domain_name": "vsphere.local",
+                },
+            },
+        }
     }
     assert json.loads(check.calls[0].request.content) == body
     assert json.loads(start.calls[0].request.content) == body
@@ -371,7 +378,7 @@ async def test_join_with_a_wrong_partner_address_fails_the_check(
     assert out["mode"] == "join_sso_domain"
     assert out["check"]["errors"] == ["Cannot reach partner-vcenter.example.test."]
     body = json.loads(check.calls[0].request.content)
-    assert body["vcsa_embedded"]["replicated"] == {
+    assert body["spec"]["vcsa_embedded"]["replicated"] == {
         "partner_hostname": "partner-vcenter.example.test",
         "sso_admin_password": _SSO_PASSWORD,
     }
@@ -394,8 +401,70 @@ async def test_join_with_a_wrong_sso_password_fails_the_check_without_the_passwo
 
     assert out["status"] == "check_failed"
     assert "partner vCenter refused the SSO login" in out["issues"][0]["message"]
+    (error,) = out["check"]["errors"]
+    assert error.startswith("HTTP 401")
+    assert "partner vCenter refused the SSO login" in error
     assert start.call_count == 0
     _assert_no_secret(out)
+
+
+async def test_a_refused_check_call_puts_the_vendor_text_into_check_errors(
+    connector: VmwareRestConnector, gate: list[dict[str, Any]]
+) -> None:
+    refused = {
+        "error_type": "INVALID_REQUEST",
+        "messages": [
+            _msg("Error in method invocation Unexpected parameter 'spec' in JSON body"),
+        ],
+    }
+    with _mock() as mock:
+        mock.post("/api/session").respond(200, json=_SESSION)
+        mock.get(_DEPLOYMENT).respond(200, json=_info("INITIALIZED"))
+        mock.post(_CHECK, params={"action": "check"}).respond(400, json=refused)
+        start = mock.post(_CHECK, params={"action": "start"}).respond(204)
+        out = await _install(connector, dict(_STANDALONE))
+
+    assert out["status"] == "check_failed"
+    assert out["check"] == {
+        "status": "FAILED",
+        "errors": [
+            "HTTP 400: INVALID_REQUEST; Error in method invocation Unexpected parameter "
+            "'spec' in JSON body"
+        ],
+        "warnings": [],
+        "info": [],
+    }
+    assert out["check"]["errors"][0] in out["issues"][0]["message"]
+    assert start.call_count == 0
+    assert gate == []
+
+
+async def test_a_refused_check_call_with_the_password_in_its_text_hides_the_text(
+    connector: VmwareRestConnector,
+) -> None:
+    refused = {"error_type": "INVALID_ARGUMENT", "messages": [_msg(f"bad {_SSO_PASSWORD}")]}
+    with _mock() as mock:
+        mock.post("/api/session").respond(200, json=_SESSION)
+        mock.get(_DEPLOYMENT).respond(200, json=_info("INITIALIZED"))
+        mock.post(_CHECK, params={"action": "check"}).respond(400, json=refused)
+        out = await _install(connector, dict(_STANDALONE))
+
+    assert out["check"]["errors"] == ["HTTP 400"]
+    _assert_no_secret(out)
+
+
+async def test_a_check_call_without_an_answer_says_why_in_check_errors(
+    connector: VmwareRestConnector,
+) -> None:
+    with _mock() as mock:
+        mock.post("/api/session").respond(200, json=_SESSION)
+        mock.get(_DEPLOYMENT).respond(200, json=_info("INITIALIZED"))
+        mock.post(_CHECK, params={"action": "check"}).mock(side_effect=httpx.ReadTimeout("lost"))
+        out = await _install(connector, dict(_STANDALONE))
+
+    assert out["status"] == "check_failed"
+    assert out["check"]["status"] is None
+    assert out["check"]["errors"] == ["the check got no answer (timeout)"]
 
 
 async def test_a_401_on_the_check_of_a_new_domain_is_raised_without_the_body(
@@ -613,8 +682,7 @@ async def test_a_question_shows_in_the_status_and_the_answer_lets_the_setup_go_o
     assert out["status"] == "accepted"
     assert out["question"]["id"] == "<question-id>"
     assert json.loads(answer.calls[0].request.content) == {
-        "question_id": "<question-id>",
-        "answer_val": "yes",
+        "spec": {"question_id": "<question-id>", "answer_val": "yes"},
     }
     assert gate[0]["op_id"] == "POST:/vcenter/deployment/question?action=answer"
     assert _steps(out) == {"read_state": "done", "read_question": "done", "answer": "done"}

@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors._shared.pwsh import pwsh_run
 from meho_backplane.connectors.msad.ops import SSH_TRANSPORT_NOTE, MsadOp
+from meho_backplane.operations import register_plain_fields
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -371,3 +372,8 @@ DOMAIN_CONFIG_OPS: tuple[MsadOp, ...] = (
         },
     ),
 )
+
+
+# ``password_policy`` holds the domain's rules (lengths, ages, lockout), never a password.
+for _op in DOMAIN_CONFIG_OPS:
+    register_plain_fields(_op.op_id, ("password_policy",))

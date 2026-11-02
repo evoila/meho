@@ -22,6 +22,12 @@ under the human's :class:`~meho_backplane.auth.operator.Operator`
 the run produces carry ``operator_sub``=human + ``actor_sub``=agent without
 a second token over the wire.
 
+The agent's tool calls use the person's
+:class:`~meho_backplane.auth.operator.Operator` only after
+:func:`delegated_operator` has narrowed it to what the agent's own login
+would get: the ``operator`` role at most, and no approval or
+``platform_admin`` flag. So the run has the stricter of the two identities.
+
 Autonomous (cron / no-human) runs do **not** use this seam: the agent
 authenticates as itself via ``client_credentials`` (see
 :mod:`meho_backplane.auth.agent_token`), so it is the subject
@@ -34,7 +40,9 @@ from contextlib import contextmanager
 
 import structlog
 
-__all__ = ["ACTOR_SUB_KEY", "actor_delegation", "resolve_actor_sub"]
+from meho_backplane.auth.operator import Operator, TenantRole
+
+__all__ = ["ACTOR_SUB_KEY", "actor_delegation", "delegated_operator", "resolve_actor_sub"]
 
 #: structlog contextvar key carrying the RFC 8693 actor (agent) principal.
 #: Shared by the binder (:func:`actor_delegation`) and the readers
@@ -75,3 +83,31 @@ def resolve_actor_sub() -> str | None:
     """
     raw = structlog.contextvars.get_contextvars().get(ACTOR_SUB_KEY)
     return raw if isinstance(raw, str) and raw else None
+
+
+def delegated_operator(operator: Operator) -> Operator:
+    """Return the identity the agent's tool calls use in a direct run.
+
+    The caller who started the run stays the subject: same ``sub``,
+    tenant, principal kind and token. But the agent never gets more than
+    its own login gives it. An agent login acts with the ``operator`` role
+    at most (:func:`meho_backplane.auth.jwt._cap_agent_role`) and never
+    approves, so a ``tenant_admin`` caller is narrowed to ``operator``
+    here, and the ``approver``, self-approval and ``platform_admin`` flags
+    are cleared. A lower role is kept as it is.
+
+    The policy gate does the same for grants (the stricter of the caller's
+    and the agent's verdict wins), so a direct run may do only what both
+    the caller and the agent may do.
+    """
+    role = operator.tenant_role
+    if role is TenantRole.TENANT_ADMIN:
+        role = TenantRole.OPERATOR
+    return operator.model_copy(
+        update={
+            "tenant_role": role,
+            "approver": False,
+            "self_approver": False,
+            "platform_admin": False,
+        }
+    )

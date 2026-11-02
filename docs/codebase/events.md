@@ -415,11 +415,20 @@ secret still needs a Vault client, which needs an operator: the
 `__ingest__` operator reuses the backplane's existing
 background-dispatch service-principal token (`check_runner_jwt`, the
 same "MEHO's own in-process dispatch, outward" identity the sensor
-check-runner uses) with `check_runner_dispatch=False` so the Vault login
-uses the standard `vault_oidc_role`. When that principal is unconfigured
-the token is empty, the Vault read fails, and ingest fails closed — the
-correct posture. A dedicated ingest principal (separately bounded Vault
-role) is a future refinement.
+check-runner uses) with `check_runner_dispatch=True`, so the Vault login
+uses the runner's own role (`VAULT_CHECK_RUNNER_ROLE`) when one is set,
+and the shared `VAULT_OIDC_ROLE` otherwise. Token and role must agree:
+the Vault recipe (`docs/cross-repo/vault-provisioning.md`, section 7)
+gives the runner client its own audience, after which the shared role
+no longer accepts the runner's token. So the runner's Vault policy must
+also cover the event source secrets
+(`secret/data/tenants/+/event-sources/*`); the recipe lists the paths.
+The secret-broker read path still checks the ref against the source's
+tenant subtree before the login. When the principal is unconfigured the
+token is empty, the Vault read fails, and ingest fails closed — the
+correct posture. A dedicated ingest principal (its own client and Vault
+role) is a possible later step; it would need one more client on every
+install.
 
 ### Reconciliation note (404 vs 401)
 

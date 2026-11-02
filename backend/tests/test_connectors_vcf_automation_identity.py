@@ -436,8 +436,9 @@ ESCAPED_SECRET = 'Pw\\sentinel"q\u00e9'
         json.dumps(ESCAPED_SECRET)[1:-1],
         json.dumps(ESCAPED_SECRET, ensure_ascii=False)[1:-1],
         "Pw%5Csentinel%22q%C3%A9",
+        "Pw\\sentinel&quot;q\u00e9",
     ],
-    ids=["as-is", "json-ascii", "json-utf8", "percent-encoded"],
+    ids=["as-is", "json-ascii", "json-utf8", "percent-encoded", "html-escaped"],
 )
 def test_hide_secrets_sees_every_form_of_the_secret(form: str) -> None:
     assert hide_secrets(f"Bind failed for {form} at ldap", [ESCAPED_SECRET]).startswith(

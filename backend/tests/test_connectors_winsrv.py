@@ -410,7 +410,7 @@ async def test_power_rejects_negative_delay() -> None:
 
 #: Messages that break the ``shutdown.exe`` message rule: a double quote (ASCII
 #: or typographic), a backslash, a control character (C0, DEL, C1), a leading
-#: ``/`` or ``-``, or more than 512 characters.
+#: whitespace, ``/`` or ``-``, or more than 512 characters.
 _BAD_POWER_MESSAGES: tuple[str, ...] = (
     'say "hi"',
     "curly \u201chi\u201d",
@@ -425,6 +425,11 @@ _BAD_POWER_MESSAGES: tuple[str, ...] = (
     "c1\x9fhere",
     "/starts with a slash",
     "-starts with a dash",
+    " /f",
+    " -f",
+    "  /starts after spaces",
+    " starts with a space",
+    "\u00a0/no-break space first",
     "x" * 513,
 )
 
@@ -480,6 +485,16 @@ async def test_power_good_message_is_one_quoted_argument(message: str) -> None:
         await winsrv_power_reboot(connector, _TARGET, {"message": message})
     script = _script_from_call(run_mock)
     assert f"shutdown.exe /r /t 15 /c {ps_single_quote(message)}; " in script
+
+
+@pytest.mark.parametrize("op_id", ["winsrv.power.reboot", "winsrv.power.shutdown"])
+def test_power_message_hint_states_the_rule(op_id: str) -> None:
+    """The agent hint names the same message rule as the parameter schema."""
+    op = next(op for op in WINSRV_OPS if op.op_id == op_id)
+    hint = op.llm_instructions["parameter_hints"]["message"]
+    for part in ("512 characters", "double quotes", "backslashes", "control characters"):
+        assert part in hint
+    assert "must not start with whitespace, / or -" in hint
 
 
 # ---------------------------------------------------------------------------

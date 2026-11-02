@@ -21,14 +21,13 @@ provider's LDAP, and one LDAP row and one OIDC row per org.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
-from urllib.parse import quote
 
 import httpx
 
+from meho_backplane.connectors._shared.secret_echo import mentions_secret
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
     load_param_secret_data,
@@ -160,26 +159,14 @@ def secret_missing_guidance(params: Mapping[str, Any], prefix: str, default_key:
     )
 
 
-def _secret_forms(secret: str) -> set[str]:
-    """The ways a vendor message can carry *secret*: as is, percent-encoded or JSON-escaped.
-
-    A vendor that echoes the request body gives the JSON form: ``\\`` and
-    ``"`` escaped, and a non-ASCII character either kept or as ``\\uXXXX``.
-    """
-    return {
-        secret,
-        quote(secret, safe=""),
-        json.dumps(secret)[1:-1],
-        json.dumps(secret, ensure_ascii=False)[1:-1],
-        secret.replace('"', '\\"'),
-    }
-
-
 def hide_secrets(text: str, secrets: Iterable[str | None]) -> str:
-    """*text*, or a fixed note when it holds one of *secrets* (as is or escaped)."""
-    for secret in secrets:
-        if secret and any(form in text for form in _secret_forms(secret)):
-            return _HIDDEN_TEXT
+    """*text*, or a fixed note when it holds one of *secrets*.
+
+    :func:`mentions_secret` knows the forms a vendor can echo a secret in: as
+    is, JSON-escaped, percent-encoded and HTML-escaped.
+    """
+    if any(secret and mentions_secret([text], secret) for secret in secrets):
+        return _HIDDEN_TEXT
     return text
 
 

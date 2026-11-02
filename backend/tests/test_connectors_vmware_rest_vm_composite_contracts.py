@@ -50,6 +50,8 @@ _PARAMETER_SCHEMAS: dict[str, dict[str, Any]] = {
     "vm.snapshot.revert": schemas.VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
     "vm.snapshot.create": schemas.VM_SNAPSHOT_CREATE_PARAMETER_SCHEMA,
     "vm.snapshot.delete": schemas.VM_SNAPSHOT_DELETE_PARAMETER_SCHEMA,
+    "vm.snapshot.delete_all": schemas.VM_SNAPSHOT_DELETE_ALL_PARAMETER_SCHEMA,
+    "vm.disks.consolidate": schemas.VM_DISKS_CONSOLIDATE_PARAMETER_SCHEMA,
     "folder.create": schemas.FOLDER_CREATE_PARAMETER_SCHEMA,
     "folder.delete": schemas.FOLDER_DELETE_PARAMETER_SCHEMA,
 }

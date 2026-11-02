@@ -1,21 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 evoila Group
 //
-// One sign-in at a time (#3857).
+// One sign-in at a time (#3857, #5514).
 //
-// Claude Desktop can start this extension twice at almost the same moment
-// (its transport version probe). Without coordination both copies of
-// mcp-remote run the browser sign-in: two browser tabs open, and the copy
+// Claude Desktop can start its extension twice at almost the same moment
+// (its transport version probe), and several Claude Code sessions on one
+// computer share one saved login. Without coordination several copies of
+// mcp-remote run the browser sign-in: several browser tabs open, and a copy
 // that loses the race fails with "InvalidGrantError: Code not valid".
-// mcp-remote 0.1.38 has its own lockfile, but it checks for the lockfile and
+// mcp-remote 0.1.39 has its own lockfile, but it checks for the lockfile and
 // creates it in two separate steps, so two copies that start together both
 // miss it, and on Windows it skips the check completely.
 //
-// The launcher therefore takes this lock before it loads mcp-remote:
+// The login guard (login-guard.mjs) therefore takes this lock before it
+// loads mcp-remote. The Claude Code plugin and the Claude Desktop bundle
+// both run the guard, so they share the lock:
 //
 // - The lock is a file created with the exclusive "wx" flag. Only one
 //   process can create it, on every platform.
-// - The holder releases it when mcp-remote is connected (index.mjs calls the
+// - The holder releases it when mcp-remote is connected (the guard calls the
 //   release function on mcp-remote's first stdout message), and when the
 //   process exits.
 // - Any other copy waits. When the lock is gone it starts mcp-remote, which
@@ -34,7 +37,10 @@
 //   only while no other copy can be writing its process id into it. See
 //   releaseLock for the details.
 // - The lock never blocks for good: after the wait limit, or when the lock
-//   file cannot be used at all, the launcher starts mcp-remote anyway.
+//   file cannot be used at all, the guard starts mcp-remote anyway.
+//
+// The same lock code, with another file name, makes one renewal of the
+// saved login run at a time (token-renewal.mjs).
 
 import { createHash, randomBytes } from "node:crypto";
 import {
@@ -68,11 +74,11 @@ function sayDefault(text) {
 
 // The lock lives next to mcp-remote's saved logins (the same folder
 // mcp-remote uses, including its MCP_REMOTE_CONFIG_DIR override), one lock
-// per MEHO endpoint.
-export function signInLockPath(serverUrl, env = process.env) {
+// per MEHO endpoint and kind ("signin" or "renew").
+export function signInLockPath(serverUrl, env = process.env, kind = "signin") {
   const base = env.MCP_REMOTE_CONFIG_DIR || join(homedir(), ".mcp-auth");
   const hash = createHash("sha256").update(serverUrl).digest("hex").slice(0, 16);
-  return join(base, `meho-claude-desktop-${hash}.lock`);
+  return join(base, `meho-${kind}-${hash}.lock`);
 }
 
 function isRunning(pid) {
@@ -265,6 +271,9 @@ function releaseLock(path) {
 // Wait for the lock, then take it. Returns a release function that is safe
 // to call more than once. It only removes the lock while this process still
 // owns it.
+//
+// `kind`, `lockName` and `doing` pick the lock file and the words in the
+// messages: the defaults are for the sign-in lock.
 export async function acquireSignInLock(
   serverUrl,
   {
@@ -273,9 +282,12 @@ export async function acquireSignInLock(
     waitLimitMs = WAIT_LIMIT_MS,
     pollMs = POLL_MS,
     graceMs = UNREADABLE_GRACE_MS,
+    kind = "signin",
+    lockName = "sign-in lock",
+    doing = "signing in",
   } = {},
 ) {
-  const path = signInLockPath(serverUrl, env);
+  const path = signInLockPath(serverUrl, env, kind);
   const noLock = () => {};
   const deadline = Date.now() + waitLimitMs;
   let foundStale = false;
@@ -290,13 +302,13 @@ export async function acquireSignInLock(
       if (reason) {
         if (!foundStale) {
           foundStale = true;
-          say(`found an old sign-in lock: ${reason}; taking it over`);
+          say(`found an old ${lockName}: ${reason}; taking it over`);
         }
         if (takeOverStaleLock(path, lock)) break;
       }
       if (Date.now() >= deadline) {
         say(
-          `another MEHO instance is still signing in after ${waitLimitMs / 1000} seconds; ` +
+          `another MEHO instance is still ${doing} after ${waitLimitMs / 1000} seconds; ` +
             "starting anyway",
         );
         return noLock;
@@ -305,15 +317,15 @@ export async function acquireSignInLock(
         waiting = true;
         say(
           reason
-            ? "another MEHO instance is taking over the old sign-in lock; waiting for it to finish"
-            : `another MEHO instance (pid ${lock.pid ?? "unknown"}) is signing in; ` +
+            ? `another MEHO instance is taking over the old ${lockName}; waiting for it to finish`
+            : `another MEHO instance (pid ${lock.pid ?? "unknown"}) is ${doing}; ` +
                 "waiting for it to finish",
         );
       }
       await sleep(pollMs);
     }
   } catch (err) {
-    say(`cannot use the sign-in lock ${path}: ${err.message}; starting without it`);
+    say(`cannot use the ${lockName} ${path}: ${err.message}; starting without it`);
     return noLock;
   }
   if (waiting) say("the other MEHO instance finished; starting");

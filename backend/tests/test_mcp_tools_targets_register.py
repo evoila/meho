@@ -430,3 +430,21 @@ def test_smuggled_fingerprint_is_rejected_at_schema_layer(
         },
     ).json()
     assert body["error"]["code"] == INVALID_PARAMS
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+async def test_bad_name_and_host_are_rejected(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    _seeded_tenant: None,
+) -> None:
+    """The model's name and host format rules (#5244) fire through this path."""
+    client, _op = client_with_operator
+    body = _register_call(
+        client, 1, {"name": "node-01 157", "product": "vault", "host": "10.0.0."}
+    ).json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    message = body["error"]["message"]
+    # The message is cut short, so check the error count and the first error.
+    assert "2 validation errors" in message
+    assert "name must not contain spaces" in message
+    assert await _count(TargetORM) == 0

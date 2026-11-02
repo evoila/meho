@@ -89,6 +89,7 @@ from meho_backplane.operations._op_miss import op_miss_result
 from meho_backplane.operations._preview import _SENSITIVE_CLASSES
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
+    params_check_errors,
     policy_gate,
     validate_params,
 )
@@ -369,6 +370,7 @@ def _gate_and_validate(
             source_kind=descriptor.source_kind,
             missing_ref=exc.missing_ref,
         )
+    validation_errors = validation_errors or params_check_errors(op_id, params)
     if validation_errors:
         return _invalid_params_envelope(
             op_id=op_id,

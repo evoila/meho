@@ -1,6 +1,7 @@
 # evoila's own connectors leave the public repository (decision)
 
-**Status:** decided by the program owner on 28 October 2026
+**Status:** decided by the program owner on 28 October 2026; changed on
+1 November 2026 (see "Who builds, signs and reviews")
 **Date:** 2026-10-28
 **Applies to:** the removal Task [#3345](https://github.com/evoila/meho/issues/3345)
 and the connector packages Initiative [#5060](https://github.com/evoila/meho/issues/5060)
@@ -49,7 +50,7 @@ and the connector packages Initiative [#5060](https://github.com/evoila/meho/iss
 
 | Wave | Folders | Notes |
 |---|---|---|
-| 1 (VMware wheel) | `vmware_rest`, `nsx`, `sddc_manager`, `sddc_vcf5`, `vcf_automation`, `vra8`, `vcf_fleet`, `fleet_lcm`, `vcf_installer`, `vcf_logs`, `vrli8`, `vcf_operations`, `vrops8`, `vcd`, `holodeck`, `hcx`, `srm`, `vr`, `vro` | Plus one VMware shared folder for the VMware-only modules of `_shared/`, the three VMware profile files, their tests and their docs pages. |
+| 1 (VMware wheel) | `vmware_rest`, `nsx`, `sddc_manager`, `sddc_vcf5`, `vcf_automation`, `vra8`, `vcf_fleet`, `fleet_lcm`, `vcf_installer`, `vcf_cloud_builder`, `vcf_logs`, `vrli8`, `vcf_operations`, `vrops8`, `vcd`, `holodeck`, `hcx`, `srm`, `vr`, `vro` | Plus one VMware shared folder for the VMware-only modules of `_shared/`, the three VMware profile files, their tests and their docs pages. |
 | 1 (VMware wheel) | `salt` | `salt-raas` is the API of VMware Aria Automation Config, so it moves with VMware. |
 | 2 | `azure` | After the VMware wave. |
 | Private only | Fortinet | Never built in this repository. The open FortiGate pull request #5169 is not merged here. |
@@ -92,8 +93,8 @@ overlay and the lab roll have one week.
 - The lab session rolls the lab to the overlay image.
 - The appliance and the Linux download take the overlay image and its
   signer as an input.
-- A person reviews each package version before it is signed (#5039): the
-  program owner plus one colleague (the name follows). A bot approval
+- One person reviews each package version before it is signed (#5039):
+  the program owner, or a person the program owner names. A bot approval
   does not count.
 
 ## The two tiers

@@ -75,6 +75,7 @@ from meho_backplane.ui.auth.routes import (
     AUTHORIZATION_STATE_EXPIRED_DETAIL,
     LOGIN_BINDING_COOKIE_PREFIX,
     login_binding_cookie_name,
+    login_location,
 )
 from meho_backplane.ui.auth.session_store import (
     create_session,
@@ -278,6 +279,34 @@ def test_login_redirects_to_keycloak_with_pkce_and_resource() -> None:
     # RFC 8707 resource indicator -- the BFF binds tokens to the
     # backplane API.
     assert params["resource"] == [f"{_BACKPLANE_URL}/api"]
+
+
+def test_login_fresh_sign_in_asks_keycloak_for_the_credentials_again() -> None:
+    """``?fresh_sign_in=1`` adds ``prompt=login`` and ``max_age=0``; a plain login sends neither.
+
+    Keycloak then ignores its SSO cookie, also in a remembered browser, so
+    the new token's ``auth_time`` is now. The approvals console sends a
+    person here when their sign-in is too old to approve.
+    """
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router)
+        client = TestClient(_build_app(), follow_redirects=False)
+        fresh = client.get(login_location("/ui/approvals", fresh_sign_in=True))
+        plain = client.get("/ui/auth/login?return_to=%2Fui%2Fapprovals")
+        other_value = client.get("/ui/auth/login?fresh_sign_in=yes")
+    assert fresh.status_code == 302
+    fresh_params = parse_qs(urlparse(fresh.headers["location"]).query)
+    assert fresh_params["prompt"] == ["login"]
+    assert fresh_params["max_age"] == ["0"]
+    assert fresh_params["client_id"] == ["meho-web"]
+    for response in (plain, other_value):
+        assert response.status_code == 302
+        params = parse_qs(urlparse(response.headers["location"]).query)
+        assert "prompt" not in params
+        assert "max_age" not in params
+    # The flag is kept out of the stored return path.
+    store = get_verifier_store()
+    assert {flow.return_to for flow in store._flows.values()} == {"/ui/approvals", "/ui/"}
 
 
 def test_login_persists_verifier_in_server_side_store_not_cookie() -> None:
@@ -973,6 +1002,96 @@ def test_middleware_redirects_unauthenticated_ui_request_to_login() -> None:
     # The encoded return_to round-trips the original path.
     return_to = parse_qs(urlparse(location).query)["return_to"][0]
     assert return_to == "/ui/sentinel"
+
+
+def test_middleware_first_visit_has_no_session_ended_reason() -> None:
+    """#5518: no cookie means a first visit -- the login starts straight away."""
+    with respx.mock(assert_all_called=False):
+        client = TestClient(_build_app(), follow_redirects=False)
+        response = client.get("/ui/sentinel")
+    assert "reason" not in parse_qs(urlparse(response.headers["location"]).query)
+
+
+def test_middleware_ended_session_adds_session_ended_reason() -> None:
+    """#5518: a cookie whose session is gone means the session ended.
+
+    The login URL carries ``reason=session_ended`` so the person sees
+    the plain message before the login.
+    """
+    with respx.mock(assert_all_called=False):
+        client = TestClient(_build_app(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(uuid.uuid4()))
+        response = client.get("/ui/sentinel?tab=2")
+    assert response.status_code == 302
+    query = parse_qs(urlparse(response.headers["location"]).query)
+    assert query["return_to"] == ["/ui/sentinel?tab=2"]
+    assert query["reason"] == ["session_ended"]
+
+
+def test_middleware_ended_session_on_htmx_returns_to_the_page() -> None:
+    """#5518: an htmx fragment request comes back to the page, not the fragment."""
+    with respx.mock(assert_all_called=False):
+        client = TestClient(_build_app(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(uuid.uuid4()))
+        response = client.get(
+            "/ui/sentinel",
+            headers={
+                "HX-Request": "true",
+                "HX-Current-URL": "https://console.example/ui/approvals?state=pending",
+            },
+        )
+    assert response.status_code == 204
+    query = parse_qs(urlparse(response.headers["hx-redirect"]).query)
+    assert query["return_to"] == ["/ui/approvals?state=pending"]
+    assert query["reason"] == ["session_ended"]
+
+
+# ---------------------------------------------------------------------------
+# Session-ended page (#5518)
+# ---------------------------------------------------------------------------
+
+
+def test_login_with_session_ended_reason_shows_the_message() -> None:
+    """``reason=session_ended`` answers with one plain line and a sign-in button.
+
+    The page does not contact the login server. The button starts the
+    normal login with the same ``return_to``, so the person comes back
+    to the page they were on.
+    """
+    with respx.mock(assert_all_called=False) as mock_router:
+        client = TestClient(_build_app(), follow_redirects=False)
+        response = client.get(
+            "/ui/auth/login",
+            params={"return_to": "/ui/approvals?state=pending", "reason": "session_ended"},
+        )
+        assert not mock_router.calls
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert response.headers["cache-control"] == "no-store"
+    assert "Your session ended. Please sign in again." in response.text
+    assert 'href="/ui/auth/login?return_to=%2Fui%2Fapprovals%3Fstate%3Dpending"' in response.text
+
+
+def test_session_ended_page_checks_return_to() -> None:
+    """A ``return_to`` outside ``/ui/`` falls back to ``/ui/`` on the page too."""
+    with respx.mock(assert_all_called=False):
+        client = TestClient(_build_app(), follow_redirects=False)
+        response = client.get(
+            "/ui/auth/login",
+            params={"return_to": "https://evil.example.com/", "reason": "session_ended"},
+        )
+    assert response.status_code == 200
+    assert 'href="/ui/auth/login?return_to=%2Fui%2F"' in response.text
+
+
+def test_login_ignores_an_unknown_reason() -> None:
+    """Any other ``reason`` value starts the normal login."""
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router)
+        client = TestClient(_build_app(), follow_redirects=False)
+        response = client.get("/ui/auth/login", params={"return_to": "/ui/", "reason": "other"})
+    assert response.status_code == 302
+    assert response.headers["location"].startswith(_AUTHORIZATION_ENDPOINT)
 
 
 def test_middleware_lets_authenticated_ui_request_through() -> None:

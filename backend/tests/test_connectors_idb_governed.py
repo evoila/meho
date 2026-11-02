@@ -30,7 +30,6 @@ import pytest
 import respx
 from sqlalchemy import select
 
-import meho_backplane.connectors.idb  # noqa: F401 -- registers the connectors
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.idb import (
     IDB_REST_CONNECTOR_ID,
